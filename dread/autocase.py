@@ -70,9 +70,10 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 5       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 6       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
-                  # 5: spins on a peripheral register are cut and answered with poll stages
+                  # 5: spins on a peripheral register are cut and answered with poll stages;
+                  # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -91,6 +92,8 @@ POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTE
 POINTER_STEP = 0x400        # ... this far apart ...
 POINTER_SLOTS = 16          # ... at most this many different ones (then they are reused)
 POINTER_KEEP = 0.9          # share of inputs that use the buffer (the rest keep their value: null checks)
+POINTER_MISALIGN = 0.25     # share of those that point 1 to 3 bytes into it (alignment-dependent paths:
+                            # a memcpy's word loop for equally misaligned pointers)
 CALLEE_DEPTH = 2            # callees whose constants and strings join the function's own
 TEXT_SHARE = 0.5            # share of fresh inputs whose data buffers hold text from the dictionary
 TEXT_MUTATE = 0.3           # share of mutations that change such a text by a token
@@ -328,7 +331,7 @@ class Generator:
                 if (s.id == csarm.ARM_INS_B and self.arch.is_conditional(s)) or s.id == csarm.ARM_INS_IT:
                     k -= 1
                     continue
-                sets = s.id in SETTERS or s.update_flags
+                sets = s.id in SETTERS or self.arch.sets_flags(s)
                 ops = s.operands[-2:]
                 if sets and len(s.operands) >= 2 and ops[0].type == csarm.ARM_OP_REG \
                         and ops[1].type in (csarm.ARM_OP_REG, csarm.ARM_OP_IMM) and not any(o.shift.type for o in ops):
@@ -565,11 +568,14 @@ class Generator:
                     m_[2] = self.fake_pointer
             for i, address in data_args.items():
                 if i < len(case["args"]) and rng.random() < POINTER_KEEP:
-                    case["args"][i] = address
+                    case["args"][i] = address + misalign()
             for m_ in case["mem"]:
                 if m_[0] in data_mem and m_[1] == 4 and rng.random() < POINTER_KEEP:
-                    m_[2] = data_mem[m_[0]]
+                    m_[2] = data_mem[m_[0]] + misalign()
             return case
+
+        def misalign():
+            return rng.randrange(1, 4) if rng.random() < POINTER_MISALIGN else 0
 
         def learn_pointers(m, case):
             """After a fault on unmapped memory: the inputs whose value lies just in front of the
@@ -598,9 +604,11 @@ class Generator:
             return bytes([rng.randrange(0x20, 0x7F)])
 
         def buffers(case):
-            """The learned data buffers this input uses."""
-            used = {address for i, address in data_args.items() if i < len(case["args"]) and case["args"][i] == address}
-            used |= {v for a, n, v in case["mem"] if a in data_mem and n == 4 and v == data_mem[a]}
+            """Where the learned data buffers this input uses begin for it (a misaligned pointer: a
+            few bytes into its buffer)."""
+            used = {case["args"][i] for i, address in data_args.items()
+                    if i < len(case["args"]) and 0 <= case["args"][i] - address < 4}
+            used |= {v for a, n, v in case["mem"] if a in data_mem and n == 4 and 0 <= v - data_mem[a] < 4}
             return sorted(used)
 
         def text_of(case, buffer):

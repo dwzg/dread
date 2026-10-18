@@ -100,8 +100,8 @@ The long runs set the pace of everything after them. Measure first, then cut.
   they have Thumb-2 ([arch] thumb2, else from -mcpu/-march), the rebuilt image gets ten times a case's
   instruction limit (lifted loops are slower; dread integration already did this), and the lifter's
   statically unreachable instructions (padding behind bx pc) are declared to the runner.
-- [ ] dread.autocase still takes capstone's update_flags to find the instruction that set the flags
-  for a branch (adc without s counts); harmless for correctness, but a VERSION bump when changed.
+- [x] dread.autocase finds the instruction that set a branch's flags with arch.sets_flags instead of
+  capstone's update_flags (generator VERSION 6, together with the next item).
 - [x] Functions that never return (`dread noreturn`, a fixpoint over calls and tail calls): a call
   of one does not fall through in the lifter, and dread lift --check refuses them with that reason
   instead of failing their case generation (gizmo: main, hang and the reset handlers).
@@ -116,9 +116,9 @@ The long runs set the pace of everything after them. Measure first, then cut.
   decoder marks it, arch.flow calls it an indirect call, for every tool), and conditional writes
   under complementary conditions (addeq r7 / addne r7) that the undefined-register check took for
   reads of what the caller left. What is left over is coverage, not translation (next item).
-- [ ] The case generator aims a learned pointer at the start of its scratch buffer, always aligned:
-  memcpy's aligned-copy path at -O3 (both pointers equally misaligned) is never run. Vary the low
-  bits of the aimed address (a VERSION bump). handle_key at -O2 and -O3 inlines read_line and needs
+- [x] Learned pointers point 1 to 3 bytes into their buffer in a quarter of the inputs (generator
+  VERSION 6): memcpy at -O3 left 31 instructions unrun, now 13 (its unrolled tail for 3 to 6 bytes
+  left over, which needs particular lengths). handle_key at -O2 and -O3 inlines read_line and needs
   the recorded cases of the -Os build, which do not carry over to other builds.
 - [ ] Lifter gaps still open: APCS frames (mov ip, sp; push {fp, ip, lr, pc}; ldmdb fp, {.., sp, pc}),
   mrs/msr/cps as inline assembly, VFP, ldrex and strex, A-profile exception handlers (subs pc, lr).
