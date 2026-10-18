@@ -40,6 +40,28 @@ changing a table, case or report format.
    that project, not here); a hit that is not a known coincidence stops the push. A leak, once
    pushed, cannot be taken back.
 
+## Working unattended
+
+When the user is away (a `/loop`), the work runs from files, not from a conversation:
+
+- **The plan is `docs/todo.md`.** Take the first open item. Finish it with tests on both gizmo
+  builds, tick it off in the same commit, push. Change the plan when the work shows a better one (an
+  item is bigger than thought, a bug comes first, an approach turns out wrong): split, add, reorder or
+  drop items, and say why in the commit message. Every few items, check with numbers (test times,
+  coverage, what an item gained) whether the order still makes sense.
+- **Never block.** A decision that is the user's (a matter of taste, anything public or
+  irreversible beyond the agreed pushes, credentials, buying or installing system software) goes
+  into "Questions for the user" in `docs/todo.md` with the options and a recommendation; then go on
+  with what does not depend on it.
+- **When stuck**, after two serious attempts or a few hours on one item: write down what was tried
+  and why it failed in the item, put the tree back to the last commit, and take the next item.
+- **Commit only green**: `.venv/bin/pytest` passes, both gizmo builds. Push only through the leak
+  check (rule 9) with a script that stops on its exit status; never force-push without the user.
+- **Stay polite on the machine**: long runs go to the background (polite, as the tools are);
+  nothing that fills memory or runs without a bound.
+- **The loop prompt** only points here and at `docs/todo.md`. It may be rewritten when the way of
+  working changes; the plan itself is changed in `docs/todo.md`.
+
 ## Conventions
 
 - Python 3.11 or newer (`tomllib`), unicorn 2.1.4 (pinned: tools rely on its hook behaviour),

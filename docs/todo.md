@@ -3,7 +3,14 @@
 The queue of work, top first. Each item says how to tell it is done. Take the first open item,
 finish it with tests on both gizmo builds, commit, run the leak check, push, and tick it off here in
 the same commit. What was done and learned goes into the commit message; this file only keeps the
-queue. The order was agreed with the user: the ARM phases, then `dread pilot`, then RISC-V.
+queue. The order was agreed with the user: the ARM phases, then `dread pilot`, then RISC-V. How the
+queue may change while the user is away: CLAUDE.md, "Working unattended".
+
+## Questions for the user
+
+Decisions that are the user's, with options and a recommendation. Work goes on around them.
+
+- (none open)
 
 ## Phase 4: cases, mutation, coverage (rest)
 
