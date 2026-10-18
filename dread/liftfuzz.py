@@ -16,7 +16,8 @@ mode (offsets, register offsets with shifts, writeback, post-index) on the buffe
 block transfers, frame slots and addresses of them; forward branches on a bit of the buffer (so
 that inputs go both ways; cbz and cbnz on Thumb) and on the flags; calls of three helpers (one takes
 three registers, one returns r0 and r1, one takes a stack argument); push and pop around a few
-instructions; IT blocks on Thumb-2. About a third of the functions keep a frame pointer (r7 on
+instructions; IT blocks on Thumb-2; instructions that act on the core (interrupt masks, the flags through APSR,
+barriers, an exclusive load and store). About a third of the functions keep a frame pointer (r7 on
 Thumb, r11 in ARM state) that addresses the frame and restores sp at the end, and about a third
 return the Thumb-1 way (pop {r3}; bx r3). At the end the registers are stored into a result buffer
 and the flags with them, read back through conditional instructions, so that the comparison sees
@@ -404,11 +405,35 @@ class Generator:
         return ["add %s, sp, #%d" % (b, slot), "%s%s %s, [%s]" % (rng.choice(["ldr", "str"]), cond, t, b),
                 "mov %s, #0" % b]
 
+    def system(self, cond):
+        """Instructions that act on the core (the lifter writes them as inline assembly): interrupt
+        masks, status-register reads and writes (the flags through APSR), barriers, and an exclusive
+        load and store on the buffer. Always unconditional."""
+        rng = self.rng
+        k = rng.randrange(6)
+        d = self.dst()
+        if k == 0:
+            return [rng.choice(["cpsid i", "cpsie i"])]
+        if k == 1:
+            return [rng.choice(["dmb", "dsb", "isb"])]
+        if k == 2:
+            return ["mrs %s, apsr" % d]                          # the flags, read
+        if k == 3:
+            return ["msr apsr_nzcvq, %s" % self.src()]            # the flags, written
+        if k == 4:
+            if self.thumb:                                      # PRIMASK: the interrupt mask bit
+                return ["and %s, %s, #1" % (d, self.src()), "msr primask, %s" % d, "mrs %s, primask" % self.dst()]
+            return ["mrs %s, cpsr" % d, "%s %s, %s, #0x80" % (rng.choice(["orr", "bic"]), d, d),   # the I bit; the
+                    "msr cpsr_c, %s" % d]                                                           # mode stays
+        pre, b = self.base(4)
+        t, x, r = rng.sample([n for n in self.regs() if "r%d" % n != b], 3)
+        return pre + ["ldrex r%d, [%s]" % (t, b), "add r%d, r%d, #1" % (x, t), "strex r%d, r%d, [%s]" % (r, x, b)]
+
     def one(self, cond=""):
         rng = self.rng
         kind = rng.choices(["data", "move", "compare", "shifts", "multiply", "misc", "memory", "double", "block",
-                            "frame"], [26, 8, 10, 10, 6, 8, 12, 4, 4, 6])[0]
-        return getattr(self, kind)(cond)
+                            "frame", "system"], [26, 8, 10, 10, 6, 8, 12, 4, 4, 6, 3])[0]
+        return getattr(self, kind)("" if kind == "system" else cond)
 
     def unit(self, name):
         """One unit of a body: lines that belong together (set-up lines and their instruction, an IT

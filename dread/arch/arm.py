@@ -334,6 +334,9 @@ class Arm:
         if csarm.ARM_REG_PC in written:
             if self.stack_kind(insn) == "pop":
                 return "return", None, conditional
+            if i in (csarm.ARM_INS_LDM, csarm.ARM_INS_LDMIB, csarm.ARM_INS_LDMDA, csarm.ARM_INS_LDMDB) and any(
+                    o.type == csarm.ARM_OP_REG and o.reg == csarm.ARM_REG_SP for o in insn.operands[1:]):
+                return "return", None, conditional      # an APCS frame's epilogue: ldmdb fp, {.., sp, pc}
             ops = insn.operands
             if (i == csarm.ARM_INS_MOV and len(ops) == 2 and ops[1].type == csarm.ARM_OP_REG
                     and ops[1].reg == csarm.ARM_REG_LR):

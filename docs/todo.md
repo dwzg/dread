@@ -120,8 +120,17 @@ The long runs set the pace of everything after them. Measure first, then cut.
   VERSION 6): memcpy at -O3 left 31 instructions unrun, now 13 (its unrolled tail for 3 to 6 bytes
   left over, which needs particular lengths). handle_key at -O2 and -O3 inlines read_line and needs
   the recorded cases of the -Os build, which do not carry over to other builds.
-- [ ] Lifter gaps still open: APCS frames (mov ip, sp; push {fp, ip, lr, pc}; ldmdb fp, {.., sp, pc}),
-  mrs/msr/cps as inline assembly, VFP, ldrex and strex, A-profile exception handlers (subs pc, lr).
+- [x] System instructions in the lifter, as inline assembly (they act on the core): cps, barriers,
+  wfi/wfe/sev, clrex, bkpt, coprocessor moves, ldrex/strex (byte, halfword, word), svc with r0-r3
+  bound, mrs/msr of PRIMASK, BASEPRI, CONTROL, SPSR and the like; APSR/CPSR reads and writes go
+  through the C flag variables, and a function that reads the flags before writing them (mrs r0,
+  cpsr opening a critical section) starts from the core's flags instead of being refused. Stack
+  pointers (msp, psp) are refused. liftfuzz generates them (about 180 per ISA and run; all agree).
+- [x] APCS frames (GCC -mapcs-frame, older ARM compilers): an ldm that loads sp and pc is a return
+  for every tool; the stack analysis takes sp, the registers and the return address from the slots
+  an ldm through a frame address reads (ldm sp, {fp, sp, lr}; bx lr on ARMv4T). gizmo with APCS
+  frames for ARMv4T and ARMv5TE (scratch builds): 42 functions accepted each.
+- [ ] Lifter gaps still open: VFP, ldrexd/strexd, A-profile exception handlers (subs pc, lr; ldm ^).
 - [ ] The case generator could start from the coverage of an image's written cases (read_line takes
   18-37 s to generate and still misses what one recorded case covers); the cache key would then
   include the written cases. Measure what the comparison loses when fewer generated cases are kept.

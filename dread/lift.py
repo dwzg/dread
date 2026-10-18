@@ -69,6 +69,13 @@ OPS = {getattr(A, "ARM_INS_" + name.upper()): name for name in (
     "ldmdb stm stmib stmda stmdb").split() if hasattr(A, "ARM_INS_" + name.upper())}
 OPS[A.ARM_INS_MOVS] = "mov"     # Thumb's 16-bit movs rd, rm (an lsls #0) has an id of its own
 SIGNED = {A.ARM_INS_LDRSB: "s8", A.ARM_INS_LDRSH: "s16"}
+# Instructions that run as themselves, in inline assembly: they act on the core, not on registers
+# the C models (interrupt masks, barriers, waits, the exclusive monitor, coprocessors, status registers)
+SYSTEM = {getattr(A, "ARM_INS_" + n) for n in (
+    "CPS DMB DSB ISB CLREX BKPT HINT MRS MSR LDREX LDREXB LDREXH STREX STREXB STREXH MCR MRC MCR2 MRC2").split()
+    if hasattr(A, "ARM_INS_" + n)}
+STATUS = ("apsr", "cpsr", "xpsr", "iapsr", "eapsr")     # status registers whose top bits are the flags
+STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -255,6 +262,11 @@ class Lifter:
             self._put(after, known[0], known[1])
         if slot is not None:
             self._put(after, slot[0], values.get(slot[1]))
+        loaded = self.ldm_slots(insn, depth, values) if not insn.writeback and self.arch.predicate(insn) is None \
+            else None
+        for r, key in loaded or ():
+            if r not in ("sp", "pc"):
+                self._put(after, r, values.get(key))
         return new, after
 
     def frame_value(self, insn, reg, depth, values):
@@ -302,6 +314,23 @@ class Lifter:
             return None
         return v[1] - ops[1].mem.disp, self.arch._name(insn.reg_name(ops[0].reg))
 
+    LDMS = {A.ARM_INS_LDM: (False, True), A.ARM_INS_LDMIB: (True, True), A.ARM_INS_LDMDA: (False, False),
+            A.ARM_INS_LDMDB: (True, False)}
+
+    def ldm_slots(self, insn, depth, values):
+        """[(register, slot)] of an ldm whose base holds a frame address (sp included), or None."""
+        mode = self.LDMS.get(insn.id)
+        ops = insn.operands
+        if mode is None or not ops or ops[0].type != A.ARM_OP_REG:
+            return None
+        v = self.frame_value(insn, ops[0].reg, depth, values)
+        if v is None:
+            return None
+        regs = [self.arch._name(insn.reg_name(o.reg)) for o in ops[1:]]
+        n = len(regs)
+        start = {(False, True): 0, (True, True): 4, (False, False): -4 * n + 4, (True, False): -4 * n}[mode]
+        return [(r, v[1] - start - 4 * k) for k, r in enumerate(regs)]
+
     def new_depth(self, insn, depth, values):
         """The depth after an instruction that writes sp: add or sub sp, sp, #imm, and mov sp, rX or
         add or sub sp, rX, #imm with a frame address in rX (a frame pointer)."""
@@ -317,6 +346,11 @@ class Lifter:
                 v = self.frame_value(insn, ops[1].reg, depth, values)
                 if v is not None:
                     return v[1]
+        slots = self.ldm_slots(insn, depth, values) if not insn.writeback else None
+        if slots is not None:               # an APCS epilogue: ldm sp, {fp, sp, lr} takes sp from its slot
+            v = values.get(dict(slots).get("sp"))
+            if v is not None and v[0] == "sp":
+                return v[1]
         raise Refused("0x%x changes the stack pointer in a way not modelled: %s %s" % (
             insn.address, insn.mnemonic, insn.op_str))
 
@@ -467,6 +501,8 @@ class Lifter:
         states = self.states(fn)
         depth = {a: st[0] for a, st in states.items()}
         undef, found = self.entry_states(fn)
+        flags_in = any("flags" in regs for regs in found.values())
+        found = {a: regs - {"flags"} for a, regs in found.items() if regs - {"flags"}}
         if found:
             a = min(found)
             raise Refused("0x%x reads %s before anything writes it (what its caller leaves)" % (
@@ -483,6 +519,7 @@ class Lifter:
             if kind == "jump" and target is not None and (target & ~1) in depth:
                 targets.add(target & ~1)
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
+                    "flags_in": flags_in,
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
         body = []
@@ -515,10 +552,13 @@ class Lifter:
                 continue
             if self.exception_return(insn):
                 raise Refused("0x%x returns from an exception: %s %s" % (a, insn.mnemonic, insn.op_str))
+            slots = self.ldm_slots(insn, depth, values)
             if self.arch.stack_kind(insn) == "pop":
                 regs = [self.arch._name(insn.reg_name(o.reg)) for o in insn.operands
                         if o.type == A.ARM_OP_REG and o.reg != A.ARM_REG_SP]
                 where = values.get(depth - 4 * regs.index("pc")) if "pc" in regs else self.RET
+            elif slots is not None and "pc" in dict(slots):
+                where = values.get(dict(slots)["pc"])
             else:
                 where = values.get("lr")
             if where != self.RET:
@@ -536,6 +576,9 @@ class Lifter:
         lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0,"
                      " r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
         lines.append("    u32 n = 0, z = 0, c = 0, v = 0;")
+        if ctx.get("flags_in"):             # read before written (mrs r0, cpsr first): the caller's flags
+            lines.append('    { u32 t; __asm__ volatile ("mrs %0, apsr" : "=r"(t)); n = t >> 31; z = t >> 30 & 1; '
+                         'c = t >> 29 & 1; v = t >> 28 & 1; }')
         lines.append("    u32 frame[%d] __attribute__((aligned(8)));" % max(2, ctx["frame"] // 4))
         lines.append("    u32 sp0 = (u32)&frame[%d];" % (ctx["frame"] // 4))
         if ctx["switch"]:
@@ -715,7 +758,12 @@ class Lifter:
         if kind == "return":
             if self.exception_return(insn):
                 raise Refused("0x%x returns from an exception: %s %s" % (insn.address, insn.mnemonic, insn.op_str))
-            loads = self._pop(insn, returning=True) if arch.stack_kind(insn) == "pop" else ""
+            if arch.stack_kind(insn) == "pop":
+                loads = self._pop(insn, returning=True)
+            elif i in self.LDMS:
+                loads = self._frame_ldm(insn, returning=True)
+            else:
+                loads = ""
             return (loads + " " if loads else "") + "return %s;" % self._ret()
         if kind == "jump":
             t = target & ~1
@@ -754,6 +802,8 @@ class Lifter:
                 if newbase is not None:
                     raise Refused("0x%x: a call through memory with writeback" % insn.address)
                 return "{ u32 f = *(volatile u32 *)(%s); %s }" % (addr, self._icall(insn, "f"))
+            if i == A.ARM_INS_SVC:
+                return self._svc(insn, ops)
             raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
         if kind == "ijump":
             if self.ret_jump(insn, self.values()):
@@ -774,10 +824,80 @@ class Lifter:
         at = arch.pc_address(insn, isa)
         if at is not None:
             return "%s = 0x%xu;" % (self.dest(ops[0]), at)
+        if i in SYSTEM:
+            return self._system(insn, ops)
+        if i in self.LDMS and any(o.type == A.ARM_OP_REG and o.reg == A.ARM_REG_SP for o in ops[1:]):
+            return self._frame_ldm(insn)
         handler = getattr(self, "op_" + OPS[i], None) if i in OPS else None
         if handler is None:
             raise Refused("0x%x: %s %s is not modelled" % (insn.address, insn.mnemonic, insn.op_str))
         return handler(insn, ops)
+
+    def _system(self, insn, ops):
+        """An instruction that acts on the core, as inline assembly (see SYSTEM). Status registers:
+        a read of APSR/CPSR takes the flags from the C variables and the rest from the core; a write
+        of their flags field sets the variables (and the core, for Q and GE). Refused: reading or
+        writing a stack pointer (the C's stack is not the original's), ldrexd and strexd."""
+        i, a = insn.id, insn.address
+        mnemonic = insn.mnemonic.split(".")[0]
+        cond = self.arch.condition(insn)
+        if cond and mnemonic.endswith(cond):
+            mnemonic = mnemonic[:-len(cond)]
+        text = (mnemonic + " " + insn.op_str).strip()
+        regs = [o for o in ops if o.type == A.ARM_OP_REG]
+        if i == A.ARM_INS_HINT and mnemonic not in ("wfi", "wfe", "sev", "sevl", "yield"):
+            raise Refused("0x%x: hint %s is not modelled" % (a, insn.op_str))
+        if i in (A.ARM_INS_CPS, A.ARM_INS_DMB, A.ARM_INS_DSB, A.ARM_INS_ISB, A.ARM_INS_CLREX, A.ARM_INS_BKPT,
+                 A.ARM_INS_HINT):
+            return '__asm__ volatile ("%s" ::: "memory");' % text
+        if i == A.ARM_INS_MRS:
+            sysreg = insn.op_str.split(",", 1)[1].strip().lower()
+            d = self.dest(ops[0])
+            if sysreg in STACK_POINTERS:
+                raise Refused("0x%x reads a stack pointer (%s): the C's stack is not the original's" % (a, sysreg))
+            if sysreg.split("_")[0] in STATUS:
+                return ('{ u32 t; __asm__ volatile ("mrs %%0, %s" : "=r"(t)); %s = (t & 0x0fffffffu) | n << 31 | '
+                        'z << 30 | c << 29 | v << 28; }') % (sysreg, d)
+            return '__asm__ volatile ("mrs %%0, %s" : "=r"(%s) :: "memory");' % (sysreg, d)
+        if i == A.ARM_INS_MSR:
+            sysreg = insn.op_str.split(",", 1)[0].strip().lower()
+            if sysreg in STACK_POINTERS:
+                raise Refused("0x%x writes a stack pointer (%s)" % (a, sysreg))
+            src = ops[-1]
+            value = self.reg(src.reg) if src.type == A.ARM_OP_REG else "0x%xu" % (src.imm & 0xFFFFFFFF)
+            out = '{ u32 t = %s; __asm__ volatile ("msr %s, %%0" :: "r"(t) : "memory", "cc");' % (value, sysreg)
+            base, _, fields = sysreg.partition("_")
+            if base in STATUS and ("f" in fields or "nzcv" in fields or fields == ""):
+                out += " n = t >> 31; z = t >> 30 & 1; c = t >> 29 & 1; v = t >> 28 & 1;"
+            return out + " }"
+        if i in (A.ARM_INS_LDREX, A.ARM_INS_LDREXB, A.ARM_INS_LDREXH):
+            m = ops[1].mem
+            d = self.dest(ops[0])
+            addr = "%s + %d" % (self.reg(m.base, sp=True), m.disp)
+            return '{ u32 a = %s; __asm__ volatile ("%s %%0, [%%1]" : "=r"(%s) : "r"(a) : "memory"); }' % (
+                addr, mnemonic, d)
+        if i in (A.ARM_INS_STREX, A.ARM_INS_STREXB, A.ARM_INS_STREXH):
+            m = ops[2].mem
+            d, value = self.dest(ops[0]), self.reg(ops[1].reg)
+            addr = "%s + %d" % (self.reg(m.base, sp=True), m.disp)
+            return ('{ u32 a = %s, x = %s, r; __asm__ volatile ("%s %%0, %%2, [%%1]" : "=&r"(r) : "r"(a), "r"(x) : '
+                    '"memory"); %s = r; }') % (addr, value, mnemonic, d)
+        if i in (A.ARM_INS_MCR, A.ARM_INS_MCR2, A.ARM_INS_MRC, A.ARM_INS_MRC2):
+            if len(regs) != 1:
+                raise Refused("0x%x: %s %s" % (a, insn.mnemonic, insn.op_str))
+            name = self.arch._name(insn.reg_name(regs[0].reg))
+            asm = text.replace(insn.reg_name(regs[0].reg), "%0", 1)
+            if i in (A.ARM_INS_MRC, A.ARM_INS_MRC2):
+                return '__asm__ volatile ("%s" : "=r"(%s) :: "memory");' % (asm, self.dest(regs[0]))
+            return '__asm__ volatile ("%s" :: "r"(%s) : "memory");' % (asm, self.reg(regs[0].reg))
+        raise Refused("0x%x: %s %s is not modelled" % (a, insn.mnemonic, insn.op_str))
+
+    def _svc(self, insn, ops):
+        """svc #n with r0-r3 bound to the handler (its arguments and results); r12, lr and the flags
+        are taken as changed, as the convention lets a call change them."""
+        return ('{ register u32 x0 __asm__("r0") = r0, x1 __asm__("r1") = r1, x2 __asm__("r2") = r2, '
+                'x3 __asm__("r3") = r3; __asm__ volatile ("svc #%d" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) :: '
+                '"r12", "lr", "memory", "cc"); r0 = x0; r1 = x1; r2 = x2; r3 = x3; }') % (ops[0].imm & 0xFFFFFF)
 
     def _literal(self, insn, ops, address, size):
         prog = self.prog
@@ -859,6 +979,27 @@ class Lifter:
                 out.append("*(volatile u32 *)(sp0 - %d) = 0x%xu;" % (d - 4 * k, insn.address + 8))
             elif r not in undef and values.get(r) != self.RET:     # a pop of the return address
                 out.append("*(volatile u32 *)(sp0 - %d) = %s;" % (d - 4 * k, r))  # uses the builtin
+        return " ".join(out)
+
+    def _frame_ldm(self, insn, returning=False):
+        """An ldm through a frame address that loads sp (an APCS epilogue): the other registers from
+        their slots (the return address as the builtin), sp left to the static depth; when returning,
+        only the registers that carry the result."""
+        st = self.ctx["states"][insn.address]
+        slots = self.ldm_slots(insn, st[0], st[1])
+        if slots is None or insn.writeback:
+            raise Refused("0x%x: %s %s is not modelled" % (insn.address, insn.mnemonic, insn.op_str))
+        keep = ({"r0", "r1"} if self._wide(self.ctx["fn"].name) else {"r0"}) if returning else None
+        out = []
+        for r, key in slots:
+            if r in ("sp", "pc") or (keep is not None and r not in keep):
+                continue
+            if r not in REGS:
+                raise Refused("0x%x loads %s" % (insn.address, r))
+            if st[1].get(key) == self.RET:
+                out.append("%s = (u32)__builtin_return_address(0);" % r)
+            else:
+                out.append("%s = *(volatile u32 *)(sp0 - %d);" % (r, key))
         return " ".join(out)
 
     def _pop(self, insn, returning=False):
