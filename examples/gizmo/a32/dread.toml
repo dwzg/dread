@@ -46,6 +46,24 @@ status = 0x4
 tx_ready = 0x1
 rx_ready = 0x2
 
+[models.timer]
+kind = "timer"
+base = 0x80001000
+irq = 0
+
+[models.intc]
+kind = "intc"
+base = 0x80002000
+
+[models.gpio]
+kind = "gpio"
+base = 0x80003000
+
 [scenarios.boot]
 until = {uart = "READY"}
+limit = 5_000_000
+
+[scenarios.keys]
+input = [[40_000, "uart", "s"]]
+until = {uart = "READY\r\nmode run volume 7"}
 limit = 5_000_000

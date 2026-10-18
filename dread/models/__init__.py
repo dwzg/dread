@@ -52,10 +52,13 @@ class Model:
         """What the model saw, for the run's summary (compared between two images)."""
         return {}
 
+    # An interrupt controller also has line(number, level), pending_interrupt() -> the number to
+    # take or None, taken(number) and returned() (dread.models.intc, dread.models.nvic).
+
 
 def classes():
-    from dread.models import uart
-    return {"uart": uart.Uart}
+    from dread.models import gpio, intc, nvic, timer, uart
+    return {"uart": uart.Uart, "timer": timer.Timer, "intc": intc.Intc, "nvic": nvic.Nvic, "gpio": gpio.Gpio}
 
 
 def create(system, name, config, root):

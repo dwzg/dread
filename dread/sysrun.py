@@ -86,6 +86,8 @@ class System:
         names = list(self.scenario["models"]) if "models" in self.scenario else sorted(target.models)
         self.models = [dmodels.create(self, n, target.models[n], target.root) for n in names]
         self.by_name = {m.name: m for m in self.models}
+        self.controllers = [m for m in self.models if hasattr(m, "pending_interrupt")]
+        self.irq_check, self.deliver, self.interrupts = False, False, collections.Counter()
         owned = sorted((lo, hi, m) for m in self.models for lo, hi in m.ranges)
         self.owned_lo, self.owned = [lo for lo, _, _ in owned], owned
         self.log, self.clock, self.new, self.stop = [], 0, 0, None
@@ -144,8 +146,23 @@ class System:
         self.uc.emu_stop()
 
     def interrupt_level(self, number, level):
-        """A model's interrupt line (delivered by an interrupt model, see dread.models)."""
+        """A model's interrupt line, handed to the interrupt controller models."""
         self.levels[number] = level
+        for c in self.controllers:
+            c.line(number, level)
+        self.interrupts_changed()
+
+    def interrupts_changed(self):
+        """Something may now ask for an interrupt: checked behind the next block of shared code."""
+        self.irq_check = True
+
+    def _wanted(self):
+        """The interrupt a controller asks for, or None."""
+        for c in self.controllers:
+            number = c.pending_interrupt()
+            if number is not None:
+                return c, number
+        return None
 
     def schedule(self):
         times = [t for t in (m.next_event() for m in self.models) if t is not None]
@@ -168,6 +185,12 @@ class System:
             self.clock += size
             if (self.next_event is not None and self.clock >= self.next_event) or self.clock >= self.limit:
                 uc.emu_stop()
+            if self.irq_check:
+                if self._wanted() is None:
+                    self.irq_check = False
+                elif self.arch.interrupts_enabled(uc):
+                    self.deliver = True
+                    uc.emu_stop()
         if self.layout.settle_it:
             self.arch.settle_it(uc)
 
@@ -221,6 +244,9 @@ class System:
 
         def word(address):
             return int.from_bytes(uc.mem_read(address, 4), "little")
+
+        def write_word(address, value):
+            uc.mem_write(address, (value & 0xFFFFFFFF).to_bytes(4, "little"))
         pc = arch.reset(uc, word, self.image.entry, self.image.vectors)
         self.schedule()
         how = None
@@ -229,9 +255,26 @@ class System:
             try:
                 uc.emu_start(pc, self.layout.sentinel, count=CHUNK)
             except UcError as e:
-                how = self.fault or "emulator error at pc 0x%x: %s" % (uc.reg_read(self.layout.pc), e)
-                break
+                back = arch.exception_return(uc, word)
+                if back is None:
+                    how = self.fault or "emulator error at pc 0x%x: %s" % (uc.reg_read(self.layout.pc), e)
+                    break
+                self.fault, pc = None, back     # the M profile's return from an exception, finished here
+                for c in self.controllers:
+                    c.returned()
+                self.interrupts_changed()
+                continue
             pc = arch.resume_address(uc)
+            if self.deliver:
+                self.deliver = False
+                wanted = self._wanted()
+                if wanted is not None and arch.interrupts_enabled(uc):
+                    controller, number = wanted
+                    controller.taken(number)
+                    self.interrupts[number] += 1
+                    self.log.append(("interrupt", controller.name, number))
+                    pc = arch.enter_interrupt(uc, number, pc, self.image.vectors, word, write_word)
+                    self.interrupts_changed()
             if self.stop:
                 how = self.stop
                 break
@@ -250,6 +293,8 @@ class System:
                         self.clock - self.last_access, pc & ~1)
                 break
         reports = {m.name: m.report() for m in self.models}
+        if self.interrupts:
+            reports["interrupts"] = dict(sorted(self.interrupts.items()))
         return Outcome(how, self.clock, list(self.log), reports, dict(self.entered), list(self.order))
 
     def service(self):

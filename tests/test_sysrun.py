@@ -51,7 +51,81 @@ def test_a_planted_bug_shows(target, variant, tmp_path):
 
 def test_stop_rules(target):
     image = target.image()
-    waits = sysrun.run_image(target, image, image.payload(), {"limit": 3_000_000})
-    assert waits.how.startswith("waits"), waits.how          # after READY: no timer, no keys
+    waits = sysrun.run_image(target, image, image.payload(), {"models": ["uart"], "limit": 3_000_000})
+    assert waits.how.startswith("waits"), waits.how          # after READY without a timer: nothing comes
     polls = sysrun.run_image(target, image, image.payload(), {"models": [], "limit": 3_000_000})
     assert polls.how.startswith("polls"), polls.how          # no UART: uart_putc waits for "can send"
+
+
+def test_keys_go_through_the_timer_interrupt(target):
+    """'s' arrives in the receive queue; timer_irq (an interrupt: a32 IRQ, m3 exception 16) moves it
+    into the ring buffer and the main loop prints the status again."""
+    a, b = both(target, scenario=target.scenarios["keys"])
+    assert a.how.startswith("until") and sysrun.compare(a, b) == [], (a.how, sysrun.compare(a, b))
+    assert a.reports["uart"]["sent"].endswith("READY\r\nmode run volume 7")
+    assert a.reports["interrupts"] and a.reports["interrupts"] == b.reports["interrupts"]
+
+
+def test_ticks_agree_for_a_long_run(target):
+    """No end condition: the timer keeps interrupting until the limit; both images take the same
+    interrupts at the same places, and the LED key reaches the pins."""
+    scenario = {"input": [[40_000, "uart", "l"]], "limit": 600_000}
+    a, b = both(target, scenario=scenario)
+    assert a.how.startswith("limit") and sysrun.compare(a, b) == []
+    assert sum(a.reports["interrupts"].values()) > 10
+    assert a.reports["gpio"]["pins"] & 2                     # led_on: GPIO_OUT bit 1
+
+
+def test_a_bug_in_the_interrupt_path_shows(target, variant, tmp_path):
+    src = src_copy(tmp_path, variant, ("r->buf[head] = c;", "r->buf[head] = c + 1;"))
+    payload = build.build(target, target.image(), src=str(src), out=str(tmp_path / "recon"), quiet=True)
+    a, b = both(target, payload, scenario=target.scenarios["keys"])
+    assert sysrun.compare(a, b), (a.how, b.how)
+
+
+class Clock:
+    """What a model needs of the system, for unit tests."""
+    def __init__(self):
+        self.clock, self.lines, self.noted, self.changed = 0, {}, [], 0
+
+    def interrupt_level(self, number, level):
+        self.lines[number] = level
+
+    def interrupts_changed(self):
+        self.changed += 1
+
+    def note(self, *what):
+        self.noted.append(what)
+
+
+def test_timer_counts_and_expires():
+    from dread.models.timer import Timer
+    system = Clock()
+    t = Timer(system, "timer", {"base": 0x1000, "rate": 10, "irq": 3})
+    t.write(0x1004, 4, 100)                  # load
+    t.write(0x1008, 4, 3)                    # run, interrupt
+    assert t.next_event() == 1000
+    system.clock = 400
+    assert t.read(0x1000, 4) == 60 and t.read(0x100C, 4) == 0
+    system.clock = 1000
+    t.event(1000)
+    assert t.read(0x100C, 4) == 1 and system.lines[3] and t.next_event() == 2000
+    t.write(0x100C, 4, 1)                    # clear
+    assert not system.lines[3]
+
+
+def test_systick():
+    from dread.models.nvic import Nvic, SYST
+    system = Clock()
+    n = Nvic(system, "nvic", {"systick_rate": 2})
+    n.write(SYST + 4, 4, 99)                 # reload
+    n.write(SYST, 4, 3)                      # enable, interrupt
+    assert n.next_event() == 200
+    n.event(200)
+    assert n.pending_interrupt() == 15 and n.read(SYST, 4) & (1 << 16)
+    assert not n.read(SYST, 4) & (1 << 16)   # countflag clears on read
+    n.taken(15)
+    assert n.pending_interrupt() is None
+    n.write(0xE000E100, 4, 1 << 4)           # enable line 4
+    n.line(4, True)
+    assert n.pending_interrupt() == 20

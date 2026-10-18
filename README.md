@@ -47,7 +47,7 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Integration run: generated inputs with real callees, also through original callers | done |
 | Register flow across calls: what callers read after a call, compared at the return | done |
 | Recorded cases from Python models of callees (`dread record`) | done |
-| System run from reset, original against rebuilt, on a shared clock (models: serial port so far) | in progress |
+| System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick) | done |
 | Lifter (ARM, then Thumb) | planned |
 | Reading aids, Claude Code plugin, method documentation | planned |
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | with the lifter |

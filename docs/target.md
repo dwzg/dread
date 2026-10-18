@@ -149,9 +149,13 @@ address faults before the run can stop.
 
 ### `[models.NAME]`: devices for the system run
 
-One table per device of `dread sysrun`. `kind` names a model class of `dread.models` (`uart`) or the
+One table per device of `dread sysrun`. `kind` names a model class of `dread.models` or the
 target's own (`"file.py:Class"`, relative to the target directory); the other keys are the class's
-(its docstring). Example, a serial port:
+(its docstring). The kinds of `dread.models`: `uart` (serial port: data, status bits, receive queue),
+`timer` (down-counter with load, control, status and an interrupt line), `gpio` (input and output
+pins), `intc` (an A-profile controller with pending, enable and acknowledge registers, taken through
+the IRQ vector), `nvic` (the Cortex-M NVIC's enable and pending registers and SysTick, taken through
+the vector table). Example, a serial port:
 
 ```toml
 [models.uart]

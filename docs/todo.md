@@ -58,7 +58,7 @@ The long runs set the pace of everything after them. Measure first, then cut.
   points (a key at instruction N). Named scenarios in a table of the target. Done when gizmo boots
   to `READY` in both images with identical device logs, and a planted bug in a rewritten function
   shows as a difference.
-- [ ] **Generic models.** UART (transmit log, receive queue), timer with interrupt, GPIO pins, an
+- [x] **Generic models.** UART (transmit log, receive queue), timer with interrupt, GPIO pins, an
   interrupt controller and exception entry for the A profile (ARM7 IRQ vector) and the M profile
   (NVIC, SysTick, exception frames). Each a plugin-shaped class configured from `dread.toml`.
   Done when both gizmo builds run their timer interrupt and echo keys from the receive queue.

@@ -400,6 +400,61 @@ class Arm:
         engine.reg_write(ua.UC_ARM_REG_CPSR, 0xD3)
         return entry
 
+    EXC_RETURN = 0xFFFFFFE0                 # M profile: branches at or above this return from an exception
+
+    def interrupts_enabled(self, engine):
+        """Whether an interrupt may be taken now: A profile, the I bit is clear; M profile,
+        PRIMASK is clear and the core runs no exception handler (one level, no nesting)."""
+        if self.profile == "m":
+            return not engine.reg_read(ua.UC_ARM_REG_PRIMASK) & 1 and not engine.reg_read(ua.UC_ARM_REG_XPSR) & 0x1FF
+        return not engine.reg_read(ua.UC_ARM_REG_CPSR) & 0x80
+
+    def enter_interrupt(self, engine, number, resume, vectors, read_word, write_word):
+        """Take interrupt `number` (A profile: the IRQ, number ignored; M profile: the exception
+        number, 16 + the line) as the core does, returning to `resume`. Returns where to go on.
+
+        A profile: SPSR_irq = CPSR, IRQ mode with I set in ARM state, LR_irq = the return address
+        + 4, at vectors + 0x18. M profile: r0-r3, r12, lr, the return address and xPSR pushed on the
+        main stack (aligned to 8 bytes, bit 9 of the stacked xPSR telling so), LR = EXC_RETURN for
+        thread mode on the main stack, IPSR = number, at the handler of the vector table. The
+        process stack, priorities and FPU frames are not modelled."""
+        if self.profile == "m":
+            sp = engine.reg_read(ua.UC_ARM_REG_SP)
+            xpsr = engine.reg_read(ua.UC_ARM_REG_XPSR) & ~self.IT_MASK
+            if sp & 4:
+                sp -= 4
+                xpsr |= 1 << 9
+            regs = [engine.reg_read(getattr(ua, "UC_ARM_REG_" + r)) for r in ("R0", "R1", "R2", "R3", "R12", "LR")]
+            frame = regs + [resume & ~1, xpsr | 0x01000000]
+            sp -= 32
+            for i, value in enumerate(frame):
+                write_word(sp + 4 * i, value)
+            engine.reg_write(ua.UC_ARM_REG_SP, sp)
+            engine.reg_write(ua.UC_ARM_REG_LR, 0xFFFFFFF9)
+            engine.reg_write(ua.UC_ARM_REG_XPSR, 0x01000000 | (number & 0x1FF))
+            return read_word(vectors + 4 * number) | 1
+        cpsr = engine.reg_read(ua.UC_ARM_REG_CPSR)
+        engine.reg_write(ua.UC_ARM_REG_CPSR, (cpsr & ~0x3F) | 0x12 | 0x80)
+        engine.reg_write(ua.UC_ARM_REG_SPSR, cpsr)
+        engine.reg_write(ua.UC_ARM_REG_LR, (resume & ~1) + 4)
+        return vectors + 0x18
+
+    def exception_return(self, engine, read_word):
+        """M profile: finish the return the core began by branching to EXC_RETURN (Unicorn stops
+        there): pop the frame of enter_interrupt and return where to go on, or None when pc is no
+        EXC_RETURN value."""
+        pc = engine.reg_read(ua.UC_ARM_REG_PC)
+        if self.profile != "m" or pc < self.EXC_RETURN:
+            return None
+        sp = engine.reg_read(ua.UC_ARM_REG_SP)
+        frame = [read_word(sp + 4 * i) for i in range(8)]
+        for r, value in zip(("R0", "R1", "R2", "R3", "R12", "LR"), frame):
+            engine.reg_write(getattr(ua, "UC_ARM_REG_" + r), value)
+        sp += 32 + (4 if frame[7] & (1 << 9) else 0)
+        engine.reg_write(ua.UC_ARM_REG_SP, sp)
+        engine.reg_write(ua.UC_ARM_REG_XPSR, frame[7] & ~(1 << 9))
+        return frame[6] | 1
+
     def resume_address(self, engine):
         """Where to go on after emu_start returned: pc, with bit 0 set in Thumb state."""
         pc = engine.reg_read(ua.UC_ARM_REG_PC)
