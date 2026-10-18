@@ -255,17 +255,20 @@ class Program:
         else:
             return
         md = self.arch.disassembler(isa)
+        link = getattr(self.arch, "link_pair", None)
         a = lo
         while a < hi:
             try:
                 code = self.read(a, hi - a)
             except TargetError:
                 return
-            got = False
+            got, prev = False, None
             for insn in md.disasm(code, a):
+                if link is not None and link(prev, insn, isa):
+                    insn.link_call = True       # a call through a register (arch.link_pair)
                 self._insns[insn.address] = insn
                 a = insn.address + insn.size
-                got = True
+                got, prev = True, insn
             if a < hi:                      # stopped at something that does not decode
                 self._insns.setdefault(a, None)
                 a += self.code[a][0] if a in self.code else self.arch.min_insn(isa)

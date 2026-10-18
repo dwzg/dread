@@ -189,6 +189,26 @@ class Arm:
             break
         return None
 
+    def link_pair(self, prev, insn, isa):
+        """Whether `insn` is ARMv4T's call through a register: an indirect jump (bx rN, mov pc, rN or
+        ldr pc, [...]) right behind mov lr, pc under the same condition, in ARM state, so that lr
+        holds the address behind the jump. dread.program marks such jumps (insn.link_call) when it
+        decodes a range, and flow() then calls them indirect calls."""
+        if isa != "a32" or prev is None or prev.id != csarm.ARM_INS_MOV or len(prev.operands) != 2:
+            return False
+        lr, pc = prev.operands
+        if not (lr.type == pc.type == csarm.ARM_OP_REG and lr.reg == csarm.ARM_REG_LR and pc.reg == csarm.ARM_REG_PC):
+            return False
+        if prev.address + prev.size != insn.address or prev.cc != insn.cc:
+            return False
+        ops = insn.operands
+        if insn.id == csarm.ARM_INS_BX:
+            return bool(ops) and ops[0].reg != csarm.ARM_REG_LR
+        if insn.id in (csarm.ARM_INS_MOV, csarm.ARM_INS_LDR) and ops and ops[0].type == csarm.ARM_OP_REG \
+                and ops[0].reg == csarm.ARM_REG_PC:
+            return len(ops) == 2 and (ops[1].type == csarm.ARM_OP_MEM or ops[1].type == csarm.ARM_OP_REG)
+        return False
+
     def is_call(self, insn):
         """bl or blx (direct or through a register)."""
         return insn.id in CALLS
@@ -217,6 +237,8 @@ class Arm:
         decided by instruction first."""
         i = insn.id
         conditional = self.is_conditional(insn)
+        if getattr(insn, "link_call", False):
+            return "icall", None, True      # mov lr, pc in front (dread.program marks it: link_pair)
         if i == csarm.ARM_INS_SVC:
             return "icall", None, True      # its handler may return values in any register and the flags
         if i in CALLS:

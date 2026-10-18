@@ -98,6 +98,16 @@ The long runs set the pace of everything after them. Measure first, then cut.
   registers and the return address through pushes and pops. liftfuzz generates both shapes. Its
   first run of them crashed the process in dread.switches: on-demand pages unmapped after a run,
   then written by a later one inside Unicorn (now kept mapped and zeroed between runs).
+- [x] gizmo built by gcc at -O0, -O2 and -O3 (scratch builds, not committed): the lifter accepts
+  41-45 functions per build. Found and fixed on the way: Thumb's two-operand adds r7, #12 on the frame
+  pointer, Thumb's nop (capstone: hint), ARMv4T's call through a register (mov lr, pc; bx r3: the
+  decoder marks it, arch.flow calls it an indirect call, for every tool), and conditional writes
+  under complementary conditions (addeq r7 / addne r7) that the undefined-register check took for
+  reads of what the caller left. What is left over is coverage, not translation (next item).
+- [ ] The case generator aims a learned pointer at the start of its scratch buffer, always aligned:
+  memcpy's aligned-copy path at -O3 (both pointers equally misaligned) is never run. Vary the low
+  bits of the aimed address (a VERSION bump). handle_key at -O2 and -O3 inlines read_line and needs
+  the recorded cases of the -Os build, which do not carry over to other builds.
 - [ ] Lifter gaps still open: APCS frames (mov ip, sp; push {fp, ip, lr, pc}; ldmdb fp, {.., sp, pc}),
   mrs/msr/cps as inline assembly, VFP, ldrex and strex, A-profile exception handlers (subs pc, lr).
 - [ ] The case generator could start from the coverage of an image's written cases (read_line takes

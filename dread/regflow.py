@@ -566,7 +566,9 @@ def cache_key(target, image):
     h = hashlib.sha1()
     h.update(b"dread regflow %d\0" % VERSION)
     from dread import switches
-    for module in (__name__, switches.__name__, type(image.arch).__module__):  # the analysis, the arch layer
+    from dread import program as program_module
+    for module in (__name__, switches.__name__, type(image.arch).__module__, program_module.__name__):
+        # the analysis, the arch layer and the decoder (it marks calls through a register)
         with open(sys.modules[module].__file__, "rb") as f:
             h.update(f.read())
     h.update(image.payload())

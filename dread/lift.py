@@ -274,11 +274,11 @@ class Lifter:
                 and ops[1].shift.type in (0, A.ARM_SFT_INVALID) and ops[0].type == A.ARM_OP_REG:
             v = self.frame_value(insn, ops[1].reg, depth, values) or values.get(rname(ops[1].reg))
             return (rname(ops[0].reg), v) if v is not None else None
-        if i in (A.ARM_INS_ADD, A.ARM_INS_ADDW, A.ARM_INS_SUB, A.ARM_INS_SUBW) and len(ops) == 3 \
-                and ops[1].type == A.ARM_OP_REG and ops[2].type == A.ARM_OP_IMM:
-            v = self.frame_value(insn, ops[1].reg, depth, values)
+        if i in (A.ARM_INS_ADD, A.ARM_INS_ADDW, A.ARM_INS_SUB, A.ARM_INS_SUBW) and len(ops) in (2, 3) \
+                and ops[-2].type == A.ARM_OP_REG and ops[-1].type == A.ARM_OP_IMM and ops[0].type == A.ARM_OP_REG:
+            v = self.frame_value(insn, ops[-2].reg, depth, values)  # also Thumb's adds r7, #12
             if v is not None:
-                k = v[1] - ops[2].imm if i in (A.ARM_INS_ADD, A.ARM_INS_ADDW) else v[1] + ops[2].imm
+                k = v[1] - ops[-1].imm if i in (A.ARM_INS_ADD, A.ARM_INS_ADDW) else v[1] + ops[-1].imm
                 return rname(ops[0].reg), ("sp", k)
         return None
 
@@ -352,7 +352,10 @@ class Lifter:
         """({address: registers that may still hold what the caller left, before the instruction},
         {address: such registers the instruction reads}). Arguments (r0-r3), sp and pc count as
         written at the entry; pushes (they only save) and returns (lr is only the way back) read
-        nothing; a call leaves the scratch registers, lr and the flags written."""
+        nothing; a call leaves the scratch registers, lr and the flags written. A conditional write
+        counts once the register is written under the opposite condition too (addeq r7, ...;
+        addne r7, ...), or on the edge of a conditional branch whose condition it was written
+        under, as long as the flags do not change in between."""
         if fn.name in self._entry:
             return self._entry[fn.name]
         prog, arch = self.prog, self.arch
@@ -362,15 +365,15 @@ class Lifter:
         except Refused:
             known = {}
         start = frozenset(r for r in REGS + ["flags"] if r not in ARGS + ("sp", "pc"))
-        state, found = {fn.insns[0]: start}, {}
+        undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
         work = [fn.insns[0]]
         while work:
             a = work.pop()
             insn = prog.insn(a)
             if insn is None:
                 continue
-            undef = state[a]
-            kind = arch.flow(insn)[0]
+            undef, partial = undef_at[a], partial_at[a]
+            kind, target, _ = arch.flow(insn)
             reads, writes = arch.reg_effects(insn)
             if arch.stack_kind(insn) == "push" or kind == "return":
                 reads = set()
@@ -379,15 +382,37 @@ class Lifter:
             bad = (reads & undef) - {"sp", "pc"}
             if bad:
                 found[a] = bad
-            after = undef if arch.predicate(insn) is not None else undef - writes
+            pred = arch.predicate(insn)
+            if pred is None:
+                after_u = undef - writes
+                after_p = frozenset(x for x in partial if x[0] not in writes)
+            else:
+                u, part = set(undef), set(partial)
+                for r in writes & undef:
+                    if (r, arch.complement(pred)) in part:
+                        u.discard(r)
+                        part = {x for x in part if x[0] != r}
+                    else:
+                        part.add((r, pred))
+                after_u, after_p = frozenset(u), frozenset(part)
+            if "flags" in writes:
+                after_p = frozenset()       # the conditions written under no longer hold
             for b in self.successors(fn, index, a, insn, strict=False, values=known.get(a, (0, None))[1]):
-                old = state.get(b)
-                new = after if old is None else old | after
-                if new != old:
-                    state[b] = new
+                bu, bp = after_u, after_p
+                if kind == "jump" and pred is not None and bp:
+                    cond = pred if isinstance(target, int) and b == target & ~1 else arch.complement(pred)
+                    done = {r for r, c in bp if c == cond}
+                    bu, bp = bu - done, frozenset(x for x in bp if x[0] not in done)
+                if b not in undef_at:
+                    undef_at[b], partial_at[b] = bu, bp
                     work.append(b)
-        self._entry[fn.name] = (state, found)
-        return state, found
+                else:
+                    nu, np = undef_at[b] | bu, partial_at[b] & bp
+                    if nu != undef_at[b] or np != partial_at[b]:
+                        undef_at[b], partial_at[b] = nu, np
+                        work.append(b)
+        self._entry[fn.name] = (undef_at, found)
+        return undef_at, found
 
     def leaves(self, fn):
         """The registers beyond r0-r3 a function reads before anything writes them."""
@@ -492,8 +517,9 @@ class Lifter:
     def reg(self, r, sp=False):
         """The C expression of a register read; the stack pointer only where `sp` allows it."""
         name = self.name(r)
-        if name == "pc":
-            raise Refused("0x%x reads pc" % self.insn_now.address)
+        if name == "pc":                    # a constant: where the original's code is
+            insn = self.insn_now
+            return "0x%xu" % self.arch.pc_value(insn.address, self.prog.isa_at(insn.address))
         if name == "sp":
             if not sp:
                 raise Refused("0x%x computes with the stack pointer: %s %s" % (
@@ -625,7 +651,7 @@ class Lifter:
     def _insn(self, insn, i, ops, isa):
         arch, prog = self.arch, self.prog
         kind, target, falls = arch.flow(insn)
-        if i in (A.ARM_INS_NOP, A.ARM_INS_IT):
+        if i in (A.ARM_INS_NOP, A.ARM_INS_IT) or (i == A.ARM_INS_HINT and insn.mnemonic.split(".")[0] == "nop"):
             return None
         if kind == "return":
             if i in (A.ARM_INS_SUB, A.ARM_INS_SUBS if hasattr(A, "ARM_INS_SUBS") else -1) or \
@@ -657,9 +683,18 @@ class Lifter:
             text = self._call(callee, insn)
             return text + " for (;;) { }" if self.never_returns(callee.name) else text
         if kind == "icall":
-            if i != A.ARM_INS_BLX:
-                raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
-            return self._icall(insn, self.reg(ops[0].reg))
+            if i == A.ARM_INS_BLX:
+                return self._icall(insn, self.reg(ops[0].reg))
+            if getattr(insn, "link_call", False):   # mov lr, pc in front: ARMv4T's call through a register
+                if i == A.ARM_INS_BX:
+                    return self._icall(insn, self.reg(ops[0].reg))
+                if i == A.ARM_INS_MOV:
+                    return self._icall(insn, self.reg(ops[1].reg))
+                addr, newbase, _ = self._mem(insn)
+                if newbase is not None:
+                    raise Refused("0x%x: a call through memory with writeback" % insn.address)
+                return "{ u32 f = *(volatile u32 *)(%s); %s }" % (addr, self._icall(insn, "f"))
+            raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
         if kind == "ijump":
             if self.ret_jump(insn, self.values()):
                 return "return %s;" % self._ret()
@@ -1255,8 +1290,10 @@ class Lifter:
             if leaves:
                 raise Refused("0x%x jumps to %s, which reads %s its caller leaves" % (
                     insn.address, callee.name, ", ".join(leaves)))
-            if self.stack_args(callee) != 0:
-                raise Refused("0x%x jumps to %s, which takes stack arguments" % (insn.address, callee.name))
+            n = self.stack_args(callee)
+            if n != 0:
+                raise Refused("0x%x jumps to %s, %s" % (insn.address, callee.name, "which takes stack arguments" if n
+                                                        else "whose stack arguments are not known"))
         wide = any(self._wide(c.name) for c in callees)
         if self._wide(self.ctx["fn"].name) and not wide:
             raise Refused("0x%x: its callers read r1 behind a tail call that does not set it" % insn.address)
