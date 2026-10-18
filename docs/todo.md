@@ -45,8 +45,11 @@ The long runs set the pace of everything after them. Measure first, then cut.
 - [x] **Poll loops**: a run that spins on a peripheral register until the instruction limit (gizmo's
   `uart_putc` takes 8 s and 19 s to generate) gets the register's answers staged automatically
   (`poll_read`) once the loop is recognised. Done when uart_putc generates in about a second.
-- [ ] **Adaptive limits**: during the search, a run that takes far longer than the function's runs
-  so far is cut early (the case keeps the full limit when it is kept). Done with numbers.
+- [x] ~~Adaptive limits~~: dropped after measuring. With the hooks in C a run to the instruction
+  limit costs about 5 ms; in the heaviest gizmo generation (memcpy, 3.5 s) emulation is about 15 %
+  of the time. What is left is Python work per memory location a function reads (one value pick
+  and one entry per buffer byte); bulk buffer contents would be the next step if it matters on a
+  large target ("Known gaps").
 
 ## Phase 5: system run
 
@@ -159,6 +162,8 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## Known gaps (not scheduled)
 
+- Case generation does Python work per buffer byte a function reads (a value pick, a memory entry):
+  fine on gizmo (seconds), to be measured on a large target before anything is changed.
 - `dread mutate`: the exhaustive equivalence proof for tiny functions, `--macro`.
 - `dread regflow`: switch shapes bounded other than by cmp/and with an immediate fall back to coarse
   rules; callee-saved registers a function reads that its caller left are not analysed.

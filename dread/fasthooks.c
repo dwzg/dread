@@ -212,6 +212,32 @@ int dread_write(void *uc, int type, uint64_t address, int size, int64_t value, s
     return 1;
 }
 
+static int by_start(const void *a, const void *b)
+{
+    uint64_t x = *(const uint64_t *)a >> 8, y = *(const uint64_t *)b >> 8;
+    return x < y ? -1 : x > y;
+}
+
+/* The stores as merged ranges [lo, hi), sorted: lo and hi need room for as many entries as there
+ * are stores (dread_count(st, 3)). Returns the number of ranges. */
+size_t dread_ranges(state_t *st, uint64_t *lo, uint64_t *hi)
+{
+    size_t n = dread_copy(st, 3, lo, NULL), out = 0;
+    qsort(lo, n, sizeof(uint64_t), by_start);
+    for (size_t i = 0; i < n; i++) {
+        uint64_t a = lo[i] >> 8, b = a + (lo[i] & 0xFF);
+        if (out && a <= hi[out - 1]) {
+            if (b > hi[out - 1])
+                hi[out - 1] = b;
+        } else {
+            lo[out] = a;
+            hi[out] = b;
+            out++;
+        }
+    }
+    return out;
+}
+
 size_t dread_state_size(void)
 {
     return sizeof(state_t);

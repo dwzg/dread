@@ -252,7 +252,7 @@ def run(target, image, name, spec_path, tries=1, seconds=None, dry_run=False, ou
             continue
         case, result = got
         again = replay(gen, name, fn, case)
-        if again is None or (again[0].ret, again[0].writes) != (result.ret, result.writes):
+        if again is None or (again[0].ret, again[0].ranges) != (result.ret, result.ranges):
             continue
         finished += 1
         if deadline is not None and not again[1] - covered:

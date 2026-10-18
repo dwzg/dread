@@ -364,12 +364,20 @@ class Generator:
         function = getattr(m, "function", None) or self.current
         m.arg_domains = self.argument_domains.get(function, []) if function else []
         extra = self.pointed(function, confine_args(m.arg_domains, case["args"]))
+        confine = bool(self.domains or extra)
+        stores = []
         for addr, size, value in case["mem"]:
-            value = self.confined(addr, size, value & ((1 << 8 * size) - 1), extra)
-            if value is not None:
-                m.write(addr, value.to_bytes(size, "little"))
-                if fixed is not None and lay.target.memory.is_io(addr):
-                    fixed.update((addr + i, b) for i, b in enumerate(value.to_bytes(size, "little")))
+            value &= (1 << 8 * size) - 1
+            if confine:
+                value = self.confined(addr, size, value, extra)
+                if value is None:
+                    continue
+            data = value.to_bytes(size, "little")
+            stores.append((addr, data))
+            if fixed is not None and lay.target.memory.is_io(addr):
+                fixed.update((addr + i, b) for i, b in enumerate(data))
+        for addr, data in coalesce(stores):
+            m.write(addr, data)
         if fixed is not None:
             m.io_fixed = fixed
         for at, nth, value in case.get("poll", ()):
@@ -442,7 +450,7 @@ class Generator:
 
     def touches_image(self, m):
         image = self.image
-        return m.code_reads or any(image.base <= a < image.end for a in m.written)
+        return m.code_reads or m.wrote_into(image.base, image.end)
 
     def coverage(self, entry, words, case, limit=200_000, check_image=False):
         """The function's instructions this input executes; empty if it does not finish (or, with
@@ -837,7 +845,7 @@ class Generator:
                     if got - covered:
                         covered |= got
                         swept.append(case)
-                    steps.append((case, repr((r.ret, sorted(r.writes.items()), r.calls))))
+                    steps.append((case, repr((r.ret, r.ranges, r.calls))))
                 edges = [j for j in range(1, len(steps)) if steps[j][1] != steps[j - 1][1]]
                 if len(edges) > 6:
                     edges = rng.sample(edges, 3)
@@ -1079,6 +1087,27 @@ class Generator:
             runs[0], cost[0] = SOLVE_RUNS, SOLVE_COST
             if state["progress"] and not words_set <= covered:
                 runs[0], cost[0] = 0, 0
+
+
+def coalesce(stores):
+    """[(address, bytes), ...] in the order given -> the same as few contiguous runs, for one emulator
+    write each (a case's memory is mostly bytes of buffers). With overlapping entries the later one
+    must win, as when they are written one by one: then they are returned as they are."""
+    order = sorted(range(len(stores)), key=lambda i: stores[i][0])
+    end = None
+    for i in order:
+        address, data = stores[i]
+        if end is not None and address < end:
+            return stores
+        end = address + len(data)
+    runs = []
+    for i in order:
+        address, data = stores[i]
+        if runs and runs[-1][0] + len(runs[-1][1]) == address:
+            runs[-1][1].extend(data)
+        else:
+            runs.append([address, bytearray(data)])
+    return [(address, bytes(data)) for address, data in runs]
 
 
 def seed_name(entry):

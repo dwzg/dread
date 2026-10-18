@@ -105,8 +105,37 @@ class Result:
     kept scratch registers at the return ((name, value) pairs; why: name -> who reads it)."""
 
     def __init__(self, ret, writes, calls, saved=(), layout=None, kept=(), why=None):
-        self.ret, self.writes, self.calls, self.saved, self.layout = ret, writes, calls, saved, layout
+        # writes: {address: byte}, or [(start, bytes), ...] as Machine.call takes them (the
+        # dictionary is then built when someone asks for it: a large copy writes megabytes)
+        self.ret, self.calls, self.saved, self.layout = ret, calls, saved, layout
+        if isinstance(writes, dict):
+            self._writes, self._ranges = writes, None
+        else:
+            self._writes, self._ranges = None, [(lo, bytes(data)) for lo, data in writes]
         self.kept, self.why = tuple(kept), why or {}
+
+    @property
+    def writes(self):
+        """{address: byte} of everything written outside the stack."""
+        if self._writes is None:
+            self._writes = {}
+            for lo, data in self._ranges:
+                self._writes.update(zip(range(lo, lo + len(data)), data))
+        return self._writes
+
+    @property
+    def ranges(self):
+        """The same as [(start, bytes), ...], contiguous runs in address order."""
+        if self._ranges is None:
+            self._ranges, run = [], None
+            for a in sorted(self._writes):
+                if run is not None and a == run[0] + len(run[1]):
+                    run[1].append(self._writes[a])
+                else:
+                    run = [a, bytearray([self._writes[a]])]
+                    self._ranges.append(run)
+            self._ranges = [(lo, bytes(data)) for lo, data in self._ranges]
+        return self._ranges
 
     def diff(self, other):
         """Readable differences to another result; empty when they agree."""
@@ -134,7 +163,7 @@ class Result:
                     out.append("%s after the return: %s vs %s (%s)" % (
                         name, "-" if a is None else "0x%x" % a, "-" if b is None else "0x%x" % b,
                         self.why.get(name) or other.why.get(name) or "read by callers after the call"))
-        for addr in sorted(set(self.writes) | set(other.writes)):
+        for addr in (() if self.ranges == other.ranges else sorted(set(self.writes) | set(other.writes))):
             a, b = self.writes.get(addr), other.writes.get(addr)
             if a != b:
                 out.append("memory 0x%x: %s vs %s" % (addr, a, b))
@@ -253,6 +282,7 @@ class Machine:
         self.core = Core.get(layout, payload)
         self.core.machine = self
         self.uc = self.core.uc
+        self.written_ranges = None  # [(lo, hi), ...] written outside the stack by the last call
         self.stubs, self.calls, self.written = {}, [], set()
         self.unalias = {}           # address a moved function is stubbed at -> its original entry
         self.wide_result = False    # also compare the second result register
@@ -425,14 +455,46 @@ class Machine:
                 self.reads.setdefault(addr, size)
         self.hook_add(UC_HOOK_MEM_READ, on_read)
 
+    @property
+    def written(self):
+        """The addresses the last call wrote outside the stack (from written_ranges when the C
+        hooks recorded them)."""
+        if self._written is None:
+            self._written = {a for lo, hi in (self.written_ranges or ()) for a in range(lo, hi)}
+        return self._written
+
+    @written.setter
+    def written(self, value):
+        self._written = value
+
+    def _read_written(self):
+        """[(start, bytes), ...] of what the call wrote outside the stack, one read per contiguous
+        run; sets written_ranges [(lo, hi), ...] (the C hooks give them merged already)."""
+        if self.written_ranges is None:
+            ranges, addrs, i = [], sorted(self._written or ()), 0
+            while i < len(addrs):
+                j = i
+                while j + 1 < len(addrs) and addrs[j + 1] == addrs[j] + 1:
+                    j += 1
+                ranges.append((addrs[i], addrs[j] + 1))
+                i = j + 1
+            self.written_ranges = ranges
+        return [(lo, self.read(lo, hi - lo)) for lo, hi in self.written_ranges]
+
+    def wrote_into(self, lo, hi):
+        """Whether the last call wrote anything in [lo, hi)."""
+        ranges = getattr(self, "written_ranges", None)
+        if ranges is None:
+            return any(lo <= a < hi for a in self.written)
+        return any(a < hi and lo < b for a, b in ranges)
+
     def _collect(self):
         """Take what the C hooks recorded into the attributes the Python hooks fill."""
         fast = self.core.fast
         if fast is None:
             return
         from dread import fasthooks
-        for k in fast.items(fasthooks.WRITES):
-            self.written.update(range(k >> 8, (k >> 8) + (k & 0xFF)))
+        self.written_ranges, self._written = fast.ranges(), None
         if self._fast_cover:
             self.blocks = {(k >> 16, k & 0xFFFF) for k in fast.items(fasthooks.BLOCKS)}
             self.tree = set(fast.items(fasthooks.TREE))
@@ -519,7 +581,7 @@ class Machine:
         for i, (name, reg) in enumerate(kept):
             if reg is not None and reg not in lay.arg_regs[:len(regs)]:
                 uc.reg_write(reg, KEPT_POISON + 0x11 * (i + 1))
-        self.calls, self.written = [], set()
+        self.calls, self.written, self.written_ranges = [], set(), None
         if self.core.fast is not None:
             from dread import fasthooks
             self.core.fast.clear(fasthooks.WRITES)
@@ -533,7 +595,7 @@ class Machine:
             raise EmuError("%s in a stub or hook at pc=0x%x: %s" % (type(e).__name__, uc.reg_read(lay.pc), e))
         finally:
             self._collect()
-        writes = {a: self.read(a, 1)[0] for a in self.written}
+        writes = self._read_written()
         for register, poll in sorted(self.polls.items()):
             if poll["count"] > poll["stages"][-1][0] + POLL_LOGGED:
                 self.calls.append(("io poll reads", register, poll["count"]))

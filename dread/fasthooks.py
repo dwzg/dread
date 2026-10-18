@@ -76,6 +76,8 @@ def _load():
     lib.dread_count.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.dread_count.restype = ctypes.c_size_t
     lib.dread_clear.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.dread_ranges.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    lib.dread_ranges.restype = ctypes.c_size_t
     return lib
 
 
@@ -135,6 +137,13 @@ class Hooks:
         vals = (ctypes.c_uint32 * max(n, 1))() if values else None
         n = self.lib.dread_copy(ctypes.byref(self.state), which, keys, vals)
         return [(keys[i], vals[i]) for i in range(n)] if values else [keys[i] for i in range(n)]
+
+    def ranges(self):
+        """The stores as merged, sorted ranges [(lo, hi), ...]."""
+        n = self.lib.dread_count(ctypes.byref(self.state), WRITES)
+        lo, hi = (ctypes.c_uint64 * max(n, 1))(), (ctypes.c_uint64 * max(n, 1))()
+        n = self.lib.dread_ranges(ctypes.byref(self.state), lo, hi)
+        return [(lo[i], hi[i]) for i in range(n)]
 
     def clear(self, which):
         self.lib.dread_clear(ctypes.byref(self.state), which)

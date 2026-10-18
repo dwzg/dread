@@ -114,7 +114,7 @@ def run_function(name):
                 out.append(m.call(addr, *args, max_instructions=limit))
             except Exception as e:          # EmuError, or anything a case's own code raises
                 out.append(e if isinstance(e, EmuError) else EmuError("%s: %s" % (type(e).__name__, e)))
-            if which == "original" and written and (m.code_reads or any(image.base <= a < image.end for a in m.written)):
+            if which == "original" and written and (m.code_reads or m.wrote_into(image.base, image.end)):
                 out = None
                 break
             if which == "original":
@@ -134,7 +134,7 @@ def run_function(name):
                 m.reg("r%d" % r, 0x3C5A0F00 + 0x13 * r)
             try:
                 again = m.call(addr, *args, max_instructions=limit)
-                if (again.ret, again.writes, again.calls) != (out[0].ret, out[0].writes, out[0].calls):
+                if (again.ret, again.ranges, again.calls) != (out[0].ret, out[0].ranges, out[0].calls):
                     depends = "the original's result depends on what its caller left in %s" % \
                         " or ".join("r%d" % r for r in regs)
             except EmuError as e:
