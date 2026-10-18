@@ -208,14 +208,17 @@ class Arm:
 
     def flow(self, insn):
         """(kind, target, falls): how control leaves an instruction. kind is "next", "jump" (direct,
-        to target), "call" (direct, to target), "icall" (through a register), "return", "ijump"
-        (indirect jump; for bx rN the target is the register's name) or "stop" (udf). falls: the
-        next instruction may run after it (conditional, cbz/cbnz, calls).
+        to target), "call" (direct, to target), "icall" (through a register; also svc, whose handler
+        may return values in any register and in the flags), "return", "ijump" (indirect jump; for
+        bx rN the target is the register's name) or "stop" (udf). falls: the next instruction may
+        run after it (conditional, cbz/cbnz, calls).
 
         Capstone does not list every pc write (tbb, tbh, cbz, cbnz show none), so the kind is
         decided by instruction first."""
         i = insn.id
         conditional = self.is_conditional(insn)
+        if i == csarm.ARM_INS_SVC:
+            return "icall", None, True      # its handler may return values in any register and the flags
         if i in CALLS:
             target = self.target(insn)
             return ("call" if target is not None else "icall"), target, True
@@ -236,19 +239,107 @@ class Arm:
         if csarm.ARM_REG_PC in written:
             if self.stack_kind(insn) == "pop":
                 return "return", None, conditional
-            if (i == csarm.ARM_INS_MOV and len(insn.operands) == 2 and insn.operands[1].type == csarm.ARM_OP_REG
-                    and insn.operands[1].reg == csarm.ARM_REG_LR):
+            ops = insn.operands
+            if (i == csarm.ARM_INS_MOV and len(ops) == 2 and ops[1].type == csarm.ARM_OP_REG
+                    and ops[1].reg == csarm.ARM_REG_LR):
                 return "return", None, conditional
+            if (i == csarm.ARM_INS_SUB and len(ops) == 3 and ops[1].type == csarm.ARM_OP_REG
+                    and ops[1].reg == csarm.ARM_REG_LR and ops[2].type == csarm.ARM_OP_IMM):
+                return "return", None, conditional      # subs pc, lr, #4: the return from an exception
             return "ijump", None, conditional
         return "next", None, False
 
+    def bound_check(self, insn):
+        """(register, limit, before) when the instruction bounds a switch index: cmp rN, #K (the
+        index is rN, at most K + 1 values pass; set before the compare) or and rN, rM, #(2^n - 1)
+        (rN takes 0 .. 2^n - 1; set after the and). None otherwise. Used by dread.switches."""
+        ops = insn.operands
+        if insn.id == csarm.ARM_INS_CMP and len(ops) == 2 and ops[0].type == csarm.ARM_OP_REG \
+                and ops[1].type == csarm.ARM_OP_IMM and 0 <= ops[1].imm < 0x10000:
+            return self._name(insn.reg_name(ops[0].reg)), ops[1].imm, True
+        if insn.id == csarm.ARM_INS_AND and len(ops) == 3 and ops[0].type == csarm.ARM_OP_REG \
+                and ops[2].type == csarm.ARM_OP_IMM and ops[2].imm > 0 and ops[2].imm & (ops[2].imm + 1) == 0 \
+                and ops[2].imm < 0x10000:
+            return self._name(insn.reg_name(ops[0].reg)), ops[2].imm, False
+        return None
+
+    SWITCH_MAX = 1024       # table entries read at most
+
+    def switch_targets(self, insn, program, inside):
+        """The targets of a switch dispatch whose table lies right behind the instruction, or None
+        when the instruction is not such a dispatch:
+          tbb/tbh [pc, rN]               Thumb: byte or halfword offsets (target = table + 2 * entry)
+          ldr pc, [pc, rN, lsl #2]       ARM: addresses
+          add pc, pc, rN, lsl #2         ARM: a run of branches, each one a target
+        A table's length is not encoded; it is read while its entries lie in the function
+        (`inside(address)`) and, for offsets, before the lowest target found (the code that follows
+        the table)."""
+        from dread.target import TargetError
+        i, ops = insn.id, insn.operands
+        if i in (csarm.ARM_INS_TBB, csarm.ARM_INS_TBH):
+            size = 1 if i == csarm.ARM_INS_TBB else 2
+            base = insn.address + 4
+            targets, a, low = [], base, None
+            for _ in range(self.SWITCH_MAX):
+                if low is not None and a >= low:
+                    break
+                try:
+                    entry = int.from_bytes(program.read(a, size), "little")
+                except TargetError:
+                    break
+                target = base + 2 * entry
+                if not inside(target):
+                    break
+                targets.append(target)
+                low = target if low is None else min(low, target)
+                a += size
+            return targets
+        if len(ops) < 2 or ops[0].type != csarm.ARM_OP_REG or ops[0].reg != csarm.ARM_REG_PC:
+            return None
+        if (i == csarm.ARM_INS_LDR and ops[1].type == csarm.ARM_OP_MEM and ops[1].mem.base == csarm.ARM_REG_PC
+                and ops[1].mem.index and ops[1].shift.type == csarm.ARM_SFT_LSL and ops[1].shift.value == 2):
+            targets, a = [], insn.address + 8
+            for _ in range(self.SWITCH_MAX):
+                try:
+                    word = program.word(a)
+                except TargetError:
+                    break
+                if not inside(word & ~1):
+                    break
+                targets.append(word & ~1)
+                a += 4
+            return targets
+        if (i == csarm.ARM_INS_ADD and len(ops) == 3 and ops[1].type == csarm.ARM_OP_REG
+                and ops[1].reg == csarm.ARM_REG_PC and ops[2].type == csarm.ARM_OP_REG
+                and ops[2].shift.type == csarm.ARM_SFT_LSL and ops[2].shift.value == 2):
+            targets, a = [], insn.address + 8
+            for _ in range(self.SWITCH_MAX):
+                if not inside(a):
+                    break
+                branch = program.insn(a)
+                if branch is None or branch.id != csarm.ARM_INS_B or self.is_conditional(branch):
+                    break
+                targets.append(a)
+                a += 4
+            return targets
+        return None
+
     def stack_kind(self, insn):
-        """"push" for push and stmdb sp!, "pop" for pop and ldm sp!, else None."""
+        """"push" for push, stmdb sp! and str rN, [sp, #-4]!; "pop" for pop, ldm sp! and
+        ldr rN, [sp], #4; else None. (Capstone shows the single-register forms as str/ldr or as
+        push/pop depending on the encoding.)"""
         i = insn.id
         if i == csarm.ARM_INS_PUSH:
             return "push"
         if i == csarm.ARM_INS_POP:
             return "pop"
+        ops = insn.operands
+        if i in (csarm.ARM_INS_STR, csarm.ARM_INS_LDR) and insn.writeback and len(ops) >= 2 \
+                and ops[1].type == csarm.ARM_OP_MEM and ops[1].mem.base == csarm.ARM_REG_SP and not ops[1].mem.index:
+            if i == csarm.ARM_INS_STR and ops[1].mem.disp == -4 and len(ops) == 2:
+                return "push"
+            if i == csarm.ARM_INS_LDR and len(ops) == 3 and ops[2].type == csarm.ARM_OP_IMM and ops[2].imm == 4:
+                return "pop"
         if i in (csarm.ARM_INS_STMDB, csarm.ARM_INS_LDM) and insn.writeback and insn.operands \
                 and insn.operands[0].type == csarm.ARM_OP_REG and insn.operands[0].reg == csarm.ARM_REG_SP:
             return "push" if i == csarm.ARM_INS_STMDB else "pop"

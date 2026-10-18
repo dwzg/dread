@@ -37,6 +37,9 @@ details of the writers:
 - `dread import-elf` leaves out an alignment `nop` at the end of a function's last instruction run.
   GCC counts that nop in the symbol's size, but it never executes, and a test that has to execute
   every instruction would never be complete. Ghidra's analysis does not count it either.
+- For the same reason `dread import-elf` cuts out of the code ranges the `nop` that GCC puts right
+  behind an unconditional `add pc, pc, ...` in ARM state (a switch: pc reads as the instruction + 8,
+  so no target lies at + 4) when no branch goes there. Ghidra's analysis leaves it out too.
 
 ### `code_ranges.tsv` (`code_ranges`)
 
@@ -142,6 +145,14 @@ tab-separated `function`, the source line as written (stripped), the change as `
 it (`>= -> >`, `4 -> 5`, `removed`, `a <-> b`), and the argument. A survivor that matches is listed
 with its argument and not counted. The key includes the line's text, so an argument stops applying
 when the line changes.
+
+### `kept.tsv` (beside the cases directory)
+
+Registers that `dread regflow` finds read by callers after a call, but whose difference at the
+return cannot matter, with the argument why: tab-separated `function`, `register` (`r1`, `r12`,
+`flags`, ...), and the argument. `dread test` and `dread integration` do not compare that register
+at that function's return and list the argument under the function's result. Typical arguments: the
+caller reads it only on a path that cannot happen, or only bits the next callee ignores.
 
 ### `tests.tsv`
 

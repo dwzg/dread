@@ -1,6 +1,6 @@
 /* Helpers with the shapes the tools have to handle: loops, boundaries, a text parser, a switch,
- * stack arguments, a 64-bit result, a division by a variable, a table of function pointers and a
- * family of functions that differ only in their constants. */
+ * a switch made into a jump table, stack arguments, a 64-bit result, a division by a variable, a
+ * table of function pointers and a family of functions that differ only in their constants. */
 #include "gizmo.h"
 
 u32 checksum(const u8 *p, u32 n)
@@ -198,3 +198,43 @@ __attribute__((noinline)) void led_on(void) { gpio_set(1, 1); }
 __attribute__((noinline)) void led_off(void) { gpio_set(1, 0); }
 __attribute__((noinline)) void beep_on(void) { gpio_set(2, 1); }
 __attribute__((noinline)) void beep_off(void) { gpio_set(2, 0); }
+
+/* A dense switch after a call: GCC makes a jump table of it (ldr pc, [pc, rN, lsl #2] in ARM state,
+ * tbb in Thumb-2). Several cases hold loops whose counters are set up inside the case: a tool that
+ * does not follow the table, and enters the loops directly, takes what a case sets up for something
+ * that came from before the switch. */
+u32 script_run(const u8 *p, u32 n)
+{
+    u32 acc = 0, i;
+    switch (keys_read() & 7) {
+    case 0:
+        for (i = 0; i < n; i++)
+            acc += p[i];
+        break;
+    case 1:
+        for (i = 0; i < n; i++)
+            acc ^= (u32)p[i] << (i & 7);
+        break;
+    case 2:
+        acc = n * 3 + 1;
+        break;
+    case 3:
+        acc = checksum(p, n);
+        break;
+    case 4:
+        for (i = n; i; i--)
+            acc = acc * 31 + p[i - 1];
+        break;
+    case 5:
+        acc = p[0] | (u32)p[1] << 8;
+        break;
+    case 6:
+        for (i = 0; i < n && p[i]; i++)
+            acc++;
+        break;
+    default:
+        acc = ~0u;
+        break;
+    }
+    return acc;
+}

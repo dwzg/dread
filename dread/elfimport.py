@@ -81,11 +81,40 @@ def padding(elf, start, end, isa):
     return nop if ends else 0
 
 
+def dispatch_slots(elf, code):
+    """Addresses of padding slots inside functions that never run: in ARM state, the nop right
+    behind an unconditional add pc, pc, ... (a switch: pc reads as the instruction + 8, so every
+    target lies at + 8 or further; GCC fills the slot at + 4 with a nop) when no branch goes there.
+    Left in the code, it would be an instruction of the function no input can run."""
+    from dread.arch.arm import Arm
+    from capstone import arm as csarm
+    slots = []
+    arm = Arm(isa="a32")
+    for start, end, isa in code:
+        if isa != "a32":
+            continue
+        insns = list(arm.disassembler("a32").disasm(elf.read(start, end - start), start))
+        targets = {arm.target(i) for i in insns}
+        for insn, after in zip(insns, insns[1:]):
+            ops = insn.operands
+            if (insn.id == csarm.ARM_INS_ADD and not arm.is_conditional(insn) and len(ops) == 3
+                    and all(o.type == csarm.ARM_OP_REG for o in ops[:2])
+                    and ops[0].reg == csarm.ARM_REG_PC and ops[1].reg == csarm.ARM_REG_PC
+                    and after.address == insn.address + 4 and bytes(after.bytes) in PADDING["a32"]
+                    and after.address not in targets):
+                slots.append(after.address)
+    return slots
+
+
 def tables(elf, unnamed=False, keep=()):
     """(functions, code_ranges, symbols): functions [(entry, name, insn_bytes)], code ranges
     [(start, end, isa)], symbols [(kind, address, name)]."""
     intervals = code_intervals(elf)
     code = [(a, b, k) for a, b, k in intervals if k != "data"]
+    for slot in dispatch_slots(elf, code):          # cut out of their ranges
+        code = [piece for a, b, k in code
+                for piece in ([(a, slot, k), (slot + 4, b, k)] if a <= slot < b else [(a, b, k)])
+                if piece[0] < piece[1]]
 
     def insn_bytes(lo, hi):
         return sum(max(0, min(hi, b) - max(lo, a)) for a, b, _ in code)
@@ -166,6 +195,38 @@ def startup_toml(copies):
     return "\n".join(lines)
 
 
+def write_startup(toml_path, image_name, copies):
+    """Put the startup list into [image.IMAGE] of a dread.toml, in place of the one there (a
+    `startup = [` line up to the line `]`) or at the end of the section. The rest of the file is
+    left as it is. Returns True when the file changed."""
+    with open(toml_path) as f:
+        lines = f.read().split("\n")
+    header = "[image.%s]" % image_name
+    try:
+        top = next(i for i, l in enumerate(lines) if l.strip() == header)
+    except StopIteration:
+        raise tgt.TargetError("%s has no %s section" % (toml_path, header))
+    end = next((i for i in range(top + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+    block = startup_toml(copies).split("\n")
+    first = next((i for i in range(top + 1, end) if lines[i].replace(" ", "").startswith("startup=[")), None)
+    if first is not None:
+        last = next((i for i in range(first, end) if lines[i].strip() == "]" or lines[i].rstrip().endswith("]")
+                     and i == first), None)
+        if last is None:
+            raise tgt.TargetError("%s: the startup list in %s does not end with a line ']'" % (toml_path, header))
+        new = lines[:first] + block + lines[last + 1:]
+    else:
+        at = end
+        while at > top + 1 and not lines[at - 1].strip():
+            at -= 1
+        new = lines[:at] + block + lines[at:]
+    if new == lines:
+        return False
+    with open(toml_path, "w") as f:
+        f.write("\n".join(new))
+    return True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread import-elf", description=__doc__.split("\n\n")[0])
     parser.add_argument("elf")
@@ -173,6 +234,8 @@ def main(argv=None):
     parser.add_argument("--payload", metavar="FILE", help="also write the raw image (from the image's base)")
     parser.add_argument("--unnamed", action="store_true", help="FUN_xxxxxxxx for every function")
     parser.add_argument("--keep", default="", help="with --unnamed: names to keep, comma-separated")
+    parser.add_argument("--write-startup", action="store_true",
+                        help="put the startup list into the image's section of dread.toml instead of printing it")
     args = parser.parse_args(argv)
     try:
         target, image = tgt.from_args(args)
@@ -190,7 +253,11 @@ def main(argv=None):
             f.write(data)
         print("%d bytes from 0x%x written to %s" % (len(data), base, args.payload))
     copies = startup(elf)
-    if copies:
+    if copies and args.write_startup:
+        changed = write_startup(target.file, image.name, copies)
+        print("startup list of [image.%s] %s in %s" % (image.name, "updated" if changed else "unchanged",
+                                                         os.path.relpath(target.file)))
+    elif copies:
         print("startup copies for [image.%s] in dread.toml:\n%s" % (image.name, startup_toml(copies)))
     return 0
 

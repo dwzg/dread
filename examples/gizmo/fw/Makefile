@@ -1,6 +1,6 @@
 # Builds the two gizmo images from the same sources and refreshes the two target directories
-# (../a32 and ../m3): the ELF (ground truth for the tests), the raw image and the tables made from
-# the ELF by `dread import-elf`. The built files are committed, so that the tests do not depend on
+# (../a32 and ../m3): the ELF (ground truth for the tests), the raw image, the tables made from
+# the ELF by `dread import-elf` and the startup list in each dread.toml. The built files are committed, so that the tests do not depend on
 # the compiler version; run `make targets` after changing a source and commit what changes.
 CROSS ?= arm-none-eabi-
 CC := $(CROSS)gcc
@@ -25,7 +25,7 @@ build/m3/gizmo.elf: start_m3.c $(SRC) m3.ld gizmo.h Makefile
 targets: all
 	for v in a32 m3; do \
 	    mkdir -p ../$$v/original && cp build/$$v/gizmo.elf ../$$v/original/gizmo.elf && \
-	    $(DREAD) import-elf build/$$v/gizmo.elf --target ../$$v --payload ../$$v/original/gizmo.bin && \
+	    $(DREAD) import-elf build/$$v/gizmo.elf --target ../$$v --payload ../$$v/original/gizmo.bin --write-startup && \
 	    mkdir -p ../$$v/src && python3 addresses.py build/$$v/gizmo.elf ../$$v/src/addresses.h $$v || exit 1; \
 	done
 

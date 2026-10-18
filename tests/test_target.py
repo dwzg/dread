@@ -102,3 +102,25 @@ def test_plugin_from_a_file(tmp_path):
 
 def test_gizmo_dirs_exist():
     assert os.path.exists(os.path.join(gizmo_dir("a32"), "dread.toml"))
+
+
+def test_gizmo_startup_lists_match_the_elf(target, variant):
+    """make -C examples/gizmo/fw targets writes them (import-elf --write-startup); a stale list
+    made the analysis read the wrong bytes for the RAM function once."""
+    from dread.elf import Elf
+    from dread.elfimport import startup
+    elf = Elf(os.path.join(target.root, "original", "gizmo.elf"))
+    assert [(c.kind, c.run, c.size, c.stored) for c in target.image().startup()] == startup(elf)
+
+
+def test_write_startup_replaces_only_the_list(tmp_path):
+    from dread.elfimport import write_startup
+    path = tmp_path / "dread.toml"
+    path.write_text('[target]\nname = "x"\n\n[image.main]\nbase = 0x0\nstartup = [\n'
+                    '    {kind = "zero", run = 0x100, size = 0x10},\n]\n\n[memory]\n')
+    copies = [("data", 0x200, 0x20, 0x40)]
+    assert write_startup(str(path), "main", copies)
+    text = path.read_text()
+    assert '{kind = "data", run = 0x200, size = 0x20, stored = 0x40},' in text and "0x100" not in text
+    assert text.startswith('[target]\nname = "x"') and text.rstrip().endswith("[memory]")
+    assert not write_startup(str(path), "main", copies)          # unchanged the second time

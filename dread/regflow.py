@@ -30,7 +30,8 @@ Conditional instructions read the flags and end nothing.
 
 It errs on the side of finding less, so that what it finds can be compared without false alarms:
 pushes do not count as reads (push {r3, lr} that only keeps the stack aligned would make r3 an
-argument); an indirect call reads nothing and ends every scratch register; an indirect jump goes on
+argument); an indirect call (and an svc, whose handler may return values anywhere) reads nothing
+and ends every scratch register; an indirect jump goes on
 at the function's code that no direct path reaches (the cases of a switch), and where there is none
 it is taken for an indirect tail call that passes nothing on. Not seen: what the callee of an
 indirect call reads, paths through code the function table does not cover, and callee-saved
@@ -38,7 +39,8 @@ registers (a function that reads one its caller left: `caller_regs` in the case 
 
 Output: each function whose kept registers go beyond the first result register, with the call sites
 that read them; with --all every function's reads and kept. Cached in BUILD/regflow/IMAGE.json,
-keyed by the image, its tables, the ABI and the source of this module and of the arch layer.
+keyed by the image, its tables, its startup copies, the ABI and the source of the analysis (this module,
+dread.switches and the arch layer).
 
     dread regflow [--target DIR] [--image NAME] [--all] [NAME...]
 """
@@ -51,15 +53,19 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 1
+VERSION = 2
 
 
 class RegFlow:
-    """The result: kept and reads per function name, with the call sites behind kept."""
+    """The result: kept, reads and preserved per function name, with the call sites behind kept
+    (sites: name -> register -> [[caller, address, always]], always: read on every path after the
+    call). preserved: the kept registers the function never writes, its callees included: its
+    callers rely on it leaving them alone."""
 
-    def __init__(self, names, kept, reads, sites):
+    def __init__(self, names, kept, reads, sites, preserved=None):
         self.names = names                  # register names in bit order
         self.kept, self.reads, self.sites = kept, reads, sites
+        self.preserved = preserved or {}
 
     def _regs(self, value):
         return [n for i, n in enumerate(self.names) if value >> i & 1]
@@ -70,17 +76,56 @@ class RegFlow:
     def read_regs(self, name):
         return self._regs(self.reads.get(name, 0))
 
+    def preserved_regs(self, name):
+        return self._regs(self.preserved.get(name, 0))
+
     def sites_of(self, name, reg):
         """[(caller, address)] of the calls after which `reg` of `name` is read; a tail call is
         listed with the address of its branch."""
-        return [tuple(s) for s in self.sites.get(name, {}).get(reg, [])]
+        return [tuple(s[:2]) for s in self.sites.get(name, {}).get(reg, [])]
+
+    def always(self, name, reg):
+        """Whether some caller reads `reg` on every path after its call (else only on some)."""
+        return any(len(s) > 2 and s[2] for s in self.sites.get(name, {}).get(reg, []))
+
+    def why(self, name, reg, limit=3):
+        """A short text for reports: who reads the register after the call, and how."""
+        sites = self.sites_of(name, reg)
+        text = "read after the call by " + ", ".join("%s 0x%x" % s for s in sites[:limit])
+        if len(sites) > limit:
+            text += " and %d more" % (len(sites) - limit)
+        if not self.always(name, reg):
+            text += ", on some paths only"
+        if reg in self.preserved_regs(name):
+            text += "; the original leaves it unchanged"
+        return text
 
     def to_json(self):
-        return {"names": self.names, "kept": self.kept, "reads": self.reads, "sites": self.sites}
+        return {"names": self.names, "kept": self.kept, "reads": self.reads, "sites": self.sites,
+                "preserved": self.preserved}
 
     @classmethod
     def from_json(cls, data):
-        return cls(data["names"], data["kept"], data["reads"], data["sites"])
+        return cls(data["names"], data["kept"], data["reads"], data["sites"], data.get("preserved"))
+
+
+def argued_path(image):
+    """kept.tsv beside the image's cases directory."""
+    return os.path.join(os.path.dirname(image.cases), "kept.tsv")
+
+
+def load_argued(image):
+    """{(function, register): argument} from the image's kept.tsv: kept registers that are not
+    compared, each with the argument why the difference cannot matter."""
+    out = {}
+    path = argued_path(image)
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) >= 3 and not line.startswith("#"):
+                    out[(fields[0].strip(), fields[1].strip())] = fields[2].strip()
+    return out
 
 
 Row = collections.namedtuple("Row", "address size kind target falls uses kills writes conditional stack written covered")
@@ -136,43 +181,55 @@ def scratch_names(target, arch):
     return [r for r in arch.general_regs() if r not in callee_saved] + ["flags"]
 
 
-def analyse(program):
-    """RegFlow of a Program (see the module's docstring)."""
-    arch = program.arch
-    names = scratch_names(program.target, arch)
-    bit = {n: 1 << i for i, n in enumerate(names)}
-    everything = (1 << len(names)) - 1
+class Analysis:
+    """The analysis of one program: per-instruction rows and control flow, what each function may
+    write, and the solution (kept, reads). Kept in memory for explanations (readers())."""
 
-    def mask(regs):
+    def __init__(self, program):
+        self.program = program
+        arch = program.arch
+        self.names = scratch_names(program.target, arch)
+        self.bit = {n: 1 << i for i, n in enumerate(self.names)}
+        self.everything = (1 << len(self.names)) - 1
+        entries = {fn.entry: fn.name for fn in program.functions}
+
+        def entry_name(address):
+            return entries.get(address & ~1) if address is not None else None
+
+        self.rows = {fn.name: _rows(program, fn, self.mask, entry_name) for fn in program.functions}
+        ordered = sorted(fn.entry for fn in program.functions)
+        following = {a: b for a, b in zip(ordered, ordered[1:])}
+        self.graphs = {fn.name: self._graph(fn, self.rows[fn.name], entry_name,
+                                            following.get(fn.entry, program.end(fn)))
+                       for fn in program.functions}
+        self.may = self._may_write()
+        self.kept = {name: 0 for name in self.rows}
+        self.reads = {name: 0 for name in self.rows}
+
+    def mask(self, regs):
         m = 0
         for r in regs:
-            m |= bit.get(r, 0)
+            m |= self.bit.get(r, 0)
         return m
 
-    entries = {fn.entry: fn.name for fn in program.functions}
-
-    def entry_name(address):
-        return entries.get(address & ~1) if address is not None else None
-
-    rows = {}
-    for fn in program.functions:
-        rows[fn.name] = _rows(program, fn, mask, entry_name)
-
-    # The control flow inside each function, and its calls and tail calls (fixed from here on).
-    graphs = {}
-    for name, code in rows.items():
+    def _graph(self, fn, code, entry_name, span_end):
+        """(successors, returns, calls [(index, callee or None)], tails [(index, callee)], unknown):
+        the control flow inside one function. unknown: it may go where the analysis cannot follow
+        (an indirect call or tail call, a branch into other code). Indirect jumps: see
+        _switch_successors."""
         n = len(code)
         index = {row.address: i for i, row in enumerate(code)}
         succ = [[] for _ in range(n)]
-        returns, calls, tails, unknown = [], [], [], False
-        ijumps = []
+        returns, calls, tails, ijumps, unknown = [], [], [], [], False
 
         def nxt(i):
             return i + 1 if i + 1 < n and code[i + 1].address == code[i].address + code[i].size else None
 
+        def falls_into(i):
+            return nxt(i) is not None and (code[i].kind in ("next", "call", "icall") or code[i].falls)
+
         for i, row in enumerate(code):
-            a, size, kind, target, falls = row.address, row.size, row.kind, row.target, row.falls
-            follow = nxt(i)
+            kind, target = row.kind, row.target
             if kind == "jump":
                 t = target & ~1
                 if t in index:
@@ -184,8 +241,7 @@ def analyse(program):
             elif kind == "call":
                 callee = entry_name(target)
                 calls.append((i, callee))   # None: not a function's entry, treated as indirect
-                if callee is None:
-                    unknown = True
+                unknown |= callee is None
             elif kind == "icall":
                 calls.append((i, None))
                 unknown = True
@@ -197,70 +253,165 @@ def analyse(program):
                     returns.append(i)       # pop {rN}; bx rN: a return (interworking on ARMv4T)
                 else:
                     ijumps.append(i)
-            if kind in ("next", "call", "icall") or falls:
-                if follow is not None:
-                    succ[i].append(follow)
-                elif kind == "next" and entry_name(a + size):
-                    tails.append((i, entry_name(a + size)))     # falls into the next function
-        def falls_into(i):
-            return nxt(i) is not None and (code[i].kind in ("next", "call", "icall") or code[i].falls)
-
+            if kind in ("next", "call", "icall") or row.falls:
+                if nxt(i) is not None:
+                    succ[i].append(nxt(i))
+                elif kind == "next" and entry_name(row.address + row.size):
+                    tails.append((i, entry_name(row.address + row.size)))     # falls into the next function
         if ijumps:
-            seen, stack = set(), [0] if n else []
-            while stack:
-                i = stack.pop()
-                if i not in seen:
-                    seen.add(i)
-                    stack.extend(succ[i])
-            starts = [j for j in range(n) if j not in seen and not (j and j - 1 not in seen and falls_into(j - 1))]
-            for i in ijumps:
-                succ[i].extend(starts)
-                if not starts:
-                    unknown = True          # an indirect tail call
-        graphs[name] = (succ, returns, calls, tails, unknown)
+            unknown |= self._switch_successors(fn, code, index, ijumps, succ, falls_into, span_end, tails,
+                                               entry_name)
+        return succ, returns, calls, tails, unknown
 
-    # Registers a function may write, its callees included (least fixpoint).
-    may = {}
-    for name, code in rows.items():
-        m = 0
-        for row in code:
-            m |= row.writes
-        may[name] = everything if graphs[name][4] else m
-    changed = True
-    while changed:
-        changed = False
-        for name, (succ, returns, calls, tails, unknown) in graphs.items():
-            m = may[name]
-            for _, callee in calls + tails:
-                m |= may[callee] if callee else everything
-            if m != may[name]:
-                may[name] = m
-                changed = True
-
-    kept = {name: 0 for name in rows}
-    reads = {name: 0 for name in rows}
-
-    def liveness(name, own=False):
-        """(live at the entry, [(call index, callee, live after it)], [(index, callee)]). With own,
-        returns pass nothing on: what the function itself reads, not what flows through it to the
-        registers its callers read afterwards (a call site lets those through by not ending them)."""
-        code = rows[name]
-        succ, returns, calls, tails, _ = graphs[name]
+    def _switch_successors(self, fn, code, index, ijumps, succ, falls_into, span_end, tails, entry_name):
+        """Give each indirect jump its targets; True when one is left without, or with a target
+        outside the function that is no function's entry (the analysis cannot follow it). In this
+        order:
+          0. the code in front of the jump run in an emulator (dread.switches), for every index
+             value its bound check lets through, or twice for a jump without one: targets in the
+             function are a switch's cases, targets elsewhere tail calls (a veneer, a far jump);
+          1. a table right behind the instruction (arch.switch_targets: tbb/tbh, ldr pc, add pc);
+          2. a table of addresses of the function's own instructions that lies between its entry
+             and the next function (in a pool), whose address one of the eight instructions before
+             the jump loads or computes;
+          3. all such tables of the function;
+          4. the code no path reaches, one root per unreached region in address order (not every
+             unreached block: a loop inside a switch case would be entered past the instructions
+             that set it up, and what they set up would look like the caller's).
+        """
+        program, arch = self.program, self.program.arch
         n = len(code)
+
+        def inside(address):
+            return (address & ~1) in index
+
+        tables, run, a = {}, None, fn.entry & ~3
+        while a + 4 <= span_end:
+            word = None
+            if a not in program.code and a + 2 not in program.code:
+                try:
+                    word = program.word(a)
+                except Exception:
+                    word = None
+            if word is not None and inside(word):
+                if run is None:
+                    run = a
+                    tables[run] = []
+                tables[run].append(word & ~1)
+            else:
+                run = None
+            a += 4
+
+        def table_at(value):
+            for start, targets in tables.items():
+                if start <= value < start + 4 * len(targets):
+                    return targets[(value - start) // 4:]
+            return None
+
+        from dread import switches
+        left, lost = [], False
+        for i in ijumps:
+            insn = program.insn(code[i].address)
+            resolved = switches.resolve(program, fn, code[i].address)
+            targets = resolved[0] if resolved else None
+            if resolved and resolved[1]:
+                for t in resolved[1]:
+                    if entry_name(t):
+                        tails.append((i, entry_name(t)))
+                    else:
+                        lost = True
+                if not targets:
+                    continue
+            if not targets and insn is not None:
+                targets = arch.switch_targets(insn, program, inside)
+            if not targets:
+                for back in range(max(0, i - 8), i):
+                    near = program.insn(code[back].address)
+                    if near is None:
+                        continue
+                    isa = program.isa_at(near.address)
+                    lit = arch.literal(near, isa)
+                    value = arch.pc_address(near, isa)
+                    if lit and lit[1] == 4 and program.in_image(lit[0], 4):
+                        value = program.word(lit[0])
+                    found = table_at(value & ~1) if value is not None else None
+                    if found:
+                        targets = found
+            if not targets and tables:
+                targets = [t for ts in tables.values() for t in ts]
+            if targets:
+                succ[i].extend(sorted({index[t & ~1] for t in targets if inside(t)}))
+            else:
+                left.append(i)
+        if not left:
+            return lost
+        seen, roots = set(), []
+
+        def mark(j):
+            stack = [j]
+            while stack:
+                k = stack.pop()
+                if k not in seen:
+                    seen.add(k)
+                    stack.extend(succ[k])
+        if n:
+            mark(0)
+        for j in range(n):
+            if j not in seen and not (j and falls_into(j - 1) and j - 1 not in seen):
+                roots.append(j)
+                mark(j)
+        for i in left:
+            succ[i].extend(roots)
+        return lost or not roots
+
+    def _may_write(self):
+        """Registers each function may write, its callees included (least fixpoint)."""
+        may = {}
+        for name, code in self.rows.items():
+            m = 0
+            for row in code:
+                m |= row.writes
+            may[name] = self.everything if self.graphs[name][4] else m
+        changed = True
+        while changed:
+            changed = False
+            for name, (_, _, calls, tails, _) in self.graphs.items():
+                m = may[name]
+                for _, callee in calls + tails:
+                    m |= may[callee] if callee else self.everything
+                if m != may[name]:
+                    may[name], changed = m, True
+        return may
+
+    def effects(self, name, own=False):
+        """(uses, kills, exits) per instruction of a function with the current solution: calls use
+        what the callee reads and end what it may write; returns and tail calls pass on what the
+        function's callers read afterwards (exits). With own, returns pass nothing on: what the
+        function itself reads, not what flows through it to its callers' later reads (a call site
+        lets those through by not ending them)."""
+        code = self.rows[name]
+        _, returns, calls, tails, _ = self.graphs[name]
         uses = [row.uses for row in code]
         kills = [row.kills for row in code]
-        exits = [0] * n
-        passed = 0 if own else kept[name]
+        exits = [0] * len(code)
+        passed = 0 if own else self.kept[name]
         for i in returns:
             exits[i] |= passed
         for i, callee in tails:
-            exits[i] |= reads[callee] | (passed & ~may[callee])
+            exits[i] |= self.reads[callee] | (passed & ~self.may[callee])
         for i, callee in calls:
             if callee is not None:
-                uses[i] |= reads[callee] & ~code[i].covered
-                kills[i] = 0 if code[i].conditional else may[callee]
+                uses[i] |= self.reads[callee] & ~code[i].covered
+                kills[i] = 0 if code[i].conditional else self.may[callee]
             else:
-                kills[i] = 0 if code[i].conditional else everything
+                kills[i] = 0 if code[i].conditional else self.everything
+        return uses, kills, exits
+
+    def liveness(self, name, own=False):
+        """(live at the entry, [(call index, callee, live after it)], tails)"""
+        succ, _, calls, tails, _ = self.graphs[name]
+        uses, kills, exits = self.effects(name, own)
+        n = len(uses)
         live_in, live_out = [0] * n, [0] * n
         changed = True
         while changed:
@@ -274,54 +425,126 @@ def analyse(program):
                     live_out[i], live_in[i], changed = o, v, True
         return (live_in[0] if n else 0), [(i, c, live_out[i]) for i, c in calls if c is not None], tails
 
-    callers = collections.defaultdict(set)
-    for name, (_, _, calls, tails, _) in graphs.items():
-        for _, callee in calls + tails:
-            if callee:
-                callers[callee].add(name)
-    work = collections.deque(rows)
-    queued = set(rows)
-    while work:
-        name = work.popleft()
-        queued.discard(name)
-        entry_live = liveness(name, own=True)[0]
-        _, calls, tails = liveness(name)
-        touched = []
-        if entry_live != reads[name]:
-            reads[name] = entry_live
-            touched += callers[name]
-        for _, callee, live in calls:
-            if live & ~kept[callee]:
-                kept[callee] |= live
-                touched.append(callee)
-        for _, callee in tails:
-            if kept[name] & ~kept[callee]:
-                kept[callee] |= kept[name]
-                touched.append(callee)
-        for t in touched:
-            if t not in queued:
-                queued.add(t)
-                work.append(t)
+    def solve(self):
+        callers = collections.defaultdict(set)
+        for name, (_, _, calls, tails, _) in self.graphs.items():
+            for _, callee in calls + tails:
+                if callee:
+                    callers[callee].add(name)
+        work = collections.deque(self.rows)
+        queued = set(self.rows)
+        while work:
+            name = work.popleft()
+            queued.discard(name)
+            entry_live = self.liveness(name, own=True)[0]
+            _, calls, tails = self.liveness(name)
+            touched = []
+            if entry_live != self.reads[name]:
+                self.reads[name] = entry_live
+                touched += callers[name]
+            for _, callee, live in calls:
+                if live & ~self.kept[callee]:
+                    self.kept[callee] |= live
+                    touched.append(callee)
+            for _, callee in tails:
+                if self.kept[name] & ~self.kept[callee]:
+                    self.kept[callee] |= self.kept[name]
+                    touched.append(callee)
+            for t in touched:
+                if t not in queued:
+                    queued.add(t)
+                    work.append(t)
+        return self
 
-    sites = collections.defaultdict(lambda: collections.defaultdict(list))
-    for name in rows:
-        _, calls, tails = liveness(name)
-        code = rows[name]
-        for i, callee, live in calls:
-            for reg in names:
-                if live & bit[reg]:
-                    sites[callee][reg].append([name, code[i].address])
-        for i, callee in tails:
-            for reg in names:
-                if kept[name] & bit[reg]:
-                    sites[callee][reg].append([name, code[i].address])
-    return RegFlow(names, kept, reads, {k: dict(v) for k, v in sites.items()})
+    def result(self):
+        sites = collections.defaultdict(lambda: collections.defaultdict(list))
+        for name, code in self.rows.items():
+            _, calls, tails = self.liveness(name)
+            for i, callee, live in calls:
+                for reg in self.names:
+                    if live & self.bit[reg]:
+                        sites[callee][reg].append([name, code[i].address, self.read_always(name, i, reg)])
+            for i, callee in tails:
+                for reg in self.names:
+                    if self.kept[name] & self.bit[reg]:
+                        sites[callee][reg].append([name, code[i].address, True])
+        preserved = {name: self.kept[name] & ~self.may[name] for name in self.rows if self.kept[name] & ~self.may[name]}
+        return RegFlow(self.names, dict(self.kept), dict(self.reads), {k: dict(v) for k, v in sites.items()},
+                       preserved)
+
+    def read_always(self, name, start, reg):
+        """Whether every path from the instruction behind index `start` reads `reg` before
+        something ends it or the function is left without passing it on (a return passes it on
+        when the function's own callers read it)."""
+        code = self.rows[name]
+        succ, returns, _, tails, _ = self.graphs[name]
+        uses, kills, exits = self.effects(name)
+        b = self.bit[reg]
+        returns, tail_at = set(returns), dict(tails)
+        seen, stack = set(), list(succ[start])
+        if not stack:
+            return False
+        while stack:
+            j = stack.pop()
+            if j in seen:
+                continue
+            seen.add(j)
+            if uses[j] & b:
+                continue
+            if kills[j] & b:
+                return False
+            if j in returns or j in tail_at:
+                if not exits[j] & b:
+                    return False
+                continue
+            if not succ[j]:
+                return False
+            stack.extend(succ[j])
+        return True
+
+    def readers(self, name, address, reg):
+        """Where `reg` is read after the call (or tail call) at `address` in function `name`:
+        [("read", address)] for an instruction that reads it, ("return", address) for a return
+        that passes it on to the function's own callers, ("tail", address, callee) for a tail call
+        that passes it on (the callee reads it or lets it through to the callers)."""
+        code = self.rows[name]
+        succ, returns, calls, tails, _ = self.graphs[name]
+        index = {row.address: i for i, row in enumerate(code)}
+        b = self.bit[reg]
+        uses, kills, _ = self.effects(name)
+        returns, tail_at = set(returns), dict(tails)
+        start = index[address]
+        if start in tail_at:
+            return [("tail", address, tail_at[start])]
+        out, seen, stack = [], set(), list(succ[start])
+        while stack:
+            j = stack.pop()
+            if j in seen:
+                continue
+            seen.add(j)
+            if uses[j] & b:
+                out.append(("read", code[j].address))
+                continue
+            if kills[j] & b:
+                continue
+            if j in returns and self.kept[name] & b:
+                out.append(("return", code[j].address))
+            if j in tail_at and (self.reads[tail_at[j]] | (self.kept[name] & ~self.may[tail_at[j]])) & b:
+                out.append(("tail", code[j].address, tail_at[j]))
+            stack.extend(succ[j])
+        return sorted(out)
+
+
+def analyse(program):
+    """RegFlow of a Program (see the module's docstring)."""
+    return Analysis(program).solve().result()
 
 
 def cache_key(target, image):
     h = hashlib.sha1()
     h.update(b"dread regflow %d\0" % VERSION)
-    for module in (__name__, type(image.arch).__module__):     # the analysis and the arch layer
+    from dread import switches
+    for module in (__name__, switches.__name__, type(image.arch).__module__):  # the analysis, the arch layer
         with open(sys.modules[module].__file__, "rb") as f:
             h.update(f.read())
     h.update(image.payload())
@@ -331,7 +554,8 @@ def cache_key(target, image):
             with open(path, "rb") as f:
                 h.update(f.read())
         h.update(b"\0")
-    h.update(repr((target.abi.callee_saved, image.arch.describe(), image.base)).encode())
+    copies = [(c.kind, c.run, c.size, c.stored) for c in image.startup()]
+    h.update(repr((target.abi.callee_saved, image.arch.describe(), image.base, copies)).encode())
     return h.hexdigest()
 
 
@@ -362,6 +586,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread regflow", description=__doc__.split("\n\n")[0])
     tgt.add_arguments(parser)
     parser.add_argument("--all", action="store_true", help="every function's reads and kept")
+    parser.add_argument("--why", action="store_true",
+                        help="for the named functions: the instructions behind each kept register")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     try:
@@ -372,17 +598,31 @@ def main(argv=None):
         return 1
     result = target.abi.result[0] if target.abi.result else None
     names = args.names or sorted(set(flow.kept) | set(flow.reads))
-    shown = 0
+    analysis = None
+    if args.why:
+        from dread.program import Program
+        analysis = Analysis(Program(target, image)).solve()
     for name in names:
         kept = flow.kept_regs(name)
         extra = [r for r in kept if r != result]
         if not (args.all or args.names or extra):
             continue
-        shown += 1
         print("%-28s reads %-16s kept %s" % (name, " ".join(flow.read_regs(name)) or "-", " ".join(kept) or "-"))
         for reg in extra:
-            where = ", ".join("%s 0x%x" % (c, a) for c, a in flow.sites_of(name, reg)[:6])
-            print("    %s read after the call by %s" % (reg, where))
+            sites = flow.sites_of(name, reg)
+            if analysis is None:
+                print("    %s read after the call by %s" % (reg, ", ".join("%s 0x%x" % s for s in sites[:6])))
+                continue
+            print("    %s:" % reg)
+            for caller, address in sites:
+                for what in analysis.readers(caller, address, reg):
+                    if what[0] == "read":
+                        text = "read at 0x%x" % what[1]
+                    elif what[0] == "return":
+                        text = "passed on by the return at 0x%x to the callers of %s" % (what[1], caller)
+                    else:
+                        text = "passed on by the tail call at 0x%x to %s" % (what[1], what[2])
+                    print("        after %s 0x%x: %s" % (caller, address, text))
     if not args.names:
         print("dread regflow: %d functions keep a register besides %s for their callers"
               % (sum(1 for n in flow.kept if [r for r in flow.kept_regs(n) if r != result]), result))

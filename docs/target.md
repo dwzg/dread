@@ -102,7 +102,9 @@ default. `--image NAME` or `$DREAD_IMAGE` selects another.
 - `"zero"`: a range the startup clears, with no `stored`.
 
 Code that runs from RAM is analysed at its run address. The program database reads its bytes at
-the stored address. Instead of a list, `startup = {plugin = "file.py:function"}` names a function
+the stored address. `dread import-elf` prints the list for an image with an ELF; with
+`--write-startup` it puts it into the image's section of `dread.toml` itself (gizmo's Makefile does,
+so the list cannot go stale when the build moves the stored copies). Instead of a list, `startup = {plugin = "file.py:function"}` names a function
 `function(image)` that returns `dread.target.Copy` objects, read from the image itself (from the
 startup's own copy table, for instance).
 

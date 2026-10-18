@@ -55,7 +55,7 @@ def run(payload, aliases, case, addr, name, watch=False, limit=None):
     m = Machine(lay, payload, aliases, isa_of=gen.program.isa_at)
     m.function = name
     m.arg_domains = gen.argument_domains.get(name, [])
-    m.kept, m.kept_why = runner.kept_for(name)
+    m.kept, m.kept_why, _ = runner.kept_for(name)
     for a, size, value in case["mem"]:
         try:
             m.write(a, (value & ((1 << 8 * size) - 1)).to_bytes(size, "little"))

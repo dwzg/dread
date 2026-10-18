@@ -1,6 +1,6 @@
 """dread integration on gizmo: rewritten functions and their callers agree with real callees, and a
-bug in a rewritten callee shows in a caller that is still original (uart_puts calls uart_putc; a
-sign extension stores 0xffffff80 for the byte 0x80)."""
+bug in a rewritten callee shows in a caller that is still original (uart_puts calls uart_putc, which
+sends every character one too high)."""
 import pytest
 
 from dread import build, integration
@@ -21,8 +21,8 @@ def test_callers_agree(target, capsys):
 
 @pytest.mark.slow
 def test_callee_bug_shows_in_a_caller(target, variant, tmp_path, capsys):
-    src = src_copy(tmp_path, variant, ("REG32(UART_BASE) = (u8)c;", "REG32(UART_BASE) = (signed char)c;"))
+    src = src_copy(tmp_path, variant, ("REG32(UART_BASE) = (u8)c;", "REG32(UART_BASE) = (u8)(c + 1);"))
     payload = build.build(target, target.image(), src=str(src), out=str(tmp_path / "recon"), quiet=True)
-    rc = integration.main(["--target", target.root, "--recon", payload, "uart_puts"])
+    rc = integration.main(["--target", target.root, "--recon", payload, "--cases", "40", "uart_puts"])
     out = capsys.readouterr().out
     assert rc == 1 and "DIFF uart_puts" in out and "peripheral accesses differ" in out, out

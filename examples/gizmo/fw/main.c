@@ -60,6 +60,9 @@ void handle_key(int c)
     case 's':
         print_status();
         break;
+    case 'k':
+        uart_putc((char)script_run((const u8 *)&g_config, sizeof g_config));
+        break;
     default:
         if (c >= '0' && c <= '9')
             dispatch(3, c - '0');

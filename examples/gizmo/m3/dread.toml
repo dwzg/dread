@@ -17,8 +17,8 @@ base = 0x08000000
 limit = 0x08010000              # 64 KiB of flash
 entry = "Reset_Handler"
 startup = [
-    {kind = "code", run = 0x20000000, size = 0x30, stored = 0x8000758},
-    {kind = "data", run = 0x20000030, size = 0x1c, stored = 0x8000788},
+    {kind = "code", run = 0x20000000, size = 0x30, stored = 0x8000800},
+    {kind = "data", run = 0x20000030, size = 0x1c, stored = 0x8000830},
     {kind = "zero", run = 0x2000004c, size = 0x2c},
 ]
 
