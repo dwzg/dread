@@ -170,11 +170,15 @@ int dispatch(u32 cmd, u32 arg)
 }
 #endif
 
+#ifndef HWREG
+#define HWREG REG32                 /* the peripherals' registers (16 bits wide on gizmo-msp430) */
+#endif
+
 void uart_putc(char c)
 {
-    while ((REG32(UART_BASE + 4) & 1) == 0)
+    while ((HWREG(UART_BASE + 4) & 1) == 0)
         ;
-    REG32(UART_BASE) = (u8)c;
+    HWREG(UART_BASE) = (u8)c;
 }
 
 int strcmp(const char *a, const char *b)

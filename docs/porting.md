@@ -3,7 +3,9 @@
 Everything DREAD knows about an instruction set sits, or should sit, in one module of `dread/arch`.
 `dread.arch.get()` returns the layer for a target's `[arch]` section: `dread.arch.arm.Arm` documents
 every method in its docstrings, `dread.arch.riscv.RiscV` is the second layer (RV32IMC; every tool runs
-on it, and its port is the worked example of the order below).
+on it, and its port is the worked example of the order below), `dread.arch.msp430.Msp430` the third
+(under way: neither capstone nor Unicorn knows the MSP430, so its layer decodes the instructions
+itself, into objects with capstone's attributes, and its emulator comes next).
 This page lists what a new layer has to provide, what is still ARM-specific outside the layer, and
 the order of the work.
 

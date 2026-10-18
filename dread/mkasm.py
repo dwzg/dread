@@ -290,7 +290,12 @@ def build(target, base, outdir, builddir):
                        capture_output=True, text=True)
     if r.returncode:
         return None, r.stderr
-    for cmd in (compiler.command("ld") + compiler.ldflags + ["-Ttext=0x%x" % base, "-e", "0x%x" % base, "-o", elf, obj],
+    # A linker script of its own: a target's default script may impose memory regions (MSP430's ends
+    # below the vectors that the image holds at its top).
+    script = os.path.join(builddir, "listing.ld")
+    with open(script, "w") as f:
+        f.write("SECTIONS\n{\n    . = 0x%x;\n    .text : { *(.text) }\n}\n" % base)
+    for cmd in (compiler.command("ld") + compiler.ldflags + ["-T", script, "-e", "0x%x" % base, "-o", elf, obj],
                 compiler.command("objcopy") + ["-O", "binary", "-j", ".text", elf, binf]):
         r2 = subprocess.run(cmd, capture_output=True, text=True)
         if r2.returncode:

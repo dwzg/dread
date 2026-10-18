@@ -116,7 +116,7 @@ def at(program, fn, address, regs=None):
     reach the address (a conditional branch in the stretch goes elsewhere under the fill values), they
     start again behind each conditional branch of the stretch, from the earliest on."""
     arch = program.arch
-    if address not in fn.insns:
+    if address not in fn.insns or not hasattr(arch, "new_uc"):   # (an architecture without an engine yet)
         return {}
     first = stretch(program, fn, address)
     if first == address:

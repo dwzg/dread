@@ -14,6 +14,12 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
   environment and costs money on that account: gizmo's four small functions take about 5 to 15
   answers of up to 16000 tokens, well under a dollar with a Sonnet-class model. Recommendation: one
   run, to compare with the local model; say which model and whether the key may be used unattended.
+- **A GCC toolchain for MSP430?** clang's MSP430 backend builds gizmo-msp430 now (lld links it), but
+  real MSP430 firmware is built with TI's compiler, IAR or GCC. The AUR has `msp430-elf-gcc` (GCC
+  15.2, built from source, with binutils, newlib and TI's device headers), `msp430-elf-gcc-bin`
+  (TI's prebuilt GCC 8.2) and `ti-cgt-msp430` (TI's own compiler, proprietary, free to download);
+  each needs your password to install (`yay -S ...`). Recommendation: `msp430-elf-gcc`, for a second
+  gizmo-msp430 build next to clang's; TI's compiler later with the "more compilers" items.
 - **IAR-built gizmo?** For the IAR profile: gizmo built with IAR EWARM (Cortex-M3) and, for MSP430,
   EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
   `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
@@ -305,13 +311,25 @@ tool, the page shows its records; the only changes are the command line's own.
 
 Unicorn does not run it and capstone does not decode it, so it needs more than a new arch layer.
 
-- [ ] **gizmo-msp430**: clang `--target=msp430`, freestanding, with gizmo's own multiply and divide
-  helpers (the base ISA has no multiplier) and a linker script for a typical part (flash, RAM,
-  vectors at the top of the first 64 KiB).
-- [ ] **Decoder** in Python for MSP430 and MSP430X (three formats, seven addressing modes, the
-  20-bit extension words), checked instruction by instruction against `llvm-objdump` on gizmo.
-- [ ] **Byte-identical rebuild**: the listing generator emits assembly that clang's integrated
-  assembler (llvm-mc) turns back into the same bytes.
+- [x] **gizmo-msp430**: built with TI's MSP430 GCC (msp430-elf-, release 8.2.0.52, unpacked in
+  ~/.local/opt with wrappers in ~/.local/bin; `-mcpu=msp430 -mhwmult=none`, libgcc's and libmul_none's
+  helpers), flash at 0x8000, the vectors at 0xffe0, RAM at 0x0200, gizmo's peripherals at 0x0100
+  with 16-bit registers (gizmo.h's hwreg), the A32 build's interrupt controller on every vector but
+  reset (start_msp430.S). The clang build stays a Makefile rule (build/msp430clang, its own helpers
+  in msp430_rt.c): clang's MSP430 driver links with GNU's ld only, so ld.lld links it. u32 and s32
+  are long where int is 16 bits (gizmo.h, dread.h). GCC shows idioms the lifter will meet: shared
+  epilogues (br #__mspabi_func_epilog_N) and calls through a register that holds a constant
+  (mov #uart_puts, r10; call r10).
+- [x] **Decoder** in Python for the 16-bit MSP430 (three formats, seven addressing modes, the
+  constant generators, llvm-objdump's aliases): every gizmo-msp430 instruction's text and length
+  equal llvm-objdump's; on 3000 random encodings the text assembles back to the same bytes with
+  llvm-mc (whose MSP430 backend lacks @rN+ into memory, push.b, push X(rN) and @pc sources; such
+  instructions become raw words). The length comes from the first word alone.
+- [ ] **MSP430X**: the 20-bit extension words, the address instructions (mova, calla, pushm, popm,
+  rrcm...), a gizmo build with -mcpu=msp430x.
+- [x] **Byte-identical rebuild**: dread asm rebuilds gizmo-msp430 with GNU as on the first pass, no
+  raw word (the listing links with a script of its own now: a target's default script may impose
+  memory regions, MSP430's ends below the vectors).
 - [ ] **Emulator interface beyond Unicorn** (what `dread.emu` needs: memory map, registers, code,
   block and memory hooks, unmapped accesses, instruction limits) and an MSP430 interpreter behind it,
   checked against what the compiled C must compute; speed in numbers.

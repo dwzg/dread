@@ -1,0 +1,75 @@
+# Gizmo 1000, MSP430 build: DREAD's test firmware (examples/gizmo/fw), built with TI's MSP430 GCC
+# (msp430-elf-, release 8.2.0.52) for the 16-bit MSP430. Not a real device. The tables in config/ come
+# from the ELF (`make -C ../fw targets`).
+
+[target]
+name = "gizmo-msp430"
+title = "Gizmo 1000 (MSP430)"
+
+[arch]
+name = "msp430"
+isa = "msp430"
+
+[image.main]
+original = "original/gizmo.bin"
+base = 0x8000
+limit = 0x10000                 # the vectors fill the top of the 64 KiB
+entry = "_start"
+vectors = 0xffe0
+startup = [
+    {kind = "code", run = 0x200, size = 0x6c, stored = 0x9656},
+    {kind = "data", run = 0x26c, size = 0x48, stored = 0x96c2},
+]
+
+[memory]
+regions = [
+    {name = "flash", base = 0x8000, size = 0x8000, kind = "rom"},
+    {name = "ram", base = 0x0200, size = 0x0800},
+    {name = "scratch", base = 0x2000, size = 0x4000},
+]
+io = [[0x0000, 0x0200]]
+stack = {top = 0x0a00, size = 0x0200}
+sentinel = 0x7ff0
+scratch = {base = 0x2000, size = 0x4000}
+
+[compiler]
+cross = "msp430-elf-"
+cflags = ["-mcpu=msp430", "-mhwmult=none", "-Os", "-ffreestanding", "-fno-builtin", "-ffunction-sections",
+          "-fno-common"]
+ldflags = []                    # TI's binutils 2.26 predates --no-warn-rwx-segments
+
+# Devices for the system run (dread sysrun): gizmo's serial port (examples/gizmo/fw/gizmo.h).
+[models.uart]
+kind = "uart"
+base = 0x0100
+data = 0x0
+status = 0x4
+tx_ready = 0x1
+rx_ready = 0x2
+
+[models.timer]
+kind = "timer"
+base = 0x0110
+irq = 0
+
+[models.intc]
+kind = "intc"
+base = 0x0120
+
+[models.gpio]
+kind = "gpio"
+base = 0x0130
+
+[scenarios.boot]
+until = {uart = "READY"}
+limit = 5_000_000
+
+[scenarios.keys]
+input = [[40_000, "uart", "s"]]
+until = {uart = "READY\r\nmode run volume 7"}
+limit = 5_000_000
+
+[scenarios.config]
+input = [[40_000, "uart", "cvolume=3\r\n"], [200_000, "uart", "s"]]
+until = {uart = "mode run volume 3"}
+limit = 5_000_000

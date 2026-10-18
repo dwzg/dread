@@ -1,0 +1,5 @@
+# instruction runs: start, end (exclusive), isa; written by dread import-elf
+0x200	0x26c	msp430
+0x8000	0x8ce8	msp430
+0x8cec	0x8e5a	msp430
+0x8fd0	0x9490	msp430

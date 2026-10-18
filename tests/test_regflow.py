@@ -89,7 +89,7 @@ def test_cache_follows_the_tables(target, tmp_path, monkeypatch):
     assert regflow.cache_key(target, image) != first
 
 
-CLOBBER = ("REG32(UART_BASE) = (u8)c;", 'REG32(UART_BASE) = (u8)c;\n    __asm__ volatile("mov r1, #0" ::: "r1");')
+CLOBBER = ("HWREG(UART_BASE) = (u8)c;", 'HWREG(UART_BASE) = (u8)c;\n    __asm__ volatile("mov r1, #0" ::: "r1");')
 
 
 @pytest.mark.slow

@@ -29,8 +29,10 @@ IDENT = re.compile(r"[^A-Za-z0-9_]")
 
 def code_intervals(elf, isa="a32"):
     """[(start, end, kind)] of every allocated section, kind an isa or "data", from the mapping
-    symbols ($a, $t for ARM; $x, code of `isa`, for RISC-V; $d data); a section without mapping
-    symbols is all code of `isa` when executable, data otherwise."""
+    symbols ($a, $t for ARM; $x, code of `isa`, for RISC-V; $d data). An executable section without
+    mapping symbols (GNU as for MSP430 writes none) is code of `isa` where its function symbols say
+    so (their extents) and data elsewhere; with no sized function symbol it is all code. A section
+    that is not executable is data."""
     mapping = {index: [(a, isa if k == "code" else k) for a, k in marks] for index, marks in elf.mapping().items()}
     out = []
     for index, s in enumerate(elf.sections):
@@ -38,7 +40,20 @@ def code_intervals(elf, isa="a32"):
             continue
         marks = [(a, k) for a, k in mapping.get(index, []) if s.addr <= a < s.addr + s.size]
         if not marks:
-            out.append((s.addr, s.addr + s.size, isa if s.code else "data"))
+            spans = sorted((sym.value & ~1, (sym.value & ~1) + sym.size) for sym in elf.symbols
+                           if sym.kind == STT_FUNC and sym.size and sym.shndx == index) if s.code else []
+            if not spans:
+                out.append((s.addr, s.addr + s.size, isa if s.code else "data"))
+                continue
+            at = s.addr
+            for lo, hi in spans:
+                if lo > at:
+                    out.append((at, lo, "data"))
+                if hi > at:
+                    out.append((max(lo, at), hi, isa))
+                    at = hi
+            if at < s.addr + s.size:
+                out.append((at, s.addr + s.size, "data"))
             continue
         if marks[0][0] != s.addr:
             out.append((s.addr, marks[0][0], "data"))

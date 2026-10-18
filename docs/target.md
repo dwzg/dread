@@ -64,8 +64,8 @@ cflags = ["-mcpu=cortex-m3", "-mthumb", "-Os", "-ffreestanding", "-fno-builtin",
 
 | Key | Meaning |
 |---|---|
-| `name` | `"arm"` or `"riscv"`, required |
-| `isa` | the instruction set of code the code ranges do not mark. ARM: `"a32"` (ARM state, default) or `"t32"` (Thumb, 16- and 32-bit); RISC-V: `"rv32"` |
+| `name` | `"arm"`, `"riscv"` or `"msp430"` (under way: decoding and the listing), required |
+| `isa` | the instruction set of code the code ranges do not mark. ARM: `"a32"` (ARM state, default) or `"t32"` (Thumb, 16- and 32-bit); RISC-V: `"rv32"`; MSP430: `"msp430"` |
 | `profile` | ARM: `"a"` (classic cores with CPSR: ARM7, ARM9, ARM11; default) or `"m"` (Cortex-M, Thumb only) |
 | `extensions` | RISC-V: the standard extensions, default `"imc"` (the C extension decides whether instructions may be 2 bytes long; `-march` in `[compiler] cflags` overrides it) |
 | `cpu` | Unicorn's CPU model (`cortex-m3`, `arm926`, `arm1176`, ...); default: Unicorn's choice for the mode |

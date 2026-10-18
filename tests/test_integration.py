@@ -23,7 +23,7 @@ def test_callee_bug_shows_in_a_caller(target, variant, tmp_path, capsys):
     """The caller is original code that calls the buggy uart_putc: uart_puts on the ARM builds; on
     rv32 clang inlined uart_putc into uart_puts, and handle_key's tail call is the only call left."""
     caller = "handle_key" if variant == "rv32" else "uart_puts"
-    src = src_copy(tmp_path, variant, ("REG32(UART_BASE) = (u8)c;", "REG32(UART_BASE) = (u8)(c + 1);"))
+    src = src_copy(tmp_path, variant, ("HWREG(UART_BASE) = (u8)c;", "HWREG(UART_BASE) = (u8)(c + 1);"))
     payload = build.build(target, target.image(), src=str(src), out=str(tmp_path / "recon"), quiet=True)
     rc = integration.main(["--target", target.root, "--recon", payload, "--cases", "40", caller])
     out = capsys.readouterr().out

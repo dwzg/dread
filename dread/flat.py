@@ -124,6 +124,11 @@ def rows(program, fn, flow=None, endless=None, callers=None):
         if at is not None:
             text, name = value_parts(program, at)
             comment.append({"text": "= " + text, "name": name} if name else {"text": "= " + text})
+        if kind not in ("call", "jump") and hasattr(arch, "immediates"):
+            for value in arch.immediates(insn):     # an address in an immediate (MSP430: mov #f, r10)
+                text, name = value_parts(program, value)
+                if name or "<" in text or (program.in_image(value) and '"' in text):
+                    comment.append({"text": "= " + text, "name": name} if name else {"text": "= " + text})
         out.append({"kind": "insn", "address": a, "bytes": bytes(insn.bytes).hex(),
                     "text": "%s %s" % (insn.mnemonic, insn.op_str), "comment": comment})
     if program.end(fn) > previous_end:

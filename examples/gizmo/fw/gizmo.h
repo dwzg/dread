@@ -1,20 +1,32 @@
 /* Gizmo 1000: a small firmware written for DREAD's tests. Not a real device.
  *
- * Built three times from the same sources: for an ARM7-style core in ARM state (GIZMO_A32, image
+ * Built four times from the same sources: for an ARM7-style core in ARM state (GIZMO_A32, image
  * at 0x20000, RAM at 0x40000000, peripherals at 0x80000000, an interrupt controller of its own),
  * for a Cortex-M3 in Thumb-2 (GIZMO_M3, flash at 0x08000000, RAM at 0x20000000, peripherals at
- * 0x40000000, the NVIC), and for an RV32IMC core in machine mode (GIZMO_RV32, flash at 0x20000000,
+ * 0x40000000, the NVIC), for an RV32IMC core in machine mode (GIZMO_RV32, flash at 0x20000000,
  * RAM at 0x80000000, peripherals at 0x10000000, the A32 build's interrupt controller at the machine
- * external interrupt). The peripherals have the same registers on all three.
+ * external interrupt), and for an MSP430 (GIZMO_MSP430, 16-bit int: flash at 0x8000, the vectors at
+ * 0xffe0, RAM at 0x0200, peripherals at 0x0100 with 16-bit registers, the A32 build's interrupt
+ * controller on every vector but reset). The peripherals have the same registers on all of them.
  */
 #ifndef GIZMO_H
 #define GIZMO_H
 
 typedef unsigned char u8;
 typedef unsigned short u16;
+#ifdef GIZMO_MSP430                 /* int is 16 bits there */
+typedef unsigned long u32;
+typedef signed long s32;
+#else
 typedef unsigned int u32;
 typedef signed int s32;
+#endif
 typedef unsigned long long u64;
+#ifdef GIZMO_MSP430
+typedef unsigned short hwreg;       /* the peripherals' registers are 16 bits wide there */
+#else
+typedef u32 hwreg;
+#endif
 
 #ifdef GIZMO_M3
 #define UART_BASE  0x40011000u
@@ -27,18 +39,23 @@ typedef unsigned long long u64;
 #define TIMER_BASE 0x10001000u
 #define INTC_BASE  0x10002000u
 #define GPIO_BASE  0x10003000u
+#elif defined(GIZMO_MSP430)
+#define UART_BASE  0x0100u
+#define TIMER_BASE 0x0110u
+#define INTC_BASE  0x0120u
+#define GPIO_BASE  0x0130u
 #else
 #define UART_BASE  0x80000000u
 #define TIMER_BASE 0x80001000u
 #define INTC_BASE  0x80002000u
 #define GPIO_BASE  0x80003000u
 #endif
-#define INTC_PENDING (*(volatile u32 *)(INTC_BASE + 0x0))
-#define INTC_ENABLE  (*(volatile u32 *)(INTC_BASE + 0x4))
-#define INTC_ACK     (*(volatile u32 *)(INTC_BASE + 0x8))
+#define INTC_PENDING (*(volatile hwreg *)(INTC_BASE + 0x0))
+#define INTC_ENABLE  (*(volatile hwreg *)(INTC_BASE + 0x4))
+#define INTC_ACK     (*(volatile hwreg *)(INTC_BASE + 0x8))
 #endif
 
-#define REG(a) (*(volatile u32 *)(a))
+#define REG(a) (*(volatile hwreg *)(a))
 #define UART_DATA   REG(UART_BASE + 0x0)
 #define UART_STATUS REG(UART_BASE + 0x4)    /* bit 0: can send, bit 1: a byte arrived */
 #define UART_CTRL   REG(UART_BASE + 0x8)    /* bit 0: on */
