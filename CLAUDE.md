@@ -29,7 +29,10 @@ changing a table, case or report format.
    disagreement between two images is traced to its instruction before anything is concluded.
 7. **Say what is not known.** Write "not confirmed" or "unknown" rather than a guess presented as
    fact, in docs, docstrings and commit messages.
-8. **Private for now, no license yet.** Push only to the user's own Forgejo remote.
+8. **Public, Apache-2.0** (github.com/dwzg/dread). Before every push, run `dread leakcheck` with the
+   tables and words of each private project code was taken from (the exact command is kept with
+   that project, not here); a hit that is not a known coincidence stops the push. A leak, once
+   pushed, cannot be taken back.
 
 ## Conventions
 

@@ -28,7 +28,8 @@ is safe to run on hardware.
 
 ## Status
 
-Early, and private. The method and the first versions of the tools come from the reconstruction of
+Early: the tools are being moved over and generalised phase by phase, and the table below says
+what works. The method and the first versions of the tools come from the reconstruction of
 a 2004 digital camera's firmware (ARM7, ARM state). Here they are being made independent of that
 firmware: everything a tool needs to know about a target comes from the target's `dread.toml`.
 DREAD tests itself on **gizmo** (`examples/gizmo`), a small firmware written for the purpose and
@@ -63,3 +64,7 @@ bin/dread --target examples/gizmo/m3 info
 
 A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the
 working directory, from `--target`, or from `$DREAD_TARGET`.
+
+## License
+
+Apache License 2.0, see `LICENSE`.

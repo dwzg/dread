@@ -12,6 +12,7 @@ COMMANDS = {
     "functions": ("dread.listfunctions", "list the functions of an image with their extents"),
     "asm": ("dread.mkasm", "a listing that GNU as rebuilds byte for byte (--verify)"),
     "ghidra": ("dread.ghidra", "analyse an image with Ghidra and write its function and code tables"),
+    "leakcheck": ("dread.leakcheck", "look for a private project's names and addresses before publishing"),
 }
 
 
