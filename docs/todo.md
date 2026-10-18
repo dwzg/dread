@@ -130,12 +130,19 @@ The long runs set the pace of everything after them. Measure first, then cut.
   for every tool; the stack analysis takes sp, the registers and the return address from the slots
   an ldm through a frame address reads (ldm sp, {fp, sp, lr}; bx lr on ARMv4T). gizmo with APCS
   frames for ARMv4T and ARMv5TE (scratch builds): 42 functions accepted each.
-- [ ] Lifter gaps still open: VFP, ldrexd/strexd, A-profile exception handlers (subs pc, lr; ldm ^).
-- [ ] The case generator could start from the coverage of an image's written cases (read_line takes
-  18-37 s to generate and still misses what one recorded case covers); the cache key would then
-  include the written cases. Measure what the comparison loses when fewer generated cases are kept.
-- [ ] **Compiler profiles** (`[compiler] idioms = ["gcc"]`): what the lifter and the template
-  families take from the compiler (prologue shapes, switch shapes, helper calls). gcc first.
+- [x] ~~The case generator could start from the coverage of written cases~~: dropped after the
+  second performance pass: read_line now generates in 0.8-1.8 s and its generated cases cover all of
+  it, which was the reason for the item.
+- [x] **Compiler profiles** for gcc: not needed. gcc at -Os, -O0, -O2, -O3, with APCS frames, for
+  ARM state, Thumb-2, Cortex-M0 and ARMv4T Thumb lifted without anything compiler-specific: the
+  stack analysis follows prologues and frame pointers, switches are resolved by running them, helper
+  conventions come from dread.regflow and the decoder's call marks. A profile (`[compiler] idioms`)
+  becomes necessary where a convention cannot be read from the code: IAR's cross-call fragments
+  (More compilers).
+- [ ] A-profile exception handlers in the lifter (subs pc, lr; ldm ^): function-level cases cannot
+  call a handler, so the acceptance has to come from the system run (the original and the rebuilt
+  image taking the same interrupts with the same device log). Then the C can be compiled with
+  `__attribute__((interrupt("IRQ")))`. ldrexd/strexd as inline assembly with a 64-bit operand.
 - [ ] (Later) liftfuzz: a Thumb-1 ISA (Cortex-M0: the 16-bit forms, high-register moves, the switch helper,
   calls through bx stubs), switches on the other ISAs (tbb, tbh, ldr pc tables), conditional returns
   and tail calls.
@@ -199,6 +206,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   listing generator.
 - [ ] AVR on the emulator interface the MSP430 work brings (clang builds it, Unicorn does not run
   it): an interpreter behind it, Harvard memory (program and data spaces) in the program database.
+
+## Floating point
+
+- [ ] A gizmo build with floating point (Cortex-M4F, hard float; and VFP in ARM state): the lifter's
+  VFP translation (C float and double with -ffp-contract=off, or inline assembly per instruction;
+  FPSCR flags through vmrs), the case generator's float inputs (NaNs, infinities, denormals,
+  boundaries), the s0-s15/d0-d7 argument registers in the harness and regflow.
 
 ## More compilers
 
