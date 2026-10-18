@@ -47,17 +47,21 @@ def callers_of(program):
     return out
 
 
-def listing(program, fn, flow=None, endless=None, callers=None):
-    """The lines of one function's flat listing."""
+def value_parts(program, value):
+    """(text, linked name or None) of a value, as describe_value shows it."""
+    name = program.name_at(value & ~1) if value is not None else None
+    if name and (value & ~1) in program.by_entry:
+        return describe_value(program, value), name
+    return describe_value(program, value), None
+
+
+def rows(program, fn, flow=None, endless=None, callers=None):
+    """The listing as data: (header, rows). header: name, entry, end, count, isa, callers [(name,
+    address)], calls [names], reads, kept, endless, notes. A row: {"kind": "insn" or "word" (a literal
+    pool word) or "label" or "note", "address", "bytes", "text", "comment": [{"text", "name"?,
+    "label"?}]}, names and labels being what a viewer links."""
     from dread import constants, switches
     arch = program.arch
-    lines = []
-    end = program.end(fn)
-    lines.append("; %s  0x%x..0x%x  %d instructions, %s" % (fn.name, fn.entry, end, len(fn.insns), fn.isa))
-    who = (callers or {}).get(fn.name, [])
-    if who:
-        lines.append("; called by: %s" % ", ".join("%s 0x%x" % w for w in who[:12]) +
-                     (" and %d more" % (len(who) - 12) if len(who) > 12 else ""))
     insns = program.instructions(fn)
     calls = []
     for insn in insns:
@@ -66,17 +70,12 @@ def listing(program, fn, flow=None, endless=None, callers=None):
             callee = program.by_entry.get(target & ~1) if kind in ("call", "jump") and isinstance(target, int) else None
             if callee is not None and callee is not fn and callee.name not in calls:
                 calls.append(callee.name)
-    if calls:
-        lines.append("; calls: %s" % ", ".join(calls))
-    if flow is not None:
-        reads, kept = flow.read_regs(fn.name), flow.kept_regs(fn.name)
-        lines.append("; reads at its entry: %s; its callers read after it: %s" % (
-            ", ".join(reads) or "nothing", ", ".join(kept) or "nothing"))
-    if endless is not None and fn.name in endless:
-        lines.append("; never returns")
     notes = program.annotations()
-    for text in notes.get(fn.entry, ()):
-        lines.append("; %s" % text)
+    header = {"name": fn.name, "entry": fn.entry, "end": program.end(fn), "count": len(fn.insns), "isa": fn.isa,
+              "callers": list((callers or {}).get(fn.name, [])), "calls": calls,
+              "reads": flow.read_regs(fn.name) if flow is not None else None,
+              "kept": flow.kept_regs(fn.name) if flow is not None else None,
+              "endless": bool(endless is not None and fn.name in endless), "notes": list(notes.get(fn.entry, ()))}
     labels = {}
     for insn in insns:
         if insn is None:
@@ -84,64 +83,95 @@ def listing(program, fn, flow=None, endless=None, callers=None):
         kind, target, _ = arch.flow(insn)
         if kind == "jump" and isinstance(target, int) and (target & ~1) in fn.insns and (target & ~1) != fn.entry:
             labels.setdefault(target & ~1, "L%d" % (len(labels) + 1))
-    pools = []
+    out = []
     previous_end = fn.entry
     for insn in insns:
         if insn is None:
             continue
         a = insn.address
-        if a > previous_end:                # data between instructions: a literal pool
-            pools.append((previous_end, a))
-            lines += pool_lines(program, previous_end, a)
+        if a > previous_end:
+            out += pool_rows(program, previous_end, a)
         previous_end = a + insn.size
         if a in labels:
-            lines.append("%s:" % labels[a])
+            out.append({"kind": "label", "address": a, "text": labels[a]})
         for text in notes.get(a, ()) if a != fn.entry else ():
-            lines.append("    ; %s" % text)
+            out.append({"kind": "note", "address": a, "text": text})
         kind, target, _ = arch.flow(insn)
-        text = "%s %s" % (insn.mnemonic, insn.op_str)
         comment = []
         if kind in ("call", "jump") and isinstance(target, int):
             t = target & ~1
             if t in labels:
-                comment.append(labels[t])
+                comment.append({"text": labels[t], "label": t})
             else:
-                comment.append(describe_value(program, t))
+                text, name = value_parts(program, t)
+                comment.append({"text": text, "name": name} if name else {"text": text})
             if kind == "call" or (program.by_entry.get(t) is not None and t not in fn.insns):
                 args = constants.at(program, fn, a, ["r0", "r1", "r2", "r3"])
                 if args:
-                    comment.append("with " + ", ".join("%s=%s" % (r, describe_value(program, v))
-                                                       for r, v in sorted(args.items())))
+                    comment.append({"text": "with " + ", ".join("%s=%s" % (r, describe_value(program, v))
+                                                                for r, v in sorted(args.items()))})
         elif kind == "ijump":
             got = switches.resolve(program, fn, a)
             if got:
                 inside, outside = got
-                comment.append("goes to " + ", ".join([labels.get(x, "0x%x" % x) for x in inside] +
-                                                       [describe_value(program, x) for x in outside]))
+                comment.append({"text": "goes to " + ", ".join([labels.get(x, "0x%x" % x) for x in inside] +
+                                                               [describe_value(program, x) for x in outside])})
         lit = arch.literal(insn, program.isa_at(a))
         if lit is not None and lit[1] == 4 and program.in_image(lit[0], 4):
-            comment.append("= " + describe_value(program, program.word(lit[0])))
+            text, name = value_parts(program, program.word(lit[0]))
+            comment.append({"text": "= " + text, "name": name} if name else {"text": "= " + text})
         at = arch.pc_address(insn, program.isa_at(a))
         if at is not None:
-            comment.append("= " + describe_value(program, at))
-        raw = bytes(insn.bytes).hex()
-        line = "    %08x  %-10s %-34s" % (a, raw, text)
-        if comment:
-            line += " ; " + "; ".join(comment)
-        lines.append(line.rstrip())
-    if end > previous_end:
-        lines += pool_lines(program, previous_end, end)
+            text, name = value_parts(program, at)
+            comment.append({"text": "= " + text, "name": name} if name else {"text": "= " + text})
+        out.append({"kind": "insn", "address": a, "bytes": bytes(insn.bytes).hex(),
+                    "text": "%s %s" % (insn.mnemonic, insn.op_str), "comment": comment})
+    if program.end(fn) > previous_end:
+        out += pool_rows(program, previous_end, program.end(fn))
+    return header, out
+
+
+def listing(program, fn, flow=None, endless=None, callers=None):
+    """The lines of one function's flat listing (the text of rows())."""
+    header, out = rows(program, fn, flow, endless, callers)
+    lines = ["; %s  0x%x..0x%x  %d instructions, %s" % (fn.name, header["entry"], header["end"], header["count"],
+                                                         header["isa"])]
+    who = header["callers"]
+    if who:
+        lines.append("; called by: %s" % ", ".join("%s 0x%x" % w for w in who[:12]) +
+                     (" and %d more" % (len(who) - 12) if len(who) > 12 else ""))
+    if header["calls"]:
+        lines.append("; calls: %s" % ", ".join(header["calls"]))
+    if header["reads"] is not None:
+        lines.append("; reads at its entry: %s; its callers read after it: %s" % (
+            ", ".join(header["reads"]) or "nothing", ", ".join(header["kept"]) or "nothing"))
+    if header["endless"]:
+        lines.append("; never returns")
+    for text in header["notes"]:
+        lines.append("; %s" % text)
+    for row in out:
+        if row["kind"] == "label":
+            lines.append("%s:" % row["text"])
+        elif row["kind"] == "note":
+            lines.append("    ; %s" % row["text"])
+        else:
+            line = "    %08x  %-10s %-34s" % (row["address"], row["bytes"], row["text"])
+            if row["comment"]:
+                line += " ; " + "; ".join(c["text"] for c in row["comment"])
+            lines.append(line.rstrip())
     return lines
 
 
-def pool_lines(program, lo, hi):
+def pool_rows(program, lo, hi):
     out = []
     a = lo
     while a + 4 <= hi:
         if a % 4:
             a += 2
             continue
-        out.append("    %08x  %-10s .word %s" % (a, program.read(a, 4).hex(), describe_value(program, program.word(a))))
+        text, name = value_parts(program, program.word(a))
+        out.append({"kind": "word", "address": a, "bytes": program.read(a, 4).hex(), "text": ".word",
+                    "comment": [{"text": text, "name": name} if name else {"text": text}]})
         a += 4
     return out
 

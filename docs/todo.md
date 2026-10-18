@@ -10,6 +10,10 @@ queue may change while the user is away: CLAUDE.md, "Working unattended".
 
 Decisions that are the user's, with options and a recommendation. Work goes on around them.
 
+- **A pilot run with a cloud model?** It needs `ANTHROPIC_API_KEY` (or another provider's key) in the
+  environment and costs money on that account: gizmo's four small functions take about 5 to 15
+  answers of up to 16000 tokens, well under a dollar with a Sonnet-class model. Recommendation: one
+  run, to compare with the local model; say which model and whether the key may be used unattended.
 - **IAR-built gizmo?** For the IAR profile: gizmo built with IAR EWARM (Cortex-M3) and, for MSP430,
   EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
   `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
@@ -210,10 +214,42 @@ The long runs set the pace of everything after them. Measure first, then cut.
 - [x] `dread pilot --task input` (one JSON input at a time for the instructions a function's cases
   leave unrun; the emulator decides; a useful input becomes a written case "by" the pilot) and
   `--task name` (a name and a sentence for FUN_ functions, collected in names.tsv, never applied).
-- [ ] A measured run of the pilot with the local model and with a cloud model on gizmo's lifted
-  functions (accepted, answers per function, seconds, what the failures were).
+- [x] A measured run of the pilot with the local model (a 27B reasoning model on llama-server) on
+  four gizmo functions, 3 answers each at most: led_on, keys_read and timer_start accepted on the
+  first answer (about 4 minutes each); fmt_dec rejected: two answers came back empty (the reasoning
+  used all 32000 tokens; the server returns it in `reasoning_content` and an empty `content` with
+  finish_reason "length"), and the third left an equivalent survivor (`j < i` -> `j <= i`: the extra
+  byte is overwritten by the terminator) with no answer left to argue it.
+- [ ] Pilot: an answer cut off by the token limit gets feedback of its own (the code first, reason
+  less), the providers report the finish reason and the tokens and the log keeps them; the survivors
+  question gets an answer of its own beyond --tries (it only asks for arguments).
+- [ ] A measured run with a cloud model (waits for "Questions for the user").
 - [ ] RISC-V (RV32IMC): a third gizmo build (clang 23 and ld.lld are installed: no system packages
   needed) and the architecture layer behind `dread.arch`.
+
+## Browser view (`dread gui`; asked for by the user on 2026-10-18)
+
+A view over what the tools know and decided, never a second implementation: whatever computes is a
+tool, the page shows its records; the only changes are the command line's own.
+
+- [x] v1: a local server (standard library, 127.0.0.1, host-name check against DNS rebinding, a
+  per-page token for changes) and one page without framework or build step. Overview (origins in
+  counts and bytes, a map of the image, refusal reasons grouped, the last test run, when the tools
+  ran), a virtual function list with filters, one function (the flat listing with calls, branches
+  and literals linked, coverage marks from the last `dread test` or lift check, the C: its source or
+  the pilot's, the lifted C built or lifted on the spot; verdict, cases, placement, notes), search
+  by name, address and text, keys. Changes: rename (new `dread rename`: every file that names the
+  function, refused outside the target's directory, compiled and loaded after the change and undone
+  when anything still uses the old name) and notes (annotations.txt). The tools now keep what the
+  page reads: `dread lift --check` writes verdicts.tsv, `dread test` the missed instructions.
+  Measured on a large private image (4586 functions): loading 0.14 s, the background analyses 19 s,
+  a median function 0.024 s (2.6 s before the GUI reused one lifter fed with the never-returning
+  functions it already has), the largest (5854 instructions) 1.5 s.
+- [ ] (Later: after MSP430) v2: a failing case's differences (the test run keeps them per function),
+  pilot review (conversations, argued survivors and name proposals, accepted or rejected from the
+  page through `dread rename` and argued.tsv).
+- [ ] (Later) v3: the call graph around a function, the system run's timeline (device logs of both
+  images side by side).
 
 ## MSP430 (of special interest to the user; right after RISC-V)
 

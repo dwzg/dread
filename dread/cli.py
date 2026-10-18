@@ -22,6 +22,8 @@ COMMANDS = {
     "sysrun": ("dread.sysrun", "the image from reset with device models, original against rebuilt"),
     "sysrecord": ("dread.sysrecord", "written cases recorded from a system run, for the functions it enters"),
     "flat": ("dread.flat", "one function's code as a flat listing to read"),
+    "rename": ("dread.rename", "give functions new names, everywhere a name is written"),
+    "gui": ("dread.gui", "browse an image in the web browser: listings, C, coverage, verdicts"),
     "callsites": ("dread.callsites", "the calls of functions with the constant arguments at each"),
     "samecode": ("dread.samecode", "functions that are the same code as functions of another image"),
     "callpair": ("dread.callpair", "names for another image's functions from the order of calls"),

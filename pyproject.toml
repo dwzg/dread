@@ -19,7 +19,7 @@ dread = "dread.cli:main"
 include = ["dread*"]
 
 [tool.setuptools.package-data]
-dread = ["include/*.h", "ghidra/*.java", "fasthooks.c"]
+dread = ["include/*.h", "ghidra/*.java", "fasthooks.c", "web/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

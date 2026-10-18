@@ -129,6 +129,11 @@ def test_check_drops_a_planted_mistake(variant, copies, monkeypatch):
     accepted = lift.check(target, image, ["script_run", "keys_read"], out=lines.append, jobs=4)
     assert accepted == ["keys_read"], lines                             # keys_read compares nothing
     assert any(line.startswith("dropped  FAIL script_run") for line in lines)
+    from dread.gui import read_tsv                                      # the record readers such as dread gui use
+    verdicts = {r["function"]: r for r in read_tsv(os.path.join(target.build, "lift-check", image.name,
+                                                                "verdicts.tsv"))}
+    assert verdicts["keys_read"]["verdict"] == "accepted"
+    assert verdicts["script_run"]["verdict"] == "dropped" and verdicts["script_run"]["reason"].startswith("FAIL")
 
 
 @pytest.mark.slow

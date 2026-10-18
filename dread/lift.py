@@ -113,10 +113,12 @@ def direct_callees(program, fn):
 
 
 class Lifter:
-    def __init__(self, program, flow=None):
+    def __init__(self, program, flow=None, endless=None):
+        """flow: the image's RegFlow (dread.regflow); endless: the names of the functions that never
+        return, when the caller has them already (dread.noreturn.find, which otherwise runs here)."""
         self.prog, self.arch, self.flow = program, program.arch, flow
         self._stack_args, self._entry, self._resolved, self._states, self._handlers = {}, {}, {}, {}, {}
-        self._noreturn = None
+        self._noreturn = set(endless) if endless is not None else None
         path = program.image.table("asm_only")
         self.asm_only = read_ranges(path) if path and os.path.exists(path) else []
 
@@ -1633,35 +1635,45 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
             if owner is not None and owner is not fn and (t & ~1) != owner.entry:
                 entered.add(owner.name)
     candidates, refused, endless = [], 0, []
+    verdicts = {}                           # name -> (verdict, reason, missed): verdicts.tsv for readers
+
+    def refuse(name, reason):
+        verdicts[name] = ("refused", str(reason), "")
+        out("refused  %-24s %s" % (name, reason))
+
     for name in names or [fn.name for fn in program.functions]:
         fn = program.by_name.get(name)
-        if fn is None or name in by_hand:
+        if fn is None:
+            continue
+        if name in by_hand:
+            verdicts[name] = ("by hand", "src defines it", "")
             continue
         refused += 1
         if program.stored(fn.entry) != fn.entry or not program.in_image(fn.entry):
-            out("refused  %-24s runs from a copy in RAM (the overlay cannot place C there)" % name)
+            refuse(name, "runs from a copy in RAM (the overlay cannot place C there)")
             continue
         if name in entered:
-            out("refused  %-24s other code branches into its middle (the overlay cannot replace it)" % name)
+            refuse(name, "other code branches into its middle (the overlay cannot replace it)")
             continue
         try:
             system_only = lifter.system_only(fn)
         except Refused as e:
-            out("refused  %-24s %s" % (name, e))
+            refuse(name, e)
             continue
         if system_only:
             try:
                 lifter.lift(fn)
                 endless.append(name)        # no case can end or call it: the system run decides (system_check)
+                refused -= 1
             except Refused as e:
-                out("refused  %-24s %s" % (name, e))
+                refuse(name, e)
             continue
         try:
             lifter.lift(fn)
             candidates.append(name)
             refused -= 1
         except Refused as e:
-            out("refused  %-24s %s" % (name, e))
+            refuse(name, e)
     callees = {n: direct_callees(program, program.by_name[n]) for n in candidates}
     accepted, retry, retried, rounds = list(candidates), [], False, 0
     while accepted:
@@ -1671,6 +1683,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
         except overlay.OverlayError as e:
             if e.function in accepted:      # one function the overlay cannot place: without it
                 out("dropped  %-24s %s" % (e.function, e))
+                verdicts[e.function] = ("dropped", "the overlay: %s" % e, "")
                 accepted = [n for n in accepted if n != e.function]
                 continue
             out("dread lift: the build failed: %s" % e)
@@ -1686,6 +1699,9 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
                 for name in drop:
                     if line.startswith(("FAIL %s " % name, "UNCOVERED %s:" % name)):
                         out("dropped  " + line[:200])
+                        if name not in verdicts or verdicts[name][0] != "dropped":
+                            missed = " ".join("0x%x" % a for a in runner.RUN.get("missed", {}).get(name, ()))
+                            verdicts[name] = ("dropped", line[:300], missed)
                         if "[case generation]" in line:
                             ungenerated.add(name)
         if not retried:
@@ -1699,10 +1715,20 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
                 retried = True
                 continue
             break
-    by_system = system_check(target, image, program, lifter, accepted, endless, out) \
+    by_system = system_check(target, image, program, lifter, accepted, endless, out, verdicts) \
         if system and target.scenarios else []
+    for name in endless:
+        verdicts.setdefault(name, ("dropped", "never returns or an exception handler, and the target has no "
+                                              "system-run scenarios to test it", ""))
     dropped = len(candidates) - len(accepted) + len(endless) - len(by_system)
     accepted = accepted + by_system
+    for name in accepted:
+        verdicts[name] = ("accepted", "by the system run" if name in by_system else "", "")
+    os.makedirs(work, exist_ok=True)
+    with open(os.path.join(work, "verdicts.tsv"), "w") as f:
+        f.write("function\tverdict\treason\tmissed\n")
+        f.writelines("%s\t%s\t%s\t%s\n" % (n, v, r.replace("\t", " ").replace("\n", " "), m)
+                     for n, (v, r, m) in sorted(verdicts.items()))
     path = image.table("lifted")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -1743,13 +1769,15 @@ class Coverage:
         pass
 
 
-def system_check(target, image, program, lifter, accepted, names, out=print):
+def system_check(target, image, program, lifter, accepted, names, out=print, verdicts=None):
     """Functions that never return (a main loop, a reset handler) get no function-level case. Each
     one is built from lifted C on its own (with the functions already accepted), and every scenario
     of the target runs on the original and on the rebuilt image (dread.sysrun): accepted when the
     device logs, model reports and endings agree and the original's runs executed every instruction
-    of it that a path reaches. Returns the accepted names."""
+    of it that a path reaches. Returns the accepted names; verdicts, a dict, gets the reason of each
+    one dropped (see check)."""
     import json
+    verdicts = {} if verdicts is None else verdicts
     from dread import build, overlay, sysrun
     work = os.path.join(target.build, "lift-system", image.name)
     original = image.payload()
@@ -1761,6 +1789,7 @@ def system_check(target, image, program, lifter, accepted, names, out=print):
             payload = build.build(target, image, out=work, lifted=list(accepted) + kept + [name], quiet=True)
         except (Refused, overlay.OverlayError) as e:
             out("dropped  %-24s %s" % (name, e))
+            verdicts[name] = ("dropped", str(e), "")
             continue
         with open(os.path.join(work, "placement.json")) as f:
             placed = json.load(f)["functions"]
@@ -1783,8 +1812,9 @@ def system_check(target, image, program, lifter, accepted, names, out=print):
             why = "the system run never ran %d of its %d instructions: %s" % (
                 len(missing), len(fn.insns), " ".join("0x%x" % a for a in missing[:8]))
         if why:
-            out("dropped  %-24s %s; %s" % (name, "an exception handler" if lifter.handler_kind(fn) else
-                                           "never returns", why))
+            kind = "an exception handler" if lifter.handler_kind(fn) else "never returns"
+            out("dropped  %-24s %s; %s" % (name, kind, why))
+            verdicts[name] = ("dropped", "%s; %s" % (kind, why), " ".join("0x%x" % a for a in missing))
         else:
             out("accepted %-24s %s; every scenario agrees and runs all of it" % (
                 name, "an exception handler" if lifter.handler_kind(fn) else "never returns"))

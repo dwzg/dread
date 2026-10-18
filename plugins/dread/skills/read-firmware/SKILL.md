@@ -6,8 +6,9 @@ description: Find your way around a firmware with DREAD's reading aids and carry
 # Read a firmware
 
 Reading comes before writing C, and names come before both: a function named after what it does is
-half reconstructed. The tools here only read; names and descriptions go into the target's
-`config/symbols.txt` and `config/annotations.txt`.
+half reconstructed. The tools here only read, except two: a name goes in with `dread rename` (the
+symbols and every file that names the function), a description into `config/annotations.txt` (by
+hand or as a note in `dread gui`).
 
 ## Listings and calls
 
@@ -19,6 +20,10 @@ half reconstructed. The tools here only read; names and descriptions go into the
 - `dread callsites --reaches TARGET PATTERN`: the shortest call chains from matching functions to
   TARGET (how does the main loop get to the flash writer?).
 - `dread functions`: every function with its extent; `dread noreturn`: those that never return.
+- `dread gui`: the same reading in the browser (overview, map, listing with coverage, the C, search);
+  rename (`n`) and notes (`;`) from there go through `dread rename` and annotations.txt.
+- `dread rename OLD=NEW`: a name, once known, everywhere it is written (tables, cases, C), or
+  nowhere: it is refused outside the target's directory and undone when the tree contradicts it.
 
 ## Names from other images
 

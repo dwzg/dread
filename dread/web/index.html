@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="dread-token" content="{{TOKEN}}">
+<title>DREAD</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='2' width='12' height='12' rx='2' fill='%235B7FA5'/%3E%3Crect x='5' y='5' width='6' height='6' rx='1' fill='%23A0C4E2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<header class="bar">
+  <button class="icon-btn menu" id="menu" title="Functions" aria-label="Functions"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg></button>
+  <a class="brand" href="#/" title="Overview (o)"><span class="mark"></span>DREAD</a>
+  <div class="where" id="where"></div>
+  <div class="search">
+    <input id="search" type="search" placeholder="Search names, addresses, text" autocomplete="off" spellcheck="false" aria-label="Search">
+    <kbd>/</kbd>
+    <div id="results" class="results" hidden></div>
+  </div>
+  <div class="tools">
+    <span id="busy" class="busy" hidden></span>
+    <button class="icon-btn" id="theme" title="Theme (t)" aria-label="Theme"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 2a6 6 0 0 0 0 12z" fill="currentColor"/></svg></button>
+    <button class="icon-btn" id="help-button" title="Keys (?)" aria-label="Keys">?</button>
+  </div>
+</header>
+<div class="layout">
+  <aside class="side" id="side">
+    <div class="side-head">
+      <input id="filter" type="search" placeholder="Filter functions" autocomplete="off" spellcheck="false" aria-label="Filter functions">
+      <div class="chips" id="chips"></div>
+      <div class="side-info"><span id="count"></span>
+        <select id="sort" aria-label="Sort">
+          <option value="address">by address</option>
+          <option value="name">by name</option>
+          <option value="size">by size</option>
+        </select>
+      </div>
+    </div>
+    <div class="list" id="list"><div class="spacer" id="spacer"></div></div>
+  </aside>
+  <main id="main"></main>
+</div>
+<div id="dialog" class="dialog" hidden>
+  <form class="box" id="dialog-form">
+    <h3 id="dialog-title"></h3>
+    <p id="dialog-hint"></p>
+    <input id="dialog-input" autocomplete="off" spellcheck="false">
+    <textarea id="dialog-text" rows="4" spellcheck="false"></textarea>
+    <div class="err" id="dialog-error"></div>
+    <div class="actions">
+      <button type="button" id="dialog-cancel">Cancel</button>
+      <button type="submit" class="primary" id="dialog-ok">Save</button>
+    </div>
+  </form>
+</div>
+<div id="help" class="dialog" hidden>
+  <div class="box">
+    <h3>Keys</h3>
+    <table class="keys">
+      <tr><td><kbd>/</kbd> <kbd>g</kbd></td><td>search names, addresses and text</td></tr>
+      <tr><td><kbd>j</kbd> <kbd>k</kbd></td><td>next, previous line of the listing</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td>follow the call or branch of the line</td></tr>
+      <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>previous, next function of the list</td></tr>
+      <tr><td><kbd>n</kbd></td><td>rename the function (dread rename)</td></tr>
+      <tr><td><kbd>;</kbd></td><td>note on the line (annotations.txt)</td></tr>
+      <tr><td><kbd>b</kbd></td><td>show or hide the bytes</td></tr>
+      <tr><td><kbd>c</kbd></td><td>show or hide the C</td></tr>
+      <tr><td><kbd>o</kbd></td><td>overview</td></tr>
+      <tr><td><kbd>t</kbd></td><td>theme: system, light, dark</td></tr>
+      <tr><td><kbd>Alt</kbd> <kbd>&larr;</kbd></td><td>back</td></tr>
+    </table>
+    <div class="actions"><button type="button" id="help-close">Close</button></div>
+  </div>
+</div>
+<div id="tip" class="tip" hidden></div>
+<div id="toast" class="toast" hidden></div>
+</body>
+</html>

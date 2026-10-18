@@ -59,6 +59,7 @@ class Suite:
         self.unreachable = {}       # name -> {address}
         self.caller_regs = {}       # name -> [register numbers] read before written (lifter)
         self.files = []
+        self.read = set()           # files the case files opened (a shared file of cases, say)
 
     # ---- the API ----
 
@@ -81,6 +82,12 @@ class Suite:
             raise ValueError("unreachable() needs the reason")
         self.unreachable.setdefault(name, set()).update(addrs)
 
+    def open_(self, file, *args, **kwargs):
+        """open() for the case files: records what they read (dread rename looks there for names)."""
+        if isinstance(file, (str, os.PathLike)):
+            self.read.add(os.path.abspath(file))
+        return open(file, *args, **kwargs)
+
     def logging_stubs(self, m, *specs, seen=lambda: ()):
         for name, ret, n, *effect in specs:
             def stub(m, *a, name=name, ret=ret, n=n, effect=effect):
@@ -99,7 +106,7 @@ class Suite:
         lay = self.layout
         return {
             "case": self.case, "auto": self.auto_, "unreachable": self.unreachable_,
-            "entry": self.entry, "logging_stubs": self.logging_stubs, "words": self.words,
+            "entry": self.entry, "logging_stubs": self.logging_stubs, "words": self.words, "open": self.open_,
             "target": self.target, "image": self.image, "program": self.program, "layout": lay,
             "SCRATCH": self.target.memory.scratch_base, "STACK_TOP": lay.stack_top,
             "struct": struct,

@@ -63,7 +63,8 @@ carries them.
 ### `annotations.txt` (`annotations`)
 
 What is known about an address: `ADDRESS | text`, as many lines per address as needed. The listing
-shows them as comments.
+shows them as comments. `dread gui` writes it: a note replaces the lines of its address in place
+(or goes to the end) and leaves every other line, comments included, as it was.
 
 ### `data_ranges.txt`, `asm_only.txt`, `left_out.txt`
 
@@ -173,4 +174,14 @@ caller reads it only on a path that cannot happen, or only bits the next callee 
 
 ### `tests.tsv`
 
-Written beside the rebuilt image by a complete `dread test`: `function`, `cases`, `failed`.
+Written beside the rebuilt image by a complete `dread test`: `function`, `cases`, `failed`, `missed`
+(the instructions of the original no case ran, as hex addresses separated by spaces; empty when
+the cases run all of it).
+
+### `BUILD/lift-check/IMAGE/verdicts.tsv`
+
+Written by `dread lift --check`: one line per function it looked at, `function`, `verdict`
+(`accepted`, `refused`: the lifter cannot translate it, `dropped`: lifted, but the cases or the
+system run disagree or do not run all of it, or the overlay cannot place it; `by hand`: src defines
+it), `reason` (the lifter's or the test run's words), `missed` (for a dropped function, the
+instructions no case ran). `dread gui` reads it; `dread rename` renames in it.

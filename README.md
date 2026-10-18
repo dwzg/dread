@@ -51,11 +51,12 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Recorded cases from Python models of callees (`dread record`) | done |
 | System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick) | done |
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
-| Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order | done |
+| Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order; renaming everywhere at once (`dread rename`) | done |
+| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes | done |
 | Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
 | Method documentation and a porting guide | done |
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
-| `dread pilot`: the reconstruction loop run unattended, an LLM (local or cloud) only for the thinking | after the ARM phases |
+| `dread pilot`: the reconstruction loop run by code, an LLM (local or cloud) only for the judgement: writing C, arguing survivors, proposing inputs and names; every answer checked by the tools | first version |
 | RISC-V: a third gizmo build and an architecture backend | after the pilot |
 
 ## Layout
@@ -84,7 +85,22 @@ bin/dread liftfuzz --isa t32                        # the lifter on random instr
 bin/dread flat --target examples/gizmo/m3 print_status        # one function to read: names, literals, arguments
 bin/dread callsites --target examples/gizmo/m3 --by 0 gpio_set # who calls it, with which constants
 bin/dread callpair --target OTHER --other examples/gizmo/a32 --seed FUN_08000738=main   # names by call order
+bin/dread rename --target examples/gizmo/m3 beep_on=buzzer_on  # a new name everywhere, or nowhere
+bin/dread pilot --target examples/gizmo/m3 --limit 4          # a language model writes C, the tools decide
+bin/dread gui --target examples/gizmo/m3 --open               # all of it in the browser
 ```
+
+### In the browser
+
+`dread gui` serves a page on this machine (127.0.0.1:8350) that shows what the tools know and
+decided: where each function stands (written by hand, by the pilot, lifted, refused, original), a
+map of the image, the listing with the instructions the cases ran or missed, the C beside it,
+verdicts and cases, search by name, address and text. It changes nothing but names (through `dread
+rename`) and notes (annotations.txt); everything else is the tools' work. Keys: `/` search, `j` `k`
+lines, `Enter` follow, `n` rename, `;` note, `?` all of them.
+
+![The overview of gizmo in dread gui](docs/images/gui-overview.webp)
+![A function with its listing, coverage and C](docs/images/gui-function.webp)
 
 ### With Claude Code
 

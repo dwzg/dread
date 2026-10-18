@@ -105,6 +105,39 @@ def read_annotations(path):
     return out
 
 
+def write_annotation(path, address, lines):
+    """Replace the annotation of one address in annotations.txt by `lines` (none: remove it). The
+    other lines, comments included, stay as they are; the new lines take the place of the old ones,
+    or go to the end."""
+    old = []
+    if os.path.exists(path):
+        with open(path) as f:
+            old = f.read().splitlines(True)
+    if old and not old[-1].endswith("\n"):
+        old[-1] += "\n"
+    new = ["0x%x | %s\n" % (address, line.strip()) for line in lines if line.strip()]
+    out, placed = [], False
+    for line in old:
+        head = line.split("|", 1)[0].strip() if "|" in line and not line.lstrip().startswith("#") else ""
+        try:
+            mine = bool(head) and int(head, 0) == address
+        except ValueError:
+            mine = False
+        if mine:
+            if not placed:
+                out += new
+                placed = True
+            continue
+        out.append(line)
+    if not placed:
+        if not old:
+            out.append("# ADDRESS | text: notes on the code at an address, several lines per address.\n")
+        out += new
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        f.writelines(out)
+
+
 def read_ranges(path):
     """A range table ("START END reason" or "START-END reason") as [(start, end, reason)], end
     exclusive. Used for data_ranges.txt, asm_only.txt and left_out.txt."""

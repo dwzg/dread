@@ -78,7 +78,8 @@ def kept_for(name):
 
 
 def run_function(name):
-    """All cases of one function: (name, cases, failed, output lines, uncovered)."""
+    """All cases of one function: (name, cases, failed, output lines, the instructions of the original
+    no case ran)."""
     suite, prog, layout = RUN["suite"], RUN["program"], RUN["layout"]
     fn = prog.by_name.get(name)
     words = fn.insns if fn else []
@@ -178,7 +179,7 @@ def run_function(name):
                                                     ", %d written refused" % refused if refused else ""))
     for reg, argument in sorted(argued.items()):
         lines.append("     %s at the return not compared (kept.tsv): %s" % (reg, argument))
-    return name, len(cases), bad, lines, bool(missed)
+    return name, len(cases), bad, lines, missed
 
 
 def prepare(target, image, recon_path, keep_failing=False):
@@ -216,14 +217,17 @@ def prepare(target, image, recon_path, keep_failing=False):
 
 
 def run(names, only=False, out=print, jobs=None):
-    """Run the functions `names` (RUN prepared); returns (failed, uncovered, results)."""
+    """Run the functions `names` (RUN prepared); returns (failed, uncovered, results). RUN["missed"]
+    keeps, per function, the instructions of the original no case ran."""
     failed, uncovered, results = 0, [], []
+    RUN["missed"] = {}
     times = os.path.join(RUN["target"].build, "times", "tests-%s%s.json" % (RUN["image"].name, "-some" if only else ""))
     with multiprocessing.get_context("fork").Pool(jobs or workers(), initializer=die_with_parent) as pool:
         for name, count, bad, lines, missed in longest_first(pool, run_function, names, str, times):
             out("\n".join(lines))
             failed += bad
             results.append((name, count, bad))
+            RUN["missed"][name] = missed
             if missed:
                 uncovered.append(name)
     return failed, uncovered, results
@@ -261,8 +265,9 @@ def main(argv=None):
             print("UNTESTED %s" % n)
         return 1 if failed or missing or uncovered else 0
     with open(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "tests.tsv"), "w") as f:
-        f.write("function\tcases\tfailed\n")
-        f.writelines("%s\t%d\t%d\n" % r for r in results)
+        f.write("function\tcases\tfailed\tmissed\n")
+        f.writelines("%s\t%d\t%d\t%s\n" % (n, c, b, " ".join("0x%x" % a for a in RUN["missed"].get(n, ())))
+                     for n, c, b in results)
     system = RUN.get("system", set())
     for fn in sorted(system & set(RUN["built"])):
         print("SYSTEM %s: never returns; the system run's scenarios test it (dread sysrun)" % fn)
