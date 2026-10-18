@@ -1,0 +1,228 @@
+"""dread test: every rewritten function against the original, in the emulator.
+
+Each case calls one function in two emulated machines, one per image (the original and the image
+with the C linked in, from `dread recon`), with identical inputs, and the results must agree
+(dread.cases says what is compared). A function the overlay built from C that has no case is
+reported UNTESTED.
+
+Coverage: while the original runs, the instructions executed inside the function under test are
+recorded. A function whose cases leave instructions of the original unexecuted is reported
+UNCOVERED and fails the run, unless those addresses are declared with unreachable() and a reason;
+a declared address that does execute fails the function (the declaration is wrong). Coverage is
+counted per executed block: a conditional instruction counts as run whether its condition held or
+not, so a function made of conditional instructions without branches is covered by one case. The
+mutation check is what shows whether its cases tell both outcomes apart.
+
+Output, one block per function, in this form (other tools read it):
+
+    ok   NAME                       n/m cases agree
+    FAIL NAME [label]               followed by the differences, indented by five spaces
+    UNCOVERED NAME: a of b instructions of the original never ran: ADDRESS ...
+    REFUSED NAME [label]: ...       a written case that reads code as data or writes into the image
+    UNTESTED NAME
+
+Exit status 1 when anything failed, is uncovered or untested. Functions run in parallel worker
+processes (fork; Linux and macOS), slowest of the previous run first. With names given, only those
+run and no summary file is written; DREAD_ALL_MISSED=1 lists every missed address.
+
+    dread test [--target DIR] [--image NAME] [--recon PAYLOAD] [--keep-failing] [NAME...]
+"""
+import argparse
+import multiprocessing
+import os
+import sys
+
+from dread import target as tgt
+from dread.build import recon_dir
+from dread.cases import Suite
+from dread.emu import EmuError, Layout, Machine
+from dread.overlay import load_placement
+from dread.program import Program
+from dread.util.polite import die_with_parent, polite, workers
+from dread.util.poolorder import longest_first
+
+RUN = {}        # what the workers need; filled before they are forked
+
+
+def generated_cases(name, fn):
+    """The generated, kept and written cases of a function with auto(): [(label, addr, setup,
+    args, limit, case dict or None)]."""
+    from dread import autocase
+    return autocase.cases_for(RUN, name, fn)
+
+
+def run_function(name):
+    """All cases of one function: (name, cases, failed, output lines, uncovered)."""
+    suite, prog, layout = RUN["suite"], RUN["program"], RUN["layout"]
+    fn = prog.by_name.get(name)
+    words = fn.insns if fn else []
+    cases = [c + (None,) for c in suite.cases.get(name, [])]
+    lines = []
+    if name in suite.auto:
+        try:
+            cases += generated_cases(name, fn)
+        except Exception as e:             # the generator failed: written cases still count
+            if not cases:
+                return name, 0, 1, ["FAIL %s [case generation]" % name, "     %s" % e], False
+            lines.append("FAIL %s [case generation]: %s" % (name, e))
+    image = RUN["image"]
+    bad, covered, failing, refused = 0, set(), [], 0
+    for label, addr, setup, args, limit, generated in cases:
+        out, plan = [], []
+        for which, payload in (("original", RUN["original"]), ("rebuilt", RUN["recon"])):
+            m = Machine(layout, payload, RUN["aliases"] if which == "rebuilt" else None, isa_of=RUN["isa_of"])
+            m.plan, m.replay = plan, which == "rebuilt"
+            m.function = name
+            try:
+                setup(m)
+            except Exception as e:
+                out = [EmuError("the case's setup failed: %s: %s" % (type(e).__name__, e)), None]
+                break
+            if (addr & ~1) in m.stubs:
+                out = [EmuError("the case stubs the function it is meant to test"), None]
+                break
+            if which == "original" and words and addr == fn.entry:
+                m.cover(words[0], prog.end(fn))
+            written = label.startswith("written")
+            if which == "original" and written:
+                m.trace_reads(image.base, image.end, RUN["code"])
+            try:
+                out.append(m.call(addr, *args, max_instructions=limit))
+            except Exception as e:          # EmuError, or anything a case's own code raises
+                out.append(e if isinstance(e, EmuError) else EmuError("%s: %s" % (type(e).__name__, e)))
+            if which == "original" and written and (m.code_reads or any(image.base <= a < image.end for a in m.written)):
+                out = None
+                break
+            if which == "original":
+                covered |= m.covered_insns(words)
+        if out is None:
+            refused += 1
+            lines.append("REFUSED %s [%s]: the input loads instructions as data or stores into the image; "
+                         "remove it" % (name, label))
+            continue
+        depends = None
+        regs = RUN["suite"].caller_regs.get(name)
+        if regs and out and not isinstance(out[0], Exception):
+            m = Machine(layout, RUN["original"], isa_of=RUN["isa_of"])
+            m.plan, m.replay, m.function = [], False, name
+            setup(m)
+            for r in regs:
+                m.reg("r%d" % r, 0x3C5A0F00 + 0x13 * r)
+            try:
+                again = m.call(addr, *args, max_instructions=limit)
+                if (again.ret, again.writes, again.calls) != (out[0].ret, out[0].writes, out[0].calls):
+                    depends = "the original's result depends on what its caller left in %s" % \
+                        " or ".join("r%d" % r for r in regs)
+            except EmuError as e:
+                depends = "the original fails with other values in %s: %s" % (" or ".join("r%d" % r for r in regs), e)
+        if len(out) == 2 and out[1] is None:
+            diff = [str(out[0])]
+        elif isinstance(out[0], Exception) or isinstance(out[1], Exception):
+            diff = ["original: %s" % out[0] if isinstance(out[0], Exception) else "original ran",
+                    "rebuilt: %s" % out[1] if isinstance(out[1], Exception) else "rebuilt ran"]
+        else:
+            diff = out[0].diff(out[1])
+        if depends:
+            diff = list(diff) + [depends]
+        if diff:
+            bad += 1
+            if generated is not None:
+                failing.append(generated)
+            lines.append("FAIL %s [%s]" % (name, label))
+            lines += ["     " + d for d in diff]
+    if failing and RUN["keep_failing"]:
+        from dread import autocase
+        autocase.kept_add(RUN["image"], name, failing, "stubbed")
+    declared = suite.unreachable.get(name, set())
+    missed = sorted(set(words) - covered - declared)
+    wrong = sorted(covered & declared)
+    if wrong:
+        bad += 1
+        lines.append("FAIL %s [unreachable]: %d instructions declared unreachable did run: %s"
+                     % (name, len(wrong), " ".join("0x%x" % a for a in wrong[:12])))
+    if missed:
+        shown = missed if os.environ.get("DREAD_ALL_MISSED") else missed[:12]
+        lines.append("UNCOVERED %s: %d of %d instructions of the original never ran: %s"
+                     % (name, len(missed), len(words), " ".join("0x%x" % a for a in shown)))
+    total = len(cases) - refused
+    lines.append("%-4s %-26s %d/%d cases agree%s" % ("ok" if not bad else "FAIL", name, total - bad, total,
+                                                    ", %d written refused" % refused if refused else ""))
+    return name, len(cases), bad, lines, bool(missed)
+
+
+def prepare(target, image, recon_path, keep_failing=False):
+    """Fill RUN for a run over one image; returns the suite."""
+    prog = Program(target, image)
+    layout = Layout(target, image)
+    suite = Suite(target, image, prog, layout).load()
+    with open(recon_path, "rb") as f:
+        recon = f.read()
+    aliases, built = load_placement(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"))
+    Machine.entries = {fn.entry for fn in prog.functions}
+    Machine.image_end = image.end
+    RUN.clear()
+    RUN.update(target=target, image=image, program=prog, layout=layout, suite=suite, original=image.payload(),
+               recon=recon, aliases=aliases, built=built, keep_failing=keep_failing,
+               isa_of=prog.isa_at, code=frozenset(prog.code))
+    return suite
+
+
+def run(names, only=False, out=print, jobs=None):
+    """Run the functions `names` (RUN prepared); returns (failed, uncovered, results)."""
+    failed, uncovered, results = 0, [], []
+    times = os.path.join(RUN["target"].build, "times", "tests-%s%s.json" % (RUN["image"].name, "-some" if only else ""))
+    with multiprocessing.get_context("fork").Pool(jobs or workers(), initializer=die_with_parent) as pool:
+        for name, count, bad, lines, missed in longest_first(pool, run_function, names, str, times):
+            out("\n".join(lines))
+            failed += bad
+            results.append((name, count, bad))
+            if missed:
+                uncovered.append(name)
+    return failed, uncovered, results
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="dread test", description=__doc__.split("\n\n")[0])
+    tgt.add_arguments(parser)
+    parser.add_argument("--recon", help="the rebuilt image (default: BUILD/recon/IMAGE/payload.bin)")
+    parser.add_argument("--keep-failing", action="store_true", help="keep failing generated cases")
+    parser.add_argument("names", nargs="*")
+    args = parser.parse_args(argv)
+    polite()
+    try:
+        target, image = tgt.from_args(args)
+        recon_path = args.recon or os.path.join(recon_dir(target, image), "payload.bin")
+        if not os.path.exists(recon_path):
+            raise tgt.TargetError("no rebuilt image at %s: run `dread recon` first" % recon_path)
+        if not args.recon and os.path.isdir(image.src):
+            built = os.path.getmtime(recon_path)
+            newer = [os.path.join(d, f) for d, _, fs in os.walk(image.src) for f in fs
+                     if f.endswith((".c", ".h")) and os.path.getmtime(os.path.join(d, f)) > built]
+            if newer:
+                raise tgt.TargetError("%s is older than %s: run `dread recon`" % (recon_path, ", ".join(sorted(newer))))
+        suite = prepare(target, image, recon_path, args.keep_failing)
+    except (tgt.TargetError, EmuError) as e:
+        print("dread test: %s" % e, file=sys.stderr)
+        return 1
+    names = [n for n in list(suite.cases) + [n for n in suite.auto if n not in suite.cases]
+             if not args.names or n in args.names]
+    failed, uncovered, results = run(names, only=bool(args.names))
+    if args.names:
+        missing = [n for n in args.names if n not in names]
+        for n in missing:
+            print("UNTESTED %s" % n)
+        return 1 if failed or missing or uncovered else 0
+    with open(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "tests.tsv"), "w") as f:
+        f.write("function\tcases\tfailed\n")
+        f.writelines("%s\t%d\t%d\n" % r for r in results)
+    untested = [fn for fn in RUN["built"] if fn not in names]
+    for fn in untested:
+        print("UNTESTED %s" % fn)
+    cases = sum(c for _, c, _ in results)
+    print("dread test: %d functions, %d cases, %d failed, %d uncovered, %d untested"
+          % (len(results), cases, failed, len(uncovered), len(untested)))
+    return 1 if failed or untested or uncovered else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

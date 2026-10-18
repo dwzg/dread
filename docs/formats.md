@@ -73,6 +73,44 @@ a single `ADDRESS reason`.
 | `asm_only` | functions that stay assembly, with the reason (they use something C cannot express, for instance) |
 | `left_out` | ranges the bulk tools leave alone, with the reason |
 
-### `lifted.txt`, `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`, `asm_raw_words.txt`
+### `asm_raw_words.txt` (`asm_raw_words`)
+
+Instructions that `dread asm` writes as raw `.inst` because GNU as encodes them differently from the
+original bytes: one stored address per line. Maintained by `dread asm --verify`.
+
+### `lifted.txt`, `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
 
 Described with the tools that use them, as those tools arrive in DREAD.
+
+## The rebuilt image (`BUILD/recon/IMAGE/`)
+
+Written by `dread recon` (and `dread overlay`): `payload.bin` (the image with the C linked in),
+`recon.ld` and `recon.elf` (the link), and two reports of where each C function went.
+
+### `report.tsv`
+
+`function`, `address` (the original entry), `original_bytes`, `c_bytes`, `placement` (text for
+people), then a `#` summary line. Not for programs; they read placement.json.
+
+### `placement.json`
+
+```json
+{"functions": {"NAME": {"entry": 131596, "address": 134300, "original_bytes": 180, "c_bytes": 184,
+                        "placement": "behind the image", "branch": true, "isa": "a32"}},
+ "summary": {"replaced": 13, "functions": 50, "image_bytes": 3440, "room_left": 127632,
+             "freed": 216, "reused": 148}}
+```
+
+`placement` is one of `in place`, `over its pools`, `behind a pool`, `freed space`,
+`behind the image`, or `helper` (a C function the table does not have; no `entry`). `branch` says
+that the old entry holds a branch to `address`; the test runner enters such a function through it.
+
+## Test cases (the image's `cases` directory)
+
+Python files that call the case API of `dread.cases` (`case`, `auto`, `unreachable`, `entry`,
+`logging_stubs`, `words`), run in name order with those names defined. The module's docstring is the
+reference: what a case is and what is compared.
+
+### `tests.tsv`
+
+Written beside the rebuilt image by a complete `dread test`: `function`, `cases`, `failed`.

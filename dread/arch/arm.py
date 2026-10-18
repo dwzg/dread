@@ -238,6 +238,18 @@ class Arm:
             engine.ctl_set_cpu_model(CPUS[self.cpu])
         return engine
 
+    def initial_status(self, engine):
+        """Put the core into the state a called function expects: on the A profile system mode
+        with IRQ and FIQ masked (ARM or Thumb state follows from the start address), on the M
+        profile Thumb state. Both clear the condition flags and the IT state: Unicorn keeps the IT
+        state the last translation block left when it stops at the return sentinel, and the next
+        call would then start inside a phantom IT block (seen on Cortex-M3: the first instructions
+        of the next function ran conditionally)."""
+        if self.profile == "a":
+            engine.reg_write(ua.UC_ARM_REG_CPSR, 0xDF)
+        else:
+            engine.reg_write(ua.UC_ARM_REG_XPSR, 0x01000000)
+
     def start_address(self, address, isa):
         """The address to start or branch to for code of `isa` at `address` (bit 0 set for Thumb)."""
         return address | 1 if isa == "t32" else address & ~1

@@ -25,7 +25,8 @@ build/m3/gizmo.elf: start_m3.c $(SRC) m3.ld gizmo.h Makefile
 targets: all
 	for v in a32 m3; do \
 	    mkdir -p ../$$v/original && cp build/$$v/gizmo.elf ../$$v/original/gizmo.elf && \
-	    $(DREAD) import-elf build/$$v/gizmo.elf --target ../$$v --payload ../$$v/original/gizmo.bin || exit 1; \
+	    $(DREAD) import-elf build/$$v/gizmo.elf --target ../$$v --payload ../$$v/original/gizmo.bin && \
+	    mkdir -p ../$$v/src && python3 addresses.py build/$$v/gizmo.elf ../$$v/src/addresses.h $$v || exit 1; \
 	done
 
 clean:

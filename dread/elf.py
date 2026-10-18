@@ -20,9 +20,9 @@ class ElfError(Exception):
 
 
 class Section:
-    def __init__(self, name, kind, flags, addr, offset, size, link):
+    def __init__(self, name, kind, flags, addr, offset, size, link, align=1):
         self.name, self.kind, self.flags, self.addr = name, kind, flags, addr
-        self.offset, self.size, self.link = offset, size, link
+        self.offset, self.size, self.link, self.align = offset, size, link, max(align, 1)
         self.lma = addr                         # set from the program headers
 
     @property
@@ -63,8 +63,8 @@ class Elf:
         self.sections = []
         heads = [struct.unpack_from("<IIIIIIIIII", raw, shoff + i * shentsize) for i in range(shnum)]
         names = heads[shstrndx][4] if shnum else 0
-        for (name, kind, flags, addr, offset, size, link, _, _, _) in heads:
-            self.sections.append(Section(self._str(names, name), kind, flags, addr, offset, size, link))
+        for (name, kind, flags, addr, offset, size, link, _, align, _) in heads:
+            self.sections.append(Section(self._str(names, name), kind, flags, addr, offset, size, link, align))
         self.segments = []
         for i in range(phnum):
             (kind, offset, vaddr, paddr, filesz, memsz, flags, _) = struct.unpack_from(
@@ -89,6 +89,10 @@ class Elf:
     def _str(self, table, offset):
         end = self.raw.index(b"\0", table + offset)
         return self.raw[table + offset:end].decode("latin-1")
+
+    def data(self, section):
+        """The contents of a section (empty for one without)."""
+        return b"" if section.nobits else self.raw[section.offset:section.offset + section.size]
 
     def section(self, name):
         for s in self.sections:

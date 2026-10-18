@@ -18,6 +18,9 @@ dread = "dread.cli:main"
 [tool.setuptools.packages.find]
 include = ["dread*"]
 
+[tool.setuptools.package-data]
+dread = ["include/*.h", "ghidra/*.java"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

@@ -12,6 +12,9 @@ COMMANDS = {
     "functions": ("dread.listfunctions", "list the functions of an image with their extents"),
     "asm": ("dread.mkasm", "a listing that GNU as rebuilds byte for byte (--verify)"),
     "ghidra": ("dread.ghidra", "analyse an image with Ghidra and write its function and code tables"),
+    "recon": ("dread.build", "compile the image's C and link it over the original"),
+    "overlay": ("dread.overlay", "link compiled C over the original image"),
+    "test": ("dread.runner", "compare every rewritten function with the original in the emulator"),
     "leakcheck": ("dread.leakcheck", "look for a private project's names and addresses before publishing"),
 }
 

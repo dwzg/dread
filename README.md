@@ -39,11 +39,13 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 |---|---|
 | Target description, function tables, ARM and Thumb layer, ELF import | done |
 | Listing generator and byte-identical rebuild, Ghidra pipeline | done |
-| Emulator, differential test runner, overlay linker, integration run | planned |
+| Emulator, differential test runner, overlay linker | done |
+| Integration run (real callees) | planned, with the case generator |
 | Case generator, compare-guided sweeps, recorded cases, mutation check | planned |
 | System run with device models | planned |
 | Lifter (ARM, then Thumb) | planned |
 | Reading aids, Claude Code plugin, method documentation | planned |
+| RISC-V: a third gizmo build and an architecture backend | after the ARM phases |
 
 ## Layout
 
@@ -59,7 +61,9 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/pytest                         # DREAD's tests on gizmo
-bin/dread --target examples/gizmo/m3 info
+bin/dread info --target examples/gizmo/m3
+bin/dread recon --target examples/gizmo/m3      # gizmo's rewritten functions over the original
+bin/dread test --target examples/gizmo/m3       # each one against the original, in the emulator
 ```
 
 A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the
