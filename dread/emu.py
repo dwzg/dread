@@ -267,12 +267,12 @@ class Core:
 class Machine:
     """One call of one function in one image: set up memory and stubs, then call().
 
-    entries / image_end: set by a runner that wants stub addresses checked against the function
-    table (a stub at an address that is not a function's entry never runs, and the case then
-    compares less than it seems to)."""
+    entries: {(target file, image name): the function entries}, set by a runner that wants stub
+    addresses checked against the function table (a stub at an address that is not a function's
+    entry never runs, and the case then compares less than it seems to). Keyed by the image, so that
+    a machine for another image is not checked against the wrong table."""
 
-    entries = None
-    image_end = 0
+    entries = {}
 
     def __init__(self, layout, payload, aliases=None, isa_of=None):
         self.layout = layout
@@ -392,7 +392,8 @@ class Machine:
         The callable records what matters about the call with machine.log(); raw pointers into the
         stack differ between builds, so it should log what they point to."""
         addr &= ~1
-        if Machine.entries is not None and self.layout.base <= addr < Machine.image_end and addr not in Machine.entries:
+        known = Machine.entries.get((self.layout.target.file, self.layout.image.name))
+        if known is not None and self.layout.base <= addr < self.layout.image.end and addr not in known:
             raise EmuError("stub at 0x%x, which is not the entry of a function" % addr)
         again = addr in self.stubs
         self.stubs[addr] = fn

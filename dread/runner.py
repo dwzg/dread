@@ -203,8 +203,7 @@ def prepare(target, image, recon_path, keep_failing=False):
     for name, addrs in lifted_info.get("unreached", {}).items():
         # no path from the entry reaches them (dread lift); one that runs fails the function
         suite.unreachable.setdefault(name, set()).update(addrs)
-    Machine.entries = {fn.entry for fn in prog.functions}
-    Machine.image_end = image.end
+    Machine.entries[(target.file, image.name)] = {fn.entry for fn in prog.functions}
     from dread import regflow
     flow = regflow.load(target, image, prog)
     kept_argued = regflow.load_argued(image)

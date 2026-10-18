@@ -28,6 +28,7 @@ COMMANDS = {
     "noreturn": ("dread.noreturn", "the functions that never return"),
     "lift": ("dread.lift", "translate functions to C instruction by instruction"),
     "liftfuzz": ("dread.liftfuzz", "check the lifter on random instructions against the emulator"),
+    "pilot": ("dread.pilot", "the reconstruction loop run by code, a language model only for the judgement"),
     "leakcheck": ("dread.leakcheck", "look for a private project's names and addresses before publishing"),
 }
 

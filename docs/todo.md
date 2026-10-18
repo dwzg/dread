@@ -198,9 +198,18 @@ The long runs set the pace of everything after them. Measure first, then cut.
 
 ## After the ARM phases
 
-- [ ] `dread pilot`: the reconstruction loop run by code, a language model only for judgement
-  (write C from a listing, propose an input, argue a survivor, propose a name), typed questions,
-  answers checked by tools; providers OpenAI-compatible and Anthropic.
+- [x] `dread pilot`, first version: the reconstruction loop run by code. Candidates are the lifted
+  functions src does not define (their cases cover them), smallest first. The question: rules, the
+  flat listing, callers' constants, prototypes, the lifted C as the exact reference; the answer's C
+  goes to src/pilot/NAME.c with auto() in tests/cases/pilot.py; then recon, test, integration
+  --callers and mutate --kill, the tools' own words back to the model on a failure. A survivor no
+  case and no search notices gets a second typed question: the model argues it in a sentence
+  (argued.tsv, marked as the pilot's and not reviewed) or corrects the C. Conversations and outcomes
+  in BUILD/pilot/IMAGE. Providers (dread.llm): OpenAI-compatible servers and the Anthropic API over
+  plain HTTP, keys from the environment. Tested with a scripted provider on gizmo.
+- [ ] `dread pilot`, more typed questions: propose an input for an UNCOVERED function (the runner
+  decides), propose a name for a FUN_ function (a proposal list, never applied by itself); a
+  measured run with the local model and with a cloud model on gizmo's lifted functions.
 - [ ] RISC-V (RV32IMC): a third gizmo build (clang 23 and ld.lld are installed: no system packages
   needed) and the architecture layer behind `dread.arch`.
 
