@@ -304,7 +304,7 @@ class Generator:
         """(set-up lines, base register): a register pointing into the buffer, aligned for `size`."""
         rng = self.rng
         b = self.dst()
-        off = rng.randrange(-48, 48 - span) & ~(min(size, 4) - 1)
+        off = rng.randrange(-48, 48 - span) & ~(min(size, 8) - 1)    # 8: ldrexd needs doubleword alignment
         return ["%s %s, r12, #%d" % ("add" if off >= 0 else "sub", b, abs(off))], b
 
     def memory(self, cond):
@@ -425,7 +425,13 @@ class Generator:
                 return ["and %s, %s, #1" % (d, self.src()), "msr primask, %s" % d, "mrs %s, primask" % self.dst()]
             return ["mrs %s, cpsr" % d, "%s %s, %s, #0x80" % (rng.choice(["orr", "bic"]), d, d),   # the I bit; the
                     "msr cpsr_c, %s" % d]                                                           # mode stays
-        pre, b = self.base(4)
+        pre, b = self.base(8, span=8)
+        if not self.thumb and rng.random() < 0.4:   # the doubleword pair (ARMv7-A; Cortex-M3 has none)
+            pairs = [n for n in (0, 2, 4, 6, 8, 10) if b not in ("r%d" % n, "r%d" % (n + 1)) and self.fp not in (n, n + 1)]
+            t, x = rng.sample(pairs, 2)
+            r = rng.choice([n for n in self.regs() if "r%d" % n != b and n not in (t, t + 1, x, x + 1)])
+            return pre + ["ldrexd r%d, r%d, [%s]" % (t, t + 1, b), "add r%d, r%d, #1" % (x, t),
+                          "eor r%d, r%d, r%d" % (x + 1, t + 1, x), "strexd r%d, r%d, r%d, [%s]" % (r, x, x + 1, b)]
         t, x, r = rng.sample([n for n in self.regs() if "r%d" % n != b], 3)
         return pre + ["ldrex r%d, [%s]" % (t, b), "add r%d, r%d, #1" % (x, t), "strex r%d, r%d, [%s]" % (r, x, b)]
 

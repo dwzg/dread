@@ -153,7 +153,10 @@ The long runs set the pace of everything after them. Measure first, then cut.
   for SWI) becomes `void __attribute__((interrupt("IRQ" or "SWI"))) f(void)`, gcc writing the entry
   and the return; it gets no register arguments, and the system run decides. gizmo-a32's irq_entry
   is accepted (a32 now 33). Refused: a data abort's return (subs pc, lr, #8), mixed forms.
-- [ ] ldrexd/strexd as inline assembly with a 64-bit operand.
+- [x] ldrexd/strexd as inline assembly with a 64-bit operand (gcc picks the register pair); liftfuzz
+  generates them on ARMv7-A (Cortex-M3 has none). Its first run of them showed the generator's own
+  mistake: their address needs doubleword alignment, the buffer offsets were word aligned, and both
+  images faulted alike at their own addresses.
 - [ ] (Later) liftfuzz: a Thumb-1 ISA (Cortex-M0: the 16-bit forms, high-register moves, the switch helper,
   calls through bx stubs), switches on the other ISAs (tbb, tbh, ldr pc tables), conditional returns
   and tail calls.

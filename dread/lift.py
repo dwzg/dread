@@ -75,7 +75,8 @@ SIGNED = {A.ARM_INS_LDRSB: "s8", A.ARM_INS_LDRSH: "s16"}
 # Instructions that run as themselves, in inline assembly: they act on the core, not on registers
 # the C models (interrupt masks, barriers, waits, the exclusive monitor, coprocessors, status registers)
 SYSTEM = {getattr(A, "ARM_INS_" + n) for n in (
-    "CPS DMB DSB ISB CLREX BKPT HINT MRS MSR LDREX LDREXB LDREXH STREX STREXB STREXH MCR MRC MCR2 MRC2").split()
+    "CPS DMB DSB ISB CLREX BKPT HINT MRS MSR LDREX LDREXB LDREXH LDREXD STREX STREXB STREXH STREXD MCR MRC MCR2 "
+    "MRC2").split()
     if hasattr(A, "ARM_INS_" + n)}
 STATUS = ("apsr", "cpsr", "xpsr", "iapsr", "eapsr")     # status registers whose top bits are the flags
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
@@ -895,7 +896,7 @@ class Lifter:
         """An instruction that acts on the core, as inline assembly (see SYSTEM). Status registers:
         a read of APSR/CPSR takes the flags from the C variables and the rest from the core; a write
         of their flags field sets the variables (and the core, for Q and GE). Refused: reading or
-        writing a stack pointer (the C's stack is not the original's), ldrexd and strexd."""
+        writing a stack pointer (the C's stack is not the original's)."""
         i, a = insn.id, insn.address
         mnemonic = insn.mnemonic.split(".")[0]
         cond = self.arch.condition(insn)
@@ -940,6 +941,18 @@ class Lifter:
             addr = "%s + %d" % (self.reg(m.base, sp=True), m.disp)
             return ('{ u32 a = %s, x = %s, r; __asm__ volatile ("%s %%0, %%2, [%%1]" : "=&r"(r) : "r"(a), "r"(x) : '
                     '"memory"); %s = r; }') % (addr, value, mnemonic, d)
+        if i == A.ARM_INS_LDREXD:           # a register pair through a 64-bit operand (gcc picks the pair)
+            lo, hi = self.dest(ops[0]), self.dest(ops[1])
+            m = ops[2].mem
+            addr = "%s + %d" % (self.reg(m.base, sp=True), m.disp)
+            return ('{ u32 a = %s; u64 t; __asm__ volatile ("ldrexd %%0, %%H0, [%%1]" : "=&r"(t) : "r"(a) : "memory"); '
+                    '%s = (u32)t; %s = (u32)(t >> 32); }') % (addr, lo, hi)
+        if i == A.ARM_INS_STREXD:
+            d, lo, hi = self.dest(ops[0]), self.reg(ops[1].reg), self.reg(ops[2].reg)
+            m = ops[3].mem
+            addr = "%s + %d" % (self.reg(m.base, sp=True), m.disp)
+            return ('{ u32 a = %s, r; u64 t = (u64)%s << 32 | %s; __asm__ volatile ("strexd %%0, %%1, %%H1, [%%2]" : '
+                    '"=&r"(r) : "r"(t), "r"(a) : "memory"); %s = r; }') % (addr, hi, lo, d)
         if i in (A.ARM_INS_MCR, A.ARM_INS_MCR2, A.ARM_INS_MRC, A.ARM_INS_MRC2):
             if len(regs) != 1:
                 raise Refused("0x%x: %s %s" % (a, insn.mnemonic, insn.op_str))
