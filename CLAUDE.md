@@ -61,6 +61,11 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   check (rule 9) with a script that stops on its exit status; never force-push without the user.
 - **Stay polite on the machine**: long runs go to the background (polite, as the tools are);
   nothing that fills memory or runs without a bound.
+- **Look for performance regularly** (the user, 2026-10-18): every few items, measure what is slow
+  now (`pytest --durations=15`, `BUILD/times/`, the `seconds` of `BUILD/autocases/*.json`), profile
+  the top item (cProfile) and fix what dominates. Prefer the algorithmic fix (work per byte or per
+  run that need not be done); move a hot path into C (`dread.fasthooks`) when a Python callback per
+  instruction or memory access dominates. Record before and after in the commit message.
 - **The loop prompt** only points here and at `docs/todo.md`. It may be rewritten when the way of
   working changes; the plan itself is changed in `docs/todo.md`.
 

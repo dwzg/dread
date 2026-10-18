@@ -28,6 +28,7 @@ POLL_LOGGED = 2     # reads after a Machine.poll_read stage's start that are sti
 POISON = 0xA5C3E100 # callee-saved registers start as POISON + 0x11 * (i + 1): no zero byte, so that
                     # a byte cleared in one of them shows
 KEPT_POISON = 0x5AC31E00    # kept scratch registers no argument sets start as KEPT_POISON + 0x11 * (i + 1)
+SPIN_PERIOD = 4         # longest cycle of peripheral reads the spin cut recognises
 ARGS_ROOM = 0x100   # mapped above the stack top: arguments beyond the registers lie there, as the
                     # caller's frame would hold them (writes there are compared like memory)
 
@@ -295,7 +296,7 @@ class Machine:
         self._fast_cover = self._fast_reads = False
         self.spin_limit = 0         # reads of one register with one value in a row that stop the run
         self.spinning = None        # (address, size, value) of the register a stopped run spun on
-        self._spin = [None, 0]
+        self._reads, self._cycle = [], [0] * (SPIN_PERIOD + 1)
         self.kept_why = {}          # register -> who reads it after the call, for the report
         self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
         self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
@@ -320,11 +321,13 @@ class Machine:
 
     def _on_io(self, uc, access, addr, size, value, user):
         """Peripheral registers are plain memory, but every access is logged in order. With
-        spin_limit, reading one register with one value that many times in a row (no peripheral
-        write between) stops the run and sets spinning: a wait that cannot end by itself."""
+        spin_limit, reads that repeat one cycle of up to SPIN_PERIOD (register, value) pairs that
+        many times in a row (no peripheral write between) stop the run and set spinning, with the
+        last register read: a wait that cannot end by itself (period 1: a status bit polled; period
+        2: status and data read in turn while the data never ends the line)."""
         if access == UC_MEM_WRITE:
             self.log("io write", addr, size, value & ((1 << 8 * size) - 1))
-            self._spin = [None, 0]
+            self._reads, self._cycle = [], [0] * (SPIN_PERIOD + 1)
             return
         if self.io_fixed is not None:
             uc.mem_write(addr, bytes(self.io_fixed.get(addr + i, 0) for i in range(size)))
@@ -345,13 +348,19 @@ class Machine:
         if logged:
             self.log("io read", addr, size, got)
         if self.spin_limit:
-            if self._spin[0] == (addr, got):
-                self._spin[1] += 1
-                if self._spin[1] >= self.spin_limit:
-                    self.spinning = (addr, size, got)
-                    uc.emu_stop()
-            else:
-                self._spin = [(addr, got), 1]
+            seen, cycle = self._reads, self._cycle
+            seen.append((addr, got))
+            if len(seen) > 2 * SPIN_PERIOD:
+                del seen[0]
+            for period in range(1, SPIN_PERIOD + 1):
+                if len(seen) > period and seen[-1] == seen[-1 - period]:
+                    cycle[period] += 1
+                    if cycle[period] >= self.spin_limit * period:
+                        self.spinning = (addr, size, got)
+                        uc.emu_stop()
+                        break
+                else:
+                    cycle[period] = 0
 
     def _on_unmapped(self, uc, access, addr, size, value, user):
         if self.unmapped is None:

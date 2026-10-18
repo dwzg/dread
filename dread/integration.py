@@ -61,6 +61,12 @@ def run(payload, aliases, case, addr, name, watch=False, limit=None):
             m.write(a, (value & ((1 << 8 * size) - 1)).to_bytes(size, "little"))
         except EmuError:
             return None
+    # the peripheral answers are inputs too (stubs are not: the callees run for real)
+    for at, nth, value in case.get("poll", ()):
+        m.poll_read(at, nth, value)
+    if case.get("io") == "fixed":
+        m.io_fixed = {a + i: b for a, size, value in case["mem"] if lay.target.memory.is_io(a)
+                      for i, b in enumerate((value & ((1 << 8 * size) - 1)).to_bytes(size, "little"))}
     stale, foreign = [], []
     if watch:
         written, last = set(), [lay.stack_top]

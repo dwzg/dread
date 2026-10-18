@@ -140,6 +140,22 @@ The long runs set the pace of everything after them. Measure first, then cut.
   calls through bx stubs), switches on the other ISAs (tbb, tbh, ldr pc tables), conditional returns
   and tail calls.
 
+## Performance, second pass (2026-10-18, asked for by the user)
+
+- [x] Case generation per gizmo build 142 s -> 27 s (a32) and 130 s -> 24 s (m3), the slowest
+  function 67 s -> 6 s, coverage the same or better (generator VERSION 7). Measured with cProfile:
+  emulation was a few percent; the time went into Python work per byte of case memory (every
+  location any run read became a value in every input: 14,000 for script_run given long lengths;
+  now at most MAX_CELLS = 512) and into runs that polled the UART to the instruction limit because
+  status and data were read in turn (the spin cut now recognises cycles of up to four register
+  reads, and a poll stage may answer with a value the function compares, so a data register can
+  deliver the line feed). read_line: 51 s -> 1.8 s, and its generated cases now cover all of it
+  (m3: 17 -> 25 of 25 instructions). dread integration now applies a case's poll stages and fixed
+  peripheral values (it applied only memory: inputs that waited on the UART never returned there).
+- [ ] C for the peripheral hook: after the cuts, Python peripheral callbacks no longer dominate on
+  gizmo; measure again on a target with more device traffic before porting `Machine._on_io` (poll
+  stages, the replay plan, spin detection, the log) to dread.fasthooks.
+
 ## Phase 7: reading aids, plugin, documentation
 
 - [ ] Reading aids: flat listing of a function, call sites with constant arguments, same code in

@@ -70,10 +70,12 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 6       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 7       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
-                  # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic
+                  # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
+                  # 7: at most MAX_CELLS memory locations per function get values; spins of a cycle
+                  # of peripheral reads cut; poll stages may answer with compared constants
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -92,6 +94,10 @@ POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTE
 POINTER_STEP = 0x400        # ... this far apart ...
 POINTER_SLOTS = 16          # ... at most this many different ones (then they are reused)
 POINTER_KEEP = 0.9          # share of inputs that use the buffer (the rest keep their value: null checks)
+MAX_CELLS = 512             # memory locations an input gives values to at most (in first-access order):
+                            # a run over a long buffer would otherwise make every input carry one value
+                            # per byte read (14,000 for a script interpreter given a long length), and
+                            # the generator spent its time on those, not in the emulator
 POINTER_MISALIGN = 0.25     # share of those that point 1 to 3 bytes into it (alignment-dependent paths:
                             # a memcpy's word loop for equally misaligned pointers)
 CALLEE_DEPTH = 2            # callees whose constants and strings join the function's own
@@ -548,7 +554,7 @@ class Generator:
         pool = sorted(set(self.boundary) | exact | near | deeper | set(chars) | set(noise))
         image = self.image
         end = self.program.end(self.program.by_entry[entry]) if entry in self.program.by_entry else words[-1] + 4
-        known, covered, corpus, extras, faults, last_gain = {}, set(), [], [], 0, 0
+        known, covered, corpus, extras, faults, last_gain = Cells(), set(), [], [], 0, 0
         pointers = any(c[0] == self.fake_pointer for c in calls)
         pin_args, pin_mem = set(), set()
         data_args, data_mem = {}, {}        # inputs learned to be data pointers -> their buffer
@@ -665,7 +671,11 @@ class Generator:
             size, stuck = spins[address]
             full = (1 << 8 * size) - 1
             masks = [full, 1 << rng.randrange(8 * size)] + [c & full for c in sorted(exact) if 0 < c & full < full]
-            stage = [address, rng.choice((1, 2, 3)), stuck ^ rng.choice(masks)]
+            if exact and rng.random() < 0.5:    # a data register: one of the values the function compares
+                answer = rng.choice(sorted(exact)) & full
+            else:
+                answer = stuck ^ rng.choice(masks)
+            stage = [address, rng.choice((1, 2, 3)), answer]
             case["poll"] = [p for p in case.get("poll", ()) if p[0] != address] + [stage]
 
         def run(case, max_instructions=limit):
@@ -740,6 +750,8 @@ class Generator:
                 # never gets any otherwise.
                 if learn and len(m.reads) < 4096:
                     for a, n in m.reads.items():
+                        if known.full():
+                            break
                         try:
                             m.read(a, n)
                         except Exception:
@@ -749,8 +761,7 @@ class Generator:
             if self.touches_image(m):
                 faults += 1
                 continue
-            for a, s in m.reads.items():
-                known.setdefault(a, s)
+            known.learn(m.reads)
             got = m.covered_insns(words)
             if got - covered:
                 covered |= got
@@ -806,8 +817,7 @@ class Generator:
                     continue
                 if self.touches_image(m):
                     continue
-                for a, s in m.reads.items():
-                    known.setdefault(a, s)
+                known.learn(m.reads)
                 got = m.covered_insns(words)
                 if got - covered:
                     covered |= got
@@ -919,8 +929,7 @@ class Generator:
                 return None, None
             if self.touches_image(m):
                 return None, None
-            for a, n in m.reads.items():
-                known.setdefault(a, n)
+            known.learn(m.reads)
             m.covered = m.covered_insns(words)
             return m, seen
 
@@ -956,8 +965,7 @@ class Generator:
             return case
 
         def keep(m, case):
-            for a, s in m.reads.items():
-                known.setdefault(a, s)
+            known.learn(m.reads)
             if m.covered - covered:
                 covered.update(m.covered)
                 corpus.append(case)
@@ -1095,6 +1103,19 @@ class Generator:
             runs[0], cost[0] = SOLVE_RUNS, SOLVE_COST
             if state["progress"] and not words_set <= covered:
                 runs[0], cost[0] = 0, 0
+
+
+class Cells(dict):
+    """The memory locations the generator gives values to: {address: size}, at most MAX_CELLS."""
+
+    def full(self):
+        return len(self) >= MAX_CELLS
+
+    def learn(self, reads):
+        for a, n in reads.items():
+            if len(self) >= MAX_CELLS:
+                return
+            self.setdefault(a, n)
 
 
 def coalesce(stores):
