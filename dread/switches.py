@@ -3,7 +3,9 @@
 A switch compiled into a table ends in an indirect jump, and its targets lie in a table of one of
 many shapes: addresses, byte or halfword offsets, a run of branches; ARM alone has tbb/tbh,
 ldr pc, [pc, rN, lsl #2], add pc, pc, rN, lsl #2 after a byte load, ldr rN, [table, rM]; mov pc, rN.
-Instead of recognising each shape, this runs the dispatch: the straight run of instructions in
+A call of a switch helper that returns behind its call site (GCC's Thumb-1 __gnu_thumb1_case_*, the
+table right after the bl; the arch layer marks such calls) is such a jump too: the run goes through
+the helper and lands where it returns. Instead of recognising each shape, this runs the dispatch: the straight run of instructions in
 front of the jump (back to the previous call, unconditional branch or return, at most RUN_BACK
 instructions) is executed in a bare emulator with the image mapped, once for every value of the
 index the bound check in that run lets through (arch.bound_check: cmp rN, #K or and rN, rM, #2^n-1),
@@ -94,7 +96,11 @@ def _on_write(uc, access, address, size, value, state):
 def _on_code(uc, address, size, state):
     if address == state["set_at"]:
         uc.reg_write(state["reg"], state["value"])
-    if not state["lo"] <= address <= state["jump"]:
+    through = state.get("through")
+    if through is not None and through[0] <= address < through[1]:
+        state["called"] = True              # inside the switch helper the jump called
+        return
+    if state.get("called") or not state["lo"] <= address <= state["jump"]:
         state["landed"] = address
         uc.emu_stop()
         return
@@ -110,6 +116,16 @@ def targets(program, fn, address):
 FILLS = (0, 0x01010101)     # register contents of the two runs of a jump without a bound check
 
 
+def _helper(program, address):
+    """(start, end) of the switch helper the jump at `address` calls (a bl the arch marked as a
+    dispatch: GCC's __gnu_thumb1_case_*), which the run goes through; None otherwise."""
+    insn = program.insn(address)
+    if insn is None or not getattr(insn, "dispatch_call", False):
+        return None
+    callee = program.function_at(program.arch.target(insn) & ~1)
+    return (callee.entry, program.end(callee)) if callee is not None else None
+
+
 def _run(program, uc, state, isa, runs, first, address):
     """Run from `first` once per entry of `runs`; where each run lands after the jump (None: it
     faulted or left the run before the jump)."""
@@ -120,7 +136,8 @@ def _run(program, uc, state, isa, runs, first, address):
             for r in arch.general_regs():
                 uc.reg_write(arch.reg_id(r), fill)
             arch.initial_status(uc)
-            state.update(set_at=set_at, reg=reg, value=value, lo=first, jump=address, landed=None, last=None, new=0)
+            state.update(set_at=set_at, reg=reg, value=value, lo=first, jump=address, landed=None, last=None, new=0,
+                         called=False, through=_helper(program, address))
             try:
                 uc.emu_start(arch.start_address(first, isa), 0xFFFFFFFF, count=STEPS)
                 landings.append(state["landed"] if state["last"] == address else None)

@@ -32,7 +32,7 @@ def test_refusals_name_their_reason(variant):
     assert "reads r1 behind the call of uart_putc" in refused.pop("uart_puts")     # dread.regflow's finding
     if variant == "a32":
         assert "changes the stack pointer" in refused.pop("reset")
-        assert "reads lr before anything writes it" in refused.pop("irq_entry")      # an exception entry
+        assert "returns from an exception" in refused.pop("irq_entry")              # subs pc, lr, #4
         assert "branches into other code" in refused.pop("__aeabi_uidivmod")
     assert refused == {}
 

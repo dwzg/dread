@@ -86,8 +86,23 @@ The long runs set the pace of everything after them. Measure first, then cut.
   setting the flags (arch.sets_flags now decides from the mnemonic), and the shifter's carry of
   movs r1, r1, lsl #7 was taken after r1 was written. 2026-10-18: 8 x 120 functions of 40
   instructions on each ISA agree.
-- [ ] liftfuzz could also generate switches (tbb, tbh, ldr pc tables), conditional returns, tail
-  calls, Thumb-1 code (ARMv4T and ARMv6-M), and run on the A profile in Thumb state.
+- [x] Thumb-1 cores, from gizmo built for Cortex-M0 and for ARMv4T Thumb (scratch builds): 44 and
+  43 functions accepted. Found and fixed: GCC's switch helpers (bl __gnu_thumb1_case_uqi, the table
+  behind the call) are marked as dispatches by the decoder and resolved by running through the helper;
+  calls through a bx rN stub (bl __call_via_r3, or a bx r3 behind the function) are indirect calls;
+  bx pc is a jump into ARM state; mov r8, r8 (Thumb-1's nop) and mov r3, r8 before push {r3} pass on
+  what the caller left instead of reading it; pop {r0}; bx r0 leaves the return address in r0, which
+  the C now has exactly (__builtin_return_address(0), also for lr read as data), and a return to a
+  computed address is refused. Outside the lifter: the overlay's symbols for the original's functions
+  carry their instruction set (an untyped PROVIDE made ld put ARM interworking stubs into the callers'
+  slots on ARMv4T), a moved function's old entry gets a veneer through ip on cores without Thumb-2
+  (b.w is invalid on ARMv4T and Cortex-M0; Unicorn's M0 model runs it anyway), cores say whether
+  they have Thumb-2 ([arch] thumb2, else from -mcpu/-march), the rebuilt image gets ten times a case's
+  instruction limit (lifted loops are slower; dread integration already did this), and the lifter's
+  statically unreachable instructions (padding behind bx pc) are declared to the runner.
+- [ ] liftfuzz: a Thumb-1 ISA (Cortex-M0: the 16-bit forms, high-register moves, the switch helper,
+  calls through bx stubs), switches on the other ISAs (tbb, tbh, ldr pc tables), conditional returns
+  and tail calls.
 - [ ] dread.autocase still takes capstone's update_flags to find the instruction that set the flags
   for a branch (adc without s counts); harmless for correctness, but a VERSION bump when changed.
 - [x] Functions that never return (`dread noreturn`, a fixpoint over calls and tail calls): a call

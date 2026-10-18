@@ -79,10 +79,12 @@ class Refused(Exception):
 
 
 class Lifted:
-    """The result for one function."""
+    """The result for one function; unreached: its instructions no path from the entry reaches
+    (padding behind an ARMv4T veneer's bx pc, say), which no case can run."""
 
-    def __init__(self, name, text, callees, frame, stack_params):
+    def __init__(self, name, text, callees, frame, stack_params, unreached=()):
         self.name, self.text, self.callees, self.frame, self.stack_params = name, text, callees, frame, stack_params
+        self.unreached = list(unreached)
 
 
 def direct_callees(program, fn):
@@ -265,11 +267,16 @@ class Lifter:
 
     def made_value(self, insn, depth, values):
         """(register, value) for the instructions that make a frame address or copy a known value:
-        mov rX, sp; mov rX, rY; add or sub rX, sp or a frame address, #imm."""
+        mov rX, sp; mov rX, rY; add or sub rX, sp or a frame address, #imm; ldr rX from a frame slot."""
         if self.arch.predicate(insn) is not None:
             return None
         i, ops = insn.id, insn.operands
         rname = lambda r: self.arch._name(insn.reg_name(r))
+        if i == A.ARM_INS_LDR and len(ops) == 2 and ops[1].type == A.ARM_OP_MEM and not ops[1].mem.index \
+                and not insn.writeback:
+            v = self.frame_value(insn, ops[1].mem.base, depth, values)
+            if v is not None:
+                return rname(ops[0].reg), values.get(v[1] - ops[1].mem.disp)
         if i in (A.ARM_INS_MOV, A.ARM_INS_MOVS) and len(ops) == 2 and ops[1].type == A.ARM_OP_REG \
                 and ops[1].shift.type in (0, A.ARM_SFT_INVALID) and ops[0].type == A.ARM_OP_REG:
             v = self.frame_value(insn, ops[1].reg, depth, values) or values.get(rname(ops[1].reg))
@@ -364,7 +371,7 @@ class Lifter:
             known = self.states(fn, strict=False)   # for returns through a register
         except Refused:
             known = {}
-        start = frozenset(r for r in REGS + ["flags"] if r not in ARGS + ("sp", "pc"))
+        start = frozenset(r for r in REGS + ["flags"] if r not in ARGS + ("sp", "pc", "lr"))   # lr: the C knows it
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
         work = [fn.insns[0]]
         while work:
@@ -379,7 +386,10 @@ class Lifter:
                 reads = set()
             if kind in ("call", "icall"):
                 writes = set(writes) | AFTER_CALL
-            bad = (reads & undef) - {"sp", "pc"}
+            copy = self.plain_move(insn)
+            if copy is not None and copy[1] in undef:
+                reads = set(reads) - {copy[1]}   # a copy of what the caller left (mov r8, r8 is a nop;
+            bad = (reads & undef) - {"sp", "pc"}  # mov r3, r8 before push {r3} saves r8)
             if bad:
                 found[a] = bad
             pred = arch.predicate(insn)
@@ -397,6 +407,8 @@ class Lifter:
                 after_u, after_p = frozenset(u), frozenset(part)
             if "flags" in writes:
                 after_p = frozenset()       # the conditions written under no longer hold
+            if copy is not None and copy[1] in undef:
+                after_u = after_u | {copy[0]}
             for b in self.successors(fn, index, a, insn, strict=False, values=known.get(a, (0, None))[1]):
                 bu, bp = after_u, after_p
                 if kind == "jump" and pred is not None and bp:
@@ -414,6 +426,16 @@ class Lifter:
         self._entry[fn.name] = (undef_at, found)
         return undef_at, found
 
+    def plain_move(self, insn):
+        """(destination, source) of mov rd, rs: unconditional, no shift, no flags; else None."""
+        ops = insn.operands
+        if insn.id != A.ARM_INS_MOV or len(ops) != 2 or self.arch.predicate(insn) is not None \
+                or self.arch.sets_flags(insn) or ops[1].type != A.ARM_OP_REG \
+                or ops[1].shift.type not in (0, A.ARM_SFT_INVALID):
+            return None
+        rd, rs = (self.arch._name(insn.reg_name(o.reg)) for o in ops)
+        return (rd, rs) if rd in REGS and rs in REGS and "pc" not in (rd, rs) else None
+
     def leaves(self, fn):
         """The registers beyond r0-r3 a function reads before anything writes them."""
         found = self.entry_states(fn)[1]
@@ -421,8 +443,19 @@ class Lifter:
 
     # ---- the translation ----
 
+    def compiled_isa(self):
+        """The instruction set the target's C compiles to: Thumb on M profile or with -mthumb, else
+        ARM (GCC's default on the A profile)."""
+        flags = self.prog.target.compiler.cflags
+        if getattr(self.arch, "profile", None) == "m" or "-mthumb" in flags:
+            return "t32"
+        return "a32" if "-marm" in flags or self.arch.name == "arm" else None
+
     def lift(self, fn):
         prog, arch = self.prog, self.arch
+        isa = prog.isa_at(fn.entry)
+        if isa != self.compiled_isa():
+            raise Refused("its code is %s, the C compiles to %s ([compiler] cflags)" % (isa, self.compiled_isa()))
         for lo, hi, reason in self.asm_only:
             if fn.entry == lo or (hi is not None and lo <= fn.entry < hi):
                 raise Refused("listed in asm_only: %s" % reason)
@@ -439,6 +472,7 @@ class Lifter:
             raise Refused("0x%x reads %s before anything writes it (what its caller leaves)" % (
                 a, ", ".join(sorted(found[a]))))
         self._check_kept(fn)
+        self._check_returns(fn, states)
         stack_params = self.stack_args(fn)
         if stack_params > MAX_STACK_ARGS:
             raise Refused("it takes %d stack words" % stack_params)
@@ -463,7 +497,32 @@ class Lifter:
             text = self.insn(insn)
             note = "/* %x: %s %s */" % (insn.address, insn.mnemonic, insn.op_str)
             body.append("    %s  %s" % (text, note) if text else "    " + note)
-        return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]), frame, stack_params)
+        stubs = {self.arch.target(i) & ~1 for i in insns if getattr(i, "call_via", None)}   # bl into a bx rN
+        return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]), frame, stack_params,
+                      [a for a in fn.insns if a not in depth and a not in stubs])
+
+    def exception_return(self, insn):
+        """subs pc, lr, #k, movs pc, lr and ldm ... {.., pc}^: the A profile's return from an exception."""
+        return insn.id == A.ARM_INS_SUB or (insn.id == A.ARM_INS_MOV and self.arch.sets_flags(insn)) \
+            or bool(getattr(insn, "usermode", False))
+
+    def _check_returns(self, fn, states):
+        """Refuse a return to anything but the return address: a helper that returns behind its call
+        site (GCC's __gnu_thumb1_case_*: add lr, r1; bx lr) is a jump the C cannot make."""
+        for a, (depth, values) in states.items():
+            insn = self.prog.insn(a)
+            if self.arch.flow(insn)[0] != "return":
+                continue
+            if self.exception_return(insn):
+                raise Refused("0x%x returns from an exception: %s %s" % (a, insn.mnemonic, insn.op_str))
+            if self.arch.stack_kind(insn) == "pop":
+                regs = [self.arch._name(insn.reg_name(o.reg)) for o in insn.operands
+                        if o.type == A.ARM_OP_REG and o.reg != A.ARM_REG_SP]
+                where = values.get(depth - 4 * regs.index("pc")) if "pc" in regs else self.RET
+            else:
+                where = values.get("lr")
+            if where != self.RET:
+                raise Refused("0x%x returns to an address it computed, not to its caller" % a)
 
     def render(self, fn, body):
         ctx = self.ctx
@@ -475,7 +534,7 @@ class Lifter:
         lines.append("%s %s(%s)" % ("u64" if self._wide(fn.name) else "u32", fn.name, ", ".join(params)))
         lines.append("{")
         lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0,"
-                     " r11 = 0, r12 = 0, lr = 0;")
+                     " r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
         lines.append("    u32 n = 0, z = 0, c = 0, v = 0;")
         lines.append("    u32 frame[%d] __attribute__((aligned(8)));" % max(2, ctx["frame"] // 4))
         lines.append("    u32 sp0 = (u32)&frame[%d];" % (ctx["frame"] // 4))
@@ -654,8 +713,7 @@ class Lifter:
         if i in (A.ARM_INS_NOP, A.ARM_INS_IT) or (i == A.ARM_INS_HINT and insn.mnemonic.split(".")[0] == "nop"):
             return None
         if kind == "return":
-            if i in (A.ARM_INS_SUB, A.ARM_INS_SUBS if hasattr(A, "ARM_INS_SUBS") else -1) or \
-                    (self.s and i == A.ARM_INS_MOV) or getattr(insn, "usermode", False):
+            if self.exception_return(insn):
                 raise Refused("0x%x returns from an exception: %s %s" % (insn.address, insn.mnemonic, insn.op_str))
             loads = self._pop(insn, returning=True) if arch.stack_kind(insn) == "pop" else ""
             return (loads + " " if loads else "") + "return %s;" % self._ret()
@@ -685,6 +743,8 @@ class Lifter:
         if kind == "icall":
             if i == A.ARM_INS_BLX:
                 return self._icall(insn, self.reg(ops[0].reg))
+            if getattr(insn, "call_via", None) in REGS:     # bl to a bx rN stub: Thumb-1's call through rN
+                return self._icall(insn, insn.call_via)
             if getattr(insn, "link_call", False):   # mov lr, pc in front: ARMv4T's call through a register
                 if i == A.ARM_INS_BX:
                     return self._icall(insn, self.reg(ops[0].reg))
@@ -792,23 +852,28 @@ class Lifter:
         regs = self._regs_of(insn)
         d = self.ctx["depth"][insn.address] + 4 * len(regs)
         undef = self.ctx["undef"].get(insn.address, frozenset())
+        values = self.values()
         out = []
         for k, r in enumerate(regs):
             if r == "pc":                   # an APCS frame: the address of the push, plus 8
                 out.append("*(volatile u32 *)(sp0 - %d) = 0x%xu;" % (d - 4 * k, insn.address + 8))
-            elif r not in undef:
-                out.append("*(volatile u32 *)(sp0 - %d) = %s;" % (d - 4 * k, r))
+            elif r not in undef and values.get(r) != self.RET:     # a pop of the return address
+                out.append("*(volatile u32 *)(sp0 - %d) = %s;" % (d - 4 * k, r))  # uses the builtin
         return " ".join(out)
 
     def _pop(self, insn, returning=False):
         """The popped registers from the frame; when returning, only those that carry the result."""
         d = self.ctx["depth"][insn.address]
         keep = ({"r0", "r1"} if self._wide(self.ctx["fn"].name) else {"r0"}) if returning else None
+        values = self.values()
         out = []
         for k, r in enumerate(self._regs_of(insn)):
             if r == "pc" or (keep is not None and r not in keep):
                 continue
-            out.append("%s = *(volatile u32 *)(sp0 - %d);" % (r, d - 4 * k))
+            if values.get(d - 4 * k) == self.RET:   # Thumb-1: pop {r0}; bx r0 leaves the address in r0
+                out.append("%s = (u32)__builtin_return_address(0);" % r)
+            else:
+                out.append("%s = *(volatile u32 *)(sp0 - %d);" % (r, d - 4 * k))
         return " ".join(out)
 
     # data processing
@@ -1168,6 +1233,10 @@ class Lifter:
         d = self.dest(ops[0])
         if ops[1].type != A.ARM_OP_MEM:
             raise Refused("0x%x: %s %s" % (insn.address, insn.mnemonic, insn.op_str))
+        st = self.ctx["states"][insn.address]
+        made = self.made_value(insn, st[0], st[1]) if ctype == "u32" else None
+        if made is not None and made[1] == self.RET:    # the saved return address (not stored: see _push)
+            return "%s = (u32)__builtin_return_address(0);" % d
         addr, newbase, base = self._mem(insn)
         if newbase is None:
             return "%s = (u32)*(volatile %s *)(%s);" % (d, ctype, addr)
@@ -1377,6 +1446,10 @@ def check(target, image, names=None, out=print, jobs=None):
         try:
             payload = build.build(target, image, out=work, lifted=accepted, quiet=True)
         except overlay.OverlayError as e:
+            if e.function in accepted:      # one function the overlay cannot place: without it
+                out("dropped  %-24s %s" % (e.function, e))
+                accepted = [n for n in accepted if n != e.function]
+                continue
             out("dread lift: the build failed: %s" % e)
             return []
         runner.prepare(target, image, payload)

@@ -47,7 +47,7 @@ TABLES = {
 # Known keys per section and their types. Sections in FREE belong to the tools that read them.
 SCHEMA = {
     "target": {"name": str, "title": str},
-    "arch": {"name": str, "isa": str, "profile": str, "cpu": str, "endian": str, "ghidra": str},
+    "arch": {"name": str, "isa": str, "profile": str, "cpu": str, "endian": str, "ghidra": str, "thumb2": bool},
     "memory": {"regions": list, "io": list, "stack": dict, "sentinel": int, "scratch": dict},
     "abi": {"args": int, "callee_saved": list, "result": list},
     "compiler": {"cross": str, "cflags": list, "include": list, "idioms": str},
@@ -250,6 +250,8 @@ class Image:
         merged = dict(target.arch_data, **data.get("arch", {}))
         _check("image.%s.arch" % name, data.get("arch", {}), SCHEMA["arch"], target.file)
         self.arch = archmod.get(merged) if data.get("arch") else target.arch
+        if self.arch is not target.arch and hasattr(self.arch, "configure"):
+            self.arch.configure(target.compiler.cflags)
         self._startup = data.get("startup", [])
         self._payload = None
         self._copies = None
@@ -345,6 +347,8 @@ class Target:
         self.paths = {"build": paths.get("build", "build"), "src": paths.get("src", "src")}
         self.build = self.path(self.paths["build"])
         self.compiler = Compiler(data.get("compiler", {}), self)
+        if hasattr(self.arch, "configure"):     # what the compiler flags say about the core
+            self.arch.configure(self.compiler.cflags)
         self.host = dict(data.get("host", {}))
         self.models = data.get("models", {})
         self.plugins = data.get("plugins", {})

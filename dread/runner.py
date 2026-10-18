@@ -2,7 +2,9 @@
 
 Each case calls one function in two emulated machines, one per image (the original and the image
 with the C linked in, from `dread recon`), with identical inputs, and the results must agree
-(dread.cases says what is compared). A function the overlay built from C that has no case is
+(dread.cases says what is compared). The rebuilt image may run REBUILT_BUDGET times a case's
+instruction limit (C is slower than the original; dread integration does the same), except in a
+case marked "hang". A function the overlay built from C that has no case is
 reported UNTESTED.
 
 Besides what dread.cases lists, the scratch registers the function's callers read after the call
@@ -49,6 +51,8 @@ from dread.util.polite import die_with_parent, polite, workers
 from dread.util.poolorder import longest_first
 
 RUN = {}        # what the workers need; filled before they are forked
+REBUILT_BUDGET = 10     # the rebuilt image may take this many times a case's limit (C runs slower than
+                        # the original: lifted C's loops take more instructions); a hang case gets the same
 
 
 def generated_cases(name, fn):
@@ -110,8 +114,9 @@ def run_function(name):
             written = label.startswith("written")
             if which == "original" and written:
                 m.trace_reads(image.base, image.end, RUN["code"])
+            budget = limit if which == "original" or getattr(m, "may_hang", False) else limit * REBUILT_BUDGET
             try:
-                out.append(m.call(addr, *args, max_instructions=limit))
+                out.append(m.call(addr, *args, max_instructions=budget))
             except Exception as e:          # EmuError, or anything a case's own code raises
                 out.append(e if isinstance(e, EmuError) else EmuError("%s: %s" % (type(e).__name__, e)))
             if which == "original" and written and (m.code_reads or m.wrote_into(image.base, image.end)):
@@ -185,8 +190,15 @@ def prepare(target, image, recon_path, keep_failing=False):
         recon = f.read()
     aliases, built = load_placement(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"))
     from dread.build import read_names
-    for name in read_names(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "lifted.txt")):
+    here = os.path.dirname(os.path.abspath(recon_path))
+    for name in read_names(os.path.join(here, "lifted.txt")):
         suite.auto.setdefault(name, {})     # lifted C is tested with generated cases, callees real
+    if os.path.exists(os.path.join(here, "lifted.json")):
+        import json
+        with open(os.path.join(here, "lifted.json")) as f:
+            for name, addrs in json.load(f).get("unreached", {}).items():
+                # no path from the entry reaches them (dread lift); one that runs fails the function
+                suite.unreachable.setdefault(name, set()).update(addrs)
     Machine.entries = {fn.entry for fn in prog.functions}
     Machine.image_end = image.end
     from dread import regflow

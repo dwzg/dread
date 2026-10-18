@@ -15,6 +15,7 @@ kept); a name the src directory defines is left to src. lifted.txt beside the im
 """
 import argparse
 import glob
+import json
 import os
 import subprocess
 import sys
@@ -87,19 +88,21 @@ def defined_functions(objects):
 
 def lift_sources(target, image, names, outdir, quiet=False):
     """Lifted C for `names` (dread.lift) in outdir, a file each, written only when it changed;
-    returns the names lifted. A name that no longer lifts is reported and left out."""
+    returns {name: the instructions no path from its entry reaches}. A name that no longer lifts is
+    reported and left out."""
     from dread import lift, regflow
     from dread.program import Program
     program = Program(target, image)
     lifter = lift.Lifter(program, regflow.load(target, image, program))
     os.makedirs(outdir, exist_ok=True)
-    made = []
+    made = {}
     for name in names:
         fn = program.by_name.get(name)
         if fn is None:
             continue
         try:
-            text = lifter.lift(fn).text
+            result = lifter.lift(fn)
+            text = result.text
         except lift.Refused as e:
             if not quiet:
                 print("dread recon: %s no longer lifts: %s" % (name, e), file=sys.stderr)
@@ -108,7 +111,7 @@ def lift_sources(target, image, names, outdir, quiet=False):
         if not os.path.exists(path) or open(path).read() != text:
             with open(path, "w") as f:
                 f.write(text)
-        made.append(name)
+        made[name] = result.unreached
     for old in glob.glob(os.path.join(outdir, "*.c")):
         if os.path.basename(old)[:-2] not in made:
             os.remove(old)
@@ -130,6 +133,8 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
                                quiet=quiet)
         with open(record, "w") as f:
             f.write("".join(n + "\n" for n in made))
+        with open(os.path.join(workdir, "lifted.json"), "w") as f:
+            json.dump({"unreached": {n: a for n, a in sorted(made.items()) if a}}, f, indent=1)
     elif os.path.exists(record):
         os.remove(record)
     payload = os.path.join(workdir, "payload.bin")

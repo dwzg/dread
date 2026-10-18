@@ -283,7 +283,13 @@ class Program:
             if address not in self._insns:
                 size = self.code[address][0] if address in self.code else 4
                 self._insns[address] = self.arch.decode(self.read(address, size), address, self.isa_at(address))
-        return self._insns[address]
+        insn = self._insns[address]
+        if insn is not None and not getattr(insn, "dread_marked", False):
+            insn.dread_marked = True
+            mark = getattr(self.arch, "mark_call", None)
+            if mark is not None:            # calls that are not ordinary ones (arch.mark_call)
+                mark(self, insn)
+        return insn
 
     def decode(self, address, isa=None):
         """The instruction at `address`; as insn(), or decoded alone in `isa` when given (an

@@ -49,7 +49,11 @@ EXTENT_TAIL = 1024      # bytes behind a function's last instruction that may st
 
 
 class OverlayError(Exception):
-    pass
+    """The link cannot be made; `function` names the one function at fault when there is one."""
+
+    def __init__(self, message, function=None):
+        super().__init__(message)
+        self.function = function
 
 
 def align_up(value, alignment):
@@ -105,10 +109,10 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
     for fn in replaced:
         f = funcs[fn]
         if any(lo <= f.entry < hi for lo, hi in ram) or not (base <= f.entry < end_of_image):
-            raise OverlayError("%s runs from a RAM copy or lies outside the image; it cannot be overlaid" % fn)
+            raise OverlayError("%s runs from a RAM copy or lies outside the image; it cannot be overlaid" % fn, fn)
         if objs[fn][3] != f.isa:
             raise OverlayError("%s is %s in the original but %s in the C: mixing instruction sets is not supported"
-                               % (fn, f.isa, objs[fn][3]))
+                               % (fn, f.isa, objs[fn][3]), fn)
 
     # Who owns which instruction, and which original code branches into a replaced function
     # behind its entry (the branch would land in whatever lies there afterwards).
@@ -194,7 +198,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             place[fn] = here
             continue
         if runs[0][1] < branch_len[fn]:
-            raise OverlayError("%s does not fit at its entry and leaves no room for a branch there" % fn)
+            raise OverlayError("%s does not fit at its entry and leaves no room for a branch there" % fn, fn)
         later = [fit(s, n, fn) for s, n in runs[1:]]
         later = [x for x in later if x]
         if later:
@@ -236,7 +240,10 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
         f.write("/* written by dread overlay */\nSECTIONS\n{\n")
         for fn in sorted(in_slot + in_body + in_hole, key=lambda n: place[n][0]):
             f.write("    .recon.%s 0x%x : { *(.text.%s) }\n" % (fn, place[fn][0], fn))
-        f.write("    .recon.tail 0x%x : { *(.text .text.* .rodata .rodata.*) }\n" % tail)
+        # the linker's own code (interworking glue for ARMv4T: Thumb calling ARM and back) goes there too:
+        # left to itself it lands behind whatever section came before, inside the image
+        f.write("    .recon.tail 0x%x : { *(.text .text.* .rodata .rodata.* .glue_7 .glue_7t .v4_bx .vfp11_veneer"
+                " .iplt) }\n" % tail)
         f.write("    .recon.data : { *(.data .data.*) }\n"
                 "    .bss (NOLOAD) : { *(.bss .bss.* COMMON) }\n"
                 "    /DISCARD/ : { *(.comment) *(.ARM.attributes) *(.note*) *(.ARM.exidx*) *(.ARM.extab*) }\n}\n"
@@ -244,12 +251,30 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                 'ASSERT(SIZEOF(.recon.data) == 0, "the C may not add writable initialised data")\n'
                 'ASSERT(ADDR(.recon.tail) + SIZEOF(.recon.tail) <= 0x%x, "the room behind the image is full")\n'
                 % limit)
-        for name, fn in sorted(funcs.items(), key=lambda kv: kv[1].entry):
-            if name not in sizes and name.replace("_", "a").isalnum() and not name[0].isdigit():
+        names = [(name, fn) for name, fn in sorted(funcs.items(), key=lambda kv: kv[1].entry)
+                 if name not in sizes and name.replace("_", "a").isalnum() and not name[0].isdigit()]
+        typed = getattr(arch, "symbol_asm", None)
+        if typed is None:
+            for name, fn in names:
                 f.write("PROVIDE(%s = 0x%x);\n" % (name, arch.start_address(fn.entry, fn.isa)))
+    extra = []
+    if names and typed is not None:
+        # The original's functions as absolute symbols that carry their instruction set: a linker
+        # script's PROVIDE has no type, and the ARM linker then takes a Thumb function for ARM code and
+        # puts an interworking stub in front of every call of it (inside the caller's slot).
+        source = os.path.join(workdir, "original_symbols.s")
+        with open(source, "w") as f:
+            f.write("".join(typed(name, fn.entry, fn.isa) for name, fn in names))
+        obj = os.path.join(workdir, "original_symbols.o")
+        r = subprocess.run([target.compiler.tool("gcc")] + target.compiler.cflags + ["-c", "-x", "assembler", "-o", obj,
+                                                                                      source],
+                           capture_output=True, text=True)
+        if r.returncode:
+            raise OverlayError("assembling the original's symbols failed:\n" + r.stderr)
+        extra.append(obj)
     elf_path = os.path.join(workdir, "recon.elf")
     r = subprocess.run([target.compiler.tool("ld"), "--no-warn-rwx-segments", "-T", script, "-o", elf_path]
-                       + list(objects), capture_output=True, text=True)
+                       + list(objects) + extra, capture_output=True, text=True)
     if r.returncode:
         message = r.stderr
         if "the room behind the image is full" in r.stderr:
@@ -268,7 +293,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
     for fn in in_slot + in_body + in_hole:
         if syms.get(fn) != place[fn][0]:
             raise OverlayError("%s was linked at 0x%x, not at its slot 0x%x (alignment?)"
-                               % (fn, syms.get(fn, 0), place[fn][0]))
+                               % (fn, syms.get(fn, 0), place[fn][0]), fn)
     for fn in in_body + relocated:
         f = funcs[fn]
         code = arch.branch(f.entry, syms[fn], f.isa)

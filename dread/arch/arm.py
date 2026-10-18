@@ -37,6 +37,20 @@ def _cpus():
 
 CPUS = _cpus()
 
+THUMB2_CPUS = ("cortex-m3", "cortex-m4", "cortex-m7", "cortex-m33", "cortex-m35", "cortex-m55", "cortex-m85",
+               "cortex-a", "cortex-r", "arm1156t2")
+
+
+def thumb2_of(cpu, cflags):
+    """Whether -mcpu, -march or the cpu name says the core has Thumb-2; None when nothing says."""
+    for flag in cflags:
+        if flag.startswith("-mcpu="):
+            return flag[6:].startswith(THUMB2_CPUS)
+        if flag.startswith("-march="):
+            arch = flag[7:]
+            return arch.startswith(("armv6t2", "armv7", "armv8")) and not arch.startswith("armv8-m.base")
+    return cpu.startswith(THUMB2_CPUS) if cpu else None
+
 # Loads that may take a pc-relative address (a literal), with the bytes they read.
 LITERAL_LOADS = {
     csarm.ARM_INS_LDR: 4, csarm.ARM_INS_LDRB: 1, csarm.ARM_INS_LDRSB: 1, csarm.ARM_INS_LDRH: 2,
@@ -60,7 +74,7 @@ class Arm:
     default_result = ("r0", "r1")
     word = 4
 
-    def __init__(self, isa="a32", profile="a", cpu=None, endian="little", ghidra=None):
+    def __init__(self, isa="a32", profile="a", cpu=None, endian="little", ghidra=None, thumb2=None):
         if isa not in ("a32", "t32"):
             raise ValueError("isa is a32 or t32, not %r" % (isa,))
         if profile not in ("a", "m"):
@@ -72,14 +86,25 @@ class Arm:
         if cpu is not None and cpu not in CPUS:
             raise ValueError("unknown cpu %r (Unicorn knows: %s)" % (cpu, ", ".join(sorted(CPUS))))
         self.isa, self.profile, self.cpu, self.endian = isa, profile, cpu, endian
+        self.thumb2 = thumb2        # whether Thumb code may use 32-bit Thumb-2 (b.w): configure()
         # Ghidra's language id: Cortex for M profile, v4t for an A-profile core that can run Thumb
         # (ARM7TDMI and later), v4 otherwise. Override in [arch] ghidra for another variant.
         self.ghidra = ghidra or ("ARM:LE:32:Cortex" if profile == "m" else "ARM:LE:32:v4t")
         self._cs = {}
 
+    def configure(self, cflags):
+        """What the target's compiler flags say about the core: whether its Thumb has Thumb-2
+        (-mcpu or -march; else [arch] cpu; unknown: yes on the M profile, no on the A profile, where
+        Thumb without a stated architecture is ARM7 or ARM9 code)."""
+        if self.thumb2 is None:
+            self.thumb2 = thumb2_of(self.cpu, cflags)
+        if self.thumb2 is None:
+            self.thumb2 = self.profile == "m"
+
     def describe(self):
-        return "arm %s, %s profile, cpu %s, %s-endian" % (
-            self.isa, "M" if self.profile == "m" else "A", self.cpu or "Unicorn's default", self.endian)
+        return "arm %s, %s profile, cpu %s, %s-endian, Thumb%s" % (
+            self.isa, "M" if self.profile == "m" else "A", self.cpu or "Unicorn's default", self.endian,
+            "-2" if self.thumb2 or self.thumb2 is None else "-1 only")
 
     # ---- registers ----
 
@@ -209,6 +234,50 @@ class Arm:
             return len(ops) == 2 and (ops[1].type == csarm.ARM_OP_MEM or ops[1].type == csarm.ARM_OP_REG)
         return False
 
+    def mark_call(self, program, insn):
+        """Marks a direct call that is not an ordinary one (dread.program calls this once for every
+        instruction it hands out): bl to a stub that is only bx rN (GCC's Thumb-1 call through a
+        register, bl __call_via_r3 or a bx r3 behind the function) gets insn.call_via = "r3"; bl to a
+        helper that computes its return address from lr (GCC's __gnu_thumb1_case_* switches, whose
+        table follows the call) gets insn.dispatch_call. flow() reads both."""
+        if insn.id != csarm.ARM_INS_BL:
+            return
+        target = self.target(insn)
+        if target is None:
+            return
+        stub = program.insn(target & ~1)
+        if stub is None:
+            return
+        ops = stub.operands
+        if stub.id == csarm.ARM_INS_BX and ops and ops[0].reg not in (csarm.ARM_REG_LR, csarm.ARM_REG_PC):
+            insn.call_via = self._name(stub.reg_name(ops[0].reg))
+        elif self._computes_return(program, target & ~1):
+            insn.dispatch_call = True
+
+    def _computes_return(self, program, address, limit=16):
+        """Whether the straight code at `address` reads lr and then writes it, or leaves through a
+        register other than lr: a helper that returns behind its call site, not to it."""
+        read = False
+        for _ in range(limit):
+            insn = program.insn(address)
+            if insn is None:
+                return False
+            kind = self.flow(insn)[0]
+            reads, writes = self.reg_effects(insn)
+            stack = self.stack_kind(insn)
+            if kind == "return":
+                return False
+            if stack != "push" and "lr" in reads:
+                read = True
+            if "lr" in writes and stack != "pop":
+                return read
+            if kind == "ijump":
+                return read
+            if kind != "next":
+                return False
+            address += insn.size
+        return False
+
     def is_call(self, insn):
         """bl or blx (direct or through a register)."""
         return insn.id in CALLS
@@ -237,8 +306,10 @@ class Arm:
         decided by instruction first."""
         i = insn.id
         conditional = self.is_conditional(insn)
-        if getattr(insn, "link_call", False):
-            return "icall", None, True      # mov lr, pc in front (dread.program marks it: link_pair)
+        if getattr(insn, "link_call", False) or getattr(insn, "call_via", None):
+            return "icall", None, True      # mov lr, pc in front, or bl to a bx rN stub (mark_call)
+        if getattr(insn, "dispatch_call", False):
+            return "ijump", None, False     # bl to a switch helper, its table behind (mark_call)
         if i == csarm.ARM_INS_SVC:
             return "icall", None, True      # its handler may return values in any register and the flags
         if i in CALLS:
@@ -256,6 +327,8 @@ class Arm:
             reg = insn.operands[0].reg if insn.operands else 0
             if reg == csarm.ARM_REG_LR:
                 return "return", None, conditional
+            if reg == csarm.ARM_REG_PC:     # into ARM state at the next word (an ARMv4T veneer's bx pc)
+                return "jump", (insn.address + (4 if insn.size == 2 else 8)) & ~3, conditional
             return "ijump", self._name(insn.reg_name(reg)), conditional
         _, written = insn.regs_access()
         if csarm.ARM_REG_PC in written:
@@ -512,7 +585,16 @@ class Arm:
 
     def branch(self, src, dst, isa, link=False):
         """The bytes of an unconditional b (or bl) at `src` to `dst`, in the isa of the code at
-        `src`. Raises ValueError when `dst` is out of reach (32 MiB in ARM state, 16 MiB in Thumb)."""
+        `src`. Raises ValueError when `dst` is out of reach (32 MiB in ARM state, 16 MiB in Thumb).
+        A core whose Thumb has no Thumb-2 (ARMv4T to ARMv6, Cortex-M0) has no b.w: there the branch
+        is a veneer of 14 or 16 bytes that goes through ip, which a call may change by the
+        convention: push {r0}; ldr r0, [pc, #k]; mov ip, r0; pop {r0}; bx ip; the address."""
+        if isa == "t32" and self.thumb2 is False and not link:
+            k = 8 if src % 4 == 0 else 4
+            code = struct.pack("<HHHHH", 0xB401, 0x4800 | (k >> 2), 0x4684, 0xBC01, 0x4760)
+            if src % 4 == 0:
+                code += struct.pack("<H", 0x46C0)           # mov r8, r8: the literal is word aligned
+            return code + struct.pack("<I", dst | 1)
         if isa == "a32":
             off = dst - (src + 8)
             if off % 4 or not -(1 << 25) <= off < (1 << 25):
@@ -529,7 +611,7 @@ class Arm:
         return struct.pack("<HH", first, second)
 
     def branch_length(self, isa):
-        return 4
+        return 16 if isa == "t32" and self.thumb2 is False else 4
 
     # ---- Unicorn ----
 
@@ -578,6 +660,14 @@ class Arm:
         value = engine.reg_read(reg)
         if value & self.IT_MASK:
             engine.reg_write(reg, value & ~self.IT_MASK)
+
+    @staticmethod
+    def symbol_asm(name, address, isa):
+        """Assembly that defines `name` as the absolute address of a function of `isa`, with its
+        type: .thumb_set marks a Thumb function (the linker then calls it without an ARM stub)."""
+        if isa == "t32":
+            return "\t.global %s\n\t.thumb_set %s, 0x%x\n" % (name, name, address & ~1)
+        return "\t.global %s\n\t.type %s, %%function\n\t.set %s, 0x%x\n" % (name, name, name, address & ~1)
 
     def start_address(self, address, isa):
         """The address to start or branch to for code of `isa` at `address` (bit 0 set for Thumb)."""

@@ -101,3 +101,50 @@ def test_unicorn_runs_arm_state():
     uc.reg_write(UC_ARM_REG_LR, 0xFFF00000)
     uc.emu_start(0x10000, 0xFFF00000)
     assert uc.reg_read(UC_ARM_REG_R0) == 42
+
+
+@pytest.mark.parametrize("cpu, flags, expected", [
+    (None, ["-mcpu=cortex-m0"], False), (None, ["-mcpu=cortex-m3"], True), (None, ["-march=armv4t"], False),
+    (None, ["-march=armv7-a", "-mthumb"], True), (None, ["-march=armv8-m.base"], False),
+    (None, ["-march=armv6-m"], False), ("cortex-m4", [], True), ("arm926", [], False), (None, [], None)])
+def test_thumb2_from_flags_and_cpu(cpu, flags, expected):
+    from dread.arch.arm import thumb2_of
+    assert thumb2_of(cpu, flags) == expected
+
+
+@pytest.mark.parametrize("src", [0x08000100, 0x08000102])
+def test_thumb1_entry_veneer_runs(src):
+    """Without Thumb-2 (no b.w) a moved function's old entry holds a veneer through ip: it reaches
+    the new place with every register but ip and the stack pointer as they were."""
+    from unicorn.arm_const import (UC_ARM_REG_LR, UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_SP)
+    arm = Arm(isa="t32", profile="m", cpu="cortex-m0", thumb2=False)
+    dst = 0x08000800
+    code = arm.branch(src, dst, "t32")
+    assert len(code) == (16 if src % 4 == 0 else 14) and arm.branch_length("t32") == 16
+    uc = arm.new_uc()
+    uc.mem_map(0x08000000, 0x1000)
+    uc.mem_map(0x20000000, 0x1000)
+    uc.mem_map(0x1FFF0000, 0x1000)
+    uc.mem_write(src, code)
+    uc.mem_write(dst, bytes.fromhex("401c021c7047"))     # adds r0, r0, #1; adds r2, r0, #0; bx lr
+    for reg, value in ((UC_ARM_REG_R0, 41), (UC_ARM_REG_R1, 7), (UC_ARM_REG_SP, 0x20001000),
+                       (UC_ARM_REG_LR, 0x1FFF0001)):
+        uc.reg_write(reg, value)
+    uc.emu_start(src | 1, 0x1FFF0000)
+    assert (uc.reg_read(UC_ARM_REG_R0), uc.reg_read(UC_ARM_REG_R1), uc.reg_read(UC_ARM_REG_R2)) == (42, 7, 42)
+    assert uc.reg_read(UC_ARM_REG_SP) == 0x20001000
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_original_symbols_carry_their_instruction_set(tmp_path):
+    """The overlay's symbols for the original's functions: Thumb ones marked as such, so that the
+    linker calls them without an ARM interworking stub."""
+    import subprocess
+    from dread.elf import Elf
+    source = tmp_path / "s.s"
+    source.write_text(Arm.symbol_asm("thumb_fn", 0x8001, "t32") + Arm.symbol_asm("arm_fn", 0x8100, "a32"))
+    subprocess.run(["arm-none-eabi-gcc", "-march=armv4t", "-c", "-x", "assembler", "-o", str(tmp_path / "s.o"),
+                    str(source)], check=True)
+    syms = {s.name: s for s in Elf(str(tmp_path / "s.o")).symbols}
+    assert syms["thumb_fn"].value == 0x8001 and syms["arm_fn"].value == 0x8100
+    assert syms["thumb_fn"].kind == syms["arm_fn"].kind == 2          # STT_FUNC
