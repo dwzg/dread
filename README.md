@@ -1,5 +1,7 @@
 # DREAD
 
+[![tests](https://github.com/dwzg/dread/actions/workflows/test.yml/badge.svg)](https://github.com/dwzg/dread/actions/workflows/test.yml)
+
 **Dennis' Reverse Engineering And Decompilation**: *disassemble, rewrite, emulate and diff.*
 
 A toolkit for rewriting embedded firmware in C, one function at a time, when the original compiler

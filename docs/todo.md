@@ -14,9 +14,6 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
   EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
   `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
   and optimisation levels matter to you?
-- **CI on GitHub Actions?** The tests on every push (both gizmo builds; arm-none-eabi-gcc and clang
-  from the runner's packages). Free for public repositories; it would show a status badge.
-  Recommendation: yes, after the performance pass, so a run stays short.
 
 ## Phase 4: cases, mutation, coverage (rest)
 
@@ -29,6 +26,12 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
   generator, a stream helper for read-style callees); the original runs once with the models and
   the run becomes a case the generic stubs replay exactly (returns, effects, fills). Done when a
   gizmo function that reads a line through `uart_getc` is covered by recorded cases on both builds.
+
+## CI
+
+- [x] **GitHub Actions** (the user agreed, 2026-10-18): the suite on every push, Python 3.11 and 3.13,
+  the distribution's arm-none-eabi-gcc. A failure there that does not happen locally is looked at
+  first (another compiler version decides placements and identical-code mutants).
 
 ## Performance, first pass
 
