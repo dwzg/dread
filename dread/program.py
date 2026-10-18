@@ -168,6 +168,7 @@ class Program:
         self._symbols = None
         self._annotations = None
         self._owner = None
+        self._insns = {}                # run address -> capstone instruction (see insn())
 
     # ---- bytes ----
 
@@ -244,16 +245,55 @@ class Program:
             return fn.entry
         return fn.insns[-1] + self.code[fn.insns[-1]][0]
 
+    def _decode_range(self, start):
+        """Decode the code range that holds `start` in one pass, from its first instruction:
+        capstone follows Thumb IT blocks only within one pass, so an instruction decoded alone
+        loses the condition its IT instruction gives it."""
+        for lo, hi, isa in self.ranges:
+            if lo <= start < hi:
+                break
+        else:
+            return
+        md = self.arch.disassembler(isa)
+        a = lo
+        while a < hi:
+            try:
+                code = self.read(a, hi - a)
+            except TargetError:
+                return
+            got = False
+            for insn in md.disasm(code, a):
+                self._insns[insn.address] = insn
+                a = insn.address + insn.size
+                got = True
+            if a < hi:                      # stopped at something that does not decode
+                self._insns.setdefault(a, None)
+                a += self.code[a][0] if a in self.code else self.arch.min_insn(isa)
+            if not got and a >= hi:
+                break
+
+    def insn(self, address):
+        """The instruction at `address` (capstone CsInsn), decoded with its code range so that
+        Thumb IT conditions are right; None if it does not decode."""
+        if address not in self._insns:
+            self._decode_range(address)
+            if address not in self._insns:
+                size = self.code[address][0] if address in self.code else 4
+                self._insns[address] = self.arch.decode(self.read(address, size), address, self.isa_at(address))
+        return self._insns[address]
+
     def decode(self, address, isa=None):
-        """The instruction at `address` (capstone CsInsn) in the isa the code ranges say."""
-        isa = isa or self.isa_at(address)
+        """The instruction at `address`; as insn(), or decoded alone in `isa` when given (an
+        instruction inside a Thumb IT block then shows no condition)."""
+        if isa is None or isa == self.isa_at(address):
+            return self.insn(address)
         size = self.code[address][0] if address in self.code else 4
         return self.arch.decode(self.read(address, size), address, isa)
 
     def instructions(self, fn):
         """The function's instructions, decoded, in address order (None for one that does not
         decode)."""
-        return [self.decode(a, fn.isa) for a in fn.insns]
+        return [self.insn(a) for a in fn.insns]
 
     # ---- names ----
 

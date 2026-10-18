@@ -8,3 +8,4 @@ __pycache__/
 examples/gizmo/*/build/
 examples/gizmo/fw/build/
 ghidra-projects/
+examples/gizmo/*/asm/

@@ -10,6 +10,7 @@ COMMANDS = {
     "info": ("dread.target", "show the target as DREAD reads it"),
     "import-elf": ("dread.elfimport", "an image's tables from an ELF with symbols"),
     "functions": ("dread.listfunctions", "list the functions of an image with their extents"),
+    "asm": ("dread.mkasm", "a listing that GNU as rebuilds byte for byte (--verify)"),
 }
 
 
