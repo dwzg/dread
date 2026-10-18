@@ -1153,13 +1153,15 @@ def cases_for(run, name, fn):
     path = os.path.join(run["target"].build, "autocases", image.name, name + ".json")
     cached = cache_load(path)
     if not cached or cached.get("key") != key:
+        started = time.time()
         try:
             made = gen.generate(name, fn.entry, fn.insns, calls=calls, frame=frame, **options)
         except GenerationError:
             if not extra_load(image, name):
                 raise
             made = []
-        cached = {"key": key, "seed": seed_name(fn.entry), "cases": made}
+        cached = {"key": key, "seed": seed_name(fn.entry), "cases": made,
+                  "seconds": round(time.time() - started, 2)}      # for reading only; not in the key
         cache_store(path, cached)
     out = []
 

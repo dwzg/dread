@@ -138,6 +138,14 @@ Python files that call the case API of `dread.cases` (`case`, `auto`, `unreachab
 `logging_stubs`, `words`), run in name order with those names defined. The module's docstring is the
 reference: what a case is and what is compared.
 
+### `BUILD/times/`
+
+Written by every parallel run (`dread test`, `dread integration`): `NAME.json` keeps the seconds
+per item of the last full run, for handing the slowest out first; `NAME.tsv` is the report of the
+last run, `item` and `seconds`, slowest first, ending with a comment line with the total seconds of
+work and the wall-clock time of the run. A generated-case cache entry
+(`BUILD/autocases/IMAGE/NAME.json`) also says how many `seconds` its generation took.
+
 ### `argued.tsv` (beside the cases directory)
 
 Survivors of `dread mutate` that cannot be caught, with the argument why the change alters nothing:

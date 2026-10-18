@@ -181,6 +181,9 @@ def scratch_names(target, arch):
     return [r for r in arch.general_regs() if r not in callee_saved] + ["flags"]
 
 
+POOL_REACH = 0x1000         # how far behind a function's last instruction its pool may lie
+
+
 class Analysis:
     """The analysis of one program: per-instruction rows and control flow, what each function may
     write, and the solution (kept, reads). Kept in memory for explanations (readers())."""
@@ -275,9 +278,11 @@ class Analysis:
              and the next function (in a pool), whose address one of the eight instructions before
              the jump loads or computes;
           3. all such tables of the function;
-          4. the code no path reaches, one root per unreached region in address order (not every
-             unreached block: a loop inside a switch case would be entered past the instructions
-             that set it up, and what they set up would look like the caller's).
+          4. the code no path reaches: first the unreached blocks no direct edge leads to (switch
+             cases are reached only through the table), then one root per region still unreached,
+             in address order. Not every unreached block: a loop inside a switch case would be
+             entered past the instructions that set it up, and what they set up would look like
+             the caller's.
         """
         program, arch = self.program, self.program.arch
         n = len(code)
@@ -285,14 +290,22 @@ class Analysis:
         def inside(address):
             return (address & ~1) in index
 
-        tables, run, a = {}, None, fn.entry & ~3
-        while a + 4 <= span_end:
-            word = None
-            if a not in program.code and a + 2 not in program.code:
-                try:
-                    word = program.word(a)
-                except Exception:
-                    word = None
+        # Tables lie in the function's own extent or in the pool behind it: up to the next function,
+        # but no further than POOL_REACH behind the last instruction (the next entry may be far away,
+        # code the startup copies to RAM), read in one piece.
+        import struct
+        lo = fn.entry & ~3
+        hi = min(span_end, program.end(fn) + POOL_REACH)
+        try:
+            blob = program.read(lo, max(0, hi - lo) & ~3)
+        except Exception:
+            blob = b""
+        words = struct.unpack("<%dI" % (len(blob) // 4), blob)
+        tables, run = {}, None
+        for k, word in enumerate(words):
+            a = lo + 4 * k
+            if a in program.code or a + 2 in program.code:
+                word = None
             if word is not None and inside(word):
                 if run is None:
                     run = a
@@ -300,7 +313,6 @@ class Analysis:
                 tables[run].append(word & ~1)
             else:
                 run = None
-            a += 4
 
         def table_at(value):
             for start, targets in tables.items():
@@ -356,8 +368,18 @@ class Analysis:
                     stack.extend(succ[k])
         if n:
             mark(0)
-        for j in range(n):
-            if j not in seen and not (j and falls_into(j - 1) and j - 1 not in seen):
+        # Switch cases are reached only through the table: first the unreached blocks that no
+        # direct edge leads to (a loop body inside a case has its back edge), then in address order
+        # whatever is still unreached.
+        entered = set()
+        for i in range(n):
+            entered.update(succ[i])
+        for pass_ in ("no predecessor", "any"):
+            for j in range(n):
+                if j in seen or (j and falls_into(j - 1) and j - 1 not in seen):
+                    continue
+                if pass_ == "no predecessor" and j in entered:
+                    continue
                 roots.append(j)
                 mark(j)
         for i in left:

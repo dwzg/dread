@@ -160,7 +160,15 @@ class Core:
         for start, data in self.initial:
             uc.mem_write(start, data)
         self.pages, self.dirty, self.hooks, self.machine = {}, set(), [], None
-        uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
+        # The hot hooks run in C when dread.fasthooks builds (stores here; coverage and load tracing
+        # per Machine); otherwise in Python. Both record the same.
+        from dread import fasthooks
+        self.fast = fasthooks.Hooks(uc, layout) if fasthooks.library() is not None else None
+        self.fast_hooks = []                # per Machine, removed at the reset
+        if self.fast is not None:
+            self.fast.add(UC_HOOK_MEM_WRITE, "dread_write")
+        else:
+            uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
         for lo, hi in layout.io:
             uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._on_io, begin=lo, end=hi - 1)
 
@@ -188,6 +196,14 @@ class Core:
         return self.pages[number]
 
     def reset(self):
+        if self.fast is not None:
+            from dread import fasthooks
+            self.dirty.update(self.fast.items(fasthooks.PAGES))
+            for which in (fasthooks.PAGES, fasthooks.WRITES, fasthooks.BLOCKS, fasthooks.TREE, fasthooks.READS):
+                self.fast.clear(which)
+            for h in self.fast_hooks:
+                self.fast.delete(h)
+            self.fast_hooks = []
         for number in self.dirty:
             try:
                 self.uc.mem_write(number << 12, self.page(number))
@@ -246,6 +262,7 @@ class Machine:
         self.arg_domains = []       # [(register number, values)] applied by call()
         self.function = ""          # the name of the function under test, for stubs that look it up
         self.kept = ()              # scratch registers compared at the return (dread.regflow)
+        self._fast_cover = self._fast_reads = False
         self.kept_why = {}          # register -> who reads it after the call, for the report
         self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
         self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
@@ -340,6 +357,12 @@ class Machine:
         that range, in self.tree (what the function's callees ran: the generator's signal for an
         input that gets further into a callee); one hook does both."""
         self.blocks, self.tree = set(), set()
+        fast = self.core.fast
+        if fast is not None:
+            fast.state.cover_lo, fast.state.cover_hi, fast.state.tree = begin, end, 1 if tree else 0
+            self.core.fast_hooks.append(fast.add(UC_HOOK_BLOCK, "dread_block", *((1, 0) if tree else (begin, end - 1))))
+            self._fast_cover = True
+            return
         if not tree:
             self.hook_add(UC_HOOK_BLOCK, lambda uc, addr, size, user: self.blocks.add((addr, size)),
                           begin=begin, end=end - 1)
@@ -369,6 +392,12 @@ class Machine:
         self.code_reads whether an instruction (an address in `code`) was loaded as data."""
         self.reads = {}
         self.code_reads = False
+        fast = self.core.fast
+        if fast is not None:
+            fast.set_code(code, image_lo, image_hi)
+            self.core.fast_hooks.append(fast.add(UC_HOOK_MEM_READ, "dread_read"))
+            self._fast_reads = True
+            return
         in_stack = self.layout.in_stack
 
         def on_read(uc, access, addr, size, value, user):
@@ -378,6 +407,21 @@ class Machine:
             elif not in_stack(addr):
                 self.reads.setdefault(addr, size)
         self.hook_add(UC_HOOK_MEM_READ, on_read)
+
+    def _collect(self):
+        """Take what the C hooks recorded into the attributes the Python hooks fill."""
+        fast = self.core.fast
+        if fast is None:
+            return
+        from dread import fasthooks
+        for k in fast.items(fasthooks.WRITES):
+            self.written.update(range(k >> 8, (k >> 8) + (k & 0xFF)))
+        if self._fast_cover:
+            self.blocks = {(k >> 16, k & 0xFFFF) for k in fast.items(fasthooks.BLOCKS)}
+            self.tree = set(fast.items(fasthooks.TREE))
+        if self._fast_reads:
+            self.reads = dict(fast.items(fasthooks.READS, values=True))
+            self.code_reads = bool(fast.state.code_reads)
 
     def log_svc(self):
         """Let svc instructions run as no-ops and log the argument registers at each. Without
@@ -459,6 +503,9 @@ class Machine:
             if reg is not None and reg not in lay.arg_regs[:len(regs)]:
                 uc.reg_write(reg, KEPT_POISON + 0x11 * (i + 1))
         self.calls, self.written = [], set()
+        if self.core.fast is not None:
+            from dread import fasthooks
+            self.core.fast.clear(fasthooks.WRITES)
         for poll in self.polls.values():
             poll["count"] = 0
         try:
@@ -467,6 +514,8 @@ class Machine:
             raise EmuError("emulation fault at pc=0x%x: %s" % (uc.reg_read(lay.pc), e))
         except Exception as e:              # an exception in a stub or a hook of the case
             raise EmuError("%s in a stub or hook at pc=0x%x: %s" % (type(e).__name__, uc.reg_read(lay.pc), e))
+        finally:
+            self._collect()
         writes = {a: self.read(a, 1)[0] for a in self.written}
         for register, poll in sorted(self.polls.items()):
             if poll["count"] > poll["stages"][-1][0] + POLL_LOGGED:

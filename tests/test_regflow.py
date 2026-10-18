@@ -95,3 +95,23 @@ def test_a_clobbered_kept_register_fails(target, variant, tmp_path, capsys, monk
     # through the caller it shows only for strings of two or more characters: all generated inputs
     assert integration.main(["--target", target.root, "--recon", payload, "--cases", "40", "uart_puts"]) == 1
     assert "DIFF uart_puts" in capsys.readouterr().out
+
+
+def test_switch_fallback_without_resolution(target, monkeypatch):
+    """With neither the emulated dispatch nor a known table shape, an indirect jump goes on at the
+    roots of the code no direct path reaches (script_run's cases), and the analysis still finds the
+    same registers."""
+    from dread import switches
+    from dread.program import Program
+
+    def extra(flow):
+        return {n for n in flow.kept if [r for r in flow.kept_regs(n) if r != "r0"]}
+    reference = extra(regflow.Analysis(Program(target)).solve().result())
+    monkeypatch.setattr(switches, "resolve", lambda program, fn, address: None)
+    program = Program(target)
+    monkeypatch.setattr(program.arch, "switch_targets", lambda insn, prog, inside: None)
+    analysis = regflow.Analysis(program).solve()
+    code = analysis.rows["script_run"]
+    jump = next(i for i, row in enumerate(code) if row.kind == "ijump")
+    assert len(analysis.graphs["script_run"][0][jump]) >= 2
+    assert extra(analysis.result()) == reference

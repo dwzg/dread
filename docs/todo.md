@@ -34,10 +34,10 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
 
 The long runs set the pace of everything after them. Measure first, then cut.
 
-- [ ] **Profile** the test suite, case generation, `dread mutate` and `dread integration` on gizmo
+- [x] **Profile** the test suite, case generation, `dread mutate` and `dread integration` on gizmo
   (and, read-only, on a larger image): seconds per step and per function, kept in a table the tools
   write (as `build/times/`). Done when the slowest steps are known with numbers.
-- [ ] **Coverage without a Python call per executed block**: the block hook runs for every loop
+- [x] **Coverage without a Python call per executed block**: the block hook runs for every loop
   iteration. Try what costs less: a hook at translation time (the cache is flushed per run, so a
   block is translated once per run), counting instructions in C, or removing the hook once the
   function's blocks are all seen. Done when generation and tests are measurably faster with the same

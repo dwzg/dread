@@ -26,14 +26,28 @@ def longest_first(pool, fn, items, key, times_file, keep_from=50):
         last = {}
     items = list(items)
     order = sorted(range(len(items)), key=lambda i: -last.get(key(items[i]), 1e9))
+    started = time.time()
     handles = {i: pool.apply_async(_timed, (fn, items[i])) for i in order}
     times = {}
     for i in range(len(items)):
         seconds, result = handles[i].get()
         times[key(items[i])] = round(seconds, 3)
         yield result
+    report(times_file, times, time.time() - started)
     if len(items) >= keep_from:
         os.makedirs(os.path.dirname(times_file) or ".", exist_ok=True)
         with open(times_file + ".tmp", "w") as f:
             json.dump(times, f)
         os.replace(times_file + ".tmp", times_file)
+
+
+def report(times_file, times, wall):
+    """TIMES.tsv: what each item took, slowest first, and the total against the wall clock."""
+    path = os.path.splitext(times_file)[0] + ".tsv"
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        f.write("item\tseconds\n")
+        for name, seconds in sorted(times.items(), key=lambda kv: (-kv[1], kv[0])):
+            f.write("%s\t%.3f\n" % (name, seconds))
+        f.write("# total %.1f s of work in %.1f s\n" % (sum(times.values()), wall))
+    os.replace(path + ".tmp", path)

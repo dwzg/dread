@@ -1,0 +1,224 @@
+/* Hot emulator hooks in C, called by Unicorn without Python in between (dread/fasthooks.py).
+ *
+ * One state per emulator records what the Python hooks record: the blocks executed in a range
+ * (coverage) and the starts of blocks outside it (what callees ran), the loads outside the stack and
+ * the image (first size per address) and whether an instruction was loaded as data, the stores
+ * outside the stack (address and size), and the pages any store touched (for the reset). On cores
+ * with Thumb IT blocks every hook ends by clearing a stale IT state, as dread.arch.arm.settle_it
+ * does. Results grow in open-addressing hash sets; Python copies them out after a run. */
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef int (*reg_rw_fn)(void *uc, int regid, void *value);
+
+typedef struct {
+    uint64_t *keys;     /* 0 = empty; stored keys are key + 1 */
+    uint32_t *vals;
+    uint64_t *order;    /* with ordered: the keys in the order they were first put */
+    size_t cap, used, order_cap;
+    int64_t ordered;
+} set_t;
+
+typedef struct {
+    /* configuration */
+    uint64_t cover_lo, cover_hi;
+    uint64_t stack_lo, stack_hi;
+    uint64_t image_lo, image_hi;
+    const uint8_t *code_bits;       /* one bit per halfword of the image: an instruction starts there */
+    int32_t tree, settle, status_reg;
+    uint32_t it_mask;
+    reg_rw_fn reg_read, reg_write;
+    /* results */
+    set_t blocks, tree_set, reads, writes, pages;
+    int32_t code_reads;
+} state_t;
+
+static uint64_t mix(uint64_t x)
+{
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33;
+    return x;
+}
+
+static int set_grow(set_t *s);
+
+/* Insert key with value; returns 1 when the key was new. With keep_first an existing value stays. */
+static int set_put(set_t *s, uint64_t key, uint32_t val, int keep_first)
+{
+    if ((s->used + 1) * 2 > s->cap && set_grow(s) != 0)
+        return 0;
+    uint64_t k = key + 1;
+    size_t mask = s->cap - 1, i = mix(k) & mask;
+    while (s->keys[i]) {
+        if (s->keys[i] == k) {
+            if (!keep_first)
+                s->vals[i] = val;
+            return 0;
+        }
+        i = (i + 1) & mask;
+    }
+    s->keys[i] = k;
+    s->vals[i] = val;
+    if (s->ordered) {
+        if (s->used == s->order_cap) {
+            size_t cap = s->order_cap ? s->order_cap * 2 : 1024;
+            uint64_t *order = realloc(s->order, cap * sizeof(uint64_t));
+            if (!order)
+                return 1;
+            s->order = order;
+            s->order_cap = cap;
+        }
+        s->order[s->used] = key;
+    }
+    s->used++;
+    return 1;
+}
+
+static uint32_t set_get(set_t *s, uint64_t key)
+{
+    uint64_t k = key + 1;
+    size_t mask = s->cap - 1, i = mix(k) & mask;
+    while (s->keys[i]) {
+        if (s->keys[i] == k)
+            return s->vals[i];
+        i = (i + 1) & mask;
+    }
+    return 0;
+}
+
+static int set_grow(set_t *s)
+{
+    size_t cap = s->cap ? s->cap * 2 : 1024;
+    set_t n = { calloc(cap, sizeof(uint64_t)), calloc(cap, sizeof(uint32_t)), NULL, cap, 0, 0, 0 };
+    if (!n.keys || !n.vals) {
+        free(n.keys);
+        free(n.vals);
+        return -1;
+    }
+    for (size_t i = 0; i < s->cap; i++)
+        if (s->keys[i])
+            set_put(&n, s->keys[i] - 1, s->vals[i], 1);
+    free(s->keys);
+    free(s->vals);
+    s->keys = n.keys;                       /* used, order and ordered stay */
+    s->vals = n.vals;
+    s->cap = cap;
+    return 0;
+}
+
+static void set_clear(set_t *s)
+{
+    if (s->cap) {
+        memset(s->keys, 0, s->cap * sizeof(uint64_t));
+        memset(s->vals, 0, s->cap * sizeof(uint32_t));
+    }
+    s->used = 0;
+}
+
+/* Copy the keys (and values) of a set into out arrays of at least s->used entries. */
+size_t dread_copy(state_t *st, int which, uint64_t *keys, uint32_t *vals)
+{
+    set_t *s = which == 0 ? &st->blocks : which == 1 ? &st->tree_set : which == 2 ? &st->reads
+             : which == 3 ? &st->writes : &st->pages;
+    size_t n = 0;
+    if (s->ordered && s->order) {
+        for (; n < s->used; n++) {
+            keys[n] = s->order[n];
+            if (vals)
+                vals[n] = set_get(s, s->order[n]);
+        }
+        return n;
+    }
+    for (size_t i = 0; i < s->cap; i++)
+        if (s->keys[i]) {
+            keys[n] = s->keys[i] - 1;
+            if (vals)
+                vals[n] = s->vals[i];
+            n++;
+        }
+    return n;
+}
+
+size_t dread_count(state_t *st, int which)
+{
+    set_t *s = which == 0 ? &st->blocks : which == 1 ? &st->tree_set : which == 2 ? &st->reads
+             : which == 3 ? &st->writes : &st->pages;
+    return s->used;
+}
+
+void dread_clear(state_t *st, int which)
+{
+    set_t *s = which == 0 ? &st->blocks : which == 1 ? &st->tree_set : which == 2 ? &st->reads
+             : which == 3 ? &st->writes : &st->pages;
+    set_clear(s);
+    if (which == 2)
+        st->code_reads = 0;
+}
+
+static void settle(void *uc, state_t *st)
+{
+    if (!st->settle)
+        return;
+    uint32_t v = 0;
+    st->reg_read(uc, st->status_reg, &v);
+    if (v & st->it_mask) {
+        v &= ~st->it_mask;
+        st->reg_write(uc, st->status_reg, &v);
+    }
+}
+
+/* UC_HOOK_BLOCK: void (uc, address, size, user) */
+void dread_block(void *uc, uint64_t address, uint32_t size, state_t *st)
+{
+    if (address >= st->cover_lo && address < st->cover_hi)
+        set_put(&st->blocks, address << 16 | (size & 0xFFFF), 0, 1);
+    else if (st->tree)
+        set_put(&st->tree_set, address, 0, 1);
+    settle(uc, st);
+}
+
+/* UC_HOOK_MEM_READ: bool (uc, type, address, size, value, user) */
+int dread_read(void *uc, int type, uint64_t address, int size, int64_t value, state_t *st)
+{
+    (void)type;
+    (void)value;
+    if (address >= st->image_lo && address < st->image_hi) {
+        if (st->code_bits) {
+            for (uint64_t a = address & ~1ULL; a < address + (uint64_t)size; a += 2) {
+                uint64_t h = (a - st->image_lo) >> 1;
+                if (a < st->image_hi && (st->code_bits[h >> 3] >> (h & 7) & 1)) {
+                    st->code_reads = 1;
+                    break;
+                }
+            }
+        }
+    } else if (!(address >= st->stack_lo && address < st->stack_hi)) {
+        set_put(&st->reads, address, (uint32_t)size, 1);
+    }
+    settle(uc, st);
+    return 1;
+}
+
+/* UC_HOOK_MEM_WRITE: bool (uc, type, address, size, value, user) */
+int dread_write(void *uc, int type, uint64_t address, int size, int64_t value, state_t *st)
+{
+    (void)type;
+    (void)value;
+    set_put(&st->pages, address >> 12, 0, 1);
+    set_put(&st->pages, (address + (uint64_t)size - 1) >> 12, 0, 1);
+    if (!(address >= st->stack_lo && address < st->stack_hi))
+        set_put(&st->writes, address << 8 | ((uint64_t)size & 0xFF), 0, 1);
+    settle(uc, st);
+    return 1;
+}
+
+size_t dread_state_size(void)
+{
+    return sizeof(state_t);
+}
+
+/* The loads are reported in the order they first happened, as Python's dict keeps them. */
+void dread_init(state_t *st)
+{
+    st->reads.ordered = 1;
+}

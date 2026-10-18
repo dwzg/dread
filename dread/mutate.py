@@ -467,8 +467,11 @@ def check(target, image, name, line_range=None, seconds=300, jobs=None, out=prin
         first = judge(tasks[0])[1]          # the unchanged source first: its code is the baseline
         results[0] = first[0] if isinstance(first, tuple) else first
         STATE["baseline"] = first[1] if isinstance(first, tuple) else None
-        with multiprocessing.get_context("fork").Pool(jobs or workers(), initializer=die_with_parent,
-                                                      maxtasksperchild=8) as pool:
+        # Workers live as long as the pool: one replaced after N tasks would be forked from the pool's
+        # handler thread, and a fork from a thread of a process that holds emulators can hang or die
+        # in the child; its task is lost and waited for until the time limit (205 of the test
+        # suite's 290 seconds went there).
+        with multiprocessing.get_context("fork").Pool(jobs or workers(), initializer=die_with_parent) as pool:
             handles = [(t[0], pool.apply_async(judge, (t,))) for t in tasks[1:]]
             for k, h in handles:
                 try:
