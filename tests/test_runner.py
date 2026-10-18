@@ -46,7 +46,8 @@ def test_rewritten_functions_agree(target, variant, tmp_path):
 
 def test_planted_bug_is_caught(target, variant, tmp_path):
     """An unsigned comparison where the original compares signed: -1 is clamped to 9, not 0.
-    (x <= lo ? lo or x >= hi ? hi would not do: they are equivalent to the original.)"""
+    (x >= hi ? hi would not do: it compiles to the same code. x <= lo ? lo differs only for
+    x == lo > hi, an empty range, which the written cases do not try; dread mutate --kill found it.)"""
     src = src_copy(tmp_path, variant, ("return x < lo ? lo : x > hi ? hi : x;",
                                        "return (u32)x < (u32)lo ? lo : (u32)x > (u32)hi ? hi : x;"))
     payload = build.build(target, target.image(), src=str(src), out=str(tmp_path / "recon"), quiet=True)

@@ -135,6 +135,14 @@ Python files that call the case API of `dread.cases` (`case`, `auto`, `unreachab
 `logging_stubs`, `words`), run in name order with those names defined. The module's docstring is the
 reference: what a case is and what is compared.
 
+### `argued.tsv` (beside the cases directory)
+
+Survivors of `dread mutate` that cannot be caught, with the argument why the change alters nothing:
+tab-separated `function`, the source line as written (stripped), the change as `dread mutate` names
+it (`>= -> >`, `4 -> 5`, `removed`, `a <-> b`), and the argument. A survivor that matches is listed
+with its argument and not counted. The key includes the line's text, so an argument stops applying
+when the line changes.
+
 ### `tests.tsv`
 
 Written beside the rebuilt image by a complete `dread test`: `function`, `cases`, `failed`.

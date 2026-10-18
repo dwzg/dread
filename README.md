@@ -41,11 +41,14 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Listing generator and byte-identical rebuild, Ghidra pipeline | done |
 | Emulator, differential test runner, overlay linker | done |
 | Case generator (coverage- and compare-guided, pointer learning) | done |
-| Integration run, compare-guided sweeps, recorded cases, mutation check | planned |
+| Mutation check with survivor search and argued survivors | done |
+| Integration run, compare-guided sweeps, recorded cases | planned |
 | System run with device models | planned |
 | Lifter (ARM, then Thumb) | planned |
 | Reading aids, Claude Code plugin, method documentation | planned |
-| RISC-V: a third gizmo build and an architecture backend | after the ARM phases |
+| Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | with the lifter |
+| `dread pilot`: the reconstruction loop run unattended, an LLM (local or cloud) only for the thinking | after the ARM phases |
+| RISC-V: a third gizmo build and an architecture backend | after the pilot |
 
 ## Layout
 
@@ -64,6 +67,7 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
 bin/dread info --target examples/gizmo/m3
 bin/dread recon --target examples/gizmo/m3      # gizmo's rewritten functions over the original
 bin/dread test --target examples/gizmo/m3       # each one against the original, in the emulator
+bin/dread mutate --target examples/gizmo/m3 --kill checksum   # would the cases notice a wrong one?
 ```
 
 A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the

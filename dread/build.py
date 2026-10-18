@@ -26,10 +26,12 @@ def recon_dir(target, image):
     return os.path.join(target.build, "recon", image.name)
 
 
-def compile_all(target, image, src, objdir, jobs=None):
-    """Compile the sources under `src` into `objdir`; returns the object paths."""
+def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=False):
+    """Compile the sources under `src` into `objdir`; returns the object paths. extra_include:
+    further include directories (dread mutate compiles a copy elsewhere and still needs the
+    headers beside the original); quiet: no compiler messages (variants that do not compile)."""
     sources = sorted(glob.glob(os.path.join(src, "**", "*.c"), recursive=True))
-    include = [INCLUDE, src] + target.compiler.include
+    include = [INCLUDE, src] + list(extra_include) + target.compiler.include
     headers = [h for d in include for h in glob.glob(os.path.join(d, "**", "*.h"), recursive=True)]
     newest_header = max((os.path.getmtime(h) for h in headers), default=0)
     objects, todo = [], []
@@ -48,7 +50,7 @@ def compile_all(target, image, src, objdir, jobs=None):
     failed = []
     for c, p in procs:
         out = p.communicate()[0]
-        if out:
+        if out and not quiet:
             sys.stderr.write(out)
         if p.returncode:
             failed.append(c)

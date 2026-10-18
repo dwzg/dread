@@ -1,0 +1,15 @@
+{
+ "cases": [
+  {
+   "args": [
+    537919488,
+    537919488,
+    1,
+    0
+   ],
+   "by": "dread mutate --kill",
+   "mem": [],
+   "why": "tells the original from the change: ../rewritten/rewritten.c:14  return x < lo ? lo : x > hi ? hi : x;   [< -> <=]"
+  }
+ ]
+}

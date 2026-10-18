@@ -29,7 +29,13 @@ changing a table, case or report format.
    disagreement between two images is traced to its instruction before anything is concluded.
 7. **Say what is not known.** Write "not confirmed" or "unknown" rather than a guess presented as
    fact, in docs, docstrings and commit messages.
-8. **Public, Apache-2.0** (github.com/dwzg/dread). Before every push, run `dread leakcheck` with the
+8. **Process in code, models only for judgement** (the user's principle). Whatever a tool can decide,
+   a tool decides: choosing work, assembling context, building, testing, searching inputs, the
+   mutation check, bookkeeping. A language model is asked only where judgement is needed (writing C
+   from a listing, an input no search finds, an argument that a mutant is equivalent, a name), with
+   a typed question and an answer a tool checks before it counts. A step that a skill or an agent
+   does by following instructions is a candidate for a tool.
+9. **Public, Apache-2.0** (github.com/dwzg/dread). Before every push, run `dread leakcheck` with the
    tables and words of each private project code was taken from (the exact command is kept with
    that project, not here); a hit that is not a known coincidence stops the push. A leak, once
    pushed, cannot be taken back.
