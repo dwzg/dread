@@ -66,6 +66,7 @@ def test_entry_reads_match_the_signatures(target):
     assert got == SIGNATURES
 
 
+@pytest.mark.rv32
 def test_cache_follows_the_tables(target, tmp_path, monkeypatch):
     image = target.image()
     first = regflow.cache_key(target, image)
@@ -97,6 +98,7 @@ def test_a_clobbered_kept_register_fails(target, variant, tmp_path, capsys, monk
     assert "DIFF uart_puts" in capsys.readouterr().out
 
 
+@pytest.mark.rv32
 def test_switch_fallback_without_resolution(target, monkeypatch):
     """With neither the emulated dispatch nor a known table shape, an indirect jump goes on at the
     roots of the code no direct path reaches (script_run's cases), and the analysis still finds the

@@ -20,7 +20,6 @@ import sys
 from dread import target as tgt
 from dread.program import Program
 
-ARGS = ("r0", "r1", "r2", "r3")
 
 
 def sites(program, patterns):
@@ -96,6 +95,7 @@ def main(argv=None):
     if not found:
         print("dread callsites: no calls of %s" % " ".join(args.patterns), file=sys.stderr)
         return 1
+    ARGS = program.arch.arg_regs(4)
     if args.by is not None:
         reg = ARGS[args.by]
         groups = collections.defaultdict(list)

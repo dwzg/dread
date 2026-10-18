@@ -64,12 +64,13 @@ cflags = ["-mcpu=cortex-m3", "-mthumb", "-Os", "-ffreestanding", "-fno-builtin",
 
 | Key | Meaning |
 |---|---|
-| `name` | `"arm"`, required (the only architecture so far) |
-| `isa` | the instruction set of code the code ranges do not mark: `"a32"` (ARM state, default) or `"t32"` (Thumb, 16- and 32-bit) |
-| `profile` | `"a"` (classic cores with CPSR: ARM7, ARM9, ARM11; default) or `"m"` (Cortex-M, Thumb only) |
+| `name` | `"arm"` or `"riscv"`, required |
+| `isa` | the instruction set of code the code ranges do not mark. ARM: `"a32"` (ARM state, default) or `"t32"` (Thumb, 16- and 32-bit); RISC-V: `"rv32"` |
+| `profile` | ARM: `"a"` (classic cores with CPSR: ARM7, ARM9, ARM11; default) or `"m"` (Cortex-M, Thumb only) |
+| `extensions` | RISC-V: the standard extensions, default `"imc"` (the C extension decides whether instructions may be 2 bytes long; `-march` in `[compiler] cflags` overrides it) |
 | `cpu` | Unicorn's CPU model (`cortex-m3`, `arm926`, `arm1176`, ...); default: Unicorn's choice for the mode |
 | `endian` | `"little"` (the only one supported) |
-| `ghidra` | Ghidra's language id (default `ARM:LE:32:Cortex` for M profile, `ARM:LE:32:v4t` otherwise) |
+| `ghidra` | Ghidra's language id (default `ARM:LE:32:Cortex` for M profile, `ARM:LE:32:v4t` otherwise, `RISCV:LE:32:RV32IMC` for RISC-V) |
 
 Unicorn has no ARM7TDMI model. An ARM7 target runs on the default model or on `arm926`. The
 differences that can matter, such as unaligned loads, are not modelled.
@@ -127,16 +128,20 @@ address faults before the run can stop.
 
 | Key | Meaning |
 |---|---|
-| `args` | how many argument registers (default 4: r0-r3) |
-| `callee_saved` | the registers a function preserves (default r4-r11) |
-| `result` | the registers a result comes back in (default r0, r1) |
+| `args` | how many argument registers (default ARM 4: r0-r3; RISC-V 8: a0-a7) |
+| `callee_saved` | the registers a function preserves (default ARM r4-r11; RISC-V s0-s11) |
+| `result` | the registers a result comes back in (default ARM r0, r1; RISC-V a0, a1) |
 
 ### `[compiler]`
 
 | Key | Meaning |
 |---|---|
-| `cross` | the prefix of the cross tools (default `arm-none-eabi-`) |
-| `cflags` | the flags C for this target is compiled with |
+| `kind` | `"gcc"` (default: a GNU cross toolchain, `cross` + gcc, as, ld, objcopy) or `"clang"` (clang `--target=triple` with its integrated assembler, ld.lld, llvm-objcopy) |
+| `cross` | the prefix of the GNU cross tools (default `arm-none-eabi-`) |
+| `triple` | clang's `--target` (`kind = "clang"` needs it), e.g. `"riscv32-unknown-elf"` |
+| `cflags` | the flags C for this target is compiled with (for clang, also given to the assembler: `-march`) |
+| `ldflags` | flags for the linker (default `--no-warn-rwx-segments` for GNU ld, none for lld) |
+| `tools` | `{cc, as, ld, objcopy, nm}`: a command or a list for a tool, overriding the defaults |
 | `include` | include directories |
 | `idioms` | the family of compiler idioms the lifter recognises |
 

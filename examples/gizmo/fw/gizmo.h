@@ -1,9 +1,11 @@
 /* Gizmo 1000: a small firmware written for DREAD's tests. Not a real device.
  *
- * Built twice from the same sources: for an ARM7-style core in ARM state (GIZMO_A32, image at
- * 0x20000, RAM at 0x40000000, peripherals at 0x80000000, an interrupt controller of its own) and
+ * Built three times from the same sources: for an ARM7-style core in ARM state (GIZMO_A32, image
+ * at 0x20000, RAM at 0x40000000, peripherals at 0x80000000, an interrupt controller of its own),
  * for a Cortex-M3 in Thumb-2 (GIZMO_M3, flash at 0x08000000, RAM at 0x20000000, peripherals at
- * 0x40000000, the NVIC). The peripherals have the same registers on both.
+ * 0x40000000, the NVIC), and for an RV32IMC core in machine mode (GIZMO_RV32, flash at 0x20000000,
+ * RAM at 0x80000000, peripherals at 0x10000000, the A32 build's interrupt controller at the machine
+ * external interrupt). The peripherals have the same registers on all three.
  */
 #ifndef GIZMO_H
 #define GIZMO_H
@@ -20,10 +22,17 @@ typedef unsigned long long u64;
 #define GPIO_BASE  0x40010800u
 #define NVIC_ISER0 (*(volatile u32 *)0xE000E100u)
 #else
+#ifdef GIZMO_RV32
+#define UART_BASE  0x10000000u
+#define TIMER_BASE 0x10001000u
+#define INTC_BASE  0x10002000u
+#define GPIO_BASE  0x10003000u
+#else
 #define UART_BASE  0x80000000u
 #define TIMER_BASE 0x80001000u
 #define INTC_BASE  0x80002000u
 #define GPIO_BASE  0x80003000u
+#endif
 #define INTC_PENDING (*(volatile u32 *)(INTC_BASE + 0x0))
 #define INTC_ENABLE  (*(volatile u32 *)(INTC_BASE + 0x4))
 #define INTC_ACK     (*(volatile u32 *)(INTC_BASE + 0x8))

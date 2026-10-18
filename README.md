@@ -37,7 +37,8 @@ what works. The method and the first versions of the tools come from the reconst
 a 2004 digital camera's firmware (ARM7, ARM state). Here they are being made independent of that
 firmware: everything a tool needs to know about a target comes from the target's `dread.toml`.
 DREAD tests itself on **gizmo** (`examples/gizmo`), a small firmware written for the purpose and
-built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 in Thumb-2.
+built three times: for an ARM7-style core in ARM state and for a Cortex-M3 in Thumb-2 with GCC, and
+for an RV32IMC core with clang (that build is new; the tools are being ported to it step by step).
 
 | Part | State |
 |---|---|
@@ -57,7 +58,7 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Method documentation and a porting guide | done |
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
 | `dread pilot`: the reconstruction loop run by code, an LLM (local or cloud) only for the judgement: writing C, arguing survivors, proposing inputs and names; every answer checked by the tools | first version |
-| RISC-V: a third gizmo build and an architecture backend | after the pilot |
+| RISC-V (RV32IMC): gizmo-rv32 built with clang; decoding, listing with byte-identical rebuild, reading aids | under way (next: the emulator, then the overlay) |
 
 ## Layout
 
@@ -65,7 +66,7 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 |---|---|
 | `dread/` | the Python package; `bin/dread` runs it from a checkout |
 | `docs/` | the method (`method.md`), porting to another architecture (`porting.md`), the target description, the file formats |
-| `examples/gizmo/` | the test firmware: sources, builds and two target directories |
+| `examples/gizmo/` | the test firmware: sources, builds and three target directories (a32, m3, rv32) |
 | `tests/` | DREAD's own tests (`.venv/bin/pytest`) |
 
 ## Using it

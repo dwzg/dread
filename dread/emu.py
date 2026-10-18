@@ -69,11 +69,12 @@ class Layout:
         self.saved_names = list(abi.callee_saved)
         self.result_regs = [self.arch.reg_id(r) for r in abi.result]
         self.all_regs = [self.arch.reg_id("r%d" % i) for i in range(13)]
-        self.sp, self.lr, self.pc = (self.arch.reg_id(r) for r in ("sp", "lr", "pc"))
+        self.sp, self.lr, self.pc = (self.arch.reg_id(r) for r in ("sp", self.arch.link_reg, "pc"))
         # Cores that can have IT blocks need every hook to clear a stale IT state (Arm.settle_it)
         from dread.program import read_code_ranges
         self.settle_it = self.arch.profile == "m" or any(
-            isa == "t32" for _, _, isa in read_code_ranges(image.table("code_ranges"), self.arch.isa))
+            isa == "t32" for _, _, isa in read_code_ranges(image.table("code_ranges"), self.arch.isa,
+                                                            self.arch.isas()))
 
     @staticmethod
     def _merge(spans):

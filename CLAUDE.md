@@ -46,8 +46,8 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
 
 - **The plan is `docs/todo.md`.** Start each item with `git pull --rebase --autostash`: the user may steer from
   anywhere by editing `docs/todo.md` on GitHub (answering a question, reordering). Take the first
-  open item. Finish it with tests on both gizmo
-  builds, tick it off in the same commit, push. Change the plan when the work shows a better one (an
+  open item. Finish it with tests on every gizmo
+  build, tick it off in the same commit, push. Change the plan when the work shows a better one (an
   item is bigger than thought, a bug comes first, an approach turns out wrong): split, add, reorder or
   drop items, and say why in the commit message. Every few items, check with numbers (test times,
   coverage, what an item gained) whether the order still makes sense.
@@ -57,7 +57,8 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   with what does not depend on it.
 - **When stuck**, after two serious attempts or a few hours on one item: write down what was tried
   and why it failed in the item, put the tree back to the last commit, and take the next item.
-- **Commit only green**: `.venv/bin/pytest` passes, both gizmo builds. Push only through the leak
+- **Commit only green**: `.venv/bin/pytest` passes, every gizmo build (rv32 for the tests marked
+  `rv32` until the port is complete). Push only through the leak
   check (rule 9) with a script that stops on its exit status; never force-push without the user.
   The push script runs the fast tests first (`pytest -m "not slow"`, about 15 s) and refuses a red
   tree: once a push went out because the command that ran the tests went on after they failed.

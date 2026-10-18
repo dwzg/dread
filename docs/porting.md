@@ -1,9 +1,10 @@
 # Porting DREAD to another architecture
 
 Everything DREAD knows about an instruction set sits, or should sit, in one module of `dread/arch`.
-`dread.arch.get()` returns the layer for a target's `[arch]` section; `dread.arch.arm.Arm` is the one
-that exists and documents every method in its docstrings. This page lists what a new layer has to
-provide, what is still ARM-specific outside the layer, and the order of the work.
+`dread.arch.get()` returns the layer for a target's `[arch]` section: `dread.arch.arm.Arm` documents
+every method in its docstrings, `dread.arch.riscv.RiscV` is the second layer (RV32IMC, under way).
+This page lists what a new layer has to provide, what is still ARM-specific outside the layer, and
+the order of the work.
 
 ## The layer
 
@@ -24,7 +25,7 @@ A class whose constructor takes the keys of `[arch]` (beyond `name`), with these
 
 | Method | What it gives |
 |---|---|
-| `disassembler(isa)`, `decode(code, address, isa)` | capstone objects with details |
+| `disassembler(isa)`, `decode(code, address, isa)` | instruction objects with `address`, `size`, `bytes`, `mnemonic`, `op_str` (capstone's; RISC-V wraps capstone and adds its own decoded fields, because capstone 5 reports no registers for RISC-V) |
 | `insn_length(code, isa)`, `min_insn(isa)` | lengths, for walking code |
 
 **What an instruction does** (used by the program database, regflow, switches, noreturn, the
@@ -40,7 +41,8 @@ generator, the lifter, the reading aids)
 | `stack_kind(insn)` | push and pop forms |
 | `literal(insn, isa)`, `pc_address(insn, isa)`, `pc_value(address, isa)` | pc-relative loads and addresses |
 | `bound_check(insn)`, `switch_targets(insn, program, inside)` | switch shapes (dread.switches runs them) |
-| `mark_call(program, insn)`, `link_pair(prev, insn, isa)` | optional: calls that are not plain calls (stubs, switch helpers, two-instruction calls) |
+| `mark_call(program, insn)`, `link_pair(prev, insn, isa)` | optional: calls that are not plain calls (stubs, switch helpers, two-instruction calls: RISC-V's auipc + jalr, and its auipc/lui + addi addresses) |
+| `link_reg`, `veneer_reg` | the register a call leaves the return address in, and the one veneers go through |
 
 **Placing C** (the overlay)
 
@@ -49,6 +51,12 @@ generator, the lifter, the reading aids)
 | `branch(src, dst, isa, link)`, `branch_length(isa)` | the branch left at a moved function's entry (it must exist on the target core) |
 | `start_address(address, isa)` | the address to call code of an isa at (ARM: bit 0 for Thumb) |
 | `symbol_asm(name, address, isa)` | optional: an absolute symbol with its type (else PROVIDE) |
+
+**The listing** (`dread asm`)
+
+| Method | What it gives |
+|---|---|
+| `asm()` | the assembler's dialect: comment character, data directives, prelude, instruction-set switches, raw bytes, function labels, and each instruction's operands with labels for places (`ArmAsm`: GNU as; `RiscVAsm`: llvm-mc with `.option exact`) |
 
 **Emulation** (Unicorn today)
 
@@ -68,8 +76,14 @@ needed on it):
   architecture gets its own module beside them (the acceptance in `dread lift --check` and the system
   run are generic).
 - `dread.autocase`: the compare-guided stage reads capstone ARM operands (about twenty places).
-- `dread.mkasm`: the listing's directives (`.syntax unified`, `.arm`, `.thumb`) and Thumb widths.
-- `dread.elfimport` (ARM dispatch slots between functions) and `dread.record` (the frame of a call).
+- `dread.elfimport` (ARM dispatch slots and padding between functions; other architectures skip
+  them) and `dread.record` (the frame of a call).
+
+Done for RISC-V: the listing's syntax moved behind `arch.asm()`, the ELF import reads `$x` mapping
+symbols as the layer's default instruction set, the reading aids take the argument registers from
+`arch.arg_regs()` and the link register from `arch.link_reg`, the compiler settings know clang
+(`[compiler] kind`), and the constant tracker stops at join points and retries behind any branch
+that falls through (it went by ARM's predicates before).
 - `dread.fasthooks`: the C hooks repair the Thumb IT state when the layer asks for it.
 
 ## The emulator

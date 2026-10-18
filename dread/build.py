@@ -49,11 +49,11 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
         objects.append(obj)
         if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(c), newest_header):
             todo.append((c, obj))
-    flags = target.compiler.cflags + REQUIRED + ["-I" + d for d in include]
+    flags = target.compiler.cflags + target.compiler.required() + ["-I" + d for d in include]
     procs = []
     for c, obj in todo:
         os.makedirs(os.path.dirname(obj), exist_ok=True)
-        procs.append((c, subprocess.Popen([target.compiler.tool("gcc")] + flags + ["-c", "-o", obj, c],
+        procs.append((c, subprocess.Popen(target.compiler.command("cc") + flags + ["-c", "-o", obj, c],
                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)))
     failed = []
     for c, p in procs:

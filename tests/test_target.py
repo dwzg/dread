@@ -24,6 +24,7 @@ def write(tmp_path, text):
     return str(tmp_path)
 
 
+@pytest.mark.rv32
 def test_gizmo_targets_load(target, variant):
     image = target.image()
     assert target.name == "gizmo-" + variant
@@ -31,12 +32,14 @@ def test_gizmo_targets_load(target, variant):
     assert len(image.payload()) > 1000
     assert image.limit > image.end
     assert [c.kind for c in image.startup()] == ["code", "data", "zero"]
-    assert target.abi.arg_regs == ["r0", "r1", "r2", "r3"]
+    assert target.abi.arg_regs == target.arch.arg_regs(target.arch.default_args)
     assert target.memory.is_io(target.memory.io[0][0])
     assert target.memory.region(target.memory.stack_top - 4) is not None
     if variant == "m3":
         assert target.arch.profile == "m" and target.arch.isa == "t32"
         assert image.entry & 1 == 0 and image.base <= image.entry < image.end   # from the symbol
+    elif variant == "rv32":
+        assert target.arch.isa == "rv32" and image.entry == image.base          # _start, from the symbol
     else:
         assert target.arch.isa == "a32" and image.entry == image.base
 
@@ -104,6 +107,7 @@ def test_gizmo_dirs_exist():
     assert os.path.exists(os.path.join(gizmo_dir("a32"), "dread.toml"))
 
 
+@pytest.mark.rv32
 def test_gizmo_startup_lists_match_the_elf(target, variant):
     """make -C examples/gizmo/fw targets writes them (import-elf --write-startup); a stale list
     made the analysis read the wrong bytes for the RAM function once."""
@@ -124,3 +128,20 @@ def test_write_startup_replaces_only_the_list(tmp_path):
     assert '{kind = "data", run = 0x200, size = 0x20, stored = 0x40},' in text and "0x100" not in text
     assert text.startswith('[target]\nname = "x"') and text.rstrip().endswith("[memory]")
     assert not write_startup(str(path), "main", copies)          # unchanged the second time
+
+
+def test_compiler_kinds(tmp_path):
+    """[compiler] kind: a GNU cross toolchain by its prefix, or clang with its triple, lld and llvm-objcopy."""
+    for name in ("gnu", "clang", "bad"):
+        (tmp_path / name).mkdir()
+    gnu = Target.load(write(tmp_path / "gnu", MINIMAL)).compiler
+    assert gnu.command("cc") == ["arm-none-eabi-gcc"] and gnu.command("ld") == ["arm-none-eabi-ld"]
+    assert gnu.ldflags == ["--no-warn-rwx-segments"] and "-fno-reorder-functions" in gnu.required()
+    text = MINIMAL + '\n[compiler]\nkind = "clang"\ntriple = "riscv32-unknown-elf"\ncflags = ["-march=rv32imc"]\n'
+    clang = Target.load(write(tmp_path / "clang", text)).compiler
+    assert clang.command("cc") == ["clang", "--target=riscv32-unknown-elf"]
+    assert clang.command("ld") == ["ld.lld"] and clang.command("objcopy") == ["llvm-objcopy"]
+    assert clang.assembler()[-1] == "-march=rv32imc" and clang.ldflags == [] and "-fno-reorder-functions" not in clang.required()
+    with pytest.raises(TargetError, match="triple"):
+        Target.load(write(tmp_path / "bad", MINIMAL + '\n[compiler]\nkind = "clang"\n'))
+

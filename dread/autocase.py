@@ -742,7 +742,7 @@ class Generator:
                     spins.setdefault(m.spinning[0], m.spinning[1:])
                 learn_pointers(m, case)
                 if pointers:
-                    went = {m.reg("pc") & ~1, m.reg("r12")} - {self.fake_pointer, 0}
+                    went = {m.reg("pc") & ~1, m.reg(self.program.arch.veneer_reg)} - {self.fake_pointer, 0}
                     pin_args.update(i for i, v in enumerate(case["args"][:nregs]) if v in went)
                     pin_mem.update(a for a, n, v in case["mem"] if n == 4 and v in went)
                 # What the run loaded before it failed is an input all the same: a function whose

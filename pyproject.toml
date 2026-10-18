@@ -26,4 +26,5 @@ testpaths = ["tests"]
 markers = [
     "slow: takes more than a few seconds",
     "ghidra: needs a Ghidra installation (GHIDRA_INSTALL_DIR)",
+    "rv32: runs on gizmo-rv32 too (the RISC-V port's tests that work there already)",
 ]

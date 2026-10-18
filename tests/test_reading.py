@@ -1,38 +1,51 @@
 """Reading aids: constant arguments at a call (dread.constants), dread callsites and dread flat on
 gizmo's two builds."""
+import pytest
+
 from dread import callsites, constants, flat
 from dread.program import Program
 
 
+@pytest.mark.rv32
 def test_constant_arguments(program):
     fn = program.by_name["print_status"]
+    first = program.arch.arg_regs(1)[0]
     texts = []
     for callee, caller, address, kind in callsites.sites(program, ["uart_puts"]):
         if caller is fn:
-            value = constants.at(program, fn, address, ["r0"]).get("r0")
+            value = constants.at(program, fn, address, [first]).get(first)
             texts.append(constants.string_at(program, value) if value is not None else None)
     assert texts == ["mode ", None, " volume ", None, "\\r\\n"]     # the rest come from callees or the stack
 
 
+@pytest.mark.rv32
 def test_a_constant_behind_a_conditional_branch(program):
     """dispatch(3, c - '0') behind cmp r1, #9; bhi: the fill values take the branch, the second try
     starts behind it."""
     [(callee, caller, address, kind)] = callsites.sites(program, ["dispatch"])
-    assert constants.at(program, caller, address, ["r0", "r1"]) == {"r0": 3}
+    first, second = program.arch.arg_regs(2)
+    assert constants.at(program, caller, address, [first, second]) == {first: 3}
 
 
-def test_calls_grouped_by_an_argument(program):
+@pytest.mark.rv32
+def test_calls_grouped_by_an_argument(program, variant):
+    first = program.arch.arg_regs(1)[0]
     groups = {}
     for callee, caller, address, kind in callsites.sites(program, ["gpio_set"]):
-        groups.setdefault(constants.at(program, caller, address, ["r0"]).get("r0"), set()).add(caller.name)
-    assert groups == {1: {"cmd_led", "led_on", "led_off"}, 2: {"cmd_beep", "beep_on", "beep_off"}}
+        groups.setdefault(constants.at(program, caller, address, [first]).get(first), set()).add(caller.name)
+    expected = {1: {"cmd_led", "led_on", "led_off"}, 2: {"cmd_beep", "beep_on", "beep_off"}}
+    if variant == "rv32":       # clang inlined the handlers into dispatch: one call, reached with 1 and with 2
+        expected[None] = {"dispatch"}
+    assert groups == expected
 
 
+@pytest.mark.rv32
 def test_call_chains(program):
     assert callsites.chains(program, "main", "uart_putc")[0] in (["main", "uart_puts", "uart_putc"],
                                                                  ["main", "handle_key", "uart_putc"])
 
 
+@pytest.mark.rv32
 def test_flat_listing(program):
     lines = flat.listing(program, program.by_name["print_status"], callers=flat.callers_of(program))
     text = "\n".join(lines)
@@ -42,8 +55,6 @@ def test_flat_listing(program):
 
 
 import shutil
-
-import pytest
 
 from conftest import gizmo_dir
 

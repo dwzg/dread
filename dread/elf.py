@@ -137,12 +137,15 @@ class Elf:
         return bytes(out), start
 
     def mapping(self):
-        """ARM mapping symbols as {section index: [(address, kind)]}, kind "a32", "t32" or "data",
-        sorted by address. GNU as writes $a, $t and $d, sometimes with a suffix ($d.1)."""
+        """Mapping symbols as {section index: [(address, kind)]}, kind "a32", "t32", "code" or "data",
+        sorted by address. GNU as writes $a, $t and $d for ARM, sometimes with a suffix ($d.1);
+        LLVM writes $x (code; for RISC-V with the ISA string behind it: $xrv32i2p1_m2p0) and $d."""
         out = {}
         for sym in self.symbols:
             head = sym.name.split(".", 1)[0]
             kind = {"$a": "a32", "$t": "t32", "$d": "data"}.get(head)
+            if kind is None and head.startswith("$x"):
+                kind = "code"
             if kind and sym.shndx and sym.shndx < len(self.sections):
                 out.setdefault(sym.shndx, []).append((sym.value, kind))
         for v in out.values():

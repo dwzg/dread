@@ -47,10 +47,12 @@ TABLES = {
 # Known keys per section and their types. Sections in FREE belong to the tools that read them.
 SCHEMA = {
     "target": {"name": str, "title": str},
-    "arch": {"name": str, "isa": str, "profile": str, "cpu": str, "endian": str, "ghidra": str, "thumb2": bool},
+    "arch": {"name": str, "isa": str, "profile": str, "cpu": str, "endian": str, "ghidra": str, "thumb2": bool,
+             "extensions": str},
     "memory": {"regions": list, "io": list, "stack": dict, "sentinel": int, "scratch": dict},
     "abi": {"args": int, "callee_saved": list, "result": list},
-    "compiler": {"cross": str, "cflags": list, "include": list, "idioms": str},
+    "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "ldflags": list, "include": list,
+                 "idioms": str, "tools": dict},
     "paths": {"build": str, "src": str},
     "host": {"jobs": int, "free_cores": int, "nice": int},
 }
@@ -170,16 +172,65 @@ class Abi:
 
 
 class Compiler:
-    """[compiler]: how C for this target is compiled (prefix, flags, include directories)."""
+    """[compiler]: how C for this target is compiled.
+
+    kind     "gcc" (default): a GNU cross toolchain, `cross` + gcc, as, ld, objcopy; "clang": clang
+             --target=`triple` with its integrated assembler, ld.lld and llvm-objcopy
+    cross    the GNU prefix (default arm-none-eabi-)
+    triple   clang's --target (kind = "clang" needs it)
+    cflags   the flags of the original's build, as far as known
+    ldflags  flags for the linker (default: --no-warn-rwx-segments for GNU ld, none for lld)
+    include  further include directories
+    idioms   the lifter's compiler profile
+    tools    {"cc"|"as"|"ld"|"objcopy"|"nm": a command or a list} overriding the defaults
+    """
+
+    KINDS = ("gcc", "clang")
 
     def __init__(self, data, target):
-        self.cross = data.get("cross", "arm-none-eabi-")
+        self.kind = data.get("kind", "gcc")
+        if self.kind not in self.KINDS:
+            raise TargetError("%s: [compiler] kind is one of %s, not %r" % (target.file, ", ".join(self.KINDS),
+                                                                             self.kind))
+        self.cross = data.get("cross", "arm-none-eabi-" if self.kind == "gcc" else "")
+        self.triple = data.get("triple")
+        if self.kind == "clang" and not self.triple:
+            raise TargetError("%s: [compiler] kind = \"clang\" needs triple (clang's --target)" % target.file)
         self.cflags = list(data.get("cflags", []))
+        self.ldflags = list(data.get("ldflags", ["--no-warn-rwx-segments"] if self.kind == "gcc" else []))
         self.include = [target.path(p) for p in data.get("include", [])]
         self.idioms = data.get("idioms")
+        self.tools = dict(data.get("tools", {}))
+
+    def command(self, name):
+        """The command line (a list) that starts one tool: cc (compiles C, and assembly with
+        -x assembler), as, ld, objcopy, nm."""
+        if name in self.tools:
+            value = self.tools[name]
+            return list(value) if isinstance(value, list) else [value]
+        if self.kind == "clang":
+            clang = ["clang", "--target=" + self.triple]
+            return {"cc": clang, "as": clang + ["-c", "-x", "assembler"], "ld": ["ld.lld"],
+                    "objcopy": ["llvm-objcopy"], "nm": ["llvm-nm"]}[name]
+        return [self.cross + ("gcc" if name == "cc" else name)]
+
+    def assembler(self):
+        """The command that assembles a .s file into an object (add -o OBJ FILE): GNU as takes the
+        instruction set from the file's directives, clang from the flags (-march)."""
+        if self.kind == "clang" and "as" not in self.tools:
+            return self.command("as") + self.cflags
+        return self.command("as")
+
+    def required(self):
+        """Flags dread recon adds to every compile: a section per function and no common
+        symbols, so that the overlay can place each function; for GCC also
+        -fno-reorder-functions (else main goes to .text.startup)."""
+        flags = ["-ffunction-sections", "-fno-common"]
+        return flags + (["-fno-reorder-functions"] if self.kind == "gcc" else [])
 
     def tool(self, name):
-        return self.cross + name
+        """The program of one tool, as one string (a GNU toolchain's name; for clang, the first word)."""
+        return self.command("cc" if name == "gcc" else name)[0]
 
 
 class Copy:
@@ -471,7 +522,7 @@ def describe(target):
         lines.append("scratch    %s, %s bytes" % (h(m.scratch_base), h(m.scratch_size)))
     lines.append("abi: arguments %s, callee-saved %s, result %s" % (
         ", ".join(target.abi.arg_regs), ", ".join(target.abi.callee_saved), ", ".join(target.abi.result)))
-    lines.append("compiler: %sgcc %s" % (target.compiler.cross, " ".join(target.compiler.cflags)))
+    lines.append("compiler: %s %s" % (" ".join(target.compiler.command("cc")), " ".join(target.compiler.cflags)))
     return "\n".join(lines)
 
 

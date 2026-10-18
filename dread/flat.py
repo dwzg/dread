@@ -106,7 +106,7 @@ def rows(program, fn, flow=None, endless=None, callers=None):
                 text, name = value_parts(program, t)
                 comment.append({"text": text, "name": name} if name else {"text": text})
             if kind == "call" or (program.by_entry.get(t) is not None and t not in fn.insns):
-                args = constants.at(program, fn, a, ["r0", "r1", "r2", "r3"])
+                args = constants.at(program, fn, a, arch.arg_regs(4))
                 if args:
                     comment.append({"text": "with " + ", ".join("%s=%s" % (r, describe_value(program, v))
                                                                 for r, v in sorted(args.items()))})

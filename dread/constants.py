@@ -1,7 +1,8 @@
 """Constant register values at an instruction, found by running the code in front of it.
 
 The straight run of instructions in front of an address (back to the previous call, return or
-unconditional branch, at most RUN_BACK instructions, within the function) is executed twice in a bare
+unconditional branch, at most RUN_BACK instructions, within the function, and never past a join: an
+instruction a jump goes to, where the values may come from another path) is executed twice in a bare
 emulator with the image mapped (read-only): once with every register and every page outside the
 image filled with one pattern, once with another. A register that holds the same value after both
 runs got it from the code and the image alone: a constant (a literal, an address the code computes,
@@ -70,12 +71,34 @@ def _engine(program, isa):
     return uc, state
 
 
+_joins = {}
+
+
+def joins(program, fn):
+    """The instructions of fn that a jump goes to: what ran in front of one need not have run."""
+    key = (id(program), fn.entry)
+    got = _joins.get(key)
+    if got is not None and got[0] is program:
+        return got[1]
+    inside, out = set(fn.insns), set()
+    for insn in program.instructions(fn):
+        if insn is None:
+            continue
+        kind, target, _ = program.arch.flow(insn)
+        if kind == "jump" and isinstance(target, int) and (target & ~1) in inside:
+            out.add(target & ~1)
+    _joins[key] = (program, out)
+    return out
+
+
 def stretch(program, fn, address):
-    """The first instruction of the straight run in fn that ends in front of `address`."""
+    """The first instruction of the straight run in fn that ends in front of `address`; it does
+    not reach back past a join (`address` itself when that is one: then nothing is known)."""
     arch = program.arch
+    targets = joins(program, fn)
     i = fn.insns.index(address)
     start = i
-    while start > 0 and i - start < RUN_BACK:
+    while start > 0 and i - start < RUN_BACK and fn.insns[start] not in targets:
         prev = fn.insns[start - 1]
         insn = program.insn(prev)
         if insn is None or prev + insn.size != fn.insns[start]:
@@ -101,8 +124,10 @@ def at(program, fn, address, regs=None):
     starts, i = [first], fn.insns.index(first)
     while fn.insns[i] != address:
         insn = program.insn(fn.insns[i])
-        if insn is not None and arch.flow(insn)[0] == "jump" and arch.predicate(insn) is not None:
-            starts.append(fn.insns[i + 1])
+        if insn is not None:
+            kind, _, falls = arch.flow(insn)
+            if kind == "jump" and falls:    # a conditional branch (ARM: predicated; RISC-V: beq and kin)
+                starts.append(fn.insns[i + 1])
         i += 1
     names = list(regs or arch.general_regs())
     for start in starts:
@@ -128,7 +153,7 @@ def _run(program, first, address, names):
             uc.reg_write(arch.reg_id(r), word)
         arch.initial_status(uc)             # (before sp: the A profile banks sp per mode)
         uc.reg_write(arch.reg_id("sp"), word & ~0xFFF)     # a stack address that differs between the runs
-        uc.reg_write(arch.reg_id("lr"), word | 1)
+        uc.reg_write(arch.reg_id(arch.link_reg), arch.start_address(word & ~3, isa))
         try:
             uc.emu_start(arch.start_address(first, isa), address, count=RUN_BACK * 2)
         except UcError:

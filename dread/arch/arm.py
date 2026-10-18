@@ -12,6 +12,7 @@ the code it looks at. The target's [arch] isa is the default for code the table 
 Only little-endian is supported. Big-endian ARM (BE-32 on old cores, BE-8 later) is not
 implemented and not tested.
 """
+import re
 import struct
 
 import capstone as cs
@@ -73,6 +74,8 @@ class Arm:
     default_callee_saved = ("r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11")
     default_result = ("r0", "r1")
     word = 4
+    link_reg = "lr"         # where a call leaves the return address
+    veneer_reg = "r12"      # the register a veneer or a call through a register may go through (ip)
 
     def __init__(self, isa="a32", profile="a", cpu=None, endian="little", ghidra=None, thumb2=None):
         if isa not in ("a32", "t32"):
@@ -678,3 +681,105 @@ class Arm:
 
     def pc_reg(self):
         return UC_REGS["pc"]
+
+    def asm(self):
+        """The listing's syntax (dread asm): ArmAsm."""
+        return ArmAsm(self)
+
+
+# ---- dread asm: the listing in GNU as syntax ----
+
+PCREL_RE = re.compile(r"\[pc(?:, #(-?(?:0x[0-9a-f]+|\d+)))?\]")
+TARGET_RE = re.compile(r"#(?:0x[0-9a-f]+|\d+)$")
+ROTIMM_RE = re.compile(r", #(\d+), #(\d+)$")
+WIDTH_FREE = ("bl", "blx", "cbz", "cbnz")       # Thumb branches with one width only
+
+
+class ArmAsm:
+    """How dread asm writes ARM code: GNU as, unified syntax; branches and literal loads by label,
+    Thumb ones with an explicit width so that the assembler keeps the original's."""
+
+    comment = "@"
+    directives = {"word": ".word", "half": ".hword", "byte": ".byte", "text": ".asciz"}
+
+    def __init__(self, arch):
+        self.arch = arch
+
+    def prelude(self, isa):
+        """The directives that put GNU as into the right instruction set."""
+        arch = self.arch
+        lines = ["\t.syntax unified"]
+        if getattr(arch, "gas", None):
+            lines.append("\t" + arch.gas)
+        elif arch.profile == "m":
+            lines.append("\t.cpu %s" % (arch.cpu or "cortex-m3"))
+        elif arch.cpu and arch.cpu.startswith("cortex-a"):
+            lines.append("\t.arch armv7-a")
+        elif arch.cpu and arch.cpu.startswith("arm11"):
+            lines.append("\t.arch armv6k")
+        else:
+            lines.append("\t.arch armv5te")
+        return lines + self.switch(isa)
+
+    def switch(self, isa):
+        return ["\t.arm" if isa == "a32" else "\t.thumb"]
+
+    def raw(self, b, isa):
+        if isa == "a32":
+            return ".inst", "0x%08x" % struct.unpack("<I", b)[0]
+        if len(b) == 2:
+            return ".inst.n", "0x%04x" % struct.unpack("<H", b)[0]
+        first, second = struct.unpack("<HH", b)
+        return ".inst.w", "0x%04x%04x" % (first, second)
+
+    def function_lines(self, label, isa, code):
+        return (["\t.thumb_func"] if isa == "t32" and code else []) + ["\t.type   %s, %%function" % label]
+
+    def operands(self, listing, insn, run, st, isa):
+        """(mnemonic, operands, comment) of one instruction for the listing, or None to write it raw."""
+        arch, prog = self.arch, listing.prog
+        mnem, ops, comment = insn.mnemonic, insn.op_str, ""
+        length = insn.size
+        target = arch.target(insn)
+        if target is not None:
+            tst = prog.stored(target)
+            if listing.space(target) == listing.space(run) and listing.has(tst, 2) and listing.labelable(tst):
+                listing.labels.add(tst)
+                if isa == "t32" and mnem.split(".")[0] not in WIDTH_FREE and "." not in mnem:
+                    mnem += ".w" if length == 4 else ".n"
+                return mnem, ("label", TARGET_RE.sub("", ops), tst), ""
+            return None
+        lit = arch.literal(insn, isa)
+        if lit is not None and PCREL_RE.search(ops):
+            address, size = lit
+            tst = prog.stored(address)
+            if listing.space(address) == listing.space(run) and listing.has(tst, 4) and tst not in listing.code:
+                if size == 4 and not tst & 3:
+                    value = listing.word(tst)
+                    comment = "=0x%x" % value
+                    what = listing.describe_value(value)
+                    if what:
+                        comment += " " + what
+                if isa == "t32" and "." not in mnem:
+                    mnem += ".w" if length == 4 else ".n"
+                listing.labels.add(tst)
+                return mnem, ("sub", PCREL_RE, ops, tst), comment
+        if mnem.split(".")[0] == "adr":
+            # Capstone prints the offset (adr r2, #4); the assembler needs the place, and a
+            # number would be taken for an absolute address and change the instruction's size.
+            at = arch.pc_address(insn, isa)
+            tst = prog.stored(at) if at is not None else None
+            if tst is not None and listing.space(at) == listing.space(run) and listing.has(tst, 1) \
+                    and listing.labelable(tst):
+                listing.labels.add(tst)
+                if isa == "t32" and "." not in mnem and length == 4:
+                    mnem += ".w"
+                return mnem, ("label", ops.split(",")[0] + ",", tst), ""
+            return None
+        if isa == "a32":
+            ops = ROTIMM_RE.sub(r", #\1, \2", ops)
+        if mnem.startswith(("mrs", "msr")):
+            ops = ops.replace("apsr", "cpsr")
+        if mnem.startswith(("mrc", "mcr", "cdp", "ldc", "stc")):
+            ops = ops.replace("#", "")
+        return mnem, ops, comment

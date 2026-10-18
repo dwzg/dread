@@ -1,4 +1,4 @@
-"""dread asm: a listing of an image that GNU as rebuilds byte for byte.
+"""dread asm: a listing of an image that the target's assembler rebuilds byte for byte.
 
 Writes `<out>/firmware.s`, which includes one file per region (64 KiB by default) with every byte
 of the image as an instruction or as data: labels at function entries and at the targets of
@@ -9,14 +9,17 @@ absolute addresses in literal pools and tables stay numbers, so code cannot move
 Code the startup copies to RAM is written where its bytes are stored. Its branches and literal
 loads keep labels when source and target lie in the same copy (the relative distance is the same at
 the stored and the run address). A branch from such code to elsewhere, or into it, is written as a
-raw instruction (`.inst`).
+raw instruction (its bytes).
 
 `--verify` assembles the listing, links it at the image's base and compares it with the image. An
-instruction GNU as encodes differently, or rejects, is added to the image's `asm_raw_words` table
-and written as `.inst` from then on; the loop repeats until the rebuild is identical. In Thumb an
+instruction the assembler encodes differently, or rejects, is added to the image's `asm_raw_words`
+table and written as raw bytes from then on; the loop repeats until the rebuild is identical. An
 instruction assembled at another length shifts everything behind it, so only the first mismatch of
-a region whose next instruction does not match either is taken per pass. Branches and literal loads
-carry an explicit width (`.w` or `.n`) to keep that rare.
+a region whose next instruction does not match either is taken per pass.
+
+The syntax is the architecture layer's (`arch.asm()`): GNU as for ARM (Thumb branches and literal
+loads carry an explicit width, `.w` or `.n`), clang's integrated assembler for RISC-V
+(`.option exact`: nothing is compressed or relaxed behind the listing's back).
 
     dread asm [--target DIR] [--image NAME] [--out DIR] [--verify] [--region BYTES] [--raw FILE]
 """
@@ -30,29 +33,8 @@ import sys
 from dread import target as tgt
 from dread.program import Program
 
-ASM_ERR_RE = re.compile(r"^(?:.*/)?([0-9a-f]{8}\.s):(\d+): Error", re.M)
-PCREL_RE = re.compile(r"\[pc(?:, #(-?(?:0x[0-9a-f]+|\d+)))?\]")
-TARGET_RE = re.compile(r"#(?:0x[0-9a-f]+|\d+)$")
-ROTIMM_RE = re.compile(r", #(\d+), #(\d+)$")
+ASM_ERR_RE = re.compile(r"^(?:.*/)?([0-9a-f]{8}\.s):(\d+):(?:\d+:)? (?:Error|error)", re.M)
 LABEL_CHARS = re.compile(r"[^A-Za-z0-9_.$]")
-WIDTH_FREE = ("bl", "blx", "cbz", "cbnz")       # Thumb branches with one width only
-
-
-def gas_prelude(arch, isa):
-    """The directives that put GNU as into the right instruction set."""
-    lines = ["\t.syntax unified"]
-    if getattr(arch, "gas", None):
-        lines.append("\t" + arch.gas)
-    elif arch.profile == "m":
-        lines.append("\t.cpu %s" % (arch.cpu or "cortex-m3"))
-    elif arch.cpu and arch.cpu.startswith("cortex-a"):
-        lines.append("\t.arch armv7-a")
-    elif arch.cpu and arch.cpu.startswith("arm11"):
-        lines.append("\t.arch armv6k")
-    else:
-        lines.append("\t.arch armv5te")
-    lines.append("\t.arm" if isa == "a32" else "\t.thumb")
-    return lines
 
 
 def load_raw_words(path):
@@ -65,8 +47,8 @@ def load_raw_words(path):
 def save_raw_words(path, raw):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
-        f.write("# Instructions written as .inst because GNU as encodes them differently from the\n"
-                "# original bytes (stored addresses). Maintained by `dread asm --verify`.\n")
+        f.write("# Instructions written as raw bytes because the assembler encodes them differently from\n"
+                "# the original bytes (stored addresses). Maintained by `dread asm --verify`.\n")
         for addr in sorted(raw):
             f.write("0x%x\n" % addr)
 
@@ -77,6 +59,7 @@ class Listing:
     def __init__(self, prog, raw, title):
         self.prog, self.raw, self.title = prog, raw, title
         self.arch, self.image = prog.arch, prog.image
+        self.syntax = prog.arch.asm()           # the assembler's dialect (dread.arch.*.Asm)
         self.base, self.data = prog.base, prog.data
         self.end = self.base + len(self.data)
         self.code = {}                      # stored address -> (run address, length, isa)
@@ -146,18 +129,12 @@ class Listing:
 
     def raw_text(self, st):
         run, length, isa = self.code[st]
-        b = self.data[st - self.base:st - self.base + length]
-        if isa == "a32":
-            return ".inst", "0x%08x" % struct.unpack("<I", b)[0]
-        if length == 2:
-            return ".inst.n", "0x%04x" % struct.unpack("<H", b)[0]
-        first, second = struct.unpack("<HH", b)
-        return ".inst.w", "0x%04x%04x" % (first, second)
+        return self.syntax.raw(self.data[st - self.base:st - self.base + length], isa)
 
     # ---- decoding ----
 
     def decode(self):
-        arch, prog = self.arch, self.prog
+        prog = self.prog
         for st in sorted(self.code):
             if st in self.raw:
                 continue
@@ -166,65 +143,25 @@ class Listing:
             if insn is None or insn.size != length:
                 self.raw.add(st)
                 continue
-            mnem, ops, comment = insn.mnemonic, insn.op_str, ""
-            target = arch.target(insn)
-            if target is not None:
-                tst = prog.stored(target)
-                if self.space(target) == self.space(run) and self.has(tst, 2) and self.labelable(tst):
-                    self.labels.add(tst)
-                    if isa == "t32" and mnem.split(".")[0] not in WIDTH_FREE and "." not in mnem:
-                        mnem += ".w" if length == 4 else ".n"
-                    self.ins[st] = (mnem, ("label", TARGET_RE.sub("", ops), tst), "")
-                else:
-                    self.raw.add(st)
-                continue
-            lit = arch.literal(insn, isa)
-            if lit is not None and PCREL_RE.search(ops):
-                address, size = lit
-                tst = prog.stored(address)
-                if (self.space(address) == self.space(run) and self.has(tst, 4) and tst not in self.code):
-                    if size == 4 and not tst & 3:
-                        value = self.word(tst)
-                        comment = "=0x%x" % value
-                        what = self.describe_value(value)
-                        if what:
-                            comment += " " + what
-                    if isa == "t32" and "." not in mnem:
-                        mnem += ".w" if length == 4 else ".n"
-                    self.labels.add(tst)
-                    self.ins[st] = (mnem, ("pcrel", ops, tst), comment)
-                    continue
-            if mnem.split(".")[0] == "adr":
-                # Capstone prints the offset (adr r2, #4); the assembler needs the place, and a
-                # number would be taken for an absolute address and change the instruction's size.
-                at = arch.pc_address(insn, isa)
-                tst = prog.stored(at) if at is not None else None
-                if tst is not None and self.space(at) == self.space(run) and self.has(tst, 1) and self.labelable(tst):
-                    self.labels.add(tst)
-                    if isa == "t32" and "." not in mnem and length == 4:
-                        mnem += ".w"
-                    self.ins[st] = (mnem, ("label", ops.split(",")[0] + ",", tst), "")
-                else:
-                    self.raw.add(st)
-                continue
-            if isa == "a32":
-                ops = ROTIMM_RE.sub(r", #\1, \2", ops)
-            if mnem.startswith(("mrs", "msr")):
-                ops = ops.replace("apsr", "cpsr")
-            if mnem.startswith(("mrc", "mcr", "cdp", "ldc", "stc")):
-                ops = ops.replace("#", "")
-            self.ins[st] = (mnem, ops, comment)
+            got = self.syntax.operands(self, insn, run, st, isa)
+            if got is None:
+                self.raw.add(st)
+            else:
+                self.ins[st] = got
 
     def render_ins(self, st):
+        """ops: text, ("label", the operands in front, target) for an operand that is a place, or
+        ("sub", pattern, text, target) for a place inside the operands (the pattern's match becomes
+        the label)."""
         mnem, ops, comment = self.ins[st]
         if isinstance(ops, tuple):
             if ops[0] == "label":
                 rest = ops[1].rstrip(", ")
                 ops = (rest + ", " if rest else "") + self.label(ops[2])
             else:
-                ops = PCREL_RE.sub(self.label(ops[2]), ops[1])
+                ops = ops[1].sub(self.label(ops[3]), ops[2])
         text = "\t%-7s %s" % (mnem, ops)
-        return text + ("\t@ " + comment if comment else "")
+        return text + ("\t%s %s" % (self.syntax.comment, comment) if comment else "")
 
     # ---- writing ----
 
@@ -232,18 +169,17 @@ class Listing:
         return a in self.labels or a in self.funcs or a in self.notes
 
     def emit_label(self, st, out):
+        c = self.syntax.comment
         if st in self.funcs:
             label, fn = self.funcs[st]
             where = "0x%x" % st if fn.entry == st else "stored at 0x%x, runs at 0x%x" % (st, fn.entry)
             out.append("")
-            out.append("@ ---- %s (%s, %d instruction bytes) ----" % (fn.name, where, fn.size))
+            out.append("%s ---- %s (%s, %d instruction bytes) ----" % (c, fn.name, where, fn.size))
         for text in self.notes.get(st, ()):
-            out.append("@ " + text)
+            out.append("%s %s" % (c, text))
         if st in self.funcs:
             label, fn = self.funcs[st]
-            if fn.isa == "t32" and st in self.code:
-                out.append("\t.thumb_func")
-            out.append("\t.type   %s, %%function" % label)
+            out += self.syntax.function_lines(label, fn.isa, st in self.code)
             out.append("%s:" % label)
         elif st in self.labels:
             out.append("L_%08x:" % st)
@@ -251,6 +187,7 @@ class Listing:
     def render_data(self, start, end, out):
         """Bytes [start, end) as strings, words, halfwords and bytes."""
         data, base = self.data, self.base
+        d, c = self.syntax.directives, self.syntax.comment
         pos = start
         while pos < end:
             if self.marked(pos):
@@ -266,7 +203,7 @@ class Listing:
                 run += 1
             if run >= 4 and pos + run < limit and data[off + run] == 0:
                 text = data[off:off + run].decode().replace("\\", "\\\\").replace('"', '\\"')
-                out.append('\t.asciz  "%s"' % text)
+                out.append('\t%-7s "%s"' % (d["text"], text))
                 pos += run + 1
             elif pos % 4 == 0 and pos + 4 <= limit:
                 words = []
@@ -279,18 +216,18 @@ class Listing:
                         break
                     words.append(self.word(pos))
                     pos += 4
-                line = "\t.word   " + ", ".join("0x%08x" % w for w in words)
+                line = "\t%-7s " % d["word"] + ", ".join("0x%08x" % w for w in words)
                 if len(words) == 1:
                     what = self.describe_value(words[0])
                     if what:
-                        line += "\t@ " + what
+                        line += "\t%s %s" % (c, what)
                 out.append(line)
             elif pos % 2 == 0 and pos + 2 <= limit and (pos + 2) % 4 == 0:
-                out.append("\t.hword  0x%04x" % struct.unpack_from("<H", data, off)[0])
+                out.append("\t%-7s 0x%04x" % (d["half"], struct.unpack_from("<H", data, off)[0]))
                 pos += 2
             else:
                 n = min(limit, (pos | 3) + 1) - pos
-                out.append("\t.byte   " + ", ".join("0x%02x" % b for b in data[off:off + n]))
+                out.append("\t%-7s " % d["byte"] + ", ".join("0x%02x" % b for b in data[off:off + n]))
                 pos += n
 
     def write(self, outdir, region):
@@ -304,16 +241,17 @@ class Listing:
         for rstart in range(self.base - self.base % region, self.end, region):
             lo, hi = max(rstart, self.base), min(rstart + region, self.end)
             fname = "%08x.s" % rstart
-            out = ["@ %s, 0x%08x-0x%08x. Generated by dread asm; change the tables and regenerate"
-                   % (self.title, lo, hi), "@ rather than editing this file.", "",
-                   "\t.arm" if isa == "a32" else "\t.thumb"]
+            cm = self.syntax.comment
+            out = ["%s %s, 0x%08x-0x%08x. Generated by dread asm; change the tables and regenerate"
+                   % (cm, self.title, lo, hi), "%s rather than editing this file." % cm, ""]
+            out += self.syntax.switch(isa)
             addr = lo
             while addr < hi:
                 c = self.code.get(addr)
                 if c is not None:
                     if c[2] != isa:
                         isa = c[2]
-                        out.append("\t.arm" if isa == "a32" else "\t.thumb")
+                        out += self.syntax.switch(isa)
                     self.emit_label(addr, out)
                     self.line_addr[(fname, len(out) + 1)] = addr
                     if addr in self.ins:
@@ -322,7 +260,7 @@ class Listing:
                         directive, value = self.raw_text(addr)
                         insn = self.prog.insn(c[0])
                         text = "%s %s" % (insn.mnemonic, insn.op_str) if insn else "?"
-                        out.append("\t%-7s %s\t@ %s" % (directive, value, text))
+                        out.append("\t%-7s %s\t%s %s" % (directive, value, self.syntax.comment, text))
                     addr += c[1]
                 else:
                     stop = addr
@@ -334,8 +272,10 @@ class Listing:
                 f.write("\n".join(out) + "\n")
             regions.append(fname)
         with open(os.path.join(outdir, "firmware.s"), "w") as f:
-            f.write("@ %s, image %s at 0x%x.\n@ Generated by dread asm.\n\n" % (self.title, self.image.name, self.base))
-            f.write("\n".join(gas_prelude(self.arch, first_isa)) + "\n\t.section .text, \"ax\"\n\n")
+            c = self.syntax.comment
+            f.write("%s %s, image %s at 0x%x.\n%s Generated by dread asm.\n\n" % (c, self.title, self.image.name,
+                                                                                 self.base, c))
+            f.write("\n".join(self.syntax.prelude(first_isa)) + "\n\t.section .text, \"ax\"\n\n")
             f.writelines('\t.include "%s"\n' % r for r in regions)
 
 
@@ -343,13 +283,13 @@ def build(target, base, outdir, builddir):
     """Assemble and link; (bytes or None, assembler messages)."""
     os.makedirs(builddir, exist_ok=True)
     obj, elf, binf = (os.path.join(builddir, n) for n in ("firmware.o", "firmware.elf", "payload.bin"))
-    tool = target.compiler.tool
-    r = subprocess.run([tool("as"), "-I", outdir, "-o", obj, os.path.join(outdir, "firmware.s")],
+    compiler = target.compiler
+    r = subprocess.run(compiler.assembler() + ["-I", outdir, "-o", obj, os.path.join(outdir, "firmware.s")],
                        capture_output=True, text=True)
     if r.returncode:
         return None, r.stderr
-    for cmd in ([tool("ld"), "--no-warn-rwx-segments", "-Ttext=0x%x" % base, "-e", "0x%x" % base, "-o", elf, obj],
-                [tool("objcopy"), "-O", "binary", "-j", ".text", elf, binf]):
+    for cmd in (compiler.command("ld") + compiler.ldflags + ["-Ttext=0x%x" % base, "-e", "0x%x" % base, "-o", elf, obj],
+                compiler.command("objcopy") + ["-O", "binary", "-j", ".text", elf, binf]):
         r2 = subprocess.run(cmd, capture_output=True, text=True)
         if r2.returncode:
             return None, r.stderr + r2.stderr

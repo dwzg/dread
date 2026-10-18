@@ -61,17 +61,18 @@ def read_functions(path):
     return out
 
 
-def read_code_ranges(path, default_isa):
+def read_code_ranges(path, default_isa, isas=("a32", "t32")):
     """code_ranges.tsv as [(start, end, isa)]: instruction runs, end exclusive, with an optional
-    third column a32 or t32 (default: the image's isa)."""
+    third column naming one of the architecture's instruction sets `isas` (default: the image's
+    isa)."""
     out = []
     for number, text in _lines(path):
         f = text.split()
         if len(f) < 2:
             raise TargetError("%s:%d: needs start and end" % (path, number))
         isa = f[2] if len(f) > 2 else default_isa
-        if isa not in ("a32", "t32"):
-            raise TargetError("%s:%d: isa is a32 or t32, not %s" % (path, number, isa))
+        if isa not in isas:
+            raise TargetError("%s:%d: isa is %s, not %s" % (path, number, " or ".join(isas), isa))
         out.append((_int(f[0], path, number), _int(f[1], path, number), isa))
     return out
 
@@ -182,7 +183,7 @@ class Program:
         self.copies = [c for c in self.image.startup() if c.kind != "zero"]
         self.isa = self.arch.isa
         self.code = {}                  # instruction address -> (length, isa)
-        self.ranges = read_code_ranges(self.image.table("code_ranges"), self.isa)
+        self.ranges = read_code_ranges(self.image.table("code_ranges"), self.isa, self.arch.isas())
         for start, end, isa in self.ranges:
             self._add_range(start, end, isa)
         self.functions = []

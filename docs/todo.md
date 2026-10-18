@@ -225,8 +225,28 @@ The long runs set the pace of everything after them. Measure first, then cut.
   keeps them; the survivors question gets an answer of its own when it comes with the last try (it
   only asks for arguments). The pilot computes the never-returning functions once for its lifters.
 - [ ] A measured run with a cloud model (waits for "Questions for the user").
-- [ ] RISC-V (RV32IMC): a third gizmo build (clang 23 and ld.lld are installed: no system packages
-  needed) and the architecture layer behind `dread.arch`.
+- [ ] RISC-V (RV32IMC), in the porting guide's order (docs/porting.md); clang 23 and ld.lld are
+  installed, Unicorn runs RV32 with the machine-mode registers, capstone 5 gives the text but not the
+  registers an instruction uses (`regs_access` is unsupported for RISC-V, system registers are no
+  operands), so the layer decodes the instruction bits itself for everything but the text:
+  - [x] gizmo-rv32 (clang and ld.lld with linker relaxation: calls inside the flash are `jal`, the
+    far call into RAM stays auipc + jalr; `start_rv32.S`, `rv32.ld`, the A32 build's interrupt
+    controller at the machine external interrupt) and `dread.arch.riscv`: its own decoder for
+    RV32IMC, Zicsr and the machine-mode instructions, checked against llvm-mc on random operands of
+    every form; flow, register effects, the auipc/lui pairs. `dread import-elf` ($x mapping symbols),
+    `dread functions`, `dread flat` and `dread callsites` work on it, and `dread asm --verify` rebuilds
+    it byte for byte on the first pass with no raw instruction (capstone's text as it is, labels for
+    jumps and branches, `.option exact`). Shared code that named ARM registers takes them from the
+    layer; `[compiler] kind = "clang"` (triple, lld, llvm-objcopy, no `-fno-reorder-functions`). The
+    constant tracker no longer reaches back past a join point (on rv32 it claimed `a0 = 2` for a call
+    reached with 1 and 2) and retries behind any branch that falls through. Clang inlined dispatch's
+    handlers (no table), so rv32's rewritten dispatch is a variant of its own. Tests that run on rv32
+    carry `@pytest.mark.rv32`; CI installs clang, lld and llvm.
+  - [ ] the emulator: `dread test` with generated cases on gizmo's rewritten functions;
+  - [ ] the overlay's branch (`jal x0` within 1 MiB, else `auipc t1` + `jalr x0`);
+  - [ ] regflow (ilp32: a0-a7, ra, s0-s11), switches, noreturn, the reading aids;
+  - [ ] the system run: reset, machine external interrupt through mtvec, mret;
+  - [ ] a lifter for RV32IMC and its fuzzer.
 
 ## Browser view (`dread gui`; asked for by the user on 2026-10-18)
 

@@ -27,18 +27,18 @@ from dread.elf import STT_FUNC, STT_OBJECT, Elf, ElfError
 IDENT = re.compile(r"[^A-Za-z0-9_]")
 
 
-def code_intervals(elf):
-    """[(start, end, kind)] of every allocated section, kind "a32", "t32" or "data", from the
-    mapping symbols; a section without mapping symbols is all code of its section flag's kind
-    when executable (a32 assumed), data otherwise."""
-    mapping = elf.mapping()
+def code_intervals(elf, isa="a32"):
+    """[(start, end, kind)] of every allocated section, kind an isa or "data", from the mapping
+    symbols ($a, $t for ARM; $x, code of `isa`, for RISC-V; $d data); a section without mapping
+    symbols is all code of `isa` when executable, data otherwise."""
+    mapping = {index: [(a, isa if k == "code" else k) for a, k in marks] for index, marks in elf.mapping().items()}
     out = []
     for index, s in enumerate(elf.sections):
         if not s.alloc or s.nobits or not s.size:
             continue
         marks = [(a, k) for a, k in mapping.get(index, []) if s.addr <= a < s.addr + s.size]
         if not marks:
-            out.append((s.addr, s.addr + s.size, "a32" if s.code else "data"))
+            out.append((s.addr, s.addr + s.size, isa if s.code else "data"))
             continue
         if marks[0][0] != s.addr:
             out.append((s.addr, marks[0][0], "data"))
@@ -65,6 +65,8 @@ def padding(elf, start, end, isa):
     GCC counts it in the symbol's size, but it never runs, and a test that has to run every
     instruction would never be complete."""
     from dread.arch.arm import Arm
+    if isa not in PADDING:                  # ARM's padding only: other architectures have no pools in code
+        return 0
     nop = 2 if isa == "t32" else 4
     if end % 4 or end - start <= nop or elf.read(end - nop, nop) not in PADDING[isa]:
         return 0
@@ -113,6 +115,8 @@ def inner_padding(elf, runs):
     behind ldr.w pc, [rN, rM, lsl #2] to align the table that follows; it never runs."""
     from dread.arch.arm import Arm
     out, insns_of = [], {}
+    if any(isa not in PADDING for _, _, isa in runs):
+        return out
     for start, end, isa in runs:
         arm = Arm(isa=isa, profile="m" if isa == "t32" else "a")
         insns_of[(start, end)] = (arm, list(arm.disassembler(isa).disasm(elf.read(start, end - start), start)))
@@ -129,10 +133,11 @@ def inner_padding(elf, runs):
     return out
 
 
-def tables(elf, unnamed=False, keep=()):
+def tables(elf, unnamed=False, keep=(), isa="a32"):
     """(functions, code_ranges, symbols): functions [(entry, name, insn_bytes)], code ranges
-    [(start, end, isa)], symbols [(kind, address, name)]."""
-    intervals = code_intervals(elf)
+    [(start, end, isa)], symbols [(kind, address, name)]. isa: the instruction set of code without
+    an ARM mapping symbol (the architecture's default)."""
+    intervals = code_intervals(elf, isa)
     code = [(a, b, k) for a, b, k in intervals if k != "data"]
     def cut(code, slot, size):
         return [piece for a, b, k in code
@@ -277,7 +282,7 @@ def main(argv=None):
     except (tgt.TargetError, ElfError, OSError) as e:
         print("dread import-elf: %s" % e, file=sys.stderr)
         return 1
-    functions, code, symbols = tables(elf, args.unnamed, set(filter(None, args.keep.split(","))))
+    functions, code, symbols = tables(elf, args.unnamed, set(filter(None, args.keep.split(","))), image.arch.isa)
     write_tables(image, functions, code, symbols)
     print("%d functions, %d code ranges, %d symbols written to %s"
           % (len(functions), len(code), len(symbols), os.path.relpath(image.config)))

@@ -1,5 +1,6 @@
-# The test suite on every push and pull request: both gizmo builds (ARM state and Cortex-M3), with
-# the cross compiler from the distribution. Ghidra tests are skipped (no Ghidra on the runner).
+# The test suite on every push and pull request: the gizmo builds (ARM state, Cortex-M3, RV32IMC),
+# with the cross compiler and LLVM from the distribution. Ghidra tests are skipped (no Ghidra on the
+# runner).
 name: tests
 on:
   push:
@@ -22,8 +23,9 @@ jobs:
       - name: Cross compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi clang lld llvm
           arm-none-eabi-gcc --version | head -1
+          clang --version | head -1
       - name: Install
         run: |
           python -m venv .venv

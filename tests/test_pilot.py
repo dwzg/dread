@@ -173,3 +173,14 @@ def test_the_providers_say_how_an_answer_ended():
     scripted = llm.Scripted([{"text": "x", "finish": "length", "tokens": 7}, "y"])
     assert scripted.ask("s", []) == "x" and scripted.last == {"finish": "length", "tokens": 7, "reasoning": 0}
     assert scripted.ask("s", []) == "y" and scripted.last["finish"] == "stop"
+
+
+@pytest.mark.slow
+@needs_gcc
+def test_a_correction_that_keeps_the_survivor_is_asked_for_the_argument(gizmo):
+    """The local model answered the survivors question with new code three times, each with the same
+    survivor: the second time the tools say that the code is not the reason and ask for the argument."""
+    (outcome, answers, stage), provider, lines = run(gizmo, [RIGHT, RIGHT, ARGUE], tries=3)
+    assert (outcome, answers, stage) == ("accepted", 3, "argued"), lines
+    assert "N: equivalent:" in provider.asked[1][1][-1]["content"]
+    assert "leaves the same change unnoticed as before" in provider.asked[2][1][-1]["content"]

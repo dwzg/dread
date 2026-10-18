@@ -8,6 +8,7 @@ from dread import ghidra
 from dread.program import read_code_ranges, read_functions
 
 
+@pytest.mark.rv32
 def test_directives_from_the_target(target, variant):
     image = target.image()
     lines = ghidra.directives(target, image)

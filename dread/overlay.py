@@ -266,14 +266,14 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
         with open(source, "w") as f:
             f.write("".join(typed(name, fn.entry, fn.isa) for name, fn in names))
         obj = os.path.join(workdir, "original_symbols.o")
-        r = subprocess.run([target.compiler.tool("gcc")] + target.compiler.cflags + ["-c", "-x", "assembler", "-o", obj,
-                                                                                      source],
+        r = subprocess.run(target.compiler.command("cc") + target.compiler.cflags + ["-c", "-x", "assembler", "-o", obj,
+                                                                                     source],
                            capture_output=True, text=True)
         if r.returncode:
             raise OverlayError("assembling the original's symbols failed:\n" + r.stderr)
         extra.append(obj)
     elf_path = os.path.join(workdir, "recon.elf")
-    r = subprocess.run([target.compiler.tool("ld"), "--no-warn-rwx-segments", "-T", script, "-o", elf_path]
+    r = subprocess.run(target.compiler.command("ld") + target.compiler.ldflags + ["-T", script, "-o", elf_path]
                        + list(objects) + extra, capture_output=True, text=True)
     if r.returncode:
         message = r.stderr

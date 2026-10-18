@@ -76,6 +76,15 @@ does:
 or, when the C has something the machine code does not, answer with the whole corrected file in a
 ```c block instead."""
 
+SURVIVORS_AGAIN = """The corrected C leaves the same change unnoticed as before:
+
+{items}
+
+The code is not the reason: no case and no search for an input tells the change apart. When you are
+sure the C does what the machine code does, argue each of them, on a line of its own:
+
+    N: equivalent: <one sentence>"""
+
 ARGUED = "argued by dread pilot ({label}), not reviewed: "
 
 CUT = """The answer ran out of room ({spent}) before any code. Reason less: begin with the whole file in
@@ -111,8 +120,9 @@ def prototypes(program, flow, fn):
     from dread.lift import direct_callees
     out = []
     for name in sorted(direct_callees(program, fn)):
-        reads = flow.read_regs(name) if flow else ["r0", "r1", "r2", "r3"]
-        n = max((int(r[1:]) + 1 for r in reads if re.fullmatch(r"r[0-3]", r)), default=0)
+        args = program.arch.arg_regs(4)
+        reads = flow.read_regs(name) if flow else args
+        n = max((args.index(r) + 1 for r in reads if r in args), default=0)
         wide = bool(flow and "r1" in flow.kept_regs(name) and "r1" not in flow.preserved_regs(name))
         out.append("%s %s(%s);" % ("u64" if wide else "u32", name,
                                    ", ".join("u32 a%d" % i for i in range(n)) or "void"))
@@ -122,19 +132,19 @@ def prototypes(program, flow, fn):
 def question(target, image, program, fn, flow=None, lifted=None):
     """(system, user) text of the write question."""
     from dread import callsites, constants, flat
-    compiler = " ".join([target.compiler.tool("gcc")] + target.compiler.cflags)
+    compiler = " ".join(target.compiler.command("cc") + target.compiler.cflags)
     system = SYSTEM.format(compiler=compiler, name=fn.name)
     lines = flat.listing(program, fn, flow, callers=flat.callers_of(program))
     parts = ["The function %s at 0x%x (%s, %d instructions):\n\n```\n%s\n```" % (
         fn.name, fn.entry, fn.isa, len(fn.insns), "\n".join(lines))]
     if flow is not None:
-        reads = [r for r in flow.read_regs(fn.name) if r in ("r0", "r1", "r2", "r3")]
+        reads = [r for r in flow.read_regs(fn.name) if r in program.arch.arg_regs(4)]
         parts.append("It reads %s at its entry (its arguments)." % (", ".join(reads) or "no argument register"))
         if "r1" in flow.kept_regs(fn.name) and "r1" not in flow.preserved_regs(fn.name):
             parts.append("Its callers read r0 and r1 after it: it returns a 64-bit value (u64).")
     calls = []
     for callee, caller, address, kind in callsites.sites(program, [fn.name]):
-        values = constants.at(program, caller, address, ["r0", "r1", "r2", "r3"])
+        values = constants.at(program, caller, address, program.arch.arg_regs(4))
         shown = ", ".join("%s=%s" % (r, flat.describe_value(program, v)) for r, v in sorted(values.items()))
         calls.append("- %s at 0x%x%s" % (caller.name, address, ": " + shown if shown else ""))
     if calls:
@@ -293,6 +303,7 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
     messages = [{"role": "user", "content": user}]
     log = ["# %s, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (name, provider.label(), system, user)]
     stage, outcome, answers, pending = "code", "rejected", 0, []
+    asked = []                              # the survivors the last survivors question named
     started = time.time()
     limit, extra = tries, False
     while answers < limit:
@@ -328,8 +339,10 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
             outcome = "accepted"
             break
         if stage == "mutate" and pending:
-            feedback = SURVIVORS.format(items="\n".join("%d. `%s`: %s" % (k, line, what)
-                                                         for k, (line, what) in enumerate(pending, 1)))
+            again = sorted(pending) == sorted(asked)
+            asked = list(pending)
+            feedback = (SURVIVORS_AGAIN if again else SURVIVORS).format(
+                items="\n".join("%d. `%s`: %s" % (k, line, what) for k, (line, what) in enumerate(pending, 1)))
             if answers == limit and not extra:      # the arguments get an answer of their own
                 limit, extra = limit + 1, True
         else:

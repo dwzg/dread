@@ -93,7 +93,8 @@ __attribute__((section(".ramfunc"), noinline)) u32 ram_crc(const u8 *p, u32 n)
 }
 
 #ifndef GIZMO_M3
-/* The ARM7-style build's interrupt: the entry (start_a32.S) calls this for every IRQ. */
+/* The ARM7-style and RV32 builds' interrupt: the entry (start_a32.S, start_rv32.S) calls this for
+   every interrupt. */
 void irq_dispatch(void)
 {
     u32 pending = INTC_PENDING;

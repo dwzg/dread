@@ -132,6 +132,34 @@ int ring_get(struct ring *r)
     return c;
 }
 
+#ifdef INLINED_COMMANDS
+/* The rv32 build's compiler (clang) turned the table of handlers into branches and inlined the
+   handlers, clamp included: the same calls and stores as that code, without a table. */
+void gpio_set(u32 pin, u32 on);
+
+int dispatch(u32 cmd, u32 arg)
+{
+    int level;
+    switch (cmd) {
+    case 0:
+        gpio_set(1, arg);
+        return 0;
+    case 1:
+        gpio_set(2, arg);
+        return 0;
+    case 2:
+        if (arg > 7)
+            return -1;
+        REG32(G_CONFIG + 8) = arg;          /* g_config.mode */
+        return 0;
+    case 3:
+        level = (int)arg < 0 ? 0 : (int)arg > 9 ? 9 : (int)arg;
+        REG32(G_CONFIG + 4) = level;        /* g_config.volume */
+        return level;
+    }
+    return -1;
+}
+#else
 typedef int (*command)(u32);
 
 int dispatch(u32 cmd, u32 arg)
@@ -140,6 +168,7 @@ int dispatch(u32 cmd, u32 arg)
         return -1;
     return ((const command *)COMMANDS)[cmd](arg);
 }
+#endif
 
 void uart_putc(char c)
 {
