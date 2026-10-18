@@ -1,0 +1,15 @@
+{
+  "name": "dread",
+  "description": "DREAD, a toolkit for reverse engineering firmware into C that is tested against the original in an emulator.",
+  "owner": {
+    "name": "Dennis Witzig",
+    "url": "https://github.com/dwzg"
+  },
+  "plugins": [
+    {
+      "name": "dread",
+      "source": "./plugins/dread",
+      "description": "Skills and agents that drive DREAD's tools: set up a firmware target, read its code, rewrite functions in C and prove them against the original."
+    }
+  ]
+}

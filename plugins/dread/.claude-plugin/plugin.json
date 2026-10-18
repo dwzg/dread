@@ -1,0 +1,19 @@
+{
+  "name": "dread",
+  "version": "0.1.0",
+  "description": "Drive DREAD (disassemble, rewrite, emulate and diff): set up a firmware target, read its code, rewrite functions in C and prove each one against the original in an emulator.",
+  "author": {
+    "name": "Dennis Witzig",
+    "url": "https://github.com/dwzg"
+  },
+  "repository": "https://github.com/dwzg/dread",
+  "license": "Apache-2.0",
+  "keywords": [
+    "reverse-engineering",
+    "firmware",
+    "decompilation",
+    "emulation",
+    "arm",
+    "differential-testing"
+  ]
+}

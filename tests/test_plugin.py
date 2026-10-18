@@ -1,0 +1,45 @@
+"""The Claude Code plugin in plugins/dread: its manifests parse, every skill and agent has the front
+matter Claude Code reads, and every `dread COMMAND` the skills and agents name exists (the skills only
+point at the tools; a renamed command must not leave them behind)."""
+import json
+import os
+import re
+
+from dread.cli import COMMANDS
+from conftest import ROOT
+
+PLUGIN = os.path.join(ROOT, "plugins", "dread")
+
+
+def documents():
+    for sub in ("skills", "agents"):
+        for dirpath, _, files in os.walk(os.path.join(PLUGIN, sub)):
+            for f in files:
+                if f.endswith(".md") and f != "TARGET.md":
+                    yield os.path.join(dirpath, f)
+
+
+def test_manifests_parse():
+    market = json.load(open(os.path.join(ROOT, ".claude-plugin", "marketplace.json")))
+    plugin = json.load(open(os.path.join(PLUGIN, ".claude-plugin", "plugin.json")))
+    assert [p["name"] for p in market["plugins"]] == [plugin["name"]] == ["dread"]
+    assert os.path.normpath(os.path.join(ROOT, market["plugins"][0]["source"])) == PLUGIN
+
+
+def test_front_matter():
+    found = list(documents())
+    assert len(found) >= 6
+    for path in found:
+        text = open(path).read()
+        head = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+        assert head, path
+        fields = dict(line.split(":", 1) for line in head.group(1).splitlines() if ":" in line)
+        assert fields.get("name", "").strip() and len(fields.get("description", "").strip()) > 40, path
+        if os.sep + "skills" + os.sep in path:
+            assert fields["name"].strip() == os.path.basename(os.path.dirname(path)), path
+
+
+def test_named_commands_exist():
+    for path in documents():
+        for command in re.findall(r"`dread ([a-z-]+)", open(path).read()):
+            assert command in COMMANDS, "%s names `dread %s`" % (path, command)

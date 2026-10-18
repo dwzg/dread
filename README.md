@@ -52,7 +52,8 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick) | done |
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
 | Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order | done |
-| Claude Code plugin, method documentation | planned |
+| Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
+| Method documentation and a porting guide | planned |
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
 | `dread pilot`: the reconstruction loop run unattended, an LLM (local or cloud) only for the thinking | after the ARM phases |
 | RISC-V: a third gizmo build and an architecture backend | after the pilot |
@@ -84,6 +85,18 @@ bin/dread flat --target examples/gizmo/m3 print_status        # one function to 
 bin/dread callsites --target examples/gizmo/m3 --by 0 gpio_set # who calls it, with which constants
 bin/dread callpair --target OTHER --other examples/gizmo/a32 --seed FUN_08000738=main   # names by call order
 ```
+
+### With Claude Code
+
+The repository is also a plugin marketplace. The `dread` plugin has skills that drive the tools
+(setting up a target, reading a firmware, rewriting a function, the system run), a writer and a
+reviewer agent, and a template for a target's README:
+
+```
+/plugin install dread --marketplace dwzg/dread
+```
+
+The skills only point at the tools: whatever a program can decide, the tools decide.
 
 A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the
 working directory, from `--target`, or from `$DREAD_TARGET`.

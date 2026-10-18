@@ -187,8 +187,11 @@ The long runs set the pace of everything after them. Measure first, then cut.
   position-independent: a stripped copy of gizmo-m3 gets 46 of 50 names back) and `dread callpair`
   (names by the order of calls: from one seed, main, 19 functions of the stripped Thumb-2 build
   named from the ARM build, all right).
-- [ ] Claude Code plugin: thin skills that call the tools (rule 8: process in code), a TARGET.md
-  template for a new target.
+- [x] Claude Code plugin (`plugins/dread`, the repository a marketplace): skills new-target,
+  read-firmware, rewrite-function and system-run that only point at the tools, agents dread-writer
+  and dread-reviewer, and TARGET.md, a README template for a target with the evidence behind each
+  value. `claude plugin validate` passes; a test checks the manifests, the front matter and that
+  every `dread COMMAND` the skills name exists.
 - [ ] Method documentation and a porting guide for a new architecture.
 
 ## After the ARM phases
