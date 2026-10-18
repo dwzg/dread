@@ -6,7 +6,9 @@ order; the condition flags are variables computed exactly (carry and overflow th
 arithmetic), conditional instructions (ARM's condition field, Thumb's IT blocks) are if statements.
 The function's own stack is a local array: the stack pointer's depth below its value at the entry
 is known statically at every instruction (refused otherwise), so [sp, #k] is a word of that array,
-or, above the entry, a stack argument, which is a parameter. Literal loads and adr are constants read
+or, above the entry, a stack argument, which is a parameter. The analysis also follows addresses in
+the frame through registers (a frame pointer: mov r7, sp ... mov sp, r7, and accesses through it)
+and the return address through pushes and pops (Thumb-1's pop {r3}; bx r3 is a return). Literal loads and adr are constants read
 from the image at lift time. A call passes the four argument registers and as many stack words as
 the callee reads above its entry (from the caller's outgoing area, or its own stack arguments for a
 tail call); the result is r0, or r0 and r1 for a callee whose callers read r1 (dread.regflow). A
@@ -28,8 +30,8 @@ the flags it leaves (C cannot return them), a read of a scratch register or the 
 that the callee leaves (dread.regflow), a call of a function that reads registers its caller leaves
 (beyond r0-r3; lr included: such a helper finds data behind the call), the address of a stack
 argument, an indirect jump that is neither a resolved switch nor a tail call, an exception return,
-code that falls through into what follows (a call that does not return, for one), or an entry in
-the asm_only table.
+code that falls through into what follows, or an entry in the asm_only table. A call of a function
+that never returns (dread.noreturn) does not fall through: an endless loop follows it in the C.
 
 With --check the lifted C is put to the test: every function that lifts (and that src does not
 define by hand) is built over the original together with the others, its generated cases run
@@ -100,7 +102,8 @@ def direct_callees(program, fn):
 class Lifter:
     def __init__(self, program, flow=None):
         self.prog, self.arch, self.flow = program, program.arch, flow
-        self._stack_args, self._entry, self._resolved = {}, {}, {}
+        self._stack_args, self._entry, self._resolved, self._states = {}, {}, {}, {}
+        self._noreturn = None
         path = program.image.table("asm_only")
         self.asm_only = read_ranges(path) if path and os.path.exists(path) else []
 
@@ -113,12 +116,31 @@ class Lifter:
             self._resolved[key] = switches.resolve(self.prog, fn, address)
         return self._resolved[key]
 
-    def successors(self, fn, index, address, insn, strict=True):
+    def never_returns(self, name):
+        """Whether the function never returns (dread.noreturn)."""
+        if self._noreturn is None:
+            from dread import noreturn
+            self._noreturn = noreturn.find(self.prog)
+        return name in self._noreturn
+
+    def dead_end(self, insn):
+        """The callee of an unconditional call that never returns, or None."""
+        kind, target, _ = self.arch.flow(insn)
+        if kind != "call" or self.arch.predicate(insn) is not None or not isinstance(target, int):
+            return None
+        callee = self.prog.by_entry.get(target & ~1)
+        return callee if callee is not None and self.never_returns(callee.name) else None
+
+    def successors(self, fn, index, address, insn, strict=True, values=None):
         """The instructions of fn that may run after the one at `address`. Falling through out of
-        the function or into data raises Refused when strict, else has no successor."""
+        the function or into data raises Refused when strict, else has no successor. A call of a
+        function that never returns does not fall through; a jump through a register that holds the
+        return address (values: see states) is a return."""
         kind, target, falls = self.arch.flow(insn)
+        if values is not None and self.ret_jump(insn, values):
+            kind = "return"
         out = []
-        if kind in ("next", "call", "icall") or falls:
+        if (kind in ("next", "call", "icall") or falls) and not self.dead_end(insn):
             i = index[address]
             if i + 1 < len(fn.insns) and fn.insns[i + 1] == address + insn.size:
                 out.append(fn.insns[i + 1])
@@ -133,47 +155,161 @@ class Lifter:
                 out += [t for t in got[0] if t in index]
         return out
 
-    def depths(self, fn, strict=True):
-        """{address: bytes below the entry's sp before the instruction} for every instruction a path
-        from the entry reaches; raises Refused when it is not the same on every path or changes in a
-        way not modelled (and, when strict, when the code falls through out of the function)."""
-        prog = self.prog
+    RET = ("ret",)
+
+    def states(self, fn, strict=True):
+        """{address: (depth, values)} before every instruction a path from the entry reaches.
+        depth: how many bytes the stack pointer is below its value at the entry. values: what is
+        known of registers (by name) and frame slots (by their depth, an int): ("sp", k) for the
+        address k bytes below the entry's stack pointer (a frame pointer, a pointer to a local) and
+        RET for the return address (lr at the entry, saved by a push, popped into another register:
+        Thumb-1's pop {r3}; bx r3 is a return). Where paths meet, the values they agree on are kept.
+        Raises Refused when the depth is not the same on every path or changes in a way not modelled
+        (and, when strict, when the code falls through out of the function)."""
+        key = (fn.name, strict)
+        if key in self._states:
+            return self._states[key]
+        prog, arch = self.prog, self.arch
         index = {a: i for i, a in enumerate(fn.insns)}
-        depth = {fn.insns[0]: 0}
+        states = {fn.insns[0]: (0, {"lr": self.RET})}
         work = [fn.insns[0]]
         while work:
             a = work.pop()
             insn = prog.insn(a)
             if insn is None:
                 raise Refused("0x%x does not decode" % a)
-            change = self.sp_change(insn)
-            kind = self.arch.flow(insn)[0]
-            if change and self.arch.is_conditional(insn) and kind != "return":
-                raise Refused("0x%x moves the stack pointer under a condition" % a)
-            d = depth[a] + (0 if kind == "return" else change)     # a conditional return goes on unpopped
-            for b in self.successors(fn, index, a, insn, strict):
-                if b in depth:
-                    if depth[b] != d:
-                        raise Refused("the stack pointer differs at 0x%x (%d and %d bytes)" % (b, depth[b], d))
+            depth, values = states[a]
+            returning = arch.flow(insn)[0] == "return" or self.ret_jump(insn, values)
+            new, after = self.step(insn, depth, values)
+            if arch.predicate(insn) is not None:
+                if new != depth and not returning:
+                    raise Refused("0x%x moves the stack pointer under a condition" % a)
+                after = {k: v for k, v in after.items() if values.get(k) == v}    # it may not run
+            if returning:
+                new, after = depth, values      # what follows a conditional return runs unpopped
+            for b in self.successors(fn, index, a, insn, strict, values):
+                if b in states:
+                    old_depth, old = states[b]
+                    if old_depth != new:
+                        raise Refused("the stack pointer differs at 0x%x (%d and %d bytes)" % (b, old_depth, new))
+                    met = {k: v for k, v in old.items() if after.get(k) == v}
+                    if met != old:
+                        states[b] = (old_depth, met)
+                        work.append(b)
                 else:
-                    depth[b] = d
+                    states[b] = (new, after)
                     work.append(b)
-        return depth
+        self._states[key] = states
+        return states
 
-    def sp_change(self, insn):
-        """How far an instruction moves the stack pointer down (negative: up)."""
+    def depths(self, fn, strict=True):
+        """{address: depth} of states()."""
+        return {a: st[0] for a, st in self.states(fn, strict).items()}
+
+    def ret_jump(self, insn, values):
+        """bx rN or mov pc, rN with the return address in rN."""
+        ops = insn.operands
+        if insn.id == A.ARM_INS_BX and ops and ops[0].type == A.ARM_OP_REG:
+            return values.get(self.arch._name(insn.reg_name(ops[0].reg))) == self.RET
+        if insn.id == A.ARM_INS_MOV and len(ops) == 2 and ops[0].reg == A.ARM_REG_PC and ops[1].type == A.ARM_OP_REG \
+                and ops[1].shift.type in (0, A.ARM_SFT_INVALID):
+            return values.get(self.arch._name(insn.reg_name(ops[1].reg))) == self.RET
+        return False
+
+    @staticmethod
+    def _put(values, key, value):
+        if value is None:
+            values.pop(key, None)
+        else:
+            values[key] = value
+
+    def step(self, insn, depth, values):
+        """(depth, values) after an instruction (see states)."""
+        arch, ops = self.arch, insn.operands
+        rname = lambda r: arch._name(insn.reg_name(r))
+        after = dict(values)
+        stack = arch.stack_kind(insn)
+        if stack in ("push", "pop"):
+            regs = [rname(o.reg) for o in ops if o.type == A.ARM_OP_REG and o.reg != A.ARM_REG_SP]
+            if stack == "push":
+                new = depth + 4 * len(regs)
+                for k, r in enumerate(regs):
+                    self._put(after, new - 4 * k, values.get(r))
+                return new, after
+            for k, r in enumerate(regs):
+                self._put(after, r, values.get(depth - 4 * k))
+            return depth - 4 * len(regs), after
+        reads, writes = arch.reg_effects(insn)
+        new = self.new_depth(insn, depth, values) if "sp" in writes else depth
+        known = self.made_value(insn, depth, values)
+        slot = self.stored_slot(insn, depth, values)
+        for r in writes:
+            if r not in ("sp", "pc", "flags"):
+                after.pop(r, None)
+        if arch.flow(insn)[0] in ("call", "icall"):
+            for r in AFTER_CALL:
+                after.pop(r, None)
+        if known is not None:
+            self._put(after, known[0], known[1])
+        if slot is not None:
+            self._put(after, slot[0], values.get(slot[1]))
+        return new, after
+
+    def frame_value(self, insn, reg, depth, values):
+        """("sp", k) when the register holds an address in the frame (sp itself included)."""
+        name = self.arch._name(insn.reg_name(reg))
+        if name == "sp":
+            return ("sp", depth)
+        v = values.get(name)
+        return v if v is not None and v[0] == "sp" else None
+
+    def made_value(self, insn, depth, values):
+        """(register, value) for the instructions that make a frame address or copy a known value:
+        mov rX, sp; mov rX, rY; add or sub rX, sp or a frame address, #imm."""
+        if self.arch.predicate(insn) is not None:
+            return None
+        i, ops = insn.id, insn.operands
+        rname = lambda r: self.arch._name(insn.reg_name(r))
+        if i in (A.ARM_INS_MOV, A.ARM_INS_MOVS) and len(ops) == 2 and ops[1].type == A.ARM_OP_REG \
+                and ops[1].shift.type in (0, A.ARM_SFT_INVALID) and ops[0].type == A.ARM_OP_REG:
+            v = self.frame_value(insn, ops[1].reg, depth, values) or values.get(rname(ops[1].reg))
+            return (rname(ops[0].reg), v) if v is not None else None
+        if i in (A.ARM_INS_ADD, A.ARM_INS_ADDW, A.ARM_INS_SUB, A.ARM_INS_SUBW) and len(ops) == 3 \
+                and ops[1].type == A.ARM_OP_REG and ops[2].type == A.ARM_OP_IMM:
+            v = self.frame_value(insn, ops[1].reg, depth, values)
+            if v is not None:
+                k = v[1] - ops[2].imm if i in (A.ARM_INS_ADD, A.ARM_INS_ADDW) else v[1] + ops[2].imm
+                return rname(ops[0].reg), ("sp", k)
+        return None
+
+    def stored_slot(self, insn, depth, values):
+        """(slot, register) for a word store into the frame at a known place (str rX, [sp or a
+        frame address, #k] without writeback)."""
+        if insn.id != A.ARM_INS_STR or self.arch.predicate(insn) is not None or insn.writeback:
+            return None
+        ops = insn.operands
+        if len(ops) != 2 or ops[1].type != A.ARM_OP_MEM or ops[1].mem.index:
+            return None
+        v = self.frame_value(insn, ops[1].mem.base, depth, values)
+        if v is None:
+            return None
+        return v[1] - ops[1].mem.disp, self.arch._name(insn.reg_name(ops[0].reg))
+
+    def new_depth(self, insn, depth, values):
+        """The depth after an instruction that writes sp: add or sub sp, sp, #imm, and mov sp, rX or
+        add or sub sp, rX, #imm with a frame address in rX (a frame pointer)."""
         ops, i = insn.operands, insn.id
-        kind = self.arch.stack_kind(insn)
-        if kind in ("push", "pop"):
-            regs = [o for o in ops if o.type == A.ARM_OP_REG and o.reg != A.ARM_REG_SP]
-            return 4 * len(regs) if kind == "push" else -4 * len(regs)
-        reads, writes = self.arch.reg_effects(insn)
-        if "sp" not in writes:
-            return 0
-        if i in (A.ARM_INS_SUB, A.ARM_INS_ADD, A.ARM_INS_SUBW, A.ARM_INS_ADDW) and ops[-1].type == A.ARM_OP_IMM \
-                and all(o.type == A.ARM_OP_REG and o.reg == A.ARM_REG_SP for o in ops[:-1]):
-            imm = ops[-1].imm
-            return imm if i in (A.ARM_INS_SUB, A.ARM_INS_SUBW) else -imm
+        if ops and ops[0].type == A.ARM_OP_REG and ops[0].reg == A.ARM_REG_SP:
+            if i in (A.ARM_INS_SUB, A.ARM_INS_ADD, A.ARM_INS_SUBW, A.ARM_INS_ADDW) and ops[-1].type == A.ARM_OP_IMM:
+                src = ops[1] if len(ops) == 3 else ops[0]
+                v = self.frame_value(insn, src.reg, depth, values) if src.type == A.ARM_OP_REG else None
+                if v is not None:
+                    return v[1] + ops[-1].imm if i in (A.ARM_INS_SUB, A.ARM_INS_SUBW) else v[1] - ops[-1].imm
+            if i == A.ARM_INS_MOV and len(ops) == 2 and ops[1].type == A.ARM_OP_REG \
+                    and ops[1].shift.type in (0, A.ARM_SFT_INVALID):
+                v = self.frame_value(insn, ops[1].reg, depth, values)
+                if v is not None:
+                    return v[1]
         raise Refused("0x%x changes the stack pointer in a way not modelled: %s %s" % (
             insn.address, insn.mnemonic, insn.op_str))
 
@@ -188,14 +324,18 @@ class Lifter:
         except Refused:
             self._stack_args[fn.name] = None
             return None
+        states = self.states(fn, strict=False)
         top = 0
         for a in fn.insns:
             if a not in depth:
                 continue
             insn, d = self.prog.insn(a), depth[a]
             for o in insn.operands:
-                if o.type == A.ARM_OP_MEM and o.mem.base == A.ARM_REG_SP and not o.mem.index:
-                    off = o.mem.disp - d
+                if o.type == A.ARM_OP_MEM and not o.mem.index:
+                    v = self.frame_value(insn, o.mem.base, d, states[a][1])
+                    if v is None:
+                        continue
+                    off = o.mem.disp - v[1]
                     width = 8 if insn.id in (A.ARM_INS_LDRD, A.ARM_INS_STRD) else 4
                     if off >= 0:
                         top = max(top, (off + width + 3) // 4)
@@ -217,6 +357,10 @@ class Lifter:
             return self._entry[fn.name]
         prog, arch = self.prog, self.arch
         index = {a: i for i, a in enumerate(fn.insns)}
+        try:
+            known = self.states(fn, strict=False)   # for returns through a register
+        except Refused:
+            known = {}
         start = frozenset(r for r in REGS + ["flags"] if r not in ARGS + ("sp", "pc"))
         state, found = {fn.insns[0]: start}, {}
         work = [fn.insns[0]]
@@ -236,7 +380,7 @@ class Lifter:
             if bad:
                 found[a] = bad
             after = undef if arch.predicate(insn) is not None else undef - writes
-            for b in self.successors(fn, index, a, insn, strict=False):
+            for b in self.successors(fn, index, a, insn, strict=False, values=known.get(a, (0, None))[1]):
                 old = state.get(b)
                 new = after if old is None else old | after
                 if new != old:
@@ -262,7 +406,8 @@ class Lifter:
         insns = prog.instructions(fn)
         if not insns or any(i is None for i in insns):
             raise Refused("an instruction does not decode")
-        depth = self.depths(fn)
+        states = self.states(fn)
+        depth = {a: st[0] for a, st in states.items()}
         undef, found = self.entry_states(fn)
         if found:
             a = min(found)
@@ -278,7 +423,7 @@ class Lifter:
             kind, target, _ = arch.flow(insn)
             if kind == "jump" and target is not None and (target & ~1) in depth:
                 targets.add(target & ~1)
-        self.ctx = {"fn": fn, "depth": depth, "undef": undef, "frame": frame, "callees": set(),
+        self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
         body = []
@@ -339,6 +484,10 @@ class Lifter:
 
     def name(self, r):
         return self.arch._name(self.insn_now.reg_name(r))
+
+    def values(self):
+        """What states() knows before the instruction being translated."""
+        return self.ctx["states"][self.insn_now.address][1]
 
     def reg(self, r, sp=False):
         """The C expression of a register read; the stack pointer only where `sp` allows it."""
@@ -505,12 +654,15 @@ class Lifter:
             callee = prog.by_entry.get(target & ~1)
             if callee is None:
                 raise Refused("0x%x calls into the middle of something (0x%x)" % (insn.address, target))
-            return self._call(callee, insn)
+            text = self._call(callee, insn)
+            return text + " for (;;) { }" if self.never_returns(callee.name) else text
         if kind == "icall":
             if i != A.ARM_INS_BLX:
                 raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
             return self._icall(insn, self.reg(ops[0].reg))
         if kind == "ijump":
+            if self.ret_jump(insn, self.values()):
+                return "return %s;" % self._ret()
             return self._switch_jump(insn)
         if kind == "stop":
             raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
@@ -519,7 +671,7 @@ class Lifter:
             return self._push(insn)
         if stack == "pop":
             return self._pop(insn)
-        if kind == "next" and self.sp_change(insn):
+        if kind == "next" and "sp" in arch.reg_effects(insn)[1]:
             return None                     # the stack pointer's depth is known statically
         lit = arch.literal(insn, isa)
         if lit is not None:
@@ -607,9 +759,9 @@ class Lifter:
         undef = self.ctx["undef"].get(insn.address, frozenset())
         out = []
         for k, r in enumerate(regs):
-            if r == "pc":
-                raise Refused("0x%x pushes pc" % insn.address)
-            if r not in undef:
+            if r == "pc":                   # an APCS frame: the address of the push, plus 8
+                out.append("*(volatile u32 *)(sp0 - %d) = 0x%xu;" % (d - 4 * k, insn.address + 8))
+            elif r not in undef:
                 out.append("*(volatile u32 *)(sp0 - %d) = %s;" % (d - 4 * k, r))
         return " ".join(out)
 
@@ -684,6 +836,10 @@ class Lifter:
             a = self.reg(first.reg, sp=True)
         else:
             a = self.reg(first.reg) if len(srcs) > 1 else d
+            v = self.values().get(self.name(first.reg)) if first.type == A.ARM_OP_REG else None
+            if v is not None and v[0] == "sp" and second.type == A.ARM_OP_IMM and kind in ("add", "sub"):
+                if (v[1] - second.imm if kind == "add" else v[1] + second.imm) <= 0:
+                    raise Refused("0x%x takes the address of a stack argument" % insn.address)
         b, _ = self.operand2(second)
         if kind in ("rsb", "rsc"):
             a, b = b, a
@@ -938,6 +1094,13 @@ class Lifter:
                         raise Refused("0x%x: a stack word beyond the arguments" % insn.address)
                     return "(u32)&s%d" % (off // 4), None, base
                 return "(sp0 - %d)" % (d - m.disp), None, base
+        v = self.values().get(base)
+        if v is not None and v[0] == "sp" and not m.index and post is None and not insn.writeback:
+            off = m.disp - v[1]             # through a frame pointer: a stack argument or a frame word
+            if off >= 0:
+                if off % 4 or off // 4 >= self.ctx["stack_params"]:
+                    raise Refused("0x%x: a stack argument access not on a word" % insn.address)
+                return "(u32)&s%d" % (off // 4), None, base
         b = self.reg(m.base, sp=True)
         if post is not None:
             if m.index or m.disp:
@@ -1160,6 +1323,9 @@ def check(target, image, names=None, out=print, jobs=None):
             continue
         if name in entered:
             out("refused  %-24s other code branches into its middle (the overlay cannot replace it)" % name)
+            continue
+        if lifter.never_returns(name):
+            out("refused  %-24s never returns (dread.noreturn): no case of it can end" % name)
             continue
         try:
             lifter.lift(fn)

@@ -90,10 +90,16 @@ The long runs set the pace of everything after them. Measure first, then cut.
   calls, Thumb-1 code (ARMv4T and ARMv6-M), and run on the A profile in Thumb state.
 - [ ] dread.autocase still takes capstone's update_flags to find the instruction that set the flags
   for a branch (adc without s counts); harmless for correctness, but a VERSION bump when changed.
-- [ ] Lifter gaps found on gizmo and from reading GCC output: calls of functions that never return
-  (a trailing bl abort is refused as falling through; needs a noreturn analysis), frame pointers
-  (-O0: mov sp, r7), Thumb-1 returns (pop {r1}; bx r1), mrs/msr/cps as inline assembly, VFP, ldrex
-  and strex, A-profile exception handlers (subs pc, lr).
+- [x] Functions that never return (`dread noreturn`, a fixpoint over calls and tail calls): a call
+  of one does not fall through in the lifter, and dread lift --check refuses them with that reason
+  instead of failing their case generation (gizmo: main, hang and the reset handlers).
+- [x] Frame pointers (mov r7, sp ... mov sp, r7; accesses and stack arguments through them) and
+  Thumb-1 returns (pop {r3}; bx r3): the lifter's stack analysis follows frame addresses through
+  registers and the return address through pushes and pops. liftfuzz generates both shapes. Its
+  first run of them crashed the process in dread.switches: on-demand pages unmapped after a run,
+  then written by a later one inside Unicorn (now kept mapped and zeroed between runs).
+- [ ] Lifter gaps still open: APCS frames (mov ip, sp; push {fp, ip, lr, pc}; ldmdb fp, {.., sp, pc}),
+  mrs/msr/cps as inline assembly, VFP, ldrex and strex, A-profile exception handlers (subs pc, lr).
 - [ ] The case generator could start from the coverage of an image's written cases (read_line takes
   18-37 s to generate and still misses what one recorded case covers); the cache key would then
   include the written cases. Measure what the comparison loses when fewer generated cases are kept.

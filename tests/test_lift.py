@@ -51,6 +51,19 @@ def test_translation_shapes(variant):
         0x40000000 if variant == "a32" else 0x20000001) in veneer
 
 
+def test_never_returns(variant):
+    from dread import noreturn
+    target = Target.load(gizmo_dir(variant))
+    expected = {"a32": {"hang", "main", "reset"}, "m3": {"Default_Handler", "Reset_Handler", "main"}}[variant]
+    assert noreturn.find(Program(target, target.image())) == expected
+
+
+def test_a_call_that_never_returns_ends_the_path():
+    target, image, lifted, refused = lift_all("m3")
+    text = lifted["Reset_Handler"].text                 # bl main is its last instruction; a pool follows
+    assert "r0 = main(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0; for (;;) { }" in text
+
+
 @needs_gcc
 def test_lifted_c_compiles(variant, tmp_path):
     target, image, lifted, refused = lift_all(variant)

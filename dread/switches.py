@@ -10,8 +10,10 @@ index the bound check in that run lets through (arch.bound_check: cmp rN, #K or 
 with the index register set to that value at the check. Where pc goes after the jump is a target.
 A value for which the run faults, takes the bound check's way out or leaves the run elsewhere gives
 no target. Registers other than the index start at zero, and memory outside the image reads as zero
-(pages are mapped on demand and dropped afterwards): the dispatch is expected to depend only on the
-index and on constant memory, which is what compiled switches do.
+(pages are mapped on demand and zeroed again after each run; never unmapped: Unicorn keeps stale
+references to an unmapped page and a later run that writes there crashes the process); the image is
+read-only, so a run that writes into it gives no target. The dispatch is expected to depend only on
+the index and on constant memory, which is what compiled switches do.
 
 A jump without a bound check (a veneer ldr ip, =f; bx ip, a far jump ldr pc, =f) is run twice with
 different register contents; when both land on the same address, that is its one target.
@@ -21,13 +23,14 @@ elsewhere (tail calls, through a table or a constant), or None when nothing reac
 caller then falls back to decoding a table it recognises (arch.switch_targets) or to coarser rules
 (dread.regflow).
 """
-from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_FETCH_UNMAPPED, UC_HOOK_MEM_READ_UNMAPPED,
-                     UC_HOOK_MEM_WRITE_UNMAPPED, UcError)
+from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_FETCH_UNMAPPED, UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE,
+                     UC_HOOK_MEM_WRITE_UNMAPPED, UC_PROT_EXEC, UC_PROT_READ, UcError)
 
 RUN_BACK = 16           # instructions in front of the jump searched for the bound check
 MAX_CASES = 1024        # index values tried at most
 STEPS = 64              # instructions run per value at most
 PAGE = 0x1000
+MAX_PAGES = 64          # zero pages mapped on demand per run at most
 
 _engines = {}           # (id(program), isa) -> (engine, state)
 
@@ -54,25 +57,38 @@ def _engine(program, isa):
     for c in program.copies:
         lo = c.stored - program.base
         uc.mem_write(c.run, bytes(program.data[lo:lo + c.size]))
-    state = {"mapped": []}
+    for lo, hi in merged:
+        uc.mem_protect(lo, hi - lo, UC_PROT_READ | UC_PROT_EXEC)
+    state = {"mapped": set(), "new": 0, "dirty": set()}
     uc.hook_add(UC_HOOK_CODE, _on_code, user_data=state)
     uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED, _on_unmapped, user_data=state)
+    uc.hook_add(UC_HOOK_MEM_WRITE, _on_write, user_data=state)
     uc.hook_add(UC_HOOK_MEM_FETCH_UNMAPPED, lambda *a: False)
     _engines[key] = (uc, state, program)
     return uc, state
 
 
 def _on_unmapped(uc, access, address, size, value, state):
-    """A zero page where the dispatch reads or writes outside the image (RAM, peripherals)."""
-    if len(state["mapped"]) >= 64:
+    """A zero page where the dispatch reads or writes outside the image (RAM, peripherals); at most
+    MAX_PAGES new ones per run."""
+    if state["new"] >= MAX_PAGES:
         return False
     for page in {address & ~(PAGE - 1), (address + size - 1) & ~(PAGE - 1)}:
+        if page in state["mapped"]:
+            continue
         try:
             uc.mem_map(page, PAGE)
-            state["mapped"].append(page)
         except UcError:
             return False
+        state["mapped"].add(page)
+        state["new"] += 1
     return True
+
+
+def _on_write(uc, access, address, size, value, state):
+    for page in {address & ~(PAGE - 1), (address + size - 1) & ~(PAGE - 1)}:
+        if page in state["mapped"]:
+            state["dirty"].add(page)
 
 
 def _on_code(uc, address, size, state):
@@ -104,17 +120,19 @@ def _run(program, uc, state, isa, runs, first, address):
             for r in arch.general_regs():
                 uc.reg_write(arch.reg_id(r), fill)
             arch.initial_status(uc)
-            state.update(set_at=set_at, reg=reg, value=value, lo=first, jump=address, landed=None, last=None)
+            state.update(set_at=set_at, reg=reg, value=value, lo=first, jump=address, landed=None, last=None, new=0)
             try:
                 uc.emu_start(arch.start_address(first, isa), 0xFFFFFFFF, count=STEPS)
+                landings.append(state["landed"] if state["last"] == address else None)
             except UcError:
                 landings.append(None)
-                continue
-            landings.append(state["landed"] if state["last"] == address else None)
+            for page in state["dirty"]:     # zero again what the run wrote, for the next one
+                uc.mem_write(page, bytes(PAGE))
+            state["dirty"] = set()
     finally:
-        for page in state["mapped"]:
-            uc.mem_unmap(page, PAGE)
-        state["mapped"] = []
+        for page in state["dirty"]:
+            uc.mem_write(page, bytes(PAGE))
+        state["dirty"] = set()
     return landings
 
 

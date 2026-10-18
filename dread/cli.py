@@ -21,6 +21,7 @@ COMMANDS = {
     "record": ("dread.record", "written cases from Python models of a function's callees"),
     "sysrun": ("dread.sysrun", "the image from reset with device models, original against rebuilt"),
     "sysrecord": ("dread.sysrecord", "written cases recorded from a system run, for the functions it enters"),
+    "noreturn": ("dread.noreturn", "the functions that never return"),
     "lift": ("dread.lift", "translate functions to C instruction by instruction"),
     "liftfuzz": ("dread.liftfuzz", "check the lifter on random instructions against the emulator"),
     "leakcheck": ("dread.leakcheck", "look for a private project's names and addresses before publishing"),

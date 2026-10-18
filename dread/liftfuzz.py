@@ -16,15 +16,18 @@ mode (offsets, register offsets with shifts, writeback, post-index) on the buffe
 block transfers, frame slots and addresses of them; forward branches on a bit of the buffer (so
 that inputs go both ways; cbz and cbnz on Thumb) and on the flags; calls of three helpers (one takes
 three registers, one returns r0 and r1, one takes a stack argument); push and pop around a few
-instructions; IT blocks on Thumb-2. At the end the registers are stored into a result buffer and
-the flags with them, read back through conditional instructions, so that the comparison sees them as
-memory.
+instructions; IT blocks on Thumb-2. About a third of the functions keep a frame pointer (r7 on
+Thumb, r11 in ARM state) that addresses the frame and restores sp at the end, and about a third
+return the Thumb-1 way (pop {r3}; bx r3). At the end the registers are stored into a result buffer
+and the flags with them, read back through conditional instructions, so that the comparison sees
+them as memory.
 
 A failing function is reduced (--reduce N: the first N): the shortest failing prefix of its units
 (an instruction with its set-up lines, an IT block, a branch with what it jumps over), then every
 unit whose absence keeps it failing is left out; what remains is printed. Found this way, on its
 first runs: capstone reports adc, sbc and rsc without s as setting the flags, and the shifter's
-carry of movs r1, r1, lsl #7 was taken after r1 was written.
+carry of movs r1, r1, lsl #7 was taken after r1 was written. Its returns through r3 also made
+dread.switches crash the process inside Unicorn (pages unmapped after a run, written by a later one).
 
 The ISAs: a32 (ARMv7-A in ARM state) and t32 (Cortex-M3, Thumb-2). Needs the cross toolchain
 (arm-none-eabi-). The image, its target directory and the lifted C go to a temporary directory,
@@ -128,14 +131,20 @@ class Generator:
         self.thumb = isa == "t32"
         self.label = 0
         self.r12 = ISAS[isa]["ram"] + 0x1000 + 4 * (BUF_WORDS // 2)
+        self.fp = None              # the frame pointer's number in a function that has one
 
     # pieces
 
+    def regs(self, low=False):
+        """The register numbers a body may write: r0-r11 (r0-r7 when low), without the frame
+        pointer of a function that has one."""
+        return [r for r in range(8 if low else 12) if r != self.fp]
+
     def dst(self, low=False):
-        return "r%d" % self.rng.randrange(8 if low else 12)
+        return "r%d" % self.rng.choice(self.regs(low))
 
     def src(self):
-        return "r%d" % self.rng.randrange(13)
+        return "r%d" % self.rng.choice(self.regs() + [12])
 
     def cond(self, p=0.25):
         return self.rng.choice(CONDS) if not self.thumb and self.rng.random() < p else ""
@@ -257,7 +266,7 @@ class Generator:
                                              self.src())]
         if k == 5 and self.thumb:
             return ["%s%s %s, %s, %s" % (rng.choice(["udiv", "sdiv"]), cond, self.dst(), self.src(), self.src())]
-        lo, hi = rng.sample(range(12), 2)
+        lo, hi = rng.sample(self.regs(), 2)
         s = "s" if not self.thumb and rng.random() < 0.3 else ""
         return ["%s%s%s r%d, r%d, %s, %s" % (rng.choice(["umull", "smull", "umlal", "smlal"]), s, cond, lo, hi,
                                              self.src(), self.src())]
@@ -343,9 +352,10 @@ class Generator:
         op = rng.choice(["ldrd", "strd"])
         pre, b = self.base(4, span=8)
         if self.thumb:
-            t1, t2 = rng.sample([r for r in range(12) if "r%d" % r != b], 2)
+            t1, t2 = rng.sample([r for r in self.regs() if "r%d" % r != b], 2)
         else:
-            t1 = rng.choice([r for r in (0, 2, 4, 6, 8, 10) if "r%d" % r != b and "r%d" % (r + 1) != b])
+            t1 = rng.choice([r for r in (0, 2, 4, 6, 8, 10) if "r%d" % r != b and "r%d" % (r + 1) != b
+                             and self.fp not in (r, r + 1)])
             t2 = t1 + 1
         k = rng.randrange(3)
         off = rng.randrange(-4, 5) * 4
@@ -360,10 +370,10 @@ class Generator:
         pre, b = self.base(4, span=16)
         mode = rng.choice(["ia", "db"] if self.thumb else ["ia", "ib", "da", "db"])
         op = rng.choice(["ldm", "stm"])
-        regs = sorted(rng.sample([r for r in range(12) if "r%d" % r != b], rng.randrange(1, 5)))
+        regs = sorted(rng.sample([r for r in self.regs() if "r%d" % r != b], rng.randrange(1, 5)))
         wb = "!" if rng.random() < 0.5 else ""
         if self.thumb and len(regs) == 1:
-            regs.append(next(r for r in range(12) if "r%d" % r != b and r not in regs))
+            regs.append(next(r for r in self.regs() if "r%d" % r != b and r not in regs))
             regs.sort()
         return pre + ["%s%s%s %s%s, {%s}" % (op, mode, cond, b, wb, ", ".join("r%d" % r for r in regs))]
 
@@ -371,6 +381,14 @@ class Generator:
         rng = self.rng
         k = rng.randrange(4)
         slot = rng.randrange(FRAME // 4) * 4
+        if self.fp is not None and rng.random() < 0.5:
+            base = "r%d" % self.fp      # the frame pointer holds the frame's lowest address
+            if k == 0:
+                return ["str%s %s, [%s, #%d]" % (cond, self.src(), base, slot)]
+            if k == 1:
+                return ["ldr%s %s, [%s, #%d]" % (cond, self.dst(), base, slot)]
+            return ["%s%s %s, [%s, #%d]" % (rng.choice(["ldrb", "strb", "ldrh", "strh"]), cond, self.dst(), base,
+                                            slot + rng.choice([0, 2]))]
         if k == 0:
             return ["str%s %s, [sp, #%d]" % (cond, self.src(), slot)]
         if k == 1:
@@ -428,8 +446,8 @@ class Generator:
         if r < 0.31:
             # push and pop around a few units, into other registers: the stack pointer moves inside
             # the function and frame slots are addressed from the moved pointer
-            pushed = sorted(rng.sample(range(12), 2))
-            popped = sorted(rng.sample(range(12), 2))
+            pushed = sorted(rng.sample(self.regs(), 2))
+            popped = sorted(rng.sample(self.regs(), 2))
             lines = ["push {r%d, r%d}" % tuple(pushed)]
             k = rng.randrange(1, 3)
             for _ in range(k):
@@ -448,9 +466,10 @@ class Generator:
         if cond:
             lines = [lines[0]]
         lines += ["ldr r12, =0x%x" % self.r12]
-        lines += ["mov r1, r%d" % rng.randrange(4, 12)] if helper != "h1" else []
-        lines += ["mov r2, r%d" % rng.randrange(4, 12), "mov r3, r%d" % rng.randrange(4, 12),
-                  "cmp r0, r%d" % rng.randrange(4, 12)]
+        high = [r for r in self.regs() if r >= 4]
+        lines += ["mov r1, r%d" % rng.choice(high)] if helper != "h1" else []
+        lines += ["mov r2, r%d" % rng.choice(high), "mov r3, r%d" % rng.choice(high),
+                  "cmp r0, r%d" % rng.choice(high)]
         return lines
 
     def body(self, name, length):
@@ -468,7 +487,11 @@ class Generator:
         kind = self.rng.choices(["data", "move", "compare", "shifts", "multiply", "misc"], [30, 10, 10, 10, 6, 8])[0]
         return getattr(self, kind)(cond)
 
-    def function(self, name, units, buf, result):
+    def function(self, name, units, buf, result, style):
+        """The function around a body. style: "fp" keeps a frame pointer (r7 on Thumb, r11 in ARM
+        state; the body neither writes nor reads it except to address the frame) and restores sp
+        from it; "ret" returns the Thumb-1 way, through a register the return address was popped
+        into."""
         lines = [".align 2", ".global %s" % name, ".type %s, %%function" % name]
         if self.thumb:
             lines.append(".thumb_func")
@@ -476,15 +499,29 @@ class Generator:
         lines += ["str r0, [sp, #%d]" % k for k in range(0, FRAME, 4)]
         lines += ["mov r4, r0", "eor r5, r1, r0", "add r6, r2, r1", "sub r7, r3, r2", "orr r8, r0, r3",
                   "bic r9, r1, r2", "rsb r10, r2, r3", "eor r11, r3, r0, ror #7",
-                  "ldr r12, =0x%x" % (buf + 4 * (BUF_WORDS // 2)), "cmp r0, r1"]
+                  "ldr r12, =0x%x" % (buf + 4 * (BUF_WORDS // 2))]
+        fp = self.fp_number() if "fp" in style else None
+        if fp is not None:
+            lines.append(self.rng.choice(["mov r%d, sp" % fp, "add r%d, sp, #0" % fp]))
+        lines.append("cmp r0, r1")
         lines += [l for unit in units for l in unit]
+        if fp is not None:
+            restore = ["mov sp, r%d" % fp] + ([] if self.thumb else ["add sp, r%d, #0" % fp, "sub sp, r%d, #0" % fp])
+            lines += [self.rng.choice(restore), "mov r%d, #0" % fp]     # a stack address differs by design
         lines += ["add sp, sp, #%d" % FRAME, "ldr lr, =0x%x" % result, "stm lr, {r0-r12}", "mov r0, #0"]
         for bit, c in ((8, "mi"), (4, "eq"), (2, "cs"), (1, "vs")):
             if self.thumb:
                 lines.append("it %s" % c)
             lines.append("orr%s r0, r0, #%d" % (c, bit))
-        lines += ["str r0, [lr, #52]", "pop {r4-r11, pc}", ".ltorg", ".size %s, . - %s" % (name, name)]
-        return lines
+        lines.append("str r0, [lr, #52]")
+        if "ret" in style:
+            lines += ["pop {r4-r11}", "pop {r3}", "bx r3"]
+        else:
+            lines.append("pop {r4-r11, pc}")
+        return lines + [".ltorg", ".size %s, . - %s" % (name, name)]
+
+    def fp_number(self):
+        return 7 if self.thumb else 11
 
 
 HELPERS = [
@@ -504,14 +541,16 @@ def helpers(thumb):
 
 
 def generate(isa, functions, length, inputs, seed):
-    """({name: units}, {name: cases}) of random functions and their inputs."""
+    """({name: (style, units)}, {name: cases}) of random functions and their inputs."""
     rng = random.Random(seed)
     gen = Generator(isa, rng)
     buf = ISAS[isa]["ram"] + 0x1000
     bodies, cases = {}, {}
     for i in range(functions):
         name = "f%d" % i
-        bodies[name] = gen.body(name, length)
+        style = "".join(k for k in ("fp", "ret") if rng.random() < 0.3)
+        gen.fp = gen.fp_number() if "fp" in style else None
+        bodies[name] = (style, gen.body(name, length))
         cases[name] = []
         for _ in range(inputs):
             args = [rng.choice(EDGES) if rng.random() < 0.4 else rng.getrandbits(32) for _ in range(4)]
@@ -530,8 +569,8 @@ def make(isa, out, bodies, cases):
     gen = Generator(isa, random.Random(0))
     buf, result = conf["ram"] + 0x1000, conf["ram"] + 0x2000
     text = [".syntax unified", ".thumb" if gen.thumb else ".arm", ".text"]
-    for name, units in bodies.items():
-        text += gen.function(name, units, buf, result)
+    for name, (style, units) in bodies.items():
+        text += gen.function(name, units, buf, result, style)
     text += helpers(gen.thumb)
     os.makedirs(out, exist_ok=True)
     source = os.path.join(out, "fuzz.S")
@@ -595,16 +634,17 @@ def check(isa, work, bodies, cases, jobs=None):
     return failures, refused, uncovered
 
 
-def minimize(isa, units, cases, work, jobs=None):
+def minimize(isa, body, cases, work, jobs=None):
     """The shortest run of units that still differs or is refused: the shortest failing prefix,
-    then every unit left out whose absence keeps it failing."""
+    then every unit left out whose absence keeps it failing. Returns (style, units, builds)."""
+    style, units = body
     trials = [0]
 
     def fails(us):
         trials[0] += 1
         here = os.path.join(work, "trial")
         shutil.rmtree(here, ignore_errors=True)
-        failures, refused, _ = check(isa, here, {"f0": us}, {"f0": cases}, jobs)
+        failures, refused, _ = check(isa, here, {"f0": (style, us)}, {"f0": cases}, jobs)
         return bool(failures or refused)
 
     lo, hi = 1, len(units)
@@ -622,7 +662,7 @@ def minimize(isa, units, cases, work, jobs=None):
         else:
             i += 1
     shutil.rmtree(os.path.join(work, "trial"), ignore_errors=True)
-    return us, trials[0]
+    return style, us, trials[0]
 
 
 def run(isa, functions=100, length=40, inputs=16, seed=1, keep=None, out=print, jobs=None, reduce=2):
@@ -639,8 +679,9 @@ def run(isa, functions=100, length=40, inputs=16, seed=1, keep=None, out=print, 
         isa, functions, length, inputs, len(failures), len(refused),
         " (%d with an instruction no input ran)" % len(uncovered) if uncovered else ""))
     for name in (sorted(refused) + sorted(failures))[:reduce]:
-        units, trials = minimize(isa, bodies[name], cases[name], os.path.join(work, "reduce-" + name), jobs)
-        out("reduced  %-6s in %d builds to: %s" % (name, trials, " | ".join("; ".join(u) for u in units)))
+        style, units, trials = minimize(isa, bodies[name], cases[name], os.path.join(work, "reduce-" + name), jobs)
+        out("reduced  %-6s in %d builds to: %s%s" % (name, trials, "[%s] " % style if style else "",
+                                                     " | ".join("; ".join(u) for u in units)))
     if failures or refused or keep:
         out("kept in %s (fuzz.S, build/recon/main/lifted/)" % work)
         return failures, refused, work
