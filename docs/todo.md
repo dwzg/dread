@@ -82,6 +82,22 @@ The long runs set the pace of everything after them. Measure first, then cut.
 - [ ] RISC-V (RV32IMC): a third gizmo build (clang 23 and ld.lld are installed: no system packages
   needed) and the architecture layer behind `dread.arch`.
 
+## MSP430 (of special interest to the user; right after RISC-V)
+
+Unicorn does not run it and capstone does not decode it, so it needs more than a new arch layer.
+
+- [ ] **gizmo-msp430**: clang `--target=msp430`, freestanding, with gizmo's own multiply and divide
+  helpers (the base ISA has no multiplier) and a linker script for a typical part (flash, RAM,
+  vectors at the top of the first 64 KiB).
+- [ ] **Decoder** in Python for MSP430 and MSP430X (three formats, seven addressing modes, the
+  20-bit extension words), checked instruction by instruction against `llvm-objdump` on gizmo.
+- [ ] **Byte-identical rebuild**: the listing generator emits assembly that clang's integrated
+  assembler (llvm-mc) turns back into the same bytes.
+- [ ] **Emulator interface beyond Unicorn** (what `dread.emu` needs: memory map, registers, code,
+  block and memory hooks, unmapped accesses, instruction limits) and an MSP430 interpreter behind it,
+  checked against what the compiled C must compute; speed in numbers.
+- [ ] **Every tool on gizmo-msp430** (tests, generator, mutation, integration, regflow).
+
 ## More architectures (each: a gizmo build with clang, the arch layer, every tool on it)
 
 - [ ] AArch64 (A64): literal loads, adrp pairs, the AAPCS64 registers.
@@ -91,8 +107,8 @@ The long runs set the pace of everything after them. Measure first, then cut.
 - [ ] Big-endian ARM (BE-8) on the existing ARM layer.
 - [ ] x86, 32-bit freestanding: variable-length instructions in the program database and the
   listing generator.
-- [ ] Research: an emulator interface beyond Unicorn for AVR and MSP430 (clang builds them, Unicorn
-  does not run them): what a backend has to provide, and whether an existing simulator fits.
+- [ ] AVR on the emulator interface the MSP430 work brings (clang builds it, Unicorn does not run
+  it): an interpreter behind it, Harvard memory (program and data spaces) in the program database.
 
 ## More compilers
 
