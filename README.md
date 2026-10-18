@@ -53,7 +53,7 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
 | Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order | done |
 | Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
-| Method documentation and a porting guide | planned |
+| Method documentation and a porting guide | done |
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
 | `dread pilot`: the reconstruction loop run unattended, an LLM (local or cloud) only for the thinking | after the ARM phases |
 | RISC-V: a third gizmo build and an architecture backend | after the pilot |
@@ -63,7 +63,7 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Path | What it is |
 |---|---|
 | `dread/` | the Python package; `bin/dread` runs it from a checkout |
-| `docs/` | the method, the target description, the file formats |
+| `docs/` | the method (`method.md`), porting to another architecture (`porting.md`), the target description, the file formats |
 | `examples/gizmo/` | the test firmware: sources, builds and two target directories |
 | `tests/` | DREAD's own tests (`.venv/bin/pytest`) |
 

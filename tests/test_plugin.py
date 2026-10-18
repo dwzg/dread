@@ -1,6 +1,7 @@
 """The Claude Code plugin in plugins/dread: its manifests parse, every skill and agent has the front
-matter Claude Code reads, and every `dread COMMAND` the skills and agents name exists (the skills only
-point at the tools; a renamed command must not leave them behind)."""
+matter Claude Code reads, and every `dread COMMAND` the skills, the agents, the README and the method
+and porting guides name exists (they only point at the tools; a renamed command must not leave them
+behind)."""
 import json
 import os
 import re
@@ -40,6 +41,7 @@ def test_front_matter():
 
 
 def test_named_commands_exist():
-    for path in documents():
+    docs = [os.path.join(ROOT, "README.md")] + [os.path.join(ROOT, "docs", f) for f in ("method.md", "porting.md")]
+    for path in list(documents()) + docs:
         for command in re.findall(r"`dread ([a-z-]+)", open(path).read()):
             assert command in COMMANDS, "%s names `dread %s`" % (path, command)

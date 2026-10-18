@@ -192,7 +192,9 @@ The long runs set the pace of everything after them. Measure first, then cut.
   and dread-reviewer, and TARGET.md, a README template for a target with the evidence behind each
   value. `claude plugin validate` passes; a test checks the manifests, the front matter and that
   every `dread COMMAND` the skills name exists.
-- [ ] Method documentation and a porting guide for a new architecture.
+- [x] Method documentation (`docs/method.md`: the parts, what each shows and does not, the order of
+  work, the lessons the tools carry) and a porting guide (`docs/porting.md`: the arch layer's methods,
+  the ARM knowledge still outside it, the emulator, a gizmo build, the order of work).
 
 ## After the ARM phases
 
