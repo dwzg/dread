@@ -42,6 +42,14 @@ def test_front_matter():
 
 def test_named_commands_exist():
     docs = [os.path.join(ROOT, "README.md")] + [os.path.join(ROOT, "docs", f) for f in ("method.md", "porting.md")]
+    todo = open(os.path.join(ROOT, "docs", "todo.md")).read()
+    planned = {c for item in re.findall(r"^- \[ \].*?(?=^- \[|^#|\Z)", todo, re.S | re.M)
+               for c in re.findall(r"`dread ([a-z-]+)", item)}       # open items may name what is to come
     for path in list(documents()) + docs:
         for command in re.findall(r"`dread ([a-z-]+)", open(path).read()):
-            assert command in COMMANDS, "%s names `dread %s`" % (path, command)
+            allowed = COMMANDS if path in documents_list() else set(COMMANDS) | planned
+            assert command in allowed, "%s names `dread %s`" % (path, command)
+
+
+def documents_list():
+    return list(documents())
