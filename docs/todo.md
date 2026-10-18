@@ -220,9 +220,10 @@ The long runs set the pace of everything after them. Measure first, then cut.
   used all 32000 tokens; the server returns it in `reasoning_content` and an empty `content` with
   finish_reason "length"), and the third left an equivalent survivor (`j < i` -> `j <= i`: the extra
   byte is overwritten by the terminator) with no answer left to argue it.
-- [ ] Pilot: an answer cut off by the token limit gets feedback of its own (the code first, reason
-  less), the providers report the finish reason and the tokens and the log keeps them; the survivors
-  question gets an answer of its own beyond --tries (it only asks for arguments).
+- [x] Pilot: an answer cut off by the token limit gets feedback of its own (the code first, reason
+  less), the providers report the finish reason, the tokens and the reasoning's length and the log
+  keeps them; the survivors question gets an answer of its own when it comes with the last try (it
+  only asks for arguments). The pilot computes the never-returning functions once for its lifters.
 - [ ] A measured run with a cloud model (waits for "Questions for the user").
 - [ ] RISC-V (RV32IMC): a third gizmo build (clang 23 and ld.lld are installed: no system packages
   needed) and the architecture layer behind `dread.arch`.

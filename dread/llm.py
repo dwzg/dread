@@ -34,13 +34,18 @@ class ProviderError(Exception):
 
 
 class Provider:
-    """ask(system, messages) -> text; messages are [{"role": "user"|"assistant", "content": str}]."""
+    """ask(system, messages) -> text; messages are [{"role": "user"|"assistant", "content": str}].
+    After each answer, last says how it ended: {"finish": the provider's reason ("stop", "length",
+    "end_turn", "max_tokens", ...), "tokens": tokens written or None, "reasoning": characters of
+    reasoning the provider returned apart from the answer}."""
 
     kind = None
+    CUT = ("length", "max_tokens")          # finish reasons that mean: out of room
 
     def __init__(self, name, config):
         self.name, self.config = name, dict(config)
         self.model = self.config.get("model", "?")
+        self.last = {}
 
     def label(self):
         return "%s (%s)" % (self.name, self.model)
@@ -74,7 +79,12 @@ class OpenAICompatible(Provider):
                 "temperature": float(self.config.get("temperature", 0.2))}
         reply = self._post(url, body, headers)
         try:
-            return reply["choices"][0]["message"].get("content") or ""
+            choice = reply["choices"][0]
+            message = choice["message"]
+            reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+            self.last = {"finish": choice.get("finish_reason"), "reasoning": len(reasoning),
+                         "tokens": (reply.get("usage") or {}).get("completion_tokens")}
+            return message.get("content") or ""
         except (KeyError, IndexError, TypeError):
             raise ProviderError("%s: unexpected reply %s" % (self.name, json.dumps(reply)[:300]))
 
@@ -91,13 +101,17 @@ class Anthropic(Provider):
                 "messages": list(messages)}
         reply = self._post(url, body, {"x-api-key": key, "anthropic-version": "2023-06-01"})
         try:
+            self.last = {"finish": reply.get("stop_reason"), "tokens": (reply.get("usage") or {}).get("output_tokens"),
+                         "reasoning": sum(len(b.get("thinking", "")) for b in reply["content"]
+                                          if b.get("type") == "thinking")}
             return "".join(block.get("text", "") for block in reply["content"] if block.get("type") == "text")
         except (KeyError, TypeError):
             raise ProviderError("%s: unexpected reply %s" % (self.name, json.dumps(reply)[:300]))
 
 
 class Scripted(Provider):
-    """Answers given in advance (a list, used in order, or a function of the messages): for tests."""
+    """Answers given in advance (a list, used in order, or a function of the messages): for tests. An
+    answer may be a dict {"text": ..., "finish": ..., "tokens": ...} to play how it ended."""
 
     kind = "scripted"
 
@@ -108,10 +122,17 @@ class Scripted(Provider):
     def ask(self, system, messages):
         self.asked.append((system, list(messages)))
         if callable(self.answers):
-            return self.answers(messages)
-        if not self.answers:
+            answer = self.answers(messages)
+        elif not self.answers:
             raise ProviderError("scripted: no answer left")
-        return self.answers.pop(0)
+        else:
+            answer = self.answers.pop(0)
+        if isinstance(answer, dict):
+            self.last = {"finish": answer.get("finish", "stop"), "tokens": answer.get("tokens"),
+                         "reasoning": answer.get("reasoning", 0)}
+            return answer.get("text", "")
+        self.last = {"finish": "stop", "tokens": None, "reasoning": 0}
+        return answer
 
 
 KINDS = {"openai": OpenAICompatible, "anthropic": Anthropic}

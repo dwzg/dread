@@ -42,6 +42,7 @@ import re
 import sys
 import time
 
+from dread import llm
 from dread import target as tgt
 
 SYSTEM = """You rewrite one function of a firmware image in C. Your C is compiled with
@@ -76,6 +77,9 @@ or, when the C has something the machine code does not, answer with the whole co
 ```c block instead."""
 
 ARGUED = "argued by dread pilot ({label}), not reviewed: "
+
+CUT = """The answer ran out of room ({spent}) before any code. Reason less: begin with the whole file in
+one ```c block, and explain afterwards, if at all."""
 
 FEEDBACK = {
     "code": "The answer has no ```c block. Answer with the whole file in one ```c block.",
@@ -259,15 +263,29 @@ def unargue(image, name):
             f.writelines(keep)
 
 
+def ended(info):
+    """How an answer ended, for the log: finish reason, tokens, reasoning."""
+    parts = []
+    if info.get("finish"):
+        parts.append("finish: %s" % info["finish"])
+    if info.get("tokens"):
+        parts.append("%d tokens" % info["tokens"])
+    if info.get("reasoning"):
+        parts.append("%d characters of reasoning" % info["reasoning"])
+    return ", ".join(parts)
+
+
 def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_lifted=True, mutate_check=True,
-              integration_check=True, out=print, jobs=None):
-    """Ask, check and ask again until accepted or out of tries; returns (outcome, answers, stage)."""
+              integration_check=True, out=print, jobs=None, endless=None):
+    """Ask, check and ask again until accepted or out of tries; returns (outcome, answers, stage).
+    The survivors question gets an answer of its own when it comes with the last try (it only asks
+    for arguments). endless: the never-returning functions, when known (for the lifter)."""
     from dread import build, lift
     fn = program.by_name[name]
     text = None
     if use_lifted:
         try:
-            text = lift.Lifter(program, flow).lift(fn).text
+            text = lift.Lifter(program, flow, endless).lift(fn).text
         except lift.Refused:
             text = None
     system, user = question(target, image, program, fn, flow, text)
@@ -276,15 +294,25 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
     log = ["# %s, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (name, provider.label(), system, user)]
     stage, outcome, answers, pending = "code", "rejected", 0, []
     started = time.time()
-    for answers in range(1, tries + 1):
+    limit, extra = tries, False
+    while answers < limit:
+        answers += 1
         try:
             answer = provider.ask(system, messages)
         except Exception as e:              # the provider failed: no point in trying again now
             log.append("## Provider error\n\n%s" % e)
             stage = "provider"
             break
-        log.append("## Answer %d\n\n%s" % (answers, answer))
+        info = getattr(provider, "last", {}) or {}
+        log.append("## Answer %d%s\n\n%s" % (answers, " (%s)" % ended(info) if ended(info) else "", answer))
         code = extract_c(answer)
+        if code is None and not pending and info.get("finish") in llm.Provider.CUT:
+            spent = ended(info).split(", ", 1)[-1] if info.get("tokens") or info.get("reasoning") else "the token limit"
+            feedback = CUT.format(spent=spent)
+            stage = "cut"
+            log.append("## The tools, after answer %d (%s)\n\n%s" % (answers, stage, feedback))
+            messages += [{"role": "assistant", "content": answer or "(empty)"}, {"role": "user", "content": feedback}]
+            continue
         if code is None and pending:        # an answer to the survivors question
             missing = argue(image, name, pending, answer, provider.label())
             if not missing:
@@ -302,6 +330,8 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
         if stage == "mutate" and pending:
             feedback = SURVIVORS.format(items="\n".join("%d. `%s`: %s" % (k, line, what)
                                                          for k, (line, what) in enumerate(pending, 1)))
+            if answers == limit and not extra:      # the arguments get an answer of their own
+                limit, extra = limit + 1, True
         else:
             feedback = FEEDBACK[stage].format(text=report)
         log.append("## The tools, after answer %d (%s)\n\n%s" % (answers, stage, feedback))
@@ -528,6 +558,8 @@ def main(argv=None):
     if not names:
         print("dread pilot: nothing to do (no lifted function that src does not define)")
         return 0
+    from dread import noreturn
+    endless = noreturn.find(program)        # once, for every lifter below
     if args.dry_run:
         from dread import lift
         for name in names:
@@ -535,7 +567,7 @@ def main(argv=None):
             text = None
             if not args.no_lifted:
                 try:
-                    text = lift.Lifter(program, flow).lift(fn).text
+                    text = lift.Lifter(program, flow, endless).lift(fn).text
                 except lift.Refused:
                     pass
             system, user = question(target, image, program, fn, flow, text)
@@ -551,7 +583,7 @@ def main(argv=None):
     accepted = 0
     for name in names:
         outcome, _, _ = pilot_one(target, image, program, provider, name, args.tries, flow, not args.no_lifted,
-                                  not args.no_mutate, not args.no_integration)
+                                  not args.no_mutate, not args.no_integration, endless=endless)
         accepted += outcome == "accepted"
     print("dread pilot: %d of %d accepted; conversations in %s" % (
         accepted, len(names), os.path.relpath(os.path.join(target.build, "pilot", image.name))))

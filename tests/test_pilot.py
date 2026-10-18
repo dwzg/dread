@@ -94,8 +94,11 @@ class Fake(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         Fake.seen.append((self.path, dict(self.headers), body))
-        reply = ({"choices": [{"message": {"content": "openai says hi"}}]} if self.path == "/v1/chat/completions"
-                 else {"content": [{"type": "text", "text": "anthropic says hi"}]})
+        reply = ({"choices": [{"message": {"content": "openai says hi", "reasoning_content": "hmm"},
+                               "finish_reason": "stop"}], "usage": {"completion_tokens": 12}}
+                 if self.path == "/v1/chat/completions"
+                 else {"content": [{"type": "thinking", "thinking": "well"}, {"type": "text", "text": "anthropic says hi"}],
+                       "stop_reason": "max_tokens", "usage": {"output_tokens": 34}})
         data = json.dumps(reply).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
@@ -116,11 +119,13 @@ def test_provider_wire_formats(monkeypatch):
         assert local.ask("be brief", [{"role": "user", "content": "hello"}]) == "openai says hi"
         path, headers, body = Fake.seen[-1]
         assert body["messages"][0] == {"role": "system", "content": "be brief"} and body["model"] == "m"
+        assert local.last == {"finish": "stop", "tokens": 12, "reasoning": 3}
         monkeypatch.setenv("TEST_KEY", "secret")
         remote = llm.Anthropic("claude", {"url": url, "model": "c", "key_env": "TEST_KEY"})
         assert remote.ask("be brief", [{"role": "user", "content": "hello"}]) == "anthropic says hi"
         path, headers, body = Fake.seen[-1]
         assert path == "/v1/messages" and body["system"] == "be brief"
+        assert remote.last == {"finish": "max_tokens", "tokens": 34, "reasoning": 4}
         assert {k.lower(): v for k, v in headers.items()}["x-api-key"] == "secret"
     finally:
         server.shutdown()
@@ -147,3 +152,24 @@ def test_a_name_proposal_is_collected_not_applied(gizmo):
     assert pilot.propose_name(target, image, program, provider, "gpio_set", flow, out=lambda *a: None) is None
     rows = open(os.path.join(target.build, "pilot", image.name, "names.tsv")).read().splitlines()
     assert rows[-1].split("\t")[1:3] == ["gpio_set", "gpio_write_pin"] and "gpio_set" in program.by_name
+
+
+@pytest.mark.slow
+@needs_gcc
+def test_an_answer_cut_off_by_the_token_limit_gets_its_own_feedback(gizmo):
+    """A reasoning model that thinks until the limit returns no answer: the tools say so and ask for
+    the code first, and the survivors question still gets an answer of its own on the last try."""
+    cut = {"text": "", "finish": "length", "tokens": 32000, "reasoning": 98000}
+    (outcome, answers, stage), provider, lines = run(gizmo, [cut, RIGHT, ARGUE], tries=2)
+    assert (outcome, answers, stage) == ("accepted", 3, "argued"), lines
+    second = provider.asked[1][1][-1]["content"]
+    assert "ran out of room (32000 tokens, 98000 characters of reasoning)" in second
+    target, image, _, _ = gizmo
+    log = open(os.path.join(target.build, "pilot", image.name, "led_on.md")).read()
+    assert "## Answer 1 (finish: length, 32000 tokens, 98000 characters of reasoning)" in log
+
+
+def test_the_providers_say_how_an_answer_ended():
+    scripted = llm.Scripted([{"text": "x", "finish": "length", "tokens": 7}, "y"])
+    assert scripted.ask("s", []) == "x" and scripted.last == {"finish": "length", "tokens": 7, "reasoning": 0}
+    assert scripted.ask("s", []) == "y" and scripted.last["finish"] == "stop"
