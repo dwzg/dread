@@ -115,7 +115,7 @@ def lift_sources(target, image, names, outdir, quiet=False):
             with open(path, "w") as f:
                 f.write(text)
         made[name] = result.unreached
-        if lifter.never_returns(name):
+        if lifter.system_only(fn):         # never returns, or an exception handler
             endless.append(name)
     for old in glob.glob(os.path.join(outdir, "*.c")):
         if os.path.basename(old)[:-2] not in made:

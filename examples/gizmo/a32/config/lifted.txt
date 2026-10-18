@@ -16,6 +16,7 @@ gpio_set
 handle_key
 irq_dispatch
 irq_enable_timer
+irq_entry
 keys_read
 led_off
 led_on

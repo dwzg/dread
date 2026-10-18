@@ -32,9 +32,15 @@ def test_refusals_name_their_reason(variant):
     assert "reads r1 behind the call of uart_putc" in refused.pop("uart_puts")     # dread.regflow's finding
     if variant == "a32":
         assert "changes the stack pointer" in refused.pop("reset")
-        assert "returns from an exception" in refused.pop("irq_entry")              # subs pc, lr, #4
         assert "branches into other code" in refused.pop("__aeabi_uidivmod")
     assert refused == {}
+
+
+def test_exception_handler_and_main_lift(variant):
+    target, image, lifted, refused = lift_all(variant)
+    assert "main" in lifted                     # never returns: the system run decides (system_check)
+    if variant == "a32":                        # an exception handler: gcc's interrupt attribute
+        assert "irq_entry" in lifted and "return;" in lifted["irq_entry"].text
 
 
 def test_translation_shapes(variant):
@@ -136,3 +142,16 @@ def test_a_main_loop_is_accepted_by_the_system_run(variant, copies):
     accepted = lift.check(target, image, ["main", "fmt_dec"], out=lines.append, jobs=4)
     assert sorted(accepted) == ["fmt_dec", "main"], lines
     assert any(line.startswith("accepted main") and "every scenario agrees" in line for line in lines)
+
+
+@pytest.mark.slow
+@needs_gcc
+def test_an_exception_handler_is_lifted_with_the_interrupt_attribute(copies):
+    """gizmo-a32's IRQ entry (sub lr, lr, #4; push; bl irq_dispatch; ldm sp!, {.., pc}^): gcc writes
+    the entry and the exception return, and the scenarios, which take timer interrupts, decide."""
+    target, image = copy_of(copies, "a32")
+    lifted = lift_all("a32")[2]
+    assert 'void __attribute__((interrupt("IRQ"))) irq_entry(void)' in lifted["irq_entry"].text
+    lines = []
+    assert lift.check(target, image, ["irq_entry"], out=lines.append, jobs=4) == ["irq_entry"], lines
+    assert any(line.startswith("accepted irq_entry") and "an exception handler" in line for line in lines)

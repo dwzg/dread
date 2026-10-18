@@ -148,10 +148,12 @@ The long runs set the pace of everything after them. Measure first, then cut.
   fired in either image and both agreed on doing nothing; a due interrupt is now taken after a wait in
   code that is not shared (FROZEN blocks with an event due). And gcc puts main into .text.startup:
   the overlay's flags now include -fno-reorder-functions.
-- [ ] A-profile exception handlers in the lifter (subs pc, lr; ldm ^): the system-run acceptance is
-  there now; the C needs `__attribute__((interrupt("IRQ")))` (or FIQ, ABORT, UNDEF, SWI after the
-  return form) and the lifter has to treat the handler's own lr adjustment and pushes as GCC's.
-  ldrexd/strexd as inline assembly with a 64-bit operand.
+- [x] A-profile exception handlers in the lifter: a function whose returns are exception returns
+  (subs pc, lr, #4; ldm .. {.., pc}^ or movs pc, lr, after its own sub lr, lr, #4 for IRQ, without
+  for SWI) becomes `void __attribute__((interrupt("IRQ" or "SWI"))) f(void)`, gcc writing the entry
+  and the return; it gets no register arguments, and the system run decides. gizmo-a32's irq_entry
+  is accepted (a32 now 33). Refused: a data abort's return (subs pc, lr, #8), mixed forms.
+- [ ] ldrexd/strexd as inline assembly with a 64-bit operand.
 - [ ] (Later) liftfuzz: a Thumb-1 ISA (Cortex-M0: the 16-bit forms, high-register moves, the switch helper,
   calls through bx stubs), switches on the other ISAs (tbb, tbh, ldr pc tables), conditional returns
   and tail calls.

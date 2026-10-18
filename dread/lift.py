@@ -114,7 +114,7 @@ def direct_callees(program, fn):
 class Lifter:
     def __init__(self, program, flow=None):
         self.prog, self.arch, self.flow = program, program.arch, flow
-        self._stack_args, self._entry, self._resolved, self._states = {}, {}, {}, {}
+        self._stack_args, self._entry, self._resolved, self._states, self._handlers = {}, {}, {}, {}, {}
         self._noreturn = None
         path = program.image.table("asm_only")
         self.asm_only = read_ranges(path) if path and os.path.exists(path) else []
@@ -408,7 +408,11 @@ class Lifter:
             known = self.states(fn, strict=False)   # for returns through a register
         except Refused:
             known = {}
-        start = frozenset(r for r in REGS + ["flags"] if r not in ARGS + ("sp", "pc", "lr"))   # lr: the C knows it
+        try:
+            args = () if self.handler_kind(fn) else ARGS     # an exception handler gets no arguments
+        except Refused:
+            args = ARGS
+        start = frozenset(r for r in REGS + ["flags"] if r not in args + ("sp", "pc", "lr"))   # lr: the C knows it
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
         work = [fn.insns[0]]
         while work:
@@ -511,7 +515,8 @@ class Lifter:
             raise Refused("0x%x reads %s before anything writes it (what its caller leaves)" % (
                 a, ", ".join(sorted(found[a]))))
         self._check_kept(fn)
-        self._check_returns(fn, states)
+        handler = self.handler_kind(fn)
+        self._check_returns(fn, states, handler)
         stack_params = self.stack_args(fn)
         if stack_params > MAX_STACK_ARGS:
             raise Refused("it takes %d stack words" % stack_params)
@@ -522,7 +527,7 @@ class Lifter:
             if kind == "jump" and target is not None and (target & ~1) in depth:
                 targets.add(target & ~1)
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
-                    "flags_in": flags_in,
+                    "flags_in": flags_in, "handler": handler,
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
         body = []
@@ -541,19 +546,61 @@ class Lifter:
         return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]), frame, stack_params,
                       [a for a in fn.insns if a not in depth and a not in stubs])
 
+    def handler_kind(self, fn):
+        """"IRQ" or "SWI" when the function is an A-profile exception handler (its returns are
+        exception returns: subs pc, lr, #4 for IRQ, ldm .. {.., pc}^ or movs pc, lr for IRQ after its
+        own sub lr, lr, #4 at the entry and for SWI without one), else None: the C becomes a function
+        with gcc's interrupt attribute, which writes the entry and the return. Refused: a data
+        abort's return (subs pc, lr, #8), mixed forms."""
+        if getattr(self.arch, "profile", None) != "a" or not fn.insns:
+            return None
+        if fn.name in self._handlers:
+            return self._handlers[fn.name]
+        returns = [i for i in self.prog.instructions(fn)
+                   if i is not None and self.arch.flow(i)[0] == "return" and self.exception_return(i)]
+        kind = None
+        if returns:
+            first = self.prog.insn(fn.insns[0])
+            ops = first.operands if first is not None else ()
+            adjusted = first is not None and first.id == A.ARM_INS_SUB and len(ops) == 3 \
+                and all(o.type == A.ARM_OP_REG and o.reg == A.ARM_REG_LR for o in ops[:2]) \
+                and ops[2].type == A.ARM_OP_IMM and ops[2].imm == 4
+            kinds = set()
+            for r in returns:
+                if r.id == A.ARM_INS_SUB:
+                    if r.operands[-1].type != A.ARM_OP_IMM or r.operands[-1].imm != 4 or adjusted:
+                        raise Refused("0x%x: an exception return the C cannot make: %s %s" % (
+                            r.address, r.mnemonic, r.op_str))
+                    kinds.add("IRQ")
+                else:
+                    kinds.add("IRQ" if adjusted else "SWI")
+            if len(kinds) != 1:
+                raise Refused("its exception returns differ in kind")
+            kind = kinds.pop()
+        self._handlers[fn.name] = kind
+        return kind
+
+    def system_only(self, fn):
+        """Whether only the system run can test the function: it never returns, or it is an exception
+        handler."""
+        return self.never_returns(fn.name) or self.handler_kind(fn) is not None
+
     def exception_return(self, insn):
         """subs pc, lr, #k, movs pc, lr and ldm ... {.., pc}^: the A profile's return from an exception."""
         return insn.id == A.ARM_INS_SUB or (insn.id == A.ARM_INS_MOV and self.arch.sets_flags(insn)) \
             or bool(getattr(insn, "usermode", False))
 
-    def _check_returns(self, fn, states):
+    def _check_returns(self, fn, states, handler=None):
         """Refuse a return to anything but the return address: a helper that returns behind its call
-        site (GCC's __gnu_thumb1_case_*: add lr, r1; bx lr) is a jump the C cannot make."""
+        site (GCC's __gnu_thumb1_case_*: add lr, r1; bx lr) is a jump the C cannot make. An exception
+        handler's returns are gcc's to write (handler_kind)."""
         for a, (depth, values) in states.items():
             insn = self.prog.insn(a)
             if self.arch.flow(insn)[0] != "return":
                 continue
             if self.exception_return(insn):
+                if handler:
+                    continue
                 raise Refused("0x%x returns from an exception: %s %s" % (a, insn.mnemonic, insn.op_str))
             slots = self.ldm_slots(insn, depth, values)
             if self.arch.stack_kind(insn) == "pop":
@@ -574,10 +621,16 @@ class Lifter:
                  '#include "dread.h"']
         for name, nstack, wide in sorted(ctx["callees"]):
             lines.append("extern %s %s(%s);" % ("u64" if wide else "u32", name, ", ".join(["u32"] * (4 + nstack))))
-        lines.append("%s %s(%s)" % ("u64" if self._wide(fn.name) else "u32", fn.name, ", ".join(params)))
-        lines.append("{")
-        lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0,"
-                     " r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
+        if ctx.get("handler"):              # gcc writes the entry and the exception return
+            lines.append('void __attribute__((interrupt("%s"))) %s(void)' % (ctx["handler"], fn.name))
+            lines.append("{")
+            lines.append("    u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
+                         " r10 = 0, r11 = 0, r12 = 0, lr = 0;")
+        else:
+            lines.append("%s %s(%s)" % ("u64" if self._wide(fn.name) else "u32", fn.name, ", ".join(params)))
+            lines.append("{")
+            lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
+                         " r10 = 0, r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
         lines.append("    u32 n = 0, z = 0, c = 0, v = 0;")
         if ctx.get("flags_in"):             # read before written (mrs r0, cpsr first): the caller's flags
             lines.append('    { u32 t; __asm__ volatile ("mrs %0, apsr" : "=r"(t)); n = t >> 31; z = t >> 30 & 1; '
@@ -760,6 +813,8 @@ class Lifter:
             return None
         if kind == "return":
             if self.exception_return(insn):
+                if self.ctx.get("handler"):
+                    return "return;"        # gcc's epilogue restores the registers and returns
                 raise Refused("0x%x returns from an exception: %s %s" % (insn.address, insn.mnemonic, insn.op_str))
             if arch.stack_kind(insn) == "pop":
                 loads = self._pop(insn, returning=True)
@@ -916,6 +971,8 @@ class Lifter:
         return "%s = 0x%xu;" % (self.dest(ops[0]), value)
 
     def _ret(self):
+        if self.ctx.get("handler"):
+            return ""
         return "((u64)r1 << 32 | r0)" if self._wide(self.ctx["fn"].name) else "r0"
 
     def _call(self, callee, insn):
@@ -1574,10 +1631,15 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
         if name in entered:
             out("refused  %-24s other code branches into its middle (the overlay cannot replace it)" % name)
             continue
-        if lifter.never_returns(name):
+        try:
+            system_only = lifter.system_only(fn)
+        except Refused as e:
+            out("refused  %-24s %s" % (name, e))
+            continue
+        if system_only:
             try:
                 lifter.lift(fn)
-                endless.append(name)        # no case can end: the system run decides (system_check)
+                endless.append(name)        # no case can end or call it: the system run decides (system_check)
             except Refused as e:
                 out("refused  %-24s %s" % (name, e))
             continue
@@ -1708,9 +1770,11 @@ def system_check(target, image, program, lifter, accepted, names, out=print):
             why = "the system run never ran %d of its %d instructions: %s" % (
                 len(missing), len(fn.insns), " ".join("0x%x" % a for a in missing[:8]))
         if why:
-            out("dropped  %-24s never returns; %s" % (name, why))
+            out("dropped  %-24s %s; %s" % (name, "an exception handler" if lifter.handler_kind(fn) else
+                                           "never returns", why))
         else:
-            out("accepted %-24s never returns; every scenario agrees and runs all of it" % name)
+            out("accepted %-24s %s; every scenario agrees and runs all of it" % (
+                name, "an exception handler" if lifter.handler_kind(fn) else "never returns"))
             kept.append(name)
     return kept
 
