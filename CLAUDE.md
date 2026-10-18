@@ -44,7 +44,7 @@ changing a table, case or report format.
 
 When the user is away (a `/loop`), the work runs from files, not from a conversation:
 
-- **The plan is `docs/todo.md`.** Start each item with `git pull --rebase`: the user may steer from
+- **The plan is `docs/todo.md`.** Start each item with `git pull --rebase --autostash`: the user may steer from
   anywhere by editing `docs/todo.md` on GitHub (answering a question, reordering). Take the first
   open item. Finish it with tests on both gizmo
   builds, tick it off in the same commit, push. Change the plan when the work shows a better one (an

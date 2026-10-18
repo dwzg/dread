@@ -194,6 +194,19 @@ class Listing:
                     self.labels.add(tst)
                     self.ins[st] = (mnem, ("pcrel", ops, tst), comment)
                     continue
+            if mnem.split(".")[0] == "adr":
+                # Capstone prints the offset (adr r2, #4); the assembler needs the place, and a
+                # number would be taken for an absolute address and change the instruction's size.
+                at = arch.pc_address(insn, isa)
+                tst = prog.stored(at) if at is not None else None
+                if tst is not None and self.space(at) == self.space(run) and self.has(tst, 1) and self.labelable(tst):
+                    self.labels.add(tst)
+                    if isa == "t32" and "." not in mnem and length == 4:
+                        mnem += ".w"
+                    self.ins[st] = (mnem, ("label", ops.split(",")[0] + ",", tst), "")
+                else:
+                    self.raw.add(st)
+                continue
             if isa == "a32":
                 ops = ROTIMM_RE.sub(r", #\1, \2", ops)
             if mnem.startswith(("mrs", "msr")):

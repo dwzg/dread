@@ -106,15 +106,49 @@ def dispatch_slots(elf, code):
     return slots
 
 
+def inner_padding(elf, runs):
+    """Addresses of alignment nops that end a run of instructions inside a function (not its last
+    run: padding() handles that one): a nop right behind an instruction that does not fall through,
+    in front of data (a jump table, a pool), that no branch of the function goes to. GCC puts one
+    behind ldr.w pc, [rN, rM, lsl #2] to align the table that follows; it never runs."""
+    from dread.arch.arm import Arm
+    out, insns_of = [], {}
+    for start, end, isa in runs:
+        arm = Arm(isa=isa, profile="m" if isa == "t32" else "a")
+        insns_of[(start, end)] = (arm, list(arm.disassembler(isa).disasm(elf.read(start, end - start), start)))
+    targets = {arm.target(i) for arm, insns in insns_of.values() for i in insns}
+    for start, end, isa in runs[:-1]:
+        arm, insns = insns_of[(start, end)]
+        if len(insns) < 2 or insns[-1].address + insns[-1].size != end:
+            continue
+        last, before = insns[-1], insns[-2]
+        kind, _, falls = arm.flow(before)
+        if (bytes(last.bytes) in PADDING[isa] and kind in ("jump", "return", "ijump") and not falls
+                and last.address not in targets):
+            out.append(last.address)
+    return out
+
+
 def tables(elf, unnamed=False, keep=()):
     """(functions, code_ranges, symbols): functions [(entry, name, insn_bytes)], code ranges
     [(start, end, isa)], symbols [(kind, address, name)]."""
     intervals = code_intervals(elf)
     code = [(a, b, k) for a, b, k in intervals if k != "data"]
-    for slot in dispatch_slots(elf, code):          # cut out of their ranges
-        code = [piece for a, b, k in code
-                for piece in ([(a, slot, k), (slot + 4, b, k)] if a <= slot < b else [(a, b, k)])
+    def cut(code, slot, size):
+        return [piece for a, b, k in code
+                for piece in ([(a, slot, k), (slot + size, b, k)] if a <= slot < b else [(a, b, k)])
                 if piece[0] < piece[1]]
+
+    for slot in dispatch_slots(elf, code):          # cut out of their ranges
+        code = cut(code, slot, 4)
+    for sym in elf.symbols:
+        if sym.kind == STT_FUNC and sym.size and sym.name:
+            entry = sym.value & ~1
+            runs = [(max(a, entry), min(b, entry + sym.size), k) for a, b, k in code
+                    if a < entry + sym.size and entry < b]
+            for slot in inner_padding(elf, runs):
+                code = cut(code, slot, 2 if elf.read(slot, 2) in PADDING["t32"] and
+                           any(k == "t32" for a, b, k in runs if a <= slot < b) else 4)
 
     def insn_bytes(lo, hi):
         return sum(max(0, min(hi, b) - max(lo, a)) for a, b, _ in code)

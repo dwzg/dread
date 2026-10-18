@@ -33,14 +33,16 @@ def test_function_instructions_match_objdump(program, variant):
     for fn in program.functions:
         expected = [a for a in sorted(truth) if fn.entry <= a < fn.entry + sizes[fn.entry]]
         # Left out may be only nops that never run: the trailing alignment nop in front of a pool,
-        # and the slot behind an unconditional add pc, pc, ... (a switch jumps to + 8 or beyond).
+        # the slot behind an unconditional add pc, pc, ... (a switch jumps to + 8 or beyond), and an
+        # alignment nop behind an instruction that does not fall through, in front of a table.
         left = [a for a in expected if a not in set(fn.insns)]
         assert [a for a in expected if a not in left] == fn.insns, fn.name
         for a in left:
             assert truth[a] in ("nop", "mov"), (fn.name, hex(a))
             before = program.insn(expected[expected.index(a) - 1])
-            assert a == expected[-1] or (before.mnemonic == "add" and before.op_str.startswith("pc, pc")), \
-                (fn.name, hex(a))
+            kind, _, falls = program.arch.flow(before)
+            assert a == expected[-1] or (before.mnemonic == "add" and before.op_str.startswith("pc, pc")) \
+                or (kind in ("jump", "return", "ijump") and not falls), (fn.name, hex(a))
         assert sum(program.insn_size(a) for a in fn.insns) == fn.size, fn.name
 
 

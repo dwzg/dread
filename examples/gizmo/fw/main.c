@@ -32,6 +32,27 @@ void apply_config(const char *text)
     }
 }
 
+/* Reads one line through uart_getc into buf (at most max - 1 characters, without the line end;
+ * carriage returns are dropped) and returns its length, or -1 when the UART has nothing before the
+ * line ends. */
+int read_line(char *buf, u32 max)
+{
+    u32 n = 0;
+    for (;;) {
+        int c = uart_getc();
+        if (c < 0)
+            return -1;
+        if (c == '\r')
+            continue;
+        if (c == '\n')
+            break;
+        if (n + 1 < max)
+            buf[n++] = (char)c;
+    }
+    buf[n] = 0;
+    return (int)n;
+}
+
 void print_status(void)
 {
     char buf[12];
@@ -63,6 +84,12 @@ void handle_key(int c)
     case 'k':
         uart_putc((char)script_run((const u8 *)&g_config, sizeof g_config));
         break;
+    case 'c': {
+        char line[40];
+        if (read_line(line, sizeof line) > 0)
+            apply_config(line);
+        break;
+    }
     default:
         if (c >= '0' && c <= '9')
             dispatch(3, c - '0');

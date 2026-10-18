@@ -21,7 +21,7 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
   characters in compares with an immediate), as fuzzers use dictionaries. Done when gizmo's
   `apply_config` gets clearly more of its instructions from generated inputs than the 38 of 65 of
   today, without written cases, on both builds.
-- [ ] **Recorded cases (`dread record`).** Callees modelled in Python by a spec (models, an input
+- [x] **Recorded cases (`dread record`).** Callees modelled in Python by a spec (models, an input
   generator, a stream helper for read-style callees); the original runs once with the models and
   the run becomes a case the generic stubs replay exactly (returns, effects, fills). Done when a
   gizmo function that reads a line through `uart_getc` is covered by recorded cases on both builds.

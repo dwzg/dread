@@ -16,8 +16,8 @@ base = 0x20000
 limit = 0x40000                 # 128 KiB of flash from the base
 entry = 0x20000
 startup = [
-    {kind = "code", run = 0x40000000, size = 0x5c, stored = 0x20d40},
-    {kind = "data", run = 0x4000005c, size = 0x1c, stored = 0x20d9c},
+    {kind = "code", run = 0x40000000, size = 0x5c, stored = 0x20de4},
+    {kind = "data", run = 0x4000005c, size = 0x1c, stored = 0x20e40},
     {kind = "zero", run = 0x40000078, size = 0x2c},
 ]
 

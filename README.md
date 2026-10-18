@@ -46,7 +46,7 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Mutation check with survivor search and argued survivors | done |
 | Integration run: generated inputs with real callees, also through original callers | done |
 | Register flow across calls: what callers read after a call, compared at the return | done |
-| Compare-guided sweeps, recorded cases | planned |
+| Recorded cases from Python models of callees (`dread record`) | done |
 | System run with device models | planned |
 | Lifter (ARM, then Thumb) | planned |
 | Reading aids, Claude Code plugin, method documentation | planned |

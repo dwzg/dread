@@ -120,8 +120,8 @@ image's `kept_cases/NAME.json` (cases that once showed a difference; `--keep-fai
 | `args` | the argument registers |
 | `mem` | `[[address, size, value], ...]` written before the call (peripheral registers too) |
 | `returns` | the answers of the stubbed callees, in call order (later calls answer 0) |
-| `calls` | `[[callee, register mask, stack words], ...]`: the generic stubs; for written cases taken from auto()'s options, not from the file |
-| `frame` | the bytes of the function's frame a stub may fill behind a pointer to a local |
+| `calls` | `[[callee, register mask, stack words], ...]`: the generic stubs; written cases without it get auto()'s; recorded cases (`dread record`) carry the ones they were recorded with, and those are kept |
+| `frame` | the bytes of the function's frame a stub may fill behind a pointer to a local (as `calls`: from auto() unless the case carries it) |
 | `effects` | `[[call number, address, size, value], ...]` written by that stub call before it returns |
 | `fills` | `[[call number, which pointer, offset, size, value], ...]` set inside what a stub stored behind a pointer |
 | `io` | `"fixed"`: peripheral reads return the `mem` values whatever was written |
@@ -129,7 +129,7 @@ image's `kept_cases/NAME.json` (cases that once showed a difference; `--keep-fai
 | `limit`, `stub_calls` | instructions (default 200,000) and stub calls (default 2,000) one run may take |
 | `hang` | true: not returning is the result (compared up to the limit) |
 | `tight` | true: a stub's fill stops at the first stack word the function stored itself |
-| `why`, `by` | where a written case comes from and why; nothing reads them but people |
+| `why`, `by` | where a written case comes from and why (`dread mutate --kill`, `dread record`); nothing reads them but people |
 | `kept` | in kept cases: `"stubbed"` or `"real callees"` |
 
 ## Test cases (the image's `cases` directory)

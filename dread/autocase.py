@@ -1120,12 +1120,12 @@ def kept_add(image, name, cases, how):
 
 def extra_load(image, name, calls=(), frame=0):
     """Cases written for one function (the image's extra_cases/NAME.json); they get the stubs and
-    frame of the generated cases."""
+    frame of the generated cases, unless they carry their own (recorded cases: dread record)."""
     path = os.path.join(image.extra_cases, name + ".json")
     if not os.path.exists(path):
         return []
     with open(path) as f:
-        return [dict(c, calls=[list(x) for x in calls], frame=frame) for c in json.load(f)["cases"]]
+        return [dict({"calls": [list(x) for x in calls], "frame": frame}, **c) for c in json.load(f)["cases"]]
 
 
 _GENERATORS = {}

@@ -98,6 +98,7 @@ int uart_getc(void);
 void gpio_set(u32 bit, u32 on);
 u32 keys_read(void);
 u32 script_run(const u8 *p, u32 n);
+int read_line(char *buf, u32 max);
 void timer_start(u32 ticks);
 void delay(u32 ticks);
 void timer_irq(void);
