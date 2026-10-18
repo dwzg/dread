@@ -139,10 +139,19 @@ The long runs set the pace of everything after them. Measure first, then cut.
   conventions come from dread.regflow and the decoder's call marks. A profile (`[compiler] idioms`)
   becomes necessary where a convention cannot be read from the code: IAR's cross-call fragments
   (More compilers).
-- [ ] A-profile exception handlers in the lifter (subs pc, lr; ldm ^): function-level cases cannot
-  call a handler, so the acceptance has to come from the system run (the original and the rebuilt
-  image taking the same interrupts with the same device log). Then the C can be compiled with
-  `__attribute__((interrupt("IRQ")))`. ldrexd/strexd as inline assembly with a 64-bit operand.
+- [x] The system run as acceptance for lifted functions that never return (a main loop, a reset
+  handler): each is built on its own and every scenario runs on both images; accepted when they agree
+  and the original's runs execute all its reachable instructions. gizmo: main on both builds and
+  Reset_Handler on m3 accepted (hang and Default_Handler never run: dropped). dread test lists such
+  functions as tested by the system run; dread integration leaves them out. Found on the way: the
+  system run took interrupts only behind shared code, so with main's idle loop rebuilt the timer never
+  fired in either image and both agreed on doing nothing; a due interrupt is now taken after a wait in
+  code that is not shared (FROZEN blocks with an event due). And gcc puts main into .text.startup:
+  the overlay's flags now include -fno-reorder-functions.
+- [ ] A-profile exception handlers in the lifter (subs pc, lr; ldm ^): the system-run acceptance is
+  there now; the C needs `__attribute__((interrupt("IRQ")))` (or FIQ, ABORT, UNDEF, SWI after the
+  return form) and the lifter has to treat the handler's own lr adjustment and pushes as GCC's.
+  ldrexd/strexd as inline assembly with a 64-bit operand.
 - [ ] (Later) liftfuzz: a Thumb-1 ISA (Cortex-M0: the 16-bit forms, high-register moves, the switch helper,
   calls through bx stubs), switches on the other ISAs (tbb, tbh, ldr pc tables), conditional returns
   and tail calls.

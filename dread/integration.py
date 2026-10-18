@@ -206,8 +206,8 @@ def main(argv=None):
     prog = gen.program
     aliases, built = load_placement(os.path.join(os.path.dirname(recon_path), "placement.json"))
     names = [n for n in built if n in suite.auto]
-    if args.callers:
-        names += callers_of(prog, set(built))
+    if args.callers:                        # (not those that never return: the system run tests them)
+        names += [n for n in callers_of(prog, set(built)) if n not in run_state.get("system", ())]
     if args.names:
         names = [n for n in names if n in args.names] + [n for n in args.names if n not in names]
     items = []
@@ -216,7 +216,11 @@ def main(argv=None):
         if fn is None:
             continue
         if name in suite.auto:
-            cases = [c for _, _, _, _, _, c in autocase.cases_for(run_state, name, fn) if c is not None]
+            try:
+                cases = [c for _, _, _, _, _, c in autocase.cases_for(run_state, name, fn) if c is not None]
+            except autocase.GenerationError as e:
+                print("dread integration: %s: no inputs (%s)" % (name, e))
+                continue
         else:
             cases = None                    # made in the worker (inputs_for)
         items.append((name, fn.entry, cases))

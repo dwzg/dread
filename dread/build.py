@@ -1,7 +1,8 @@
 """dread recon: compile the image's C and link it over the original (dread.overlay).
 
 Compiles every .c file under the image's src directory (dread.toml, [image] src, default src) with
-the target's [compiler] flags plus what the overlay needs (-ffunction-sections, -fno-common),
+the target's [compiler] flags plus what the overlay needs (-ffunction-sections, -fno-common,
+-fno-reorder-functions),
 with DREAD's include directory (dread.h), the src directory and [compiler] include on the include
 path. Objects go to BUILD/recon/IMAGE/obj; a source is compiled again when it, or any header in
 those directories, is newer than its object. Then links them over the image:
@@ -24,7 +25,9 @@ from dread import overlay
 from dread import target as tgt
 
 INCLUDE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "include")
-REQUIRED = ["-ffunction-sections", "-fno-common"]
+REQUIRED = ["-ffunction-sections", "-fno-common", "-fno-reorder-functions"]
+# -fno-reorder-functions: at -O2 and -Os gcc puts main into .text.startup.main (and cold or hot
+# functions into .text.unlikely or .text.hot), where the overlay does not find a function's section
 
 
 def recon_dir(target, image):
@@ -88,14 +91,14 @@ def defined_functions(objects):
 
 def lift_sources(target, image, names, outdir, quiet=False):
     """Lifted C for `names` (dread.lift) in outdir, a file each, written only when it changed;
-    returns {name: the instructions no path from its entry reaches}. A name that no longer lifts is
-    reported and left out."""
+    returns ({name: the instructions no path from its entry reaches}, [the names that never return:
+    the system run tests them]). A name that no longer lifts is reported and left out."""
     from dread import lift, regflow
     from dread.program import Program
     program = Program(target, image)
     lifter = lift.Lifter(program, regflow.load(target, image, program))
     os.makedirs(outdir, exist_ok=True)
-    made = {}
+    made, endless = {}, []
     for name in names:
         fn = program.by_name.get(name)
         if fn is None:
@@ -112,10 +115,12 @@ def lift_sources(target, image, names, outdir, quiet=False):
             with open(path, "w") as f:
                 f.write(text)
         made[name] = result.unreached
+        if lifter.never_returns(name):
+            endless.append(name)
     for old in glob.glob(os.path.join(outdir, "*.c")):
         if os.path.basename(old)[:-2] not in made:
             os.remove(old)
-    return made
+    return made, endless
 
 
 def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=None):
@@ -127,14 +132,15 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
     record = os.path.join(workdir, "lifted.txt")
     if names:
         defined = defined_functions(objects)
-        made = lift_sources(target, image, [n for n in names if n not in defined], os.path.join(workdir, "lifted"),
+        made, endless = lift_sources(target, image, [n for n in names if n not in defined], os.path.join(workdir, "lifted"),
                             quiet=quiet)
         objects += compile_all(target, image, os.path.join(workdir, "lifted"), os.path.join(workdir, "obj-lifted"),
                                quiet=quiet)
         with open(record, "w") as f:
             f.write("".join(n + "\n" for n in made))
         with open(os.path.join(workdir, "lifted.json"), "w") as f:
-            json.dump({"unreached": {n: a for n, a in sorted(made.items()) if a}}, f, indent=1)
+            json.dump({"unreached": {n: a for n, a in sorted(made.items()) if a}, "system": sorted(endless)}, f,
+                      indent=1)
     elif os.path.exists(record):
         os.remove(record)
     payload = os.path.join(workdir, "payload.bin")

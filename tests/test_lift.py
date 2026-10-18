@@ -123,3 +123,16 @@ def test_check_drops_a_planted_mistake(variant, copies, monkeypatch):
     accepted = lift.check(target, image, ["script_run", "keys_read"], out=lines.append, jobs=4)
     assert accepted == ["keys_read"], lines                             # keys_read compares nothing
     assert any(line.startswith("dropped  FAIL script_run") for line in lines)
+
+
+@pytest.mark.slow
+@needs_gcc
+def test_a_main_loop_is_accepted_by_the_system_run(variant, copies):
+    """main never returns, so no case of it ends: the scenarios decide. They agree on both images and
+    run all of it only because a due interrupt is taken after a wait in code built from C (main's own
+    idle loop): without that, the timer never fires in either image and the key path stays unrun."""
+    target, image = copy_of(copies, variant)
+    lines = []
+    accepted = lift.check(target, image, ["main", "fmt_dec"], out=lines.append, jobs=4)
+    assert sorted(accepted) == ["fmt_dec", "main"], lines
+    assert any(line.startswith("accepted main") and "every scenario agrees" in line for line in lines)

@@ -13,9 +13,11 @@ that are the same in both images (the original's code of the functions rewritten
 code with the branches left at moved functions' old entries, do not count), plus ACCESS units for
 every device access (the accesses must be the same in both anyway, and a rewritten function that
 polls a register still lets time pass). So a model that acts after N units acts at the corresponding
-place in both runs, however many instructions the C takes. A chunk in which the clock does not move
-at all (a wait in code that is not shared, for an interrupt) moves it to the next scheduled event,
-in both runs alike. Interrupts are taken behind a block of shared code. The device log, every
+place in both runs, however many instructions the C takes. A wait in code that is not shared (a
+rebuilt idle loop waiting for an interrupt: FROZEN blocks in a row with an event due, or a chunk in
+which the clock does not move at all) moves the clock to the next scheduled event, in both runs
+alike. Interrupts are taken behind a block of shared code, or, after such a wait, at once: the code
+it interrupts is not shared, so there is no common place to wait for. The device log, every
 peripheral access with its value in order plus what the models note (bytes sent), is what is
 compared; the functions entered are information (a rewritten function enters what it calls in its
 own way).
@@ -59,6 +61,7 @@ from dread.program import Program
 CHUNK = 200_000          # instructions per emu_start (stop rules are checked between chunks)
 ACCESS = 8               # shared-clock units a device access takes
 QUIET = 200_000          # shared-clock units without a new block or a device access: the firmware waits
+FROZEN = 2_000           # blocks in a row outside shared code with an event due: a wait the clock cannot see
 LIMIT = 20_000_000       # default shared-clock limit
 
 
@@ -95,6 +98,7 @@ class System:
         self.levels = {}
         self.blocks, self.entered, self.order = set(), collections.Counter(), []
         self.last_new, self.last_access, self.limit = 0, 0, LIMIT
+        self.frozen = 0                     # blocks in a row outside shared code
         self.observers = []                 # tools that watch the run (dread.sysrecord): block(), io()
         self._shared(placement, built)
         uc.hook_add(UC_HOOK_BLOCK, self._on_block)
@@ -184,7 +188,12 @@ class System:
             if not self.entered[entry]:
                 self.order.append(entry)
             self.entered[entry] += 1
-        if self.is_shared(addr):
+        if not self.is_shared(addr):
+            self.frozen += 1                # a wait in code built from C (a rebuilt idle loop): stop the
+            if self.frozen >= FROZEN and self.next_event is not None:      # chunk, the run moves the
+                uc.emu_stop()                                               # clock on to the event
+        else:
+            self.frozen = 0
             self.clock += size
             if (self.next_event is not None and self.clock >= self.next_event) or self.clock >= self.limit:
                 uc.emu_stop()
@@ -270,25 +279,34 @@ class System:
                 self.interrupts_changed()
                 continue
             pc = arch.resume_address(uc)
+
+            def take(pc):
+                wanted = self._wanted()
+                if wanted is None or not arch.interrupts_enabled(uc):
+                    return pc
+                controller, number = wanted
+                controller.taken(number)
+                self.interrupts[number] += 1
+                self.log.append(("interrupt", controller.name, number))
+                pc = arch.enter_interrupt(uc, number, pc, self.image.vectors, word, write_word)
+                self.interrupts_changed()
+                return pc
             if self.deliver:
                 self.deliver = False
-                wanted = self._wanted()
-                if wanted is not None and arch.interrupts_enabled(uc):
-                    controller, number = wanted
-                    controller.taken(number)
-                    self.interrupts[number] += 1
-                    self.log.append(("interrupt", controller.name, number))
-                    pc = arch.enter_interrupt(uc, number, pc, self.image.vectors, word, write_word)
-                    self.interrupts_changed()
+                pc = take(pc)
             if self.stop:
                 how = self.stop
                 break
             if self.clock >= limit:
                 how = "limit: %d units of shared clock" % limit
                 break
-            if self.clock == clock_before and self.next_event is not None:
+            frozen = self.clock == clock_before and self.next_event is not None
+            if frozen:
                 self.clock = self.next_event        # a wait outside shared code: on to the next event
             self.service()
+            if frozen:                              # and no shared block behind which to take its interrupt
+                self.frozen = 0
+                pc = take(pc)
             if self.next_event is None and (self.clock == clock_before or self.clock - self.last_new >= QUIET):
                 if self.log and self.log[-1][0] == "read" and self.clock - self.last_access < QUIET:
                     how = "polls: register 0x%x read %d times in a row, nothing scheduled, pc 0x%x" % (

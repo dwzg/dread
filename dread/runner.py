@@ -191,20 +191,25 @@ def prepare(target, image, recon_path, keep_failing=False):
     aliases, built = load_placement(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"))
     from dread.build import read_names
     here = os.path.dirname(os.path.abspath(recon_path))
-    for name in read_names(os.path.join(here, "lifted.txt")):
-        suite.auto.setdefault(name, {})     # lifted C is tested with generated cases, callees real
+    lifted_info = {}
     if os.path.exists(os.path.join(here, "lifted.json")):
         import json
         with open(os.path.join(here, "lifted.json")) as f:
-            for name, addrs in json.load(f).get("unreached", {}).items():
-                # no path from the entry reaches them (dread lift); one that runs fails the function
-                suite.unreachable.setdefault(name, set()).update(addrs)
+            lifted_info = json.load(f)
+    system = set(lifted_info.get("system", ()))  # never return: dread sysrun's scenarios test them
+    for name in read_names(os.path.join(here, "lifted.txt")):
+        if name not in system:
+            suite.auto.setdefault(name, {})     # lifted C is tested with generated cases, callees real
+    for name, addrs in lifted_info.get("unreached", {}).items():
+        # no path from the entry reaches them (dread lift); one that runs fails the function
+        suite.unreachable.setdefault(name, set()).update(addrs)
     Machine.entries = {fn.entry for fn in prog.functions}
     Machine.image_end = image.end
     from dread import regflow
     flow = regflow.load(target, image, prog)
     kept_argued = regflow.load_argued(image)
     RUN.clear()
+    RUN.update(system=system)
     RUN.update(target=target, image=image, program=prog, layout=layout, suite=suite, original=image.payload(),
                recon=recon, aliases=aliases, built=built, keep_failing=keep_failing,
                isa_of=prog.isa_at, code=frozenset(prog.code), regflow=flow, kept_argued=kept_argued)
@@ -259,7 +264,10 @@ def main(argv=None):
     with open(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "tests.tsv"), "w") as f:
         f.write("function\tcases\tfailed\n")
         f.writelines("%s\t%d\t%d\n" % r for r in results)
-    untested = [fn for fn in RUN["built"] if fn not in names]
+    system = RUN.get("system", set())
+    for fn in sorted(system & set(RUN["built"])):
+        print("SYSTEM %s: never returns; the system run's scenarios test it (dread sysrun)" % fn)
+    untested = [fn for fn in RUN["built"] if fn not in names and fn not in system]
     for fn in untested:
         print("UNTESTED %s" % fn)
     cases = sum(c for _, c, _ in results)

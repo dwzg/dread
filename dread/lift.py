@@ -38,8 +38,11 @@ define by hand) is built over the original together with the others, its generat
 (callees real, dread.autocase), and a function whose cases disagree or leave an instruction of the
 original unrun is dropped; the build and the run are repeated until nothing is dropped. A function
 that failed while a callee of it was lifted and failed too gets one more round without that callee.
-What stays is written to the image's lifted table (config/lifted.txt), which dread recon builds
-from then on (it lifts those functions again at every build: the C is not kept).
+A function that never returns gets no case that ends; when the target has scenarios, the system
+run decides for it instead (system_check: every scenario agrees on the original and the rebuilt
+image, and the original's runs execute every instruction a path reaches). What stays is written to
+the image's lifted table (config/lifted.txt), which dread recon builds from then on (it lifts those
+functions again at every build: the C is not kept).
 
     dread lift [--target DIR] [--image NAME] [--out DIR] [NAME...]
     dread lift --check [--target DIR] [--image NAME] [NAME...]
@@ -1544,7 +1547,7 @@ class Lifter:
         return "switch (index) { %s default: return r0; }" % cases
 
 
-def check(target, image, names=None, out=print, jobs=None):
+def check(target, image, names=None, out=print, jobs=None, system=True):
     """The acceptance loop (see the module's docstring); returns the accepted names."""
     from dread import build, overlay, regflow, runner
     program = Program(target, image)
@@ -1559,7 +1562,7 @@ def check(target, image, names=None, out=print, jobs=None):
             owner = program.function_at(t & ~1) if t is not None else None
             if owner is not None and owner is not fn and (t & ~1) != owner.entry:
                 entered.add(owner.name)
-    candidates, refused = [], 0
+    candidates, refused, endless = [], 0, []
     for name in names or [fn.name for fn in program.functions]:
         fn = program.by_name.get(name)
         if fn is None or name in by_hand:
@@ -1572,7 +1575,11 @@ def check(target, image, names=None, out=print, jobs=None):
             out("refused  %-24s other code branches into its middle (the overlay cannot replace it)" % name)
             continue
         if lifter.never_returns(name):
-            out("refused  %-24s never returns (dread.noreturn): no case of it can end" % name)
+            try:
+                lifter.lift(fn)
+                endless.append(name)        # no case can end: the system run decides (system_check)
+            except Refused as e:
+                out("refused  %-24s %s" % (name, e))
             continue
         try:
             lifter.lift(fn)
@@ -1617,16 +1624,95 @@ def check(target, image, names=None, out=print, jobs=None):
                 retried = True
                 continue
             break
+    by_system = system_check(target, image, program, lifter, accepted, endless, out) \
+        if system and target.scenarios else []
+    dropped = len(candidates) - len(accepted) + len(endless) - len(by_system)
+    accepted = accepted + by_system
     path = image.table("lifted")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        f.write("# Functions built from lifted C: their generated cases agree with the original and run\n"
-                "# every instruction of it. Written by dread lift --check; not edited by hand.\n")
+        f.write("# Functions built from lifted C: their cases (for one that never returns: every scenario\n"
+                "# of the system run) agree with the original and run every instruction it can reach.\n"
+                "# Written by dread lift --check; not edited by hand.\n")
         f.write("".join(n + "\n" for n in sorted(accepted)))
-    out("dread lift --check: %d accepted after %d rounds (%d written by hand, %d refused, %d dropped), into %s" % (
-        len(accepted), rounds, len(by_hand & set(program.by_name)), refused, len(candidates) - len(accepted),
-        os.path.relpath(path)))
+    out("dread lift --check: %d accepted after %d rounds (%d by the system run; %d written by hand, %d refused, "
+        "%d dropped), into %s" % (len(accepted), rounds, len(by_system), len(by_hand & set(program.by_name)), refused,
+                                  dropped, os.path.relpath(path)))
     return accepted
+
+
+class Coverage:
+    """A system run's observer: the instructions of some functions that ran."""
+
+    def __init__(self, program, names):
+        self.program = program
+        self.insns = {program.by_name[n].entry: sorted(program.by_name[n].insns) for n in names}
+        self.spans = sorted((program.by_name[n].insns[0], program.end(program.by_name[n])) for n in names)
+        self.ran = set()
+
+    def block(self, addr, size):
+        import bisect
+        for lo, hi in self.spans:
+            if lo <= addr < hi:
+                fn = self.program.function_at(addr)
+                if fn is None:
+                    return
+                insns = self.insns.get(fn.entry, ())
+                i = bisect.bisect_left(insns, addr)
+                while i < len(insns) and insns[i] < addr + size:
+                    self.ran.add(insns[i])
+                    i += 1
+                return
+
+    def io(self, addr, size, value):
+        pass
+
+
+def system_check(target, image, program, lifter, accepted, names, out=print):
+    """Functions that never return (a main loop, a reset handler) get no function-level case. Each
+    one is built from lifted C on its own (with the functions already accepted), and every scenario
+    of the target runs on the original and on the rebuilt image (dread.sysrun): accepted when the
+    device logs, model reports and endings agree and the original's runs executed every instruction
+    of it that a path reaches. Returns the accepted names."""
+    import json
+    from dread import build, overlay, sysrun
+    work = os.path.join(target.build, "lift-system", image.name)
+    original = image.payload()
+    kept = []
+    for name in names:
+        fn = program.by_name[name]
+        try:
+            unreached = set(lifter.lift(fn).unreached)
+            payload = build.build(target, image, out=work, lifted=list(accepted) + kept + [name], quiet=True)
+        except (Refused, overlay.OverlayError) as e:
+            out("dropped  %-24s %s" % (name, e))
+            continue
+        with open(os.path.join(work, "placement.json")) as f:
+            placed = json.load(f)["functions"]
+        built = [n for n, p in placed.items() if p["placement"] != "helper"]
+        with open(payload, "rb") as f:
+            rebuilt = f.read()
+        coverage, why = Coverage(program, [name]), None
+        for scenario_name, scenario in sorted(target.scenarios.items()):
+            scenario = dict(scenario, _name=scenario_name)
+            system = sysrun.System(target, image, original, program=program, built=built, scenario=scenario)
+            system.observers.append(coverage)
+            a = system.run(int(scenario.get("limit", sysrun.LIMIT)))
+            b = sysrun.run_image(target, image, rebuilt, scenario, placement=placed)
+            diff = sysrun.compare(a, b)
+            if diff:
+                why = "scenario %s: %s" % (scenario_name, " ".join(diff)[:200])
+                break
+        missing = sorted(set(fn.insns) - coverage.ran - unreached) if why is None else []
+        if why is None and missing:
+            why = "the system run never ran %d of its %d instructions: %s" % (
+                len(missing), len(fn.insns), " ".join("0x%x" % a for a in missing[:8]))
+        if why:
+            out("dropped  %-24s never returns; %s" % (name, why))
+        else:
+            out("accepted %-24s never returns; every scenario agrees and runs all of it" % name)
+            kept.append(name)
+    return kept
 
 
 def main(argv=None):
