@@ -70,7 +70,7 @@ cflags = ["-mcpu=cortex-m3", "-mthumb", "-Os", "-ffreestanding", "-fno-builtin",
 | `extensions` | RISC-V: the standard extensions, default `"imc"` (the C extension decides whether instructions may be 2 bytes long; `-march` in `[compiler] cflags` overrides it) |
 | `cpu` | Unicorn's CPU model (`cortex-m3`, `arm926`, `arm1176`, ...); default: Unicorn's choice for the mode |
 | `endian` | `"little"` (the only one supported) |
-| `ghidra` | Ghidra's language id (default `ARM:LE:32:Cortex` for M profile, `ARM:LE:32:v4t` otherwise, `RISCV:LE:32:RV32IMC` for RISC-V) |
+| `ghidra` | Ghidra's language id (default `ARM:LE:32:Cortex` for M profile, `ARM:LE:32:v4t` otherwise, `RISCV:LE:32:default` for RISC-V, analysed with Ghidra's `gcc` compiler spec) |
 
 Unicorn has no ARM7TDMI model. An ARM7 target runs on the default model or on `arm926`. The
 differences that can matter, such as unaligned loads, are not modelled.

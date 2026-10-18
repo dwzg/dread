@@ -234,7 +234,8 @@ class RiscV:
         self.isa, self.endian, self.cpu = isa, endian, cpu
         self.extensions = extensions.lower()
         self.compressed = "c" in self.extensions
-        self.ghidra = ghidra or "RISCV:LE:32:RV32IMC"
+        self.ghidra = ghidra or "RISCV:LE:32:default"     # Ghidra's one RV32 language (its spec: gcc)
+        self.ghidra_cspec = "gcc"
         self.profile = None
         self._cs = {}
 
@@ -363,10 +364,18 @@ class RiscV:
         """Join auipc/lui with the instruction behind it when that one uses the register it wrote:
         auipc + jalr is a call or tail call to a known address (rv_target), auipc or lui + addi
         an address (rv_address), auipc or lui + a load or store a known memory address
-        (rv_memory: (address, width)). Returns False: none of these is a call through a register."""
+        (rv_memory: (address, width)). li rN, K in front of a branch that compares rN gives the
+        branch its constant (rv_compare: (the other register's number, K)). Returns False: none of
+        these is a call through a register."""
         if prev is None:
             return False
         p, f = fields(prev), fields(insn)
+        if (p.op == "addi" and p.rs1 == 0 and p.rd and f.op in ("beq", "bne", "blt", "bge", "bltu", "bgeu")
+                and prev.address + prev.size == insn.address and p.rd in (f.rs1, f.rs2)):
+            other = f.rs2 if f.rs1 == p.rd else f.rs1
+            if other:
+                insn.rv_compare = (other, p.imm)
+            return False
         if p.op not in ("auipc", "lui") or not p.rd or prev.address + prev.size != insn.address:
             return False
         if f.rs1 != p.rd:
@@ -414,6 +423,16 @@ class RiscV:
         return getattr(insn, "rv_address", None)
 
     def bound_check(self, insn):
+        """(register, limit, before) when the instruction bounds a switch index (dread.switches):
+        andi rN, rM, 2^n - 1 (rN takes 0 .. 2^n - 1; set after it), or a branch that compares the
+        index with a constant loaded right in front of it (li + bltu and kin, joined by link_pair:
+        values up to the constant are tried; set before the branch)."""
+        f = fields(insn)
+        if f.op == "andi" and f.rd and 0 < f.imm < 0x10000 and f.imm & (f.imm + 1) == 0:
+            return NAMES[f.rd], f.imm, False
+        compare = getattr(insn, "rv_compare", None)
+        if compare is not None and 0 <= compare[1] < 0x10000:
+            return NAMES[compare[0]], compare[1], True
         return None
 
     def switch_targets(self, insn, program, inside):

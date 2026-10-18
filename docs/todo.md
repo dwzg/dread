@@ -253,7 +253,12 @@ The long runs set the pace of everything after them. Measure first, then cut.
     from the entry and the image's span) and 8 bytes give auipc t1 + jalr when jal does not reach
     (entry_branch, which dread.emu checks too); the C's instruction set from the layer
     (isa_of_symbol); `.srodata`, `.sdata`, `.sbss`, `.riscv.attributes` in the linker script;
-  - [ ] regflow (ilp32: a0-a7, ra, s0-s11), switches, noreturn, the reading aids;
+  - [x] regflow (ilp32: a0-a7, ra, s0-s11): the entry reads of every gizmo function match its C
+    signature (sum6 takes all six arguments in registers); switches: the layer's bound_check (andi
+    with 2^n - 1; a branch against a constant loaded right in front of it, joined by link_pair)
+    lets dread.switches run script_run's table (8 targets); noreturn (_start, main); the reading
+    aids; dread ghidra (Ghidra's RV32 language `RISCV:LE:32:default` with its `gcc` compiler spec,
+    the exporter names the plain instruction set by the layer) agrees with the ELF;
   - [ ] the system run: reset, machine external interrupt through mtvec, mret;
   - [ ] a lifter for RV32IMC and its fuzzer.
 

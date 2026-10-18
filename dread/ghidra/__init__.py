@@ -179,10 +179,10 @@ def main(argv=None):
     cmd = [os.path.join(ghidra, "support", "analyzeHeadless"), project, "%s-%s" % (target.name, image.name),
            "-import", image.original, "-overwrite",
            "-loader", "BinaryLoader", "-loader-baseAddr", "0x%x" % image.base, "-loader-blockName", "image",
-           "-processor", image.arch.ghidra, "-cspec", "default",
+           "-processor", image.arch.ghidra, "-cspec", getattr(image.arch, "ghidra_cspec", "default"),
            "-scriptPath", HERE,
            "-preScript", "DreadSetup.java", setup,
-           "-postScript", "DreadExportMap.java", functions, code_ranges]
+           "-postScript", "DreadExportMap.java", functions, code_ranges, image.arch.isas()[0]]
     if not args.no_decompile:
         if os.path.isdir(decompiled):
             shutil.rmtree(decompiled)

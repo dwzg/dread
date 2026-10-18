@@ -31,6 +31,7 @@ def test_subtract():
     assert ghidra.subtract((0, 100), [(0, 100)]) == []
 
 
+@pytest.mark.rv32
 @pytest.mark.slow
 @pytest.mark.ghidra
 @pytest.mark.skipif(ghidra.find_ghidra() is None, reason="needs Ghidra (GHIDRA_INSTALL_DIR)")
@@ -46,5 +47,5 @@ def test_analysis_agrees_with_the_elf(target, variant, tmp_path):
         assert got[entry] == (name, size), (name, got[entry])
     extra = [got[e][0] for e in set(got) - set(truth)]
     assert all(name.startswith("thunk_") for name in extra), extra
-    ranges = read_code_ranges(str(tmp_path / "config" / "code_ranges.tsv"), target.arch.isa)
+    ranges = read_code_ranges(str(tmp_path / "config" / "code_ranges.tsv"), target.arch.isa, target.arch.isas())
     assert {isa for _, _, isa in ranges} == {target.arch.isa}

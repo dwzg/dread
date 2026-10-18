@@ -21,16 +21,24 @@ SIGNATURES = {           # registers each function reads at its entry, from the 
 }
 
 
+@pytest.mark.rv32
 def test_kept_registers(target, variant):
     flow = regflow.load(target, target.image())
-    extra = {name for name in flow.kept if [r for r in flow.kept_regs(name) if r != "r0"]}
-    assert extra == ({"uart_putc", "__aeabi_uidivmod"} if variant == "a32" else {"uart_putc"})
-    assert flow.kept_regs("uart_putc") == ["r1"]
-    assert [caller for caller, _ in flow.sites_of("uart_putc", "r1")] == ["uart_puts"]
-    assert "r0" in flow.kept_regs("parse_uint") and "r0" not in flow.kept_regs("ring_put")
+    first = target.arch.arg_regs(1)[0]
+    extra = {name for name in flow.kept if [r for r in flow.kept_regs(name) if r != first]}
+    if variant == "rv32":       # clang inlined uart_putc into uart_puts, the caller that read r1 on ARM
+        assert extra == set()
+    else:
+        assert extra == ({"uart_putc", "__aeabi_uidivmod"} if variant == "a32" else {"uart_putc"})
+        assert flow.kept_regs("uart_putc") == ["r1"]
+        assert [caller for caller, _ in flow.sites_of("uart_putc", "r1")] == ["uart_puts"]
+    assert first in flow.kept_regs("parse_uint") and first not in flow.kept_regs("ring_put")
 
 
-def test_kept_registers_are_classified(target):
+@pytest.mark.rv32
+def test_kept_registers_are_classified(target, variant):
+    if variant == "rv32":
+        pytest.skip("no register is kept beyond a0 on rv32 (test_kept_registers)")
     flow = regflow.load(target, target.image())
     assert flow.always("uart_putc", "r1") and flow.preserved_regs("uart_putc") == ["r1"]
     assert flow.why("uart_putc", "r1").endswith("the original leaves it unchanged")
@@ -43,13 +51,19 @@ def jumps(program, name):
     return fn, [a for a in fn.insns if program.arch.flow(program.insn(a))[0] == "ijump"]
 
 
+@pytest.mark.rv32
 def test_indirect_jumps_are_resolved(target, variant):
-    """script_run's switch (a byte table and add pc on a32, tbb on m3), dispatch's table of
-    function pointers (tail calls) and the veneer to the RAM function."""
+    """script_run's switch (a byte table and add pc on a32, tbb on m3, a table of addresses behind
+    andi a0, a0, 7 and jr on rv32), dispatch's table of function pointers (tail calls) and the veneer
+    to the RAM function (clang builds neither: dispatch's handlers are inlined, the far call is
+    auipc + jalr)."""
     program = Program(target)
     fn, (jump,) = jumps(program, "script_run")
     inside, outside = switches.resolve(program, fn, jump)
-    assert len(inside) == 7 and not outside and set(inside) <= set(fn.insns)
+    assert len(inside) == (8 if variant == "rv32" else 7) and not outside and set(inside) <= set(fn.insns)
+    if variant == "rv32":
+        assert jumps(program, "dispatch")[1] == [] and "__ram_crc_veneer" not in program.by_name
+        return
     if variant == "m3":     # the emulated dispatch agrees with decoding the tbb table
         decoded = program.arch.switch_targets(program.insn(jump), program, lambda a: (a & ~1) in set(fn.insns))
         assert sorted(decoded) == inside
@@ -60,10 +74,16 @@ def test_indirect_jumps_are_resolved(target, variant):
     assert switches.resolve(program, fn, jump) == ([], [program.by_name["ram_crc"].entry])
 
 
-def test_entry_reads_match_the_signatures(target):
+@pytest.mark.rv32
+def test_entry_reads_match_the_signatures(target, variant):
     flow = regflow.load(target, target.image())
-    got = {name: " ".join(flow.read_regs(name)) for name in SIGNATURES}
-    assert got == SIGNATURES
+    want = dict(SIGNATURES)
+    if variant == "rv32":       # a0-a7 for the arguments: sum6 takes all six in registers; no veneer
+        want = {name: " ".join("a" + r[1:] for r in regs.split()) for name, regs in want.items()}
+        want["sum6"] = "a0 a1 a2 a3 a4 a5"
+        del want["__ram_crc_veneer"]
+    got = {name: " ".join(flow.read_regs(name)) for name in want}
+    assert got == want
 
 
 @pytest.mark.rv32
@@ -78,10 +98,13 @@ CLOBBER = ("REG32(UART_BASE) = (u8)c;", 'REG32(UART_BASE) = (u8)c;\n    __asm__ 
 
 
 @pytest.mark.slow
+@pytest.mark.rv32
 @pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_a_clobbered_kept_register_fails(target, variant, tmp_path, capsys, monkeypatch):
     """A uart_putc that ends with r1 = 0: everything its own tests compared before agrees, but
     uart_puts reads r1 after the call."""
+    if variant == "rv32":
+        pytest.skip("on rv32 uart_puts has uart_putc inlined: no caller reads a register after it")
     src = src_copy(tmp_path, variant, CLOBBER)
     payload = build.build(target, target.image(), src=str(src), out=str(tmp_path / "recon"), quiet=True)
     failed, uncovered, text = run_all(target, payload, names=["uart_putc"])

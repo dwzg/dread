@@ -1,6 +1,7 @@
 // DREAD: export the analysis as DREAD's tables (docs/formats.md):
 //   functions.tsv    address, name, instruction bytes, prototype (every function Ghidra knows)
-//   code_ranges.tsv  runs of instructions, end exclusive, with their instruction set (a32 or t32)
+//   code_ranges.tsv  runs of instructions, end exclusive, with their instruction set: the third
+//                    argument's (default a32), or t32 where ARM's TMode register says Thumb
 // Script args: <functions.tsv> <code_ranges.tsv>
 //@category DREAD
 
@@ -44,6 +45,7 @@ public class DreadExportMap extends GhidraScript {
 			}
 		}
 		Register tmode = currentProgram.getProgramContext().getRegister("TMode");
+		String plain = args.length > 2 ? args[2] : "a32";
 		long start = -1, end = -1;
 		String runIsa = null;
 		int ranges = 0;
@@ -51,7 +53,7 @@ public class DreadExportMap extends GhidraScript {
 			out.println("# start\tend (exclusive)\tisa: runs of instructions as Ghidra classified them");
 			for (Instruction ins : currentProgram.getListing().getInstructions(true)) {
 				long a = ins.getMinAddress().getOffset();
-				String isa = "a32";
+				String isa = plain;
 				if (tmode != null) {
 					BigInteger v = ins.getValue(tmode, false);
 					if (v != null && v.intValue() == 1) {

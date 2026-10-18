@@ -93,6 +93,7 @@ class Arm:
         # Ghidra's language id: Cortex for M profile, v4t for an A-profile core that can run Thumb
         # (ARM7TDMI and later), v4 otherwise. Override in [arch] ghidra for another variant.
         self.ghidra = ghidra or ("ARM:LE:32:Cortex" if profile == "m" else "ARM:LE:32:v4t")
+        self.ghidra_cspec = "default"
         self._cs = {}
 
     def configure(self, cflags):
