@@ -6,7 +6,7 @@ import pytest
 from dread import build, integration
 from test_runner import src_copy
 
-pytestmark = [pytest.mark.compiles, pytest.mark.rv32]
+pytestmark = pytest.mark.compiles
 
 
 @pytest.mark.slow

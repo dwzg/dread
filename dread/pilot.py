@@ -295,7 +295,7 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
     text = None
     if use_lifted:
         try:
-            text = lift.Lifter(program, flow, endless).lift(fn).text
+            text = lift.make_lifter(program, flow, endless).lift(fn).text
         except lift.Refused:
             text = None
     system, user = question(target, image, program, fn, flow, text)
@@ -580,7 +580,7 @@ def main(argv=None):
             text = None
             if not args.no_lifted:
                 try:
-                    text = lift.Lifter(program, flow, endless).lift(fn).text
+                    text = lift.make_lifter(program, flow, endless).lift(fn).text
                 except lift.Refused:
                     pass
             system, user = question(target, image, program, fn, flow, text)

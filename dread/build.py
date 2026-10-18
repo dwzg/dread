@@ -96,7 +96,7 @@ def lift_sources(target, image, names, outdir, quiet=False):
     from dread import lift, regflow
     from dread.program import Program
     program = Program(target, image)
-    lifter = lift.Lifter(program, regflow.load(target, image, program))
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
     os.makedirs(outdir, exist_ok=True)
     made, endless = {}, []
     for name in names:

@@ -112,7 +112,22 @@ def direct_callees(program, fn):
     return out
 
 
+def make_lifter(program, flow=None, endless=None):
+    """The lifter for the program's architecture: Lifter for ARM, dread.lift_riscv.RiscVLifter for
+    RISC-V."""
+    if program.arch.name == "riscv":
+        from dread.lift_riscv import RiscVLifter
+        return RiscVLifter(program, flow, endless)
+    return Lifter(program, flow, endless)
+
+
 class Lifter:
+    """The ARM translator (ARM state and Thumb), and the analyses every translator shares: control
+    flow, the stack pointer's depth, the registers a function reads before writing them, the
+    acceptance. Another instruction set subclasses it (dread.lift_riscv)."""
+
+    REGS, ARGS, AFTER_CALL = REGS, ARGS, AFTER_CALL     # the architecture's names (class attributes)
+
     def __init__(self, program, flow=None, endless=None):
         """flow: the image's RegFlow (dread.regflow); endless: the names of the functions that never
         return, when the caller has them already (dread.noreturn.find, which otherwise runs here)."""
@@ -186,7 +201,7 @@ class Lifter:
             return self._states[key]
         prog, arch = self.prog, self.arch
         index = {a: i for i, a in enumerate(fn.insns)}
-        states = {fn.insns[0]: (0, {"lr": self.RET})}
+        states = {fn.insns[0]: (0, {self.arch.link_reg: self.RET})}
         work = [fn.insns[0]]
         while work:
             a = work.pop()
@@ -262,7 +277,7 @@ class Lifter:
             if r not in ("sp", "pc", "flags"):
                 after.pop(r, None)
         if arch.flow(insn)[0] in ("call", "icall"):
-            for r in AFTER_CALL:
+            for r in self.AFTER_CALL:
                 after.pop(r, None)
         if known is not None:
             self._put(after, known[0], known[1])
@@ -412,10 +427,11 @@ class Lifter:
         except Refused:
             known = {}
         try:
-            args = () if self.handler_kind(fn) else ARGS     # an exception handler gets no arguments
+            args = () if self.handler_kind(fn) else self.ARGS   # an exception handler gets no arguments
         except Refused:
-            args = ARGS
-        start = frozenset(r for r in REGS + ["flags"] if r not in args + ("sp", "pc", "lr"))   # lr: the C knows it
+            args = self.ARGS
+        link = self.arch.link_reg                                # the C knows the return address
+        start = frozenset(r for r in self.REGS + ["flags"] if r not in tuple(args) + ("sp", "pc", link))
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
         work = [fn.insns[0]]
         while work:
@@ -428,8 +444,11 @@ class Lifter:
             reads, writes = arch.reg_effects(insn)
             if arch.stack_kind(insn) == "push" or kind == "return":
                 reads = set()
+            saved = self.saving_store(insn, known.get(a, (0, {}))[1])
+            if saved is not None and saved in undef:
+                reads = set(reads) - {saved}    # stored into the frame to be restored: a save, no use
             if kind in ("call", "icall"):
-                writes = set(writes) | AFTER_CALL
+                writes = set(writes) | self.AFTER_CALL
             copy = self.plain_move(insn)
             if copy is not None and copy[1] in undef:
                 reads = set(reads) - {copy[1]}   # a copy of what the caller left (mov r8, r8 is a nop;
@@ -470,6 +489,11 @@ class Lifter:
         self._entry[fn.name] = (undef_at, found)
         return undef_at, found
 
+    def saving_store(self, insn, values):
+        """The register a store saves into the frame (to restore it later), or None. ARM saves with
+        push, which stack_kind tells; a single-register store into the frame is a save on RISC-V."""
+        return None
+
     def plain_move(self, insn):
         """(destination, source) of mov rd, rs: unconditional, no shift, no flags; else None."""
         ops = insn.operands
@@ -483,7 +507,7 @@ class Lifter:
     def leaves(self, fn):
         """The registers beyond r0-r3 a function reads before anything writes them."""
         found = self.entry_states(fn)[1]
-        return sorted(set().union(*found.values()) - set(ARGS)) if found else []
+        return sorted(set().union(*found.values()) - set(self.ARGS)) if found else []
 
     # ---- the translation ----
 
@@ -1623,7 +1647,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
     """The acceptance loop (see the module's docstring); returns the accepted names."""
     from dread import build, overlay, regflow, runner
     program = Program(target, image)
-    lifter = Lifter(program, regflow.load(target, image, program))
+    lifter = make_lifter(program, regflow.load(target, image, program))
     work = os.path.join(target.build, "lift-check", image.name)
     by_hand = build.defined_functions(build.compile_all(target, image, image.src, os.path.join(work, "obj"),
                                                         quiet=True))
@@ -1841,7 +1865,7 @@ def main(argv=None):
         return 0
     from dread import regflow
     program = Program(target, image)
-    lifter = Lifter(program, regflow.load(target, image, program))
+    lifter = make_lifter(program, regflow.load(target, image, program))
     out = args.out or os.path.join(target.build, "lifted", image.name)
     os.makedirs(out, exist_ok=True)
     lifted = refused = 0

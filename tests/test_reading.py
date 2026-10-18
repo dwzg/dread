@@ -6,7 +6,6 @@ from dread import callsites, constants, flat
 from dread.program import Program
 
 
-@pytest.mark.rv32
 def test_constant_arguments(program):
     fn = program.by_name["print_status"]
     first = program.arch.arg_regs(1)[0]
@@ -18,7 +17,6 @@ def test_constant_arguments(program):
     assert texts == ["mode ", None, " volume ", None, "\\r\\n"]     # the rest come from callees or the stack
 
 
-@pytest.mark.rv32
 def test_a_constant_behind_a_conditional_branch(program):
     """dispatch(3, c - '0') behind cmp r1, #9; bhi: the fill values take the branch, the second try
     starts behind it."""
@@ -27,7 +25,6 @@ def test_a_constant_behind_a_conditional_branch(program):
     assert constants.at(program, caller, address, [first, second]) == {first: 3}
 
 
-@pytest.mark.rv32
 def test_calls_grouped_by_an_argument(program, variant):
     first = program.arch.arg_regs(1)[0]
     groups = {}
@@ -39,13 +36,11 @@ def test_calls_grouped_by_an_argument(program, variant):
     assert groups == expected
 
 
-@pytest.mark.rv32
 def test_call_chains(program):
     assert callsites.chains(program, "main", "uart_putc")[0] in (["main", "uart_puts", "uart_putc"],
                                                                  ["main", "handle_key", "uart_putc"])
 
 
-@pytest.mark.rv32
 def test_flat_listing(program):
     lines = flat.listing(program, program.by_name["print_status"], callers=flat.callers_of(program))
     text = "\n".join(lines)

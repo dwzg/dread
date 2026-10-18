@@ -270,7 +270,8 @@ def main(argv=None):
                      for n, c, b in results)
     system = RUN.get("system", set())
     for fn in sorted(system & set(RUN["built"])):
-        print("SYSTEM %s: never returns; the system run's scenarios test it (dread sysrun)" % fn)
+        print("SYSTEM %s: it never returns or is an exception handler; the system run's scenarios test it"
+              " (dread sysrun)" % fn)
     untested = [fn for fn in RUN["built"] if fn not in names and fn not in system]
     for fn in untested:
         print("UNTESTED %s" % fn)

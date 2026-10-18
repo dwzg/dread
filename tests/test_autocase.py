@@ -9,8 +9,6 @@ from dread.autocase import Generator
 from dread.target import Target
 from conftest import gizmo_dir
 
-pytestmark = pytest.mark.rv32
-
 
 @pytest.fixture
 def gen(target):

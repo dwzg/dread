@@ -5,13 +5,9 @@ the same result and the same memory written, so every kept case checks the repla
 import json
 import os
 
-import pytest
-
 from dread import autocase, record
 
 from conftest import GIZMO
-
-pytestmark = pytest.mark.rv32
 
 SPEC = os.path.join(GIZMO, "specs", "read_line.py")
 

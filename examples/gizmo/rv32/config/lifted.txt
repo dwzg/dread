@@ -1,0 +1,34 @@
+# Functions built from lifted C: their cases (for one that never returns: every scenario
+# of the system run) agree with the original and run every instruction it can reach.
+# Written by dread lift --check; not edited by hand.
+apply_config
+beep_off
+beep_on
+cmd_beep
+cmd_led
+cmd_mode
+cmd_volume
+delay
+fmt_dec
+gpio_set
+irq_dispatch
+irq_enable_timer
+keys_read
+led_off
+led_on
+main
+memcmp
+memcpy
+memset
+parse_kv
+print_status
+read_line
+script_run
+strlen
+strncpy
+timer_irq
+timer_start
+trap_entry
+uart_getc
+uart_init
+uart_puts

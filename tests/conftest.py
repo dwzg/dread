@@ -1,9 +1,7 @@
 """Fixtures shared by DREAD's tests: the gizmo targets.
 
-A test that takes `variant` (or `target`, `program`) runs on the two ARM builds; marked with
-@pytest.mark.rv32 it runs on the RV32 build as well. The marker goes once every test runs there.
-Marked with @pytest.mark.compiles, a test is skipped when its build's compiler is missing (GCC for
-the ARM builds, clang for rv32)."""
+A test that takes `variant` (or `target`, `program`) runs on every build: a32 and m3 (GCC), rv32
+(clang). Marked with @pytest.mark.compiles, a test is skipped when its build's compiler is missing."""
 import os
 import shutil
 
@@ -11,8 +9,7 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GIZMO = os.path.join(ROOT, "examples", "gizmo")
-VARIANTS = ("a32", "m3")
-RV32 = ("rv32",)
+VARIANTS = ("a32", "m3", "rv32")
 COMPILERS = {"a32": "arm-none-eabi-gcc", "m3": "arm-none-eabi-gcc", "rv32": "clang"}
 
 
@@ -20,10 +17,9 @@ def gizmo_dir(variant):
     return os.path.join(GIZMO, variant)
 
 
-def pytest_generate_tests(metafunc):
-    if "variant" in metafunc.fixturenames:
-        ready = metafunc.definition.get_closest_marker("rv32") is not None
-        metafunc.parametrize("variant", VARIANTS + (RV32 if ready else ()))
+@pytest.fixture(params=VARIANTS)
+def variant(request):
+    return request.param
 
 
 @pytest.fixture(autouse=True)

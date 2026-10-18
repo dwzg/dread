@@ -10,7 +10,7 @@ import pytest
 from dread import build, sysrun
 from test_runner import src_copy
 
-pytestmark = [pytest.mark.compiles, pytest.mark.rv32]
+pytestmark = pytest.mark.compiles
 
 
 def both(target, payload=None, scenario=None):

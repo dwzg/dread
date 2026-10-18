@@ -225,7 +225,7 @@ The long runs set the pace of everything after them. Measure first, then cut.
   keeps them; the survivors question gets an answer of its own when it comes with the last try (it
   only asks for arguments). The pilot computes the never-returning functions once for its lifters.
 - [ ] A measured run with a cloud model (waits for "Questions for the user").
-- [ ] RISC-V (RV32IMC), in the porting guide's order (docs/porting.md); clang 23 and ld.lld are
+- [x] RISC-V (RV32IMC), in the porting guide's order (docs/porting.md); clang 23 and ld.lld are
   installed, Unicorn runs RV32 with the machine-mode registers, capstone 5 gives the text but not the
   registers an instruction uses (`regs_access` is unsupported for RISC-V, system registers are no
   operands), so the layer decodes the instruction bits itself for everything but the text:
@@ -264,7 +264,18 @@ The long runs set the pace of everything after them. Measure first, then cut.
     vectored mode too), mret in the emulator itself. gizmo-rv32 boots to READY on both images, the
     keys go through the timer interrupt, a planted bug and a bug in the interrupt path show, and
     dread sysrecord records from it;
-  - [ ] a lifter for RV32IMC and its fuzzer.
+  - [x] a lifter for RV32IMC and its fuzzer: dread.lift_riscv (a subclass of dread.lift's Lifter: the
+    control flow, the stack pointer's depth, the acceptance and the switches are shared; the
+    translation, the frame slots, saves by single stores and the trap handler are its own; make_lifter
+    picks it). On gizmo-rv32: 46 of 47 functions lift (_start sets sp from a constant), 31 are
+    accepted (the trap entry through clang's interrupt("machine") and main by the system run), the
+    image with 13 hand-written and 31 lifted functions agrees on 1510 cases and in the system run.
+    dread liftfuzz --isa rv32 (RiscVGenerator: the base, M and Zicsr instructions, compressed forms by
+    the assembler, frame pointer and register-return styles): 450 random functions of 40 instructions,
+    none differ, none refused; a planted division mistake is found and reduced. On its first run it
+    found that the machine CSRs (mscratch) kept their values from one call to the next, differently
+    in each image's emulator: every call now finds them at zero. All tests run on rv32 (the marker
+    is gone); 269 pass.
 
 ## Browser view (`dread gui`; asked for by the user on 2026-10-18)
 

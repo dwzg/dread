@@ -2,7 +2,8 @@
 
 Everything DREAD knows about an instruction set sits, or should sit, in one module of `dread/arch`.
 `dread.arch.get()` returns the layer for a target's `[arch]` section: `dread.arch.arm.Arm` documents
-every method in its docstrings, `dread.arch.riscv.RiscV` is the second layer (RV32IMC, under way).
+every method in its docstrings, `dread.arch.riscv.RiscV` is the second layer (RV32IMC; every tool runs
+on it, and its port is the worked example of the order below).
 This page lists what a new layer has to provide, what is still ARM-specific outside the layer, and
 the order of the work.
 
@@ -73,9 +74,13 @@ generator, the lifter, the reading aids)
 To move behind the layer when the second architecture arrives (one at a time, as each tool is
 needed on it):
 
-- `dread.lift` and `dread.liftfuzz`: the lifter is a translator per instruction set; a new
-  architecture gets its own module beside them (the acceptance in `dread lift --check` and the system
-  run are generic).
+- `dread.lift` and `dread.liftfuzz`: the lifter is a translator per instruction set. A new
+  architecture subclasses `dread.lift.Lifter` in a module of its own (`dread.lift_riscv`): the
+  control flow, the stack pointer's depth (states, with its step, new_depth, made_value and
+  stored_slot), the registers read before written (entry_states, with saving_store for saves by
+  single stores), the acceptance, the system run and the switches are shared; the translation of
+  each instruction, the rendering and the kinds of handlers are its own. `make_lifter` picks it.
+  `dread.liftfuzz` takes a generator per ISA (`RiscVGenerator` beside the ARM `Generator`).
 - `dread.elfimport`: ARM dispatch slots and padding between functions (other architectures skip
   them).
 

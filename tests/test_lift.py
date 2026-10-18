@@ -1,5 +1,6 @@
 """dread lift: what the gizmo builds lift and why the rest is refused, that the lifted C compiles,
-and that the acceptance keeps what agrees with the original and drops a planted mistake."""
+and that the acceptance keeps what agrees with the original and drops a planted mistake. On gizmo-rv32
+the translator is dread.lift_riscv (dread.lift.make_lifter)."""
 import os
 import shutil
 
@@ -17,7 +18,7 @@ def lift_all(variant):
     target = Target.load(gizmo_dir(variant))
     image = target.image()
     program = Program(target, image)
-    lifter = lift.Lifter(program, regflow.load(target, image, program))
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
     lifted, refused = {}, {}
     for fn in program.functions:
         try:
@@ -29,6 +30,10 @@ def lift_all(variant):
 
 def test_refusals_name_their_reason(variant):
     target, image, lifted, refused = lift_all(variant)
+    if variant == "rv32":       # the startup sets sp from a constant (la sp, __stack_top)
+        assert "changes the stack pointer in a way not modelled: auipc sp" in refused.pop("_start")
+        assert refused == {}
+        return
     assert "reads r1 behind the call of uart_putc" in refused.pop("uart_puts")     # dread.regflow's finding
     if variant == "a32":
         assert "changes the stack pointer" in refused.pop("reset")
@@ -41,13 +46,20 @@ def test_exception_handler_and_main_lift(variant):
     assert "main" in lifted                     # never returns: the system run decides (system_check)
     if variant == "a32":                        # an exception handler: gcc's interrupt attribute
         assert "irq_entry" in lifted and "return;" in lifted["irq_entry"].text
+    if variant == "rv32":                       # the trap entry ends in mret: clang's interrupt("machine")
+        text = lifted["trap_entry"].text
+        assert 'void __attribute__((interrupt("machine"))) trap_entry(void)' in text and "return;" in text
 
 
 def test_translation_shapes(variant):
     target, image, lifted, refused = lift_all(variant)
     text = lifted["script_run"].text
-    assert "switch (index) {" in text and text.count("case ") == 7          # the switch over 0..6
+    assert "switch (index) {" in text and text.count("case ") == (8 if variant == "rv32" else 7)
     assert "u32 frame[" in text and "volatile" in text
+    if variant == "rv32":       # the far call into RAM (auipc + jalr) is a call by name; the frame
+        assert "a0 = ram_crc(a0, a1, a2, a3, a4, a5, a6, a7);" in lifted["main"].text
+        assert "(sp0 - " in lifted["apply_config"].text
+        return
     if variant == "m3":
         assert "u32 x = r2, a = r1;" in text                            # lsls r2, r1 shifts r2 by r1
     apply = lifted["apply_config"].text
@@ -60,7 +72,8 @@ def test_translation_shapes(variant):
 def test_never_returns(variant):
     from dread import noreturn
     target = Target.load(gizmo_dir(variant))
-    expected = {"a32": {"hang", "main", "reset"}, "m3": {"Default_Handler", "Reset_Handler", "main"}}[variant]
+    expected = {"a32": {"hang", "main", "reset"}, "m3": {"Default_Handler", "Reset_Handler", "main"},
+                "rv32": {"_start", "main"}}[variant]
     assert noreturn.find(Program(target, target.image())) == expected
 
 
@@ -70,7 +83,7 @@ def test_a_call_that_never_returns_ends_the_path():
     assert "r0 = main(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0; for (;;) { }" in text
 
 
-@needs_gcc
+@pytest.mark.compiles
 def test_lifted_c_compiles(variant, tmp_path):
     target, image, lifted, refused = lift_all(variant)
     src = tmp_path / "lifted"
@@ -90,7 +103,7 @@ def copies(tmp_path_factory):
     example has already cached (they are keyed by what they depend on, so they stay valid)."""
     copy = tmp_path_factory.mktemp("lift") / "gizmo"
     shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
-    for variant in ("a32", "m3"):
+    for variant in ("a32", "m3", "rv32"):
         for cache in ("autocases", "regflow"):
             here = os.path.join(gizmo_dir(variant), "build", cache)
             if os.path.isdir(here):
@@ -104,7 +117,7 @@ def copy_of(copies, variant):
 
 
 @pytest.mark.slow
-@needs_gcc
+@pytest.mark.compiles
 def test_check_accepts_what_agrees(variant, copies):
     target, image = copy_of(copies, variant)
     lines = []
@@ -116,9 +129,18 @@ def test_check_accepts_what_agrees(variant, copies):
 
 
 @pytest.mark.slow
-@needs_gcc
+@pytest.mark.compiles
 def test_check_drops_a_planted_mistake(variant, copies, monkeypatch):
     target, image = copy_of(copies, variant)
+    if variant == "rv32":       # the unsigned branches reversed: fmt_dec's loop has one, keys_read none
+        from dread import lift_riscv
+        monkeypatch.setitem(lift_riscv.CONDS, "bltu", "%s > %s")
+        monkeypatch.setitem(lift_riscv.CONDS, "bgeu", "%s <= %s")
+        lines = []
+        accepted = lift.check(target, image, ["fmt_dec", "keys_read"], out=lines.append, jobs=4)
+        assert accepted == ["keys_read"], lines
+        assert any(line.startswith("dropped  FAIL fmt_dec") for line in lines), lines
+        return
     compare = lift.Lifter._compare
 
     def wrong_carry(self, insn, ops, kind):                             # cmp leaves the carry inverted
@@ -137,7 +159,7 @@ def test_check_drops_a_planted_mistake(variant, copies, monkeypatch):
 
 
 @pytest.mark.slow
-@needs_gcc
+@pytest.mark.compiles
 def test_a_main_loop_is_accepted_by_the_system_run(variant, copies):
     """main never returns, so no case of it ends: the scenarios decide. They agree on both images and
     run all of it only because a due interrupt is taken after a wait in code built from C (main's own

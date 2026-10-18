@@ -24,7 +24,6 @@ def write(tmp_path, text):
     return str(tmp_path)
 
 
-@pytest.mark.rv32
 def test_gizmo_targets_load(target, variant):
     image = target.image()
     assert target.name == "gizmo-" + variant
@@ -107,7 +106,6 @@ def test_gizmo_dirs_exist():
     assert os.path.exists(os.path.join(gizmo_dir("a32"), "dread.toml"))
 
 
-@pytest.mark.rv32
 def test_gizmo_startup_lists_match_the_elf(target, variant):
     """make -C examples/gizmo/fw targets writes them (import-elf --write-startup); a stale list
     made the analysis read the wrong bytes for the RAM function once."""

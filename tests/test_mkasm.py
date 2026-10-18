@@ -10,7 +10,6 @@ from conftest import have
 needs_binutils = pytest.mark.skipif(not have("arm-none-eabi-as"), reason="needs arm-none-eabi binutils")
 
 
-@pytest.mark.rv32
 def test_listing_rebuilds_identically(target, variant, tmp_path):
     tools = ("clang", "ld.lld", "llvm-objcopy") if variant == "rv32" else ("arm-none-eabi-as",)
     if not all(have(t) for t in tools):
@@ -49,7 +48,6 @@ def test_thumb_it_conditions_survive_decoding(variant, program):
     assert seen > 5
 
 
-@pytest.mark.rv32
 def test_labels_only_within_one_copy(target, tmp_path):
     """The RAM function is written at its stored address with labels for its own branches."""
     prog = Program(target)

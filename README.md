@@ -58,7 +58,7 @@ for an RV32IMC core with clang (that build is new; the tools are being ported to
 | Method documentation and a porting guide | done |
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
 | `dread pilot`: the reconstruction loop run by code, an LLM (local or cloud) only for the judgement: writing C, arguing survivors, proposing inputs and names; every answer checked by the tools | first version |
-| RISC-V (RV32IMC): gizmo-rv32 built with clang; decoding, listing with byte-identical rebuild, reading aids, the overlay, differential tests with generated cases, integration and recorded cases, regflow, switches, Ghidra, the system run with interrupts | under way (next: the lifter) |
+| RISC-V (RV32IMC): gizmo-rv32 built with clang; every tool runs on it: listing with byte-identical rebuild, reading aids, the overlay, differential tests, integration, recorded cases, regflow, switches, Ghidra, the system run with interrupts, the lifter and its fuzzer | done |
 
 ## Layout
 
@@ -83,6 +83,7 @@ bin/dread sysrun --target examples/gizmo/m3                   # the whole firmwa
 bin/dread sysrecord --target examples/gizmo/m3 --scenario config read_line   # cases from what the run saw
 bin/dread lift --target examples/gizmo/m3 --check  # lift every function, keep those whose cases agree
 bin/dread liftfuzz --isa t32                        # the lifter on random instructions, against the emulator
+bin/dread test --target examples/gizmo/rv32         # the same tools on the RISC-V build
 bin/dread flat --target examples/gizmo/m3 print_status        # one function to read: names, literals, arguments
 bin/dread callsites --target examples/gizmo/m3 --by 0 gpio_set # who calls it, with which constants
 bin/dread callpair --target OTHER --other examples/gizmo/a32 --seed FUN_08000738=main   # names by call order

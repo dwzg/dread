@@ -8,7 +8,7 @@ import pytest
 from dread import build, runner
 from conftest import GIZMO
 
-pytestmark = [pytest.mark.compiles, pytest.mark.rv32]
+pytestmark = pytest.mark.compiles
 
 
 def run_all(target, payload, cases_dir=None, names=None):

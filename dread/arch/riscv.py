@@ -569,9 +569,15 @@ class RiscV:
     def new_uc(self, isa=None):
         return uc.Uc(uc.UC_ARCH_RISCV, uc.UC_MODE_RISCV32)
 
+    CALL_CSRS = ("MSTATUS", "MIE", "MSCRATCH", "MEPC", "MCAUSE", "MTVAL", "MTVEC")
+
     def initial_status(self, engine):
-        """Machine mode with interrupts off, as a called function finds it."""
-        engine.reg_write(ur.UC_RISCV_REG_MSTATUS, engine.reg_read(ur.UC_RISCV_REG_MSTATUS) & ~0x8)
+        """Machine mode with interrupts off and the machine CSRs a function may read at zero, as
+        every call finds them: a CSR keeps its value from one call to the next in an emulator, and
+        each image has its own (dread liftfuzz found it: an mscratch the other image's earlier case
+        had written)."""
+        for name in self.CALL_CSRS:
+            engine.reg_write(getattr(ur, "UC_RISCV_REG_" + name), 0)
 
     def status_reg(self):
         return ur.UC_RISCV_REG_MSTATUS

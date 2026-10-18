@@ -32,7 +32,6 @@ def objdump_instructions(elf_path, variant="a32"):
     return insns
 
 
-@pytest.mark.rv32
 def test_function_instructions_match_objdump(program, variant):
     if not have(objdump(variant)):
         pytest.skip("needs " + objdump(variant))
@@ -57,7 +56,6 @@ def test_function_instructions_match_objdump(program, variant):
         assert sum(program.insn_size(a) for a in fn.insns) == fn.size, fn.name
 
 
-@pytest.mark.rv32
 def test_ram_function_reads_its_stored_bytes(program, variant):
     elf = Elf(os.path.join(gizmo_dir(variant), "original", "gizmo.elf"))
     ram = elf.section(".ramfunc")
@@ -67,13 +65,11 @@ def test_ram_function_reads_its_stored_bytes(program, variant):
     assert program.function_at(fn.insns[2]) is fn
 
 
-@pytest.mark.rv32
 def test_isa_comes_from_the_code_ranges(program, variant):
     isas = {fn.isa for fn in program.functions}
     assert isas == {{"m3": "t32", "rv32": "rv32"}.get(variant, "a32")}
 
 
-@pytest.mark.rv32
 def test_veneer_to_the_ram_function(program, variant):
     """The linker's long branch to the RAM function is a function of its own that loads its
     target from a literal: the thunk idiom the tools have to follow. RISC-V needs none: the far call
@@ -90,14 +86,12 @@ def test_veneer_to_the_ram_function(program, variant):
     assert program.word(address) & ~1 == program.by_name["ram_crc"].entry
 
 
-@pytest.mark.rv32
 def test_decode_every_instruction(program):
     for fn in program.functions:
         for insn in program.instructions(fn):
             assert insn is not None, fn.name
 
 
-@pytest.mark.rv32
 def test_names_and_annotations(program):
     main = program.by_name["main"]
     assert program.name_at(main.entry) == "main"

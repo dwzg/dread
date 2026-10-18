@@ -30,12 +30,17 @@ first runs: capstone reports adc, sbc and rsc without s as setting the flags, an
 carry of movs r1, r1, lsl #7 was taken after r1 was written. Its returns through r3 also made
 dread.switches crash the process inside Unicorn (pages unmapped after a run, written by a later one).
 
-The ISAs: a32 (ARMv7-A in ARM state) and t32 (Cortex-M3, Thumb-2). Needs the cross toolchain
-(arm-none-eabi-). The image, its target directory and the lifted C go to a temporary directory,
-kept when something fails (or with --keep).
+The ISAs: a32 (ARMv7-A in ARM state) and t32 (Cortex-M3, Thumb-2), with the cross toolchain
+(arm-none-eabi-); rv32 (RV32IMC, dread.lift_riscv), with clang and ld.lld: RiscVGenerator, which
+frames a function the same way (ra and s0-s11 saved, every frame slot written, every register set
+from the arguments before the body reads it, s11 the buffer's address, s0 the frame pointer in the
+"fp" style, a return through another register in the "ret" style) and draws from the base, M and
+Zicsr instructions; the assembler compresses what it can, so the compressed forms come along. The
+image, its target directory and the lifted C go to a temporary directory, kept when something fails
+(or with --keep).
 
-    dread liftfuzz [--isa a32|t32] [--functions N] [--length L] [--inputs K] [--seed S] [--reduce N]
-                   [--keep DIR]
+    dread liftfuzz [--isa a32|t32|rv32] [--functions N] [--length L] [--inputs K] [--seed S]
+                   [--reduce N] [--keep DIR]
 """
 import argparse
 import json
@@ -115,6 +120,35 @@ sentinel = 0x1fff0000
 scratch = {base = 0x20100000, size = 0x20000}
 ''',
         "base": 0x08000000, "ram": 0x20000000,
+    },
+    "rv32": {
+        "flags": ["--target=riscv32-unknown-elf", "-march=rv32imc", "-mabi=ilp32", "-mno-relax"],
+        "toml": '''[target]
+name = "liftfuzz-rv32"
+title = "dread liftfuzz, RV32IMC"
+
+[arch]
+name = "riscv"
+isa = "rv32"
+
+[image.main]
+original = "fuzz.bin"
+base = 0x20000000
+limit = 0x20080000
+entry = "f0"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x20000000, size = 0x100000, kind = "rom"},
+    {name = "ram", base = 0x80000000, size = 0x10000},
+    {name = "scratch", base = 0x80100000, size = 0x20000},
+]
+io = [[0x10000000, 0x10010000]]
+stack = {top = 0x80010000, size = 0x2000}
+sentinel = 0x1fff0000
+scratch = {base = 0x80100000, size = 0x20000}
+''',
+        "base": 0x20000000, "ram": 0x80000000,
     },
 }
 
@@ -562,6 +596,173 @@ HELPERS = [
 ]
 
 
+RV_ALU = ["add", "sub", "sll", "srl", "sra", "slt", "sltu", "xor", "or", "and"]
+RV_IMM = ["addi", "slti", "sltiu", "xori", "ori", "andi"]
+RV_MUL = ["mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"]
+RV_BRANCH = ["beq", "bne", "blt", "bge", "bltu", "bgeu"]
+RV_LOADS = [("lb", 1), ("lbu", 1), ("lh", 2), ("lhu", 2), ("lw", 4)]
+RV_STORES = [("sb", 1), ("sh", 2), ("sw", 4)]
+RV_SAVED = ["s%d" % i for i in range(12)]
+RV_HELPERS = [
+    ("h0", ["xor a0, a0, a1", "add a0, a0, a2", "ret"]),                    # three registers in
+    ("h1", ["mul a2, a0, a1", "mulhu a1, a0, a1", "mv a0, a2", "ret"]),     # a 64-bit result: a0 and a1
+    ("h2", ["add a0, a3, a4", "xor a0, a0, a5", "ret"]),                    # the sixth argument
+]
+
+
+class RiscVGenerator:
+    """Random RV32IMC functions (see the module): the same interface as Generator."""
+
+    thumb = False
+
+    def __init__(self, isa, rng):
+        self.isa, self.rng, self.label, self.fp = isa, rng, 0, None
+        self.buf = ISAS[isa]["ram"] + 0x1000 + 4 * (BUF_WORDS // 2)
+
+    def regs(self):
+        """The registers the body computes with: not zero, ra, sp, gp, tp, s11 (the buffer), s0
+        when it is the frame pointer."""
+        out = ["t%d" % i for i in range(7)] + ["a%d" % i for i in range(8)] + ["s%d" % i for i in range(1, 11)]
+        return out + ([] if self.fp else ["s0"])
+
+    def dst(self):
+        return self.rng.choice(self.regs())
+
+    def src(self):
+        return self.rng.choice(self.regs() + ["zero"] * 1)
+
+    def imm12(self):
+        rng = self.rng
+        return rng.choice([0, 1, -1, 2, 31, 32, -2048, 2047, 0x7F, 0x80, -0x80, 0x7FF]) if rng.random() < 0.5 \
+            else rng.randrange(-2048, 2048)
+
+    def one(self):
+        rng = self.rng
+        kind = rng.choices(["alu", "imm", "shift", "upper", "mul", "load", "store", "frame", "system"],
+                           [24, 18, 8, 4, 8, 12, 10, 8, 2])[0]
+        if kind == "alu":
+            return ["%s %s, %s, %s" % (rng.choice(RV_ALU), self.dst(), self.src(), self.src())]
+        if kind == "imm":
+            return ["%s %s, %s, %d" % (rng.choice(RV_IMM), self.dst(), self.src(), self.imm12())]
+        if kind == "shift":
+            return ["%s %s, %s, %d" % (rng.choice(["slli", "srli", "srai"]), self.dst(), self.src(), rng.randrange(32))]
+        if kind == "upper":
+            return ["%s %s, %d" % (rng.choice(["lui", "auipc"]), self.dst(), rng.getrandbits(20))]
+        if kind == "mul":
+            return ["%s %s, %s, %s" % (rng.choice(RV_MUL), self.dst(), self.src(), self.src())]
+        if kind == "load":
+            op, width = rng.choice(RV_LOADS)
+            return ["%s %s, %d(s11)" % (op, self.dst(), width * rng.randrange(-32 // width * 4, 32 // width * 4))]
+        if kind == "store":
+            op, width = rng.choice(RV_STORES)
+            return ["%s %s, %d(s11)" % (op, self.src(), width * rng.randrange(-32 // width * 4, 32 // width * 4))]
+        if kind == "frame":
+            base = "s0" if self.fp and rng.random() < 0.5 else "sp"
+            off = 4 * rng.randrange(FRAME // 4) - (FRAME if base == "s0" else 0)
+            if rng.random() < 0.5:
+                return ["sw %s, %d(%s)" % (self.src(), off, base)]
+            return ["lw %s, %d(%s)" % (self.dst(), off, base)]
+        csr = rng.choice(["csrrw %s, mscratch, %s", "csrrs %s, mscratch, zero", "csrrwi %s, mscratch, 5", "fence"])
+        if csr == "fence":
+            return ["fence"]
+        return [csr % ((self.dst(), self.src()) if csr.count("%s") == 2 else (self.dst(),))]
+
+    def unit(self, name):
+        rng = self.rng
+        r = rng.random()
+        if r < 0.2:
+            # a forward branch; most test a bit of a buffer word first, so that inputs go both ways
+            self.label += 1
+            label = ".L%s_%d" % (name, self.label)
+            t = self.dst()
+            if rng.random() < 0.6:
+                lines = ["lw %s, %d(s11)" % (t, 4 * rng.randrange(-8, 8)),
+                         "andi %s, %s, %d" % (t, t, 1 << rng.randrange(11)),
+                         "%s %s, %s" % (rng.choice(["beqz", "bnez"]), t, label)]
+            else:
+                lines = ["%s %s, %s, %s" % (rng.choice(RV_BRANCH), self.src(), self.src(), label)]
+            k = rng.randrange(1, 4)
+            for _ in range(k):
+                lines += self.one()
+            return lines + [label + ":"], k
+        if r < 0.25:
+            return self.call(), 1
+        return self.one(), 1
+
+    def call(self):
+        """A call of a helper; the scratch registers it may change are set again afterwards."""
+        rng = self.rng
+        helper = rng.choice(["h0", "h1", "h2"])
+        keep = {"a0", "a1"} if helper == "h1" else {"a0"}
+        saved = ["s%d" % i for i in range(1, 11)]
+        lines = ["call %s" % helper]
+        for r in ["t%d" % i for i in range(7)] + ["a%d" % i for i in range(8)]:
+            if r not in keep:
+                lines.append("mv %s, %s" % (r, rng.choice(saved)))
+        return lines
+
+    def body(self, name, length):
+        units, n = [], 0
+        while n < length:
+            lines, k = self.unit(name)
+            units.append(lines)
+            n += k
+        return units
+
+    def fp_number(self):
+        return 8                                # s0
+
+    def prelude(self):
+        return [".text"]
+
+    def helpers(self):
+        lines = []
+        for name, body in RV_HELPERS:
+            lines += [".p2align 2", ".global %s" % name, ".type %s, @function" % name, "%s:" % name] + body
+            lines += [".size %s, . - %s" % (name, name)]
+        return lines
+
+    def function(self, name, units, buf, result, style):
+        """The function around a body (see the module)."""
+        save = 4 * (len(RV_SAVED) + 1)
+        total = FRAME + save
+        lines = [".p2align 2", ".global %s" % name, ".type %s, @function" % name, "%s:" % name,
+                 "addi sp, sp, -%d" % total, "sw ra, %d(sp)" % (total - 4)]
+        lines += ["sw %s, %d(sp)" % (r, total - 8 - 4 * k) for k, r in enumerate(RV_SAVED)]
+        lines += ["sw a0, %d(sp)" % k for k in range(0, FRAME, 4)]
+        lines += ["mv a4, a0", "xor a5, a1, a0", "add a6, a2, a1", "sub a7, a3, a2",
+                  "mv t0, a0", "xor t1, a1, a3", "add t2, a2, a0", "sub t3, a3, a1", "or t4, a0, a2",
+                  "and t5, a1, a3", "slli t6, a2, 3"]
+        lines += ["mv s%d, a%d" % (i, (i - 1) % 4) if i < 5 else "xor s%d, a%d, a%d" % (i, i % 4, (i + 1) % 4)
+                  for i in range(1, 11)]
+        lines += ["lui s11, %%hi(0x%x)" % self.buf, "addi s11, s11, %%lo(0x%x)" % self.buf]
+        if "fp" in style:
+            lines.append("addi s0, sp, %d" % FRAME)     # the frame's top: slots at negative offsets
+        else:
+            lines.append("xor s0, a0, a1")
+        lines += [l for unit in units for l in unit]
+        if "fp" in style:
+            lines += ["addi sp, s0, -%d" % FRAME, "li s0, 0"]     # a stack address differs by design
+        lines += ["lui ra, %%hi(0x%x)" % result, "addi ra, ra, %%lo(0x%x)" % result]
+        regs = ["t%d" % i for i in range(7)] + ["a%d" % i for i in range(8)] + ["s%d" % i for i in range(11)]
+        lines += ["sw %s, %d(ra)" % (r, 4 * k) for k, r in enumerate(regs)]
+        lines += ["lw ra, %d(sp)" % (total - 4)]
+        lines += ["lw %s, %d(sp)" % (r, total - 8 - 4 * k) for k, r in enumerate(RV_SAVED)]
+        lines.append("addi sp, sp, %d" % total)
+        if "ret" in style:
+            lines += ["mv t1, ra", "jr t1"]
+        else:
+            lines.append("ret")
+        return lines + [".size %s, . - %s" % (name, name)]
+
+
+GENERATORS = {"a32": None, "t32": None, "rv32": RiscVGenerator}     # None: Generator (ARM)
+
+
+def generator(isa, rng):
+    return (GENERATORS.get(isa) or Generator)(isa, rng)
+
+
 def helpers(thumb):
     lines = []
     for name, body in HELPERS:
@@ -574,7 +775,7 @@ def helpers(thumb):
 def generate(isa, functions, length, inputs, seed):
     """({name: (style, units)}, {name: cases}) of random functions and their inputs."""
     rng = random.Random(seed)
-    gen = Generator(isa, rng)
+    gen = generator(isa, rng)
     buf = ISAS[isa]["ram"] + 0x1000
     bodies, cases = {}, {}
     for i in range(functions):
@@ -597,32 +798,40 @@ def make(isa, out, bodies, cases):
     from dread.elf import Elf
     from dread.target import Target
     conf = ISAS[isa]
-    gen = Generator(isa, random.Random(0))
+    gen = generator(isa, random.Random(0))
     buf, result = conf["ram"] + 0x1000, conf["ram"] + 0x2000
-    text = [".syntax unified", ".thumb" if gen.thumb else ".arm", ".text"]
+    riscv = isa == "rv32"
+    text = gen.prelude() if riscv else [".syntax unified", ".thumb" if gen.thumb else ".arm", ".text"]
     for name, (style, units) in bodies.items():
         text += gen.function(name, units, buf, result, style)
-    text += helpers(gen.thumb)
+    text += gen.helpers() if riscv else helpers(gen.thumb)
     os.makedirs(out, exist_ok=True)
     source = os.path.join(out, "fuzz.S")
     with open(source, "w") as f:
         f.write("\n".join(l if l.endswith(":") or l.startswith(".") else "    " + l for l in text) + "\n")
     elf_path = os.path.join(out, "fuzz.elf")
     first = next(iter(bodies))
-    cmd = ["arm-none-eabi-gcc"] + conf["flags"] + ["-nostdlib", "-Wl,-Ttext=0x%x" % conf["base"], "-Wl,-e," + first,
-                                                   "-Wl,--no-warn-rwx-segments", "-o", elf_path, source]
+    if riscv:
+        cmd = ["clang"] + conf["flags"] + ["-nostdlib", "-fuse-ld=lld", "-Wl,-Ttext=0x%x" % conf["base"],
+                                           "-Wl,-e," + first, "-o", elf_path, source]
+    else:
+        cmd = ["arm-none-eabi-gcc"] + conf["flags"] + ["-nostdlib", "-Wl,-Ttext=0x%x" % conf["base"],
+                                                       "-Wl,-e," + first, "-Wl,--no-warn-rwx-segments", "-o", elf_path,
+                                                       source]
     got = subprocess.run(cmd, capture_output=True, text=True)
     if got.returncode:
         raise RuntimeError("the assembler refused the generated code:\n" + got.stderr)
-    cflags = conf["flags"] + ["-Os", "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common"]
+    cflags = [f for f in conf["flags"] if not f.startswith("--target=")] + \
+        ["-Os", "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common"]
     toml = conf["toml"].replace('entry = "f0"', 'entry = "%s"' % first)
-    toml += '\n[compiler]\ncross = "arm-none-eabi-"\ncflags = [%s]\n' % ", ".join('"%s"' % f for f in cflags)
+    compiler = 'kind = "clang"\ntriple = "riscv32-unknown-elf"' if riscv else 'cross = "arm-none-eabi-"'
+    toml += '\n[compiler]\n%s\ncflags = [%s]\n' % (compiler, ", ".join('"%s"' % f for f in cflags))
     with open(os.path.join(out, "dread.toml"), "w") as f:
         f.write(toml)
     target = Target.load(out)
     image = target.image()
     elf = Elf(elf_path)
-    funcs, code, symbols = elfimport.tables(elf)
+    funcs, code, symbols = elfimport.tables(elf, isa=image.arch.isa)
     elfimport.write_tables(image, funcs, code, symbols, header="dread liftfuzz")
     data, _ = elf.payload(image.base, image.erased)
     with open(os.path.join(out, "fuzz.bin"), "wb") as f:
@@ -641,7 +850,7 @@ def check(isa, work, bodies, cases, jobs=None):
     from dread.program import Program
     target, image = make(isa, work, bodies, cases)
     program = Program(target, image)
-    lifter = lift.Lifter(program, regflow.load(target, image, program))
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
     names, refused = [], {}
     for fn in program.functions:
         try:
@@ -722,7 +931,8 @@ def run(isa, functions=100, length=40, inputs=16, seed=1, keep=None, out=print, 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread liftfuzz", description=__doc__.split("\n\n")[0])
-    parser.add_argument("--isa", choices=sorted(ISAS), action="append", help="a32, t32 (default: both)")
+    parser.add_argument("--isa", choices=sorted(ISAS), action="append",
+                        help="a32, t32, rv32 (default: those whose toolchain is installed)")
     parser.add_argument("--functions", type=int, default=100)
     parser.add_argument("--length", type=int, default=40, help="random instructions per function")
     parser.add_argument("--inputs", type=int, default=16, help="written cases per function")
@@ -730,13 +940,16 @@ def main(argv=None):
     parser.add_argument("--reduce", type=int, default=2, help="failures reduced to their shortest form (default 2)")
     parser.add_argument("--keep", help="work in this directory and keep it")
     args = parser.parse_args(argv)
-    if not shutil.which("arm-none-eabi-gcc"):
-        print("dread liftfuzz: needs arm-none-eabi-gcc", file=sys.stderr)
+    tools = {isa: ("clang", "ld.lld") if isa == "rv32" else ("arm-none-eabi-gcc",) for isa in ISAS}
+    isas = args.isa or [isa for isa in sorted(ISAS) if all(shutil.which(t) for t in tools[isa])]
+    missing = [t for isa in isas for t in tools[isa] if not shutil.which(t)]
+    if missing or not isas:
+        print("dread liftfuzz: needs %s" % (", ".join(sorted(set(missing))) or "a toolchain"), file=sys.stderr)
         return 1
     from dread.util.polite import polite
     polite()
     bad = 0
-    for isa in args.isa or sorted(ISAS):
+    for isa in isas:
         keep = os.path.join(args.keep, isa) if args.keep else None
         failures, refused, _ = run(isa, args.functions, args.length, args.inputs, args.seed, keep, reduce=args.reduce)
         bad += len(failures) + len(refused)

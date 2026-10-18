@@ -21,7 +21,6 @@ SIGNATURES = {           # registers each function reads at its entry, from the 
 }
 
 
-@pytest.mark.rv32
 def test_kept_registers(target, variant):
     flow = regflow.load(target, target.image())
     first = target.arch.arg_regs(1)[0]
@@ -35,7 +34,6 @@ def test_kept_registers(target, variant):
     assert first in flow.kept_regs("parse_uint") and first not in flow.kept_regs("ring_put")
 
 
-@pytest.mark.rv32
 def test_kept_registers_are_classified(target, variant):
     if variant == "rv32":
         pytest.skip("no register is kept beyond a0 on rv32 (test_kept_registers)")
@@ -51,7 +49,6 @@ def jumps(program, name):
     return fn, [a for a in fn.insns if program.arch.flow(program.insn(a))[0] == "ijump"]
 
 
-@pytest.mark.rv32
 def test_indirect_jumps_are_resolved(target, variant):
     """script_run's switch (a byte table and add pc on a32, tbb on m3, a table of addresses behind
     andi a0, a0, 7 and jr on rv32), dispatch's table of function pointers (tail calls) and the veneer
@@ -74,7 +71,6 @@ def test_indirect_jumps_are_resolved(target, variant):
     assert switches.resolve(program, fn, jump) == ([], [program.by_name["ram_crc"].entry])
 
 
-@pytest.mark.rv32
 def test_entry_reads_match_the_signatures(target, variant):
     flow = regflow.load(target, target.image())
     want = dict(SIGNATURES)
@@ -86,7 +82,6 @@ def test_entry_reads_match_the_signatures(target, variant):
     assert got == want
 
 
-@pytest.mark.rv32
 def test_cache_follows_the_tables(target, tmp_path, monkeypatch):
     image = target.image()
     first = regflow.cache_key(target, image)
@@ -98,7 +93,6 @@ CLOBBER = ("REG32(UART_BASE) = (u8)c;", 'REG32(UART_BASE) = (u8)c;\n    __asm__ 
 
 
 @pytest.mark.slow
-@pytest.mark.rv32
 @pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_a_clobbered_kept_register_fails(target, variant, tmp_path, capsys, monkeypatch):
     """A uart_putc that ends with r1 = 0: everything its own tests compared before agrees, but
@@ -121,7 +115,6 @@ def test_a_clobbered_kept_register_fails(target, variant, tmp_path, capsys, monk
     assert "DIFF uart_puts" in capsys.readouterr().out
 
 
-@pytest.mark.rv32
 def test_switch_fallback_without_resolution(target, monkeypatch):
     """With neither the emulated dispatch nor a known table shape, an indirect jump goes on at the
     roots of the code no direct path reaches (script_run's cases), and the analysis still finds the

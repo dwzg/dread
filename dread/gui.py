@@ -393,7 +393,7 @@ class State:
                 return out
             try:
                 if self.lifter is None:
-                    self.lifter = lift.Lifter(self.program, self.ready("flow"), self.ready("endless"))
+                    self.lifter = lift.make_lifter(self.program, self.ready("flow"), self.ready("endless"))
                 text = self.lifter.lift(fn).text
                 out.append({"kind": "lifted", "path": None, "first": 1, "text": text,
                             "how": "lifted now, not built or tested"})
