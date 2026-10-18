@@ -6,6 +6,8 @@ leaves in scratch registers. This run takes each function's generated inputs (th
 cache, BUILD/autocases/IMAGE/) and runs them again with nothing stubbed, in the original image and
 in the rebuilt one: the whole call tree executes.
 
+The scratch registers callers read after the call (dread.regflow) are compared at the return too.
+
 An input is used when the original runs it to the end within LIMIT instructions and does not read
 a stack location nobody wrote (a local set only on some paths: what it holds depends on earlier
 calls and differs between builds), nor reads as data a place of the image where the two builds
@@ -53,6 +55,7 @@ def run(payload, aliases, case, addr, name, watch=False, limit=None):
     m = Machine(lay, payload, aliases, isa_of=gen.program.isa_at)
     m.function = name
     m.arg_domains = gen.argument_domains.get(name, [])
+    m.kept, m.kept_why = runner.kept_for(name)
     for a, size, value in case["mem"]:
         try:
             m.write(a, (value & ((1 << 8 * size) - 1)).to_bytes(size, "little"))
@@ -143,6 +146,11 @@ def check(item):
                 problems.append("case %d: return value 0x%x vs 0x%x" % (i, a.ret, b.ret))
             if a.calls != b.calls:
                 problems.append("case %d: peripheral accesses differ" % i)
+            theirs = dict(b.kept)
+            for reg, value in a.kept:
+                if theirs.get(reg) != value:
+                    problems.append("case %d: %s after the return 0x%x vs %s (%s)" % (
+                        i, reg, value, "-" if theirs.get(reg) is None else "0x%x" % theirs[reg], a.why.get(reg, "")))
             diff = [x for x in sorted(set(a.writes) | set(b.writes))
                     if a.writes.get(x) != b.writes.get(x) and not stackish(a.writes, x, lay)]
             if diff:

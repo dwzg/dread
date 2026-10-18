@@ -5,6 +5,10 @@ with the C linked in, from `dread recon`), with identical inputs, and the result
 (dread.cases says what is compared). A function the overlay built from C that has no case is
 reported UNTESTED.
 
+Besides what dread.cases lists, the scratch registers the function's callers read after the call
+(dread.regflow: a second result, or a register a compiler with -fipa-ra kept a value in across the
+call) are compared at the return.
+
 Coverage: while the original runs, the instructions executed inside the function under test are
 recorded. A function whose cases leave instructions of the original unexecuted is reported
 UNCOVERED and fails the run, unless those addresses are declared with unreachable() and a reason;
@@ -51,6 +55,18 @@ def generated_cases(name, fn):
     return autocase.cases_for(RUN, name, fn)
 
 
+def kept_for(name):
+    """(registers, why) to compare at the return besides the result: the scratch registers the
+    function's callers read after the call (dread.regflow)."""
+    flow = RUN.get("regflow")
+    if flow is None:
+        return (), {}
+    result = RUN["target"].abi.result[:1]
+    regs = tuple(r for r in flow.kept_regs(name) if r not in result)
+    why = {r: "read after the call by " + ", ".join("%s 0x%x" % s for s in flow.sites_of(name, r)[:3]) for r in regs}
+    return regs, why
+
+
 def run_function(name):
     """All cases of one function: (name, cases, failed, output lines, uncovered)."""
     suite, prog, layout = RUN["suite"], RUN["program"], RUN["layout"]
@@ -66,6 +82,7 @@ def run_function(name):
                 return name, 0, 1, ["FAIL %s [case generation]" % name, "     %s" % e], False
             lines.append("FAIL %s [case generation]: %s" % (name, e))
     image = RUN["image"]
+    kept, why = kept_for(name)
     bad, covered, failing, refused = 0, set(), [], 0
     for label, addr, setup, args, limit, generated in cases:
         out, plan = [], []
@@ -73,6 +90,7 @@ def run_function(name):
             m = Machine(layout, payload, RUN["aliases"] if which == "rebuilt" else None, isa_of=RUN["isa_of"])
             m.plan, m.replay = plan, which == "rebuilt"
             m.function = name
+            m.kept, m.kept_why = kept, why
             try:
                 setup(m)
             except Exception as e:
@@ -160,10 +178,12 @@ def prepare(target, image, recon_path, keep_failing=False):
     aliases, built = load_placement(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"))
     Machine.entries = {fn.entry for fn in prog.functions}
     Machine.image_end = image.end
+    from dread import regflow
+    flow = regflow.load(target, image, prog)
     RUN.clear()
     RUN.update(target=target, image=image, program=prog, layout=layout, suite=suite, original=image.payload(),
                recon=recon, aliases=aliases, built=built, keep_failing=keep_failing,
-               isa_of=prog.isa_at, code=frozenset(prog.code))
+               isa_of=prog.isa_at, code=frozenset(prog.code), regflow=flow)
     return suite
 
 

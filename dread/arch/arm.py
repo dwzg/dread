@@ -200,6 +200,105 @@ class Arm:
         """Whether a direct call changes the instruction set (blx #imm)."""
         return insn.id == csarm.ARM_INS_BLX and self.target(insn) is not None
 
+    # ---- control and register flow (dread.regflow) ----
+
+    def general_regs(self):
+        """The general registers a function may use for values (not sp, lr, pc)."""
+        return ["r%d" % i for i in range(13)]
+
+    def flow(self, insn):
+        """(kind, target, falls): how control leaves an instruction. kind is "next", "jump" (direct,
+        to target), "call" (direct, to target), "icall" (through a register), "return", "ijump"
+        (indirect jump; for bx rN the target is the register's name) or "stop" (udf). falls: the
+        next instruction may run after it (conditional, cbz/cbnz, calls).
+
+        Capstone does not list every pc write (tbb, tbh, cbz, cbnz show none), so the kind is
+        decided by instruction first."""
+        i = insn.id
+        conditional = self.is_conditional(insn)
+        if i in CALLS:
+            target = self.target(insn)
+            return ("call" if target is not None else "icall"), target, True
+        if i == csarm.ARM_INS_B:
+            return "jump", self.target(insn), conditional
+        if i in (csarm.ARM_INS_CBZ, csarm.ARM_INS_CBNZ):
+            return "jump", self.target(insn), True
+        if i in (csarm.ARM_INS_TBB, csarm.ARM_INS_TBH):
+            return "ijump", None, conditional
+        if i == csarm.ARM_INS_UDF:
+            return "stop", None, False
+        if i == csarm.ARM_INS_BX:
+            reg = insn.operands[0].reg if insn.operands else 0
+            if reg == csarm.ARM_REG_LR:
+                return "return", None, conditional
+            return "ijump", self._name(insn.reg_name(reg)), conditional
+        _, written = insn.regs_access()
+        if csarm.ARM_REG_PC in written:
+            if self.stack_kind(insn) == "pop":
+                return "return", None, conditional
+            if (i == csarm.ARM_INS_MOV and len(insn.operands) == 2 and insn.operands[1].type == csarm.ARM_OP_REG
+                    and insn.operands[1].reg == csarm.ARM_REG_LR):
+                return "return", None, conditional
+            return "ijump", None, conditional
+        return "next", None, False
+
+    def stack_kind(self, insn):
+        """"push" for push and stmdb sp!, "pop" for pop and ldm sp!, else None."""
+        i = insn.id
+        if i == csarm.ARM_INS_PUSH:
+            return "push"
+        if i == csarm.ARM_INS_POP:
+            return "pop"
+        if i in (csarm.ARM_INS_STMDB, csarm.ARM_INS_LDM) and insn.writeback and insn.operands \
+                and insn.operands[0].type == csarm.ARM_OP_REG and insn.operands[0].reg == csarm.ARM_REG_SP:
+            return "push" if i == csarm.ARM_INS_STMDB else "pop"
+        return None
+
+    def reg_effects(self, insn):
+        """(reads, writes): the registers an instruction reads and writes, by name (r0-r12, sp, lr,
+        pc, "flags" for the condition flags; others by capstone's name). Flags are read by every
+        conditional instruction and written by every instruction that sets them (capstone reports
+        that in update_flags, not in its register lists; it also claims it for adc without s, which
+        only makes the analysis find less). A conditional instruction's writes may not happen:
+        regflow does not let them end a register."""
+        r, w = insn.regs_access()
+        reads = {self._name(insn.reg_name(x)) for x in r}
+        writes = {self._name(insn.reg_name(x)) for x in w}
+        if insn.update_flags:
+            writes.add("flags")
+        if self.is_conditional(insn) and insn.id != csarm.ARM_INS_IT:
+            reads.add("flags")
+        reads.discard(None)
+        writes.discard(None)
+        return reads, writes
+
+    @staticmethod
+    def _name(name):
+        if name is None:
+            return None
+        name = name.lower()
+        if name in ("cpsr", "apsr", "apsr_nzcv", "apsr_nzcvq", "apsr_nzcvqg"):
+            return "flags"
+        if name == "itstate":
+            return None
+        return ALIASES.get(name, name)
+
+    def predicate(self, insn):
+        """The condition a predicated instruction runs under (an opaque value), or None. The IT
+        instruction itself is not predicated; the instructions it covers are."""
+        if insn.id == csarm.ARM_INS_IT or not self.is_conditional(insn):
+            return None
+        return insn.cc
+
+    @staticmethod
+    def complement(predicate):
+        """The opposite condition: eq/ne, hs/lo, mi/pl, vs/vc, hi/ls, ge/lt, gt/le."""
+        return predicate + 1 if predicate % 2 else predicate - 1
+
+    def flags_value(self, engine):
+        """The condition flags (N, Z, C, V) as they lie in the status register."""
+        return engine.reg_read(self.status_reg()) & 0xF0000000
+
     # ---- encoding ----
 
     def branch(self, src, dst, isa, link=False):

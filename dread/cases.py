@@ -27,8 +27,9 @@ defined, so a file needs no imports:
         the top of the stack.
 
 What is compared: the return value (with m.wide_result also the second result register), the
-callee-saved registers at the return, every byte written outside the stack, and the log: stub
-calls (whatever the stubs log) and every peripheral access in order. A case where either image
+callee-saved registers at the return, the scratch registers the function's callers read after the
+call (dread.regflow; the runner sets m.kept), every byte written outside the stack, and the log:
+stub calls (whatever the stubs log) and every peripheral access in order. A case where either image
 faults, or does not return within its limit, fails (m.may_hang makes not returning a result).
 """
 import os

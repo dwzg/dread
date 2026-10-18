@@ -2,7 +2,8 @@
 
 Both images (the original and the one with C linked in) are loaded into identical machines, the
 same function is called with the same inputs, and what it does must agree: the return value, the
-callee-saved registers it hands back, every byte it writes outside its stack, the calls it makes to
+callee-saved registers it hands back, the scratch registers its callers read after the call
+(Machine.kept, from dread.regflow), every byte it writes outside its stack, the calls it makes to
 stubbed functions, and every access to the peripheral ranges, in order.
 
 Only memory is modelled: the target's regions ([memory] in dread.toml), the image at its base with
@@ -26,6 +27,7 @@ PAGE = 0x1000
 POLL_LOGGED = 2     # reads after a Machine.poll_read stage's start that are still logged one by one
 POISON = 0xA5C3E100 # callee-saved registers start as POISON + 0x11 * (i + 1): no zero byte, so that
                     # a byte cleared in one of them shows
+KEPT_POISON = 0x5AC31E00    # kept scratch registers no argument sets start as KEPT_POISON + 0x11 * (i + 1)
 ARGS_ROOM = 0x100   # mapped above the stack top: arguments beyond the registers lie there, as the
                     # caller's frame would hold them (writes there are compared like memory)
 
@@ -99,10 +101,12 @@ class Layout:
 
 class Result:
     """What one call did: return value, bytes written outside the stack (address -> value), the
-    log of stub calls and peripheral accesses, the callee-saved registers at the return."""
+    log of stub calls and peripheral accesses, the callee-saved registers at the return, and the
+    kept scratch registers at the return ((name, value) pairs; why: name -> who reads it)."""
 
-    def __init__(self, ret, writes, calls, saved=(), layout=None):
+    def __init__(self, ret, writes, calls, saved=(), layout=None, kept=(), why=None):
         self.ret, self.writes, self.calls, self.saved, self.layout = ret, writes, calls, saved, layout
+        self.kept, self.why = tuple(kept), why or {}
 
     def diff(self, other):
         """Readable differences to another result; empty when they agree."""
@@ -122,6 +126,14 @@ class Result:
             for name, a, b in zip(names, self.saved, other.saved):
                 if a != b:
                     out.append("%s after the return: 0x%x vs 0x%x" % (name, a, b))
+        if self.kept != other.kept:
+            mine, theirs = dict(self.kept), dict(other.kept)
+            for name in sorted(set(mine) | set(theirs)):
+                a, b = mine.get(name), theirs.get(name)
+                if a != b:
+                    out.append("%s after the return: %s vs %s (%s)" % (
+                        name, "-" if a is None else "0x%x" % a, "-" if b is None else "0x%x" % b,
+                        self.why.get(name) or other.why.get(name) or "read by callers after the call"))
         for addr in sorted(set(self.writes) | set(other.writes)):
             a, b = self.writes.get(addr), other.writes.get(addr)
             if a != b:
@@ -233,6 +245,8 @@ class Machine:
         self.polls = {}             # see poll_read()
         self.arg_domains = []       # [(register number, values)] applied by call()
         self.function = ""          # the name of the function under test, for stubs that look it up
+        self.kept = ()              # scratch registers compared at the return (dread.regflow)
+        self.kept_why = {}          # register -> who reads it after the call, for the report
         self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
         self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
 
@@ -428,6 +442,10 @@ class Machine:
         for i, reg in enumerate(lay.saved_regs):
             if uc.reg_read(reg) == 0:
                 uc.reg_write(reg, POISON + 0x11 * (i + 1))
+        kept = [(name, None if name == "flags" else self.arch.reg_id(name)) for name in self.kept]
+        for i, (name, reg) in enumerate(kept):
+            if reg is not None and reg not in lay.arg_regs[:len(regs)]:
+                uc.reg_write(reg, KEPT_POISON + 0x11 * (i + 1))
         self.calls, self.written = [], set()
         for poll in self.polls.values():
             poll["count"] = 0
@@ -448,4 +466,6 @@ class Machine:
         ret = uc.reg_read(lay.result_regs[0])
         if self.wide_result and len(lay.result_regs) > 1:
             ret |= uc.reg_read(lay.result_regs[1]) << 32
-        return Result(ret, writes, list(self.calls), tuple(uc.reg_read(r) for r in lay.saved_regs), layout=lay)
+        kept_values = [(name, self.arch.flags_value(uc) if reg is None else uc.reg_read(reg)) for name, reg in kept]
+        return Result(ret, writes, list(self.calls), tuple(uc.reg_read(r) for r in lay.saved_regs), layout=lay,
+                      kept=kept_values, why=self.kept_why)

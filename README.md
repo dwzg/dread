@@ -19,9 +19,11 @@ byte. DREAD instead proves the rewritten function behaves like the original:
    recorded in order. Inputs come from hand-written cases and from a generator that is guided by
    coverage and by the values each branch compares. The whole image can also run from reset with
    device models.
-4. **Diff.** Return values, memory written, calls made and peripheral accesses must all agree. The
-   cases must run every instruction of the original function. A mutation check confirms that the
-   cases would notice a wrong function.
+4. **Diff.** Return values, memory written, calls made and peripheral accesses must all agree, and
+   so must every register a caller reads after the call: a compiler that saw the callee (GCC's
+   `-fipa-ra`) may keep a value in a scratch register across it, and a rewrite has to leave that
+   register alone. The cases must run every instruction of the original function. A mutation check
+   confirms that the cases would notice a wrong function.
 
 What this proves is agreement on the inputs tried, in an emulator. It is not a proof that an image
 is safe to run on hardware.
@@ -43,6 +45,7 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Case generator (coverage- and compare-guided, pointer learning) | done |
 | Mutation check with survivor search and argued survivors | done |
 | Integration run: generated inputs with real callees, also through original callers | done |
+| Register flow across calls: what callers read after a call, compared at the return | done |
 | Compare-guided sweeps, recorded cases | planned |
 | System run with device models | planned |
 | Lifter (ARM, then Thumb) | planned |
