@@ -100,9 +100,6 @@ The long runs set the pace of everything after them. Measure first, then cut.
   they have Thumb-2 ([arch] thumb2, else from -mcpu/-march), the rebuilt image gets ten times a case's
   instruction limit (lifted loops are slower; dread integration already did this), and the lifter's
   statically unreachable instructions (padding behind bx pc) are declared to the runner.
-- [ ] liftfuzz: a Thumb-1 ISA (Cortex-M0: the 16-bit forms, high-register moves, the switch helper,
-  calls through bx stubs), switches on the other ISAs (tbb, tbh, ldr pc tables), conditional returns
-  and tail calls.
 - [ ] dread.autocase still takes capstone's update_flags to find the instruction that set the flags
   for a branch (adc without s counts); harmless for correctness, but a VERSION bump when changed.
 - [x] Functions that never return (`dread noreturn`, a fixpoint over calls and tail calls): a call
@@ -130,6 +127,9 @@ The long runs set the pace of everything after them. Measure first, then cut.
   include the written cases. Measure what the comparison loses when fewer generated cases are kept.
 - [ ] **Compiler profiles** (`[compiler] idioms = ["gcc"]`): what the lifter and the template
   families take from the compiler (prologue shapes, switch shapes, helper calls). gcc first.
+- [ ] (Later) liftfuzz: a Thumb-1 ISA (Cortex-M0: the 16-bit forms, high-register moves, the switch helper,
+  calls through bx stubs), switches on the other ISAs (tbb, tbh, ldr pc tables), conditional returns
+  and tail calls.
 
 ## Phase 7: reading aids, plugin, documentation
 
