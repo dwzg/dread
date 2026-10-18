@@ -96,6 +96,14 @@ class Elf:
                 return s
         return None
 
+    def read(self, address, n):
+        """n bytes at a section address (run address, as symbols give it)."""
+        for sec in self.sections:
+            if sec.alloc and not sec.nobits and sec.addr <= address and address + n <= sec.addr + sec.size:
+                o = sec.offset + (address - sec.addr)
+                return self.raw[o:o + n]
+        raise ElfError("0x%x is in no section with contents" % address)
+
     def section_of(self, symbol):
         if 0 < symbol.shndx < len(self.sections):
             return self.sections[symbol.shndx]

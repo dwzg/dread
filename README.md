@@ -36,8 +36,8 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 
 | Part | State |
 |---|---|
-| Target description, function tables, ARM and Thumb layer, ELF import | in progress |
-| Listing generator and byte-identical rebuild, Ghidra pipeline | planned |
+| Target description, function tables, ARM and Thumb layer, ELF import | done |
+| Listing generator and byte-identical rebuild, Ghidra pipeline | done |
 | Emulator, differential test runner, overlay linker, integration run | planned |
 | Case generator, compare-guided sweeps, recorded cases, mutation check | planned |
 | System run with device models | planned |

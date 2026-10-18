@@ -1,0 +1,78 @@
+// DREAD: export the analysis as DREAD's tables (docs/formats.md):
+//   functions.tsv    address, name, instruction bytes, prototype (every function Ghidra knows)
+//   code_ranges.tsv  runs of instructions, end exclusive, with their instruction set (a32 or t32)
+// Script args: <functions.tsv> <code_ranges.tsv>
+//@category DREAD
+
+import java.io.PrintWriter;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+
+import ghidra.app.script.GhidraScript;
+import ghidra.program.model.lang.Register;
+import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Instruction;
+
+public class DreadExportMap extends GhidraScript {
+
+	@Override
+	public void run() throws Exception {
+		String[] args = getScriptArgs();
+		if (args.length < 2) {
+			throw new IllegalArgumentException("usage: DreadExportMap.java <functions.tsv> <code_ranges.tsv>");
+		}
+		int functions = 0;
+		try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(Paths.get(args[0]), StandardCharsets.UTF_8))) {
+			out.println("address\tname\tbytes\tprototype");
+			for (Function f : currentProgram.getFunctionManager().getFunctions(true)) {
+				if (f.isExternal()) {
+					continue;
+				}
+				String name = f.getName();
+				if (f.isThunk()) {
+					// a thunk shows its target's name; the table needs names of its own
+					Function t = f.getThunkedFunction(false);
+					if (t != null && name.equals(t.getName())) {
+						name = "thunk_" + name;
+					}
+				}
+				out.printf("0x%x\t%s\t%d\t%s%n", f.getEntryPoint().getOffset(), name,
+					f.getBody().getNumAddresses(), f.getPrototypeString(false, false));
+				functions++;
+			}
+		}
+		Register tmode = currentProgram.getProgramContext().getRegister("TMode");
+		long start = -1, end = -1;
+		String runIsa = null;
+		int ranges = 0;
+		try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(Paths.get(args[1]), StandardCharsets.UTF_8))) {
+			out.println("# start\tend (exclusive)\tisa: runs of instructions as Ghidra classified them");
+			for (Instruction ins : currentProgram.getListing().getInstructions(true)) {
+				long a = ins.getMinAddress().getOffset();
+				String isa = "a32";
+				if (tmode != null) {
+					BigInteger v = ins.getValue(tmode, false);
+					if (v != null && v.intValue() == 1) {
+						isa = "t32";
+					}
+				}
+				if (a != end || !isa.equals(runIsa)) {
+					if (start >= 0) {
+						out.printf("0x%x\t0x%x\t%s%n", start, end, runIsa);
+						ranges++;
+					}
+					start = a;
+					runIsa = isa;
+				}
+				end = a + ins.getLength();
+			}
+			if (start >= 0) {
+				out.printf("0x%x\t0x%x\t%s%n", start, end, runIsa);
+				ranges++;
+			}
+		}
+		println("exported " + functions + " functions and " + ranges + " code ranges");
+	}
+}

@@ -55,6 +55,32 @@ def code_intervals(elf):
     return merged
 
 
+PADDING = {"t32": (b"\x00\xbf", b"\xc0\x46"), "a32": (b"\x00\x00\xa0\xe1", b"\x00\xf0\x20\xe3")}
+
+
+def padding(elf, start, end, isa):
+    """How many bytes at the end of a function's last run of instructions [start, end) are
+    alignment padding in front of a literal pool: a nop (Thumb: nop or mov r8, r8; ARM: mov r0, r0
+    or nop) that ends on a word boundary right behind an instruction that does not fall through.
+    GCC counts it in the symbol's size, but it never runs, and a test that has to run every
+    instruction would never be complete."""
+    from dread.arch.arm import Arm
+    nop = 2 if isa == "t32" else 4
+    if end % 4 or end - start <= nop or elf.read(end - nop, nop) not in PADDING[isa]:
+        return 0
+    arm = Arm(isa=isa, profile="m" if isa == "t32" else "a")
+    insns = list(arm.disassembler(isa).disasm(elf.read(start, end - nop - start), start))
+    if not insns or insns[-1].address + insns[-1].size != end - nop:
+        return 0
+    last = insns[-1]
+    if arm.is_conditional(last):
+        return 0
+    text = last.mnemonic.split(".")[0]
+    ends = (text in ("b", "bx") or (text == "pop" and "pc" in last.op_str)
+            or (text in ("ldr", "mov", "ldm", "ldmia") and last.op_str.startswith("pc")))
+    return nop if ends else 0
+
+
 def tables(elf, unnamed=False, keep=()):
     """(functions, code_ranges, symbols): functions [(entry, name, insn_bytes)], code ranges
     [(start, end, isa)], symbols [(kind, address, name)]."""
@@ -71,7 +97,10 @@ def tables(elf, unnamed=False, keep=()):
         entry = sym.value & ~1
         if entry in funcs:                      # an alias of a function already seen
             continue
-        funcs[entry] = (IDENT.sub("_", sym.name), insn_bytes(entry, entry + sym.size))
+        runs = [(max(a, entry), min(b, entry + sym.size), k) for a, b, k in code
+                if a < entry + sym.size and entry < b]
+        pad = padding(elf, runs[-1][0], runs[-1][1], runs[-1][2]) if runs else 0
+        funcs[entry] = (IDENT.sub("_", sym.name), insn_bytes(entry, entry + sym.size) - pad)
     names = {}
     for entry, (name, _) in funcs.items():
         names.setdefault(name, []).append(entry)

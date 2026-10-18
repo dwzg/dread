@@ -29,7 +29,14 @@ walk. Entry plus size is **not** the end of a function with pools inside.
 
 Code the startup copies to RAM is listed at its **run** address.
 
-Written by the Ghidra pipeline or by `dread import-elf`. Not edited by hand.
+Written by the Ghidra pipeline (`dread ghidra`) or by `dread import-elf`. Not edited by hand. Two
+details of the writers:
+
+- `dread ghidra` names a thunk Ghidra shows under its target's name `thunk_NAME`, so that names stay
+  unique.
+- `dread import-elf` leaves out an alignment `nop` at the end of a function's last instruction run.
+  GCC counts that nop in the symbol's size, but it never executes, and a test that has to execute
+  every instruction would never be complete. Ghidra's analysis does not count it either.
 
 ### `code_ranges.tsv` (`code_ranges`)
 
@@ -38,7 +45,10 @@ The instruction runs of the image: `start`, `end` (exclusive), and optionally th
 addresses, like the function table.
 
 In Thumb code, instruction boundaries are found by walking a run from its start, so a run must
-start at an instruction. Written by the Ghidra pipeline or by `dread import-elf`.
+start at an instruction. Written by the Ghidra pipeline (always with the instruction set) or by
+`dread import-elf`. Ghidra's heuristics sometimes take data for code, for instance a string behind a
+pointer that a register carries. The listing still rebuilds, but such ranges are worth a look before
+functions are written there.
 
 ### `symbols.txt` (`symbols`)
 
