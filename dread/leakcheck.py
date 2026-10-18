@@ -10,7 +10,7 @@ never from the repository being checked:
                     not generic, and every address of at least five hex digits
   --words FILE      one word or regular expression per line, matched case-insensitively
   --allow FILE      hits that are coincidences, one per line: a hit ("0x10000", "timer_start") or
-                    "path:hit"
+                    "path:hit" (also in the history, for lines of that file's diffs)
 
 Scans every text file of the tree (not .git, .venv, build directories) and, with --history, the
 message and diff of every commit on every branch, and the commit authors. Prints each hit with where
@@ -116,15 +116,19 @@ def main(argv=None):
         if log.returncode:
             print("dread leakcheck: %s is not a git repository" % tree, file=sys.stderr)
             return 1
-        commit, seen = None, set()
+        commit, path, seen = None, None, set()
         for line in log.stdout.splitlines():
             if line.startswith("commit "):
-                commit = line.split()[1][:10]
+                commit, path = line.split()[1][:10], None
+                continue
+            if line.startswith("diff --git "):
+                path = line.split(" b/", 1)[1] if " b/" in line else None
                 continue
             for hit in sorted(scan(line, names, addresses, words)):
-                if hit.lower() not in allowed and (commit, hit) not in seen:
+                ok = hit.lower() in allowed or (path and ("%s:%s" % (path, hit)).lower() in allowed)
+                if not ok and (commit, hit) not in seen:
                     seen.add((commit, hit))
-                    print("HIT history %s: %s" % (commit, hit))
+                    print("HIT history %s%s: %s" % (commit, " " + path if path else "", hit))
                     bad += 1
         authors = sorted(set(re.findall(r"^author (.*)$", log.stdout, re.M)))
         print("commit authors: %s" % "; ".join(authors))

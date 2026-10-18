@@ -48,3 +48,27 @@ def test_allow_list_and_history(tmp_path, capsys):
     assert "allowed a.txt: blinker_task" in out
     assert "HIT history" in out and "0x13000" in out and "blinker_task" in out    # the history is not allowed
     assert rc == 1
+
+
+def test_history_honours_path_allows(tmp_path, capsys):
+    """A path:hit allow entry covers the lines of that file's diffs in the history too, and only
+    those."""
+    import subprocess
+    from dread import leakcheck
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.txt").write_text("entry 0x123456\n")
+    (repo / "b.txt").write_text("also 0x123456\n")
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.org"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(git + ["add", "."], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "add"], check=True)
+    table = tmp_path / "functions.tsv"
+    table.write_text("0x123456\tprivate_function\t4\n")
+    allow = tmp_path / "allow.txt"
+    allow.write_text("a.txt:0x123456\nb.txt:0x123456\n")
+    assert leakcheck.main(["--tree", str(repo), "--tables", str(table), "--allow", str(allow), "--history"]) == 0
+    allow.write_text("a.txt:0x123456\n")
+    assert leakcheck.main(["--tree", str(repo), "--tables", str(table), "--allow", str(allow), "--history"]) == 1
+    out = capsys.readouterr().out
+    assert "HIT b.txt: 0x123456" in out and "b.txt: 0x123456" in out.split("HIT history")[-1]
