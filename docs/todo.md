@@ -10,7 +10,9 @@ queue may change while the user is away: CLAUDE.md, "Working unattended".
 
 Decisions that are the user's, with options and a recommendation. Work goes on around them.
 
-- (none open)
+- **CI on GitHub Actions?** The tests on every push (both gizmo builds; arm-none-eabi-gcc and clang
+  from the runner's packages). Free for public repositories; it would show a status badge.
+  Recommendation: yes, after the performance pass, so a run stays short.
 
 ## Phase 4: cases, mutation, coverage (rest)
 
@@ -23,6 +25,24 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
   generator, a stream helper for read-style callees); the original runs once with the models and
   the run becomes a case the generic stubs replay exactly (returns, effects, fills). Done when a
   gizmo function that reads a line through `uart_getc` is covered by recorded cases on both builds.
+
+## Performance, first pass
+
+The long runs set the pace of everything after them. Measure first, then cut.
+
+- [ ] **Profile** the test suite, case generation, `dread mutate` and `dread integration` on gizmo
+  (and, read-only, on a larger image): seconds per step and per function, kept in a table the tools
+  write (as `build/times/`). Done when the slowest steps are known with numbers.
+- [ ] **Coverage without a Python call per executed block**: the block hook runs for every loop
+  iteration. Try what costs less: a hook at translation time (the cache is flushed per run, so a
+  block is translated once per run), counting instructions in C, or removing the hook once the
+  function's blocks are all seen. Done when generation and tests are measurably faster with the same
+  coverage results.
+- [ ] **Poll loops**: a run that spins on a peripheral register until the instruction limit (gizmo's
+  `uart_putc` takes 8 s and 19 s to generate) gets the register's answers staged automatically
+  (`poll_read`) once the loop is recognised. Done when uart_putc generates in about a second.
+- [ ] **Adaptive limits**: during the search, a run that takes far longer than the function's runs
+  so far is cut early (the case keeps the full limit when it is kept). Done with numbers.
 
 ## Phase 5: system run
 
@@ -59,7 +79,49 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
 - [ ] `dread pilot`: the reconstruction loop run by code, a language model only for judgement
   (write C from a listing, propose an input, argue a survivor, propose a name), typed questions,
   answers checked by tools; providers OpenAI-compatible and Anthropic.
-- [ ] RISC-V: a third gizmo build and the architecture layer.
+- [ ] RISC-V (RV32IMC): a third gizmo build (clang 23 and ld.lld are installed: no system packages
+  needed) and the architecture layer behind `dread.arch`.
+
+## More architectures (each: a gizmo build with clang, the arch layer, every tool on it)
+
+- [ ] AArch64 (A64): literal loads, adrp pairs, the AAPCS64 registers.
+- [ ] MIPS32, little endian: delay slots (branch encoding in the overlay, the lifter, regflow), gp.
+- [ ] PowerPC 32, big endian: brings big-endian support to the emulator, the program database and
+  the listing generator; lr/ctr calls.
+- [ ] Big-endian ARM (BE-8) on the existing ARM layer.
+- [ ] x86, 32-bit freestanding: variable-length instructions in the program database and the
+  listing generator.
+- [ ] Research: an emulator interface beyond Unicorn for AVR and MSP430 (clang builds them, Unicorn
+  does not run them): what a backend has to provide, and whether an existing simulator fits.
+
+## More compilers
+
+- [ ] Clang builds of gizmo for ARM state and Cortex-M3 (libgcc from arm-none-eabi-gcc for the
+  division helpers): every tool on clang's code shapes (switch tables, prologues, no -fipa-ra).
+- [ ] gcc at -O0, -O2 and -O3 for both ARM builds: frame pointers and spills, unrolled loops,
+  inlining. The tests run on all of them (marked slow where needed).
+- [ ] `dread whatcc`: guess the compiler and options of an unknown image from its code (prologue
+  shapes, helper names and calls, switch shapes, literal pool placement, register use across calls)
+  and suggest a compiler profile.
+
+## Scale and robustness
+
+- [ ] An open-source firmware built locally as a large test target (a FreeRTOS or Zephyr demo for
+  Cortex-M3, our own build, not committed: a script fetches and builds it; tests skip without it).
+  Every tool on it; numbers on speed and coverage.
+- [ ] Relocatable layout: symbols instead of absolute addresses in literal pools and tables, proven
+  by building with a function moved, then a normal link instead of fixed slots.
+- [ ] Typed data in the listing: structures, strings and tables described in the target's config and
+  emitted structured by `dread asm`.
+- [ ] Ghidra round trip: names, annotations and types from the tables back into the Ghidra project.
+- [ ] Property tests: random instruction streams through the listing generator (rebuild identical),
+  random placements through the overlay.
+
+## Documentation and packaging
+
+- [ ] A tutorial that takes gizmo from ELF to a rewritten, tested function, step by step.
+- [ ] A reference page per tool (from the docstrings, checked by a test that every command has one).
+- [ ] `pip install` from the repository works in a clean environment; version and changelog.
 
 ## Known gaps (not scheduled)
 
