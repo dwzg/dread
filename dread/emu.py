@@ -333,13 +333,25 @@ class Machine:
             if not again:
                 self.hook_add(UC_HOOK_CODE, self._on_stub, begin=moved, end=moved)
 
-    def cover(self, begin, end):
+    def cover(self, begin, end, tree=False):
         """Record the blocks executed in [begin, end): covered_insns() turns them into
         instruction addresses (block granularity: a conditional instruction that does not
-        execute counts as executed)."""
-        self.blocks = set()
-        self.hook_add(UC_HOOK_BLOCK, lambda uc, addr, size, user: self.blocks.add((addr, size)),
-                      begin=begin, end=end - 1)
+        execute counts as executed). With tree, also the start of every block executed outside
+        that range, in self.tree (what the function's callees ran: the generator's signal for an
+        input that gets further into a callee); one hook does both."""
+        self.blocks, self.tree = set(), set()
+        if not tree:
+            self.hook_add(UC_HOOK_BLOCK, lambda uc, addr, size, user: self.blocks.add((addr, size)),
+                          begin=begin, end=end - 1)
+            return
+        blocks, outside = self.blocks, self.tree
+
+        def on_block(uc, addr, size, user):
+            if begin <= addr < end:
+                blocks.add((addr, size))
+            else:
+                outside.add(addr)
+        self.hook_add(UC_HOOK_BLOCK, on_block)
 
     def covered_insns(self, insns):
         """The addresses of `insns` (sorted instruction addresses) that lie in executed blocks."""

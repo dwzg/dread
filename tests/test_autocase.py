@@ -1,5 +1,6 @@
-"""The case generator on gizmo: coverage from generated cases alone, determinism, pointer learning,
-and the Thumb IT-state repair in the emulator (a regression test with the input that hung)."""
+"""The case generator on gizmo: coverage from generated cases alone (apply_config only with the
+dictionary: its lines must read like volume=7), determinism, pointer learning, and the Thumb
+IT-state repair in the emulator (a regression test with the input that hung)."""
 import json
 
 import pytest
@@ -23,12 +24,21 @@ def covered(gen, name, cases):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", ["parse_uint", "memcmp", "strncpy", "fmt_dec"])
+@pytest.mark.parametrize("name", ["parse_uint", "memcmp", "strncpy", "fmt_dec", "apply_config"])
 def test_generated_cases_cover(gen, name):
     fn = gen.program.by_name[name]
     cases = gen.generate(name, fn.entry, fn.insns)
     got, words = covered(gen, name, cases)
     assert got == words, sorted(hex(a) for a in words - got)
+
+
+def test_dictionary_of_a_parser(gen):
+    """apply_config compares keys with three strings; parse_kv, two levels down, splits at '='."""
+    fn = gen.program.by_name["apply_config"]
+    strings, chars = gen.dictionary(fn.insns)
+    assert {b"volume", b"mode", b"baud"} <= set(strings) and ord("=") in chars
+    assert "parse_kv" in [f.name for f in gen.callees(fn.insns)]
+    assert gen.dictionary(gen.program.by_name["checksum"].insns) == ([], [])
 
 
 @pytest.mark.slow

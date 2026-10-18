@@ -42,7 +42,7 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Target description, function tables, ARM and Thumb layer, ELF import | done |
 | Listing generator and byte-identical rebuild, Ghidra pipeline | done |
 | Emulator, differential test runner, overlay linker | done |
-| Case generator (coverage- and compare-guided, pointer learning) | done |
+| Case generator (coverage- and compare-guided, pointer learning, a dictionary for parsers) | done |
 | Mutation check with survivor search and argued survivors | done |
 | Integration run: generated inputs with real callees, also through original callers | done |
 | Register flow across calls: what callers read after a call, compared at the return | done |

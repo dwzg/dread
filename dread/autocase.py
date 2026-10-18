@@ -35,6 +35,13 @@ run, later ones 0) and logs the argument registers in the mask and the stack wor
 inside the stack replaced by the word "stack". Peripheral registers are inputs like memory; with
 "io": "fixed" they read what the case says whatever was written.
 
+Parsers: the constants of the function's callees (CALLEE_DEPTH levels) join its own, and the strings
+and characters they compare against form a dictionary. When a function reads a learned buffer and
+the dictionary is not empty, inputs fill the buffer with text made of its tokens (often in the shape
+identifier, separator, value), and mutations insert, overwrite or exchange tokens. An input that
+runs code in a callee that no input ran before is kept for further mutation (not as a case): a
+parser's progress inside the callee that checks a line shows nowhere else.
+
 Generated cases are cached per function (BUILD/autocases/IMAGE/NAME.json), keyed by the function's
 bytes, the generator VERSION and the options. A change that alters what the generator produces
 needs a VERSION bump; SEED stays, so that a bump does not reshuffle every function's search. The
@@ -58,7 +65,8 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 3       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults
+VERSION = 4       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+                  # 4: callee constants, the dictionary, text in buffers, call-tree coverage
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -77,6 +85,13 @@ POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTE
 POINTER_STEP = 0x400        # ... this far apart ...
 POINTER_SLOTS = 16          # ... at most this many different ones (then they are reused)
 POINTER_KEEP = 0.9          # share of inputs that use the buffer (the rest keep their value: null checks)
+CALLEE_DEPTH = 2            # callees whose constants and strings join the function's own
+TEXT_SHARE = 0.5            # share of fresh inputs whose data buffers hold text from the dictionary
+TEXT_MUTATE = 0.3           # share of mutations that change such a text by a token
+TEXT_MAX = 96               # bytes of text at most
+TEXT_TOKENS = 8             # tokens per text at most
+STRING_MAX = 64             # longest string constant taken into the dictionary
+STEPPING_MAX = 48           # inputs kept for new code in callees only (mutated further, not cases)
 # String and memory routines that generated cases do not stub: small, pure, and what they write is
 # behaviour of their caller (a stubbed strcpy copies nothing, and a caller that copies one byte too
 # many into its frame then agrees with any C).
@@ -216,6 +231,63 @@ class Generator:
         for v in found:
             near.update(x & 0xFFFFFFFF for x in (v + 1, v - 1, ~v, -v))
         return found, near
+
+    def callees(self, words, depth=CALLEE_DEPTH):
+        """The functions the instructions call directly, and theirs, `depth` levels deep."""
+        seen, level, out = set(), list(words), []
+        for _ in range(depth):
+            nxt = []
+            for ins in self.insns(level):
+                if not self.arch.is_call(ins):
+                    continue
+                target = self.arch.target(ins)
+                fn = self.program.by_entry.get(target & ~1) if target is not None else None
+                if fn is not None and fn.entry not in seen:
+                    seen.add(fn.entry)
+                    out.append(fn)
+                    nxt += fn.insns
+            level = nxt
+        return out
+
+    def dictionary(self, words):
+        """(strings, characters) the instructions and their callees compare against: the
+        NUL-terminated printable strings their literals and pc-relative addresses point at, and the
+        printable characters (and tab, line feed, carriage return) in compares with an immediate.
+        What fuzzers call a dictionary: parsers check their input against these."""
+        strings, chars = [], []
+        everything = list(words) + [a for fn in self.callees(words) for a in fn.insns]
+        for ins in self.insns(everything):
+            isa = self.program.isa_at(ins.address)
+            ops = ins.operands
+            if ins.id in (csarm.ARM_INS_CMP, csarm.ARM_INS_CMN) and len(ops) == 2 and ops[1].type == csarm.ARM_OP_IMM:
+                c = ops[1].imm & 0xFFFFFFFF
+                if (0x20 <= c < 0x7F or c in (9, 10, 13)) and c not in chars:
+                    chars.append(c)
+            lit = self.arch.literal(ins, isa)
+            pointers = [self.program.word(lit[0])] if lit and lit[1] == 4 and self.program.in_image(lit[0], 4) else []
+            at = self.arch.pc_address(ins, isa)
+            if at is not None:
+                pointers.append(at)
+            for p in pointers:
+                text = self._string_at(p)
+                if text and text not in strings:
+                    strings.append(text)
+        return strings, chars
+
+    def _string_at(self, address):
+        if not self.program.in_image(address, 2):
+            return None
+        out = bytearray()
+        for i in range(STRING_MAX + 1):
+            if not self.program.in_image(address + i, 1):
+                return None
+            b = self.program.read(address + i, 1)[0]
+            if b == 0:
+                return bytes(out) if out else None
+            if not (0x20 <= b < 0x7F or b in (9, 10, 13)):
+                return None
+            out.append(b)
+        return None
 
     def flag_setters(self, words):
         """{conditional branch: (address of the instruction that decides it, reader)}. The reader
@@ -447,9 +519,14 @@ class Generator:
     def _generate_once(self, name, entry, words, calls, frame, count, budget, limit, sweep, learn):
         rng = random.Random("%s/%d" % (seed_name(entry), SEED))
         exact, near = self.constants(words)
+        deeper = set()
+        for fn in self.callees(words):
+            deeper |= self.constants(fn.insns)[0]
+        strings, chars = self.dictionary(words)
         noise = [rng.getrandbits(32) for _ in range(8)]
-        hot = sorted(exact | {0, 1, 2, self.scratch} | set(noise[:3]) | {c[0] for c in calls if c[0] == self.fake_pointer})
-        pool = sorted(set(self.boundary) | exact | near | set(noise))
+        hot = sorted(exact | set(chars) | {0, 1, 2, self.scratch} | set(noise[:3])
+                     | {c[0] for c in calls if c[0] == self.fake_pointer})
+        pool = sorted(set(self.boundary) | exact | near | deeper | set(chars) | set(noise))
         image = self.image
         end = self.program.end(self.program.by_entry[entry]) if entry in self.program.by_entry else words[-1] + 4
         known, covered, corpus, extras, faults, last_gain = {}, set(), [], [], 0, 0
@@ -494,6 +571,61 @@ class Generator:
         def value():
             return rng.choice(hot) if rng.random() < 0.5 else rng.choice(pool)
 
+        def token():
+            r = rng.random()
+            if strings and r < 0.35:
+                return rng.choice(strings)
+            if chars and r < 0.7:
+                return bytes([rng.choice(chars)])
+            if r < 0.9:
+                return str(rng.choice((0, 1, 2, 7, 9, 10, 42, 100, 255, 1000, 4096, rng.randrange(100000)))).encode()
+            return bytes([rng.randrange(0x20, 0x7F)])
+
+        def buffers(case):
+            """The learned data buffers this input uses."""
+            used = {address for i, address in data_args.items() if i < len(case["args"]) and case["args"][i] == address}
+            used |= {v for a, n, v in case["mem"] if a in data_mem and n == 4 and v == data_mem[a]}
+            return sorted(used)
+
+        def text_of(case, buffer):
+            mem = {a: v for a, n, v in case["mem"] if n == 1 and buffer <= a < buffer + TEXT_MAX + 1}
+            out = bytearray()
+            while buffer + len(out) in mem and mem[buffer + len(out)] & 0xFF:
+                out.append(mem[buffer + len(out)] & 0xFF)
+            return bytes(out)
+
+        def put_text(case, buffer, data):
+            data = data[:TEXT_MAX] + b"\0"
+            case["mem"] = [m_ for m_ in case["mem"] if not (m_[0] < buffer + len(data) and buffer < m_[0] + m_[1])]
+            case["mem"] += [[buffer + i, 1, b] for i, b in enumerate(data)]
+
+        def fresh_text():
+            if strings and chars and rng.random() < 0.5:
+                # identifier, separator, value: the shape of config lines, commands, queries
+                pairs = []
+                for _ in range(rng.randint(1, 3)):
+                    value_part = token() if rng.random() < 0.3 else str(rng.choice(
+                        (0, 1, 2, 3, 7, 9, 10, 100, 255, rng.randrange(100000)))).encode()
+                    pairs.append(rng.choice(strings) + bytes([rng.choice(chars)]) + value_part)
+                end = bytes([rng.choice(chars)]) if rng.random() < 0.5 else b""
+                return end.join(pairs) + (end if rng.random() < 0.5 else b"")
+            return b"".join(token() for _ in range(rng.randint(1, TEXT_TOKENS)))
+
+        def mutate_text(old):
+            found = [(i, w) for w in strings for i in range(len(old)) if old.startswith(w, i)]
+            if found and len(strings) > 1 and rng.random() < 0.3:     # one dictionary string for another
+                i, w = rng.choice(found)
+                return old[:i] + rng.choice([x for x in strings if x != w]) + old[i + len(w):]
+            r, at = rng.random(), rng.randint(0, len(old))
+            if r < 0.4:
+                return old[:at] + token() + old[at:]                    # insert a token
+            if r < 0.7:
+                piece = token()
+                return old[:at] + piece + old[at + len(piece):]        # overwrite with a token
+            if r < 0.85 and old:
+                return old[:at] + old[at + 1:]                         # delete a byte
+            return fresh_text()
+
         def fresh():
             return {"args": [value() for _ in range(nregs)],
                     "mem": [[a, s, value()] for a, s in sorted(known.items())],
@@ -509,34 +641,46 @@ class Generator:
             m.call(entry, *case["args"], max_instructions=max_instructions)
             return m
 
+        stepping, tree_seen = [], set()     # inputs that only reached new code in callees
         started = time.time()
         for attempt in range(budget * 5):
-            if attempt >= budget and (words_set <= covered or attempt - last_gain > budget):
+            patience = budget * 2 if (data_args or data_mem) and (strings or chars) else budget
+            if attempt >= budget and (words_set <= covered or attempt - last_gain > patience):
                 break
             if self.late():
                 break
             if self.long and not corpus and time.time() - started > LONG_SECONDS:
                 break
-            if corpus and rng.random() < 0.75:
-                case = json.loads(json.dumps(rng.choice(corpus)))
+            if (corpus or stepping) and rng.random() < 0.75:
+                case = json.loads(json.dumps(rng.choice(corpus + stepping)))
                 present = {a for a, _, _ in case["mem"]}
                 case["mem"] += [[a, s, value()] for a, s in sorted(known.items()) if a not in present]
-                for _ in range(rng.choice((1, 1, 2, 3))):
-                    slots = [("args", i) for i in range(nregs)] + [("mem", i) for i in range(len(case["mem"]))] \
-                        + [("returns", i) for i in range(len(case["returns"]))]
-                    kind, i = rng.choice(slots)
-                    if kind == "mem":
-                        case["mem"][i][2] = value()
-                    else:
-                        case[kind][i] = value()
+                texts = buffers(case) if strings or chars else ()
+                if texts and rng.random() < TEXT_MUTATE:
+                    buffer = rng.choice(texts)
+                    put_text(case, buffer, mutate_text(text_of(case, buffer)))
+                else:
+                    for _ in range(rng.choice((1, 1, 2, 3))):
+                        slots = [("args", i) for i in range(nregs)] + [("mem", i) for i in range(len(case["mem"]))] \
+                            + [("returns", i) for i in range(len(case["returns"]))]
+                        kind, i = rng.choice(slots)
+                        if kind == "mem":
+                            case["mem"][i][2] = value()
+                        else:
+                            case[kind][i] = value()
+                if pin_args or pin_mem or data_args or data_mem:
+                    pinned(case)
             else:
                 case = fresh()
-            if pin_args or pin_mem or data_args or data_mem:
-                pinned(case)
+                if pin_args or pin_mem or data_args or data_mem:
+                    pinned(case)
+                    for buffer in (buffers(case) if strings or chars else ()):
+                        if rng.random() < TEXT_SHARE:
+                            put_text(case, buffer, fresh_text())
             m = self.machine()
             m.plan = []
             self.apply(m, case)
-            m.cover(words[0], end)
+            m.cover(words[0], end, tree=True)
             m.trace_reads(image.base, image.end, self.code)
             try:
                 m.call(entry, *case["args"], max_instructions=limit)
@@ -568,8 +712,12 @@ class Generator:
                 covered |= got
                 corpus.append(case)
                 last_gain = attempt
+            elif m.tree - tree_seen and len(stepping) < STEPPING_MAX:
+                stepping.append(case)           # further into a callee: worth mutating, not a case
+                last_gain = attempt
             elif len(extras) < count:
                 extras.append(case)
+            tree_seen |= m.tree
             if words_set <= covered and len(extras) >= count:
                 break
 
