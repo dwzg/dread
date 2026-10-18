@@ -179,8 +179,14 @@ The long runs set the pace of everything after them. Measure first, then cut.
 
 ## Phase 7: reading aids, plugin, documentation
 
-- [ ] Reading aids: flat listing of a function, call sites with constant arguments, same code in
-  two images (names carried over), the boot sector style call-order pairing.
+- [x] Reading aids: `dread flat` (a function's listing with targets and literals by name, texts,
+  the constant arguments of each call, switch targets, annotations, callers and regflow's
+  registers), `dread callsites` (calls with constant arguments, grouped by an argument with --by,
+  call chains with --reaches; dread.constants runs the code in front of a call twice with
+  different fills of registers and RAM), `dread samecode` (the same code in two images,
+  position-independent: a stripped copy of gizmo-m3 gets 46 of 50 names back) and `dread callpair`
+  (names by the order of calls: from one seed, main, 19 functions of the stripped Thumb-2 build
+  named from the ARM build, all right).
 - [ ] Claude Code plugin: thin skills that call the tools (rule 8: process in code), a TARGET.md
   template for a new target.
 - [ ] Method documentation and a porting guide for a new architecture.

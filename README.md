@@ -51,7 +51,8 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Recorded cases from Python models of callees (`dread record`) | done |
 | System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick) | done |
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
-| Reading aids, Claude Code plugin, method documentation | planned |
+| Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order | done |
+| Claude Code plugin, method documentation | planned |
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
 | `dread pilot`: the reconstruction loop run unattended, an LLM (local or cloud) only for the thinking | after the ARM phases |
 | RISC-V: a third gizmo build and an architecture backend | after the pilot |
@@ -79,6 +80,9 @@ bin/dread sysrun --target examples/gizmo/m3                   # the whole firmwa
 bin/dread sysrecord --target examples/gizmo/m3 --scenario config read_line   # cases from what the run saw
 bin/dread lift --target examples/gizmo/m3 --check  # lift every function, keep those whose cases agree
 bin/dread liftfuzz --isa t32                        # the lifter on random instructions, against the emulator
+bin/dread flat --target examples/gizmo/m3 print_status        # one function to read: names, literals, arguments
+bin/dread callsites --target examples/gizmo/m3 --by 0 gpio_set # who calls it, with which constants
+bin/dread callpair --target OTHER --other examples/gizmo/a32 --seed FUN_08000738=main   # names by call order
 ```
 
 A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the
