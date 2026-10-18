@@ -184,6 +184,9 @@ def prepare(target, image, recon_path, keep_failing=False):
     with open(recon_path, "rb") as f:
         recon = f.read()
     aliases, built = load_placement(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"))
+    from dread.build import read_names
+    for name in read_names(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "lifted.txt")):
+        suite.auto.setdefault(name, {})     # lifted C is tested with generated cases, callees real
     Machine.entries = {fn.entry for fn in prog.functions}
     Machine.image_end = image.end
     from dread import regflow

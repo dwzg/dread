@@ -81,7 +81,16 @@ a single `ADDRESS reason`.
 Instructions that `dread asm` writes as raw `.inst` because GNU as encodes them differently from the
 original bytes: one stored address per line. Maintained by `dread asm --verify`.
 
-### `lifted.txt`, `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
+### `lifted.txt` (`lifted`)
+
+The functions `dread recon` builds from lifted C (`dread lift`): one name per line, `#` comments.
+Written by `dread lift --check`, which lists a function only when its generated cases (and the
+kept and written ones) agree with the original and run every instruction of it; not edited by hand.
+The lifted C itself is made again at every build (`BUILD/recon/IMAGE/lifted/`) and not kept; a name
+that the src directory defines is left to src. `BUILD/recon/IMAGE/lifted.txt` says which functions
+the last build lifted, and `dread test` gives each of them its generated cases.
+
+### `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
 
 Described with the tools that use them, as those tools arrive in DREAD.
 

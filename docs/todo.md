@@ -70,9 +70,26 @@ The long runs set the pace of everything after them. Measure first, then cut.
 
 ## Phase 6: lifter
 
-- [ ] **Lifter for ARM and Thumb** (instruction by instruction to C, volatile memory accesses in
+- [x] **Lifter for ARM and Thumb** (instruction by instruction to C, volatile memory accesses in
   order), with the acceptance rule: lifted C is built only when its cases agree and cover every
-  instruction. Done when most gizmo functions lift and pass on both builds.
+  instruction. Done when most gizmo functions lift and pass on both builds. (`dread lift`, 2026-10-18:
+  a32 30 accepted, m3 31; the rest is written by hand, never returns, runs from RAM, or is refused
+  with its reason: a stack pointer loaded from memory, an exception entry reading lr, uart_puts
+  reading r1 behind a call, __aeabi_uidivmod branching into __udivsi3. read_line and handle_key
+  needed the cases dread sysrecord recorded; the generator alone misses a few of their instructions.)
+- [ ] **Instruction-level check of the lifter** (`dread liftfuzz`): random instruction sequences
+  assembled into a small image, original against lifted in the emulator over many register values,
+  flags read back through conditional instructions. Needed: a planted mistake (eor translated as
+  orr) passed every generated case of script_run on the m3 build, because the cases that cover the
+  xor loop run it once from zero. Coverage-complete cases are not proof of a correct translation;
+  the semantics need their own test.
+- [ ] Lifter gaps found on gizmo and from reading GCC output: calls of functions that never return
+  (a trailing bl abort is refused as falling through; needs a noreturn analysis), frame pointers
+  (-O0: mov sp, r7), Thumb-1 returns (pop {r1}; bx r1), mrs/msr/cps as inline assembly, VFP, ldrex
+  and strex, A-profile exception handlers (subs pc, lr).
+- [ ] The case generator could start from the coverage of an image's written cases (read_line takes
+  18-37 s to generate and still misses what one recorded case covers); the cache key would then
+  include the written cases. Measure what the comparison loses when fewer generated cases are kept.
 - [ ] **Compiler profiles** (`[compiler] idioms = ["gcc"]`): what the lifter and the template
   families take from the compiler (prologue shapes, switch shapes, helper calls). gcc first.
 

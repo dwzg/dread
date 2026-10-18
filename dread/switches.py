@@ -166,3 +166,47 @@ def resolve(program, fn, address):
         return None
     inside = set(fn.insns)
     return sorted(a for a in found if a in inside), sorted(a for a in found if a not in inside)
+
+
+def mapping(program, fn, address):
+    """For a switch with a bound check: (address where the index is taken, the register it is in,
+    {index value: target in fn} for the values that reach the jump, the largest value the check lets
+    through); None otherwise. What dread.lift needs to switch over the index instead of reading the
+    table at run time."""
+    arch = program.arch
+    if address not in fn.insns:
+        return None
+    i = fn.insns.index(address)
+    start = i
+    while start > 0 and i - start < RUN_BACK:
+        prev = fn.insns[start - 1]
+        insn = program.insn(prev)
+        if insn is None or prev + insn.size != fn.insns[start]:
+            break
+        kind, _, falls = arch.flow(insn)
+        if kind not in ("next", "jump") or (kind == "jump" and not falls):
+            break
+        start -= 1
+    check = None
+    for k in range(i - 1, start - 1, -1):
+        insn = program.insn(fn.insns[k])
+        found = arch.bound_check(insn) if insn is not None else None
+        if found:
+            check = (k, found)
+            break
+    if check is None:
+        return None
+    k, (reg, limit, before) = check
+    set_at = fn.insns[k] if before else (fn.insns[k + 1] if k + 1 <= i else None)
+    if set_at is None:
+        return None
+    isa = program.isa_at(address)
+    uc, state = _engine(program, isa)
+    runs = [(0, set_at, arch.reg_id(reg), value) for value in range(0, min(limit, MAX_CASES) + 2)]
+    inside, values = set(fn.insns), {}
+    for first in [fn.insns[start]] + ([fn.insns[k]] if k != start else []):
+        landings = _run(program, uc, state, isa, runs, first, address)
+        values = {run[3]: at for run, at in zip(runs, landings) if at is not None and at in inside}
+        if values:
+            break
+    return (set_at, reg, values, limit) if values else None

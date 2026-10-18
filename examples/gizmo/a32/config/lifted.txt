@@ -1,0 +1,32 @@
+# Functions built from lifted C: their generated cases agree with the original and run
+# every instruction of it. Written by dread lift --check; not edited by hand.
+__aeabi_ldiv0
+apply_config
+beep_off
+beep_on
+cmd_beep
+cmd_led
+cmd_mode
+cmd_volume
+delay
+fmt_dec
+gpio_set
+handle_key
+irq_dispatch
+irq_enable_timer
+keys_read
+led_off
+led_on
+memcmp
+memcpy
+memset
+parse_kv
+print_status
+read_line
+script_run
+strlen
+strncpy
+timer_irq
+timer_start
+uart_getc
+uart_init

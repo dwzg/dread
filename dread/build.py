@@ -7,6 +7,10 @@ path. Objects go to BUILD/recon/IMAGE/obj; a source is compiled again when it, o
 those directories, is newer than its object. Then links them over the image:
 BUILD/recon/IMAGE/payload.bin, with report.tsv, placement.json, recon.ld and recon.elf beside it.
 
+Functions in the image's lifted table (config/lifted.txt, written by `dread lift --check`) are
+built from C that dread.lift makes from the original at every build (BUILD/recon/IMAGE/lifted, not
+kept); a name the src directory defines is left to src. lifted.txt beside the image says which.
+
     dread recon [--target DIR] [--image NAME] [--src DIR] [--out DIR] [--no-extent]
 """
 import argparse
@@ -62,10 +66,72 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
     return objects
 
 
-def build(target, image, src=None, out=None, extent=True, quiet=False):
-    """Compile and link; returns the path of the rebuilt image."""
+def read_names(path):
+    """The names of a list table (one per line, # comments), or [] when it does not exist."""
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [l.split("#", 1)[0].strip() for l in f if l.split("#", 1)[0].strip()]
+
+
+def defined_functions(objects):
+    """The global functions the objects define."""
+    from dread.elf import STT_FUNC, Elf
+    names = set()
+    for obj in objects:
+        for sym in Elf(obj).symbols:
+            if sym.kind == STT_FUNC and sym.shndx and sym.bind == 1:
+                names.add(sym.name)
+    return names
+
+
+def lift_sources(target, image, names, outdir, quiet=False):
+    """Lifted C for `names` (dread.lift) in outdir, a file each, written only when it changed;
+    returns the names lifted. A name that no longer lifts is reported and left out."""
+    from dread import lift, regflow
+    from dread.program import Program
+    program = Program(target, image)
+    lifter = lift.Lifter(program, regflow.load(target, image, program))
+    os.makedirs(outdir, exist_ok=True)
+    made = []
+    for name in names:
+        fn = program.by_name.get(name)
+        if fn is None:
+            continue
+        try:
+            text = lifter.lift(fn).text
+        except lift.Refused as e:
+            if not quiet:
+                print("dread recon: %s no longer lifts: %s" % (name, e), file=sys.stderr)
+            continue
+        path = os.path.join(outdir, name + ".c")
+        if not os.path.exists(path) or open(path).read() != text:
+            with open(path, "w") as f:
+                f.write(text)
+        made.append(name)
+    for old in glob.glob(os.path.join(outdir, "*.c")):
+        if os.path.basename(old)[:-2] not in made:
+            os.remove(old)
+    return made
+
+
+def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=None):
+    """Compile and link; returns the path of the rebuilt image. lifted: names to build from lifted C
+    (default: the image's lifted table); a name src defines is left to src."""
     workdir = out or recon_dir(target, image)
     objects = compile_all(target, image, src or image.src, os.path.join(workdir, "obj"))
+    names = read_names(image.table("lifted")) if lifted is None else list(lifted)
+    record = os.path.join(workdir, "lifted.txt")
+    if names:
+        defined = defined_functions(objects)
+        made = lift_sources(target, image, [n for n in names if n not in defined], os.path.join(workdir, "lifted"),
+                            quiet=quiet)
+        objects += compile_all(target, image, os.path.join(workdir, "lifted"), os.path.join(workdir, "obj-lifted"),
+                               quiet=quiet)
+        with open(record, "w") as f:
+            f.write("".join(n + "\n" for n in made))
+    elif os.path.exists(record):
+        os.remove(record)
     payload = os.path.join(workdir, "payload.bin")
     lines, _ = overlay.link(target, image, objects, payload, workdir, extent=extent)
     if not quiet:

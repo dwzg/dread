@@ -50,9 +50,9 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Register flow across calls: what callers read after a call, compared at the return | done |
 | Recorded cases from Python models of callees (`dread record`) | done |
 | System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick) | done |
-| Lifter (ARM, then Thumb) | planned |
+| Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original | done |
 | Reading aids, Claude Code plugin, method documentation | planned |
-| Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | with the lifter |
+| Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
 | `dread pilot`: the reconstruction loop run unattended, an LLM (local or cloud) only for the thinking | after the ARM phases |
 | RISC-V: a third gizmo build and an architecture backend | after the pilot |
 
@@ -77,6 +77,7 @@ bin/dread mutate --target examples/gizmo/m3 --kill checksum   # would the cases 
 bin/dread integration --target examples/gizmo/m3 --callers    # the same with real callees, and through callers
 bin/dread sysrun --target examples/gizmo/m3                   # the whole firmware from reset, both images
 bin/dread sysrecord --target examples/gizmo/m3 --scenario config read_line   # cases from what the run saw
+bin/dread lift --target examples/gizmo/m3 --check  # lift every function, keep those whose cases agree
 ```
 
 A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the
