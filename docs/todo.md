@@ -42,7 +42,7 @@ The long runs set the pace of everything after them. Measure first, then cut.
   block is translated once per run), counting instructions in C, or removing the hook once the
   function's blocks are all seen. Done when generation and tests are measurably faster with the same
   coverage results.
-- [ ] **Poll loops**: a run that spins on a peripheral register until the instruction limit (gizmo's
+- [x] **Poll loops**: a run that spins on a peripheral register until the instruction limit (gizmo's
   `uart_putc` takes 8 s and 19 s to generate) gets the register's answers staged automatically
   (`poll_read`) once the loop is recognised. Done when uart_putc generates in about a second.
 - [ ] **Adaptive limits**: during the search, a run that takes far longer than the function's runs

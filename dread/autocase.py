@@ -35,6 +35,11 @@ run, later ones 0) and logs the argument registers in the mask and the stack wor
 inside the stack replaced by the word "stack". Peripheral registers are inputs like memory; with
 "io": "fixed" they read what the case says whatever was written.
 
+Waits: a run that reads one peripheral register with one value SPIN_READS times in a row is cut (it
+would spin to the instruction limit), and later inputs give that register a poll stage: from the
+n-th read on it answers with some bits changed, so the wait ends after a few rounds and its loop is
+covered. dread test does not cut runs.
+
 Parsers: the constants of the function's callees (CALLEE_DEPTH levels) join its own, and the strings
 and characters they compare against form a dictionary. When a function reads a learned buffer and
 the dictionary is not empty, inputs fill the buffer with text made of its tokens (often in the shape
@@ -65,8 +70,9 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 4       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
-                  # 4: callee constants, the dictionary, text in buffers, call-tree coverage
+VERSION = 5       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+                  # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
+                  # 5: spins on a peripheral register are cut and answered with poll stages
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -92,6 +98,8 @@ TEXT_MAX = 96               # bytes of text at most
 TEXT_TOKENS = 8             # tokens per text at most
 STRING_MAX = 64             # longest string constant taken into the dictionary
 STEPPING_MAX = 48           # inputs kept for new code in callees only (mutated further, not cases)
+SPIN_READS = 256            # one register read this often in a row with one value: the run spins
+SPIN_POLL = 0.5             # share of inputs that get a poll stage for a register runs spun on
 # String and memory routines that generated cases do not stub: small, pure, and what they write is
 # behaviour of their caller (a stubbed strcpy copies nothing, and a caller that copies one byte too
 # many into its frame then agrees with any C).
@@ -632,9 +640,22 @@ class Generator:
                     "returns": [value() for _ in range(8)] if calls else [], "calls": [list(c) for c in calls],
                     "frame": frame, **({"io": "fixed"} if self.io_fixed else {}), **({"limit": self.long} if self.long else {})}
 
+        spins = {}                          # register -> (size, value) a run spun on
+
+        def add_poll(case):
+            """A poll stage for a register a run spun on: from the n-th read on it answers with some
+            bits changed (all, one, or a mask the function tests), so the wait can end."""
+            address = rng.choice(sorted(spins))
+            size, stuck = spins[address]
+            full = (1 << 8 * size) - 1
+            masks = [full, 1 << rng.randrange(8 * size)] + [c & full for c in sorted(exact) if 0 < c & full < full]
+            stage = [address, rng.choice((1, 2, 3)), stuck ^ rng.choice(masks)]
+            case["poll"] = [p for p in case.get("poll", ()) if p[0] != address] + [stage]
+
         def run(case, max_instructions=limit):
             m = self.machine()
             m.plan = []
+            m.spin_limit = SPIN_READS
             self.apply(m, case)
             m.cover(words[0], end)
             m.trace_reads(image.base, image.end, self.code)
@@ -670,8 +691,12 @@ class Generator:
                             case[kind][i] = value()
                 if pin_args or pin_mem or data_args or data_mem:
                     pinned(case)
+                if spins and rng.random() < SPIN_POLL / 2:
+                    add_poll(case)
             else:
                 case = fresh()
+                if spins and rng.random() < SPIN_POLL:
+                    add_poll(case)
                 if pin_args or pin_mem or data_args or data_mem:
                     pinned(case)
                     for buffer in (buffers(case) if strings or chars else ()):
@@ -679,6 +704,7 @@ class Generator:
                             put_text(case, buffer, fresh_text())
             m = self.machine()
             m.plan = []
+            m.spin_limit = SPIN_READS
             self.apply(m, case)
             m.cover(words[0], end, tree=True)
             m.trace_reads(image.base, image.end, self.code)
@@ -686,6 +712,8 @@ class Generator:
                 m.call(entry, *case["args"], max_instructions=limit)
             except EmuError:
                 faults += 1
+                if m.spinning:
+                    spins.setdefault(m.spinning[0], m.spinning[1:])
                 learn_pointers(m, case)
                 if pointers:
                     went = {m.reg("pc") & ~1, m.reg("r12")} - {self.fake_pointer, 0}

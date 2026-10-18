@@ -263,6 +263,9 @@ class Machine:
         self.function = ""          # the name of the function under test, for stubs that look it up
         self.kept = ()              # scratch registers compared at the return (dread.regflow)
         self._fast_cover = self._fast_reads = False
+        self.spin_limit = 0         # reads of one register with one value in a row that stop the run
+        self.spinning = None        # (address, size, value) of the register a stopped run spun on
+        self._spin = [None, 0]
         self.kept_why = {}          # register -> who reads it after the call, for the report
         self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
         self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
@@ -286,13 +289,16 @@ class Machine:
             self.written.update(range(addr, addr + size))
 
     def _on_io(self, uc, access, addr, size, value, user):
-        """Peripheral registers are plain memory, but every access is logged in order."""
+        """Peripheral registers are plain memory, but every access is logged in order. With
+        spin_limit, reading one register with one value that many times in a row (no peripheral
+        write between) stops the run and sets spinning: a wait that cannot end by itself."""
         if access == UC_MEM_WRITE:
             self.log("io write", addr, size, value & ((1 << 8 * size) - 1))
+            self._spin = [None, 0]
             return
         if self.io_fixed is not None:
             uc.mem_write(addr, bytes(self.io_fixed.get(addr + i, 0) for i in range(size)))
-        poll = self.polls.get(addr)
+        poll, logged = self.polls.get(addr), True
         if poll:
             poll["count"] += 1
             n = poll["count"]
@@ -302,9 +308,20 @@ class Machine:
                     value = v
             if value is not None:
                 uc.mem_write(addr, (value & ((1 << 8 * size) - 1)).to_bytes(size, "little"))
-            if n > poll["stages"][-1][0] + POLL_LOGGED:
-                return      # counted, not logged one by one; call() logs the total
-        self.log("io read", addr, size, int.from_bytes(uc.mem_read(addr, size), "little"))
+            logged = n <= poll["stages"][-1][0] + POLL_LOGGED     # later ones are counted; call() logs the total
+        if not (logged or self.spin_limit):
+            return
+        got = int.from_bytes(uc.mem_read(addr, size), "little")
+        if logged:
+            self.log("io read", addr, size, got)
+        if self.spin_limit:
+            if self._spin[0] == (addr, got):
+                self._spin[1] += 1
+                if self._spin[1] >= self.spin_limit:
+                    self.spinning = (addr, size, got)
+                    uc.emu_stop()
+            else:
+                self._spin = [(addr, got), 1]
 
     def _on_unmapped(self, uc, access, addr, size, value, user):
         if self.unmapped is None:
