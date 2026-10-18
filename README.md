@@ -1,0 +1,65 @@
+# DREAD
+
+**Dennis' Reverse Engineering And Decompilation**: *disassemble, rewrite, emulate and diff.*
+
+A toolkit for rewriting embedded firmware in C, one function at a time, when the original compiler
+is not available. Matching-decompilation tools assume you can recompile the original byte for
+byte. DREAD instead proves the rewritten function behaves like the original:
+
+1. **Disassemble.** Analysis tables (from Ghidra, or from an ELF when there are symbols) become a
+   listing that reassembles to the original image, byte for byte. That rebuild is the baseline
+   every change is measured against.
+2. **Rewrite.** C functions are linked over the original image at their own addresses: in place
+   when they fit, otherwise into space freed by other rewritten functions. Everything not rewritten
+   stays the original machine code, so every intermediate state is a complete image. The C comes
+   from three sources: written by hand, generated for families of identical functions, or lifted
+   mechanically, instruction by instruction, as a first step.
+3. **Emulate.** Every rewritten function runs in the original image and in the rebuilt one, in
+   Unicorn, with the same inputs. Callees are stubbed and logged, and peripheral accesses are
+   recorded in order. Inputs come from hand-written cases and from a generator that is guided by
+   coverage and by the values each branch compares. The whole image can also run from reset with
+   device models.
+4. **Diff.** Return values, memory written, calls made and peripheral accesses must all agree. The
+   cases must run every instruction of the original function. A mutation check confirms that the
+   cases would notice a wrong function.
+
+What this proves is agreement on the inputs tried, in an emulator. It is not a proof that an image
+is safe to run on hardware.
+
+## Status
+
+Early, and private. The method and the first versions of the tools come from the reconstruction of
+a 2004 digital camera's firmware (ARM7, ARM state). Here they are being made independent of that
+firmware: everything a tool needs to know about a target comes from the target's `dread.toml`.
+DREAD tests itself on **gizmo** (`examples/gizmo`), a small firmware written for the purpose and
+built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 in Thumb-2.
+
+| Part | State |
+|---|---|
+| Target description, function tables, ARM and Thumb layer, ELF import | in progress |
+| Listing generator and byte-identical rebuild, Ghidra pipeline | planned |
+| Emulator, differential test runner, overlay linker, integration run | planned |
+| Case generator, compare-guided sweeps, recorded cases, mutation check | planned |
+| System run with device models | planned |
+| Lifter (ARM, then Thumb) | planned |
+| Reading aids, Claude Code plugin, method documentation | planned |
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `dread/` | the Python package; `bin/dread` runs it from a checkout |
+| `docs/` | the method, the target description, the file formats |
+| `examples/gizmo/` | the test firmware: sources, builds and two target directories |
+| `tests/` | DREAD's own tests (`.venv/bin/pytest`) |
+
+## Using it
+
+```sh
+python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
+.venv/bin/pytest                         # DREAD's tests on gizmo
+bin/dread --target examples/gizmo/m3 info
+```
+
+A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the
+working directory, from `--target`, or from `$DREAD_TARGET`.

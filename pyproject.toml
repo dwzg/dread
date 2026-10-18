@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dread-re"
+version = "0.1.0"
+description = "Dennis' Reverse Engineering And Decompilation: rewrite firmware in C, proven by differential emulation"
+requires-python = ">=3.11"
+dependencies = ["unicorn==2.1.4", "capstone>=5,<6"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+dread = "dread.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["dread*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: takes more than a few seconds",
+    "ghidra: needs a Ghidra installation (GHIDRA_INSTALL_DIR)",
+]

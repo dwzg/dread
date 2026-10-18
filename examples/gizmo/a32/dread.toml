@@ -1,0 +1,38 @@
+# Gizmo 1000, ARM7-style build: DREAD's test firmware (examples/gizmo/fw), built for an ARM-state
+# core. Not a real device. The tables in config/ come from the ELF (`make -C ../fw targets`).
+
+[target]
+name = "gizmo-a32"
+title = "Gizmo 1000 (ARM state)"
+
+[arch]
+name = "arm"
+isa = "a32"
+profile = "a"
+
+[image.main]
+original = "original/gizmo.bin"
+base = 0x20000
+limit = 0x40000                 # 128 KiB of flash from the base
+entry = 0x20000
+startup = [
+    {kind = "code", run = 0x40000000, size = 0x5c, stored = 0x20c20},
+    {kind = "data", run = 0x4000005c, size = 0x1c, stored = 0x20c7c},
+    {kind = "zero", run = 0x40000078, size = 0x2c},
+]
+
+[memory]
+regions = [
+    {name = "flash", base = 0x0, size = 0x100000, kind = "rom"},
+    {name = "ram", base = 0x40000000, size = 0x10000},
+    {name = "scratch", base = 0x40100000, size = 0x20000},
+]
+io = [[0x80000000, 0x80010000]]
+stack = {top = 0x40010000, size = 0x2000}
+sentinel = 0x0fff0000
+scratch = {base = 0x40100000, size = 0x20000}
+
+[compiler]
+cross = "arm-none-eabi-"
+cflags = ["-march=armv4t", "-marm", "-mabi=aapcs", "-mfloat-abi=soft", "-Os", "-ffreestanding",
+          "-fno-builtin", "-ffunction-sections", "-fno-common"]

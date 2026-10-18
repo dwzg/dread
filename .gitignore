@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+/.venv/
+/build/
+*.egg-info/
+.pytest_cache/
+# generated per target
+examples/gizmo/*/build/
+examples/gizmo/fw/build/
+ghidra-projects/

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Run DREAD from a checkout without installing it: with $DREAD_PYTHON, else the checkout's own
+# .venv, else python3. The checkout is found through symlinks, so bin/dread can be linked into PATH.
+here=$(dirname "$(readlink -f "$0")")/..
+here=$(cd "$here" && pwd -P)
+py=${DREAD_PYTHON:-}
+if [ -z "$py" ] && [ -x "$here/.venv/bin/python" ]; then py="$here/.venv/bin/python"; fi
+if [ -z "$py" ]; then py=python3; fi
+PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}" exec "$py" -m dread.cli "$@"

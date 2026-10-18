@@ -1,0 +1,39 @@
+# Gizmo 1000, Cortex-M3 build: DREAD's test firmware (examples/gizmo/fw), built for Thumb-2.
+# Not a real device. The tables in config/ come from the ELF (`make -C ../fw targets`).
+
+[target]
+name = "gizmo-m3"
+title = "Gizmo 1000 (Cortex-M3)"
+
+[arch]
+name = "arm"
+isa = "t32"
+profile = "m"
+cpu = "cortex-m3"
+
+[image.main]
+original = "original/gizmo.bin"
+base = 0x08000000
+limit = 0x08010000              # 64 KiB of flash
+entry = "Reset_Handler"
+startup = [
+    {kind = "code", run = 0x20000000, size = 0x30, stored = 0x8000758},
+    {kind = "data", run = 0x20000030, size = 0x1c, stored = 0x8000788},
+    {kind = "zero", run = 0x2000004c, size = 0x2c},
+]
+
+[memory]
+regions = [
+    {name = "flash", base = 0x08000000, size = 0x100000, kind = "rom"},
+    {name = "sram", base = 0x20000000, size = 0x5000},
+    {name = "scratch", base = 0x20100000, size = 0x20000},
+]
+io = [[0x40000000, 0x40020000], [0xe000e000, 0xe000f000]]
+stack = {top = 0x20005000, size = 0x1000}
+sentinel = 0x1fff0000           # in the code region: on M profile, 0xe0000000 and up is execute-never
+scratch = {base = 0x20100000, size = 0x20000}
+
+[compiler]
+cross = "arm-none-eabi-"
+cflags = ["-mcpu=cortex-m3", "-mthumb", "-mfloat-abi=soft", "-Os", "-ffreestanding", "-fno-builtin",
+          "-ffunction-sections", "-fno-common"]
