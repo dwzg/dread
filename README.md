@@ -42,7 +42,8 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Emulator, differential test runner, overlay linker | done |
 | Case generator (coverage- and compare-guided, pointer learning) | done |
 | Mutation check with survivor search and argued survivors | done |
-| Integration run, compare-guided sweeps, recorded cases | planned |
+| Integration run: generated inputs with real callees, also through original callers | done |
+| Compare-guided sweeps, recorded cases | planned |
 | System run with device models | planned |
 | Lifter (ARM, then Thumb) | planned |
 | Reading aids, Claude Code plugin, method documentation | planned |
@@ -68,6 +69,7 @@ bin/dread info --target examples/gizmo/m3
 bin/dread recon --target examples/gizmo/m3      # gizmo's rewritten functions over the original
 bin/dread test --target examples/gizmo/m3       # each one against the original, in the emulator
 bin/dread mutate --target examples/gizmo/m3 --kill checksum   # would the cases notice a wrong one?
+bin/dread integration --target examples/gizmo/m3 --callers    # the same with real callees, and through callers
 ```
 
 A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the

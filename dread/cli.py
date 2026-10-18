@@ -16,6 +16,7 @@ COMMANDS = {
     "overlay": ("dread.overlay", "link compiled C over the original image"),
     "test": ("dread.runner", "compare every rewritten function with the original in the emulator"),
     "mutate": ("dread.mutate", "break rewritten C on purpose and list the changes no case notices"),
+    "integration": ("dread.integration", "run generated inputs with real callees, original against rebuilt"),
     "leakcheck": ("dread.leakcheck", "look for a private project's names and addresses before publishing"),
 }
 

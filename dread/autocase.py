@@ -117,6 +117,7 @@ class Generator:
         self._domains()
         self.io_fixed, self.long = False, 0
         self.current = None                 # the function whose cases are made or run (domains)
+        self.deadline = None
 
     # ---- tables ----
 
@@ -383,14 +384,24 @@ class Generator:
 
     # ---- the search ----
 
-    def generate(self, name, entry, words, calls=(), frame=0, count=40, budget=400, limit=200_000, sweep=3):
+    def generate(self, name, entry, words, calls=(), frame=0, count=40, budget=400, limit=200_000, sweep=3,
+                 fallbacks=True, seconds=None):
         """Cases for one function (see the module's docstring). Raises GenerationError when no
-        input runs to the end."""
+        input runs to the end. fallbacks=False skips the io "fixed" and long-run searches;
+        seconds bounds the time (a deadline after which every stage stops; the result then
+        depends on the machine's speed, so it is for quick uses such as the integration run)."""
         before, self.current = self.current, name
+        self.deadline = time.time() + seconds if seconds else None
         try:
+            if not fallbacks:
+                return self._generate_once(name, entry, words, calls, frame, count, budget, limit, sweep, learn=True)
             return self._generate_all(name, entry, words, calls, frame, count, budget, limit, sweep)
         finally:
             self.current = before
+            self.deadline = None
+
+    def late(self):
+        return self.deadline is not None and time.time() > self.deadline
 
     def _generate_all(self, name, entry, words, calls, frame, count, budget, limit, sweep):
         args = (name, entry, words, calls, frame, count, budget, limit, sweep)
@@ -502,6 +513,8 @@ class Generator:
         for attempt in range(budget * 5):
             if attempt >= budget and (words_set <= covered or attempt - last_gain > budget):
                 break
+            if self.late():
+                break
             if self.long and not corpus and time.time() - started > LONG_SECONDS:
                 break
             if corpus and rng.random() < 0.75:
@@ -579,7 +592,7 @@ class Generator:
             frontier = edge()
             gained = 0
             for attempt in range(budget * 4):
-                if words_set <= covered or not frontier or attempt - gained > budget:
+                if words_set <= covered or not frontier or attempt - gained > budget or self.late():
                     break
                 bases = [i for i, c in reach.items() if c & frontier]
                 if not bases:
@@ -612,7 +625,7 @@ class Generator:
                     gained = attempt
 
         first_stages = len(corpus)
-        if not words_set <= covered and corpus:
+        if not words_set <= covered and corpus and not self.late():
             self._solve(name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, reach, edge)
 
         # Boundary sweep: step each value of a few inputs through the constants and their
@@ -678,7 +691,7 @@ class Generator:
 
         def spent():
             return runs[0] >= SOLVE_RUNS or cost[0] >= SOLVE_COST or \
-                total[0] >= 4 * SOLVE_RUNS or total[1] >= 4 * SOLVE_COST
+                total[0] >= 4 * SOLVE_RUNS or total[1] >= 4 * SOLVE_COST or self.late()
 
         def attempt(case, watch=(), record=False):
             runs[0] += 1
