@@ -124,3 +124,26 @@ def test_provider_wire_formats(monkeypatch):
         assert {k.lower(): v for k, v in headers.items()}["x-api-key"] == "secret"
     finally:
         server.shutdown()
+
+
+def test_an_input_that_runs_missed_code_becomes_a_written_case(gizmo):
+    """--task input: the emulator decides; a useful input is kept in extra_cases, by the pilot."""
+    target, image, program, flow = gizmo
+    fn = program.by_name["keys_read"]
+    provider = llm.Scripted(["no idea", '```json\n{"args": ["0x0", 0, 0, 0], "mem": [], "poll": []}\n```'])
+    still = pilot.find_inputs(target, image, program, provider, "keys_read", list(fn.insns), tries=3, flow=flow,
+                              out=lambda *a: None)
+    assert still == []
+    assert "no ```json block" in provider.asked[1][1][-1]["content"]
+    cases = json.load(open(os.path.join(image.extra_cases, "keys_read.json")))["cases"]
+    assert cases[-1]["by"].startswith("dread pilot") and cases[-1]["why"].startswith("runs 0x")
+
+
+def test_a_name_proposal_is_collected_not_applied(gizmo):
+    target, image, program, flow = gizmo
+    provider = llm.Scripted(["name: gpio_write_pin\nwhat: sets or clears one output pin", "name: main\nwhat: taken"])
+    assert pilot.propose_name(target, image, program, provider, "gpio_set", flow, out=lambda *a: None) == (
+        "gpio_write_pin", "sets or clears one output pin")
+    assert pilot.propose_name(target, image, program, provider, "gpio_set", flow, out=lambda *a: None) is None
+    rows = open(os.path.join(target.build, "pilot", image.name, "names.tsv")).read().splitlines()
+    assert rows[-1].split("\t")[1:3] == ["gpio_set", "gpio_write_pin"] and "gpio_set" in program.by_name

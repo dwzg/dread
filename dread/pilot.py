@@ -25,8 +25,14 @@ Without names, the candidates are the functions of the image's lifted table that
 Model-written C is its own kind: checked by cases, mutation and integration, but nobody has read it.
 Count it apart from C people wrote, and read it before calling it understood.
 
+Two more typed questions: --task input asks, for each function whose cases leave instructions unrun,
+for one input at a time (JSON: argument registers, memory, peripheral answers); the emulator decides,
+and an input that runs some of them becomes a written case. --task name asks for a name and a
+sentence for FUN_ functions and collects the proposals in BUILD/pilot/IMAGE/names.tsv: no tool can
+check a name, so none is applied.
+
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
-                [--no-mutate] [--no-integration] [--dry-run] [NAME...]
+                [--no-mutate] [--no-integration] [--dry-run] [--task write|input|name] [NAME...]
 """
 import argparse
 import contextlib
@@ -321,6 +327,163 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
     return outcome, answers, stage
 
 
+# ---- the other typed questions ----
+
+INPUT_SYSTEM = """You find inputs for one function of a firmware image, so that all of its code can be
+tested in an emulator. An input gives the argument registers, the memory the function reads and the
+values peripheral registers answer with:
+
+    {{"args": [r0, r1, r2, r3],
+     "mem": [[address, size in bytes, value], ...],
+     "poll": [[register address, from the n-th read on, value], ...]}}
+
+Numbers may be integers or hex strings ("0x20001000"). Memory not given reads as zero; for buffers
+use the scratch area 0x{scratch:x} to 0x{end:x}. Answer with one ```json block holding one input."""
+
+NAME_SYSTEM = """You name functions of a firmware image from their code. A name says what the function
+does, in snake_case, with a prefix for its subsystem when one is clear (uart_, gpio_, timer_, cfg_).
+Answer with exactly two lines:
+
+name: <the name>
+what: <one sentence: what the function does>"""
+
+
+def number(value):
+    return int(value, 0) if isinstance(value, str) else int(value)
+
+
+def parse_input(answer):
+    """The input of an answer's ```json block as a case, or None."""
+    import json
+    m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+        args = [number(v) & 0xFFFFFFFF for v in data.get("args", [])][:4]
+        mem = [[number(a), number(n), number(v)] for a, n, v in data.get("mem", [])]
+        poll = [[number(a), number(n), number(v)] for a, n, v in data.get("poll", [])]
+    except (ValueError, TypeError, KeyError):
+        return None
+    return {"args": args + [0] * (4 - len(args)), "mem": mem, "poll": poll, "returns": [], "calls": [], "frame": 0,
+            "limit": 200_000}
+
+
+def missed_instructions(target, image, names):
+    """{name: [addresses]} the cases of each function leave unrun (dread test's UNCOVERED)."""
+    from dread import build, runner
+    payload = build.build(target, image, quiet=True)
+    suite = runner.prepare(target, image, payload)
+    names = [n for n in names if n in suite.cases or n in suite.auto]
+    lines = []
+    old = os.environ.get("DREAD_ALL_MISSED")
+    os.environ["DREAD_ALL_MISSED"] = "1"
+    try:
+        runner.run(names, only=True, out=lines.append)
+    finally:
+        if old is None:
+            del os.environ["DREAD_ALL_MISSED"]
+    out = {}
+    for text in lines:
+        for line in text.splitlines():
+            m = re.match(r"UNCOVERED (\S+): .* never ran: (.*)$", line)
+            if m:
+                out[m.group(1)] = [int(a, 16) for a in m.group(2).split()]
+    return out
+
+
+def find_inputs(target, image, program, provider, name, missed, tries=3, flow=None, out=print):
+    """Ask for inputs that run the missed instructions; each one that runs some becomes a written
+    case of the function (extra_cases, "by" the pilot). Returns the addresses still unrun."""
+    import json
+    from dread import autocase, flat
+    fn = program.by_name[name]
+    gen = autocase.Generator(target, image, program=program)
+    scratch = target.memory.scratch_base or 0
+    system = INPUT_SYSTEM.format(scratch=scratch, end=scratch + (target.memory.scratch_size or 0))
+    marked = []
+    for line in flat.listing(program, fn, flow, callers=flat.callers_of(program)):
+        m = re.match(r"\s+([0-9a-f]{8})\s", line)
+        marked.append((">> " if m and int(m.group(1), 16) in missed else "   ") + line)
+    still = set(missed)
+    user = ("The function %s:\n\n```\n%s\n```\n\nThe instructions marked >> never ran under any input yet: "
+            "%s. Give one input that runs as many of them as you can." % (
+                name, "\n".join(marked), " ".join("0x%x" % a for a in sorted(still))))
+    messages = [{"role": "user", "content": user}]
+    log = ["# Inputs for %s, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (name, provider.label(), system, user)]
+    for k in range(1, tries + 1):
+        if not still:
+            break
+        try:
+            answer = provider.ask(system, messages)
+        except Exception as e:
+            log.append("## Provider error\n\n%s" % e)
+            break
+        log.append("## Answer %d\n\n%s" % (k, answer))
+        case = parse_input(answer)
+        if case is None:
+            feedback = "The answer has no ```json block with an input of the form given. Answer with one."
+        else:
+            ran = gen.coverage(fn.entry, fn.insns, case, case["limit"], check_image=True)
+            new = ran & still
+            if not ran:
+                feedback = ("The input does not finish (it faults, runs on beyond its limit, or loads code as "
+                            "data or writes into the image). Give another one.")
+            elif not new:
+                feedback = "The input runs, but none of the marked instructions. Give another one."
+            else:
+                still -= new
+                case.update({"by": "dread pilot (%s)" % provider.label(),
+                             "why": "runs %s" % " ".join("0x%x" % a for a in sorted(new))})
+                path = os.path.join(image.extra_cases, name + ".json")
+                old = json.load(open(path))["cases"] if os.path.exists(path) else []
+                os.makedirs(image.extra_cases, exist_ok=True)
+                with open(path, "w") as f:
+                    json.dump({"cases": old + [case]}, f, indent=1, sort_keys=True)
+                feedback = ("It runs %s and is kept. %s" % (
+                    " ".join("0x%x" % a for a in sorted(new)),
+                    "Still never run: %s. Give another input." % " ".join("0x%x" % a for a in sorted(still))
+                    if still else "All marked instructions ran."))
+        log.append("## The tools, after answer %d\n\n%s" % (k, feedback))
+        messages += [{"role": "assistant", "content": answer}, {"role": "user", "content": feedback}]
+    folder = os.path.join(target.build, "pilot", image.name)
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, name + ".inputs.md"), "w") as f:
+        f.write("\n\n".join(log) + "\n")
+    out("%-24s %d of %d missed instructions run by the inputs found" % (name, len(missed) - len(still), len(missed)))
+    return sorted(still)
+
+
+def propose_name(target, image, program, provider, name, flow=None, out=print):
+    """Ask for a name and a sentence; a proposal goes to BUILD/pilot/IMAGE/names.tsv, never into the
+    tables (no tool can check a name). Returns (name, what) or None."""
+    from dread import flat
+    fn = program.by_name[name]
+    user = "The function %s:\n\n```\n%s\n```" % (name, "\n".join(
+        flat.listing(program, fn, flow, callers=flat.callers_of(program))))
+    try:
+        answer = provider.ask(NAME_SYSTEM, [{"role": "user", "content": user}])
+    except Exception as e:
+        out("%-24s no proposal: %s" % (name, e))
+        return None
+    proposed = re.search(r"^\s*name\s*:\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*$", answer, re.M | re.I)
+    what = re.search(r"^\s*what\s*:\s*(.+?)\s*$", answer, re.M | re.I)
+    if not proposed or not what or len(proposed.group(1)) > 48 or proposed.group(1) in program.by_name:
+        out("%-24s no usable proposal" % name)
+        return None
+    folder = os.path.join(target.build, "pilot", image.name)
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "names.tsv")
+    new = not os.path.exists(path)
+    with open(path, "a") as f:
+        if new:
+            f.write("address\tnow\tproposed\twhat\tprovider\n")
+        f.write("0x%x\t%s\t%s\t%s\t%s\n" % (fn.entry, name, proposed.group(1), what.group(1).replace("\t", " "),
+                                            provider.label()))
+    out("%-24s proposed %s: %s" % (name, proposed.group(1), what.group(1)))
+    return proposed.group(1), what.group(1)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread pilot", description=__doc__.split("\n\n")[0])
     tgt.add_arguments(parser)
@@ -331,6 +494,8 @@ def main(argv=None):
     parser.add_argument("--no-mutate", action="store_true", help="skip the mutation check")
     parser.add_argument("--no-integration", action="store_true", help="skip the integration run")
     parser.add_argument("--dry-run", action="store_true", help="print the question for each function, ask nothing")
+    parser.add_argument("--task", choices=("write", "input", "name"), default="write",
+                        help="write C (default), find inputs for unrun instructions, or propose names")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     try:
@@ -342,6 +507,23 @@ def main(argv=None):
     from dread.program import Program
     program = Program(target, image)
     flow = regflow.load(target, image, program)
+    if args.task != "write":
+        try:
+            provider = llm.load(args.provider)
+        except llm.ProviderError as e:
+            print("dread pilot: %s" % e, file=sys.stderr)
+            return 1
+        if args.task == "name":
+            from dread.samecode import UNNAMED
+            names = args.names or sorted((fn.name for fn in program.functions if UNNAMED.match(fn.name)),
+                                         key=lambda n: len(program.by_name[n].insns))[:args.limit]
+            for name in names:
+                propose_name(target, image, program, provider, name, flow)
+            return 0
+        missed = missed_instructions(target, image, args.names or [fn.name for fn in program.functions])
+        for name, addresses in sorted(missed.items())[:args.limit]:
+            find_inputs(target, image, program, provider, name, addresses, args.tries, flow)
+        return 0
     names = args.names or candidates(target, image, program, args.limit)
     if not names:
         print("dread pilot: nothing to do (no lifted function that src does not define)")

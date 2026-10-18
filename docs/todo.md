@@ -207,9 +207,11 @@ The long runs set the pace of everything after them. Measure first, then cut.
   (argued.tsv, marked as the pilot's and not reviewed) or corrects the C. Conversations and outcomes
   in BUILD/pilot/IMAGE. Providers (dread.llm): OpenAI-compatible servers and the Anthropic API over
   plain HTTP, keys from the environment. Tested with a scripted provider on gizmo.
-- [ ] `dread pilot`, more typed questions: propose an input for an UNCOVERED function (the runner
-  decides), propose a name for a FUN_ function (a proposal list, never applied by itself); a
-  measured run with the local model and with a cloud model on gizmo's lifted functions.
+- [x] `dread pilot --task input` (one JSON input at a time for the instructions a function's cases
+  leave unrun; the emulator decides; a useful input becomes a written case "by" the pilot) and
+  `--task name` (a name and a sentence for FUN_ functions, collected in names.tsv, never applied).
+- [ ] A measured run of the pilot with the local model and with a cloud model on gizmo's lifted
+  functions (accepted, answers per function, seconds, what the failures were).
 - [ ] RISC-V (RV32IMC): a third gizmo build (clang 23 and ld.lld are installed: no system packages
   needed) and the architecture layer behind `dread.arch`.
 
