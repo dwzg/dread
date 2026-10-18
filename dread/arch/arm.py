@@ -386,6 +386,27 @@ class Arm:
         """The opposite condition: eq/ne, hs/lo, mi/pl, vs/vc, hi/ls, ge/lt, gt/le."""
         return predicate + 1 if predicate % 2 else predicate - 1
 
+    # ---- the whole system (dread.sysrun) ----
+
+    def reset(self, engine, read_word, entry, vectors):
+        """Put the core into its state after reset and return where it starts (bit 0 set for
+        Thumb). A profile: supervisor mode with IRQ and FIQ masked, at the reset entry. M profile:
+        the stack pointer and the reset handler from the first two words of the vector table,
+        Thumb state, interrupts enabled."""
+        if self.profile == "m":
+            engine.reg_write(ua.UC_ARM_REG_SP, read_word(vectors))
+            engine.reg_write(ua.UC_ARM_REG_XPSR, 0x01000000)
+            return read_word(vectors + 4) | 1
+        engine.reg_write(ua.UC_ARM_REG_CPSR, 0xD3)
+        return entry
+
+    def resume_address(self, engine):
+        """Where to go on after emu_start returned: pc, with bit 0 set in Thumb state."""
+        pc = engine.reg_read(ua.UC_ARM_REG_PC)
+        if self.profile == "m" or engine.reg_read(ua.UC_ARM_REG_CPSR) & 0x20:
+            return pc | 1
+        return pc
+
     def flags_value(self, engine):
         """The condition flags (N, Z, C, V) as they lie in the status register."""
         return engine.reg_read(self.status_reg()) & 0xF0000000

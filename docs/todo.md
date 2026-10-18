@@ -53,7 +53,7 @@ The long runs set the pace of everything after them. Measure first, then cut.
 
 ## Phase 5: system run
 
-- [ ] **Framework.** The image from reset with device models, original against rebuilt: device
+- [x] **Framework.** The image from reset with device models, original against rebuilt: device
   accesses in order, what the models see (bytes sent, pins), instruction budget, events at fixed
   points (a key at instruction N). Named scenarios in a table of the target. Done when gizmo boots
   to `READY` in both images with identical device logs, and a planted bug in a rewritten function

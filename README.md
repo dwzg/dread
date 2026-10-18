@@ -47,7 +47,7 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Integration run: generated inputs with real callees, also through original callers | done |
 | Register flow across calls: what callers read after a call, compared at the return | done |
 | Recorded cases from Python models of callees (`dread record`) | done |
-| System run with device models | planned |
+| System run from reset, original against rebuilt, on a shared clock (models: serial port so far) | in progress |
 | Lifter (ARM, then Thumb) | planned |
 | Reading aids, Claude Code plugin, method documentation | planned |
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | with the lifter |
@@ -73,6 +73,7 @@ bin/dread recon --target examples/gizmo/m3      # gizmo's rewritten functions ov
 bin/dread test --target examples/gizmo/m3       # each one against the original, in the emulator
 bin/dread mutate --target examples/gizmo/m3 --kill checksum   # would the cases notice a wrong one?
 bin/dread integration --target examples/gizmo/m3 --callers    # the same with real callees, and through callers
+bin/dread sysrun --target examples/gizmo/m3                   # the whole firmware from reset, both images
 ```
 
 A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the

@@ -36,3 +36,16 @@ scratch = {base = 0x40100000, size = 0x20000}
 cross = "arm-none-eabi-"
 cflags = ["-march=armv4t", "-marm", "-mabi=aapcs", "-mfloat-abi=soft", "-Os", "-ffreestanding",
           "-fno-builtin", "-ffunction-sections", "-fno-common"]
+
+# Devices for the system run (dread sysrun): gizmo's serial port (examples/gizmo/fw/gizmo.h).
+[models.uart]
+kind = "uart"
+base = 0x80000000
+data = 0x0
+status = 0x4
+tx_ready = 0x1
+rx_ready = 0x2
+
+[scenarios.boot]
+until = {uart = "READY"}
+limit = 5_000_000

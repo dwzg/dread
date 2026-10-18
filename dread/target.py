@@ -57,9 +57,9 @@ SCHEMA = {
 IMAGE_KEYS = {
     "original": str, "vendor": str, "container": str, "base": int, "limit": int, "erased": int,
     "entry": (int, str), "config": str, "cases": str, "extra_cases": str, "kept_cases": str,
-    "record_specs": str, "src": str, "startup": (list, dict), "tables": dict, "arch": dict,
+    "record_specs": str, "src": str, "startup": (list, dict), "tables": dict, "arch": dict, "vectors": int,
 }
-FREE = ("models", "plugins")
+FREE = ("models", "plugins", "scenarios")
 
 
 class TargetError(Exception):
@@ -212,6 +212,8 @@ class Image:
     limit     the end of the room the overlay may use behind the image (default: the image's end)
     erased    the value of unprogrammed flash (default 0xff)
     entry     the reset entry, an address or a symbol name (default: base)
+    vectors   where the exception vectors lie (A profile) or the vector table (M profile; the
+              system run takes the stack pointer and the reset handler from it); default: base
     config    the directory of the image's tables (default "config")
     cases, extra_cases, kept_cases, record_specs, src: where its test cases and its C live
     startup   the startup's copies, as a list of {kind, run, size, stored}, or {plugin = "..."}
@@ -234,6 +236,7 @@ class Image:
         self._limit = data.get("limit")
         self.erased = data.get("erased", 0xFF)
         self._entry = data.get("entry", self.base)
+        self.vectors = data.get("vectors", self.base)
         self.config = target.path(data.get("config", "config"))
         self.cases = target.path(data.get("cases", "tests/cases"))
         self.extra_cases = target.path(data.get("extra_cases", "tests/extra_cases"))
@@ -345,6 +348,7 @@ class Target:
         self.host = dict(data.get("host", {}))
         self.models = data.get("models", {})
         self.plugins = data.get("plugins", {})
+        self.scenarios = data.get("scenarios", {})
         images = data.get("image", {})
         if not images:
             raise TargetError("%s: no [image.NAME] section" % self.file)

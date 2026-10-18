@@ -19,6 +19,7 @@ COMMANDS = {
     "integration": ("dread.integration", "run generated inputs with real callees, original against rebuilt"),
     "regflow": ("dread.regflow", "registers callers read after a call, and those a function reads at entry"),
     "record": ("dread.record", "written cases from Python models of a function's callees"),
+    "sysrun": ("dread.sysrun", "the image from reset with device models, original against rebuilt"),
     "leakcheck": ("dread.leakcheck", "look for a private project's names and addresses before publishing"),
 }
 

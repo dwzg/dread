@@ -88,6 +88,7 @@ default. `--image NAME` or `$DREAD_IMAGE` selects another.
 | `limit` | the end of the room the overlay may use behind the image (default: the image's end) |
 | `erased` | the value of unprogrammed flash (default `0xff`) |
 | `entry` | the reset entry, an address or a symbol name from the image's symbols (default: `base`) |
+| `vectors` | where the exception vectors lie (A profile) or the vector table (M profile: the system run takes the stack pointer and the reset handler from its first two words); default `base` |
 | `config` | the directory of the image's tables (default `config`) |
 | `cases`, `extra_cases`, `kept_cases`, `record_specs` | where its test cases live (defaults under `tests/`) |
 | `src` | the directory of its C (default `[paths] src`) |
@@ -139,13 +140,37 @@ address faults before the run can stop.
 | `include` | include directories |
 | `idioms` | the family of compiler idioms the lifter recognises |
 
-### `[paths]`, `[host]`, `[models]`, `[plugins]`
+### `[paths]`, `[host]`, `[plugins]`
 
 - `[paths]`: `build` (default `build`) and `src` (default `src`).
 - `[host]`: settings of the machine the tools run on (`jobs`, `free_cores`, `nice`). The environment
   variables of `dread.util.polite` override them.
-- `[models]` and `[plugins]`: free-form sections owned by the tools that read them, such as the
-  device models of the system run.
+- `[plugins]`: a free-form section owned by the tools that read it.
+
+### `[models.NAME]`: devices for the system run
+
+One table per device of `dread sysrun`. `kind` names a model class of `dread.models` (`uart`) or the
+target's own (`"file.py:Class"`, relative to the target directory); the other keys are the class's
+(its docstring). Example, a serial port:
+
+```toml
+[models.uart]
+kind = "uart"
+base = 0x80000000
+data = 0x0
+status = 0x4
+tx_ready = 0x1
+rx_ready = 0x2
+```
+
+### `[scenarios.NAME]`: system runs with a name
+
+| Key | Meaning |
+|---|---|
+| `until` | `{model = "text"}`: end when that model's report `sent` contains the text |
+| `limit` | the shared-clock units the run may take (`dread.sysrun`) |
+| `input` | `[[clock, "model", "bytes"], ...]`: input handed to a model at that time |
+| `models` | the models of the run (default: all of `[models]`; `[]` for none) |
 
 ## Plugins
 
