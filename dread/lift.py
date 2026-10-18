@@ -16,7 +16,9 @@ compares, with the target dread.switches finds for every value the check lets th
 
 Lifted C is a stepping stone, not a reconstruction: no names, no structure, nobody read it. It is
 useful because it builds and comes with generated cases that must cover every instruction of the
-original and agree on all of them before it is accepted (see --check).
+original and agree on all of them before it is accepted (see --check). The translation of each
+instruction is checked on its own by dread liftfuzz: cases that cover a function need not tell a
+wrong translation apart (an xor loop run once from zero agrees with an or).
 
 A function is refused, with the reason, when it uses something not modelled exactly: an unknown
 instruction (coprocessor and status register access included), a stack pointer that is not static
@@ -63,6 +65,7 @@ OPS = {getattr(A, "ARM_INS_" + name.upper()): name for name in (
     "mul mla mls umull smull umlal smlal udiv sdiv clz uxtb uxth sxtb sxth uxtab uxtah sxtab sxtah rev rev16 "
     "revsh movw movt ubfx sbfx bfc bfi ldr ldrb ldrh ldrsb ldrsh str strb strh ldrd strd ldm ldmib ldmda "
     "ldmdb stm stmib stmda stmdb").split() if hasattr(A, "ARM_INS_" + name.upper())}
+OPS[A.ARM_INS_MOVS] = "mov"     # Thumb's 16-bit movs rd, rm (an lsls #0) has an id of its own
 SIGNED = {A.ARM_INS_LDRSB: "s8", A.ARM_INS_LDRSH: "s16"}
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
@@ -452,10 +455,21 @@ class Lifter:
     def flags_nz(self, result):
         return "n = %s >> 31; z = %s == 0;" % (result, result)
 
+    def logical(self, d, value, carry):
+        """d = value, and with s the flags of a logical instruction: n and z of the result, c from
+        the shifter when it gives one. The carry is taken before d is written: the shifted register
+        may be d itself (movs r1, r1, lsl #7)."""
+        if not self.s:
+            return "%s = %s;" % (d, value)
+        if carry is None:
+            return "%s = %s; %s" % (d, value, self.flags_nz(d))
+        return "{ u32 cy = %s; %s = %s; %s c = cy; }" % (carry, d, value, self.flags_nz(d))
+
     # instructions
 
     def insn(self, insn):
         self.insn_now = insn
+        self.s = self.arch.sets_flags(insn)
         out = self._insn(insn, insn.id, insn.operands, self.prog.isa_at(insn.address))
         return self.cond(insn, out) if out else ""
 
@@ -466,7 +480,7 @@ class Lifter:
             return None
         if kind == "return":
             if i in (A.ARM_INS_SUB, A.ARM_INS_SUBS if hasattr(A, "ARM_INS_SUBS") else -1) or \
-                    (insn.update_flags and i == A.ARM_INS_MOV) or getattr(insn, "usermode", False):
+                    (self.s and i == A.ARM_INS_MOV) or getattr(insn, "usermode", False):
                 raise Refused("0x%x returns from an exception: %s %s" % (insn.address, insn.mnemonic, insn.op_str))
             loads = self._pop(insn, returning=True) if arch.stack_kind(insn) == "pop" else ""
             return (loads + " " if loads else "") + "return %s;" % self._ret()
@@ -619,10 +633,7 @@ class Lifter:
             a, (b, carry) = d, self.operand2(srcs[0])
         else:
             a, (b, carry) = self.reg(srcs[0].reg), self.operand2(srcs[1])
-        out = "%s = %s;" % (d, expr_fn(a, b))
-        if insn.update_flags:
-            out += " " + self.flags_nz(d) + (" c = %s;" % carry if carry else "")
-        return out
+        return self.logical(d, expr_fn(a, b), carry)
 
     def op_and(self, insn, ops):
         return self._logic(insn, ops, lambda a, b: "%s & %s" % (a, b))
@@ -644,21 +655,15 @@ class Lifter:
         if len(ops) != 2:
             raise Refused("0x%x: %s %s" % (insn.address, insn.mnemonic, insn.op_str))
         src = ops[1]
-        if src.type == A.ARM_OP_REG and src.reg == A.ARM_REG_SP and not insn.update_flags:
+        if src.type == A.ARM_OP_REG and src.reg == A.ARM_REG_SP and not self.s:
             return "%s = %s;" % (d, self.reg(src.reg, sp=True))
         b, carry = self.operand2(src)
-        out = "%s = %s;" % (d, b)
-        if insn.update_flags:
-            out += " " + self.flags_nz(d) + (" c = %s;" % carry if carry else "")
-        return out
+        return self.logical(d, b, carry)
 
     def op_mvn(self, insn, ops):
         d = self.dest(ops[0])
         b, carry = self.operand2(ops[1])
-        out = "%s = ~%s;" % (d, b)
-        if insn.update_flags:
-            out += " " + self.flags_nz(d) + (" c = %s;" % carry if carry else "")
-        return out
+        return self.logical(d, "~%s" % b, carry)
 
     def _arith(self, insn, ops, kind):
         d = self.dest(ops[0])
@@ -670,7 +675,7 @@ class Lifter:
         if first.type == A.ARM_OP_REG and first.reg == A.ARM_REG_SP:
             # an address in the frame: sp plus a constant below the entry's stack pointer, or plus a
             # register (an index into a local array; the frame mirrors the original's layout)
-            if kind != "add" or insn.update_flags or (second.type == A.ARM_OP_REG and
+            if kind != "add" or self.s or (second.type == A.ARM_OP_REG and
                                                        second.shift.type not in (0, A.ARM_SFT_INVALID)):
                 raise Refused("0x%x computes with the stack pointer: %s %s" % (
                     insn.address, insn.mnemonic, insn.op_str))
@@ -684,7 +689,7 @@ class Lifter:
             a, b = b, a
         carry_in = {"add": "0", "sub": "1", "adc": "c", "sbc": "c", "rsb": "1", "rsc": "c"}[kind]
         plus = kind in ("add", "adc")
-        if not insn.update_flags:
+        if not self.s:
             if kind == "add":
                 return "%s = %s + %s;" % (d, a, b)
             if kind in ("sub", "rsb"):
@@ -745,23 +750,20 @@ class Lifter:
         d = self.dest(ops[0])
         if len(ops) == 2 and ops[1].type == A.ARM_OP_REG and ops[1].shift.type not in (0, A.ARM_SFT_INVALID):
             value, carry = self.shifted(ops[1])
-            out = "%s = %s;" % (d, value)
-            if insn.update_flags:
-                out += " " + self.flags_nz(d) + (" c = %s;" % carry if carry else "")
-            return out
+            return self.logical(d, value, carry)
         if len(ops) == 2:
             src, amount = d, self.reg(ops[1].reg)
         elif ops[2].type == A.ARM_OP_IMM:
             value, carry = self.imm_shift(kind, "x", ops[2].imm)
             out = "{ u32 x = %s; %s = %s;" % (self.reg(ops[1].reg), d, value)
-            if insn.update_flags:
+            if self.s:
                 out += " " + self.flags_nz(d) + (" c = %s;" % carry if carry else "")
             return out + " }"
         else:
             src, amount = self.reg(ops[1].reg), self.reg(ops[2].reg)
         value, carry = self.reg_shift(kind, "x", "a")
         out = "{ u32 x = %s, a = %s; %s = %s;" % (src, amount, d, value)
-        if insn.update_flags:
+        if self.s:
             out += " c = %s; %s" % (carry, self.flags_nz(d))
         return out + " }"
 
@@ -780,7 +782,7 @@ class Lifter:
     def op_rrx(self, insn, ops):
         d, s = self.dest(ops[0]), self.reg(ops[1].reg)
         out = "{ u32 x = %s; %s = (x >> 1) | (c << 31);" % (s, d)
-        if insn.update_flags:
+        if self.s:
             out += " c = x & 1; " + self.flags_nz(d)
         return out + " }"
 
@@ -788,14 +790,14 @@ class Lifter:
         d = self.dest(ops[0])
         a, b = (self.reg(ops[1].reg), self.reg(ops[2].reg)) if len(ops) == 3 else (d, self.reg(ops[1].reg))
         out = "%s = %s * %s;" % (d, a, b)
-        if insn.update_flags:
+        if self.s:
             out += " " + self.flags_nz(d)
         return out
 
     def op_mla(self, insn, ops):
         d = self.dest(ops[0])
         out = "%s = %s * %s + %s;" % (d, self.reg(ops[1].reg), self.reg(ops[2].reg), self.reg(ops[3].reg))
-        if insn.update_flags:
+        if self.s:
             out += " " + self.flags_nz(d)
         return out
 
@@ -810,7 +812,7 @@ class Lifter:
         prod = "(u64)((s64)(s32)%s * (s32)%s)" % (a, b) if signed else "(u64)%s * %s" % (a, b)
         acc = " + ((u64)%s << 32 | %s)" % (hi, lo) if accumulate else ""
         out = "{ u64 t = %s%s; %s = (u32)t; %s = (u32)(t >> 32);" % (prod, acc, lo, hi)
-        if insn.update_flags:
+        if self.s:
             out += " n = (u32)(t >> 63); z = t == 0;"
         return out + " }"
 

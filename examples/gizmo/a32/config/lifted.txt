@@ -1,6 +1,7 @@
 # Functions built from lifted C: their generated cases agree with the original and run
 # every instruction of it. Written by dread lift --check; not edited by hand.
 __aeabi_ldiv0
+__ram_crc_veneer
 apply_config
 beep_off
 beep_on

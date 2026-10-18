@@ -349,19 +349,39 @@ class Arm:
         """(reads, writes): the registers an instruction reads and writes, by name (r0-r12, sp, lr,
         pc, "flags" for the condition flags; others by capstone's name). Flags are read by every
         conditional instruction and written by every instruction that sets them (capstone reports
-        that in update_flags, not in its register lists; it also claims it for adc without s, which
-        only makes the analysis find less). A conditional instruction's writes may not happen:
+        that in update_flags, not in its register lists, and claims it for adc, sbc and rsc without
+        s as well: sets_flags() decides). A conditional instruction's writes may not happen:
         regflow does not let them end a register."""
         r, w = insn.regs_access()
         reads = {self._name(insn.reg_name(x)) for x in r}
         writes = {self._name(insn.reg_name(x)) for x in w}
-        if insn.update_flags:
+        if self.sets_flags(insn):
             writes.add("flags")
         if self.is_conditional(insn) and insn.id != csarm.ARM_INS_IT:
             reads.add("flags")
         reads.discard(None)
         writes.discard(None)
         return reads, writes
+
+    COMPARES = (csarm.ARM_INS_CMP, csarm.ARM_INS_CMN, csarm.ARM_INS_TST, csarm.ARM_INS_TEQ)
+
+    def sets_flags(self, insn):
+        """Whether an instruction sets the condition flags. Capstone's update_flags is also true for
+        adc, sbc and rsc without s (and for the 16-bit forms inside an IT block, which set nothing),
+        so the mnemonic decides: the s in front of the condition and the width suffix. Compares
+        always set them; other instructions whose mnemonic does not end in s (msr, the exception
+        returns) as capstone says."""
+        if insn.id in self.COMPARES:
+            return True
+        if not insn.update_flags:
+            return False
+        mnemonic = insn.mnemonic.split(".")[0]
+        cond = self.condition(insn)
+        if cond and mnemonic.endswith(cond):
+            mnemonic = mnemonic[:-len(cond)]
+        if insn.id in (csarm.ARM_INS_ADC, csarm.ARM_INS_SBC, csarm.ARM_INS_RSC) or mnemonic.endswith("s"):
+            return mnemonic.endswith("s")
+        return True
 
     @staticmethod
     def _name(name):

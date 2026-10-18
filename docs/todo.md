@@ -77,12 +77,19 @@ The long runs set the pace of everything after them. Measure first, then cut.
   with its reason: a stack pointer loaded from memory, an exception entry reading lr, uart_puts
   reading r1 behind a call, __aeabi_uidivmod branching into __udivsi3. read_line and handle_key
   needed the cases dread sysrecord recorded; the generator alone misses a few of their instructions.)
-- [ ] **Instruction-level check of the lifter** (`dread liftfuzz`): random instruction sequences
+- [x] **Instruction-level check of the lifter** (`dread liftfuzz`): random instruction sequences
   assembled into a small image, original against lifted in the emulator over many register values,
-  flags read back through conditional instructions. Needed: a planted mistake (eor translated as
-  orr) passed every generated case of script_run on the m3 build, because the cases that cover the
-  xor loop run it once from zero. Coverage-complete cases are not proof of a correct translation;
-  the semantics need their own test.
+  flags read back through conditional instructions, failures reduced to their shortest form. Needed:
+  a planted mistake (eor translated as orr) passed every generated case of script_run on the m3
+  build, because the cases that cover the xor loop run it once from zero. Its first runs found two
+  lifter bugs the gizmo functions had not shown: capstone reports adc, sbc and rsc without s as
+  setting the flags (arch.sets_flags now decides from the mnemonic), and the shifter's carry of
+  movs r1, r1, lsl #7 was taken after r1 was written. 2026-10-18: 8 x 120 functions of 40
+  instructions on each ISA agree.
+- [ ] liftfuzz could also generate switches (tbb, tbh, ldr pc tables), conditional returns, tail
+  calls, Thumb-1 code (ARMv4T and ARMv6-M), and run on the A profile in Thumb state.
+- [ ] dread.autocase still takes capstone's update_flags to find the instruction that set the flags
+  for a branch (adc without s counts); harmless for correctness, but a VERSION bump when changed.
 - [ ] Lifter gaps found on gizmo and from reading GCC output: calls of functions that never return
   (a trailing bl abort is refused as falling through; needs a noreturn analysis), frame pointers
   (-O0: mov sp, r7), Thumb-1 returns (pop {r1}; bx r1), mrs/msr/cps as inline assembly, VFP, ldrex
