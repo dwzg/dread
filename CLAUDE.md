@@ -59,6 +59,8 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   and why it failed in the item, put the tree back to the last commit, and take the next item.
 - **Commit only green**: `.venv/bin/pytest` passes, both gizmo builds. Push only through the leak
   check (rule 9) with a script that stops on its exit status; never force-push without the user.
+  The push script runs the fast tests first (`pytest -m "not slow"`, about 15 s) and refuses a red
+  tree: once a push went out because the command that ran the tests went on after they failed.
 - **Stay polite on the machine**: long runs go to the background (polite, as the tools are);
   nothing that fills memory or runs without a bound.
 - **Look for performance regularly** (the user, 2026-10-18): every few items, measure what is slow
