@@ -78,7 +78,6 @@ needed on it):
   run are generic).
 - `dread.elfimport`: ARM dispatch slots and padding between functions (other architectures skip
   them).
-- `dread.sysrun`: reset, interrupt entry and return (the layer's methods exist for ARM only).
 
 Done for RISC-V: the listing's syntax moved behind `arch.asm()`, the ELF import reads `$x` mapping
 symbols as the layer's default instruction set, the reading aids take the argument registers from

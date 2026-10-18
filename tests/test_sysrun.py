@@ -8,10 +8,9 @@ import os
 import pytest
 
 from dread import build, sysrun
-from conftest import have
 from test_runner import src_copy
 
-pytestmark = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+pytestmark = [pytest.mark.compiles, pytest.mark.rv32]
 
 
 def both(target, payload=None, scenario=None):

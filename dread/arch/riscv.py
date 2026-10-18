@@ -589,6 +589,44 @@ class RiscV:
         """The listing's syntax (dread asm): RiscVAsm."""
         return RiscVAsm(self)
 
+    # ---- the system run (dread.sysrun) ----
+
+    MSTATUS_MIE, MSTATUS_MPIE, MIE_MEIE, EXTERNAL = 1 << 3, 1 << 7, 1 << 11, 11
+
+    def reset(self, engine, read_word, entry, vectors):
+        """Machine mode with interrupts off (mstatus.MIE and MPIE clear, mie clear), at the reset
+        entry."""
+        status = engine.reg_read(ur.UC_RISCV_REG_MSTATUS)
+        engine.reg_write(ur.UC_RISCV_REG_MSTATUS, status & ~(self.MSTATUS_MIE | self.MSTATUS_MPIE))
+        engine.reg_write(ur.UC_RISCV_REG_MIE, 0)
+        return entry
+
+    def interrupts_enabled(self, engine):
+        """Whether the machine external interrupt (the interrupt controller's line to the core) may
+        be taken: mstatus.MIE and mie.MEIE set. The handler runs with MIE clear: no nesting."""
+        return bool(engine.reg_read(ur.UC_RISCV_REG_MSTATUS) & self.MSTATUS_MIE) and \
+            bool(engine.reg_read(ur.UC_RISCV_REG_MIE) & self.MIE_MEIE)
+
+    def enter_interrupt(self, engine, number, resume, vectors, read_word, write_word):
+        """Take the machine external interrupt as the core does, returning to `resume`: mepc =
+        resume, mcause = 11 with the interrupt bit, MPIE = MIE, MIE = 0, MPP = machine; on at mtvec
+        (vectored mode: base + 4 * 11). `number` is the controller's line, not the core's cause.
+        mret, at the handler's end, runs in the emulator itself."""
+        status = engine.reg_read(ur.UC_RISCV_REG_MSTATUS)
+        engine.reg_write(ur.UC_RISCV_REG_MEPC, resume)
+        engine.reg_write(ur.UC_RISCV_REG_MCAUSE, 0x80000000 | self.EXTERNAL)
+        engine.reg_write(ur.UC_RISCV_REG_MSTATUS, (status & ~(self.MSTATUS_MIE | self.MSTATUS_MPIE))
+                         | (self.MSTATUS_MPIE if status & self.MSTATUS_MIE else 0) | 3 << 11)
+        vector = engine.reg_read(ur.UC_RISCV_REG_MTVEC)
+        return (vector & ~3) + (4 * self.EXTERNAL if vector & 3 == 1 else 0)
+
+    def exception_return(self, engine, read_word):
+        """Nothing to finish: mret runs in the emulator."""
+        return None
+
+    def resume_address(self, engine):
+        return engine.reg_read(UC_REGS["pc"])
+
 
 _EXACT = {}
 

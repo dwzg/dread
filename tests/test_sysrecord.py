@@ -4,8 +4,12 @@ cases do not, replay in the function-level harness with the result the system ru
 UART's reads as poll stages, and move the caller's line buffer into scratch memory."""
 import os
 
+import pytest
+
 from dread import autocase, sysrecord
 from dread.program import Program
+
+pytestmark = pytest.mark.rv32
 
 
 def test_recorded_calls_reach_the_config_path(target, tmp_path):

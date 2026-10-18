@@ -58,7 +58,7 @@ for an RV32IMC core with clang (that build is new; the tools are being ported to
 | Method documentation and a porting guide | done |
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
 | `dread pilot`: the reconstruction loop run by code, an LLM (local or cloud) only for the judgement: writing C, arguing survivors, proposing inputs and names; every answer checked by the tools | first version |
-| RISC-V (RV32IMC): gizmo-rv32 built with clang; decoding, listing with byte-identical rebuild, reading aids, the overlay, differential tests with generated cases, integration and recorded cases, regflow, switches, Ghidra | under way (next: the system run, then the lifter) |
+| RISC-V (RV32IMC): gizmo-rv32 built with clang; decoding, listing with byte-identical rebuild, reading aids, the overlay, differential tests with generated cases, integration and recorded cases, regflow, switches, Ghidra, the system run with interrupts | under way (next: the lifter) |
 
 ## Layout
 

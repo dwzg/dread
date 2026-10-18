@@ -259,7 +259,11 @@ The long runs set the pace of everything after them. Measure first, then cut.
     lets dread.switches run script_run's table (8 targets); noreturn (_start, main); the reading
     aids; dread ghidra (Ghidra's RV32 language `RISCV:LE:32:default` with its `gcc` compiler spec,
     the exporter names the plain instruction set by the layer) agrees with the ELF;
-  - [ ] the system run: reset, machine external interrupt through mtvec, mret;
+  - [x] the system run: reset (machine mode, interrupts off), the interrupt controller's line as
+    the machine external interrupt (mstatus.MIE and mie.MEIE; mepc, mcause 11, MPIE, at mtvec,
+    vectored mode too), mret in the emulator itself. gizmo-rv32 boots to READY on both images, the
+    keys go through the timer interrupt, a planted bug and a bug in the interrupt path show, and
+    dread sysrecord records from it;
   - [ ] a lifter for RV32IMC and its fuzzer.
 
 ## Browser view (`dread gui`; asked for by the user on 2026-10-18)
