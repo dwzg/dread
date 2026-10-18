@@ -10,6 +10,10 @@ queue may change while the user is away: CLAUDE.md, "Working unattended".
 
 Decisions that are the user's, with options and a recommendation. Work goes on around them.
 
+- **IAR-built gizmo?** For the IAR profile: gizmo built with IAR EWARM (Cortex-M3) and, for MSP430,
+  EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
+  `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
+  and optimisation levels matter to you?
 - **CI on GitHub Actions?** The tests on every push (both gizmo builds; arm-none-eabi-gcc and clang
   from the runner's packages). Free for public repositories; it would show a status badge.
   Recommendation: yes, after the performance pass, so a run stays short.
@@ -116,9 +120,23 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   division helpers): every tool on clang's code shapes (switch tables, prologues, no -fipa-ra).
 - [ ] gcc at -O0, -O2 and -O3 for both ARM builds: frame pointers and spills, unrolled loops,
   inlining. The tests run on all of them (marked slow where needed).
+- [ ] **IAR profile** (EWARM, EW430; of interest to the user): IAR's runtime helper names and
+  calling details, its switch shapes, and its cross-call optimisation (repeated sequences outlined
+  into fragments that are called but follow no convention): fragments recognised, their register
+  contract taken from regflow, which for that also has to follow callee-saved registers a function
+  reads that its caller left. Validation needs IAR-built gizmo binaries from the user (question
+  below); they stay out of the public repository (IAR's runtime is in them).
 - [ ] `dread whatcc`: guess the compiler and options of an unknown image from its code (prologue
   shapes, helper names and calls, switch shapes, literal pool placement, register use across calls)
   and suggest a compiler profile.
+
+## C++
+
+- [ ] **C++ originals and rewrites**: a C++ part in gizmo (a class with virtual methods, a template
+  used twice, a static object with a constructor), built with g++ and clang++ (-fno-exceptions
+  -fno-rtti). The tools on it: mangled names kept for linking and shown demangled, vtables in data
+  that stay valid when a method moves, static constructors in the startup (system run), template
+  instances as families; `.cpp` sources in the build, a method rewritten in C++ and one in C.
 
 ## Scale and robustness
 
