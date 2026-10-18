@@ -40,8 +40,8 @@ built twice, once for an ARM7-style core in ARM state and once for a Cortex-M3 i
 | Target description, function tables, ARM and Thumb layer, ELF import | done |
 | Listing generator and byte-identical rebuild, Ghidra pipeline | done |
 | Emulator, differential test runner, overlay linker | done |
-| Integration run (real callees) | planned, with the case generator |
-| Case generator, compare-guided sweeps, recorded cases, mutation check | planned |
+| Case generator (coverage- and compare-guided, pointer learning) | done |
+| Integration run, compare-guided sweeps, recorded cases, mutation check | planned |
 | System run with device models | planned |
 | Lifter (ARM, then Thumb) | planned |
 | Reading aids, Claude Code plugin, method documentation | planned |

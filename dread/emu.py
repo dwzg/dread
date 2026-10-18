@@ -19,8 +19,8 @@ Architecture: ARM (A and M profile, ARM state and Thumb) through dread.arch.
 """
 import struct
 
-from unicorn import (UC_HOOK_BLOCK, UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
-                     UC_MEM_WRITE, UcError)
+from unicorn import (UC_HOOK_BLOCK, UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ,
+                     UC_HOOK_MEM_WRITE, UC_MEM_WRITE, UcError)
 
 PAGE = 0x1000
 POLL_LOGGED = 2     # reads after a Machine.poll_read stage's start that are still logged one by one
@@ -67,6 +67,10 @@ class Layout:
         self.result_regs = [self.arch.reg_id(r) for r in abi.result]
         self.all_regs = [self.arch.reg_id("r%d" % i) for i in range(13)]
         self.sp, self.lr, self.pc = (self.arch.reg_id(r) for r in ("sp", "lr", "pc"))
+        # Cores that can have IT blocks need every hook to clear a stale IT state (Arm.settle_it)
+        from dread.program import read_code_ranges
+        self.settle_it = self.arch.profile == "m" or any(
+            isa == "t32" for _, _, isa in read_code_ranges(image.table("code_ranges"), self.arch.isa))
 
     @staticmethod
     def _merge(spans):
@@ -152,9 +156,13 @@ class Core:
         self.dirty.add(addr >> 12)
         self.dirty.add((addr + size - 1) >> 12)
         self.machine._on_write(uc, access, addr, size, value, user)
+        if self.layout.settle_it:
+            self.layout.arch.settle_it(uc)
 
     def _on_io(self, uc, access, addr, size, value, user):
         self.machine._on_io(uc, access, addr, size, value, user)
+        if self.layout.settle_it:
+            self.layout.arch.settle_it(uc)
 
     def page(self, number):
         """The initial contents of one page."""
@@ -225,11 +233,21 @@ class Machine:
         self.polls = {}             # see poll_read()
         self.arg_domains = []       # [(register number, values)] applied by call()
         self.function = ""          # the name of the function under test, for stubs that look it up
+        self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
+        self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
 
     # ---- hooks ----
 
     def hook_add(self, kind, callback, **where):
-        """Add an emulator hook that lasts as long as this Machine."""
+        """Add an emulator hook that lasts as long as this Machine. On cores with IT blocks the
+        hook ends by clearing a stale IT state (Arm.settle_it)."""
+        if self.layout.settle_it:
+            inner, settle = callback, self.arch.settle_it
+
+            def callback(uc, *args, inner=inner, settle=settle):
+                result = inner(uc, *args)
+                settle(uc)
+                return result
         self.core.hooks.append(self.uc.hook_add(kind, callback, **where))
 
     def _on_write(self, uc, access, addr, size, value, user):
@@ -256,6 +274,11 @@ class Machine:
             if n > poll["stages"][-1][0] + POLL_LOGGED:
                 return      # counted, not logged one by one; call() logs the total
         self.log("io read", addr, size, int.from_bytes(uc.mem_read(addr, size), "little"))
+
+    def _on_unmapped(self, uc, access, addr, size, value, user):
+        if self.unmapped is None:
+            self.unmapped = (access, addr)
+        return False                        # the access faults as before
 
     def poll_read(self, addr, n, value):
         """From the n-th read (1 is the first) of the register at addr on, until a later stage,

@@ -88,3 +88,11 @@ case("uart_putc", "waits two reads", uart(3), 0x42)
 for a, b in [(b"", b""), (b"a", b""), (b"", b"a"), (b"abc", b"abc"), (b"abc", b"abd"), (b"\xff", b"\x01"),
              (b"ab", b"abc"), (b"b", b"a")]:
     case("strcmp", "%r vs %r" % (a, b), memory((SCR, a + b"\0"), (SCR + 0x80, b + b"\0")), SCR, SCR + 0x80)
+
+
+# Generated cases (dread.autocase) for the same functions, beside the written ones; dispatch's
+# commands are stubbed (each reads r0 only).
+for name in ("clamp", "checksum", "parse_uint", "mode_name", "sum6", "udiv_var", "fmt_hex", "ring_put",
+             "ring_get", "strcmp", "uart_putc"):
+    auto(name)
+auto("dispatch", calls=[("cmd_led", 1), ("cmd_beep", 1), ("cmd_mode", 1), ("cmd_volume", 1)])

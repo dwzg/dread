@@ -250,6 +250,27 @@ class Arm:
         else:
             engine.reg_write(ua.UC_ARM_REG_XPSR, 0x01000000)
 
+    IT_MASK = (3 << 25) | (0x3F << 10)     # the IT state in CPSR and xPSR
+
+    def status_reg(self):
+        return ua.UC_ARM_REG_XPSR if self.profile == "m" else ua.UC_ARM_REG_CPSR
+
+    def settle_it(self, engine):
+        """Clear a stale IT state; called at the end of every hook on cores with IT blocks.
+
+        Unicorn 2.1.4 restores the CPU state of the instruction's start when a memory hook fires
+        (to give the hook a precise pc), IT state included. When that instruction is the last
+        of an IT block, the translated code writes no IT state back at the end of the block (it
+        assumes the state is already zero), so the restored state survives into the next block
+        and makes its first instruction conditional: a loop on gizmo-m3 skipped the load at its
+        head and never ended, depending on which hooks were installed. Clearing the IT bits in the
+        hook is safe: the translated code checks its conditions statically, and where a block ends
+        inside an IT block it writes the right state itself."""
+        reg = self.status_reg()
+        value = engine.reg_read(reg)
+        if value & self.IT_MASK:
+            engine.reg_write(reg, value & ~self.IT_MASK)
+
     def start_address(self, address, isa):
         """The address to start or branch to for code of `isa` at `address` (bit 0 set for Thumb)."""
         return address | 1 if isa == "t32" else address & ~1

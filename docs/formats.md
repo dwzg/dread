@@ -105,6 +105,30 @@ people), then a `#` summary line. Not for programs; they read placement.json.
 `behind the image`, or `helper` (a C function the table does not have; no `entry`). `branch` says
 that the old entry holds a branch to `address`; the test runner enters such a function through it.
 
+## Generated, kept and written cases (JSON)
+
+Generated cases (cached in `BUILD/autocases/IMAGE/NAME.json` as `{"key", "seed", "cases"}`), the
+image's `kept_cases/NAME.json` (cases that once showed a difference; `--keep-failing` adds to it) and
+`extra_cases/NAME.json` (cases written to reach what the generator does not) share one format,
+`{"cases": [CASE, ...]}`, with these fields:
+
+| Field | Meaning |
+|---|---|
+| `args` | the argument registers |
+| `mem` | `[[address, size, value], ...]` written before the call (peripheral registers too) |
+| `returns` | the answers of the stubbed callees, in call order (later calls answer 0) |
+| `calls` | `[[callee, register mask, stack words], ...]`: the generic stubs; for written cases taken from auto()'s options, not from the file |
+| `frame` | the bytes of the function's frame a stub may fill behind a pointer to a local |
+| `effects` | `[[call number, address, size, value], ...]` written by that stub call before it returns |
+| `fills` | `[[call number, which pointer, offset, size, value], ...]` set inside what a stub stored behind a pointer |
+| `io` | `"fixed"`: peripheral reads return the `mem` values whatever was written |
+| `poll` | `[[address, n, value], ...]`: from the n-th read of that register on it returns value |
+| `limit`, `stub_calls` | instructions (default 200,000) and stub calls (default 2,000) one run may take |
+| `hang` | true: not returning is the result (compared up to the limit) |
+| `tight` | true: a stub's fill stops at the first stack word the function stored itself |
+| `why`, `by` | where a written case comes from and why; nothing reads them but people |
+| `kept` | in kept cases: `"stubbed"` or `"real callees"` |
+
 ## Test cases (the image's `cases` directory)
 
 Python files that call the case API of `dread.cases` (`case`, `auto`, `unreachable`, `entry`,
