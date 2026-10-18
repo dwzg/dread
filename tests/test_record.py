@@ -5,8 +5,13 @@ the same result and the same memory written, so every kept case checks the repla
 import json
 import os
 
+import pytest
+
 from dread import autocase, record
+
 from conftest import GIZMO
+
+pytestmark = pytest.mark.rv32
 
 SPEC = os.path.join(GIZMO, "specs", "read_line.py")
 
@@ -79,7 +84,7 @@ CALLS = (("parse_kv", 0xF),)             # parse_kv(line, key, keymax, &value), 
 SCRATCH = None
 LINES = [b"volume=7", b"mode=2", b"baud=9600", b"name=x", b"junk"]
 def parse_kv(m, regs, state):
-    line, key, keymax, value = regs
+    line, key, keymax, value = regs[:4]
     text = bytearray()
     while m.read(line + len(text), 1)[0]:
         text.append(m.read(line + len(text), 1)[0])

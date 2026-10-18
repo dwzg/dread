@@ -72,12 +72,13 @@ def runs_of(prog, fn):
     return [tuple(r) for r in out]
 
 
-def read_objects(objects):
-    """{function: (size, alignment, words of its contents, isa)} from the .text.NAME sections."""
+def read_objects(objects, arch):
+    """{function: (size, alignment, words of its contents, isa)} from the .text.NAME sections; the
+    isa from the function's symbol (arch.isa_of_symbol: ARM marks Thumb with bit 0)."""
     out = {}
     for obj in objects:
         elf = Elf(obj)
-        thumb = {s.name for s in elf.symbols if s.kind == STT_FUNC and s.value & 1}
+        isa = {s.name: arch.isa_of_symbol(s.value) for s in elf.symbols if s.kind == STT_FUNC}
         for sec in elf.sections:
             if sec.name.startswith(".text.") and sec.kind == SHT_PROGBITS and sec.alloc:
                 fn = sec.name[len(".text."):]
@@ -85,7 +86,7 @@ def read_objects(objects):
                     raise OverlayError("function %s is defined in more than one object" % fn)
                 data = elf.data(sec)
                 words = set(struct.unpack_from("<%dI" % (len(data) // 4), data))
-                out[fn] = (sec.size, sec.align, words, "t32" if fn in thumb else "a32")
+                out[fn] = (sec.size, sec.align, words, isa.get(fn, arch.isa))
     return out
 
 
@@ -100,7 +101,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
     funcs = {fn.name: fn for fn in prog.functions}
     ram = [(c.run, c.run + c.size) for c in image.startup() if c.kind == "code"]
     slots = {name: runs_of(prog, fn) for name, fn in funcs.items()}
-    objs = read_objects(objects)
+    objs = read_objects(objects, arch)
     sizes = {fn: v[0] for fn, v in objs.items()}
     aligns = {fn: v[1] for fn, v in objs.items()}
     constants = {fn: v[2] for fn, v in objs.items()}
@@ -187,7 +188,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
         at = align_up(start, aligns[fn])
         return (at, start + length - at) if sizes[fn] <= start + length - at else None
 
-    branch_len = {fn: arch.branch_length(funcs[fn].isa) for fn in replaced}
+    branch_len = {fn: arch.branch_length(funcs[fn].isa, funcs[fn].entry, (base, limit)) for fn in replaced}
     in_slot, in_body, relocated, helpers = [], [], [], [fn for fn in sizes if fn not in funcs]
     place = {}
     for fn in sorted(replaced):
@@ -242,11 +243,13 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             f.write("    .recon.%s 0x%x : { *(.text.%s) }\n" % (fn, place[fn][0], fn))
         # the linker's own code (interworking glue for ARMv4T: Thumb calling ARM and back) goes there too:
         # left to itself it lands behind whatever section came before, inside the image
-        f.write("    .recon.tail 0x%x : { *(.text .text.* .rodata .rodata.* .glue_7 .glue_7t .v4_bx .vfp11_veneer"
-                " .iplt) }\n" % tail)
-        f.write("    .recon.data : { *(.data .data.*) }\n"
-                "    .bss (NOLOAD) : { *(.bss .bss.* COMMON) }\n"
-                "    /DISCARD/ : { *(.comment) *(.ARM.attributes) *(.note*) *(.ARM.exidx*) *(.ARM.extab*) }\n}\n"
+        # (RISC-V: small constants in .srodata, small data in .sdata and .sbss)
+        f.write("    .recon.tail 0x%x : { *(.text .text.* .rodata .rodata.* .srodata .srodata.* .glue_7 .glue_7t"
+                " .v4_bx .vfp11_veneer .iplt) }\n" % tail)
+        f.write("    .recon.data : { *(.data .data.* .sdata .sdata.*) }\n"
+                "    .bss (NOLOAD) : { *(.bss .bss.* .sbss .sbss.* COMMON) }\n"
+                "    /DISCARD/ : { *(.comment) *(.ARM.attributes) *(.riscv.attributes) *(.note*) *(.ARM.exidx*)"
+                " *(.ARM.extab*) }\n}\n"
                 'ASSERT(SIZEOF(.bss) == 0, "the C may not add zero-initialised data")\n'
                 'ASSERT(SIZEOF(.recon.data) == 0, "the C may not add writable initialised data")\n'
                 'ASSERT(ADDR(.recon.tail) + SIZEOF(.recon.tail) <= 0x%x, "the room behind the image is full")\n'
@@ -296,7 +299,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                                % (fn, syms.get(fn, 0), place[fn][0]), fn)
     for fn in in_body + relocated:
         f = funcs[fn]
-        code = arch.branch(f.entry, syms[fn], f.isa)
+        code = arch.entry_branch(f.entry, syms[fn], f.isa, branch_len[fn])
         picture[f.entry - base:f.entry - base + len(code)] = code
     picture.extend(bytes([erased]) * (-len(picture) % 4))
 

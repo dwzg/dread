@@ -242,8 +242,17 @@ The long runs set the pace of everything after them. Measure first, then cut.
     reached with 1 and 2) and retries behind any branch that falls through. Clang inlined dispatch's
     handlers (no table), so rv32's rewritten dispatch is a variant of its own. Tests that run on rv32
     carry `@pytest.mark.rv32`; CI installs clang, lld and llvm.
-  - [ ] the emulator: `dread test` with generated cases on gizmo's rewritten functions;
-  - [ ] the overlay's branch (`jal x0` within 1 MiB, else `auipc t1` + `jalr x0`);
+  - [x] the emulator: `dread test` on gizmo-rv32's 13 rewritten functions, 630 cases, all agree and
+    cover every instruction; `dread integration`, `dread record` and the C hooks work there. The case
+    generator's compare-guided stage asks the layer (immediates, switch_hints, compare_chars,
+    branch_deciders: on RISC-V a branch compares its two registers itself), `dread record` the
+    prologue's frame (prologue_frame); the generated-case cache key carries the layer's
+    generator_version when it is not 0. Clang inlined uart_putc into uart_puts on rv32, so the
+    integration test's buggy callee shows through handle_key there;
+  - [x] the overlay's branch: jal within 1 MiB; the room is reserved before linking (branch_length
+    from the entry and the image's span) and 8 bytes give auipc t1 + jalr when jal does not reach
+    (entry_branch, which dread.emu checks too); the C's instruction set from the layer
+    (isa_of_symbol); `.srodata`, `.sdata`, `.sbss`, `.riscv.attributes` in the linker script;
   - [ ] regflow (ilp32: a0-a7, ra, s0-s11), switches, noreturn, the reading aids;
   - [ ] the system run: reset, machine external interrupt through mtvec, mret;
   - [ ] a lifter for RV32IMC and its fuzzer.

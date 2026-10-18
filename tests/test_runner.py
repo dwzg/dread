@@ -6,9 +6,9 @@ import shutil
 import pytest
 
 from dread import build, runner
-from conftest import GIZMO, have
+from conftest import GIZMO
 
-pytestmark = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+pytestmark = [pytest.mark.compiles, pytest.mark.rv32]
 
 
 def run_all(target, payload, cases_dir=None, names=None):

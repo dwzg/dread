@@ -169,7 +169,9 @@ def test_flow_and_pairs():
     assert arch.flow(call) == ("call", 0x1400, True)
     jump = Insn(0x1000, enc(0x1000, 0x0F00, "rv32"))
     assert arch.flow(jump) == ("jump", 0x0F00, False)
-    far = enc(0x20000000, 0x80000000, "rv32", link=True)
+    with pytest.raises(ValueError, match="1 MiB"):
+        enc(0x20000000, 0x80000000, "rv32", link=True)
+    far = arch.far_branch(0x20000000, 0x80000000, "rv32", link=True)
     assert len(far) == 8
     auipc, jalr = Insn(0x20000000, far[:4]), Insn(0x20000004, far[4:])
     assert arch.flow(jalr)[0] == "icall"                    # alone: through a register
@@ -188,7 +190,22 @@ def test_far_branch_lands():
     """auipc + jalr over 1.5 GiB, both directions, decoded back."""
     arch = RiscV()
     for src, dst in ((0x20000000, 0x80000000), (0x80000010, 0x20000400), (0x1000, 0x1000 + (1 << 20))):
-        code = arch.branch(src, dst, "rv32")
+        code = arch.far_branch(src, dst, "rv32")
         a, j = decode_fields(code[:4]), decode_fields(code[4:])
         assert (a.op, j.op, a.rd, j.rs1, j.rd) == ("auipc", "jalr", 6, 6, 0)
         assert (src + a.imm + j.imm) & 0xFFFFFFFF == dst
+
+
+def test_the_entry_branch_takes_the_room_it_needs():
+    """The overlay reserves 8 bytes where the image's span may be out of jal's reach, and the branch
+    it writes there is jal when that reaches, auipc t1 + jalr when not."""
+    arch = RiscV()
+    assert arch.branch_length("rv32", 0x20000100, (0x20000000, 0x20020000)) == 4
+    assert arch.branch_length("rv32", 0x20000100, (0x20000000, 0x20200000)) == 8
+    assert len(arch.entry_branch(0x20000100, 0x20000800, "rv32", 8)) == 4
+    far = arch.entry_branch(0x20000100, 0x20180000, "rv32", 8)
+    a, j = decode_fields(far[:4]), decode_fields(far[4:])
+    assert len(far) == 8 and (0x20000100 + a.imm + j.imm) & 0xFFFFFFFF == 0x20180000
+    with pytest.raises(ValueError):
+        arch.entry_branch(0x20000100, 0x20180000, "rv32", 4)
+

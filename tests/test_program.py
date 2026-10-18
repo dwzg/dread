@@ -17,7 +17,9 @@ def objdump(variant):
 
 def objdump_instructions(elf_path, variant="a32"):
     """{address: mnemonic} of every instruction objdump decodes (not .word/.short/.byte)."""
-    out = subprocess.run([objdump(variant), "-d", elf_path], capture_output=True, text=True,
+    # (the ISA explicitly: older llvm-objdump does not take it from the mapping symbols)
+    extra = ["--mattr=+m,+c"] if variant == "rv32" else []
+    out = subprocess.run([objdump(variant), "-d"] + extra + [elf_path], capture_output=True, text=True,
                          check=True).stdout
     pattern = (r"\s*([0-9a-f]+):\s+[0-9a-f]{4,8}\s*\t(\S+)" if variant == "rv32" else
                r"\s*([0-9a-f]+):\t(?:[0-9a-f]{4,8}(?: [0-9a-f]{4})?)\s*\t(\S+)")

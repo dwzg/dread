@@ -68,7 +68,7 @@ class Layout:
         self.saved_regs = [self.arch.reg_id(r) for r in abi.callee_saved]
         self.saved_names = list(abi.callee_saved)
         self.result_regs = [self.arch.reg_id(r) for r in abi.result]
-        self.all_regs = [self.arch.reg_id("r%d" % i) for i in range(13)]
+        self.all_regs = [self.arch.reg_id(r) for r in self.arch.general_regs()]
         self.sp, self.lr, self.pc = (self.arch.reg_id(r) for r in ("sp", self.arch.link_reg, "pc"))
         # Cores that can have IT blocks need every hook to clear a stale IT state (Arm.settle_it)
         from dread.program import read_code_ranges
@@ -566,7 +566,7 @@ class Machine:
         moved = self.aliases.get(addr)
         if moved:
             try:
-                expected = self.arch.branch(addr, moved, isa)
+                expected = self.arch.entry_branch(addr, moved, isa)
             except ValueError:
                 expected = None
             if self.read(addr, len(expected or b"\0" * 4)) != expected:

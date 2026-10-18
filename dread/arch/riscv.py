@@ -13,6 +13,7 @@ the return address in ra. There are no condition flags and no predicated instruc
 Constructed from [arch]: isa ("rv32"), extensions (default "imc": the C extension decides whether
 instructions may be 2 bytes long), endian, ghidra.
 """
+import os
 import struct
 
 import capstone as cs
@@ -418,19 +419,95 @@ class RiscV:
     def switch_targets(self, insn, program, inside):
         return None
 
+    # ---- what the case generator learns from the code (dread.autocase) ----
+
+    generator_version = 1       # in the generated-case cache's key: bump when these change
+
+    def prologue_frame(self, program, fn, look=32):
+        """The stack a function's prologue reserves for locals: addi sp, sp, -N makes the frame, and
+        the stores of ra and the callee-saved registers at its top are not locals: the locals lie
+        below the lowest of them."""
+        total, saved = 0, []
+        keep = set(program.target.abi.callee_saved) | {"ra"}
+        for a in fn.insns[:look]:
+            insn = program.insn(a)
+            if insn is None or self.flow(insn)[0] != "next":
+                break
+            f = fields(insn)
+            if f.op == "addi" and f.rd == 2 and f.rs1 == 2 and f.imm < 0:
+                total += -f.imm
+            elif f.op == "sw" and f.rs1 == 2 and NAMES[f.rs2] in keep:
+                saved.append(f.imm)
+        return min(saved + [total]) if total else 0
+
+    def immediates(self, insn):
+        """Candidate input values: the immediates of the arithmetic and logic instructions and of
+        lui, and the address or constant an auipc/lui pair makes (not offsets of loads, stores,
+        jumps)."""
+        f = fields(insn)
+        out = []
+        if f.op in ("addi", "slti", "sltiu", "xori", "ori", "andi", "lui"):
+            out.append(f.imm & 0xFFFFFFFF)
+        pair = getattr(insn, "rv_address", None)
+        if pair is not None:
+            out.append(pair)
+        return out
+
+    def switch_hints(self, insns):
+        """(bounds, table): small constants that a branch compares with (li rN, k in front of a
+        bltu; sltiu, slti), and whether the code jumps through a register other than ra (a table)."""
+        limits, table = set(), False
+        for ins in insns:
+            f = fields(ins)
+            if ((f.op == "addi" and f.rs1 == 0) or f.op in ("slti", "sltiu")) and 0 < f.imm <= 0xFF:
+                limits.add(f.imm)
+            if self.flow(ins)[0] == "ijump":
+                table = True
+        return limits, table
+
+    def compare_chars(self, insn):
+        """Values that may be characters a parser checks: li rN, c (the other operand of a branch),
+        addi rN, rM, -c (rM - c, compared with a bound), xori, slti, sltiu with an immediate."""
+        f = fields(insn)
+        if f.op == "addi" and f.rs1 == 0:
+            return [f.imm & 0xFFFFFFFF]
+        if f.op == "addi" and f.imm < 0:
+            return [-f.imm]
+        if f.op in ("xori", "slti", "sltiu"):
+            return [f.imm & 0xFFFFFFFF]
+        return []
+
+    def branch_deciders(self, insns):
+        """{conditional branch: (itself, first, second, 0, "compare", 1)}: a RISC-V branch compares
+        its two registers itself; zero stands for the constant 0 (None)."""
+        out = {}
+        for ins in insns:
+            f = fields(ins)
+            if f.op in ("beq", "bne", "blt", "bge", "bltu", "bgeu"):
+                first = UC_REGS[NAMES[f.rs1]] if f.rs1 else None
+                second = UC_REGS[NAMES[f.rs2]] if f.rs2 else None
+                out[ins.address] = (ins.address, first, second, 0, "compare", 1)
+        return out
+
     # ---- placing C ----
 
     def branch(self, src, dst, isa, link=False):
-        """The bytes of a jump (jal x0, or jal ra with link) at `src` to `dst`: 4 bytes within
-        1 MiB. Farther, auipc t1 + jalr x0 (jalr ra with link), 8 bytes: t1 is free at a function's
-        entry by the convention."""
+        """The bytes of a jump (jal x0, or jal ra with link) at `src` to `dst`, 4 bytes. Raises
+        ValueError when `dst` is farther than 1 MiB (far_branch has the 8-byte form)."""
         off = dst - src
         rd = 1 if link else 0
-        if not off % 2 and -(1 << 20) <= off < (1 << 20):
-            imm = off & 0x1FFFFF
-            word = ((imm >> 20) & 1) << 31 | ((imm >> 1) & 0x3FF) << 21 | ((imm >> 11) & 1) << 20 | \
-                   ((imm >> 12) & 0xFF) << 12 | rd << 7 | 0x6F
-            return struct.pack("<I", word)
+        if off % 2 or not -(1 << 20) <= off < (1 << 20):
+            raise ValueError("no RISC-V jump from 0x%x to 0x%x (jal reaches 1 MiB)" % (src, dst))
+        imm = off & 0x1FFFFF
+        word = ((imm >> 20) & 1) << 31 | ((imm >> 1) & 0x3FF) << 21 | ((imm >> 11) & 1) << 20 | \
+               ((imm >> 12) & 0xFF) << 12 | rd << 7 | 0x6F
+        return struct.pack("<I", word)
+
+    def far_branch(self, src, dst, isa, link=False):
+        """auipc t1 + jalr x0 (jalr ra with link) at `src` to `dst`, 8 bytes, anywhere in the 4 GiB:
+        t1 is free at a function's entry by the convention."""
+        off = dst - src
+        rd = 1 if link else 0
         if off % 2:
             raise ValueError("no RISC-V jump from 0x%x to an odd address 0x%x" % (src, dst))
         hi = (off + 0x800) & 0xFFFFF000
@@ -439,11 +516,27 @@ class RiscV:
         jalr = lo << 20 | 6 << 15 | rd << 7 | 0x67                    # jalr rd, lo(t1)
         return struct.pack("<II", auipc & 0xFFFFFFFF, jalr)
 
-    def branch_length(self, isa):
+    def branch_length(self, isa, src=None, span=None):
+        """The room the branch at a moved function's entry needs: 4 bytes (jal) when every address
+        of span (the image's base to its limit) lies within 1 MiB of src, else 8 (auipc + jalr)."""
+        if src is not None and span is not None and max(span[1] - src, src - span[0]) >= 1 << 20:
+            return 8
         return 4
+
+    def entry_branch(self, src, dst, isa, room=8):
+        """jal when it reaches, else auipc t1 + jalr when the room allows (dread.overlay, dread.emu)."""
+        try:
+            return self.branch(src, dst, isa)
+        except ValueError:
+            if room < 8:
+                raise
+            return self.far_branch(src, dst, isa)
 
     def start_address(self, address, isa):
         return address
+
+    def isa_of_symbol(self, value):
+        return "rv32"
 
     @staticmethod
     def symbol_asm(name, address, isa):
@@ -467,6 +560,9 @@ class RiscV:
     def settle_it(self, engine):
         pass
 
+    def flags_value(self, engine):
+        return 0                            # no condition flags on RISC-V
+
     def pc_reg(self):
         return UC_REGS["pc"]
 
@@ -475,21 +571,50 @@ class RiscV:
         return RiscVAsm(self)
 
 
+_EXACT = {}
+
+
+def supports_exact(compiler):
+    """Whether the target's assembler knows `.option exact` (LLVM 19 and later; LLVM 18 warns and
+    goes on compressing)."""
+    import subprocess
+    import tempfile
+    command = tuple(compiler.assembler())
+    if command not in _EXACT:
+        with tempfile.TemporaryDirectory() as folder:
+            source = os.path.join(folder, "probe.s")
+            with open(source, "w") as f:
+                f.write("\t.option exact\n\tnop\n")
+            try:
+                r = subprocess.run(list(command) + ["-o", os.path.join(folder, "probe.o"), source],
+                                   capture_output=True, text=True)
+                _EXACT[command] = r.returncode == 0 and "unknown option" not in r.stderr
+            except OSError:
+                _EXACT[command] = False
+    return _EXACT[command]
+
+
 class RiscVAsm:
     """How dread asm writes RISC-V code: for clang's integrated assembler (llvm-mc), with `.option
     exact`, so that nothing is compressed or relaxed that the listing does not say. capstone's text
     is taken as it is: llvm-mc reads its compressed mnemonics (c.addi) and aliases (beqz, mv, li,
     jalr rd, rs1, imm) as the same encodings. Direct jumps and branches go to labels; an auipc or
-    lui pair keeps its numbers (the same bytes at the same place)."""
+    lui pair keeps its numbers (the same bytes at the same place). An assembler without `.option
+    exact` (LLVM 18) gets `.option norelax` and compresses what it can: the verify loop then writes
+    the original's 32-bit forms of compressible instructions as raw words (still byte-identical)."""
 
     comment = "#"
     directives = {"word": ".4byte", "half": ".2byte", "byte": ".byte", "text": ".asciz"}
 
     def __init__(self, arch):
         self.arch = arch
+        self.exact = True
+
+    def configure(self, compiler):
+        self.exact = supports_exact(compiler)
 
     def prelude(self, isa):
-        return ["\t.option exact"]
+        return ["\t.option exact" if self.exact else "\t.option norelax"]
 
     def switch(self, isa):
         return []

@@ -98,7 +98,7 @@ class Hooks:
             self.set_code(code, image.base, image.end)
         s.settle = 1 if layout.settle_it else 0
         s.status_reg = layout.arch.status_reg()
-        s.it_mask = layout.arch.IT_MASK
+        s.it_mask = getattr(layout.arch, "IT_MASK", 0)     # ARM's IT state; other cores have none
         s.reg_read = ctypes.cast(self.uclib.uc_reg_read, ctypes.c_void_p)
         s.reg_write = ctypes.cast(self.uclib.uc_reg_write, ctypes.c_void_p)
         self.fn = {name: ctypes.cast(getattr(self.lib, name), ctypes.c_void_p) for name in

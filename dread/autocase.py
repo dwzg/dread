@@ -115,10 +115,6 @@ SPIN_POLL = 0.5             # share of inputs that get a poll stage for a regist
 REAL_LIBRARY = ("memcpy", "memmove", "memset", "memcmp", "strcat", "strcmp", "strcpy", "strlen", "strncmp",
                 "strncpy", "strstr", "strchr")
 
-CONDITIONAL_BRANCHES = (csarm.ARM_INS_B, csarm.ARM_INS_CBZ, csarm.ARM_INS_CBNZ)
-SETTERS = (csarm.ARM_INS_CMP, csarm.ARM_INS_CMN, csarm.ARM_INS_TST, csarm.ARM_INS_TEQ)
-TESTS = (csarm.ARM_INS_TST, csarm.ARM_INS_TEQ, csarm.ARM_INS_AND, csarm.ARM_INS_BIC, csarm.ARM_INS_EOR,
-         csarm.ARM_INS_ORR)
 
 
 class GenerationError(Exception):
@@ -221,26 +217,15 @@ class Generator:
     def constants(self, words):
         """(exact, near): immediates and literal values of the instructions, and their neighbours.
         Branch targets are left out: as data pointers they would aim writes at code."""
-        found, limits, table = set(), set(), False
+        found = set()
         insns = self.insns(words)
-        for ins in insns:
-            ops = ins.operands
-            if ins.id == csarm.ARM_INS_CMP and len(ops) == 2 and ops[1].type == csarm.ARM_OP_IMM and 0 < ops[1].imm <= 0xFF:
-                limits.add(ops[1].imm)
-            if ins.id in (csarm.ARM_INS_TBB, csarm.ARM_INS_TBH) or (
-                    ins.id in (csarm.ARM_INS_MOV, csarm.ARM_INS_LDR, csarm.ARM_INS_ADD) and ops
-                    and ops[0].type == csarm.ARM_OP_REG and ops[0].reg == csarm.ARM_REG_PC):
-                table = True
+        limits, table = self.arch.switch_hints(insns)
         if table:                       # a jump table: one arm per value up to the compare's bound
             for limit in limits:
                 found.update(range(limit + 2))
         for ins in insns:
-            if (ins.group(cs.CS_GRP_JUMP) or ins.group(cs.CS_GRP_CALL)) and ins.id != csarm.ARM_INS_BIC:
-                continue
             isa = self.program.isa_at(ins.address)
-            for op in ins.operands:
-                if op.type == csarm.ARM_OP_IMM:
-                    found.add(op.imm & 0xFFFFFFFF)
+            found.update(self.arch.immediates(ins))
             lit = self.arch.literal(ins, isa)
             if lit and lit[1] == 4 and self.program.in_image(lit[0], 4):
                 found.add(self.program.word(lit[0]))
@@ -275,9 +260,7 @@ class Generator:
         everything = list(words) + [a for fn in self.callees(words) for a in fn.insns]
         for ins in self.insns(everything):
             isa = self.program.isa_at(ins.address)
-            ops = ins.operands
-            if ins.id in (csarm.ARM_INS_CMP, csarm.ARM_INS_CMN) and len(ops) == 2 and ops[1].type == csarm.ARM_OP_IMM:
-                c = ops[1].imm & 0xFFFFFFFF
+            for c in self.arch.compare_chars(ins):
                 if (0x20 <= c < 0x7F or c in (9, 10, 13)) and c not in chars:
                     chars.append(c)
             lit = self.arch.literal(ins, isa)
@@ -309,57 +292,24 @@ class Generator:
     def flag_setters(self, words):
         """{conditional branch: (address of the instruction that decides it, reader)}. The reader
         takes the emulator stopped at that instruction and returns (first operand, second operand,
-        "test" or "compare"). Plain forms only: a register against a register or a constant, no
-        shifted operand, the setter at most four instructions before the branch with nothing but
-        other conditional branches between; cbz and cbnz decide themselves (register against 0)."""
-        ins_list = self.insns(words)
-        index = {ins.address: k for k, ins in enumerate(ins_list)}
+        "test" or "compare"). Which instruction decides a branch, and with which operands, is the
+        architecture's (arch.branch_deciders: ARM's flag setters, RISC-V's branch itself)."""
         out = {}
-
-        def reg(capstone_reg, ins):
-            name = ins.reg_name(capstone_reg)
-            try:
-                return self.arch.reg_id(name)
-            except ValueError:
-                return None
-
-        for ins in ins_list:
-            if ins.id in (csarm.ARM_INS_CBZ, csarm.ARM_INS_CBNZ):
-                r = reg(ins.operands[0].reg, ins)
-                if r is not None:
-                    out[ins.address] = (ins.address, lambda uc, r=r: (uc.reg_read(r), 0, "compare"))
-                continue
-            if ins.id != csarm.ARM_INS_B or not self.arch.is_conditional(ins):
-                continue
-            k = index[ins.address] - 1
-            while k >= 0 and ins.address - ins_list[k].address <= 16:
-                s = ins_list[k]
-                if (s.id == csarm.ARM_INS_B and self.arch.is_conditional(s)) or s.id == csarm.ARM_INS_IT:
-                    k -= 1
-                    continue
-                sets = s.id in SETTERS or self.arch.sets_flags(s)
-                ops = s.operands[-2:]
-                if sets and len(s.operands) >= 2 and ops[0].type == csarm.ARM_OP_REG \
-                        and ops[1].type in (csarm.ARM_OP_REG, csarm.ARM_OP_IMM) and not any(o.shift.type for o in ops):
-                    kind = "test" if s.id in TESTS else "compare"
-                    first = reg(ops[0].reg, s)
-                    second = reg(ops[1].reg, s) if ops[1].type == csarm.ARM_OP_REG else None
-                    imm = ops[1].imm & 0xFFFFFFFF if second is None else 0
-                    # adds r2, r2, #4; beq asks whether r2 was -4; cmn compares with the negation
-                    sign = -1 if s.id in (csarm.ARM_INS_ADD, csarm.ARM_INS_CMN) else 1
-                    if first is not None and (second is not None or ops[1].type == csarm.ARM_OP_IMM):
-                        out[ins.address] = (s.address, lambda uc, first=first, second=second, imm=imm, kind=kind, sign=sign:
-                                            (uc.reg_read(first), sign * (uc.reg_read(second) if second is not None else imm)
-                                             & 0xFFFFFFFF, kind))
-                break
+        for branch, (at, first, second, imm, kind, sign) in self.arch.branch_deciders(self.insns(words)).items():
+            def reader(uc, first=first, second=second, imm=imm, kind=kind, sign=sign):
+                a = uc.reg_read(first) if first is not None else imm
+                b = uc.reg_read(second) if second is not None else imm
+                return a, (sign * b) & 0xFFFFFFFF, kind
+            out[branch] = (at, reader)
         return out
 
     def conditional_branches(self, words):
         """{address: (target, fall-through)} of the function's conditional direct branches."""
         out = {}
         for ins in self.insns(words):
-            if ins.id in (csarm.ARM_INS_CBZ, csarm.ARM_INS_CBNZ) or (ins.id == csarm.ARM_INS_B and self.arch.is_conditional(ins)):
-                out[ins.address] = (self.arch.target(ins), ins.address + ins.size)
+            kind, target, falls = self.arch.flow(ins)
+            if kind == "jump" and falls and target is not None:
+                out[ins.address] = (target, ins.address + ins.size)
         return out
 
     # ---- applying a case ----
@@ -1154,9 +1104,15 @@ def resolve_calls(generator, calls):
     return out
 
 
-def cache_key(payload, base, words, sizes, entry, options):
+def cache_key(payload, base, words, sizes, entry, options, arch=None):
+    """The key of a function's cached cases: its bytes, VERSION, the options, and the architecture
+    layer's generator_version when it is not 0 (what the generator learns from that architecture's
+    code: changing it renews only that architecture's caches)."""
     blob = b"".join(payload[a - base:a - base + sizes[a]] for a in words if 0 <= a - base < len(payload))
-    return hashlib.sha1(blob + repr((VERSION, entry, sorted((k, repr(v)) for k, v in options.items()))).encode()).hexdigest()
+    version = VERSION
+    if arch is not None and getattr(arch, "generator_version", 0):
+        version = (VERSION, arch.name, arch.generator_version)
+    return hashlib.sha1(blob + repr((version, entry, sorted((k, repr(v)) for k, v in options.items()))).encode()).hexdigest()
 
 
 def cache_load(path):
@@ -1235,7 +1191,8 @@ def cases_for(run, name, fn):
     frame = options.pop("frame", 0)
     prog = gen.program
     sizes = {a: prog.insn_size(a) for a in fn.insns}
-    key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, dict(options, calls=calls, frame=frame))
+    key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, dict(options, calls=calls, frame=frame),
+                    prog.arch)
     path = os.path.join(run["target"].build, "autocases", image.name, name + ".json")
     cached = cache_load(path)
     if not cached or cached.get("key") != key:

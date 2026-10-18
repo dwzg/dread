@@ -616,8 +616,117 @@ class Arm:
         second = (0xD000 if link else 0x9000) | (j1 << 13) | (j2 << 11) | ((off >> 1) & 0x7FF)
         return struct.pack("<HH", first, second)
 
-    def branch_length(self, isa):
+    def branch_length(self, isa, src=None, span=None):
+        """The room the branch at a moved function's entry needs (src, span: where it is and the
+        range its destination lies in; ARM's branches reach the whole image)."""
         return 16 if isa == "t32" and self.thumb2 is False else 4
+
+    def entry_branch(self, src, dst, isa, room=None):
+        """The branch the overlay leaves at a moved function's entry (dread.emu checks it)."""
+        return self.branch(src, dst, isa)
+
+    # ---- what the case generator learns from the code (dread.autocase) ----
+
+    generator_version = 0       # in the generated-case cache's key when not 0: bump when these change
+
+    SETTERS = (csarm.ARM_INS_CMP, csarm.ARM_INS_CMN, csarm.ARM_INS_TST, csarm.ARM_INS_TEQ)
+    TESTS = (csarm.ARM_INS_TST, csarm.ARM_INS_TEQ, csarm.ARM_INS_AND, csarm.ARM_INS_BIC, csarm.ARM_INS_EOR,
+             csarm.ARM_INS_ORR)
+
+    def prologue_frame(self, program, fn, look=12):
+        """The stack a function's prologue reserves for locals: the sum of sub sp, sp, #N (ARM and
+        Thumb forms) before the first branch or call, and the scratch registers its first push stores
+        below the saved ones (GCC reserves small frames with push {r0, r1, r2, r3, r4, lr}; the
+        lowest registers lie lowest, where sp then points)."""
+        total, pushed = 0, False
+        scratch = [r for r in self.general_regs() if r not in program.target.abi.callee_saved]
+        for a in fn.insns[:look]:
+            insn = program.insn(a)
+            if insn is None or self.flow(insn)[0] != "next":
+                break
+            if not pushed and self.stack_kind(insn) == "push":
+                pushed = True
+                regs = [self.reg_name(insn.reg_name(o.reg)) for o in insn.operands if o.type == csarm.ARM_OP_REG
+                        and o.reg != csarm.ARM_REG_SP]
+                total += 4 * sum(1 for r in regs if r in scratch)
+                continue
+            ops = insn.operands
+            if insn.id in (csarm.ARM_INS_SUB, csarm.ARM_INS_SUBW) and ops and ops[0].type == csarm.ARM_OP_REG \
+                    and ops[0].reg == csarm.ARM_REG_SP and ops[-1].type == csarm.ARM_OP_IMM \
+                    and all(o.type == csarm.ARM_OP_REG and o.reg == csarm.ARM_REG_SP for o in ops[:-1]):
+                total += ops[-1].imm
+        return total
+
+    def immediates(self, insn):
+        """The immediates of an instruction, as candidate input values (none of jumps and calls)."""
+        if (insn.group(cs.CS_GRP_JUMP) or insn.group(cs.CS_GRP_CALL)) and insn.id != csarm.ARM_INS_BIC:
+            return []
+        return [op.imm & 0xFFFFFFFF for op in insn.operands if op.type == csarm.ARM_OP_IMM]
+
+    def switch_hints(self, insns):
+        """(bounds, table): the small constants compares check (cmp rN, #k), and whether the code
+        jumps through a table (tbb, tbh, or a write to pc by mov, ldr or add)."""
+        limits, table = set(), False
+        for ins in insns:
+            ops = ins.operands
+            if ins.id == csarm.ARM_INS_CMP and len(ops) == 2 and ops[1].type == csarm.ARM_OP_IMM and 0 < ops[1].imm <= 0xFF:
+                limits.add(ops[1].imm)
+            if ins.id in (csarm.ARM_INS_TBB, csarm.ARM_INS_TBH) or (
+                    ins.id in (csarm.ARM_INS_MOV, csarm.ARM_INS_LDR, csarm.ARM_INS_ADD) and ops
+                    and ops[0].type == csarm.ARM_OP_REG and ops[0].reg == csarm.ARM_REG_PC):
+                table = True
+        return limits, table
+
+    def compare_chars(self, insn):
+        """Values an instruction compares against that may be characters (cmp, cmn with an immediate)."""
+        ops = insn.operands
+        if insn.id in (csarm.ARM_INS_CMP, csarm.ARM_INS_CMN) and len(ops) == 2 and ops[1].type == csarm.ARM_OP_IMM:
+            return [ops[1].imm & 0xFFFFFFFF]
+        return []
+
+    def branch_deciders(self, insns):
+        """{conditional branch: (address of what decides it, first, second, imm, kind, sign)}: first
+        and second are Unicorn register ids (second None: the constant imm), kind "test" or "compare",
+        sign -1 when the decider compares with the negation (adds rN, rN, #4; beq asks whether rN was
+        -4; cmn). Plain forms only: a register against a register or a constant, no shifted operand,
+        the setter at most four instructions before the branch with nothing but other conditional
+        branches between; cbz and cbnz decide themselves (register against 0)."""
+        index = {ins.address: k for k, ins in enumerate(insns)}
+        out = {}
+
+        def reg(capstone_reg, ins):
+            try:
+                return self.reg_id(ins.reg_name(capstone_reg))
+            except ValueError:
+                return None
+
+        for ins in insns:
+            if ins.id in (csarm.ARM_INS_CBZ, csarm.ARM_INS_CBNZ):
+                r = reg(ins.operands[0].reg, ins)
+                if r is not None:
+                    out[ins.address] = (ins.address, r, None, 0, "compare", 1)
+                continue
+            if ins.id != csarm.ARM_INS_B or not self.is_conditional(ins):
+                continue
+            k = index[ins.address] - 1
+            while k >= 0 and ins.address - insns[k].address <= 16:
+                s = insns[k]
+                if (s.id == csarm.ARM_INS_B and self.is_conditional(s)) or s.id == csarm.ARM_INS_IT:
+                    k -= 1
+                    continue
+                sets = s.id in self.SETTERS or self.sets_flags(s)
+                ops = s.operands[-2:]
+                if sets and len(s.operands) >= 2 and ops[0].type == csarm.ARM_OP_REG \
+                        and ops[1].type in (csarm.ARM_OP_REG, csarm.ARM_OP_IMM) and not any(o.shift.type for o in ops):
+                    kind = "test" if s.id in self.TESTS else "compare"
+                    first = reg(ops[0].reg, s)
+                    second = reg(ops[1].reg, s) if ops[1].type == csarm.ARM_OP_REG else None
+                    imm = ops[1].imm & 0xFFFFFFFF if second is None else 0
+                    sign = -1 if s.id in (csarm.ARM_INS_ADD, csarm.ARM_INS_CMN) else 1
+                    if first is not None and (second is not None or ops[1].type == csarm.ARM_OP_IMM):
+                        out[ins.address] = (s.address, first, second, imm, kind, sign)
+                break
+        return out
 
     # ---- Unicorn ----
 
@@ -674,6 +783,11 @@ class Arm:
         if isa == "t32":
             return "\t.global %s\n\t.thumb_set %s, 0x%x\n" % (name, name, address & ~1)
         return "\t.global %s\n\t.type %s, %%function\n\t.set %s, 0x%x\n" % (name, name, name, address & ~1)
+
+    @staticmethod
+    def isa_of_symbol(value):
+        """The instruction set of a function from its symbol's value: bit 0 set for Thumb."""
+        return "t32" if value & 1 else "a32"
 
     def start_address(self, address, isa):
         """The address to start or branch to for code of `isa` at `address` (bit 0 set for Thumb)."""

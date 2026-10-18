@@ -48,7 +48,8 @@ generator, the lifter, the reading aids)
 
 | Method | What it gives |
 |---|---|
-| `branch(src, dst, isa, link)`, `branch_length(isa)` | the branch left at a moved function's entry (it must exist on the target core) |
+| `branch(src, dst, isa, link)`, `branch_length(isa, src, span)`, `entry_branch(src, dst, isa, room)` | the branch left at a moved function's entry (it must exist on the target core); the room it needs from the entry and the span its destination may lie in |
+| `isa_of_symbol(value)` | the instruction set of a compiled function from its symbol (ARM: bit 0 for Thumb) |
 | `start_address(address, isa)` | the address to call code of an isa at (ARM: bit 0 for Thumb) |
 | `symbol_asm(name, address, isa)` | optional: an absolute symbol with its type (else PROVIDE) |
 
@@ -75,15 +76,19 @@ needed on it):
 - `dread.lift` and `dread.liftfuzz`: the lifter is a translator per instruction set; a new
   architecture gets its own module beside them (the acceptance in `dread lift --check` and the system
   run are generic).
-- `dread.autocase`: the compare-guided stage reads capstone ARM operands (about twenty places).
-- `dread.elfimport` (ARM dispatch slots and padding between functions; other architectures skip
-  them) and `dread.record` (the frame of a call).
+- `dread.elfimport`: ARM dispatch slots and padding between functions (other architectures skip
+  them).
+- `dread.sysrun`: reset, interrupt entry and return (the layer's methods exist for ARM only).
 
 Done for RISC-V: the listing's syntax moved behind `arch.asm()`, the ELF import reads `$x` mapping
 symbols as the layer's default instruction set, the reading aids take the argument registers from
 `arch.arg_regs()` and the link register from `arch.link_reg`, the compiler settings know clang
 (`[compiler] kind`), and the constant tracker stops at join points and retries behind any branch
-that falls through (it went by ARM's predicates before).
+that falls through (it went by ARM's predicates before). The case generator's compare-guided stage
+asks the layer (`immediates`, `switch_hints`, `compare_chars`, `branch_deciders`), `dread record`
+too (`prologue_frame`); the overlay takes the C's instruction set (`isa_of_symbol`) and the entry
+branch (`branch_length` with the image's span, `entry_branch`) from it; `dread.fasthooks` clears an
+IT state only where the layer has one.
 - `dread.fasthooks`: the C hooks repair the Thumb IT state when the layer asks for it.
 
 ## The emulator

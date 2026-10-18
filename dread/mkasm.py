@@ -60,6 +60,8 @@ class Listing:
         self.prog, self.raw, self.title = prog, raw, title
         self.arch, self.image = prog.arch, prog.image
         self.syntax = prog.arch.asm()           # the assembler's dialect (dread.arch.*.Asm)
+        if hasattr(self.syntax, "configure"):   # what the target's assembler can do
+            self.syntax.configure(prog.target.compiler)
         self.base, self.data = prog.base, prog.data
         self.end = self.base + len(self.data)
         self.code = {}                      # stored address -> (run address, length, isa)

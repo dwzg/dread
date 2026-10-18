@@ -26,7 +26,8 @@ image's extra_cases/NAME.json with "by" and "why".
 The spec is a Python file:
 
   MODELS = {callee name: f(m, regs, state) -> answer}
-           regs are the argument registers; a model stores with write(m, address, data) so that the
+           regs are the argument registers (as many as the architecture has: 4 on ARM, 8 on
+           RISC-V; take the first ones by index); a model stores with write(m, address, data) so that the
            case gets it, and reads with m.read(address, n); state is what gen() returned.
   gen(rng) -> (args, mem, state, extra)
            one input: the argument registers, [[address, size, value], ...] set before the run, the
@@ -194,30 +195,10 @@ def replay(gen, name, fn, case, limit=LIMIT):
     return result, m.covered_insns(fn.insns)
 
 
-def prologue_frame(program, fn, look=12):
-    """The stack a function's prologue reserves for locals: the sum of sub sp, sp, #N (ARM and
-    Thumb forms) before the first branch or call, and the scratch registers its first push stores
-    below the saved ones (GCC reserves small frames with push {r0, r1, r2, r3, r4, lr}; the lowest
-    registers lie lowest, where sp then points)."""
-    from capstone import arm as csarm
-    total, pushed = 0, False
-    scratch = [r for r in program.arch.general_regs() if r not in program.target.abi.callee_saved]
-    for a in fn.insns[:look]:
-        insn = program.insn(a)
-        if insn is None or program.arch.flow(insn)[0] != "next":
-            break
-        if not pushed and program.arch.stack_kind(insn) == "push":
-            pushed = True
-            regs = [program.arch.reg_name(insn.reg_name(o.reg)) for o in insn.operands if o.type == csarm.ARM_OP_REG
-                    and o.reg != csarm.ARM_REG_SP]
-            total += 4 * sum(1 for r in regs if r in scratch)
-            continue
-        ops = insn.operands
-        if insn.id in (csarm.ARM_INS_SUB, csarm.ARM_INS_SUBW) and ops and ops[0].type == csarm.ARM_OP_REG \
-                and ops[0].reg == csarm.ARM_REG_SP and ops[-1].type == csarm.ARM_OP_IMM \
-                and all(o.type == csarm.ARM_OP_REG and o.reg == csarm.ARM_REG_SP for o in ops[:-1]):
-            total += ops[-1].imm
-    return total
+def prologue_frame(program, fn):
+    """The stack a function's prologue reserves for its locals (the architecture's reading:
+    arch.prologue_frame)."""
+    return program.arch.prologue_frame(program, fn)
 
 
 def stubs_for(gen, suite, name, spec):

@@ -7,7 +7,8 @@ from dread import fasthooks
 from dread.emu import Core, Layout, Machine
 from dread.program import Program
 
-pytestmark = pytest.mark.skipif(fasthooks.library() is None, reason="needs a C compiler for dread.fasthooks")
+pytestmark = [pytest.mark.skipif(fasthooks.library() is None, reason="needs a C compiler for dread.fasthooks"),
+              pytest.mark.rv32]
 
 
 def runs(target, fast):
