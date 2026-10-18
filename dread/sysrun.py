@@ -95,6 +95,7 @@ class System:
         self.levels = {}
         self.blocks, self.entered, self.order = set(), collections.Counter(), []
         self.last_new, self.last_access, self.limit = 0, 0, LIMIT
+        self.observers = []                 # tools that watch the run (dread.sysrecord): block(), io()
         self._shared(placement, built)
         uc.hook_add(UC_HOOK_BLOCK, self._on_block)
         for lo, hi in self.layout.io:
@@ -172,6 +173,8 @@ class System:
     # ---- hooks ----
 
     def _on_block(self, uc, addr, size, user):
+        for o in self.observers:
+            o.block(addr, size)
         if addr not in self.blocks:
             self.blocks.add(addr)
             self.new += 1
@@ -217,6 +220,8 @@ class System:
                 if got is not None:
                     uc.mem_write(addr, (got & mask).to_bytes(size, "little"))
             got = int.from_bytes(uc.mem_read(addr, size), "little")
+            for o in self.observers:
+                o.io(addr, size, got)
             last = self.log[-1] if self.log else None
             if last is not None and last[:5] == ("read", who, addr, size, got):
                 self.log[-1] = last[:5] + (last[5] + 1,)        # the same read again: one entry, counted

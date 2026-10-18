@@ -67,3 +67,8 @@ limit = 5_000_000
 input = [[40_000, "uart", "s"]]
 until = {uart = "READY\r\nmode run volume 7"}
 limit = 5_000_000
+
+[scenarios.config]
+input = [[40_000, "uart", "cvolume=3\r\n"], [200_000, "uart", "s"]]
+until = {uart = "mode run volume 3"}
+limit = 5_000_000

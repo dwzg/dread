@@ -74,6 +74,7 @@ bin/dread test --target examples/gizmo/m3       # each one against the original,
 bin/dread mutate --target examples/gizmo/m3 --kill checksum   # would the cases notice a wrong one?
 bin/dread integration --target examples/gizmo/m3 --callers    # the same with real callees, and through callers
 bin/dread sysrun --target examples/gizmo/m3                   # the whole firmware from reset, both images
+bin/dread sysrecord --target examples/gizmo/m3 --scenario config read_line   # cases from what the run saw
 ```
 
 A target is any directory with a `dread.toml` (`docs/target.md`). The tools find it from the

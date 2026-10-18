@@ -62,7 +62,7 @@ The long runs set the pace of everything after them. Measure first, then cut.
   interrupt controller and exception entry for the A profile (ARM7 IRQ vector) and the M profile
   (NVIC, SysTick, exception frames). Each a plugin-shaped class configured from `dread.toml`.
   Done when both gizmo builds run their timer interrupt and echo keys from the receive queue.
-- [ ] **Recording inputs from a system run** for the functions it enters, as written cases. Done when gizmo's system run adds cases that cover
+- [x] **Recording inputs from a system run** for the functions it enters, as written cases. Done when gizmo's system run adds cases that cover
   instructions the generator does not reach.
 
 ## Phase 6: lifter
