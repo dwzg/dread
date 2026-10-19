@@ -16,6 +16,19 @@ from conftest import have
 needs_gcc = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 
 
+def adapter_ready(name):
+    """Whether a built-in adapter finds its compiler here."""
+    try:
+        path = ad.load(name).tool("cc")
+    except ad.AdapterError:
+        return False
+    return os.path.exists(path) or bool(shutil.which(path))
+
+
+needs_riscv = pytest.mark.skipif(not adapter_ready("gcc-riscv"), reason="needs a RISC-V GCC")
+needs_msp430 = pytest.mark.skipif(not adapter_ready("gcc-msp430"), reason="needs msp430-elf-gcc")
+
+
 def test_builds_are_every_combination():
     a = ad.load("gcc-arm")
     builds = a.builds()
@@ -64,10 +77,10 @@ def test_a_tool_from_a_list_of_places(tmp_path):
     assert a.tool("cc") == str(here / "cc")
 
 
-def measured(work, adapter, builds):
+def measured(work, adapter, builds, guard=None):
     a = ad.load(adapter)
     from dread.cclab import run
-    results = run(a, str(work), only=builds, jobs=2, out=lambda *x: None)
+    results = run(a, str(work), only=builds, jobs=2, out=lambda *x: None, guard=guard)
     for key, r in results.items():
         assert "error" not in r, (key, r.get("error"), [s["output"][-500:] for s in r.get("log", [])])
     return {key: r["results"] for key, r in results.items()}
@@ -96,8 +109,8 @@ def test_gcc_follows_the_procedure_call_standard(tmp_path):
     assert udiv[0]["args"][:2] == ["0x%08x" % 1000, "0x%08x" % 7] and udiv[0]["results"][0] == "0x%08x" % 142
     assert m3["op_udiv"]["helpers"] == [] and "udiv" in m3["op_udiv"]["shape"]["mnemonics"]
     for r in got.values():                                              # what a call keeps
-        assert r["keeps_pressure"]["kept"] == "all" and r["keeps_pressure"]["sp_mod8_at_calls"] == [0]
-        assert any(t.startswith("push") for t in r["keeps_pressure"]["saves"])
+        assert r["keeps_pressure"]["kept"] == "all" and all(f % 8 == 0 for f in r["keeps_pressure"]["frames_at_calls"])
+        assert {"r4", "return address"} <= set(r["keeps_pressure"]["saved"])
     shl = m0["op_shl64"]                                               # what a 64-bit shift does there
     assert shl["result"] == ["0x%08x" % (0x0123456789ABCDEF << 5 & 0xFFFFFFFF), "0x%08x" % (0x0123456789ABCDEF << 5 >> 32 & 0xFFFFFFFF)]
 
@@ -190,7 +203,7 @@ script = os.path.join(here, "standin.ld")
 open(script, "w").write("MEMORY { ROM (rx) : ORIGIN = 0x%x, LENGTH = 0x%x\n RAM (rwx) : ORIGIN = 0x%x, LENGTH = 0x%x }\n"
                         "SECTIONS { .text : { KEEP(*(.text*)) *(.rodata*) } > ROM .data : { *(.data*) } > RAM AT > ROM"
                         " .bss : { *(.bss*) *(COMMON) } > RAM }\n" % (regions["ROM_region"] + regions["RAM_region"]))
-support = os.path.join(here, "src", "standin_support.c")
+support = os.path.join(here, "obj", "standin_support.c")
 open(support, "w").write(open(os.environ["STANDIN_SUPPORT"]).read())
 flags = ["-mthumb", "-mcpu=cortex-m3"]
 sys.exit(subprocess.call(["arm-none-eabi-gcc"] + flags + ["-nostdlib", "-T", script, "-e", entry, "-o", out] + objs
@@ -261,19 +274,85 @@ def test_other_compilers(adapter, tmp_path):
 @needs_gcc
 def test_the_bundle_leaves_images_and_tables_behind(tmp_path):
     """What may leave the work directory: results, logs, reports, probe sources and objects; not the
-    linked image, its binary or the tables made from it (a vendor's runtime code is in them). The
-    work directory gets a CLAUDE.md and deny rules for Claude Code."""
+    linked image, its binary or the tables made from it (a vendor's runtime code is in them). A
+    guarded work directory gets a CLAUDE.md and deny rules for Claude Code; an open compiler's
+    does not need them."""
     import zipfile
     from dread.cclab import workdir
-    measured(tmp_path / "work", "gcc-arm", ["cortex-m3-O2"])
+    measured(tmp_path / "plain", "gcc-arm", ["cortex-m3-O2"])
+    assert not (tmp_path / "plain" / "CLAUDE.md").exists()
+    assert "[llm]" not in (tmp_path / "plain" / "gcc-arm" / "cortex-m3-O2" / "dread.toml").read_text()
+    measured(tmp_path / "work", "gcc-arm", ["cortex-m3-O2"], guard=True)
     assert (tmp_path / "work" / "CLAUDE.md").exists()
     assert "Read(./**/image.elf)" in (tmp_path / "work" / ".claude" / "settings.json").read_text()
     packed = workdir.bundle(str(tmp_path / "work"), str(tmp_path / "b.zip"))
     names = zipfile.ZipFile(tmp_path / "b.zip").namelist()
     assert sorted(names) == sorted(packed)
-    assert "gcc-arm/cortex-m3-O2/results.json" in names and "gcc-arm/cortex-m3-O2/src/abi.c" in names
+    assert "gcc-arm/cortex-m3-O2/results.json" in names and "gcc-arm/cortex-m3-O2/probes/abi.c" in names
     assert "gcc-arm/cortex-m3-O2/obj/abi.o" in names
     assert not any(n.endswith((".elf", ".bin")) or "/config/" in n or "/original/" in n for n in names)
+
+
+@needs_gcc
+def test_the_pilot_keeps_to_the_probes_of_a_guarded_build(tmp_path):
+    """A guarded build (a proprietary toolchain's) names the functions an LLM may be shown, the
+    probes and the lab's entry, in its dread.toml; dread pilot asks about those only, never about
+    the toolchain's runtime library."""
+    from dread import pilot
+    from dread.program import Program
+    from dread.target import Target
+    measured(tmp_path, "gcc-arm", ["cortex-m3-O2"], guard=True)
+    target = Target.load(str(tmp_path / "gcc-arm" / "cortex-m3-O2"))
+    image = target.image()
+    program = Program(target, image)
+    assert {"pick_i5_5", "op_udiv", "cclab_entry"} <= target.llm_only
+    helper = next(n for n in sorted(program.by_name) if n.startswith("__") and n not in target.llm_only)
+    said = []
+    assert pilot.shown(target, ["pick_i5_5", helper], out=said.append) == ["pick_i5_5"] and said
+    with open(image.table("lifted"), "w") as f:
+        f.write("pick_i5_5\n%s\n" % helper)
+    assert pilot.candidates(target, image, program) == ["pick_i5_5"]
+
+
+@needs_riscv
+def test_riscv_gcc_follows_its_psabi(tmp_path):
+    """The RISC-V psABI's rules, measured on GCC's RV32 code: eight argument registers a0-a7; a
+    64-bit scalar in any free pair, a variadic one in an even pair; a struct of more than two words
+    by reference; results of up to two words in a0:a1, larger ones through a pointer in a0; narrow
+    results extended; the stack 16-byte aligned at calls; no M extension, division by a helper."""
+    got = measured(tmp_path, "gcc-riscv", ["rv32imc-O2", "rv32ic-Os"])
+    for r in got.values():
+        assert r["pick_i5_5"]["where"] == "a4" and r["pick_i8_8"]["where"] == "a7"
+        assert r["pick_i_ll"]["where"] == "a1:a2"
+        assert r["pick_va_ll"]["where"] == "a2:a3"
+        assert r["pick_s12_c"]["where"] == "memory at a0+8"
+        assert r["ret_s8"]["where"] == "a0:a1" and r["ret_s12"]["where"].startswith("memory at the address in a0")
+        assert r["ret_schar"]["value"] == 0xffffff88
+    with_m, without = got["rv32imc-O2"], got["rv32ic-Os"]
+    assert with_m["op_udiv"]["helpers"] == [] and "divu" in with_m["op_udiv"]["shape"]["mnemonics"]
+    assert any("__udivsi3" in h["function"] for h in without["op_udiv"]["helpers"])
+    from dread.cclab import make_report
+    make_report(str(tmp_path), "gcc-riscv", out=lambda *x: None)
+    assert "a multiple of 16 bytes" in (tmp_path / "gcc-riscv" / "report.md").read_text()
+
+
+@needs_msp430
+def test_msp430_gcc_follows_its_eabi(tmp_path):
+    """The MSP430 EABI's rules, measured on GCC's code (16-bit registers): arguments in r12-r15, a
+    64-bit value in all four or on the stack, a later argument in a register left free; structs by
+    reference both ways; 32-bit long, int-sized enums; division by a helper; the stack word-aligned."""
+    r = measured(tmp_path, "gcc-msp430", ["msp430-O2"])["msp430-O2"]
+    assert r["pick_i5_1"]["where"] == "r12" and r["pick_i5_5"]["where"] == "stack+0"
+    assert r["pick_ll_1"]["where"] == "r12:r13:r14:r15"
+    assert r["pick_i_ll"]["where"] == "stack+0:stack+2:stack+4:stack+6"
+    assert r["pick_i_ll_i"]["where"] == "r13"
+    assert r["pick_s8_b"]["where"] == "memory at r12+2"
+    assert r["ret_s4"]["where"].startswith("memory at the address in r12")
+    assert r["size_long"]["value"] == 4 and r["size_enum_small"]["value"] == 2
+    assert any("__mspabi_divu" in h["function"] for h in r["op_udiv"]["helpers"])
+    from dread.cclab import make_report
+    make_report(str(tmp_path), "gcc-msp430", out=lambda *x: None)
+    assert "a multiple of 2 bytes" in (tmp_path / "gcc-msp430" / "report.md").read_text()
 
 
 def test_a_target_takes_helper_results_from_a_profile(tmp_path):

@@ -28,7 +28,9 @@ import glob
 import json
 import os
 
-ORDER = ["r%d" % i for i in range(16)] + ["sp", "lr"]
+ORDER = ["r%d" % i for i in range(16)] + ["a%d" % i for i in range(8)] + ["t%d" % i for i in range(7)] + \
+    ["s%d" % i for i in range(12)] + ["ra", "sp", "lr"]          # (ARM, MSP430, RISC-V names)
+ABI_PREFIXES = ("__aeabi_", "__mspabi_")    # a helper's key: its name in an ABI, else its shortest
 
 
 def build_profile(work, adapter):
@@ -81,7 +83,7 @@ def build_profile(work, adapter):
         for k in ("results", "changes"):
             info[k] = [r for r in ORDER if r in info[k]]
         info["called_by"] = sorted(info["called_by"])
-        out[sorted(info["names"], key=lambda n: (not n.startswith("__aeabi_"), n))[0]] = info
+        out[sorted(info["names"], key=lambda n: (not n.startswith(ABI_PREFIXES), len(n), n))[0]] = info
     return {"compiler": {"adapter": adapter, "version": version, "builds": builds}, "helpers": out}
 
 

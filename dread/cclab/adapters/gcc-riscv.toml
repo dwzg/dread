@@ -1,0 +1,29 @@
+# GNU GCC for RV32 (riscv64-elf-gcc with -march=rv32...: its rv32 multilib), linked without a C
+# library: the lab's support file gives memcpy and the like, libgcc the runtime helpers. No linker
+# relaxation (-mno-relax): nothing is placed relative to gp.
+name = "gcc-riscv"
+family = "gnu"
+support = true
+arch = "riscv"
+isa = "rv32"
+profile = ""
+support_flags = ["-fno-builtin"]
+cflags = ["-mno-relax"]
+
+[tools]
+cc = ["riscv64-elf-gcc", "riscv64-unknown-elf-gcc", "riscv32-unknown-elf-gcc"]
+ld = ["riscv64-elf-gcc", "riscv64-unknown-elf-gcc", "riscv32-unknown-elf-gcc"]
+
+[commands]
+version = ["{cc}", "--version"]
+compile = ["{cc}", "-c", "{src}", "-o", "{obj}", "{flags}"]
+link = ["{ld}", "{flags}", "{objs}", "-o", "{out}", "-T", "{script}", "-nostdlib", "-Wl,--no-relax", "{ldflags}", "-lgcc"]
+
+[matrix.march]
+rv32imc = ["-march=rv32imc", "-mabi=ilp32"]
+rv32ic = ["-march=rv32ic", "-mabi=ilp32"]
+
+[matrix.opt]
+O0 = ["-O0"]
+Os = ["-Os"]
+O2 = ["-O2"]

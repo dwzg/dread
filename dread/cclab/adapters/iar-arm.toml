@@ -7,6 +7,7 @@
 # The options as IAR's documentation for EWARM 9.70 spells them (--cpu=, --fpu=none, -O[n|l|m|h|hs|hz];
 # ILINK's --config, --entry, --keep): checked against the documentation, not against the tools.
 name = "iar-arm"
+guard = true
 family = "iar"
 windows = true
 support = false

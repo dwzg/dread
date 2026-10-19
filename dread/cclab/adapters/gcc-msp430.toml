@@ -1,0 +1,28 @@
+# TI's MSP430 GCC (msp430-elf-gcc) for the 16-bit MSP430, linked without a C library: the lab's
+# support file gives memcpy and the like, libgcc the runtime helpers (multiplication in software:
+# -mhwmult=none: libgcc and libmul_none, which holds the multiplications). The emulator is DREAD's own
+# MSP430 engine.
+name = "gcc-msp430"
+family = "gnu"
+support = true
+arch = "msp430"
+isa = "msp430"
+profile = ""
+support_flags = ["-fno-builtin"]
+
+[tools]
+cc = ["msp430-elf-gcc", "~/.local/opt/msp430-gcc-*/bin/msp430-elf-gcc"]
+ld = ["msp430-elf-gcc", "~/.local/opt/msp430-gcc-*/bin/msp430-elf-gcc"]
+
+[commands]
+version = ["{cc}", "--version"]
+compile = ["{cc}", "-c", "{src}", "-o", "{obj}", "{flags}"]
+link = ["{ld}", "{flags}", "{objs}", "-o", "{out}", "-T", "{script}", "-nostdlib", "{ldflags}", "-lgcc", "-lmul_none", "-lgcc"]
+
+[matrix.core]
+msp430 = ["-mcpu=msp430", "-mhwmult=none"]
+
+[matrix.opt]
+O0 = ["-O0"]
+Os = ["-Os"]
+O2 = ["-O2"]

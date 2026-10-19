@@ -111,14 +111,31 @@ FEEDBACK = {
 }
 
 
+def may_show(target, name):
+    """Whether an LLM may be shown the function: any, unless the target's [llm] only list names the
+    ones it may (a dread cclab build of a proprietary compiler: the probes, not the vendor's runtime
+    library). Every question of the pilot is about one function and shows that function's code
+    only; its callees appear by name."""
+    return target.llm_only is None or name in target.llm_only
+
+
+def shown(target, names, out=print):
+    """The names an LLM may be shown, saying how many [llm] only held back."""
+    kept = [n for n in names if may_show(target, n)]
+    if len(kept) < len(names):
+        out("dread pilot: %d of %d functions held back by [llm] only in dread.toml" % (len(names) - len(kept),
+                                                                                      len(names)))
+    return kept
+
+
 def candidates(target, image, program, limit=None):
-    """The lifted functions src does not define, smallest first."""
+    """The lifted functions src does not define that an LLM may be shown, smallest first."""
     from dread import build
     lifted = build.read_names(image.table("lifted"))
     objects = build.compile_all(target, image, image.src, os.path.join(target.build, "pilot", image.name, "obj"),
                                 quiet=True) if os.path.isdir(image.src) else []
     defined = build.defined_functions(objects)
-    names = sorted((n for n in lifted if n in program.by_name and n not in defined),
+    names = sorted((n for n in lifted if n in program.by_name and n not in defined and may_show(target, n)),
                    key=lambda n: (len(program.by_name[n].insns), n))
     return names[:limit] if limit else names
 
@@ -630,8 +647,9 @@ def main(argv=None):
             return 1
         if args.task == "name":
             from dread.samecode import UNNAMED
-            names = args.names or sorted((fn.name for fn in program.functions if UNNAMED.match(fn.name)),
-                                         key=lambda n: len(program.by_name[n].insns))[:args.limit]
+            names = shown(target, args.names) if args.names else sorted(
+                (fn.name for fn in program.functions if UNNAMED.match(fn.name) and may_show(target, fn.name)),
+                key=lambda n: len(program.by_name[n].insns))[:args.limit]
             for name in names:
                 propose_name(target, image, program, provider, name, flow)
             return 0
@@ -639,6 +657,7 @@ def main(argv=None):
         for name, addresses in lift_missed(target, image, program).items():      # what the lifter left
             if not args.names or name in args.names:
                 missed.setdefault(name, addresses)
+        missed = {n: missed[n] for n in shown(target, sorted(missed))}
         started, before = time.time(), llm.usage_summary().get(provider.name, {})
         asked = sorted(missed.items(), key=lambda kv: (len(kv[1]), kv[0]))[:args.limit]     # fewest first
         whole, ran, total = 0, 0, 0
@@ -654,7 +673,7 @@ def main(argv=None):
                   len(asked), whole, ran, total, spent["answers"], spent["input"], spent["output"],
                   ", $%.2f" % spent["cost"] if after.get("cost") is not None else "", time.time() - started))
         return 0
-    names = args.names or candidates(target, image, program, args.limit)
+    names = shown(target, args.names) if args.names else candidates(target, image, program, args.limit)
     if not names:
         print("dread pilot: nothing to do (no lifted function that src does not define)")
         return 0

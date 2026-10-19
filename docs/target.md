@@ -154,9 +154,12 @@ address faults before the run can stop.
 | `include` | include directories |
 | `idioms` | the family of compiler idioms the lifter recognises |
 
-### `[paths]`, `[host]`, `[plugins]`
+### `[paths]`, `[host]`, `[llm]`, `[plugins]`
 
 - `[paths]`: `build` (default `build`) and `src` (default `src`).
+- `[llm]`: `only`, the names of the functions a language model may be shown; `dread pilot` asks
+  about no other function (a `dread cclab` build of a proprietary toolchain lists its probes there,
+  so that the toolchain's runtime library never reaches a model). Without it, any function may be.
 - `[host]`: settings of the machine the tools run on (`jobs`, `free_cores`, `nice`). The environment
   variables of `dread.util.polite` override them.
 - `[plugins]`: a free-form section owned by the tools that read it.

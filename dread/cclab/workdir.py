@@ -1,12 +1,15 @@
 """dread cclab's work directory: what an LLM there may read, and the bundle that leaves it.
 
-A build's directory holds our probes (src/), their objects (obj/: our code as the compiler made it),
+A build's directory holds our probes (probes/), their objects (obj/: our code as the compiler made it),
 the linked image (image.elf, original/: the probes and the toolchain's runtime library, which for a
 proprietary compiler is its vendor's code), the tables made from it (config/) and the results. The
 user's rule (2026-10-19): an LLM sees our probes, their compiled code and the compilers' messages,
 never the company's code and never a compiler's runtime code. So `run` writes, once, a CLAUDE.md and
-Claude Code deny rules into the work directory, and `bundle` packs only what may leave: results,
-logs, reports, the compiler's version text, probe sources and objects; no image, binary or table.
+Claude Code deny rules into the work directory (an adapter of a proprietary toolchain asks for that
+with guard = true, `--guard` asks for it with any), each build's dread.toml then names the functions
+an LLM may be shown ([llm] only, which dread pilot keeps to), and `bundle` packs only what may leave:
+results, logs, reports, the compiler's version text, probe sources and objects; no image, binary or
+table.
 """
 import json
 import os
@@ -14,9 +17,10 @@ import zipfile
 
 CLAUDE_MD = """# A dread cclab work directory
 
-The probes in */*/src are ours (DREAD's, public); */*/obj holds them as the compiler compiled them;
-results.json, build.json, report.md and version.txt say what was measured. Those may be read, and
-an LLM may be shown them.
+The probes in */*/probes are ours (DREAD's, public); */*/obj holds them as the compiler compiled
+them; results.json, build.json, report.md and version.txt say what was measured. Those may be read,
+and an LLM may be shown them. `dread pilot` on a build asks only about the functions its dread.toml
+lists under [llm] only (the probes).
 
 Never read, show or send: */*/image.elf, */*/original/, */*/config/ (the linked image and its tables
 hold the toolchain's runtime library, a vendor's code), and nothing outside this directory (the
@@ -53,7 +57,7 @@ def bundle(work, out):
             if any(p in ("original", "config", ".claude") for p in parts):
                 continue
             for name in files:
-                keep = name in BUNDLED or (len(parts) >= 3 and parts[-1] in ("src", "obj"))
+                keep = name in BUNDLED or (len(parts) >= 3 and parts[-1] in ("probes", "obj"))
                 if keep and not name.endswith((".elf", ".bin", ".out")):
                     path = os.path.join(root, name)
                     z.write(path, os.path.relpath(path, work))

@@ -6,5 +6,5 @@ probes = [
     {function = "keeps_leaf", measure = "keeps", args = [6, 7], note = "a leaf"},
     {function = "keeps_across_call", measure = "keeps", args = [100, 200, 3, 4], note = "values live across two calls"},
     {function = "keeps_pressure", measure = "keeps", args = [100, 200, 3, 4], note = "many values live across a call"},
-    {function = "keeps_ll", measure = "keeps", args = [100, 0, 3, 0], note = "64-bit values live across a call"},
+    {function = "keeps_ll", measure = "keeps", args = ["i64:100", "i64:3"], note = "64-bit values live across a call"},
 ]

@@ -33,7 +33,14 @@ def load(work, adapter):
     return out
 
 
-def op_text(entry):
+NOTABLE = {      # instructions that mark an idiom in inline code, per architecture
+    "arm": ("udiv", "sdiv", "umull", "smull", "smmul", "tbb", "tbh", "ldrd", "strd", "umlal", "mla", "mls"),
+    "riscv": ("mul", "mulh", "mulhu", "mulhsu", "div", "divu", "rem", "remu"),
+}
+NOTABLE_PREFIXES = {"arm": ("ldm", "stm")}
+
+
+def op_text(entry, arch="arm"):
     """An op's result in one line: its direct calls (or inline) and, inline, its code's notable
     instructions (division, table branches)."""
     if "error" in entry:
@@ -43,19 +50,19 @@ def op_text(entry):
     if direct:
         return ", ".join(dict.fromkeys(direct))
     notable = [m for m in entry.get("shape", {}).get("mnemonics", [])
-               if m in ("udiv", "sdiv", "umull", "smull", "smmul", "tbb", "tbh", "ldm", "stm", "ldrd", "strd",
-                        "umlal", "mla", "mls") or m.startswith(("ldm", "stm"))]
+               if m in NOTABLE.get(arch, ()) or m.startswith(NOTABLE_PREFIXES.get(arch, ()))]
     return "inline" + (" (%s)" % ", ".join(notable) if notable else "")
 
 
 def keeps_text(entry):
-    """A keeps probe in one line: what came back changed, the alignment at calls, the saves."""
+    """A keeps probe in one line: what came back changed, what its frame saved, its frame at calls."""
     if "error" in entry:
         return "error: " + entry["error"][:60]
-    sp = entry.get("sp_mod8_at_calls", [])
-    return "kept %s%s; saves: %s" % (entry.get("kept", "?"),
-                                    "; sp at calls: %s" % ("8-aligned" if sp == [0] else "mod 8 = %s" % sp) if sp else "",
-                                    " / ".join(entry.get("saves", [])) or "none")
+    text = "kept %s; saves %s" % (entry.get("kept", "?"), " ".join(entry.get("saved", [])) or "nothing")
+    frames = entry.get("frames_at_calls", [])
+    if frames:
+        text += "; frame at calls %s" % "/".join(str(f) for f in frames)
+    return text
 
 
 def builds_text(keys, every):
@@ -71,6 +78,7 @@ def write(work, adapter_name=None, out=print):
             out("dread cclab report: nothing measured for %s in %s" % (name, work))
             continue
         good = {k: v for k, v in builds.items() if "results" in v}
+        arch = next((v.get("arch") for v in good.values() if v.get("arch")), "arm")
         lines = ["# dread cclab: %s" % name, ""]
         version = os.path.join(work, name, "version.txt")
         if os.path.exists(version):
@@ -96,7 +104,7 @@ def write(work, adapter_name=None, out=print):
                         continue
                     note = entry.get("note", "")
                     if kind == "op":
-                        text = op_text(entry)
+                        text = op_text(entry, arch)
                     elif kind == "keeps":
                         text = keeps_text(entry)
                     else:
@@ -107,6 +115,11 @@ def write(work, adapter_name=None, out=print):
                     rows.append("| `%s` | %s | %s |" % (fn, note, cells))
             if rows:
                 lines += ["", "## " + title, "", "| probe | what | result (builds) |", "|---|---|---|"] + rows
+            aligned = [e["aligned"] for r in good.values() for e in r["results"].values()
+                       if e.get("measure") == kind == "keeps" and e.get("aligned")]
+            if aligned:
+                lines += ["", "Every frame at a call is a multiple of %d bytes, over all builds: the stack alignment "
+                              "the compiler keeps at calls (given an aligned entry)." % min(aligned)]
         helpers = collections.OrderedDict()
         for key, result in good.items():
             for fn, entry in result["results"].items():
@@ -121,9 +134,9 @@ def write(work, adapter_name=None, out=print):
             lines += ["", "## Runtime helpers the probes call", "",
                       "Registers changed: over every call in every build (results included).", "",
                       "| helper | called by | registers changed | builds |", "|---|---|---|---|"]
-            order = ["r%d" % i for i in range(13)] + ["sp"]
+            from dread.cclab.profile import ORDER
             for h, info in helpers.items():
-                changed = [r for r in order if r in info["changed"]]
+                changed = [r for r in ORDER if r in info["changed"]] + sorted(info["changed"] - set(ORDER))
                 lines.append("| `%s` | %s | %s | %s |" % (h, ", ".join(sorted(info["ops"])), " ".join(changed) or "-",
                                                          builds_text(sorted(info["builds"]), good)))
         path = os.path.join(work, name, "report.md")

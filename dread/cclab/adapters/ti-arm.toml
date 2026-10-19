@@ -3,6 +3,7 @@
 # fits the objects), the probes' memory in a TI linker command file. A toolchain of its own kind,
 # like IAR's: its own front end, command line, linker configuration and runtime helpers.
 name = "ti-arm"
+guard = true
 family = "ti"
 support = false
 arch = "arm"

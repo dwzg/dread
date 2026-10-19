@@ -13,6 +13,9 @@ other options. Its fields:
                               # Windows side (/mnt/c/...), where the Windows program sees it
     support = true            # link the lab's support file (memcpy and the like, for a link without
                               # a C library); false where the toolchain's own library is linked
+    guard = false             # a proprietary toolchain: its runtime library must not reach an LLM;
+                              # `run` then writes the work directory's CLAUDE.md and deny rules, and
+                              # each build's dread.toml limits an LLM to the probes (dread.cclab.workdir)
     arch = "arm"              # the emulator's architecture layer, as [arch] in a dread.toml
     isa = "t32"
     profile = "m"
@@ -97,6 +100,7 @@ class Adapter:
             raise AdapterError("adapter %s: family is one of %s, not %r" % (path, ", ".join(self.FAMILIES),
                                                                            self.family))
         self.windows = bool(data.get("windows", False))
+        self.guard = bool(data.get("guard", False))
         self.support = bool(data.get("support", self.family == "gnu"))
         self.arch = data.get("arch", "arm")
         self.isa = data.get("isa", "t32")

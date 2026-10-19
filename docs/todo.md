@@ -29,6 +29,11 @@ IAR's runtime code marked and left out.
   Done with GCC 16.2, 14.2 and 10.3, clang 23.1, Arm's ATfE 23.1 and TI's armcl 20.2.7 (installed
   for it in ~/.local/opt; TI's needs its own linker family, a TI linker command file): 70 builds,
   the AAPCS facts as the standard says. Not yet: caching builds (a run of twelve takes a second).
+  Since then for any architecture DREAD emulates (the user, 2026-10-19: "You can make it also
+  generic, but it should also run under my work constraints"): registers, widths and memory maps
+  from the architecture layer, C-typed values in the specs, arguments passed by reference, the
+  guard per adapter (`guard = true`, `--guard`) with `[llm] only` in each build for dread pilot;
+  GCC for RV32 and TI's MSP430 GCC measured, each standard's fine print as written.
 - [x] **The IAR adapter**: iccarm and ilinkarm through WSL interop (wslpath, the work directory on
   the Windows side), an ILINK configuration (.icf) written for the emulator's memory map, the
   probes kept from ILINK's removal of unreferenced code; written from IAR's documented command
@@ -58,6 +63,12 @@ IAR's runtime code marked and left out.
   and probes for what the corpus does not answer, each one compiled and run before it counts. A
   CLAUDE.md and deny rules for the lab's work directory keep Claude Code at work to the probes and
   their results: not IAR's runtime code, nothing outside the lab.
+- [ ] **LLM providers for work** (the user, 2026-10-19: "We use GitHub Copilot at work. Could we
+  attach that to dread?"): a provider kind that runs a command line with the question and reads the
+  answer (GitHub Copilot CLI's `copilot -p`, Claude Code's `claude -p`, the local model), run in an
+  empty directory; and GitHub Models' OpenAI-compatible endpoint (its path differs from
+  /v1/chat/completions). `dread llm ask` to try a provider. Copilot cannot be tried here: what the
+  presets say comes from GitHub's documentation.
 - [ ] **C++ probes**: name mangling, vtables, constructors and static initialisation, new and delete,
   exceptions.
 - [ ] Later: `dread whatcc` from stored profiles (More compilers), and a search for the options that
@@ -655,6 +666,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   listing generator.
 - [ ] AVR on the emulator interface the MSP430 work brings (clang builds it, Unicorn does not run
   it): an interpreter behind it, Harvard memory (program and data spaces) in the program database.
+- [ ] Z80 (low priority; the user, 2026-10-19: "Z80 and later 8051, but both low in prio"): an engine
+  of DREAD's own (Unicorn has no 8-bit core), SDCC as the compiler (packaged; its own assembler and
+  linker, Intel HEX with a map, `__sdcccall` conventions), and SDCC as a cclab adapter: the hardest
+  test of the lab's generality (no GNU tools, its own linker).
+- [ ] 8051, after Z80 (low priority): its four address spaces (code, internal data, external data,
+  bits) in the emulator and the program database, and a cclab measure for arguments in a static
+  parameter area (SDCC's default for functions that are not reentrant). Keil C51 and IAR's 8051
+  compiler are the proprietary compilers it would be compared with.
 
 ## Floating point
 

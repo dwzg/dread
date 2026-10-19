@@ -2,14 +2,18 @@
 
 Put a compiler in and learn how it compiles. A corpus of small probe programs (plain C99, each
 function asking one question) is compiled and linked for every combination of a compiler's option
-matrix, and each build is run in DREAD's emulator:
+matrix, and each build is run in DREAD's emulator, on any architecture DREAD emulates (ARM, RISC-V,
+MSP430):
 
 - where each argument arrives and where results come back (registers, stack words, memory through
-  a pointer the caller passes), for ints, 64-bit values, structs of every size and varargs;
+  a pointer: a struct passed or returned by reference), for ints, 64-bit values, structs of every
+  size and varargs;
 - the basic types: sizes, alignments, plain char's sign, sign extension of narrow results, bit
   field order;
 - which runtime helper each operation calls (division, 64-bit arithmetic, soft float, copies), with
   every name it has, what it reads and returns, and the registers it changes;
+- what a function keeps across a call: which callee-saved registers it stores in its frame, the
+  return address, the frame at its calls, and from that the stack alignment the compiler keeps;
 - the shape of every probe's code: size, calls and tail calls, first and last instructions, the
   instructions that mark an idiom (a division instruction, a table branch, block transfers).
 
@@ -19,13 +23,20 @@ several compilers side by side.
 
 ## The compilers it was tried on
 
-Here: GCC 16.2, 14.2 and 10.3 (`gcc-arm`, the latter two by their paths), clang 23.1 linked with
-GCC's libgcc (`clang-arm`), Arm Toolchain for Embedded 23.1 with its own runtime and C library
-(`atfe-arm`), and TI's Arm compiler 20.2.7 with its own linker and library (`ti-arm`): every build of
-every matrix measured. IAR (`iar-arm`) could not be tried here: its adapter follows IAR's documented
-command line (EWARM 9.70: `--cpu=`, `--fpu=none`, `-O[n|l|m|h|hs|hz]`; ILINK's `--config`,
-`--entry`, `--keep`) and was run against a stand-in that takes exactly those option forms and links
-with GCC below (tests/test_cclab.py). The doctor is there for what that leaves open.
+Here: GCC 16.2, 14.2 and 10.3 for ARM (`gcc-arm`, the latter two by their paths), clang 23.1 linked
+with GCC's libgcc (`clang-arm`), Arm Toolchain for Embedded 23.1 with its own runtime and C library
+(`atfe-arm`), TI's Arm compiler 20.2.7 with its own linker and library (`ti-arm`), GCC 16.2 for
+RV32 (`gcc-riscv`: riscv64-elf-gcc's rv32imc and rv32ic multilibs) and TI's MSP430 GCC 8.2
+(`gcc-msp430`): every build of every matrix measured. Each architecture's procedure call standard
+came out as written, including its fine print: on RV32 a 64-bit argument takes any free register
+pair but a variadic one an even pair; on the MSP430 a 64-bit argument takes r12-r15 or the stack and
+a later int fills the register left free; the stack is kept 8-byte aligned at calls on ARM,
+16-byte on RISC-V, 2-byte on the MSP430.
+
+IAR (`iar-arm`) could not be tried here: its adapter follows IAR's documented command line (EWARM
+9.70: `--cpu=`, `--fpu=none`, `-O[n|l|m|h|hs|hz]`; ILINK's `--config`, `--entry`, `--keep`) and was
+run against a stand-in that takes exactly those option forms and links with GCC below
+(tests/test_cclab.py). The doctor is there for what that leaves open.
 
 ## At work: IAR EWARM on Windows, DREAD in WSL
 
@@ -64,17 +75,23 @@ bin/dread cclab bundle --work /mnt/c/cclab-work --out cclab-bundle.zip
 
 ## What may be read, shown and taken home
 
-A build's directory holds our probes (`src/`), their objects (`obj/`: our code as the compiler made
-it), the linked image (`image.elf`, `original/`) and the tables made from it (`config/`). The image
-and its tables also hold the toolchain's runtime library: for IAR, IAR's code.
+A build's directory holds our probes (`probes/`), their objects (`obj/`: our code as the compiler
+made it), the linked image (`image.elf`, `original/`) and the tables made from it (`config/`). The
+image and its tables also hold the toolchain's runtime library: for IAR, IAR's code. (`src/` is
+left to DREAD's tools: a build is a DREAD target, and src/ is where its rewritten C would go.)
 
-- An LLM (Claude Code at work, or one at home) sees our probes, their compiled code and the
-  compilers' own messages: never the company's code and never a compiler's runtime library code
-  (the user, 2026-10-19). `run` writes a `CLAUDE.md` and Claude Code deny rules
-  (`.claude/settings.json`: the images, binaries and tables) into the work directory; start Claude
-  Code there, so that both apply.
+For a proprietary toolchain the lab guards what an LLM sees (the user, 2026-10-19: an LLM sees our
+probes, their compiled code and the compilers' own messages; never the company's code and never a
+compiler's runtime library code). An adapter asks for it with `guard = true` (`iar-arm` and `ti-arm`
+do), and `--guard` asks for it with any adapter:
+
+- `run` and `doctor` write a `CLAUDE.md` and Claude Code deny rules (`.claude/settings.json`: the
+  images, binaries and tables) into the work directory; start Claude Code there, so that both apply.
+- Each build's `dread.toml` names the functions an LLM may be shown, the probes and the lab's entry
+  (`[llm] only`). `dread pilot` asks about no other function, whatever its provider: a question
+  shows one function's code, its callees by name only.
 - `bundle` packs only what may leave: results, build logs, reports, the compiler's version text,
-  the probe sources and objects. No image, binary or table.
+  the probe sources and objects. No image, binary or table. (It does so with or without the guard.)
 - What the lab learns about IAR stays out of DREAD's public repository (CLAUDE.md, rule 1).
 
 ## The profile, for DREAD's other tools
@@ -94,26 +111,51 @@ lifted helper returns all of its result and its cases compare it (C compiled ane
 by that contract, whatever the original's callers read of it). A profile of IAR stays with the
 target it describes, outside DREAD's repository.
 
+Each build is a DREAD target of its own, so the other tools run on it unchanged (`dread lift
+--target BUILD` lifts the probes and the runtime library alike): a way to try DREAD's pipeline on a
+compiler's code generation with nothing but the probes.
+
 ## Adapters
 
 An adapter is a TOML file: the tools (a name on PATH, a path, a glob, or a list of those), the
-command templates for compiling and linking, the option matrix, and the linker family the lab
-writes the memory map for (`gnu`: a GNU ld script, `iar`: an ILINK configuration, `ti`: a TI linker
-command file). The fields are described in `dread/cclab/adapters.py`. `windows = true` makes every
-file name in a command go through `wslpath -w`.
+command templates for compiling and linking, the option matrix, the architecture (`arch`, `isa`,
+as in a `dread.toml`), and the linker family the lab writes the memory map for (`gnu`: a GNU ld
+script, `iar`: an ILINK configuration, `ti`: a TI linker command file). The fields are described in
+`dread/cclab/adapters.py`. `windows = true` makes every file name in a command go through
+`wslpath -w`; `guard = true` is described above.
+
+The memory map comes from the architecture (`MAPS` in `dread/cclab/lab.py`: flash, RAM and the
+lab's scratch memory, the stack at the top of RAM, the sentinel return address in unmapped memory);
+an adapter's `[memory]` table, with the same keys, replaces any of them (a core whose memory lies
+elsewhere). The scratch memory may not overlap the stack arguments above the stack's top: the lab
+refuses such a map.
 
 ## Probes
 
 A probe file is a C file in `dread/cclab/probes/` with a TOML file of the same name that says what
-each function shows (`arg`, `result`, `value` or `op`, see `dread/cclab/lab.py`). Probes are plain
-C99, every function external (nothing may inline it away), with no initialised writable data (the
-lab runs functions without the toolchain's startup code).
+each function shows (`arg`, `result`, `value`, `op` or `keeps`, see `dread/cclab/lab.py`). Probes
+are plain C99, every function external (nothing may inline it away), with no initialised writable
+data (the lab runs functions without the toolchain's startup code).
+
+A spec's values are C-typed, so that one spec serves every architecture: a plain number is an int
+(two bytes on the MSP430, four elsewhere); `"u64:..."`, `"i64:..."`, `"float:BITS"`,
+`"double:BITS"` and `"ptr:scratch+N"` (an address in the lab's scratch memory) say their type; the lab
+splits each into register-wide words, lowest first. An `arg` spec names the argument's C `type`; a
+`result` spec its `value` and `type`, or the `fields` of a struct and their `field` type.
+
+How `arg` finds a place: every argument register holds a marker (one byte repeated across the
+register, naming it) and so do 16 stack words; the marker that comes back names where the argument
+arrived. When none does (the ABI passes the value by reference), a second run points every argument
+register at a buffer of its own whose bytes name register and offset, and the answer is
+"memory at a0+8".
 
 ## What it does not establish
 
 Anything about code the probes do not contain; a register a helper did not change in the runs that
 were made may still be changed by other inputs; a probe's C may mean different things to compilers
 where C leaves it open (that is why the probes keep to plain C99). A helper's result registers in the
-profile are those some probe read: a probe that uses a result is what adds it. Not yet measured:
-prologue and epilogue variants as such, literal pools and padding, hard-float calling conventions,
-C++.
+profile are those some probe read: a probe that uses a result is what adds it. The stack alignment
+is the largest power of two that divided every frame at a call: a measurement, from an aligned
+entry. Not yet measured: prologue and epilogue variants as such, literal pools and padding,
+hard-float calling conventions, C++. Not yet possible: big-endian targets, and the 8-bit cores of
+compilers such as SDCC, which need an engine of DREAD's own first (docs/todo.md: Z80, then 8051).

@@ -1,23 +1,32 @@
 """dread cclab's core: one build of the probes (compiled, linked, made a DREAD target) and what is
-measured on it.
+measured on it, for any architecture DREAD's emulator runs.
 
-A build links the probes into fixed memory (flash at FLASH, RAM at RAM; GNU ld script or ILINK
-configuration written here), so that the emulator maps exactly that; DREAD's ELF import makes the
-linked image a target of its own (dread.toml, tables, payload) in the build's directory. Then each
-probe function is measured by what its spec says (the probes' TOML files):
+A build links the probes into fixed memory (MAPS: per architecture, or the adapter's [memory]),
+written for the toolchain's linker (a GNU ld script, an ILINK configuration or a TI linker command
+file), so that the emulator maps exactly that; DREAD's ELF import makes the linked image a target of
+its own in the build's directory. The registers come from DREAD's architecture layer: the argument
+registers in order (they also carry results), the callee-saved ones, the register width. Each probe
+function is measured by what its spec says (the probes' TOML files):
 
   arg     where the argument it returns arrives: it is run with a marker in every argument register
-          and in 16 stack words, and the marker that comes back names the place (r2, stack+4; two
-          words for a 64-bit value: r2:r3)
-  result  where a result comes back: in registers (r0, r0:r1) or in memory through a pointer the
-          caller passes in r0 (AAPCS's way for a struct of more than a word)
-  value   what it returns (a size, an alignment, a sign extension), read as the spec's note says
+          and in 16 stack words (a marker repeats one byte across the register, so a char or a short
+          of it still names its place), and the marker that comes back names the place (r2,
+          stack+4: bytes into the stack arguments; a value wider than a register: r2:r3)
+  result  where a result comes back: in the first argument registers, or in memory through a
+          pointer the caller passes in the first one (AAPCS's way for a struct of more than a word)
+  value   what it returns, read as the spec's note says (a size, an alignment, a sign extension)
   op      what it calls and the shape of its code; one run on the spec's inputs records, for every
           function it calls, the registers at the call and at the return and the ones changed
+  keeps   run with a marker in every callee-saved register: which came back changed, which of
+          them (and the return address) it stored in its own frame, its frame at the calls it makes
+
+A spec's values are C-typed: a plain number is an int; "u64:0x...", "i64:..", "float:BITS",
+"double:BITS", "ptr:scratch+N" (an address in the lab's scratch memory) name their type, and the lab
+splits a value into register-wide words, lowest first (an int is two bytes on the MSP430).
 
 Every probe function also gets its shape: size, instructions, calls, the first and last few
 instructions. What this does not establish: that a probe's C means the same to every compiler
-(they are written in plain C99), and anything about code the probes do not contain.
+(they are plain C99), anything about code the probes do not contain, big-endian targets.
 """
 import glob
 import json
@@ -27,25 +36,33 @@ import shutil
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROBES = os.path.join(HERE, "probes")
 
-FLASH, FLASH_SIZE = 0x08000000, 0x100000
-RAM, RAM_SIZE = 0x20000000, 0x40000
-SCRATCH, SCRATCH_SIZE = 0x20100000, 0x20000
-STACK_SIZE = 0x2000
-SENTINEL = 0x1FFF0000
 LIMIT = 200_000                     # instructions a probe's run may take
 STACK_WORDS = 16                    # stack words that get a marker (arg)
+
+# Where the probes are linked and the emulator maps memory, per architecture (an adapter's [memory]
+# table, with the same keys, overrides): the stack at the top of RAM, the sentinel (the return
+# address of a run) in unmapped memory.
+MAPS = {
+    "arm": {"flash": 0x08000000, "flash_size": 0x100000, "ram": 0x20000000, "ram_size": 0x40000,
+            "scratch": 0x20100000, "scratch_size": 0x20000, "stack": 0x2000, "sentinel": 0x1FFF0000, "io": []},
+    "riscv": {"flash": 0x20000000, "flash_size": 0x100000, "ram": 0x20400000, "ram_size": 0x40000,
+              "scratch": 0x20500000, "scratch_size": 0x20000, "stack": 0x2000, "sentinel": 0x1FFF0000, "io": []},
+    "msp430": {"flash": 0x4000, "flash_size": 0xBF00, "ram": 0x0200, "ram_size": 0x1E00,
+               "scratch": 0x2200, "scratch_size": 0x1600, "stack": 0x0400, "sentinel": 0x3FF0,
+               "io": [[0x0000, 0x0200]]},
+}
 
 GNU_SCRIPT = """/* dread cclab: the probes' memory; the emulator maps the same */
 ENTRY(cclab_entry)
 MEMORY {{
-    FLASH (rx) : ORIGIN = 0x{flash:08x}, LENGTH = 0x{flash_size:x}
-    RAM (rwx) : ORIGIN = 0x{ram:08x}, LENGTH = 0x{ram_size:x}
+    FLASH (rx) : ORIGIN = 0x{flash:x}, LENGTH = 0x{flash_size:x}
+    RAM (rwx) : ORIGIN = 0x{ram:x}, LENGTH = 0x{ram_size:x}
 }}
 SECTIONS {{
-    .text : {{ KEEP(*(.text*)) *(.rodata*) *(.glue_7*) *(.ARM.extab* .gnu.linkonce.armextab.*) }} > FLASH
+    .text : {{ KEEP(*(.text*)) *(.rodata*) *(.srodata*) *(.glue_7*) *(.ARM.extab* .gnu.linkonce.armextab.*) }} > FLASH
     .ARM.exidx : {{ *(.ARM.exidx* .gnu.linkonce.armexidx.*) }} > FLASH
-    .data : {{ *(.data*) }} > RAM AT > FLASH
-    .bss : {{ *(.bss*) *(COMMON) }} > RAM
+    .data : {{ *(.data*) *(.sdata*) }} > RAM AT > FLASH
+    .bss : {{ *(.bss*) *(.sbss*) *(COMMON) }} > RAM
 }}
 """
 
@@ -95,22 +112,29 @@ title = "dread cclab: {adapter} {build}"
 [arch]
 name = "{arch}"
 isa = "{isa}"
-profile = "{profile}"
-{cpu}
+{profile}{cpu}
 [image.main]
 original = "original/image.bin"
-base = 0x{flash:08x}
+base = 0x{flash:x}
+limit = 0x{flash_end:x}
 entry = "cclab_entry"
 
 [memory]
 regions = [
-    {{name = "flash", base = 0x{flash:08x}, size = 0x{flash_size:x}, kind = "rom"}},
-    {{name = "ram", base = 0x{ram:08x}, size = 0x{ram_size:x}}},
-    {{name = "scratch", base = 0x{scratch:08x}, size = 0x{scratch_size:x}}},
+    {{name = "flash", base = 0x{flash:x}, size = 0x{flash_size:x}, kind = "rom"}},
+    {{name = "ram", base = 0x{ram:x}, size = 0x{ram_size:x}}},
+    {{name = "scratch", base = 0x{scratch:x}, size = 0x{scratch_size:x}}},
 ]
-stack = {{top = 0x{stack_top:08x}, size = 0x{stack:x}}}
-sentinel = 0x{sentinel:08x}
-scratch = {{base = 0x{scratch:08x}, size = 0x{scratch_size:x}}}
+io = {io}
+stack = {{top = 0x{stack_top:x}, size = 0x{stack:x}}}
+sentinel = 0x{sentinel:x}
+scratch = {{base = 0x{scratch:x}, size = 0x{scratch_size:x}}}
+{llm}"""
+
+LLM = """
+# dread cclab: an LLM may be shown these functions only, nothing of the toolchain's library
+[llm]
+only = {names}
 """
 
 
@@ -144,22 +168,37 @@ def probes(names=None, directory=PROBES):
     return out
 
 
-def memory():
-    return {"flash": FLASH, "flash_size": FLASH_SIZE, "ram": RAM, "ram_size": RAM_SIZE, "scratch": SCRATCH,
-            "scratch_size": SCRATCH_SIZE, "stack": STACK_SIZE, "stack_top": RAM + RAM_SIZE,
-            "sentinel": SENTINEL}
+def memory(adapter):
+    """The adapter's memory map: its architecture's (MAPS), with the adapter's [memory] over it."""
+    base = MAPS.get(adapter.arch)
+    if base is None and "memory" not in adapter.data:
+        raise ValueError("no memory map for architecture %s: give the adapter a [memory] table" % adapter.arch)
+    out = dict(base or {}, **adapter.data.get("memory", {}))
+    out["stack_top"] = out["ram"] + out["ram_size"]
+    out["flash_end"] = out["flash"] + out["flash_size"]
+    from dread.emu import ARGS_ROOM
+    room = (out["stack_top"], out["stack_top"] + ARGS_ROOM)     # the stack arguments of a run lie there
+    if out["scratch"] < room[1] and room[0] < out["scratch"] + out["scratch_size"]:
+        raise ValueError("the scratch memory 0x%x-0x%x overlaps the stack arguments above the stack top "
+                         "(0x%x-0x%x)" % (out["scratch"], out["scratch"] + out["scratch_size"], *room))
+    return out
 
 
 # ---- building ----
 
-def build(adapter, key, picked, flags, probe_files, work):
+def build(adapter, key, picked, flags, probe_files, work, guard=None):
     """Compile, link and import one build; returns its directory. Raises BuildError with the log
-    ([{step, file, argv, code, output}]) when a step fails."""
+    ([{step, file, argv, code, output}]) when a step fails. The probes' sources are copied to
+    probes/ (src/ is where DREAD's tools look for rewritten C of the target). Guarded (default: as
+    the adapter says), the build's dread.toml names the functions an LLM may be shown: the probes
+    and the lab's entry, nothing of the toolchain's library ([llm] only; dread pilot keeps to it)."""
+    guard = adapter.guard if guard is None else guard
     from dread import elfimport
     d = os.path.join(work, adapter.name, key)
     shutil.rmtree(d, ignore_errors=True)
-    for sub in ("src", "obj", "original"):
+    for sub in ("probes", "obj", "original"):
         os.makedirs(os.path.join(d, sub))
+    mem = memory(adapter)
     sources = [os.path.join(PROBES, "entry.c")]
     if adapter.support:
         sources.append(os.path.join(PROBES, "support.c"))
@@ -167,7 +206,7 @@ def build(adapter, key, picked, flags, probe_files, work):
     log, objs = [], []
     for source in sources:
         name = os.path.splitext(os.path.basename(source))[0]
-        local = os.path.join(d, "src", os.path.basename(source))      # where a Windows tool sees it
+        local = os.path.join(d, "probes", os.path.basename(source))   # where a Windows tool sees it
         shutil.copyfile(source, local)
         obj = os.path.join(d, "obj", name + ".o")
         extra = adapter.support_flags if name == "support" else []
@@ -180,7 +219,7 @@ def build(adapter, key, picked, flags, probe_files, work):
     template, script_name = SCRIPTS[adapter.family]
     script = os.path.join(d, script_name)
     with open(script, "w") as f:
-        f.write(template.format(**memory()))
+        f.write(template.format(**mem))
     elf = os.path.join(d, "image.elf")
     keep = ["cclab_entry"] + [fn for p in probe_files for fn in p.functions]
     argv = adapter.command("link", objs=objs, out=elf, script=script, flags=list(flags), ldflags=adapter.ldflags,
@@ -192,7 +231,10 @@ def build(adapter, key, picked, flags, probe_files, work):
     cpu = adapter.cpu_model(picked)
     with open(os.path.join(d, "dread.toml"), "w") as f:
         f.write(TARGET.format(adapter=adapter.name, build=key, arch=adapter.arch, isa=adapter.isa,
-                              profile=adapter.profile, cpu='cpu = "%s"\n' % cpu if cpu else "", **memory()))
+                              profile='profile = "%s"\n' % adapter.profile if adapter.profile else "",
+                              cpu='cpu = "%s"\n' % cpu if cpu else "",
+                              llm=LLM.format(names=json.dumps(keep)) if guard else "",
+                              **dict(mem, io=json.dumps(mem.get("io", [])).replace('"', ""))))
     import contextlib
     import io
     quiet = io.StringIO()
@@ -209,33 +251,23 @@ def build(adapter, key, picked, flags, probe_files, work):
     return d
 
 
-# ---- measuring ----
+# ---- values and markers ----
 
-def reg_mark(i):
-    """The marker of argument register i (its low byte names it, so does its low halfword)."""
-    return 0xC0DE0000 | (0x10 + i) << 8 | (0x10 + i)
-
-
-def stack_mark(k):
-    """The marker of stack word k above the stack pointer at the call."""
-    return 0x5EA00000 | (0x40 + k) << 8 | (0x40 + k)
+def reg_mark(i, nbytes):
+    """The marker of argument register i: the byte 0x10 + i across the register."""
+    return int.from_bytes(bytes([0x10 + i]) * nbytes, "little")
 
 
-def place(word, nbytes=4):
-    """Where a marker came from ("r2", "stack+8"), from its low nbytes bytes; None if no marker."""
-    low = word & 0xFF
-    mask = (1 << 8 * nbytes) - 1
-    if 0x10 <= low < 0x20 and (word & mask) == (reg_mark(low - 0x10) & mask):
-        return "r%d" % (low - 0x10)
-    if 0x40 <= low < 0x40 + STACK_WORDS and (word & mask) == (stack_mark(low - 0x40) & mask):
-        return "stack+%d" % (4 * (low - 0x40))
-    return None
+def stack_mark(k, nbytes):
+    """The marker of the k-th word of stack arguments: the byte 0x40 + k across the word."""
+    return int.from_bytes(bytes([0x40 + k]) * nbytes, "little")
 
 
 class Bench:
-    """A built probe image in the emulator: its program and a fresh machine per run."""
+    """A built probe image in the emulator: its program, its registers, a fresh machine per run."""
 
     def __init__(self, directory):
+        from dread.elf import Elf
         from dread.emu import Layout
         from dread.program import Program
         from dread.target import Target
@@ -245,9 +277,18 @@ class Bench:
         self.program = Program(self.target, self.image)
         self.layout = Layout(self.target, self.image)
         self.arch = self.image.arch
+        self.width = max(1, self.arch.reg_bits // 8)       # bytes in a register (2 on the MSP430)
+        self.word = self.layout.word                       # bytes in a stack argument word
+        self.args = list(self.target.abi.arg_regs)         # names, in order: they carry results too
+        self.saved = list(self.layout.saved_names)
+        self.regs = list(self.arch.general_regs()) + ["sp"] + ([self.arch.link_reg] if self.arch.link_reg else [])
+        mem = {}
+        for region in self.target.memory.regions:
+            mem[region.name] = region.base
+        self.scratch = self.target.memory.scratch_base
+        self.sentinel = self.layout.sentinel
         self.aliases = {}                   # address -> every function name there (libgcc's __aeabi_uidiv
-        from dread.elf import Elf           # is __udivsi3), the import's own name first
-        for fn in self.program.functions:
+        for fn in self.program.functions:   # is __udivsi3), the import's own name first
             self.aliases.setdefault(fn.entry, []).append(fn.name)
         for sym in Elf(os.path.join(directory, "image.elf")).symbols:
             if sym.kind == 2 and sym.name and (sym.value & ~1) in self.aliases \
@@ -267,18 +308,47 @@ class Bench:
     def reg(self, m, name):
         return m.uc.reg_read(self.arch.reg_id(name))
 
-    def value(self, word):
-        """A spec's argument: a number (negative ones as 32-bit), or "scratch[+N]"."""
-        if isinstance(word, str):
-            base, _, offset = word.partition("+")
-            if base != "scratch":
-                raise ValueError("unknown argument %r" % word)
-            return SCRATCH + (int(offset, 0) if offset else 0)
-        return word & 0xFFFFFFFF
+    def sizes(self):
+        """The C types' sizes on this target (int and pointers as wide as a register, but at least
+        two bytes)."""
+        w = max(2, self.width)
+        return {"char": 1, "short": 2, "int": w, "unsigned": w, "long": 4, "long long": 8, "i64": 8, "u64": 8,
+                "ptr": w, "float": 4, "double": 8}
 
+    def words(self, value):
+        """A spec's value as register-wide words, lowest first (see the module)."""
+        if isinstance(value, int):
+            kind, v = "int", value
+        else:
+            kind, _, text = value.partition(":")
+            if not text:
+                kind, text = "ptr", value
+            if text.startswith("scratch"):
+                _, _, offset = text.partition("+")
+                v = self.scratch + (int(offset, 0) if offset else 0)
+            else:
+                v = int(text, 0)
+        size = self.sizes()[kind]
+        v &= (1 << 8 * size) - 1
+        n = max(1, -(-size // self.width))
+        return [(v >> (8 * self.width * i)) & ((1 << 8 * self.width) - 1) for i in range(n)]
+
+    def place(self, word, nbytes):
+        """Where a marker came from (an argument register's name, "stack+N"), from its low nbytes
+        bytes; None if no marker."""
+        low = word & 0xFF
+        mask = (1 << 8 * nbytes) - 1
+        if 0x10 <= low < 0x10 + len(self.args) and (word & mask) == (reg_mark(low - 0x10, self.width) & mask):
+            return self.args[low - 0x10]
+        if 0x40 <= low < 0x40 + STACK_WORDS and (word & mask) == (stack_mark(low - 0x40, self.word) & mask):
+            return "stack+%d" % (self.word * (low - 0x40))
+        return None
+
+
+# ---- measuring ----
 
 def shape(bench, name):
-    """{size, instructions, calls, tails, head, tail}: a probe function's code as the build made it."""
+    """{size, instructions, calls, tails, head, tail, mnemonics}: a probe function's code."""
     program, arch = bench.program, bench.arch
     fn = program.by_name.get(name)
     if fn is None:
@@ -299,54 +369,111 @@ def shape(bench, name):
             "head": text[:6], "tail": text[-4:], "mnemonics": sorted({i.mnemonic for i in insns})}
 
 
-def measure_arg(bench, spec):
+def _run(bench, m, fn, args):
     from dread.emu import EmuError
-    fn = bench.program.by_name[spec["function"]]
-    m = bench.machine()
-    args = [reg_mark(i) for i in range(4)] + [stack_mark(k) for k in range(STACK_WORDS)]
     try:
         m.call(fn.entry, *args, max_instructions=LIMIT)
     except EmuError as e:
-        return {"error": str(e)}
-    words = [bench.reg(m, "r%d" % i) for i in range(spec.get("words", 1))]
-    places = [place(w, spec.get("bytes", 4)) for w in words]
-    return {"where": ":".join(p or "?" for p in places), "words": ["0x%08x" % w for w in words]}
+        return str(e)
+    return None
+
+
+REF_SPAN = 32                       # bytes behind each argument register in the by-reference run
+
+
+def ref_byte(i, offset):
+    """Byte `offset` of the by-reference run's buffer behind argument register i: it names both
+    (eight registers and 32 offsets in one byte)."""
+    return (i & 7) << 5 | (offset & 31)
+
+
+def measure_arg(bench, spec):
+    """Where the argument comes from: a marker that comes back names a register or a stack word.
+    When none does (an ABI that passes the value by reference: a struct on the MSP430, one wider
+    than two words on RISC-V), a second run points every argument register at a buffer of its own
+    whose bytes name the register and the offset (ref_byte), and the answer is "memory at r12+2"."""
+    fn = bench.program.by_name[spec["function"]]
+    size = bench.sizes()[spec.get("type", "int")]
+    n = max(1, -(-size // bench.width))
+    m = bench.machine()
+    args = [reg_mark(i, bench.width) for i in range(len(bench.args))]
+    args += [stack_mark(k, bench.word) for k in range(STACK_WORDS)]
+    error = _run(bench, m, fn, args)
+    if not error:
+        words = [bench.reg(m, r) for r in bench.args[:n]]
+        places = [bench.place(w, min(size, bench.width)) for w in words]
+        if all(places):
+            return {"where": ":".join(places), "words": ["0x%0*x" % (2 * bench.width, w) for w in words]}
+    m = bench.machine()
+    for i in range(min(8, len(bench.args))):
+        m.write(bench.scratch + i * REF_SPAN, bytes(ref_byte(i, j) for j in range(REF_SPAN)))
+    args = [bench.scratch + i * REF_SPAN for i in range(len(bench.args))]
+    args += [stack_mark(k, bench.word) for k in range(STACK_WORDS)]
+    second = _run(bench, m, fn, args)
+    if not second:
+        value = bench.reg(m, bench.args[0])
+        width = min(size, bench.width)
+        data = value.to_bytes(bench.width, "little")[:width]
+        i, j = data[0] >> 5, data[0] & 31
+        if i < len(bench.args) and all(data[k] == ref_byte(i, j + k) for k in range(1, width)):
+            return {"where": "memory at %s+%d" % (bench.args[i], j), "by_reference": True}
+    if error:
+        return {"error": error}
+    return {"where": "?", "words": ["0x%0*x" % (2 * bench.width, bench.reg(m, r)) for r in bench.args[:n]]}
+
+
+def expected_bytes(bench, spec):
+    """A result spec's value as the bytes it has in memory (little endian)."""
+    sizes = bench.sizes()
+    if "fields" in spec:
+        size = sizes[spec.get("field", "int")]
+        out = bytearray()
+        for v in spec["fields"]:
+            while len(out) % size:
+                out.append(0)
+            out += (v & ((1 << 8 * size) - 1)).to_bytes(size, "little")
+        return bytes(out)
+    size = sizes[spec.get("type", "int")]
+    return (spec["value"] & ((1 << 8 * size) - 1)).to_bytes(size, "little")
 
 
 def measure_result(bench, spec):
-    from dread.emu import EmuError
     fn = bench.program.by_name[spec["function"]]
-    value = [v & 0xFFFFFFFF for v in spec["value"]]
-    nbytes = spec.get("bytes", 4)
-    mask = (1 << 8 * nbytes) - 1
+    want = expected_bytes(bench, spec)
     m = bench.machine()
-    m.write(SCRATCH, bytes(64))
-    try:
-        m.call(fn.entry, SCRATCH, reg_mark(1), reg_mark(2), reg_mark(3), max_instructions=LIMIT)
-    except EmuError as e:
-        return {"error": str(e)}
-    regs = [bench.reg(m, "r%d" % i) for i in range(4)]
-    memory = m.read(SCRATCH, 4 * len(value))
-    words = [int.from_bytes(memory[4 * i:4 * i + 4], "little") for i in range(len(value))]
-    if all((w & mask) == v for w, v in zip(words, value)):
+    m.write(bench.scratch, bytes(64))
+    args = [bench.scratch] + [reg_mark(i, bench.width) for i in range(1, len(bench.args))]
+    error = _run(bench, m, fn, args)
+    if error:
+        return {"error": error}
+    if bytes(m.read(bench.scratch, len(want))) == want:
         # first: a value stored through the pointer (registers may hold it by the way: strd r2, r3)
-        returned = " (r0 returns the address)" if regs[0] == SCRATCH else ""
-        return {"where": "memory at the address in r0" + returned}
-    if len(value) <= 4 and all((regs[i] & mask) == v for i, v in enumerate(value)):
-        return {"where": ":".join("r%d" % i for i in range(len(value)))}
-    return {"where": "?", "regs": ["0x%08x" % r for r in regs]}
+        returned = " (%s returns the address)" % bench.args[0] if bench.reg(m, bench.args[0]) == bench.scratch else ""
+        return {"where": "memory at the address in %s%s" % (bench.args[0], returned)}
+    n = -(-len(want) // bench.width)
+    got = b"".join(bench.reg(m, r).to_bytes(bench.width, "little") for r in bench.args[:n])
+    if n <= len(bench.args) and got[:len(want)] == want:
+        return {"where": ":".join(bench.args[:n])}
+    return {"where": "?", "regs": ["0x%0*x" % (2 * bench.width, bench.reg(m, r)) for r in bench.args[:4]]}
 
 
 def measure_value(bench, spec):
-    from dread.emu import EmuError
     fn = bench.program.by_name[spec["function"]]
     m = bench.machine()
-    try:
-        m.call(fn.entry, max_instructions=LIMIT)
-    except EmuError as e:
-        return {"error": str(e)}
-    r0 = bench.reg(m, "r0")
-    return {"value": r0, "hex": "0x%08x" % r0}
+    error = _run(bench, m, fn, [])
+    if error:
+        return {"error": error}
+    v = bench.reg(m, bench.args[0])
+    return {"value": v, "hex": "0x%0*x" % (2 * bench.width, v)}
+
+
+def return_address(bench, uc):
+    """The return address of a function at its first instruction: the link register's, or the
+    word a call pushed (the MSP430)."""
+    if bench.arch.link_reg:
+        return uc.reg_read(bench.arch.reg_id(bench.arch.link_reg)) & ~1
+    sp = uc.reg_read(bench.arch.reg_id("sp"))
+    return int.from_bytes(bytes(uc.mem_read(sp, bench.word)), "little")
 
 
 def measure_op(bench, spec):
@@ -356,21 +483,22 @@ def measure_op(bench, spec):
     library's routines branch into one another); a return may close several frames at once; a tail
     call returns where the probe would, so its frame closes when the run ends."""
     from unicorn import UC_HOOK_CODE
-    from dread.emu import EmuError
     program, arch = bench.program, bench.arch
     fn = program.by_name[spec["function"]]
     fn_end = program.end(fn)
-    names = ["r%d" % i for i in range(13)] + ["sp", "lr"]
+    names = bench.regs
     ids = [arch.reg_id(n) for n in names]
+    link = arch.link_reg
     m = bench.machine()
-    if any(isinstance(a, str) for a in spec.get("args", [])):
-        m.write(SCRATCH, bytes(range(256)) * 2)
+    args = [w for a in spec.get("args", []) for w in bench.words(a)]
+    if any(isinstance(a, str) and "scratch" in a for a in spec.get("args", [])):
+        m.write(bench.scratch, bytes(range(256)) * 2)
     frames, seen = [], []
     state = {"prev": None}              # (address, flow kind) of the instruction before
 
     def close(frame, after):
-        frame["changed"] = [n for n, a, b in zip(names, frame["regs"], after) if a != b and n != "lr"]
-        frame["results"] = ["0x%08x" % v for v in after[:2]]
+        frame["changed"] = [n for n, a, b in zip(names, frame["regs"], after) if a != b and n != link]
+        frame["results"] = ["0x%0*x" % (2 * bench.width, after[names.index(r)]) for r in bench.args[:2]]
         seen.append(frame)
 
     def on_code(uc, address, size, user):
@@ -385,65 +513,93 @@ def measure_op(bench, spec):
         callee = program.by_entry.get(address)
         if callee is not None and callee is not fn and prev is not None:
             regs = [uc.reg_read(r) for r in ids]
+            entry_args = ["0x%0*x" % (2 * bench.width, regs[names.index(r)]) for r in bench.args[:4]]
             if prev[1] in ("call", "icall"):
                 frames.append({"function": bench.names(address), "depth": len(frames) + 1, "regs": regs,
-                               "ret": regs[names.index("lr")] & ~1, "args": ["0x%08x" % v for v in regs[:4]]})
+                               "ret": return_address(bench, uc), "args": entry_args})
             elif prev[1] == "jump" and fn.entry <= prev[0] < fn_end and not frames:
-                frames.append({"function": bench.names(address), "depth": 1, "regs": regs, "ret": SENTINEL,
-                               "tail": True, "args": ["0x%08x" % v for v in regs[:4]]})
+                frames.append({"function": bench.names(address), "depth": 1, "regs": regs,
+                               "ret": bench.sentinel, "tail": True, "args": entry_args})
         insn = program.insn(address)
         state["prev"] = (address, arch.flow(insn)[0] if insn is not None else "next")
-    m.hook_add(UC_HOOK_CODE, on_code, begin=FLASH, end=FLASH + FLASH_SIZE - 1)
-    args = [bench.value(a) for a in spec.get("args", [])]
-    try:
-        m.call(fn.entry, *args, max_instructions=LIMIT)
-    except EmuError as e:
-        return {"error": str(e)}
+    m.hook_add(UC_HOOK_CODE, on_code, begin=bench.image.base, end=bench.image.base + len(bench.image.payload()) - 1)
+    error = _run(bench, m, fn, args)
+    if error:
+        return {"error": error}
     after = [m.uc.reg_read(r) for r in ids]
     for frame in frames:                # tail calls: they return where the probe returns
         close(frame, after)
-    out = {"result": ["0x%08x" % after[0], "0x%08x" % after[1]], "helpers": []}
+    out = {"result": ["0x%0*x" % (2 * bench.width, after[names.index(r)]) for r in bench.args[:2]], "helpers": []}
     for frame in seen:
-        out["helpers"].append({k: frame[k] for k in ("function", "depth", "args", "results", "changed")
-                               if k in frame} | ({"tail": True} if frame.get("tail") else {}))
+        out["helpers"].append({k: frame[k] for k in ("function", "depth", "args", "results", "changed")}
+                              | ({"tail": True} if frame.get("tail") else {}))
     return out
 
 
+def lowbit(n):
+    return n & -n
+
+
 def measure_keeps(bench, spec):
-    """Run with a marker in every register a call must keep (the ABI's callee-saved registers):
-    which came back changed, the stack pointer's alignment at every call the function itself makes
-    (seen at the callee's first instruction; AAPCS asks for 8 bytes at a public interface), and the
-    saving instructions at its entry."""
+    """Run with a marker in every register a call must keep (the ABI's callee-saved registers, the
+    i-th the byte 0x20 + i across the register): which came back changed; which of them, and the
+    return address, the function stored in its own frame (read after the run, between the stack
+    pointer at its entry and the lowest its own instructions set); and its frame at every call it
+    makes (bytes below the entry's stack pointer, before the call pushes anything). The largest
+    power of two that divides every such frame is the alignment it kept (given an aligned entry:
+    AAPCS asks for 8, RISC-V for 16, the MSP430 for 2)."""
     from unicorn import UC_HOOK_CODE
-    from dread.emu import EmuError
     program, arch = bench.program, bench.arch
     fn = program.by_name[spec["function"]]
     fn_end = program.end(fn)
     m = bench.machine()
+    lay = bench.layout
+    m.write(lay.stack_top - lay.stack_size, bytes(lay.stack_size))     # what the scan finds, this run wrote
     marks = {}
-    for i, reg in enumerate(bench.layout.saved_regs):
-        marks[reg] = 0x5AFE0000 | (0x20 + i) << 8 | (0x20 + i)
-        m.uc.reg_write(reg, marks[reg])
-    sp_id, state, calls = arch.reg_id("sp"), {"prev": None}, []
+    for i, name in enumerate(bench.saved):
+        marks[name] = int.from_bytes(bytes([0x20 + i]) * bench.width, "little")
+        m.uc.reg_write(arch.reg_id(name), marks[name])
+    sp_id = arch.reg_id("sp")
+    state = {"prev": None, "entry": None, "low": None}
+    frames = []
 
     def on_code(uc, address, size, user):
         prev = state["prev"]
-        if prev is not None and prev[1] in ("call", "icall") and fn.entry <= prev[0] < fn_end \
-                and program.by_entry.get(address) is not None:
-            calls.append(uc.reg_read(sp_id) % 8)
+        if fn.entry <= address < fn_end:
+            sp = uc.reg_read(sp_id)
+            if state["entry"] is None:
+                state["entry"] = sp
+            state["low"] = sp if state["low"] is None else min(state["low"], sp)
+        elif prev is not None and prev[1] in ("call", "icall") and fn.entry <= prev[0] < fn_end \
+                and state["entry"] is not None:
+            sp = uc.reg_read(sp_id) + (0 if arch.link_reg else bench.word)     # before a pushed return
+            frames.append(state["entry"] - sp)
         insn = program.insn(address)
         state["prev"] = (address, arch.flow(insn)[0] if insn is not None else "next")
-    m.hook_add(UC_HOOK_CODE, on_code, begin=FLASH, end=FLASH + FLASH_SIZE - 1)
-    args = [bench.value(a) for a in spec.get("args", [])]
-    try:
-        m.call(fn.entry, *args, max_instructions=LIMIT)
-    except EmuError as e:
-        return {"error": str(e)}
-    ids = {arch.reg_id(n): n for n in ["r%d" % i for i in range(13)]}
-    broken = [ids.get(reg, str(reg)) for reg, v in marks.items() if m.uc.reg_read(reg) != v]
-    head = ["%s %s" % (i.mnemonic, i.op_str) for i in [i for i in program.instructions(fn) if i is not None][:8]]
-    return {"kept": "all" if not broken else "not " + " ".join(broken), "sp_mod8_at_calls": sorted(set(calls)),
-            "saves": [t for t in head if t.startswith(("push", "stmdb", "sub sp", "vpush", "str"))][:3]}
+    m.hook_add(UC_HOOK_CODE, on_code, begin=bench.image.base, end=bench.image.base + len(bench.image.payload()) - 1)
+    args = [w for a in spec.get("args", []) for w in bench.words(a)]
+    error = _run(bench, m, fn, args)
+    if error:
+        return {"error": error}
+    broken = [name for name, v in marks.items() if bench.reg(m, name) != v]
+    found, ret = set(), False
+    if state["entry"] is not None and state["low"] is not None and state["entry"] > state["low"]:
+        low = state["low"] - state["low"] % bench.width
+        data = bytes(m.read(low, state["entry"] - low))
+        by_value = {v: n for n, v in marks.items()}
+        for off in range(0, len(data) - bench.width + 1, bench.width):
+            v = int.from_bytes(data[off:off + bench.width], "little")
+            if v in by_value:
+                found.add(by_value[v])
+            elif arch.link_reg and (v & ~1) == (bench.sentinel & ~1):
+                ret = True
+    out = {"kept": "all" if not broken else "not " + " ".join(broken),
+           "saved": [n for n in bench.saved if n in found] + (["return address"] if ret else []),
+           "frames_at_calls": sorted(set(frames))}
+    nonzero = [f for f in frames if f]
+    if nonzero:
+        out["aligned"] = min(lowbit(f) for f in nonzero)
+    return out
 
 
 MEASURES = {"arg": measure_arg, "result": measure_result, "value": measure_value, "op": measure_op,
