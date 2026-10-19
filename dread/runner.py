@@ -123,7 +123,7 @@ def run_function(name):
                 out.append(m.call(addr, *args, max_instructions=budget))
             except Exception as e:          # EmuError, or anything a case's own code raises
                 out.append(e if isinstance(e, EmuError) else EmuError("%s: %s" % (type(e).__name__, e)))
-            if which == "original" and written and (m.code_reads or m.wrote_into(image.base, image.end)):
+            if which == "original" and written and (m.code_reads or m.wrote_into(image.base, prog.writable_end())):
                 out = None
                 break
             if which == "original":
@@ -219,7 +219,7 @@ def prepare(target, image, recon_path, keep_failing=False):
     RUN.update(system=system)
     RUN.update(target=target, image=image, program=prog, layout=layout, suite=suite, original=image.payload(),
                recon=recon, aliases=aliases, built=built, keep_failing=keep_failing,
-               isa_of=prog.isa_at, code=frozenset(prog.code), owners=prog.extent_owners(), regflow=flow,
+               isa_of=prog.isa_at, code=prog.instruction_halves(), owners=prog.extent_owners(), regflow=flow,
                kept_argued=kept_argued)
     return suite
 

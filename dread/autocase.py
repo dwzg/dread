@@ -73,7 +73,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 13       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 14       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -84,7 +84,8 @@ VERSION = 13       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 10: a run that hangs in a callee that never returns makes a "hang" case instead
                   # 11: system calls run as logged no-ops (dread.emu), no longer faults;
                   # 12: a run caught in a hook that never returns stubs the callee it went in by;
-                  # 13: a load from a function's extent by another function's code is a load of code
+                  # 13: a load from a function's extent by another function's code is a load of code;
+                  # 14: so is one of any halfword of an instruction, and a store behind the image counts
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -153,7 +154,7 @@ class Generator:
         self.boundary = tuple(range(17)) + (0x7F, 0x80, 0xFF, 0x100, 0x7FFF, 0x8000, 0xFFFF, 0x10000, 0x7FFFFFFF,
                                             0x80000000, 0xFFFFFFFE, 0xFFFFFFFF, self.scratch, self.scratch + 0x40,
                                             self.scratch + 0x104)
-        self.code = frozenset(self.program.code)
+        self.code = self.program.instruction_halves()
         self.owners = self.program.extent_owners()  # a load from another function's extent is one of code
         self.entries = {fn.name: fn.entry for fn in self.program.functions}
         self.real = {self.entries[n] for n in REAL_LIBRARY if n in self.entries}
@@ -473,8 +474,7 @@ class Generator:
         return Machine(self.layout, self.payload if payload is None else payload, aliases, isa_of=self.program.isa_at)
 
     def touches_image(self, m):
-        image = self.image
-        return m.code_reads or m.wrote_into(image.base, image.end)
+        return m.code_reads or m.wrote_into(self.image.base, self.program.writable_end())
 
     def coverage(self, entry, words, case, limit=200_000, check_image=False):
         """The function's instructions this input executes; empty if it does not finish (or, with

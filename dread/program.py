@@ -276,6 +276,20 @@ class Program:
         c = self.code.get(address)
         return c[1] if c else self.isa
 
+    def instruction_halves(self):
+        """Every halfword address an instruction covers (not only where it starts): a load of the
+        second half of a 32-bit Thumb instruction is a load of code too (a case of strcmp compared a
+        string at an address inside strcmp itself, and the rebuilt image has other bytes there)."""
+        if getattr(self, "_halves", None) is None:
+            self._halves = frozenset(a + k for a, (size, _) in self.code.items() for k in range(0, max(size, 2), 2))
+        return self._halves
+
+    def writable_end(self):
+        """The end of what a case may not store into: the image, and behind it the room the overlay
+        fills up to the image's limit."""
+        end = self.base + len(self.data)
+        return max(end, self.image.limit or end)
+
     def extent_owners(self):
         """An array with one entry per halfword of the image: 1 + the index in self.functions of the
         function whose extent holds it (its instructions and the literal pools behind them, up to the

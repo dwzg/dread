@@ -278,3 +278,27 @@ def test_loads_from_another_functions_pool_are_code_reads():
         except EmuError:
             pass
         assert m.code_reads, hex(pointer)
+
+
+def test_loads_inside_instructions_and_stores_behind_the_image():
+    """strcmp was handed an address inside its own code (the second half of a 32-bit instruction)
+    as a string: the original read its own instruction bytes, the rebuilt image others. Every
+    halfword an instruction covers counts, and so does a store into the room behind the image."""
+    from dread.emu import EmuError
+    t = Target.load(gizmo_dir("m3"))
+    g = Generator(t, t.image())
+    p = g.program
+    wide = next(a for a, (size, _) in sorted(p.code.items()) if size == 4)
+    assert wide + 2 in g.code and wide + 2 not in p.code
+    assert p.writable_end() == t.image().limit
+    fn = p.by_name["strncpy"]
+    s = t.memory.scratch_base
+    for args, what in (([s, wide + 2, 4, 0], "load"), ([t.image().end + 0x40, s, 4, 0], "store")):
+        case = {"args": args, "mem": [[s, 1, 65], [s + 1, 1, 0]], "returns": [], "calls": [], "frame": 0}
+        m = g.machine(); m.plan = []; g.apply(m, case)
+        m.trace_reads(t.image().base, t.image().end, g.code, g.owners)
+        try:
+            m.call(fn.entry, *case["args"], max_instructions=100_000)
+        except EmuError:
+            pass
+        assert g.touches_image(m), what
