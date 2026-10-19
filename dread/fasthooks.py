@@ -33,7 +33,7 @@ class State(ctypes.Structure):
                 ("it_mask", ctypes.c_uint32),
                 ("reg_read", ctypes.c_void_p), ("reg_write", ctypes.c_void_p),
                 ("blocks", Set), ("tree_set", Set), ("reads", Set), ("writes", Set), ("pages", Set),
-                ("code_reads", ctypes.c_int32)]
+                ("code_reads", ctypes.c_int32), ("last_block", ctypes.c_uint64)]
 
 
 def library():

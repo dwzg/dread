@@ -73,7 +73,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 11       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 12       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -82,7 +82,8 @@ VERSION = 11       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 8: a callee a run hung in until the instruction limit is stubbed in later inputs
                   # 9: those stubs log only the argument registers the callee reads (dread.regflow)
                   # 10: a run that hangs in a callee that never returns makes a "hang" case instead
-                  # 11: system calls run as logged no-ops (dread.emu), no longer faults
+                  # 11: system calls run as logged no-ops (dread.emu), no longer faults;
+                  # 12: a run caught in a hook that never returns stubs the callee it went in by
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -733,14 +734,19 @@ class Generator:
                 faults += 1
                 if m.spinning:
                     spins.setdefault(m.spinning[0], m.spinning[1:])
-                # A run that never came back from a callee. One that never returns at all (dread.noreturn:
-                # a hook that spins with interrupts off) makes a case of its own, "hang": both images
-                # run into it and are compared up to the limit (stubbed, the original would go on behind
-                # the call where the lifted C knows better). One that waits for something (an assertion
-                # that waits for a debugger, a flag nothing sets) is stubbed in later inputs, so the code
-                # around the call can be covered; each case says which stubs it has, for both images.
+                # A run that never came back from a callee. One caught in a function that never
+                # returns at all (dread.noreturn: a hook that spins with interrupts off) makes a case of
+                # its own, "hang": both images run into it and are compared up to the limit (stubbed,
+                # the original would go on behind the call where the lifted C knows better). When the
+                # run got there through a callee that does return (an allocator whose failure hook it
+                # is), that callee is stubbed in later inputs, so the code behind its call is covered
+                # too: stubbing a function that returns cannot make one that never returns return.
+                # One that waits for something (an assertion that waits for a debugger, a flag nothing
+                # sets) is stubbed itself in later inputs. Each case says which stubs it has, for both
+                # images.
                 inside = self.program.function_at(m.reg("pc") & ~1) if m.timed_out else None
                 if inside is not None and inside.entry != entry:
+                    stub = inside
                     if inside.name in self.endless():
                         got = m.covered_insns(words)
                         if got - covered and not self.touches_image(m):
@@ -748,10 +754,13 @@ class Generator:
                             covered |= got
                             corpus.append(case)
                             last_gain = attempt
-                    elif len(hung) < HUNG_STUBS and inside.entry not in hung and all(c[0] != inside.entry
-                                                                                      for c in calls):
-                        hung.add(inside.entry)
-                        calls.append([inside.entry, self.reads_mask(inside.name), 0])
+                        via = self.left_through(m, words)
+                        stub = via if via is not None and via.entry not in (inside.entry, entry) and \
+                            via.name not in self.endless() else None
+                    if stub is not None and len(hung) < HUNG_STUBS and stub.entry not in hung and \
+                            all(c[0] != stub.entry for c in calls):
+                        hung.add(stub.entry)
+                        calls.append([stub.entry, self.reads_mask(stub.name), 0])
                 learn_pointers(m, case)
                 if pointers:
                     went = {m.reg("pc") & ~1, m.reg(self.program.arch.veneer_reg)} - {self.fake_pointer, 0}
@@ -892,6 +901,25 @@ class Generator:
             raise GenerationError("%s: only %d of %d generated inputs ran to the end (%d faulted); write cases"
                                   % (name, len(corpus) + len(extras), budget, faults))
         return self.settle_hangs(entry, corpus + extras)
+
+    def left_through(self, m, words):
+        """The function a run that ended elsewhere left the tested one for: the destination of the
+        call or jump that ends the last block it ran inside it (m.last_block); None when that is
+        not a direct call or jump."""
+        import bisect
+        last = getattr(m, "last_block", None)
+        if not last:
+            return None
+        i = bisect.bisect_left(words, last[0] + last[1]) - 1
+        if i < 0 or words[i] < last[0]:
+            return None
+        insn = self.program.insn(words[i])
+        if insn is None:
+            return None
+        kind, target, _ = self.program.arch.flow(insn)
+        if kind not in ("call", "jump") or target is None:
+            return None
+        return self.program.function_at(target)
 
     def settle_hangs(self, entry, cases):
         """A case is a "hang" case by its own run, not by the case it was made from: one that returns

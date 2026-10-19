@@ -430,23 +430,29 @@ class Machine:
         instruction addresses (block granularity: a conditional instruction that does not
         execute counts as executed). With tree, also the start of every block executed outside
         that range, in self.tree (what the function's callees ran: the generator's signal for an
-        input that gets further into a callee); one hook does both."""
-        self.blocks, self.tree = set(), set()
+        input that gets further into a callee); one hook does both. self.last_block is the
+        (address, size) of the last block run inside the range: when a run ends elsewhere, its
+        last instruction is the call or jump that left for good."""
+        self.blocks, self.tree, self.last_block = set(), set(), None
         fast = self.core.fast
         if fast is not None:
             fast.state.cover_lo, fast.state.cover_hi, fast.state.tree = begin, end, 1 if tree else 0
+            fast.state.last_block = 0
             self.core.fast_hooks.append(fast.add(UC_HOOK_BLOCK, "dread_block", *((1, 0) if tree else (begin, end - 1))))
             self._fast_cover = True
             return
-        if not tree:
-            self.hook_add(UC_HOOK_BLOCK, lambda uc, addr, size, user: self.blocks.add((addr, size)),
-                          begin=begin, end=end - 1)
-            return
         blocks, outside = self.blocks, self.tree
+
+        def inside(uc, addr, size, user):
+            blocks.add((addr, size))
+            self.last_block = (addr, size)
+        if not tree:
+            self.hook_add(UC_HOOK_BLOCK, inside, begin=begin, end=end - 1)
+            return
 
         def on_block(uc, addr, size, user):
             if begin <= addr < end:
-                blocks.add((addr, size))
+                inside(uc, addr, size, user)
             else:
                 outside.add(addr)
         self.hook_add(UC_HOOK_BLOCK, on_block)
@@ -525,6 +531,8 @@ class Machine:
         self.written_ranges, self._written = fast.ranges(), None
         if self._fast_cover:
             self.blocks = {(k >> 16, k & 0xFFFF) for k in fast.items(fasthooks.BLOCKS)}
+            last = fast.state.last_block
+            self.last_block = (last >> 16, last & 0xFFFF) if last else None
             self.tree = set(fast.items(fasthooks.TREE))
         if self._fast_reads:
             self.reads = dict(fast.items(fasthooks.READS, values=True))

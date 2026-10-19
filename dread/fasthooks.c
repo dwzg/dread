@@ -32,6 +32,7 @@ typedef struct {
     /* results */
     set_t blocks, tree_set, reads, writes, pages;
     int32_t code_reads;
+    uint64_t last_block;            /* address << 16 | size of the last block run inside the range */
 } state_t;
 
 static uint64_t mix(uint64_t x)
@@ -170,9 +171,10 @@ static void settle(void *uc, state_t *st)
 /* UC_HOOK_BLOCK: void (uc, address, size, user) */
 void dread_block(void *uc, uint64_t address, uint32_t size, state_t *st)
 {
-    if (address >= st->cover_lo && address < st->cover_hi)
+    if (address >= st->cover_lo && address < st->cover_hi) {
         set_put(&st->blocks, address << 16 | (size & 0xFFFF), 0, 1);
-    else if (st->tree)
+        st->last_block = address << 16 | (size & 0xFFFF);
+    } else if (st->tree)
         set_put(&st->tree_set, address, 0, 1);
     settle(uc, st);
 }

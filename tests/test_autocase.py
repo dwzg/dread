@@ -139,3 +139,37 @@ def test_a_callee_that_never_returns_makes_hang_cases(tmp_path):
     assert not any(c[0] == hook for case in cases for c in case.get("calls", ()))
     hangs = [c for c in cases if c.get("hang")]
     assert hangs and all(c["args"][0] & 0x80000000 for c in hangs)
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_hook_deeper_down_stubs_the_callee_it_was_reached_by(tmp_path):
+    """FreeRTOS's queue set-up calls the allocator, which calls a failure hook that never returns
+    when the heap's state (an input) says no. Every such run became a hang case and nothing was
+    stubbed, so the code behind the allocator's call stayed uncovered (26 of 57 instructions). The
+    callee the run went in by is stubbed in later inputs; the hook itself stays unstubbed."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text("__attribute__((noipa)) void hook(void) { for (;;) ; }\n"
+                                  "__attribute__((noipa)) int alloc(int n) { if (n != 12345) hook(); return n; }\n"
+                                  "__attribute__((noipa)) int side(int r) { return r + 3; }\n"
+                                  "int make(int n) { int r = alloc(n); if (r == 12345) return 1; return side(r); }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "make", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    g = Generator(t, t.image())
+    assert "hook" in g.endless() and "alloc" not in g.endless()
+    fn = g.program.by_name["make"]
+    cases = g.generate("make", fn.entry, fn.insns)
+    got, words = covered(g, "make", cases)
+    assert got == words, sorted(hex(a) for a in words - got)
+    stubs = {c[0] for case in cases for c in case.get("calls", ())}
+    assert g.program.by_name["alloc"].entry in stubs and g.program.by_name["hook"].entry not in stubs
