@@ -166,3 +166,48 @@ def test_what_capstone_leaves_out_of_an_instructions_registers():
         insn = next(md.disasm(bytes.fromhex(hx), 0x1000))
         r, w = arm.reg_effects(insn)
         assert reads <= r and writes <= w, (insn.mnemonic, insn.op_str, r, w)
+
+
+def test_an_exception_with_the_fpus_state_takes_the_extended_frame():
+    """On a Cortex-M4 that has run an FPU instruction (CONTROL.FPCA), an exception pushes s0-s15 and
+    FPSCR behind the eight words (0x68 bytes), returns through EXC_RETURN 0xFFFFFFE9 and runs its
+    handler with FPCA clear; the return restores s0-s15 and FPCA. Without FPU state: eight words,
+    0xFFFFFFF9."""
+    import unicorn as uc
+    from unicorn import arm_const as ua
+    from dread import arch as archmod
+    arm = archmod.get({"name": "arm", "isa": "t32", "profile": "m", "cpu": "cortex-m4"})
+    for fpu in (True, False):
+        engine = uc.Uc(uc.UC_ARCH_ARM, arm.uc_mode())
+        engine.ctl_set_cpu_model(ua.UC_CPU_ARM_CORTEX_M4)
+        engine.mem_map(0x08000000, 0x10000)
+        engine.mem_map(0x20000000, 0x10000)
+        engine.mem_write(0x08000000, bytes.fromhex("00ee100a" "00bf"))     # vmov s0, r0; nop
+        engine.reg_write(ua.UC_ARM_REG_SP, 0x20008000)
+        engine.reg_write(ua.UC_ARM_REG_R0, 0x3F800000)
+        if fpu:
+            engine.emu_start(0x08000001, 0x08000004, count=1)            # sets CONTROL.FPCA
+        for k in range(1, 16):
+            engine.reg_write(getattr(ua, "UC_ARM_REG_S%d" % k), 0x40000000 + k)
+        memory = {}
+
+        def write_word(address, value):
+            engine.mem_write(address, (value & 0xFFFFFFFF).to_bytes(4, "little"))
+
+        def read_word(address):
+            return int.from_bytes(engine.mem_read(address, 4), "little")
+        engine.mem_write(0x08000400 + 4 * 16, (0x08000101).to_bytes(4, "little"))     # a handler's vector
+        arm.enter_interrupt(engine, 16, 0x08000005, 0x08000400, read_word, write_word)
+        sp = engine.reg_read(ua.UC_ARM_REG_SP)
+        lr = engine.reg_read(ua.UC_ARM_REG_LR)
+        assert (0x20008000 - sp, lr) == ((0x68, 0xFFFFFFE9) if fpu else (32, 0xFFFFFFF9))
+        assert not engine.reg_read(ua.UC_ARM_REG_CONTROL) & 4
+        if fpu:
+            assert read_word(sp + 32) == 0x3F800000 and read_word(sp + 32 + 4 * 15) == 0x4000000F
+        for k in range(16):                                              # the handler changes them
+            engine.reg_write(getattr(ua, "UC_ARM_REG_S%d" % k), 0)
+        engine.reg_write(ua.UC_ARM_REG_PC, lr)
+        assert arm.exception_return(engine, read_word) == 0x08000005
+        assert engine.reg_read(ua.UC_ARM_REG_SP) == 0x20008000
+        assert bool(engine.reg_read(ua.UC_ARM_REG_CONTROL) & 4) == fpu
+        assert engine.reg_read(ua.UC_ARM_REG_S15) == (0x4000000F if fpu else 0)

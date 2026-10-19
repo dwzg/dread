@@ -670,8 +670,13 @@ class Arm:
         stack in use (the process stack in thread mode with CONTROL.SPSEL, else the main stack;
         aligned to 8 bytes, bit 9 of the stacked xPSR telling so), the main stack from then on,
         LR = EXC_RETURN (0xFFFFFFF1 from a handler, 0xFFFFFFF9 from thread mode on the main stack,
-        0xFFFFFFFD on the process stack), IPSR = number, at the handler of the vector table. FPU
-        frames are not modelled."""
+        0xFFFFFFFD on the process stack), IPSR = number, at the handler of the vector table. With
+        the FPU's state active (CONTROL.FPCA, which the core sets when it runs an FPU instruction)
+        the frame is the extended one, s0-s15, FPSCR and a reserved word behind the eight (0x68
+        bytes), EXC_RETURN's bit 4 is clear (0xFFFFFFE1, E9, ED) and FPCA is cleared for the
+        handler. The hardware's lazy stacking (space reserved, the registers written when the
+        handler first uses the FPU) is modelled as eager stacking: the registers come out the same;
+        only the reserved words' memory differs when a handler never uses the FPU."""
         if self.profile == "m":
             xpsr = engine.reg_read(ua.UC_ARM_REG_XPSR)
             handler = xpsr & 0x1FF
@@ -684,13 +689,18 @@ class Arm:
                 xpsr |= 1 << 9
             regs = [engine.reg_read(getattr(ua, "UC_ARM_REG_" + r)) for r in ("R0", "R1", "R2", "R3", "R12", "LR")]
             frame = regs + [resume & ~1, xpsr | 0x01000000]
-            sp -= 32
+            fp = control & 4                # CONTROL.FPCA: the extended frame
+            if fp:
+                frame += [engine.reg_read(getattr(ua, "UC_ARM_REG_S%d" % k)) for k in range(16)]
+                frame += [engine.reg_read(ua.UC_ARM_REG_FPSCR), 0]
+            sp -= 4 * len(frame)
             for i, value in enumerate(frame):
                 write_word(sp + 4 * i, value)
             engine.reg_write(ua.UC_ARM_REG_SP, sp)
-            if process:                     # in thread mode, a write of SPSEL switches the stack
-                engine.reg_write(ua.UC_ARM_REG_CONTROL, control & ~2)
-            engine.reg_write(ua.UC_ARM_REG_LR, 0xFFFFFFF1 if handler else 0xFFFFFFFD if process else 0xFFFFFFF9)
+            if process or fp:               # in thread mode, a write of SPSEL switches the stack
+                engine.reg_write(ua.UC_ARM_REG_CONTROL, control & ~(2 if process else 0) & ~4)
+            exc_return = 0xFFFFFFF1 if handler else 0xFFFFFFFD if process else 0xFFFFFFF9
+            engine.reg_write(ua.UC_ARM_REG_LR, exc_return & ~0x10 if fp else exc_return)
             engine.reg_write(ua.UC_ARM_REG_XPSR, 0x01000000 | (number & 0x1FF))
             return read_word(vectors + 4 * number) | 1
         cpsr = engine.reg_read(ua.UC_ARM_REG_CPSR)
@@ -701,9 +711,10 @@ class Arm:
 
     def exception_return(self, engine, read_word):
         """M profile: finish the return the core began by branching to EXC_RETURN (Unicorn stops
-        there): pop the frame from the stack EXC_RETURN names (bit 2: the process stack), to thread
-        mode (bit 3) or the handler that was interrupted, and return where to go on; None when pc is
-        no EXC_RETURN value."""
+        there): pop the frame from the stack EXC_RETURN names (bit 2: the process stack), the
+        extended one with s0-s15 and FPSCR where bit 4 is clear (CONTROL.FPCA set again, else
+        cleared), to thread mode (bit 3) or the handler that was interrupted, and return where to go
+        on; None when pc is no EXC_RETURN value."""
         pc = engine.reg_read(ua.UC_ARM_REG_PC)
         if self.profile != "m" or pc < self.EXC_RETURN:
             return None
@@ -712,13 +723,20 @@ class Arm:
         frame = [read_word(sp + 4 * i) for i in range(8)]
         for r, value in zip(("R0", "R1", "R2", "R3", "R12", "LR"), frame):
             engine.reg_write(getattr(ua, "UC_ARM_REG_" + r), value)
-        sp += 32 + (4 if frame[7] & (1 << 9) else 0)
+        fp = not pc & 0x10
+        if fp:
+            for k in range(16):
+                engine.reg_write(getattr(ua, "UC_ARM_REG_S%d" % k), read_word(sp + 32 + 4 * k))
+            engine.reg_write(ua.UC_ARM_REG_FPSCR, read_word(sp + 96))
+        sp += (0x68 if fp else 32) + (4 if frame[7] & (1 << 9) else 0)
         xpsr = frame[7] & ~(1 << 9)
         if thread:
             xpsr &= ~0x1FF
         engine.reg_write(ua.UC_ARM_REG_XPSR, xpsr)      # the mode first: SPSEL changes in thread mode only
-        if process:
-            engine.reg_write(ua.UC_ARM_REG_CONTROL, engine.reg_read(ua.UC_ARM_REG_CONTROL) | 2)
+        control = engine.reg_read(ua.UC_ARM_REG_CONTROL)
+        control = (control | 2 if process else control) & ~4 | (4 if fp else 0)
+        if control != engine.reg_read(ua.UC_ARM_REG_CONTROL):
+            engine.reg_write(ua.UC_ARM_REG_CONTROL, control)
         engine.reg_write(ua.UC_ARM_REG_SP, sp)
         return frame[6] | 1
 

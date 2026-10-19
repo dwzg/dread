@@ -598,8 +598,13 @@ of the MSP430 section comes after this one.
   four float functions pass the lift check (42 accepted, what gizmo-m3's does and more). Not yet: a
   generic stub's log of a callee's float arguments; a float result that nothing in the image reads
   is not compared (as an integer register beyond r0); vpush, vpop and double precision stay refused.
-- [ ] **The system run with an FPU**: the extended exception frame, lazy stacking (FPCCR) and the
-  EXC_RETURN values with FP context in dread.models.nvic.
+- [x] **The system run with an FPU** (2026-10-19): where the FPU's state is active (CONTROL.FPCA,
+  which Unicorn's Cortex-M4 sets when it runs an FPU instruction, as the hardware does) an exception
+  pushes the extended frame, s0-s15, FPSCR and a reserved word behind the eight (0x68 bytes),
+  returns through EXC_RETURN 0xFFFFFFE1, E9 or ED and runs its handler with FPCA clear; the return
+  restores them and FPCA. Lazy stacking is modelled eagerly (the registers come out the same; the
+  reserved words' memory differs only when a handler never uses the FPU). Tested on the core
+  directly; gizmo's scenarios interrupt no float code: FreeRTOS's ARM_CM4F port (next) will.
 - [ ] **FreeRTOS on it**: the ARM_CM4F port on QEMU's mps2-an386 (Cortex-M4) in the benchmark's
   matrix, with GCC and clang.
 

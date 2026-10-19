@@ -28,6 +28,11 @@ takes it when its group priority (PRIGROUP) is higher than the core's execution 
 an exception of higher priority, and the active exceptions form a stack (returns come in reverse
 order). With every priority 0, the state after reset, no exception preempts another.
 
+Entry and return push and pop the frame through the architecture layer (dread.arch.arm
+enter_interrupt, exception_return): the extended frame with s0-s15 and FPSCR where the FPU's state
+is active (CONTROL.FPCA), with EXC_RETURN's bit 4 clear; the hardware's lazy stacking is modelled
+eagerly (the same registers; the reserved words' memory differs when a handler never uses the FPU).
+
 Assumed: the model raises no NMI or fault exceptions of its own (an svc that cannot be taken would
 escalate to HardFault; the system run stops with a fault instead), tail-chaining is a return
 followed by an entry (the same memory and registers in the end), no late arrival, SHCSR and the
