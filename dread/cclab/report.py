@@ -12,7 +12,8 @@ import json
 import os
 
 SECTIONS = (("arg", "Where arguments arrive", "where"), ("result", "Where results come back", "where"),
-            ("value", "Types and values", "hex"), ("op", "Operations: what each calls", None))
+            ("value", "Types and values", "hex"), ("op", "Operations: what each calls", None),
+            ("keeps", "What a function keeps across a call", None))
 
 
 def load(work, adapter):
@@ -45,6 +46,16 @@ def op_text(entry):
                if m in ("udiv", "sdiv", "umull", "smull", "smmul", "tbb", "tbh", "ldm", "stm", "ldrd", "strd",
                         "umlal", "mla", "mls") or m.startswith(("ldm", "stm"))]
     return "inline" + (" (%s)" % ", ".join(notable) if notable else "")
+
+
+def keeps_text(entry):
+    """A keeps probe in one line: what came back changed, the alignment at calls, the saves."""
+    if "error" in entry:
+        return "error: " + entry["error"][:60]
+    sp = entry.get("sp_mod8_at_calls", [])
+    return "kept %s%s; saves: %s" % (entry.get("kept", "?"),
+                                    "; sp at calls: %s" % ("8-aligned" if sp == [0] else "mod 8 = %s" % sp) if sp else "",
+                                    " / ".join(entry.get("saves", [])) or "none")
 
 
 def builds_text(keys, every):
@@ -84,7 +95,12 @@ def write(work, adapter_name=None, out=print):
                     if entry is None or entry.get("measure") != kind:
                         continue
                     note = entry.get("note", "")
-                    text = op_text(entry) if kind == "op" else entry.get(field, entry.get("error", "?"))
+                    if kind == "op":
+                        text = op_text(entry)
+                    elif kind == "keeps":
+                        text = keeps_text(entry)
+                    else:
+                        text = entry.get(field, entry.get("error", "?"))
                     seen.setdefault(text, []).append(key)
                 if seen:
                     cells = "; ".join("%s (%s)" % (text, builds_text(keys, good)) for text, keys in seen.items())

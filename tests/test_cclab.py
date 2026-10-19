@@ -95,6 +95,9 @@ def test_gcc_follows_the_procedure_call_standard(tmp_path):
     assert len(udiv) == 1 and "__aeabi_uidiv" in udiv[0]["function"]   # libgcc's alias of __udivsi3
     assert udiv[0]["args"][:2] == ["0x%08x" % 1000, "0x%08x" % 7] and udiv[0]["results"][0] == "0x%08x" % 142
     assert m3["op_udiv"]["helpers"] == [] and "udiv" in m3["op_udiv"]["shape"]["mnemonics"]
+    for r in got.values():                                              # what a call keeps
+        assert r["keeps_pressure"]["kept"] == "all" and r["keeps_pressure"]["sp_mod8_at_calls"] == [0]
+        assert any(t.startswith("push") for t in r["keeps_pressure"]["saves"])
     shl = m0["op_shl64"]                                               # what a 64-bit shift does there
     assert shl["result"] == ["0x%08x" % (0x0123456789ABCDEF << 5 & 0xFFFFFFFF), "0x%08x" % (0x0123456789ABCDEF << 5 >> 32 & 0xFFFFFFFF)]
 

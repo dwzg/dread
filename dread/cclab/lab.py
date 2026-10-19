@@ -409,7 +409,45 @@ def measure_op(bench, spec):
     return out
 
 
-MEASURES = {"arg": measure_arg, "result": measure_result, "value": measure_value, "op": measure_op}
+def measure_keeps(bench, spec):
+    """Run with a marker in every register a call must keep (the ABI's callee-saved registers):
+    which came back changed, the stack pointer's alignment at every call the function itself makes
+    (seen at the callee's first instruction; AAPCS asks for 8 bytes at a public interface), and the
+    saving instructions at its entry."""
+    from unicorn import UC_HOOK_CODE
+    from dread.emu import EmuError
+    program, arch = bench.program, bench.arch
+    fn = program.by_name[spec["function"]]
+    fn_end = program.end(fn)
+    m = bench.machine()
+    marks = {}
+    for i, reg in enumerate(bench.layout.saved_regs):
+        marks[reg] = 0x5AFE0000 | (0x20 + i) << 8 | (0x20 + i)
+        m.uc.reg_write(reg, marks[reg])
+    sp_id, state, calls = arch.reg_id("sp"), {"prev": None}, []
+
+    def on_code(uc, address, size, user):
+        prev = state["prev"]
+        if prev is not None and prev[1] in ("call", "icall") and fn.entry <= prev[0] < fn_end \
+                and program.by_entry.get(address) is not None:
+            calls.append(uc.reg_read(sp_id) % 8)
+        insn = program.insn(address)
+        state["prev"] = (address, arch.flow(insn)[0] if insn is not None else "next")
+    m.hook_add(UC_HOOK_CODE, on_code, begin=FLASH, end=FLASH + FLASH_SIZE - 1)
+    args = [bench.value(a) for a in spec.get("args", [])]
+    try:
+        m.call(fn.entry, *args, max_instructions=LIMIT)
+    except EmuError as e:
+        return {"error": str(e)}
+    ids = {arch.reg_id(n): n for n in ["r%d" % i for i in range(13)]}
+    broken = [ids.get(reg, str(reg)) for reg, v in marks.items() if m.uc.reg_read(reg) != v]
+    head = ["%s %s" % (i.mnemonic, i.op_str) for i in [i for i in program.instructions(fn) if i is not None][:8]]
+    return {"kept": "all" if not broken else "not " + " ".join(broken), "sp_mod8_at_calls": sorted(set(calls)),
+            "saves": [t for t in head if t.startswith(("push", "stmdb", "sub sp", "vpush", "str"))][:3]}
+
+
+MEASURES = {"arg": measure_arg, "result": measure_result, "value": measure_value, "op": measure_op,
+            "keeps": measure_keeps}
 
 
 def measure(directory, probe_files):
