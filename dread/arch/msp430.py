@@ -359,6 +359,35 @@ class Msp430:
     def is_call(self, insn):
         return self.flow(insn)[0] in ("call", "icall")
 
+    def register_call_targets(self, program, fn):
+        """{address of a call through a register: [function entries]} for the calls of fn through
+        a register whose every write in fn (pops aside: the epilogue's restores) is mov #entry: GCC
+        loads a function it calls more than once into a register (mov #uart_puts, r10; call r10).
+        Flow-insensitive: each entry moved into the register counts, which can name one too many,
+        never one too few."""
+        moved, other, calls = {}, set(), []
+        for insn in program.instructions(fn):
+            if insn is None:
+                continue
+            f = insn.fields
+            if self.flow(insn)[0] == "icall":
+                if f.src is not None and f.src.mode == "reg" and f.src.reg >= 4:
+                    calls.append((insn.address, f.src.reg))
+                continue
+            if self.stack_kind(insn) == "pop":
+                continue
+            reads, writes = self.reg_effects(insn)
+            for name in writes:
+                if name not in NAMES[4:]:
+                    continue
+                reg = NAMES.index(name)
+                if f.op == "mov" and not f.byte and f.src.mode == "imm" and f.dst.mode == "reg" \
+                        and f.dst.reg == reg and (f.src.value & 0xFFFF) in program.by_entry:
+                    moved.setdefault(reg, set()).add(f.src.value & 0xFFFF)
+                else:
+                    other.add(reg)
+        return {a: sorted(moved[r]) for a, r in calls if r in moved and r not in other}
+
     def is_conditional(self, insn):
         return False
 

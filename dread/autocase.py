@@ -9,7 +9,9 @@ that comparisons are hit on both sides.
 
 Stages, each only for what the one before left uncovered:
 
-1. random inputs and mutations of those that gained coverage;
+1. random inputs and mutations of those that gained coverage; when fewer than four ran to the end,
+   a second round with small arguments (half of them 0: a count split over two registers is small
+   only when both halves are);
 2. mutations of the inputs that reach a conditional branch whose other way was never taken;
 3. the compare-guided stage: for such a branch it finds the instruction that set the flags (or the
    compare-and-branch itself), changes every input once to learn which ones the compared values
@@ -73,7 +75,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 19       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 20       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -91,7 +93,9 @@ VERSION = 19       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 17: a run's limit is a byte budget (dread.emu.Machine.call), STUB_CALLS 256;
                   # 18: STUB_CALLS 2,000 again (at 256 FreeRTOS's -O0 build lost coverage);
                   # 19: an emulator a CPU exception may have broken is replaced (dread.emu.Core.retire:
-                  # cases made in a broken worker were cached), a quick failure is not cached
+                  # cases made in a broken worker were cached), a quick failure is not cached;
+                  # 20: a round of small arguments when fewer than four inputs ran to the end, and
+                  # the callees a layer names for calls through a register (MSP430)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -111,6 +115,7 @@ SWEEP_RUNS = 600            # emulator runs per base input in the boundary sweep
 LONG_SECONDS = 120          # the last-resort search gives up after this long without one input that finished
 KEPT_MAX = 6
 HUNG_STUBS = 4              # callees at most that get stubbed because runs hung in them
+SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
 HUNG_STOP = 0.5             # share of fresh inputs in which such a callee ends the run instead ("stops")
 POINTER_REACH = 0x1000      # a fault this far behind an input's value makes the input a learned pointer
 POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTER_BASE ...
@@ -263,21 +268,41 @@ class Generator:
         return found, near
 
     def callees(self, words, depth=CALLEE_DEPTH):
-        """The functions the instructions call directly, and theirs, `depth` levels deep."""
+        """The functions the instructions call directly, and theirs, `depth` levels deep; with a
+        layer that names them (register_call_targets: MSP430), also those called through a register
+        that holds their entry."""
         seen, level, out = set(), list(words), []
+        through = getattr(self.arch, "register_call_targets", None)
         for _ in range(depth):
             nxt = []
             for ins in self.insns(level):
                 if not self.arch.is_call(ins):
                     continue
                 target = self.arch.target(ins)
-                fn = self.program.by_entry.get(target & ~1) if target is not None else None
-                if fn is not None and fn.entry not in seen:
-                    seen.add(fn.entry)
-                    out.append(fn)
-                    nxt += fn.insns
+                if target is not None:
+                    targets = [target & ~1]
+                elif through is not None:
+                    targets = self._register_calls(ins.address).get(ins.address, ())
+                else:
+                    targets = ()
+                for t in targets:
+                    fn = self.program.by_entry.get(t)
+                    if fn is not None and fn.entry not in seen:
+                        seen.add(fn.entry)
+                        out.append(fn)
+                        nxt += fn.insns
             level = nxt
         return out
+
+    def _register_calls(self, address):
+        """The layer's register_call_targets of the function holding address, once per function."""
+        fn = self.program.function_at(address)
+        if fn is None:
+            return {}
+        cache = self.__dict__.setdefault("_register_call_cache", {})
+        if fn.entry not in cache:
+            cache[fn.entry] = self.arch.register_call_targets(self.program, fn)
+        return cache[fn.entry]
 
     def dictionary(self, words):
         """(strings, characters) the instructions and their callees compare against: the
@@ -655,6 +680,15 @@ class Generator:
         def value():
             return rng.choice(hot) if rng.random() < 0.5 else rng.choice(pool)
 
+        small = [False]
+
+        def small_value():
+            """An argument of the round of small values, which starts when fewer than four inputs ran
+            to the end: half of them 0. A count split over two registers (MSP430's 32-bit length in
+            r14:r15) is small only when both halves are, which random values almost never are; every
+            input of gizmo's strncpy ran off memory so."""
+            return 0 if rng.random() < 0.5 else rng.choice(SMALL_ARGS)
+
         def token():
             r = rng.random()
             if strings and r < 0.35:
@@ -713,7 +747,7 @@ class Generator:
             return fresh_text()
 
         def fresh():
-            case = {"args": [value() for _ in range(nregs)],
+            case = {"args": [small_value() if small[0] else value() for _ in range(nregs)],
                     "mem": [[a, s, value()] for a, s in sorted(known.items())],
                     "returns": [value() for _ in range(8)] if calls else [], "calls": [list(c) for c in calls],
                     "frame": frame, **({"io": "fixed"} if self.io_fixed else {}), **({"limit": self.long} if self.long else {}),
@@ -759,7 +793,9 @@ class Generator:
         for attempt in range(budget * 5):
             patience = budget * 2 if (data_args or data_mem) and (strings or chars) else budget
             if attempt >= budget and (words_set <= covered or attempt - last_gain > patience):
-                break
+                if small[0] or len(corpus) + len(extras) >= 4:
+                    break
+                small[0], last_gain = True, attempt     # once more with small arguments (small_value)
             if self.late():
                 break
             if self.long and not corpus and time.time() - started > LONG_SECONDS:

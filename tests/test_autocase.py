@@ -342,3 +342,42 @@ def test_a_slow_failed_generation_is_cached(target, tmp_path, monkeypatch):
         with pytest.raises(autocase.GenerationError, match="only 0 of 400"):
             autocase.cases_for(run, "clamp", fn)
     assert calls == ["clamp", "clamp", "clamp"]
+
+
+def test_a_round_of_small_arguments(monkeypatch):
+    """When fewer than four inputs ran to the end, a second round draws the arguments small (half of
+    them 0): a count split over two registers (MSP430's 32-bit length in r14:r15) is small only when
+    both halves are, which random values almost never are. Here a run only finishes when every
+    argument is 0 or 1 (the emulator's call is wrapped)."""
+    from dread import autocase, emu
+    from dread.target import Target
+    from conftest import gizmo_dir
+    target = Target.load(gizmo_dir("m3"))
+    gen = autocase.Generator(target, target.image())
+    fn = gen.program.by_name["strncpy"]
+    call = emu.Machine.call
+
+    def picky(self, addr, *args, **kwargs):
+        if any(a > 1 for a in args):
+            raise emu.EmuError("emulation fault at pc=0x%x: Invalid memory write (UC_ERR_WRITE_UNMAPPED)" % addr)
+        return call(self, addr, *args, **kwargs)
+    monkeypatch.setattr(emu.Machine, "call", picky)
+    cases = gen.generate("strncpy", fn.entry, fn.insns, fallbacks=False, budget=100)
+    assert len(cases) >= 4 and all(a <= 1 for c in cases for a in c["args"])
+
+
+def test_msp430_calls_through_a_register_are_callees():
+    """GCC for the MSP430 loads a function it calls more than once into a register (mov #uart_puts,
+    r10; call r10): the layer names such callees, and the generator stubs them in loop cases (gizmo's
+    main calls only so in its loop)."""
+    from dread import autocase
+    from dread.target import Target
+    from conftest import gizmo_dir
+    target = Target.load(gizmo_dir("msp430"))
+    gen = autocase.Generator(target, target.image())
+    program = gen.program
+    main = program.by_name["main"]
+    found = gen.arch.register_call_targets(program, main)
+    names = {program.by_entry[e].name for entries in found.values() for e in entries}
+    assert {"uart_puts", "handle_key"} <= names
+    assert {"uart_puts", "handle_key"} <= {f.name for f in gen.callees(main.insns, depth=1)}

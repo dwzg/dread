@@ -590,9 +590,15 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   (gizmo's parse_kv and sum6, libgcc's udivmodsi4) and their callers (apply_config); FreeRTOS's
   task creation takes two on the stack. mul64 calls __mspabi_mpyll, which takes its second operand in
   r8-r11 (the ABI's 64-bit helper convention): refused as reading what its caller leaves.
-- [ ] **Case generation on MSP430**: every generated input of gizmo's strncpy (its count in r14:r15)
-  and main faults ("only 0 of 100 generated inputs ran to the end"); script_run, gpio_set and
-  handle_key keep instructions uncovered. Find out why before the FreeRTOS build goes through.
+- [ ] **Case generation on MSP430**: every generated input of gizmo's strncpy and main failed ("only 0
+  of 100 generated inputs ran to the end"). strncpy's count is a u32 in r14:r15, small only when both
+  halves are: a round of small arguments when fewer than four inputs finished (strncpy: 69 cases, all
+  31 instructions). main's loop calls only through registers (mov #f, r10; call r10), which the
+  generator's callee list missed, so no loop case could end at a stub: the layer names such callees
+  now (register_call_targets; main: 6 loop cases, 38 of 51 instructions). Generator VERSION 20.
+  Left: script_run, gpio_set and handle_key keep instructions uncovered; why, before the FreeRTOS
+  build goes through. Generation on the MSP430 engine is slow (strncpy 193 s, main 322 s, with a
+  benchmark running beside it).
 - [ ] **FreeRTOS's MSP430 build through the lift check** (msp430-gcc-Os: 250 functions).
 - [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the
   5-million-instruction limit (about 5 s per case on the MSP430 engine; two of gizmo's took over 300
