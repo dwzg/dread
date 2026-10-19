@@ -213,6 +213,14 @@ class Core:
             uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
         for lo, hi in layout.io:
             uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._on_io, begin=lo, end=hi - 1)
+        # The CPU as built, put back by every reset: a run can change CPU state that no register
+        # write reaches. A FreeRTOS run on Unicorn's Cortex-M33 executed a bxns (code it had
+        # overwritten) and left the core in Non-secure state; from then on every fetch raised a
+        # SecureFault (CPU exception 3) at the first instruction of every call. The masks, stack
+        # pointers and stack limits of both security states, CONTROL, the FP registers and the
+        # exclusive monitor are of the same kind. A context goes back only into the engine it came
+        # from: it holds that engine's heap pointers (the MPU's region arrays).
+        self.clean = uc.context_save() if isinstance(uc, Uc) else None
 
     def _on_write(self, uc, access, addr, size, value, user):
         self.dirty.add(addr >> 12)
@@ -259,17 +267,20 @@ class Core:
         # address had no stub runs past a stub added later. Every Machine starts with an empty
         # translation cache.
         self.uc.ctl_flush_tb()
-        for reg in self.layout.all_regs:
-            self.uc.reg_write(reg, 0)
+        if self.clean is not None:
+            self.uc.context_restore(self.clean)     # every register as built (r0-r12 are 0 there)
+        else:
+            for reg in self.layout.all_regs:
+                self.uc.reg_write(reg, 0)
 
     def retire(self):
         """Take this core out of use: the next Machine for its image gets a new one (about a
-        millisecond to build). After a run that ends in a CPU exception or an invalid instruction,
-        Unicorn's own state can be what the reset does not reach: on a FreeRTOS build one run ended
-        in a prefetch abort with its stack pointer at 0, and from then on every call on that core
-        raised the same abort at its first instruction, for every function; the worker process's
-        generations all failed, 149 of a lift check's 175 failures. The Machine that made the run
-        keeps the core it ran on."""
+        millisecond to build), after a run that ends in a CPU exception or an invalid instruction.
+        A backstop for CPU state outside the context the reset restores: the state that broke a
+        core was inside it (a FreeRTOS run had stored over its own code and executed a bxns, which
+        left Unicorn's Cortex-M33 in Non-secure state; every later fetch faulted, and the worker
+        process's generations all failed, 149 of a lift check's 175 failures). The Machine that
+        made the run keeps the core it ran on."""
         key = (id(self.layout), id(self.payload))
         if Core.cores.get(key) is self:
             del Core.cores[key]

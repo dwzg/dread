@@ -83,6 +83,27 @@ def test_a_run_ending_in_a_cpu_exception_gets_a_new_core(target, variant):
     assert Machine(layout, image.payload(), isa_of=program.isa_at).core is again.core
 
 
+def test_cpu_state_does_not_reach_the_next_call(monkeypatch):
+    """The reset puts the whole CPU back as built (Unicorn's context), not only the registers a
+    write reaches: BASEPRI set by one call was what the next call started with, and a bxns once
+    left a core in Non-secure state for every later call (dread.emu.Core.reset)."""
+    from dread.emu import Core
+    from dread.target import Target
+    from conftest import gizmo_dir
+    monkeypatch.setattr(Core, "retire", lambda self: None)     # the same core, reset
+    target = Target.load(gizmo_dir("m3"))
+    image = target.image()
+    layout, program = Layout(target, image), Program(target, image)
+    code = target.memory.scratch_base + 0x800
+    m = Machine(layout, image.payload(), isa_of=program.isa_at)
+    m.write(code, b"\x80\xf3\x11\x88\x70\x47")        # msr basepri, r0; bx lr
+    m.call(code, 0x40, max_instructions=100)
+    again = Machine(layout, image.payload(), isa_of=program.isa_at)
+    assert again.core is m.core
+    again.write(code, b"\xef\xf3\x11\x80\x70\x47")    # mrs r0, basepri; bx lr
+    assert again.call(code, max_instructions=100).ret == 0
+
+
 def test_the_instruction_limit_is_a_budget_alike_in_c_and_python(target, monkeypatch):
     """A run's limit is a budget of bytes of code entered (the instruction set's shortest
     instructions), kept by a C block hook (Unicorn's own count calls a hook before every

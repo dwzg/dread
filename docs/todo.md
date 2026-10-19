@@ -261,10 +261,19 @@ The long runs set the pace of everything after them. Measure first, then cut.
   check's 175 failures), and the failure cache kept them. A core is now replaced after a run that ends
   in a CPU exception or an invalid instruction (a millisecond each; some 6,300 such runs in that
   build's check), and a failed generation is cached only when it took ten seconds or more. The -O0
-  lift check: 226 -> 312 accepted before recorded inputs (291 before the pass), 21 -> 13 rounds. Not
-  found: what in Unicorn keeps the exception (the reset writes every register; the input replays
-  it on a fresh core). Lesson: a cache of failures assumes they recur; check that the same key gives
-  the same result in a second run before caching what a fault elsewhere could have caused.
+  lift check: 226 -> 312 accepted before recorded inputs (291 before the pass), 21 -> 13 rounds.
+  Found afterwards (an agent read Unicorn's source; checked here): Unicorn 2.1.4 builds a Cortex-M33
+  for UC_MODE_MCLASS whatever CPU model is asked for, so the cortex-m3 targets ran on a core with
+  the Security Extension. The input had made the code store over its own strlen, one byte turning
+  bx lr into bxns r0, which left the core in Non-secure state, where every fetch faults; no register
+  write reaches that state. The reset now restores Unicorn's whole CPU context as it was built
+  (14 us a reset instead of 31): that state, BASEPRI, CONTROL, PSP and the rest no longer carry
+  from one call into the next (BASEPRI did, FreeRTOS's critical sections set it). retire stays as
+  a backstop. Lesson: a cache of failures assumes they recur; check that the same key gives the
+  same result in a second run before caching what a fault elsewhere could have caused.
+- [ ] **The configured Cortex-M model**: without UC_MODE_MCLASS Unicorn builds the cpu the target
+  names (a real M3 for cortex-m3: no Security Extension, DSP or FPU; an M0 would be ARMv6-M). The
+  Cortex-M tests pass on it; the suite and a measurement of the matrix decide.
 - [x] The test suite in a fresh worktree regenerated gizmo's cases (21 minutes; the MSP430 test 772 s,
   0.4 s with its cache): `bin/dev-worktree` copies the caches into a new worktree.
 - [ ] The generation of functions that never return is the slowest left (one task's loop: 49,000 runs
