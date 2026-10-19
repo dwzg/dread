@@ -355,7 +355,11 @@ repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in
   ~/.local/opt): 250 functions, the listing rebuilds byte for byte, Ghidra finds 43 without symbols;
   no lifter for MSP430 yet, and no system-run models of its board.
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
-  and cost per function (the usage ledger).
+  and cost per function (the usage ledger). --task input now also asks for the functions the lift
+  check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed
+  instructions run, 74,000 tokens in and 352,000 out, 28 minutes. Most misses were failed
+  assertions, which the generator covers itself since (stops): the next runs, with Sonnet and the
+  local model too, go on what the measurement after that leaves.
 - [ ] **New architectures through it**: MSP430X with TI's cl430 (FreeRTOS's MSP430X port), AVR (its
   ATmega ports), each as its own item below.
 - [ ] (Later) a compute-heavy library (littlefs) for the case generator on parsers and data structures.
