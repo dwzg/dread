@@ -115,7 +115,10 @@ def run_function(name):
             written = label.startswith("written")
             if which == "original" and written:
                 m.trace_reads(image.base, image.end, RUN["code"])
-            budget = limit if which == "original" or getattr(m, "may_hang", False) else limit * REBUILT_BUDGET
+            # a loop case ends at a stub call, not at the limit: the C may take more instructions to get there
+            loop_case = bool(generated and generated.get("hang") and generated.get("stub_calls"))
+            budget = limit if which == "original" or (getattr(m, "may_hang", False) and not loop_case) \
+                else limit * REBUILT_BUDGET
             try:
                 out.append(m.call(addr, *args, max_instructions=budget))
             except Exception as e:          # EmuError, or anything a case's own code raises
@@ -198,8 +201,12 @@ def prepare(target, image, recon_path, keep_failing=False):
         with open(os.path.join(here, "lifted.json")) as f:
             lifted_info = json.load(f)
     system = set(lifted_info.get("system", ()))  # never return: dread sysrun's scenarios test them
+    loops = set(lifted_info.get("loop", ()))    # never return: loop cases test them (dread.autocase)
+    system -= loops
     for name in read_names(os.path.join(here, "lifted.txt")):
-        if name not in system:
+        if name in loops:
+            suite.auto.setdefault(name, {"loop": True})
+        elif name not in system:
             suite.auto.setdefault(name, {})     # lifted C is tested with generated cases, callees real
     for name, addrs in lifted_info.get("unreached", {}).items():
         # no path from the entry reaches them (dread lift); one that runs fails the function

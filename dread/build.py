@@ -98,7 +98,7 @@ def lift_sources(target, image, names, outdir, quiet=False):
     program = Program(target, image)
     lifter = lift.make_lifter(program, regflow.load(target, image, program))
     os.makedirs(outdir, exist_ok=True)
-    made, endless = {}, []
+    made, endless, loops = {}, [], []
     for name in names:
         fn = program.by_name.get(name)
         if fn is None:
@@ -117,10 +117,22 @@ def lift_sources(target, image, names, outdir, quiet=False):
         made[name] = result.unreached
         if lifter.system_only(fn):         # never returns, or an exception handler
             endless.append(name)
+            if lifter.handler_kind(fn) is None:
+                loops.append(name)          # it never returns: loop cases may test it (dread.autocase)
     for old in glob.glob(os.path.join(outdir, "*.c")):
         if os.path.basename(old)[:-2] not in made:
             os.remove(old)
-    return made, endless
+    return made, endless, loops
+
+
+def system_names(path):
+    """The names of a lifted table that the system run accepted (dread lift --check marks them with
+    a comment): they keep being tested by the scenarios, not by loop cases."""
+    if not os.path.exists(path):
+        return set()
+    with open(path) as f:
+        return {l.split("#", 1)[0].strip() for l in f if "#" in l and "system run" in l.split("#", 1)[1]
+                and l.split("#", 1)[0].strip()}
 
 
 def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=None):
@@ -132,15 +144,18 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
     record = os.path.join(workdir, "lifted.txt")
     if names:
         defined = defined_functions(objects)
-        made, endless = lift_sources(target, image, [n for n in names if n not in defined], os.path.join(workdir, "lifted"),
-                            quiet=quiet)
+        made, endless, loops = lift_sources(target, image, [n for n in names if n not in defined],
+                                            os.path.join(workdir, "lifted"), quiet=quiet)
+        if lifted is None:                  # the image's table: the system run's acceptances stay its own
+            by_system = system_names(image.table("lifted"))
+            loops = [n for n in loops if n not in by_system]
         objects += compile_all(target, image, os.path.join(workdir, "lifted"), os.path.join(workdir, "obj-lifted"),
                                quiet=quiet)
         with open(record, "w") as f:
             f.write("".join(n + "\n" for n in made))
         with open(os.path.join(workdir, "lifted.json"), "w") as f:
-            json.dump({"unreached": {n: a for n, a in sorted(made.items()) if a}, "system": sorted(endless)}, f,
-                      indent=1)
+            json.dump({"unreached": {n: a for n, a in sorted(made.items()) if a}, "system": sorted(endless),
+                       "loop": sorted(loops)}, f, indent=1)
     elif os.path.exists(record):
         os.remove(record)
     payload = os.path.join(workdir, "payload.bin")

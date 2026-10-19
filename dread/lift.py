@@ -38,9 +38,11 @@ define by hand) is built over the original together with the others, its generat
 (callees real, dread.autocase), and a function whose cases disagree or leave an instruction of the
 original unrun is dropped; the build and the run are repeated until nothing is dropped. A function
 that failed while a callee of it was lifted and failed too gets one more round without that callee.
-A function that never returns gets no case that ends; when the target has scenarios, the system
-run decides for it instead (system_check: every scenario agrees on the original and the rebuilt
-image, and the original's runs execute every instruction a path reaches). What stays is written to
+A function that never returns gets no case that ends: it gets loop cases (dread.autocase, loop=True:
+its callees stubbed, compared at the same stub call in both images), and what they do not accept,
+and every A-profile exception handler, the system run decides when the target has scenarios
+(system_check: every scenario agrees on the original and the rebuilt image, and the original's runs
+execute every instruction a path reaches; the lifted table marks those). What stays is written to
 the image's lifted table (config/lifted.txt), which dread recon builds from then on (it lifts those
 functions again at every build: the C is not kept).
 
@@ -1682,8 +1684,9 @@ class Lifter:
         return "switch (index) { %s default: return r0; }" % cases
 
 
-def check(target, image, names=None, out=print, jobs=None, system=True):
-    """The acceptance loop (see the module's docstring); returns the accepted names."""
+def check(target, image, names=None, out=print, jobs=None, system=True, loop_cases=True):
+    """The acceptance loop (see the module's docstring); returns the accepted names. loop_cases=False
+    leaves every function that never returns to the system run."""
     from dread import build, overlay, regflow, runner
     program = Program(target, image)
     lifter = make_lifter(program, regflow.load(target, image, program))
@@ -1697,7 +1700,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
             owner = program.function_at(t & ~1) if t is not None else None
             if owner is not None and owner is not fn and (t & ~1) != owner.entry:
                 entered.add(owner.name)
-    candidates, refused, endless = [], 0, []
+    candidates, refused, endless, loops = [], 0, [], set()
     verdicts = {}                           # name -> (verdict, reason, missed): verdicts.tsv for readers
 
     def refuse(name, reason):
@@ -1726,8 +1729,12 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
         if system_only:
             try:
                 lifter.lift(fn)
-                endless.append(name)        # no case can end or call it: the system run decides (system_check)
                 refused -= 1
+                if loop_cases and lifter.handler_kind(fn) is None:
+                    loops.add(name)         # it never returns: loop cases first (dread.autocase), then the
+                    candidates.append(name)     # system run for what they do not accept (system_check)
+                else:
+                    endless.append(name)    # an exception handler: the system run decides (system_check)
             except Refused as e:
                 refuse(name, e)
             continue
@@ -1789,15 +1796,18 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
                 passes += 1
                 continue
             break
+    endless = endless + sorted(n for n in loops if n not in accepted)     # what loop cases did not accept
     by_system = system_check(target, image, program, lifter, accepted, endless, out, verdicts) \
         if system and target.scenarios else []
     for name in endless:
         verdicts.setdefault(name, ("dropped", "never returns or an exception handler, and the target has no "
                                               "system-run scenarios to test it", ""))
-    dropped = len(candidates) - len(accepted) + len(endless) - len(by_system)
+    dropped = len(candidates) - len(accepted) + len(endless) - len(by_system) - len(loops - set(accepted))
+    by_loops = [n for n in accepted if n in loops]
     accepted = accepted + by_system
     for name in accepted:
-        verdicts[name] = ("accepted", "by the system run" if name in by_system else "", "")
+        verdicts[name] = ("accepted", "by the system run" if name in by_system else
+                          "by loop cases" if name in loops else "", "")
     os.makedirs(work, exist_ok=True)
     with open(os.path.join(work, "verdicts.tsv"), "w") as f:
         f.write("function\tverdict\treason\tmissed\n")
@@ -1806,13 +1816,15 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
     path = image.table("lifted")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        f.write("# Functions built from lifted C: their cases (for one that never returns: every scenario\n"
-                "# of the system run) agree with the original and run every instruction it can reach.\n"
-                "# Written by dread lift --check; not edited by hand.\n")
-        f.write("".join(n + "\n" for n in sorted(accepted)))
-    out("dread lift --check: %d accepted after %d rounds (%d by the system run; %d written by hand, %d refused, "
-        "%d dropped), into %s" % (len(accepted), rounds, len(by_system), len(by_hand & set(program.by_name)), refused,
-                                  dropped, os.path.relpath(path)))
+        f.write("# Functions built from lifted C: their cases (for one that never returns: its loop cases,\n"
+                "# or every scenario of the system run) agree with the original and run every instruction it\n"
+                "# can reach. Written by dread lift --check; not edited by hand.\n")
+        f.write("".join(n + ("  # accepted by the system run" if n in by_system else "") + "\n"
+                        for n in sorted(accepted)))
+    out("dread lift --check: %d accepted after %d rounds (%d by loop cases, %d by the system run; %d written by hand, "
+        "%d refused, %d dropped), into %s" % (len(accepted), rounds, len(by_loops), len(by_system),
+                                             len(by_hand & set(program.by_name)), refused, dropped,
+                                             os.path.relpath(path)))
     return accepted
 
 

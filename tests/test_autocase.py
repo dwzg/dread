@@ -193,3 +193,49 @@ def test_cached_cases_follow_the_whole_image(target):
             for g in (g1, g2)]
     assert keys[0] != keys[1]
     assert cache_key(g1.payload, image.base, fn.insns, sizes, fn.entry, {}, g1.program.arch, g1.environment()) == keys[0]
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_loop_cases_for_a_function_that_never_returns(tmp_path):
+    """A task's loop gets no case that returns. Loop cases stub its callees and end at the same stub
+    call in both images, or at the call of a callee that never returns (its stub ends the run, so
+    the C's endless loop behind that call is never compared); together they run all of it."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.emu import EmuError
+    (tmp_path / "t.c").write_text("volatile int flag;\n"
+                                  "__attribute__((noipa)) void fail(void) { for (;;) ; }\n"
+                                  "__attribute__((noipa)) int poll(int x) { return x + flag; }\n"
+                                  "void task(int p) { for (;;) { int v = poll(p); if (v == 77) fail();"
+                                  " if (v & 1) flag++; } }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "task", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    g = Generator(t, t.image())
+    assert {"task", "fail"} <= g.endless()
+    fn = g.program.by_name["task"]
+    cases = g.generate("task", fn.entry, fn.insns, loop=True)
+    got, words = covered(g, "task", cases)
+    assert got == words, sorted(hex(a) for a in words - got)
+    fail, poll = g.program.by_name["fail"].entry, g.program.by_name["poll"].entry
+    assert all(c.get("hang") and c.get("stub_calls") and c.get("stops") == [fail] for c in cases)
+    assert all(any(x[0] == poll for x in c["calls"]) for c in cases)
+    ends = set()
+    for c in cases:                         # each replays to the same end: a stub call, or the hook's call
+        m = g.machine()
+        m.plan = []
+        g.apply(m, c)
+        r = m.call(fn.entry, *c["args"], max_instructions=c["limit"])
+        ends.add(m.stopped_at)
+        assert r.calls[-1] == ("did not return",)
+    assert ends == {"calls", "never returns"}

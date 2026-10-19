@@ -166,9 +166,30 @@ def test_a_main_loop_is_accepted_by_the_system_run(variant, copies):
     idle loop): without that, the timer never fires in either image and the key path stays unrun."""
     target, image = copy_of(copies, variant)
     lines = []
-    accepted = lift.check(target, image, ["main", "fmt_dec"], out=lines.append, jobs=4)
+    accepted = lift.check(target, image, ["main", "fmt_dec"], out=lines.append, jobs=4, loop_cases=False)
     assert sorted(accepted) == ["fmt_dec", "main"], lines
     assert any(line.startswith("accepted main") and "every scenario agrees" in line for line in lines)
+    assert "main  # accepted by the system run" in open(image.table("lifted")).read()
+    import json
+    from dread import build
+    build.build(target, image, quiet=True)          # from the table: main stays the system run's
+    with open(os.path.join(build.recon_dir(target, image), "lifted.json")) as f:
+        info = json.load(f)
+    assert "main" in info["system"] and "main" not in info["loop"]
+
+
+@pytest.mark.slow
+@pytest.mark.compiles
+def test_a_main_loop_is_accepted_by_loop_cases(variant, copies):
+    """Loop cases: main's callees stubbed, each case compared at the same stub call in both images,
+    every instruction run by some case; the system run is not needed for it."""
+    target, image = copy_of(copies, variant)
+    lines = []
+    accepted = lift.check(target, image, ["main", "fmt_dec"], out=lines.append, jobs=4)
+    assert sorted(accepted) == ["fmt_dec", "main"], lines
+    assert any("(1 by loop cases, 0 by the system run" in line for line in lines), lines[-3:]
+    marked = open(image.table("lifted")).read()
+    assert "\nmain\n" in marked and "accepted by the system run" not in marked
 
 
 @pytest.mark.slow

@@ -87,6 +87,7 @@ VERSION = 12       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
+LOOP_CALLS = 48             # a loop case (a function that never returns) ends at this many stub calls
 SOLVE_RUNS = 3000           # emulator runs per function in the compare-guided stage ...
 SOLVE_COST = 1_500_000      # ... and memory values written for them
 SOLVE_EFFECTS = 64          # memory changes by callees examined per starting input
@@ -140,6 +141,7 @@ class Generator:
         self._flow = None                   # dread.regflow, when a stub's mask needs it
         self._endless = None                # dread.noreturn, when a run hangs in a callee
         self._environment = None            # see environment()
+        self.loop = False                   # generating loop cases (generate(loop=True))
         self.payload = payload if payload is not None else image.payload()
         self.arch = image.arch
         mem = target.memory
@@ -357,6 +359,7 @@ class Generator:
         frame = case.get("frame", 0)
         count = [0]
         made = m.stub_calls = [0]
+        m.stopped_at = None                 # "calls" or "never returns" when a stub ended the run
         effects = case.get("effects", ())
         fills = case.get("fills", ())
         own = set() if case.get("tight") else None
@@ -369,6 +372,7 @@ class Generator:
         def stub(m, *args, target=0, nargs=0, nstack=0):
             made[0] += 1
             if made[0] > case.get("stub_calls", STUB_CALLS):
+                m.stopped_at = "calls"
                 m.uc.emu_stop()
                 return 0
             for number, addr, size, v in effects:
@@ -415,6 +419,14 @@ class Generator:
             nstack = rest[0] if rest else 0
             m.stub(target, lambda m, *a, target=target, nargs=nargs, nstack=nstack:
                    stub(m, *a, target=target, nargs=nargs, nstack=nstack))
+
+        def stop(m, *args, target=0):       # a callee that never returns: the run ends at its call
+            m.log("call 0x%x, never returns" % target)
+            m.stopped_at = "never returns"
+            m.uc.emu_stop()
+            return 0
+        for target in case.get("stops", ()):
+            m.stub(target, lambda m, *a, target=target: stop(m, *a, target=target))
 
     def endless(self):
         """The functions that never return (dread.noreturn), found once."""
@@ -483,13 +495,20 @@ class Generator:
     # ---- the search ----
 
     def generate(self, name, entry, words, calls=(), frame=0, count=40, budget=400, limit=200_000, sweep=3,
-                 fallbacks=True, seconds=None):
+                 fallbacks=True, seconds=None, loop=False):
         """Cases for one function (see the module's docstring). Raises GenerationError when no
         input runs to the end. fallbacks=False skips the io "fixed" and long-run searches;
         seconds bounds the time (a deadline after which every stage stops; the result then
-        depends on the machine's speed, so it is for quick uses such as the integration run)."""
+        depends on the machine's speed, so it is for quick uses such as the integration run).
+
+        loop: the function never returns (a task's loop, a main loop): every callee it calls is
+        stubbed, and a run ends at its LOOP_CALLS-th stub call or at a call of a callee that never
+        returns ("stops": its stub ends the run), the same place in both images however many
+        instructions the C takes; the cases are "hang" cases compared there. A run that ends at the
+        instruction limit instead (a path that calls nothing) is no case."""
         before, self.current = self.current, name
         self.deadline = time.time() + seconds if seconds else None
+        loop_before, self.loop = self.loop, loop
         try:
             if not fallbacks:
                 return self._generate_once(name, entry, words, calls, frame, count, budget, limit, sweep, learn=True)
@@ -497,6 +516,7 @@ class Generator:
         finally:
             self.current = before
             self.deadline = None
+            self.loop = loop_before
 
     def late(self):
         return self.deadline is not None and time.time() > self.deadline
@@ -558,6 +578,16 @@ class Generator:
         known, covered, corpus, extras, faults, last_gain = Cells(), set(), [], [], 0, 0
         calls = [list(c) for c in calls]    # grows by the callees runs hang in (hung, below)
         hung = set()
+        stops = []                          # loop cases: callees that never return end the run
+        if self.loop:
+            have = {c[0] for c in calls}
+            for fn in self.callees(words, depth=1):
+                if fn.entry in have:
+                    continue
+                if fn.name in self.endless():
+                    stops.append(fn.entry)
+                else:
+                    calls.append([fn.entry, self.reads_mask(fn.name), 0])
         pointers = any(c[0] == self.fake_pointer for c in calls)
         pin_args, pin_mem = set(), set()
         data_args, data_mem = {}, {}        # inputs learned to be data pointers -> their buffer
@@ -663,7 +693,8 @@ class Generator:
             return {"args": [value() for _ in range(nregs)],
                     "mem": [[a, s, value()] for a, s in sorted(known.items())],
                     "returns": [value() for _ in range(8)] if calls else [], "calls": [list(c) for c in calls],
-                    "frame": frame, **({"io": "fixed"} if self.io_fixed else {}), **({"limit": self.long} if self.long else {})}
+                    "frame": frame, **({"io": "fixed"} if self.io_fixed else {}), **({"limit": self.long} if self.long else {}),
+                    **({"hang": True, "limit": limit, "stub_calls": LOOP_CALLS, "stops": list(stops)} if self.loop else {})}
 
         spins = {}                          # register -> (size, value) a run spun on
 
@@ -689,6 +720,8 @@ class Generator:
             m.cover(words[0], end)
             m.trace_reads(image.base, image.end, self.code)
             m.call(entry, *case["args"], max_instructions=max_instructions)
+            if self.loop and not m.stopped_at:
+                raise EmuError("a loop case ended at the instruction limit")
             return m
 
         stepping, tree_seen = [], set()     # inputs that only reached new code in callees
@@ -703,7 +736,7 @@ class Generator:
                 break
             if (corpus or stepping) and rng.random() < 0.75:
                 case = json.loads(json.dumps(rng.choice(corpus + stepping)))
-                if case.pop("hang", None):          # a mutant hangs or not by its own run
+                if not self.loop and case.pop("hang", None):    # a mutant hangs or not by its own run
                     if self.long:
                         case["limit"] = self.long
                     else:
@@ -796,8 +829,8 @@ class Generator:
                             continue
                         known.setdefault(a, n)
                 continue
-            if self.touches_image(m):
-                faults += 1
+            if self.touches_image(m) or (self.loop and not m.stopped_at):
+                faults += 1                     # (a loop run that ended at the limit: no common place)
                 continue
             known.learn(m.reads)
             got = m.covered_insns(words)
