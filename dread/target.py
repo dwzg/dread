@@ -60,7 +60,7 @@ IMAGE_KEYS = {
     "original": str, "vendor": str, "container": str, "base": int, "limit": int, "erased": int,
     "entry": (int, str), "config": str, "cases": str, "extra_cases": str, "kept_cases": str,
     "record_specs": str, "src": str, "startup": (list, dict), "tables": dict, "arch": dict, "vectors": int,
-    "free": list,
+    "free": list, "fixed": dict,
 }
 FREE = ("models", "plugins", "scenarios")
 
@@ -266,6 +266,8 @@ class Image:
     container plugin ("module:attr" or "file.py:attr") that unpacks and packs `vendor`
     base      the load address of `original`
     limit     the end of the room the overlay may use behind the image (default: the image's end)
+    fixed     registers that hold one value in the whole program, {name = value}: RISC-V's gp
+              (__global_pointer$, which GCC's code addresses small data from; import-elf writes it)
     free      ranges [[start, end], ...] inside the image that hold nothing (erased flash between the
               code and a vector table at the top): the overlay may put C there (dread import-elf
               writes them from the gaps between an ELF's sections)
@@ -314,6 +316,14 @@ class Image:
             self.arch.configure(target.compiler.cflags)
         self._startup = data.get("startup", [])
         self._free = data.get("free", [])
+        self.fixed = dict(data.get("fixed", {}))
+        for reg, value in self.fixed.items():
+            if not isinstance(value, int):
+                raise TargetError("%s: fixed takes register = value, not %s = %r" % (where, reg, value))
+            try:
+                self.arch.reg_id(reg)
+            except (ValueError, KeyError):
+                raise TargetError("%s: fixed names an unknown register %s" % (where, reg))
         for r in self._free:
             if not (isinstance(r, list) and len(r) == 2 and all(isinstance(v, int) for v in r) and r[0] < r[1]):
                 raise TargetError("%s: free takes ranges [start, end], not %r" % (where, r))

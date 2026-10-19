@@ -299,7 +299,8 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             raise OverlayError("assembling the original's symbols failed:\n" + r.stderr)
         extra.append(obj)
     elf_path = os.path.join(workdir, "recon.elf")
-    r = subprocess.run(target.compiler.command("ld") + target.compiler.ldflags + ["-T", script, "-o", elf_path]
+    extra_ld = arch.linker_flags(target.compiler) if hasattr(arch, "linker_flags") else []
+    r = subprocess.run(target.compiler.command("ld") + target.compiler.ldflags + extra_ld + ["-T", script, "-o", elf_path]
                        + list(objects) + extra, capture_output=True, text=True)
     if r.returncode:
         message = r.stderr

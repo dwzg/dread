@@ -74,6 +74,7 @@ class Layout:
         # the layer's push_return and pop_return then set up a call and return from a stub)
         self.lr = self.arch.reg_id(self.arch.link_reg) if self.arch.link_reg else None
         self.word = self.arch.word                      # the size of a stack argument
+        self.fixed = [(self.arch.reg_id(r), v) for r, v in sorted(image.fixed.items())]     # [image] fixed
         # Cores that can have IT blocks need every hook to clear a stale IT state (Arm.settle_it)
         from dread.program import read_code_ranges
         self.settle_it = self.arch.profile == "m" or any(
@@ -587,6 +588,8 @@ class Machine:
         regs = list(args[:len(lay.arg_regs)])
         stacked = list(args[len(lay.arg_regs):])
         self.arch.initial_status(uc)            # before sp: on the A profile sp is banked per mode
+        for reg, value in lay.fixed:            # registers that hold one value in the whole program (gp)
+            uc.reg_write(reg, value)
         for reg, value in zip(lay.arg_regs, regs):
             uc.reg_write(reg, value & 0xFFFFFFFF)
         uc.reg_write(lay.sp, lay.stack_top)

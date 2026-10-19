@@ -183,3 +183,57 @@ def test_an_extent_does_not_take_a_free_range(tmp_path):
     spans = sorted((p["address"], p["address"] + p["c_bytes"]) for p in placed.values())
     assert all(a_hi <= b_lo for (_, a_hi), (b_lo, _) in zip(spans, spans[1:])), spans
     assert os.path.getsize(payload) > 0
+
+
+@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+def test_gp_holds_one_value(tmp_path):
+    """GCC's RISC-V code addresses small data from gp, which the startup sets to __global_pointer$
+    once: import-elf writes it as a fixed register, the emulator sets it before every call, and the
+    lifter takes it as that constant instead of refusing a function that reads it (FreeRTOS's GCC
+    builds: 209 of 311 functions refused before)."""
+    from dread import elfimport
+    from dread.emu import Layout, Machine
+    from dread.lift import make_lifter
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.c").write_text("int counter = 7;\nint next(void) { return counter + 1; }\n")   # one load: relaxed
+    (tmp_path / "t.ld").write_text(
+        "MEMORY { ROM (rx) : ORIGIN = 0x80000000, LENGTH = 64K\n RAM (rw) : ORIGIN = 0x80080000, LENGTH = 64K }\n"
+        "SECTIONS { .text : { *(.text*) } > ROM\n .sdata : { __global_pointer$ = . + 0x100; *(.sdata*) } > RAM AT > ROM\n"
+        " .sbss : { *(.sbss*) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac", "-mabi=ilp32", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-msmall-data-limit=8", "-T", str(tmp_path / "t.ld"), "-e", "next", "-o", elf, str(tmp_path / "t.c")],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text('''[target]
+name = "gp"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "rom", base = 0x80000000, size = 0x10000, kind = "rom"},
+           {name = "ram", base = 0x80080000, size = 0x10000}]
+stack = {top = 0x80090000, size = 0x1000}
+sentinel = 0x7fff0000
+[image.main]
+original = "original/t.bin"
+base = 0x80000000
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac", "-mabi=ilp32", "-Os"]
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    assert set(image.fixed) == {"gp"}
+    program = Program(target, image)
+    fn = program.by_name["next"]
+    assert any("gp" in (i.op_str or "") for i in program.instructions(fn))     # it does address from gp
+    machine = Machine(Layout(target, image), image.payload())
+    machine.write(0x80080000, (7).to_bytes(4, "little"))      # the startup's copy of .sdata
+    assert machine.call(fn.entry).ret == 8
+    text = make_lifter(program).lift(fn).text
+    assert "gp = 0x%x;" % image.fixed["gp"] in text

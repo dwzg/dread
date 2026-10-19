@@ -258,6 +258,8 @@ class Listing:
                     self.emit_label(addr, out)
                     self.line_addr[(fname, len(out) + 1)] = addr
                     if addr in self.ins:
+                        if hasattr(self.syntax, "before"):     # (RISC-V: compression on or off)
+                            out += self.syntax.before(self.prog.insn(c[0]))
                         out.append(self.render_ins(addr))
                     else:
                         directive, value = self.raw_text(addr)
@@ -283,12 +285,16 @@ class Listing:
             f.writelines('\t.include "%s"\n' % r for r in regions)
 
 
-def build(target, base, outdir, builddir):
-    """Assemble and link; (bytes or None, assembler messages)."""
+def build(target, base, outdir, builddir, arch=None):
+    """Assemble and link; (bytes or None, assembler messages). arch: the image's layer (its flags for
+    the assembler and the linker)."""
     os.makedirs(builddir, exist_ok=True)
     obj, elf, binf = (os.path.join(builddir, n) for n in ("firmware.o", "firmware.elf", "payload.bin"))
     compiler = target.compiler
-    r = subprocess.run(compiler.assembler() + ["-I", outdir, "-o", obj, os.path.join(outdir, "firmware.s")],
+    arch = arch or target.arch
+    extra_as = arch.assembler_flags(compiler) if hasattr(arch, "assembler_flags") else []
+    extra_ld = arch.linker_flags(compiler) if hasattr(arch, "linker_flags") else []
+    r = subprocess.run(compiler.assembler() + extra_as + ["-I", outdir, "-o", obj, os.path.join(outdir, "firmware.s")],
                        capture_output=True, text=True)
     if r.returncode:
         return None, r.stderr
@@ -297,7 +303,7 @@ def build(target, base, outdir, builddir):
     script = os.path.join(builddir, "listing.ld")
     with open(script, "w") as f:
         f.write("SECTIONS\n{\n    . = 0x%x;\n    .text : { *(.text) }\n}\n" % base)
-    for cmd in (compiler.command("ld") + compiler.ldflags + ["-T", script, "-e", "0x%x" % base, "-o", elf, obj],
+    for cmd in (compiler.command("ld") + compiler.ldflags + extra_ld + ["-T", script, "-e", "0x%x" % base, "-o", elf, obj],
                 compiler.command("objcopy") + ["-O", "binary", "-j", ".text", elf, binf]):
         r2 = subprocess.run(cmd, capture_output=True, text=True)
         if r2.returncode:
@@ -358,7 +364,7 @@ def main(argv=None):
               % (attempt, len(listing.ins), len(raw & set(listing.code)), len(listing.funcs), len(listing.notes)))
         if not args.verify:
             return 0
-        binary, stderr = build(target, image.base, outdir, builddir)
+        binary, stderr = build(target, image.base, outdir, builddir, image.arch)
         if binary is None:
             bad = set()
             for fname, line in ASM_ERR_RE.findall(stderr):

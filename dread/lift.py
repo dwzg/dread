@@ -431,7 +431,8 @@ class Lifter:
         except Refused:
             args = self.ARGS
         link = self.arch.link_reg                                # the C knows the return address
-        start = frozenset(r for r in self.REGS + ["flags"] if r not in tuple(args) + ("sp", "pc", link))
+        fixed = tuple(self.prog.image.fixed)                    # one value everywhere ([image] fixed)
+        start = frozenset(r for r in self.REGS + ["flags"] if r not in tuple(args) + ("sp", "pc", link) + fixed)
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
         work = [fn.insns[0]]
         while work:
@@ -504,6 +505,10 @@ class Lifter:
         rd, rs = (self.arch._name(insn.reg_name(o.reg)) for o in ops)
         return (rd, rs) if rd in REGS and rs in REGS and "pc" not in (rd, rs) else None
 
+    def fixed_lines(self, name=lambda r: r):
+        """The lifted C's assignments of the registers that hold one value ([image] fixed)."""
+        return ["    %s = 0x%x;    /* [image] fixed */" % (name(r), v) for r, v in sorted(self.prog.image.fixed.items())]
+
     def leaves(self, fn):
         """The registers beyond r0-r3 a function reads before anything writes them."""
         found = self.entry_states(fn)[1]
@@ -541,6 +546,12 @@ class Lifter:
             a = min(found)
             raise Refused("0x%x reads %s before anything writes it (what its caller leaves)" % (
                 a, ", ".join(sorted(found[a]))))
+        fixed = set(self.prog.image.fixed)
+        for insn in insns:
+            changed = fixed & set(arch.reg_effects(insn)[1])
+            if changed:
+                raise Refused("0x%x writes %s, which holds one value in the whole program ([image] fixed)"
+                              % (insn.address, ", ".join(sorted(changed))))
         self._check_kept(fn)
         handler = self.handler_kind(fn)
         self._check_returns(fn, states, handler)
@@ -659,6 +670,7 @@ class Lifter:
             lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
                          " r10 = 0, r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
         lines.append("    u32 n = 0, z = 0, c = 0, v = 0;")
+        lines += self.fixed_lines()
         if ctx.get("flags_in"):             # read before written (mrs r0, cpsr first): the caller's flags
             lines.append('    { u32 t; __asm__ volatile ("mrs %0, apsr" : "=r"(t)); n = t >> 31; z = t >> 30 & 1; '
                          'c = t >> 29 & 1; v = t >> 28 & 1; }')

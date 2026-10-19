@@ -337,6 +337,10 @@ def free_toml(ranges):
     return "free = [%s]" % ", ".join("[0x%x, 0x%x]" % r for r in ranges)
 
 
+def fixed_toml(fixed):
+    return "fixed = {%s}" % ", ".join("%s = 0x%x" % kv for kv in sorted(fixed.items()))
+
+
 def write_startup(toml_path, image_name, copies, key="startup", block=None):
     """Put the startup list (or another list: key and its TOML text in block) into [image.IMAGE]
     of a dread.toml, in place of the one there (a `KEY = [` line up to the line `]`, or that one
@@ -351,9 +355,10 @@ def write_startup(toml_path, image_name, copies, key="startup", block=None):
         raise tgt.TargetError("%s has no %s section" % (toml_path, header))
     end = next((i for i in range(top + 1, len(lines)) if lines[i].startswith("[")), len(lines))
     block = (block if block is not None else startup_toml(copies)).split("\n")
-    first = next((i for i in range(top + 1, end) if lines[i].replace(" ", "").startswith(key + "=[")), None)
+    first = next((i for i in range(top + 1, end) if lines[i].replace(" ", "").startswith((key + "=[", key + "={"))),
+                 None)
     if first is not None:
-        last = next((i for i in range(first, end) if lines[i].strip() == "]" or lines[i].rstrip().endswith("]")
+        last = next((i for i in range(first, end) if lines[i].strip() == "]" or lines[i].rstrip().endswith(("]", "}"))
                      and i == first), None)
         if last is None:
             raise tgt.TargetError("%s: the %s list in %s does not end with a line ']'" % (toml_path, key, header))
@@ -415,6 +420,14 @@ def main(argv=None):
                                                          os.path.relpath(target.file)))
     elif copies:
         print("startup copies for [image.%s] in dread.toml:\n%s" % (image.name, startup_toml(copies, files)))
+    fixer = getattr(image.arch, "fixed_from_symbols", None)
+    fixed = fixer({s.name: s.value for s in elf.symbols if s.name}) if fixer else {}
+    if fixed and args.write_startup:
+        changed = write_startup(target.file, image.name, None, "fixed", fixed_toml(fixed))
+        print("fixed registers of [image.%s] %s in %s" % (image.name, "updated" if changed else "unchanged",
+                                                            os.path.relpath(target.file)))
+    elif fixed:
+        print("fixed registers for [image.%s] in dread.toml:\n%s" % (image.name, fixed_toml(fixed)))
     free = free_ranges(elf, image.base, region[1] if region else None)
     if free and args.write_startup:
         changed = write_startup(target.file, image.name, None, "free", free_toml(free))

@@ -281,6 +281,9 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
     metrics.update(cc=info["cc"], cflags=" ".join(info["cflags"]))
     truth = {fn.entry for fn in program.functions}
     if "asm" in steps:
+        raw_file = os.path.join(where, "work", "raw.txt")
+        if os.path.exists(raw_file):            # each measurement starts without raw words
+            os.remove(raw_file)
         seconds, code, text = dread("asm", "--target", where, "--verify", "--out", os.path.join(where, "work", "asm-out"),
                                     "--build", os.path.join(where, "work", "asm"),
                                     "--raw", os.path.join(where, "work", "raw.txt"), log=os.path.join(where, "work", "asm.log"))

@@ -449,6 +449,7 @@ class RiscVLifter(lift.Lifter):
             init = ["ra = (u32)__builtin_return_address(0)" if r == "ra" else
                     "%s = p%d" % (r, ARGS.index(r)) if r in ARGS else "%s = 0" % cname(r) for r in regs]
         lines.append("    u32 %s;" % ", ".join(init))
+        lines += self.fixed_lines(cname)
         frame = (ctx["frame"] + 15) & ~15
         lines.append("    u32 frame[%d] __attribute__((aligned(16)));" % max(4, frame // 4))
         lines.append("    u32 sp0 = (u32)&frame[%d];" % (frame // 4))

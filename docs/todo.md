@@ -302,12 +302,24 @@ tool, the page shows its records; the only changes are the command line's own.
 Decompile a real project built by ourselves in many ways, with the ELF as ground truth. The
 repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in `~/dread-bench`.
 
-- [ ] **Recipe and harness**: `bench/freertos.toml` (pinned sources, build configurations) and a tool
-  that fetches, builds, imports (ground truth), and measures per build: the listing's byte-identical
-  rebuild, Ghidra's functions against the ELF's, the lifter's acceptance, coverage, the mutation
-  check, noreturn and regflow; times. First build: the QEMU MPS2 demo for Cortex-M3, GCC -Os.
-- [ ] **The matrix**: Cortex-M3 with GCC -O0/-Os/-O2 and clang -Os/-O2; RISC-V (QEMU virt demo) with
-  GCC and clang -Os; MSP430 (16-bit port) with TI's GCC -Os. Figures per build in a report.
+- [x] **Recipe and harness**: `dread bench` and `bench/freertos.toml`: fetch, build with our flags,
+  import (ground truth), measure (listing, Ghidra against the ELF, the lifter's acceptance, noreturn,
+  seconds), report. It found five faults in DREAD so far (a listing file that began with the last
+  one's tail, an extent over a free range, a crash after a failed generation, the RISC-V listing and
+  link with GNU binutils, gp read as an argument) and brought the "load" startup kind (QEMU's ELF
+  loader filling RAM) and fixed registers ([image] fixed).
+- [x] **The matrix, first part**: Cortex-M3 GCC -O0/-Os/-O2, clang -Os/-O2; RISC-V GCC -Os/-O2. Every
+  listing rebuilds byte for byte; Ghidra finds 235-419 of 295-437 function starts without symbols;
+  the lifter accepts 30-31 % (GCC, ARM), 21-22 % (clang, ARM), 5-6 % (GCC, RISC-V).
+- [ ] **What keeps the lifter at a third**, in order of size: (1) functions that never return (the
+  demo's tasks, 63-78 per build) or are handlers: accepted only through system-run scenarios, so the
+  bench targets need device models of the MPS2 and virt boards (UART, timers, NVIC/SysTick, CLINT)
+  and scenarios; (2) callers that keep values in scratch registers across a call or read what a
+  callee leaves (GCC's -fipa-ra; on RISC-V most of the rest): a build with -fno-ipa-ra to measure
+  it, and C that leaves those registers as the original does (the lifted C knows their values);
+  (3) a few disagreements and failed generations per build (FAIL [generated N], [case generation]):
+  each to be traced (lifter bug or harness).
+- [ ] **The rest of the matrix**: clang for RISC-V; MSP430 (16-bit port) with TI's GCC -Os.
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger).
 - [ ] **New architectures through it**: MSP430X with TI's cl430 (FreeRTOS's MSP430X port), AVR (its

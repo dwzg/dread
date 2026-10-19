@@ -555,6 +555,23 @@ class RiscV:
     def start_address(self, address, isa):
         return address
 
+    def assembler_flags(self, compiler):
+        """GNU as takes the instruction set from its own flags (clang's driver has cflags already)."""
+        if compiler.kind == "clang":
+            return []
+        return [f for f in compiler.cflags if f.startswith(("-march=", "-mabi="))] or \
+            ["-march=rv32%s" % self.extensions, "-mabi=ilp32"]
+
+    def fixed_from_symbols(self, symbols):
+        """The registers that keep one value (dread.target.Image.fixed) from an ELF's symbols: gp is
+        __global_pointer$ (the psABI's convention; GCC's code addresses small data from it)."""
+        value = symbols.get("__global_pointer$")
+        return {"gp": value} if value is not None else {}
+
+    def linker_flags(self, compiler):
+        """GNU ld for RISC-V links 64-bit by default; lld takes the class from the objects."""
+        return [] if compiler.kind == "clang" else ["-m", "elf32lriscv"]
+
     def isa_of_symbol(self, value):
         return "rv32"
 
@@ -638,12 +655,13 @@ class RiscV:
 _EXACT = {}
 
 
-def supports_exact(compiler):
+def supports_exact(compiler, flags=()):
     """Whether the target's assembler knows `.option exact` (LLVM 19 and later; LLVM 18 warns and
-    goes on compressing)."""
+    goes on compressing; GNU as warns "unrecognized .option directive" and goes on). flags: what
+    the layer adds to the assembler (assembler_flags)."""
     import subprocess
     import tempfile
-    command = tuple(compiler.assembler())
+    command = tuple(compiler.assembler()) + tuple(flags)
     if command not in _EXACT:
         with tempfile.TemporaryDirectory() as folder:
             source = os.path.join(folder, "probe.s")
@@ -652,20 +670,21 @@ def supports_exact(compiler):
             try:
                 r = subprocess.run(list(command) + ["-o", os.path.join(folder, "probe.o"), source],
                                    capture_output=True, text=True)
-                _EXACT[command] = r.returncode == 0 and "unknown option" not in r.stderr
+                _EXACT[command] = r.returncode == 0 and "unknown option" not in r.stderr \
+                    and "unrecognized" not in r.stderr
             except OSError:
                 _EXACT[command] = False
     return _EXACT[command]
 
 
 class RiscVAsm:
-    """How dread asm writes RISC-V code: for clang's integrated assembler (llvm-mc), with `.option
+    """How dread asm writes RISC-V code: for clang's integrated assembler (llvm-mc) with `.option
     exact`, so that nothing is compressed or relaxed that the listing does not say. capstone's text
-    is taken as it is: llvm-mc reads its compressed mnemonics (c.addi) and aliases (beqz, mv, li,
-    jalr rd, rs1, imm) as the same encodings. Direct jumps and branches go to labels; an auipc or
-    lui pair keeps its numbers (the same bytes at the same place). An assembler without `.option
-    exact` (LLVM 18) gets `.option norelax` and compresses what it can: the verify loop then writes
-    the original's 32-bit forms of compressible instructions as raw words (still byte-identical)."""
+    is taken as it is: llvm-mc and GNU as read its compressed mnemonics (c.addi) and aliases (beqz,
+    mv, li, jalr rd, rs1, imm) as the same encodings. Direct jumps and branches go to labels; an auipc
+    or lui pair keeps its numbers (the same bytes at the same place). An assembler without `.option
+    exact` (LLVM 18, GNU as) gets `.option norelax` and `.option norvc`, and `.option rvc` around each
+    run of compressed instructions: it compresses only what is written compressed."""
 
     comment = "#"
     directives = {"word": ".4byte", "half": ".2byte", "byte": ".byte", "text": ".asciz"}
@@ -673,12 +692,22 @@ class RiscVAsm:
     def __init__(self, arch):
         self.arch = arch
         self.exact = True
+        self.rvc = False
 
     def configure(self, compiler):
-        self.exact = supports_exact(compiler)
+        self.exact = supports_exact(compiler, self.arch.assembler_flags(compiler))
 
     def prelude(self, isa):
-        return ["\t.option exact" if self.exact else "\t.option norelax"]
+        self.rvc = False
+        return ["\t.option exact"] if self.exact else ["\t.option norelax", "\t.option norvc"]
+
+    def before(self, insn):
+        """Lines in front of an instruction: without `.option exact`, compression on for a
+        compressed one and off for a full one."""
+        if self.exact or (insn.size == 2) == self.rvc:
+            return []
+        self.rvc = insn.size == 2
+        return ["\t.option rvc" if self.rvc else "\t.option norvc"]
 
     def switch(self, isa):
         return []

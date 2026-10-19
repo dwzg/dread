@@ -152,8 +152,11 @@ def _run(program, first, address, names):
         for r in arch.general_regs():
             uc.reg_write(arch.reg_id(r), word)
         arch.initial_status(uc)             # (before sp: the A profile banks sp per mode)
+        for r, value in program.image.fixed.items():    # gp and kin keep their one value
+            uc.reg_write(arch.reg_id(r), value)
         uc.reg_write(arch.reg_id("sp"), word & ~0xFFF)     # a stack address that differs between the runs
-        uc.reg_write(arch.reg_id(arch.link_reg), arch.start_address(word & ~3, isa))
+        if arch.link_reg:
+            uc.reg_write(arch.reg_id(arch.link_reg), arch.start_address(word & ~3, isa))
         try:
             uc.emu_start(arch.start_address(first, isa), address, count=RUN_BACK * 2)
         except UcError:
