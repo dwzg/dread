@@ -60,6 +60,21 @@ LITERAL_LOADS = {
     csarm.ARM_INS_LDRSH: 2, csarm.ARM_INS_LDRD: 8, csarm.ARM_INS_VLDR: 0,   # 0: size from the register
 }
 CALLS = (csarm.ARM_INS_BL, csarm.ARM_INS_BLX)
+# The DSP extension (ARMv7E-M; ARMv5TE and later in ARM state)
+DSP_IDS = {getattr(csarm, "ARM_INS_" + n) for n in (
+    "QADD QSUB QDADD QDSUB QADD16 QADD8 QASX QSAX QSUB16 QSUB8 SADD16 SADD8 SASX SSAX SSUB16 SSUB8 SHADD16 SHADD8 "
+    "SHASX SHSAX SHSUB16 SHSUB8 UADD16 UADD8 UASX USAX USUB16 USUB8 UHADD16 UHADD8 UHASX UHSAX UHSUB16 UHSUB8 "
+    "UQADD16 UQADD8 UQASX UQSAX UQSUB16 UQSUB8 SEL SSAT SSAT16 USAT USAT16 SMLAD SMLADX SMLSD SMLSDX SMUAD SMUADX "
+    "SMUSD SMUSDX SMLALD SMLALDX SMLSLD SMLSLDX SMMUL SMMULR SMMLA SMMLAR SMMLS SMMLSR SMLABB SMLABT SMLATB SMLATT "
+    "SMULBB SMULBT SMULTB SMULTT SMULWB SMULWT SMLAWB SMLAWT SMLALBB SMLALBT SMLALTB SMLALTT PKHBT PKHTB SXTAB16 "
+    "UXTAB16 SXTB16 UXTB16 USAD8 USADA8 UMAAL").split() if hasattr(csarm, "ARM_INS_" + n)}
+# Instructions that add into their destination pair (RdLo, RdHi: read and written)
+ACCUMULATE_PAIR = {getattr(csarm, "ARM_INS_" + n) for n in (
+    "UMLAL SMLAL SMLALD SMLALDX SMLSLD SMLSLDX SMLALBB SMLALBT SMLALTB SMLALTT UMAAL").split()
+    if hasattr(csarm, "ARM_INS_" + n)}
+# Where capstone's own access lists are wrong (operand_roles): the accumulating pairs, which it
+# lists as written only, and ssat16 and usat16, whose source it does not list at all
+OWN_ROLES = DSP_IDS | ACCUMULATE_PAIR
 CONDITION_NAMES = {
     csarm.ARM_CC_EQ: "eq", csarm.ARM_CC_NE: "ne", csarm.ARM_CC_HS: "hs", csarm.ARM_CC_LO: "lo",
     csarm.ARM_CC_MI: "mi", csarm.ARM_CC_PL: "pl", csarm.ARM_CC_VS: "vs", csarm.ARM_CC_VC: "vc",
@@ -500,6 +515,18 @@ class Arm:
             return "push" if i == csarm.ARM_INS_STMDB else "pop"
         return None
 
+    def operand_roles(self, insn):
+        """[(capstone register id, read, written)] of an instruction's register operands, in order,
+        where capstone's access lists are wrong (OWN_ROLES; capstone 5 lists umlal's RdLo and RdHi
+        as written only and leaves ssat16's source out): the first register is written, the second
+        too where the instruction adds into a pair (and both are read then); the others are read.
+        None for other instructions."""
+        if insn.id not in OWN_ROLES:
+            return None
+        pair = 2 if insn.id in ACCUMULATE_PAIR else 1
+        regs = [o.reg for o in insn.operands if o.type == csarm.ARM_OP_REG]
+        return [(r, k >= 1 or pair == 2, k < pair) for k, r in enumerate(regs)]
+
     def reg_effects(self, insn):
         """(reads, writes): the registers an instruction reads and writes, by name (r0-r12, sp, lr,
         pc, "flags" for the condition flags; others by capstone's name). Flags are read by every
@@ -510,6 +537,11 @@ class Arm:
         r, w = insn.regs_access()
         reads = {self._name(insn.reg_name(x)) for x in r}
         writes = {self._name(insn.reg_name(x)) for x in w}
+        for reg, read, written in self.operand_roles(insn) or ():       # capstone's gaps
+            if read:
+                reads.add(self._name(insn.reg_name(reg)))
+            if written:
+                writes.add(self._name(insn.reg_name(reg)))
         if self.sets_flags(insn):
             writes.add("flags")
         if self.is_conditional(insn) and insn.id != csarm.ARM_INS_IT:

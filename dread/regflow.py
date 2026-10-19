@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 7                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 8                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -61,6 +61,9 @@ VERSION = 7                 # 3: entry spills (variadic functions) are no use; 4
                             # layer's register_call_targets: MSP430) is a call of that function, and
                             # a runtime helper's result by the ABI (abi_results) counts as read;
                             # 7: and by the target's compiler profile (dread cclab)
+                            # 8: umlal and smlal (and the DSP extension's accumulating pairs) read
+                            # their RdLo and RdHi, ssat16 and usat16 their source: capstone's lists
+                            # left those out (dread.arch.arm.operand_roles)
 
 
 class RegFlow:

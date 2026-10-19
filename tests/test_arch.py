@@ -148,3 +148,21 @@ def test_original_symbols_carry_their_instruction_set(tmp_path):
     syms = {s.name: s for s in Elf(str(tmp_path / "s.o")).symbols}
     assert syms["thumb_fn"].value == 0x8001 and syms["arm_fn"].value == 0x8100
     assert syms["thumb_fn"].kind == syms["arm_fn"].kind == 2          # STT_FUNC
+
+
+def test_what_capstone_leaves_out_of_an_instructions_registers():
+    """umlal and smlal add into RdLo:RdHi, and so do the DSP extension's smlald and the like: the
+    registers are read as well as written, which capstone 5 does not list; nor ssat16's and usat16's
+    source. The register flow and the lifter take the ARM layer's own roles (operand_roles)."""
+    import capstone as cs
+    from dread import arch as archmod
+    arm = archmod.get({"name": "arm", "isa": "t32", "profile": "m"})
+    md = cs.Cs(cs.CS_ARCH_ARM, cs.CS_MODE_THUMB)
+    md.detail = True
+    for hx, reads, writes in (("e3fb0201", {"r0", "r1", "r2", "r3"}, {"r0", "r1"}),      # umlal r0, r1, r3, r2
+                              ("c1fbc201", {"r0", "r1", "r2"}, {"r0", "r1"}),            # smlald r0, r1, r1, r2
+                              ("24f30002", {"r4"}, {"r2"}),                              # ssat16 r2, #1, r4
+                              ("81fa82f0", {"r1", "r2"}, {"r0"})):                       # qadd r0, r2, r1
+        insn = next(md.disasm(bytes.fromhex(hx), 0x1000))
+        r, w = arm.reg_effects(insn)
+        assert reads <= r and writes <= w, (insn.mnemonic, insn.op_str, r, w)
