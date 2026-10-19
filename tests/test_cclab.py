@@ -101,7 +101,8 @@ def test_gcc_follows_the_procedure_call_standard(tmp_path):
         assert r["ret_ll"]["where"] == "r0:r1"
         assert r["ret_s4"]["where"] == "r0"
         assert r["ret_s8"]["where"].startswith("memory at the address in r0")
-        assert r["size_enum_small"]["value"] in (1, 4) and r["char_is_signed"]["value"] == 0
+        assert r["size_enum_small"]["value"] == 1 and r["char_is_signed"]["value"] == 0   # arm-none-eabi:
+        # short enums by default (the objects say Tag_ABI_enum_size: small), plain char unsigned
         assert r["align_ll"]["value"] == 8
     m0, m3 = got["cortex-m0-O2"], got["cortex-m3-O2"]
     udiv = [h for h in m0["op_udiv"]["helpers"] if h["depth"] == 1]
@@ -291,6 +292,27 @@ def test_the_bundle_leaves_images_and_tables_behind(tmp_path):
     assert "gcc-arm/cortex-m3-O2/results.json" in names and "gcc-arm/cortex-m3-O2/probes/abi.c" in names
     assert "gcc-arm/cortex-m3-O2/obj/abi.o" in names
     assert not any(n.endswith((".elf", ".bin")) or "/config/" in n or "/original/" in n for n in names)
+
+
+@needs_gcc
+def test_compare_names_the_options_that_close_a_difference(tmp_path):
+    """Two compilers side by side: GCC with int-sized enums and signed plain char as the original's
+    compiler, GCC as it comes (arm-none-eabi: short enums, unsigned char) as the rebuilding one. The
+    comparison lists those differences and names the options that close them; the rest agrees."""
+    from dread.cclab import compare
+    text = open(ad.builtin()["gcc-arm"]).read().replace('name = "gcc-arm"', 'name = "variant"')
+    text = text.replace('support_flags = ["-fno-builtin"]',
+                        'support_flags = ["-fno-builtin"]\ncflags = ["-fno-short-enums", "-fsigned-char"]')
+    (tmp_path / "variant.toml").write_text(text)
+    measured(tmp_path, str(tmp_path / "variant.toml"), ["cortex-m3-O2"])
+    measured(tmp_path, "gcc-arm", ["cortex-m3-O2"])
+    said = []
+    assert compare.write(str(tmp_path), "variant", "gcc-arm", out=said.append) == 0
+    md = (tmp_path / "compare-variant-gcc-arm.md").read_text()
+    assert "- -fno-short-enums: `size_enum_small`" in md and "- -fsigned-char: `char_is_signed`" in md
+    assert "| `size_enum_small` | sizeof an enum of 0 and 1 | 4 (all 1) | 1 (all 1) |" in md
+    assert "`pick_i5_5`" not in md and "probes agree on what linking depends on." in md
+    assert compare.write(str(tmp_path), "variant", "nothing", out=said.append) == 1
 
 
 @needs_gcc

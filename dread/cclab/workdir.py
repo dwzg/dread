@@ -31,7 +31,7 @@ COPY`; every proposal is tried before it counts.
 SETTINGS = {"permissions": {"deny": ["Read(./**/image.elf)", "Read(./**/original/**)", "Read(./**/config/**)",
                                      "Read(./**/*.bin)"]}}
 
-BUNDLED = ("results.json", "build.json", "report.md", "version.txt")
+BUNDLED = ("results.json", "build.json", "report.md", "version.txt")      # and compare-*.md
 
 
 def guard(work):
@@ -57,7 +57,8 @@ def bundle(work, out):
             if any(p in ("original", "config", ".claude") for p in parts):
                 continue
             for name in files:
-                keep = name in BUNDLED or (len(parts) >= 3 and parts[-1] in ("probes", "obj"))
+                keep = name in BUNDLED or (len(parts) >= 3 and parts[-1] in ("probes", "obj")) or \
+                    (rel_root == "." and name.startswith("compare-") and name.endswith(".md"))
                 if keep and not name.endswith((".elf", ".bin", ".out")):
                     path = os.path.join(root, name)
                     z.write(path, os.path.relpath(path, work))

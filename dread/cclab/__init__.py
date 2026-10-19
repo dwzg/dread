@@ -12,6 +12,8 @@ compares the builds.
     dread cclab doctor --adapter A [--work DIR]  the tools, their versions, one probe built and run
     dread cclab run --adapter A [--work DIR] [--build KEY...] [--probes NAME...] [--jobs N] [--guard]
     dread cclab report [--work DIR] [--adapter A]
+    dread cclab compare [--work DIR] ORIGINAL REBUILD   where two compilers differ, and the options
+                                                        of the rebuilding one that close a difference
     dread cclab bundle [--work DIR] --out FILE.zip   what may leave the work directory
 
 For a proprietary toolchain (the adapter's guard = true, or --guard), `run` also writes a CLAUDE.md
@@ -168,6 +170,10 @@ def main(argv=None):
     p = sub.add_parser("report", help="compare the builds measured in the work directory")
     p.add_argument("--work", default="cclab-work")
     p.add_argument("--adapter")
+    p = sub.add_parser("compare", help="where two measured compilers differ, with the options that close it")
+    p.add_argument("--work", default="cclab-work")
+    p.add_argument("original", help="the adapter of the compiler that made the image")
+    p.add_argument("rebuild", help="the adapter of the compiler that rebuilds its functions")
     p = sub.add_parser("bundle", help="zip what may leave the work directory (no images, binaries, tables)")
     p.add_argument("--work", default="cclab-work")
     p.add_argument("--out", required=True)
@@ -181,6 +187,9 @@ def main(argv=None):
             return 0
         if args.action == "report":
             return make_report(args.work, args.adapter)
+        if args.action == "compare":
+            from dread.cclab import compare
+            return compare.write(args.work, args.original, args.rebuild)
         if args.action == "bundle":
             from dread.cclab import workdir
             packed = workdir.bundle(args.work, args.out)

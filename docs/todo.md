@@ -63,6 +63,13 @@ IAR's runtime code marked and left out.
   and probes for what the corpus does not answer, each one compiled and run before it counts. A
   CLAUDE.md and deny rules for the lab's work directory keep Claude Code at work to the probes and
   their results: not IAR's runtime code, nothing outside the lab.
+- [x] **`dread cclab compare`** (from the user's question how the lab fits DREAD's workflow, 2026-10-19):
+  two compilers side by side, where the calling convention, the types and what a call keeps differ
+  (what linking rebuilt C into another compiler's image depends on), the options of the rebuilding
+  compiler that close a difference, and apart the code's differences. TI's armcl against GCC: one
+  difference that matters (wchar_t, `-fshort-wchar`), 42 probes agree. Open: feeding the options
+  into a target's `[compiler] cflags` by itself, and the pilot's question naming the original
+  compiler's facts where they differ.
 - [x] **LLM providers for work** (the user, 2026-10-19: "We use GitHub Copilot at work. Could we
   attach that to dread?"): `kind = "command"` runs a command line with the question (in an argument,
   a file or on standard input) and reads the answer, in an empty directory without the environment's

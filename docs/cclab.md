@@ -94,6 +94,26 @@ do), and `--guard` asks for it with any adapter:
   the probe sources and objects. No image, binary or table. (It does so with or without the guard.)
 - What the lab learns about IAR stays out of DREAD's public repository (CLAUDE.md, rule 1).
 
+## Two compilers side by side
+
+DREAD rebuilds a function with GCC or clang and links it over an image another compiler made: the
+rebuilt C calls the original's code and is called by it, so the two compilers must agree on the
+calling convention, the types and what a call keeps. `compare` says where they do not:
+
+```sh
+bin/dread cclab compare --work /mnt/c/cclab-work iar-arm gcc-arm     # the original's, the rebuilding one
+```
+
+`WORK/compare-iar-arm-gcc-arm.md` lists the probes whose results differ (each compiler's results
+with the builds that gave them), the options of the rebuilding compiler that close a difference
+(`-fshort-wchar`, `-fno-short-enums`, `-fsigned-char`, `-fpcc-struct-return`, ...: they go into the
+target's `[compiler] cflags`), and apart, the code's differences (helpers, inline code, saves and
+frames), which matter to a reader, not to linking. TI's armcl against GCC, measured here: one
+difference that matters, `wchar_t` of 2 bytes against 4 (`-fshort-wchar`); 42 probes agree; 31
+differences in the code (TI's tail-calls its helpers at every level but -Ooff, a `tbb` table for a
+dense switch). Arm GCC's own defaults (arm-none-eabi): short enums (the objects say
+`Tag_ABI_enum_size: small`), unsigned plain char. The bundle carries the comparisons.
+
 ## A language model at work
 
 `dread pilot` (and so the lab's builds) asks its questions through a provider of

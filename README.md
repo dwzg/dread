@@ -88,6 +88,7 @@ bin/dread liftfuzz --isa t32                        # the lifter on random instr
 bin/dread test --target examples/gizmo/rv32         # the same tools on the RISC-V build
 bin/dread bench all freertos                        # a real project built many ways, measured (in ~/dread-bench)
 bin/dread cclab run --adapter gcc-arm               # how a compiler compiles: probes run in the emulator
+bin/dread cclab compare ti-arm gcc-arm              # where two compilers differ, and the options that close it
 bin/dread flat --target examples/gizmo/m3 print_status        # one function to read: names, literals, arguments
 bin/dread callsites --target examples/gizmo/m3 --by 0 gpio_set # who calls it, with which constants
 bin/dread callpair --target OTHER --other examples/gizmo/a32 --seed FUN_08000738=main   # names by call order
