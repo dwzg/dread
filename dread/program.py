@@ -162,6 +162,8 @@ def read_ranges(path):
     return out
 
 
+ROOM = 0xFFFF       # extent_owners: room the overlay may fill, nobody's
+
 class Function:
     """One function: name, entry, size (instruction bytes), isa and its instruction addresses."""
 
@@ -279,17 +281,23 @@ class Program:
         function whose extent holds it (its instructions and the literal pools behind them, up to the
         next function: dread.overlay may place C over all of it), 0 elsewhere. A tail behind the last
         instruction that a word of the image points into is data the overlay keeps (a string between
-        two functions), not part of the extent. With it a load of code as data is told from a load
-        of a function's own constants (dread.emu.Machine.trace_reads): a case of FreeRTOS that pointed
-        into another function's pool read other bytes in the rebuilt image."""
+        two functions), not part of the extent. The room the overlay fills besides (the image's free
+        ranges, and behind the image up to its limit) is ROOM, nobody's. With it a load of code as
+        data is told from a load of a function's own constants (dread.emu.Machine.trace_reads): cases
+        of FreeRTOS that pointed into another function's pool, or behind the image, read other bytes
+        in the rebuilt image."""
         if getattr(self, "_owners", None) is None:
             import array
             from dread.overlay import EXTENT_TAIL
             end = self.base + len(self.data)
+            limit = max(end, self.image.limit or end)
             entries = sorted(f.entry for f in self.functions if f.insns)
             words = sorted({v & ~1 for v in struct.unpack_from("<%dI" % (len(self.data) // 4), self.data)
                             if self.base < v < end})
-            owners = array.array("H", bytes(2 * ((len(self.data) + 1) // 2)))
+            owners = array.array("H", bytes(2 * ((limit - self.base + 1) // 2)))
+            for lo, hi in list(self.image.free) + [(end, limit)]:
+                for a in range(max(lo, self.base) & ~1, min(hi, limit), 2):
+                    owners[(a - self.base) >> 1] = ROOM
             for k, f in enumerate(self.functions):
                 if not f.insns:
                     continue
@@ -302,7 +310,8 @@ class Program:
                 if j < len(words) and words[j] < stop:
                     stop = last
                 for a in range(max(f.insns[0] & ~1, self.base), min(stop, end), 2):
-                    owners[(a - self.base) >> 1] = min(k + 1, 0xFFFF)
+                    if owners[(a - self.base) >> 1] != ROOM:
+                        owners[(a - self.base) >> 1] = min(k + 1, ROOM - 1)
             self._owners = owners
         return self._owners
 

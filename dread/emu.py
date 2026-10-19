@@ -475,6 +475,8 @@ class Machine:
         an instruction of another function (a function's own literal pools are its constants)."""
         self.reads = {}
         self.code_reads = False
+        if owners is not None:              # (its table reaches over the room behind the image)
+            image_hi = max(image_hi, image_lo + 2 * len(owners))
         fast = self.core.fast
         if fast is not None:
             fast.set_code(code, image_lo, image_hi, owners, self.layout.pc)

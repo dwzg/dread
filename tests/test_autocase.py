@@ -243,9 +243,9 @@ def test_loop_cases_for_a_function_that_never_returns(tmp_path):
 
 def test_loads_from_another_functions_pool_are_code_reads():
     """A case that pointed into another function's literal pool read other bytes in the rebuilt
-    image, where the overlay had put C over that pool (FreeRTOS: a queue at an address in code).
-    A load from a function's extent by an instruction of another function is a load of code; a
-    function's own literal loads are not (its constants), and loads of instructions are."""
+    image, where the overlay had put C over that pool or behind the image. A load from a function's
+    extent by an instruction of another function, or from the room the overlay fills, is a load of
+    code; a function's own literal loads are not (its constants), and loads of instructions are."""
     from dread.emu import EmuError
     t = Target.load(gizmo_dir("m3"))
     g = Generator(t, t.image())
@@ -267,12 +267,14 @@ def test_loads_from_another_functions_pool_are_code_reads():
     except EmuError:
         pass
     assert not m.code_reads
-    # the same function handed a pointer into another function's pool loads code
-    case["args"][0] = pool
-    m = g.machine(); m.plan = []; g.apply(m, case)
-    m.trace_reads(t.image().base, t.image().end, g.code, owners)
-    try:
-        m.call(fn.entry, *case["args"], max_instructions=100_000)
-    except EmuError:
-        pass
-    assert m.code_reads
+    # the same function handed a pointer into another function's pool, or behind the image where
+    # the overlay puts C (FreeRTOS: a queue at 0x10000, zeros in the original), loads code
+    for pointer in (pool, t.image().end + 0x100):
+        case["args"][0] = pointer
+        m = g.machine(); m.plan = []; g.apply(m, case)
+        m.trace_reads(t.image().base, t.image().end, g.code, owners)
+        try:
+            m.call(fn.entry, *case["args"], max_instructions=100_000)
+        except EmuError:
+            pass
+        assert m.code_reads, hex(pointer)
