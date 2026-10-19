@@ -35,11 +35,6 @@ def test_refusals_name_their_reason(variant):
         assert refused == {}
         return
     assert "reads r1 behind the call of uart_putc" in refused.pop("uart_puts")     # dread.regflow's finding
-    if variant == "m4":         # the hard-float calling convention, not modelled yet (docs/todo.md, Cortex-M4)
-        assert "reads s0, s1 before anything writes it" in refused.pop("lp_filter")         # float arguments
-        assert "reads s0 before anything writes it" in refused.pop("to_millivolts")
-        assert "leaves a value in s14" in refused.pop("average")                            # a float result
-        assert "calls to_millivolts, which uses the FPU" in refused.pop("signal_step")
     if variant == "a32":
         assert "changes the stack pointer" in refused.pop("reset")
         assert "branches into other code" in refused.pop("__aeabi_uidivmod")
@@ -120,6 +115,21 @@ def copies(tmp_path_factory):
 def copy_of(copies, variant):
     target = Target.load(str(copies / variant))
     return target, target.image()
+
+
+@pytest.mark.compiles
+def test_float_functions_lift_with_the_hard_float_convention(copies):
+    """gizmo-m4's float functions: float arguments in s0-s2 (lp_filter, to_millivolts), a float
+    result (average), a call of one with a float argument (signal_step). The lifted C mirrors s0-s15
+    at its entry, its returns and around its calls, the generated cases give float arguments, and
+    every case agrees and runs every instruction."""
+    target, image = copy_of(copies, "m4")
+    names = ["lp_filter", "to_millivolts", "average", "signal_step"]
+    lines = []
+    assert sorted(lift.check(target, image, names, out=lines.append, jobs=4)) == sorted(names), lines
+    program = Program(target, image)
+    text = lift.make_lifter(program, regflow.load(target, image, program)).lift(program.by_name["to_millivolts"]).text
+    assert 'vmov %0, s0' in text and 'vcvt.s32.f32 s15, s14' in text and 'vmov s0, %0' in text
 
 
 @pytest.mark.compiles

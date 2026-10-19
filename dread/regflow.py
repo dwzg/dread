@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 9                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 10                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -66,6 +66,7 @@ VERSION = 9                 # 3: entry spills (variadic functions) are no use; 4
                             # left those out (dread.arch.arm.operand_roles)
                             # 9: the FPU's block transfers (vldm writes, vstm reads, vpush and vpop),
                             # vmrs APSR_nzcv writes the flags, d<n> is s<2n> and s<2n+1>
+                            # 10: with hard float, s0-s15 are followed like the scratch registers
 
 
 class RegFlow:
@@ -242,8 +243,10 @@ def variadic_save_area(program, fn, insns, joins):
 
 
 def scratch_names(target, arch):
+    """The registers a call may leave changed, which the analysis follows: the scratch registers,
+    the flags, and where floats travel in the FPU (hard float) its argument registers (s0-s15)."""
     callee_saved = set(target.abi.callee_saved)
-    return [r for r in arch.general_regs() if r not in callee_saved] + ["flags"]
+    return [r for r in arch.general_regs() if r not in callee_saved] + ["flags"] + list(target.abi.fp_arg_regs)
 
 
 POOL_REACH = 0x1000         # how far behind a function's last instruction its pool may lie

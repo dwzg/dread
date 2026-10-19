@@ -143,3 +143,10 @@ def test_compiler_kinds(tmp_path):
     with pytest.raises(TargetError, match="triple"):
         Target.load(write(tmp_path / "bad", MINIMAL + '\n[compiler]\nkind = "clang"\n'))
 
+
+def test_the_float_convention_comes_from_the_flags():
+    """[abi] float: hard where the compiler's flags say -mfloat-abi=hard (gizmo-m4), soft otherwise;
+    with hard float the FPU's argument registers are s0-s15."""
+    m4, m3 = Target.load(gizmo_dir("m4")), Target.load(gizmo_dir("m3"))
+    assert m4.abi.float == "hard" and m4.abi.fp_arg_regs == ["s%d" % k for k in range(16)]
+    assert m3.abi.float == "soft" and m3.abi.fp_arg_regs == []

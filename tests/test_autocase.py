@@ -407,3 +407,18 @@ def test_msp430_calls_through_a_register_are_callees():
     names = {program.by_entry[e].name for entries in found.values() for e in entries}
     assert {"uart_puts", "handle_key"} <= names
     assert {"uart_puts", "handle_key"} <= {f.name for f in gen.callees(main.insns, depth=1)}
+
+
+def test_float_arguments_get_values_of_their_own():
+    """A function that reads FPU registers at its entry under hard float gets float arguments
+    (fregs, fargs): to_millivolts' s0 takes both signs, so both of its paths run."""
+    from dread import autocase
+    from dread.target import Target
+    from conftest import gizmo_dir
+    target = Target.load(gizmo_dir("m4"))
+    gen = autocase.Generator(target, target.image())
+    fn = gen.program.by_name["to_millivolts"]
+    cases = gen.generate("to_millivolts", fn.entry, fn.insns)
+    assert all(c.get("fregs") == ["s0"] for c in cases)
+    signs = {c["fargs"][0] >> 31 for c in cases if c["fargs"][0] & 0x7FFFFFFF}
+    assert signs == {0, 1}

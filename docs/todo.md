@@ -588,8 +588,16 @@ of the MSP430 section comes after this one.
   vpush's and vpop's as both (the ARM layer replaces those lists); and the lifter's entry analysis
   refused a register read under the condition it was written under in the same IT block (vmovgt
   s15, r1; vcvtgt s15, s15), core registers alike.
-- [ ] **The hard-float calling convention**: the s0-s15 arguments and the s0 result in the harness,
-  regflow, the case generator (float inputs: NaNs, infinities, denormals, boundaries) and stubs.
+- [x] **The hard-float calling convention** (2026-10-19): `[abi] float` (hard where the cflags say
+  -mfloat-abi=hard); regflow follows s0-s15 like the scratch registers (float arguments in
+  read_regs, float results in kept_regs, which the runner compares); the case generator gives the
+  FPU registers a function reads at its entry values of their own (zeros, ones, boundaries of the
+  integer conversions, normal limits, denormals, infinities, NaNs, the function's float constants,
+  any bits); the lifted C mirrors s0-s15 where it meets other code (at its entry, at every return,
+  around every call), so float arguments, results and what a callee changes are exact. gizmo-m4: all
+  four float functions pass the lift check (42 accepted, what gizmo-m3's does and more). Not yet: a
+  generic stub's log of a callee's float arguments; a float result that nothing in the image reads
+  is not compared (as an integer register beyond r0); vpush, vpop and double precision stay refused.
 - [ ] **The system run with an FPU**: the extended exception frame, lazy stacking (FPCCR) and the
   EXC_RETURN values with FP context in dread.models.nvic.
 - [ ] **FreeRTOS on it**: the ARM_CM4F port on QEMU's mps2-an386 (Cortex-M4) in the benchmark's

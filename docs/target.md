@@ -139,6 +139,7 @@ address faults before the run can stop.
 | `args` | how many argument registers (default ARM 4: r0-r3; RISC-V 8: a0-a7) |
 | `callee_saved` | the registers a function preserves (default ARM r4-r11; RISC-V s0-s11) |
 | `result` | the registers a result comes back in (default ARM r0, r1; RISC-V a0, a1) |
+| `float` | `"hard"`: floats travel in the FPU's argument registers (ARM: s0-s15, as the procedure call standard's VFP variant says), which the register flow, the generated cases and the lifted C then follow; `"soft"`: in the core registers. Default: hard where `[compiler] cflags` has `-mfloat-abi=hard` |
 
 ### `[compiler]`
 

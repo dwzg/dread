@@ -5,6 +5,7 @@ Reset_Handler
 TIMER_IRQHandler
 __ram_crc_veneer
 apply_config
+average
 beep_off
 beep_on
 clamp12
@@ -23,6 +24,7 @@ keys_read
 led_off
 led_on
 level8
+lp_filter
 main
 memcmp
 memcpy
@@ -32,10 +34,12 @@ parse_kv
 print_status
 read_line
 script_run
+signal_step
 strlen
 strncpy
 timer_irq
 timer_start
+to_millivolts
 uart_getc
 uart_init
 zero_words_constprop_0

@@ -101,6 +101,13 @@ VFP_MOVES = {getattr(A, "ARM_INS_" + n) for n in ("VMOV", "FCONSTS", "FCONSTD") 
 VFP = VFP_ASM | VFP_MEMORY | VFP_MOVES | {A.ARM_INS_VMRS, A.ARM_INS_VMSR, A.ARM_INS_FMSTAT}
 # (capstone's ids: FCONSTS is vmov.f32 sN, #const; FMSTAT is vmrs APSR_nzcv, fpscr)
 FP_SCRATCH = ("s15", "s14", "s13", "s12")    # the inline assembly's own registers (caller-saved)
+# FPU_MIRROR: a function that uses the FPU keeps the core's s0-s15 and its own f0-f15 alike where it
+# meets other code: it reads them at its entry, hands them back at every return, and around every
+# call hands them over and reads them back (Lifter._fp_sync). So float arguments and results in
+# the FPU's registers (hard float), and whatever a callee changes there, are exact; the C keeps
+# none of them in s0-s15 itself (its own asm uses the scratch registers above), and s16-s31, which
+# a call keeps, it never touches.
+FPU_MIRRORED = frozenset("s%d" % k for k in range(16))
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
@@ -192,10 +199,6 @@ class Lifter:
         self.prog, self.arch, self.flow = program, program.arch, flow
         self._stack_args, self._entry, self._resolved, self._states, self._handlers = {}, {}, {}, {}, {}
         self._noreturn = set(endless) if endless is not None else None
-        # Lift a function that leaves values in the FPU's argument registers (s0-s15), which a
-        # caller may read: only where they are compared (dread liftfuzz stores them to memory); the
-        # test runner does not compare them yet (the hard-float calling convention, docs/todo.md)
-        self.fp_results = False
         path = program.image.table("asm_only")
         self.asm_only = read_ranges(path) if path and os.path.exists(path) else []
 
@@ -554,7 +557,8 @@ class Lifter:
             args = self.ARGS
         link = self.arch.link_reg                                # the C knows the return address
         fixed = tuple(self.prog.image.fixed)                    # one value everywhere ([image] fixed)
-        fpu = ["s%d" % k for k in range(32)] if getattr(self.arch, "fp_arg_regs", None) else []    # (ARM)
+        # (ARM) s0-s15 are the lifted C's at the entry (FPU_MIRROR); s16-s31 hold the caller's
+        fpu = ["s%d" % k for k in range(16, 32)] if getattr(self.arch, "fp_arg_regs", None) else []
         start = frozenset(r for r in self.REGS + ["flags"] + fpu if r not in tuple(args) + ("sp", "pc", link) + fixed)
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
         work = [fn.insns[0]]
@@ -695,7 +699,7 @@ class Lifter:
             if kind == "jump" and target is not None and (target & ~1) in depth:
                 targets.add(target & ~1)
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
-                    "flags_in": flags_in, "handler": handler,
+                    "flags_in": flags_in, "handler": handler, "fp": any(i.id in VFP for i in insns),
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
         body = []
@@ -715,32 +719,12 @@ class Lifter:
                       [a for a in fn.insns if a not in depth and a not in stubs])
 
     def _check_fpu(self, fn, insns):
-        """Refuse what the FPU's registers cannot carry yet: in a function that uses them, a call of
-        one that uses them too (a hard-float callee takes and returns floats in s0-s15, which the C
-        call does not pass) or through a register; and,
-        unless fp_results, a value left in s0-s15 (a caller may read it, the runner does not
-        compare it). Reading one before writing it (a float argument) is refused with the other
-        registers a caller leaves (entry_states)."""
-        if not any(i.id in VFP for i in insns):
-            return
-        for insn in insns:
-            kind, target, _ = self.arch.flow(insn)
-            if kind == "icall":
-                raise Refused("0x%x calls through a register while it uses the FPU: the hard-float calling "
-                              "convention is not modelled yet" % insn.address)
-            callee = self.prog.by_entry.get(target & ~1) if kind in ("call", "jump") and isinstance(target, int) \
-                else None
-            if callee is not None and callee is not fn and any(
-                    c is not None and c.id in VFP for c in self.prog.instructions(callee)):
-                raise Refused("0x%x calls %s, which uses the FPU (float arguments and results in s0-s15): the "
-                              "hard-float calling convention is not modelled yet" % (insn.address, callee.name))
-        if not self.fp_results:
-            for insn in insns:
-                left = sorted(r for r in self.arch.reg_effects(insn)[1]
-                              if r[:1] == "s" and r[1:].isdigit() and int(r[1:]) < 16)
-                if left:
-                    raise Refused("0x%x leaves a value in %s, which a caller may read (the hard-float calling "
-                                  "convention is not modelled yet)" % (insn.address, left[0]))
+        """Refuse what the FPU's registers cannot carry: an exception handler that uses them. The rest
+        is the mirror (FPU_MIRROR); once,
+        reading s16-s31 before writing them is refused with the other registers a caller leaves
+        (entry_states)."""
+        if any(i.id in VFP for i in insns) and self.handler_kind(fn):
+            raise Refused("an exception handler that uses the FPU (its lazily stacked context is not modelled)")
 
     def handler_kind(self, fn):
         """"IRQ" or "SWI" when the function is an A-profile exception handler (its returns are
@@ -828,8 +812,9 @@ class Lifter:
             lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
                          " r10 = 0, r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
         lines.append("    u32 n = 0, z = 0, c = 0, v = 0;")
-        if ctx.get("fp"):                   # the FPU's registers, as bit patterns (see VFP)
+        if ctx.get("fp"):                   # the FPU's registers, as bit patterns (see VFP), s0-s15 the caller's
             lines.append("    __attribute__((unused)) u32 %s;" % ", ".join("f%d = 0" % k for k in range(32)))
+            lines.append("    " + self._fp_sync("in").strip())
         lines += self.fixed_lines()
         if ctx.get("flags_in"):             # read before written (mrs r0, cpsr first): the caller's flags
             lines.append('    { u32 t; __asm__ volatile ("mrs %0, apsr" : "=r"(t)); n = t >> 31; z = t >> 30 & 1; '
@@ -854,7 +839,7 @@ class Lifter:
         if flow is None:
             return
         result = {"r0", "r1"} if self._wide(fn.name) else {"r0"}
-        kept = set(flow.kept_regs(fn.name)) - result
+        kept = set(flow.kept_regs(fn.name)) - result - FPU_MIRRORED     # (handed back at every return)
         if "flags" in kept:
             raise Refused("its callers read the flags it leaves (%s)" % flow.why(fn.name, "flags"))
         written = sorted(kept - set(flow.preserved_regs(fn.name)))
@@ -1021,7 +1006,7 @@ class Lifter:
                 loads = self._frame_ldm(insn, returning=True)
             else:
                 loads = ""
-            return (loads + " " if loads else "") + "return %s;" % self._ret()
+            return (loads + " " if loads else "") + self._fp_sync("out") + "return %s;" % self._ret()
         if kind == "jump":
             t = target & ~1
             if i in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ):
@@ -1035,19 +1020,19 @@ class Lifter:
             callee = prog.by_entry.get(t)
             if callee is None:
                 raise Refused("0x%x branches into other code (0x%x)" % (insn.address, t))
-            call = self._call(callee, insn)
+            call = self._fp_call(self._call(callee, insn))
             if arch.predicate(insn) is not None:
-                return "if (%s) { %s return %s; }" % (COND[insn.cc], call, self._ret())
-            return "%s return %s;" % (call, self._ret())
+                return "if (%s) { %s %sreturn %s; }" % (COND[insn.cc], call, self._fp_sync("out"), self._ret())
+            return "%s %sreturn %s;" % (call, self._fp_sync("out"), self._ret())
         if kind == "call":
             callee = prog.by_entry.get(target & ~1)
             if callee is None:
                 raise Refused("0x%x calls into the middle of something (0x%x)" % (insn.address, target))
-            text = self._call(callee, insn)
+            text = self._fp_call(self._call(callee, insn))
             return text + " for (;;) { }" if self.never_returns(callee.name) else text
         if kind == "icall":
             if i == A.ARM_INS_BLX:
-                return self._icall(insn, self.reg(ops[0].reg))
+                return self._fp_call(self._icall(insn, self.reg(ops[0].reg)))
             if getattr(insn, "call_via", None) in REGS:     # bl to a bx rN stub: Thumb-1's call through rN
                 return self._icall(insn, insn.call_via)
             if getattr(insn, "link_call", False):   # mov lr, pc in front: ARMv4T's call through a register
@@ -1064,7 +1049,7 @@ class Lifter:
             raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
         if kind == "ijump":
             if self.ret_jump(insn, self.values()):
-                return "return %s;" % self._ret()
+                return self._fp_sync("out") + "return %s;" % self._ret()
             return self._switch_jump(insn)
         if kind == "stop":
             raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
@@ -1217,12 +1202,34 @@ class Lifter:
             return ["f%d" % (2 * k), "f%d" % (2 * k + 1)]
         return None
 
+    def _fp_sync(self, direction):
+        """In a function that uses the FPU (FPU_MIRROR): the C's f0-f15 into the core's s0-s15
+        ("out": before a call and at a return) or back ("in": at the entry and after a call), four
+        registers to an asm statement (each takes a core register). Empty elsewhere."""
+        if not self.ctx.get("fp"):
+            return ""
+        out = []
+        for k in range(0, 16, 4):
+            group = range(k, k + 4)
+            if direction == "out":
+                text = "\\n\\t".join("vmov s%d, %%%d" % (r, j) for j, r in enumerate(group))
+                out.append('__asm__ volatile ("%s" :: %s : %s);' % (
+                    text, ", ".join('"r"(f%d)' % r for r in group), ", ".join('"s%d"' % r for r in group)))
+            else:
+                text = "\\n\\t".join("vmov %%%d, s%d" % (j, r) for j, r in enumerate(group))
+                out.append('__asm__ volatile ("%s" : %s);' % (text, ", ".join('"=r"(f%d)' % r for r in group)))
+        return " ".join(out) + " "
+
+    def _fp_call(self, text):
+        """A call in a function that uses the FPU: s0-s15 as the C has them before it (a hard-float
+        callee's arguments), as the callee left them after it (its result, what it changed)."""
+        return (self._fp_sync("out") + text + " " + self._fp_sync("in")).strip() if self.ctx.get("fp") else text
+
     def _vfp(self, insn, ops, isa):
         """An FPU instruction: see VFP above. The FPU's own state (the rounding mode, the cumulative
         exception flags, the flags of a compare until vmrs moves them) stays in the core, which the
         lifted C runs on as well."""
         i, a = insn.id, insn.address
-        self.ctx["fp"] = True
         if i in VFP_MOVES:
             return self._vmov(insn, ops)
         if i in VFP_MEMORY:
@@ -1431,6 +1438,8 @@ class Lifter:
             return
         result = {"r0", "r1"} if self._wide(callee.name) else {"r0"}
         for reg in flow.kept_regs(callee.name):
+            if reg in FPU_MIRRORED:
+                continue                    # read back after the call (FPU_MIRROR)
             if reg not in result and (self.ctx["fn"].name, insn.address) in flow.sites_of(callee.name, reg):
                 raise Refused("0x%x reads %s behind the call of %s (what the callee leaves)" % (
                     insn.address, reg, callee.name))

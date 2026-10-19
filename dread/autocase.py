@@ -79,7 +79,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 22       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 23       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -103,7 +103,9 @@ VERSION = 22       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 21: the Cortex-M a target names is the core cases run on (dread.arch.arm.uc_mode:
                   # with UC_MODE_MCLASS Unicorn built a Cortex-M33 whatever the target named);
                   # 22: near misses repaired (an input that ran new code, then faulted or looped to the
-                  # limit in the function itself: each argument in turn set small)
+                  # limit in the function itself: each argument in turn set small);
+                  # 23: float arguments (hard float): the FPU registers a function reads at its entry
+                  # (dread.regflow) get values of their own (FLOATS, its float constants, any bits)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -124,6 +126,12 @@ LONG_SECONDS = 120          # the last-resort search gives up after this long wi
 KEPT_MAX = 6
 HUNG_STUBS = 4              # callees at most that get stubbed because runs hung in them
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
+# Float arguments (hard float), as bits: zeros, ones, halves, decimal steps, the integer conversions'
+# bounds, the smallest and largest normal numbers, denormals, infinities, quiet and signalling NaNs
+FLOATS = (0x00000000, 0x80000000, 0x3F800000, 0xBF800000, 0x3F000000, 0xBF000000, 0x40000000, 0x3E800000,
+          0x41200000, 0x42C80000, 0x447A0000, 0x3A83126F, 0x3DCCCCCD, 0x40533333, 0xC0533333, 0x49742400,
+          0xC9742400, 0x7149F2CA, 0x4F000000, 0xCF000000, 0x4F800000, 0x477FFF00, 0x00800000, 0x7F7FFFFF,
+          0x00000001, 0x007FFFFF, 0x7F800000, 0xFF800000, 0x7FC00000, 0x7F800001)
 HUNG_STOP = 0.5             # share of fresh inputs in which such a callee ends the run instead ("stops")
 POINTER_REACH = 0x1000      # a fault this far behind an input's value makes the input a learned pointer
 POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTER_BASE ...
@@ -269,7 +277,7 @@ class Generator:
             isa = self.program.isa_at(ins.address)
             found.update(self.arch.immediates(ins))
             lit = self.arch.literal(ins, isa)
-            if lit and lit[1] == 4 and self.program.in_image(lit[0], 4):
+            if lit and lit[1] in (0, 4) and self.program.in_image(lit[0], 4):     # (0: vldr, a float constant)
                 found.add(self.program.word(lit[0]))
         near = set()
         for v in found:
@@ -382,6 +390,8 @@ class Generator:
         fixed = {} if case.get("io") == "fixed" else None
         if case.get("hang"):
             m.may_hang = True
+        for reg, v in zip(case.get("fregs", ()), case.get("fargs", ())):     # float arguments (hard float)
+            m.uc.reg_write(self.program.arch.reg_id(reg), v & 0xFFFFFFFF)
         function = getattr(m, "function", None) or self.current
         m.arg_domains = self.argument_domains.get(function, []) if function else []
         extra = self.pointed(function, confine_args(m.arg_domains, case["args"]))
@@ -501,6 +511,25 @@ class Generator:
             h.update(b"regflow %d" % regflow.VERSION)
             self._environment = h.hexdigest()
         return self._environment
+
+    def flow(self):
+        """dread.regflow for the image, loaded once; False when it cannot be made."""
+        if self._flow is None:
+            from dread import regflow
+            try:
+                self._flow = regflow.load(self.target, self.image, self.program)
+            except Exception:
+                self._flow = False
+        return self._flow
+
+    def fp_inputs(self, name):
+        """The FPU registers a function reads at its entry where floats travel in them (hard float:
+        its float arguments, s0-s15 on ARM), as dread.regflow finds them; [] otherwise."""
+        regs = list(self.target.abi.fp_arg_regs)
+        if not regs or not name or not self.flow():
+            return []
+        reads = set(self._flow.read_regs(name))
+        return [r for r in regs if r in reads]
 
     def reads_mask(self, name):
         """The argument registers a function reads at its entry (dread.regflow), as a stub's logging
@@ -650,6 +679,7 @@ class Generator:
         data_args, data_mem = {}, {}        # inputs learned to be data pointers -> their buffer
         words_set = set(words)
         nregs = len(self.layout.arg_regs)
+        fregs = self.fp_inputs(name)        # float arguments in the FPU's registers (hard float)
 
         def buffer_for(slot):
             """A scratch buffer of its own for each learned data pointer, below the stub address."""
@@ -688,6 +718,21 @@ class Generator:
 
         def value():
             return rng.choice(hot) if rng.random() < 0.5 else rng.choice(pool)
+
+        floats = [w for w in sorted(exact) if 0x00800000 <= w & 0x7FFFFFFF < 0x7F800000]   # (its float constants)
+
+        def fvalue():
+            """A float argument: the boundaries and special values (FLOATS), the function's own float
+            constants, or any bits."""
+            r = rng.random()
+            if r < 0.6:
+                return rng.choice(FLOATS)
+            if r < 0.85 and floats:
+                return rng.choice(floats) ^ (0x80000000 if rng.random() < 0.3 else 0)
+            return rng.getrandbits(32)
+
+        def any_value(kind):
+            return fvalue() if kind == "fargs" else value()
 
         small = [False]
 
@@ -759,6 +804,7 @@ class Generator:
             case = {"args": [small_value() if small[0] else value() for _ in range(nregs)],
                     "mem": [[a, s, value()] for a, s in sorted(known.items())],
                     "returns": [value() for _ in range(8)] if calls else [], "calls": [list(c) for c in calls],
+                    **({"fregs": list(fregs), "fargs": [fvalue() for _ in fregs]} if fregs else {}),
                     "frame": frame, **({"io": "fixed"} if self.io_fixed else {}), **({"limit": self.long} if self.long else {}),
                     **({"hang": True, "limit": limit, "stub_calls": LOOP_CALLS, "stops": list(stops)} if self.loop else {})}
             # A callee a run hung in either returns from its stub (the code behind the call runs) or
@@ -859,12 +905,13 @@ class Generator:
                 else:
                     for _ in range(rng.choice((1, 1, 2, 3))):
                         slots = [("args", i) for i in range(nregs)] + [("mem", i) for i in range(len(case["mem"]))] \
-                            + [("returns", i) for i in range(len(case["returns"]))]
+                            + [("returns", i) for i in range(len(case["returns"]))] \
+                            + [("fargs", i) for i in range(len(case.get("fargs", ())))]
                         kind, i = rng.choice(slots)
                         if kind == "mem":
                             case["mem"][i][2] = value()
                         else:
-                            case[kind][i] = value()
+                            case[kind][i] = any_value(kind)
                 if pin_args or pin_mem or data_args or data_mem:
                     pinned(case)
                 if spins and rng.random() < SPIN_POLL / 2:
@@ -991,13 +1038,14 @@ class Generator:
                 present = {a for a, _, _ in case["mem"]}
                 case["mem"] += [[a, s, value()] for a, s in sorted(known.items()) if a not in present]
                 slots = [("args", i) for i in range(nregs)] + [("mem", i) for i in range(len(case["mem"]))] \
-                    + [("returns", i) for i in range(len(case["returns"]))]
+                    + [("returns", i) for i in range(len(case["returns"]))] \
+                    + [("fargs", i) for i in range(len(case.get("fargs", ())))]
                 for _ in range(rng.choice((1, 1, 1, 2))):
                     kind, i = rng.choice(slots)
                     if kind == "mem":
                         case["mem"][i][2] = value()
                     else:
-                        case[kind][i] = value()
+                        case[kind][i] = any_value(kind)
                 try:
                     m = run(case)
                 except EmuError:
@@ -1037,7 +1085,8 @@ class Generator:
                 return (m, None) if m.timed_out else (None, None)
         for base in (corpus[:first_stages][-sweep:] + corpus[first_stages:][-sweep:] if corpus else extras[:1]):
             slots = [("args", i) for i in range(nregs)] + [("mem", i) for i in range(len(base["mem"]))] \
-                + [("returns", i) for i in range(len(base["returns"]))]
+                + [("returns", i) for i in range(len(base["returns"]))] \
+                + [("fargs", i) for i in range(len(base.get("fargs", ())))]
             if len(slots) * len(ladder) > SWEEP_RUNS:
                 slots = rng.sample(slots, max(4, SWEEP_RUNS // len(ladder)))
             for kind, i in slots:
@@ -1330,7 +1379,8 @@ class Generator:
 
                 depends = {at: [] for at in watch}
                 slots = [("args", i) for i in range(nregs)] + [("mem", i) for i in range(len(base["mem"]))] \
-                    + [("returns", i) for i in range(len(base["returns"]))]
+                    + [("returns", i) for i in range(len(base["returns"]))] \
+                    + [("fargs", i) for i in range(len(base.get("fargs", ())))]
                 mem = [s for s in slots if s[0] == "mem"]
                 if len(mem) > SOLVE_SLOTS:
                     mem = sorted(solver.sample(mem, SOLVE_SLOTS))

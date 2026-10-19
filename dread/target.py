@@ -50,7 +50,7 @@ SCHEMA = {
     "arch": {"name": str, "isa": str, "profile": str, "cpu": str, "endian": str, "ghidra": str, "thumb2": bool,
              "extensions": str},
     "memory": {"regions": list, "io": list, "stack": dict, "sentinel": int, "scratch": dict},
-    "abi": {"args": int, "callee_saved": list, "result": list},
+    "abi": {"args": int, "callee_saved": list, "result": list, "float": str},
     "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "ldflags": list, "include": list,
                  "idioms": str, "tools": dict, "profile": str},
     "paths": {"build": str, "src": str},
@@ -162,6 +162,10 @@ class Abi:
     args          how many argument registers (r0-r3 on ARM: 4)
     callee_saved  the registers a function keeps for its caller
     result        the registers a result comes back in (r0, and r1 for 64-bit values)
+    float         "hard": floats travel in the FPU's argument registers (ARM: s0-s15, the result in
+                  s0 or s0:s1), as the VFP variant of the procedure call standard says; "soft": in
+                  the core registers like integers. Default: hard where the compiler's flags say
+                  -mfloat-abi=hard, else soft (set_float)
     """
 
     def __init__(self, data, arch):
@@ -171,6 +175,17 @@ class Abi:
         for reg in self.callee_saved + self.result:
             arch.reg_id(reg)                    # raises on an unknown register name
         self.arg_regs = arch.arg_regs(self.args)
+        self.float = data.get("float")
+        self.fp_arg_regs = []
+
+    def set_float(self, cflags, arch):
+        """Settle `float` once the compiler's flags are known: the FPU's argument registers
+        (fp_arg_regs) where floats travel in them."""
+        if self.float is None:
+            self.float = "hard" if "-mfloat-abi=hard" in cflags else "soft"
+        if self.float not in ("hard", "soft"):
+            raise ValueError('[abi] float is "hard" or "soft", not %r' % self.float)
+        self.fp_arg_regs = list(getattr(arch, "fp_arg_regs", lambda: [])()) if self.float == "hard" else []
 
 
 class Compiler:
@@ -455,6 +470,10 @@ class Target:
         self.paths = {"build": paths.get("build", "build"), "src": paths.get("src", "src")}
         self.build = self.path(self.paths["build"])
         self.compiler = Compiler(data.get("compiler", {}), self)
+        try:
+            self.abi.set_float(self.compiler.cflags, self.arch)
+        except ValueError as e:
+            raise TargetError("%s: %s" % (self.file, e))
         if hasattr(self.arch, "configure"):     # what the compiler flags say about the core
             self.arch.configure(self.compiler.cflags)
         self.host = dict(data.get("host", {}))

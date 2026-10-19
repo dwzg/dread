@@ -1277,7 +1277,6 @@ def check(isa, work, bodies, cases, jobs=None):
     target, image = make(isa, work, bodies, cases)
     program = Program(target, image)
     lifter = lift.make_lifter(program, regflow.load(target, image, program))
-    lifter.fp_results = True    # s0-s15 are stored into the result buffer: compared as memory
     names, refused = [], {}
     for fn in program.functions:
         try:

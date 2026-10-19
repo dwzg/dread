@@ -328,3 +328,15 @@ def test_arm_frame_slots():
     assert slot(b"\xcd\xf8\x08\xc0") == ("store", "r12", 8) and slot(b"\xdd\xf8\x08\xc0") == ("load", "r12", 8)
     assert slot(b"\x02\x93") == ("store", "r3", 8) and slot(b"\x02\x9b") == ("load", "r3", 8)
     assert slot(b"\x4d\xf8\x04\x3d") is None and slot(b"\x5d\xf8\x04\xfb") is None
+
+
+def test_float_arguments_and_results_with_hard_float():
+    """With hard float the analysis follows s0-s15 like the scratch registers: gizmo-m4's lp_filter
+    reads s0-s2 at its entry, to_millivolts s0; the M3's build has no such registers to follow."""
+    from dread.program import Program
+    from dread.target import Target
+    from conftest import gizmo_dir
+    target = Target.load(gizmo_dir("m4"))
+    flow = regflow.load(target, target.image(), Program(target, target.image()))
+    assert {"s0", "s1", "s2"} <= set(flow.read_regs("lp_filter"))
+    assert "s0" in flow.read_regs("to_millivolts") and "s1" not in flow.read_regs("to_millivolts")
