@@ -99,6 +99,10 @@ class System:
         self.blocks, self.entered, self.order = set(), collections.Counter(), []
         self.last_new, self.last_access, self.limit = 0, 0, LIMIT
         self.frozen = 0                     # blocks in a row outside shared code
+        # A stop asked for by a peripheral access, taken where the next block starts: stopped inside a
+        # memory hook, Unicorn leaves pc on the accessing instruction (a store done, a load not), and
+        # going on from pc would repeat the access (dread.engines)
+        self.due = False
         self.observers = []                 # tools that watch the run (dread.sysrecord): block(), io()
         self._shared(placement, built)
         uc.hook_add(UC_HOOK_BLOCK, self._on_block)
@@ -177,6 +181,10 @@ class System:
     # ---- hooks ----
 
     def _on_block(self, uc, addr, size, user):
+        if self.due:
+            self.due = False
+            uc.emu_stop()                   # this block runs (and counts) when the run goes on
+            return
         for o in self.observers:
             o.block(addr, size)
         if addr not in self.blocks:
@@ -239,7 +247,7 @@ class System:
                 self.new += 1
                 self.last_new = self.clock
         if (self.next_event is not None and self.clock >= self.next_event) or self.clock >= self.limit:
-            uc.emu_stop()
+            self.due = True                 # (not emu_stop here: see self.due)
         if self.layout.settle_it:
             self.arch.settle_it(uc)
 

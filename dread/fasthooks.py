@@ -50,6 +50,15 @@ def library():
     return lib
 
 
+def usable(engine):
+    """Whether the C hooks can serve this engine: they reach into Unicorn's C library, so only a
+    unicorn.Uc (DREAD's own engines, dread.engines, record in Python)."""
+    if library() is None:
+        return False
+    from unicorn import Uc
+    return isinstance(engine, Uc)
+
+
 def _load():
     with open(SOURCE, "rb") as f:
         source = f.read()

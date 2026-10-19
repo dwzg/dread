@@ -69,7 +69,11 @@ class Layout:
         self.saved_names = list(abi.callee_saved)
         self.result_regs = [self.arch.reg_id(r) for r in abi.result]
         self.all_regs = [self.arch.reg_id(r) for r in self.arch.general_regs()]
-        self.sp, self.lr, self.pc = (self.arch.reg_id(r) for r in ("sp", self.arch.link_reg, "pc"))
+        self.sp, self.pc = self.arch.reg_id("sp"), self.arch.reg_id("pc")
+        # The register a call leaves the return address in; None where the call pushes it (MSP430:
+        # the layer's push_return and pop_return then set up a call and return from a stub)
+        self.lr = self.arch.reg_id(self.arch.link_reg) if self.arch.link_reg else None
+        self.word = self.arch.word                      # the size of a stack argument
         # Cores that can have IT blocks need every hook to clear a stale IT state (Arm.settle_it)
         from dread.program import read_code_ranges
         self.settle_it = self.arch.profile == "m" or any(
@@ -194,7 +198,7 @@ class Core:
         # The hot hooks run in C when dread.fasthooks builds (stores here; coverage and load tracing
         # per Machine); otherwise in Python. Both record the same.
         from dread import fasthooks
-        self.fast = fasthooks.Hooks(uc, layout) if fasthooks.library() is not None else None
+        self.fast = fasthooks.Hooks(uc, layout) if fasthooks.usable(uc) else None
         self.fast_hooks = []                # per Machine, removed at the reset
         if self.fast is not None:
             self.fast.add(UC_HOOK_MEM_WRITE, "dread_write")
@@ -385,7 +389,10 @@ class Machine:
                 uc.reg_write(reg, (v or 0) & 0xFFFFFFFF)
         else:
             uc.reg_write(self.layout.result_regs[0], (ret or 0) & 0xFFFFFFFF)
-        uc.reg_write(self.layout.pc, uc.reg_read(self.layout.lr))  # bit 0 of lr keeps Thumb state
+        if self.layout.lr is not None:
+            uc.reg_write(self.layout.pc, uc.reg_read(self.layout.lr))  # bit 0 of lr keeps Thumb state
+        else:
+            self.arch.pop_return(uc, self.read)
 
     def stub(self, addr, fn=lambda m, *a: 0):
         """Replace the function at addr with a callable(machine, r0, r1, r2, r3) -> result.
@@ -580,11 +587,15 @@ class Machine:
         for reg, value in zip(lay.arg_regs, regs):
             uc.reg_write(reg, value & 0xFFFFFFFF)
         uc.reg_write(lay.sp, lay.stack_top)
-        if 4 * len(stacked) > ARGS_ROOM:
+        word = lay.word
+        if word * len(stacked) > ARGS_ROOM:
             raise EmuError("more stack arguments than the %d bytes above the stack top hold" % ARGS_ROOM)
         for i, value in enumerate(stacked):
-            self.write(lay.stack_top + 4 * i, struct.pack("<I", value & 0xFFFFFFFF))
-        uc.reg_write(lay.lr, self.arch.start_address(lay.sentinel, isa))
+            self.write(lay.stack_top + word * i, (value & ((1 << 8 * word) - 1)).to_bytes(word, "little"))
+        if lay.lr is not None:
+            uc.reg_write(lay.lr, self.arch.start_address(lay.sentinel, isa))
+        else:                               # pushed below the stack arguments, as a call does
+            self.arch.push_return(uc, self.arch.start_address(lay.sentinel, isa), self.write)
         for i, reg in enumerate(lay.saved_regs):
             if uc.reg_read(reg) == 0:
                 uc.reg_write(reg, POISON + 0x11 * (i + 1))
@@ -616,7 +627,7 @@ class Machine:
             raise EmuError("function at 0x%x did not return within %d instructions" % (addr, max_instructions))
         ret = uc.reg_read(lay.result_regs[0])
         if self.wide_result and len(lay.result_regs) > 1:
-            ret |= uc.reg_read(lay.result_regs[1]) << 32
+            ret |= uc.reg_read(lay.result_regs[1]) << self.arch.reg_bits
         kept_values = [(name, self.arch.flags_value(uc) if reg is None else uc.reg_read(reg)) for name, reg in kept]
         return Result(ret, writes, list(self.calls), tuple(uc.reg_read(r) for r in lay.saved_regs), layout=lay,
                       kept=kept_values, why=self.kept_why)

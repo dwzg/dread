@@ -128,3 +128,15 @@ def test_systick():
     n.write(0xE000E100, 4, 1 << 4)           # enable line 4
     n.line(4, True)
     assert n.pending_interrupt() == 20
+
+
+def test_a_stop_at_a_device_access_does_not_repeat_it(target, monkeypatch):
+    """With a peripheral access costing much of the shared clock, events come due inside the access
+    hooks. A stop there left pc on the accessing instruction (Unicorn's way), and going on repeated
+    the access: the UART sent characters twice ("modee run") and input went missing. The run stops
+    at the next block instead (System.due)."""
+    monkeypatch.setattr(sysrun, "ACCESS", 333)
+    image = target.image()
+    out = sysrun.run_image(target, image, image.payload(), target.scenarios["keys"])
+    assert out.how.startswith("until"), out.how
+    assert out.reports["uart"]["sent"].startswith("GIZMO 1000\r\nmode run volume 7\r\ncrc c9c999c5\r\nREADY\r\nmode run")

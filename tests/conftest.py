@@ -10,7 +10,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GIZMO = os.path.join(ROOT, "examples", "gizmo")
 VARIANTS = ("a32", "m3", "rv32")
-COMPILERS = {"a32": "arm-none-eabi-gcc", "m3": "arm-none-eabi-gcc", "rv32": "clang"}
+COMPILERS = {"a32": "arm-none-eabi-gcc", "m3": "arm-none-eabi-gcc", "rv32": "clang", "msp430": "msp430-elf-gcc"}
 
 
 def gizmo_dir(variant):

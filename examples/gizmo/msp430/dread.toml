@@ -20,6 +20,7 @@ startup = [
     {kind = "code", run = 0x200, size = 0x6c, stored = 0x9656},
     {kind = "data", run = 0x26c, size = 0x48, stored = 0x96c2},
 ]
+free = [[0x9710, 0xffe0]]
 
 [memory]
 regions = [

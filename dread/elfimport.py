@@ -5,7 +5,9 @@ what an analysis otherwise has to work out: where functions start, how many inst
 have, which bytes are code of which instruction set and which are data. This tool writes the
 image's functions.tsv, code_ranges.tsv and symbols.txt from it, in the formats Ghidra's export uses
 (docs/formats.md). It prints the startup copies for dread.toml: sections whose run address differs
-from their load address, and zeroed sections. With --payload it also writes the raw image.
+from their load address, and zeroed sections, and the image's free ranges: gaps between the
+sections inside the payload (erased flash between the code and a vector table at the top), where
+the overlay may put C. With --payload it also writes the raw image.
 
 Names that are not C identifiers (GCC's clones such as foo.part.0) get their other characters
 replaced by "_"; a name that occurs twice (two static functions in different files) gets the
@@ -25,23 +27,53 @@ from dread import target as tgt
 from dread.elf import STT_FUNC, STT_OBJECT, Elf, ElfError
 
 IDENT = re.compile(r"[^A-Za-z0-9_]")
+STB_GLOBAL, STB_WEAK, STT_NOTYPE = 1, 2, 0
+
+
+def entry_labels(elf):
+    """[(entry, end, name)] of the global and weak labels without a type in executable sections
+    that have no mapping symbols: the entries of hand-written assembly where the assembler marks
+    nothing (GNU as for MSP430: libgcc's shift routines and shared epilogues have no .type). Each
+    runs to the next label or function of its section; one inside a sized function is left out.
+    Sections with mapping symbols (ARM, RISC-V) are left alone: a label there (an ARM vector table
+    named _start) is not a function."""
+    marked = set(elf.mapping())
+    out = []
+    for index, s in enumerate(elf.sections):
+        if not (s.alloc and s.code and s.size) or s.nobits or index in marked:
+            continue
+        funcs = [(sym.value & ~1, (sym.value & ~1) + sym.size) for sym in elf.symbols
+                 if sym.kind == STT_FUNC and sym.size and sym.shndx == index]
+        labels = {}
+        for sym in elf.symbols:
+            if sym.shndx == index and sym.kind == STT_NOTYPE and sym.bind in (STB_GLOBAL, STB_WEAK) and \
+                    sym.name and sym.name[0] not in ".$" and s.addr <= sym.value < s.addr + s.size and \
+                    not any(lo <= sym.value < hi for lo, hi in funcs):
+                labels.setdefault(sym.value, sym.name)
+        starts = sorted(set(labels) | {lo for lo, _ in funcs})
+        for entry, name in sorted(labels.items()):
+            later = [a for a in starts if a > entry]
+            out.append((entry, min(later[0] if later else s.addr + s.size, s.addr + s.size), name))
+    return out
 
 
 def code_intervals(elf, isa="a32"):
     """[(start, end, kind)] of every allocated section, kind an isa or "data", from the mapping
     symbols ($a, $t for ARM; $x, code of `isa`, for RISC-V; $d data). An executable section without
-    mapping symbols (GNU as for MSP430 writes none) is code of `isa` where its function symbols say
-    so (their extents) and data elsewhere; with no sized function symbol it is all code. A section
-    that is not executable is data."""
+    mapping symbols (GNU as for MSP430 writes none) is code of `isa` where its function symbols and
+    its entry labels say so (their extents) and data elsewhere; with neither it is all code. A
+    section that is not executable is data."""
     mapping = {index: [(a, isa if k == "code" else k) for a, k in marks] for index, marks in elf.mapping().items()}
+    labels = entry_labels(elf)
     out = []
     for index, s in enumerate(elf.sections):
         if not s.alloc or s.nobits or not s.size:
             continue
         marks = [(a, k) for a, k in mapping.get(index, []) if s.addr <= a < s.addr + s.size]
         if not marks:
-            spans = sorted((sym.value & ~1, (sym.value & ~1) + sym.size) for sym in elf.symbols
-                           if sym.kind == STT_FUNC and sym.size and sym.shndx == index) if s.code else []
+            spans = sorted([(sym.value & ~1, (sym.value & ~1) + sym.size) for sym in elf.symbols
+                            if sym.kind == STT_FUNC and sym.size and sym.shndx == index] +
+                           [(lo, hi) for lo, hi, _ in labels if s.addr <= lo < s.addr + s.size]) if s.code else []
             if not spans:
                 out.append((s.addr, s.addr + s.size, isa if s.code else "data"))
                 continue
@@ -184,6 +216,9 @@ def tables(elf, unnamed=False, keep=(), isa="a32"):
                 if a < entry + sym.size and entry < b]
         pad = padding(elf, runs[-1][0], runs[-1][1], runs[-1][2]) if runs else 0
         funcs[entry] = (IDENT.sub("_", sym.name), insn_bytes(entry, entry + sym.size) - pad)
+    for entry, end, name in entry_labels(elf):
+        if entry not in funcs:
+            funcs[entry] = (IDENT.sub("_", name), insn_bytes(entry, end))
     names = {}
     for entry, (name, _) in funcs.items():
         names.setdefault(name, []).append(entry)
@@ -222,6 +257,23 @@ def startup(elf):
     return out
 
 
+FREE_MIN = 16           # smaller gaps between sections are alignment, not room
+
+
+def free_ranges(elf, base):
+    """[(start, end)] of the gaps between the sections loaded into the payload from `base` (none
+    behind the last one: that is the room behind the image)."""
+    spans = sorted((lma, lma + len(data)) for lma, data, _ in elf.loaded() if lma >= base)
+    out, at = [], None
+    for lo, hi in spans:
+        if at is not None and lo - at >= FREE_MIN:
+            start = (at + 7) & ~7
+            if lo - start >= FREE_MIN:
+                out.append((start, lo))
+        at = hi if at is None else max(at, hi)
+    return out
+
+
 def write_tables(image, functions, code, symbols, header="dread import-elf"):
     os.makedirs(image.config, exist_ok=True)
     with open(image.table("functions"), "w") as f:
@@ -249,10 +301,15 @@ def startup_toml(copies):
     return "\n".join(lines)
 
 
-def write_startup(toml_path, image_name, copies):
-    """Put the startup list into [image.IMAGE] of a dread.toml, in place of the one there (a
-    `startup = [` line up to the line `]`) or at the end of the section. The rest of the file is
-    left as it is. Returns True when the file changed."""
+def free_toml(ranges):
+    return "free = [%s]" % ", ".join("[0x%x, 0x%x]" % r for r in ranges)
+
+
+def write_startup(toml_path, image_name, copies, key="startup", block=None):
+    """Put the startup list (or another list: key and its TOML text in block) into [image.IMAGE]
+    of a dread.toml, in place of the one there (a `KEY = [` line up to the line `]`, or that one
+    line) or at the end of the section. The rest of the file is left as it is. Returns True when
+    the file changed."""
     with open(toml_path) as f:
         lines = f.read().split("\n")
     header = "[image.%s]" % image_name
@@ -261,13 +318,13 @@ def write_startup(toml_path, image_name, copies):
     except StopIteration:
         raise tgt.TargetError("%s has no %s section" % (toml_path, header))
     end = next((i for i in range(top + 1, len(lines)) if lines[i].startswith("[")), len(lines))
-    block = startup_toml(copies).split("\n")
-    first = next((i for i in range(top + 1, end) if lines[i].replace(" ", "").startswith("startup=[")), None)
+    block = (block if block is not None else startup_toml(copies)).split("\n")
+    first = next((i for i in range(top + 1, end) if lines[i].replace(" ", "").startswith(key + "=[")), None)
     if first is not None:
         last = next((i for i in range(first, end) if lines[i].strip() == "]" or lines[i].rstrip().endswith("]")
                      and i == first), None)
         if last is None:
-            raise tgt.TargetError("%s: the startup list in %s does not end with a line ']'" % (toml_path, header))
+            raise tgt.TargetError("%s: the %s list in %s does not end with a line ']'" % (toml_path, key, header))
         new = lines[:first] + block + lines[last + 1:]
     else:
         at = end
@@ -289,7 +346,8 @@ def main(argv=None):
     parser.add_argument("--unnamed", action="store_true", help="FUN_xxxxxxxx for every function")
     parser.add_argument("--keep", default="", help="with --unnamed: names to keep, comma-separated")
     parser.add_argument("--write-startup", action="store_true",
-                        help="put the startup list into the image's section of dread.toml instead of printing it")
+                        help="put the startup list and the free ranges into the image's section of dread.toml "
+                             "instead of printing them")
     args = parser.parse_args(argv)
     try:
         target, image = tgt.from_args(args)
@@ -313,6 +371,13 @@ def main(argv=None):
                                                          os.path.relpath(target.file)))
     elif copies:
         print("startup copies for [image.%s] in dread.toml:\n%s" % (image.name, startup_toml(copies)))
+    free = free_ranges(elf, image.base)
+    if free and args.write_startup:
+        changed = write_startup(target.file, image.name, None, "free", free_toml(free))
+        print("free ranges of [image.%s] %s in %s" % (image.name, "updated" if changed else "unchanged",
+                                                        os.path.relpath(target.file)))
+    elif free:
+        print("free ranges for [image.%s] in dread.toml:\n%s" % (image.name, free_toml(free)))
     return 0
 
 

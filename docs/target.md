@@ -64,7 +64,7 @@ cflags = ["-mcpu=cortex-m3", "-mthumb", "-Os", "-ffreestanding", "-fno-builtin",
 
 | Key | Meaning |
 |---|---|
-| `name` | `"arm"`, `"riscv"` or `"msp430"` (under way: decoding and the listing), required |
+| `name` | `"arm"`, `"riscv"` or `"msp430"` (the 16-bit MSP430, on DREAD's own engine; under way), required |
 | `isa` | the instruction set of code the code ranges do not mark. ARM: `"a32"` (ARM state, default) or `"t32"` (Thumb, 16- and 32-bit); RISC-V: `"rv32"`; MSP430: `"msp430"` |
 | `profile` | ARM: `"a"` (classic cores with CPSR: ARM7, ARM9, ARM11; default) or `"m"` (Cortex-M, Thumb only) |
 | `extensions` | RISC-V: the standard extensions, default `"imc"` (the C extension decides whether instructions may be 2 bytes long; `-march` in `[compiler] cflags` overrides it) |
@@ -87,6 +87,7 @@ default. `--image NAME` or `$DREAD_IMAGE` selects another.
 | `vendor` | the vendor's file the image was taken from, when it has a container |
 | `container` | plugin that unpacks and packs `vendor` |
 | `limit` | the end of the room the overlay may use behind the image (default: the image's end) |
+| `free` | ranges `[[start, end], ...]` inside the image that hold nothing (erased flash between the code and a vector table at the top of a microcontroller's flash): the overlay puts moved functions and the C's own code there; `dread import-elf --write-startup` writes them from the gaps between the ELF's sections |
 | `erased` | the value of unprogrammed flash (default `0xff`) |
 | `entry` | the reset entry, an address or a symbol name from the image's symbols (default: `base`) |
 | `vectors` | where the exception vectors lie (A profile) or the vector table (M profile: the system run takes the stack pointer and the reset handler from its first two words); default `base` |

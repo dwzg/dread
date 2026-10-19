@@ -6,7 +6,8 @@ only when its callee returns (an indirect call, an svc and a call of something w
 the function table are taken to return), and a jump to another function's entry (a tail call)
 returns when that function does. An indirect jump whose targets are not found counts as a return:
 not known, so the function is not called non-returning on a guess. Falling out of the function's
-instructions (into data or the next function) is not a return.
+instructions into the next function's entry is a tail call of it (MSP430's shared epilogues: pop r4
+falls into the function that pops r5); falling into data is not a return.
 
 The fixpoint starts with no function known to return and adds every function that reaches a return
 with what is known, until nothing changes. What is left never returns: an endless loop, a reset
@@ -40,6 +41,9 @@ def _nodes(program, fn):
         t = target & ~1 if isinstance(target, int) else None
         if kind == "next" or kind == "icall":
             succ.append(nxt)
+            after_end = a + insn.size
+            if nxt is None and after_end not in index and after_end in program.by_entry:
+                tails.append(program.by_entry[after_end].name)     # falls into the next function
         elif kind == "return":
             ret = True
             if falls:

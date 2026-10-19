@@ -59,7 +59,7 @@ for an RV32IMC core with clang (that build is new; the tools are being ported to
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
 | `dread pilot`: the reconstruction loop run by code, an LLM (local or cloud) only for the judgement: writing C, arguing survivors, proposing inputs and names; every answer checked by the tools | first version |
 | RISC-V (RV32IMC): gizmo-rv32 built with clang; every tool runs on it: listing with byte-identical rebuild, reading aids, the overlay, differential tests, integration, recorded cases, regflow, switches, Ghidra, the system run with interrupts, the lifter and its fuzzer | done |
-| MSP430: gizmo-msp430 built with TI's MSP430 GCC; a decoder of its own (no capstone), the listing with byte-identical rebuild, the reading aids | under way (next: an emulator, as Unicorn has none) |
+| MSP430: gizmo-msp430 built with TI's MSP430 GCC; a decoder of its own (no capstone), an engine of its own (no Unicorn: a Python interpreter behind Unicorn's interface, checked against GDB's simulator), the listing with byte-identical rebuild, the reading aids, the overlay (into the image's free flash), differential tests with generated cases and the mutation check | under way (next: integration, regflow, the system run, the lifter) |
 
 ## Layout
 

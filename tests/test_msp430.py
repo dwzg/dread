@@ -125,3 +125,40 @@ def test_gizmo_msp430_against_llvm_objdump():
             assert (insn.mnemonic, insn.op_str, insn.size) == truth[insn.address], (fn.name, hex(insn.address))
             n += 1
     assert n > 1500
+
+
+def test_import_elf_reads_untyped_entries_and_free_ranges():
+    """libgcc's MSP430 shift routines and shared epilogues are assembly without .type: their global
+    labels are entries, each running to the next; the gap between the code and the vectors is free."""
+    from dread.elf import Elf
+    from dread.elfimport import entry_labels, free_ranges, tables
+    elf = Elf(os.path.join(gizmo_dir("msp430"), "original", "gizmo.elf"))
+    labels = {name: (lo, hi) for lo, hi, name in entry_labels(elf)}
+    assert labels["__mspabi_func_epilog_7"][1] - labels["__mspabi_func_epilog_7"][0] == 2
+    assert labels["__mspabi_func_epilog_1"][1] - labels["__mspabi_func_epilog_1"][0] == 4    # pop r10; ret
+    functions, code, _ = tables(elf, isa="msp430")
+    names = {name for _, name, _ in functions}
+    assert {"__mspabi_func_epilog_3", "__mspabi_srli", "__mspabi_divllu", "memcpy"} <= names
+    assert any(lo <= labels["__mspabi_srli"][0] < hi for lo, hi, _ in code)
+    assert free_ranges(elf, 0x8000) == [(0x9710, 0xFFE0)]
+
+
+@pytest.mark.skipif(not shutil.which("msp430-elf-gcc"), reason="needs TI's MSP430 GCC")
+def test_gizmo_msp430_rewritten_functions_agree(tmp_path):
+    """The rewritten C over the original on the MSP430 engine: moved functions land in the image's
+    free flash, and every function agrees with generated cases covering every instruction."""
+    from dread import build, runner
+    from dread.target import Target
+    from test_runner import src_copy
+    target = Target.load(gizmo_dir("msp430"))
+    payload = build.build(target, target.image(), src=str(src_copy(tmp_path, "msp430")), out=str(tmp_path / "recon"),
+                          quiet=True)
+    with open(tmp_path / "recon" / "report.tsv") as f:
+        report = f.read()
+    assert "into the image's free space" in report
+    suite = runner.prepare(target, target.image(), payload)
+    lines = []
+    failed, uncovered, _ = runner.run(list(suite.cases), out=lines.append, jobs=4)
+    text = "\n".join(lines)
+    assert failed == 0 and not uncovered, text
+    assert "ok   checksum" in text and "ok   fmt_hex" in text

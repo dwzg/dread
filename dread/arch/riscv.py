@@ -223,6 +223,7 @@ class RiscV:
     default_callee_saved = ("s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11")
     default_result = ("a0", "a1")
     word = 4
+    reg_bits = 32
     link_reg = "ra"
     veneer_reg = "t1"       # the overlay's far branch and the linker's call stubs go through t1
 

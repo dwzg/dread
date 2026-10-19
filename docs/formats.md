@@ -114,8 +114,9 @@ people), then a `#` summary line. Not for programs; they read placement.json.
              "freed": 216, "reused": 148}}
 ```
 
-`placement` is one of `in place`, `over its pools`, `behind a pool`, `freed space`,
-`behind the image`, or `helper` (a C function the table does not have; no `entry`). `branch` says
+`placement` is one of `in place`, `over its pools`, `behind a pool`, `freed space`, `free space`
+(one of the image's free ranges, `[image] free`), `behind the image`, or `helper` (a C function the
+table does not have; no `entry`). The summary's `free_left` is what the free ranges still hold. `branch` says
 that the old entry holds a branch to `address`; the test runner enters such a function through it.
 
 ## Generated, kept and written cases (JSON)

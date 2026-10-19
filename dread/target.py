@@ -60,6 +60,7 @@ IMAGE_KEYS = {
     "original": str, "vendor": str, "container": str, "base": int, "limit": int, "erased": int,
     "entry": (int, str), "config": str, "cases": str, "extra_cases": str, "kept_cases": str,
     "record_specs": str, "src": str, "startup": (list, dict), "tables": dict, "arch": dict, "vectors": int,
+    "free": list,
 }
 FREE = ("models", "plugins", "scenarios")
 
@@ -261,6 +262,9 @@ class Image:
     container plugin ("module:attr" or "file.py:attr") that unpacks and packs `vendor`
     base      the load address of `original`
     limit     the end of the room the overlay may use behind the image (default: the image's end)
+    free      ranges [[start, end], ...] inside the image that hold nothing (erased flash between the
+              code and a vector table at the top): the overlay may put C there (dread import-elf
+              writes them from the gaps between an ELF's sections)
     erased    the value of unprogrammed flash (default 0xff)
     entry     the reset entry, an address or a symbol name (default: base)
     vectors   where the exception vectors lie (A profile) or the vector table (M profile; the
@@ -304,6 +308,10 @@ class Image:
         if self.arch is not target.arch and hasattr(self.arch, "configure"):
             self.arch.configure(target.compiler.cflags)
         self._startup = data.get("startup", [])
+        self._free = data.get("free", [])
+        for r in self._free:
+            if not (isinstance(r, list) and len(r) == 2 and all(isinstance(v, int) for v in r) and r[0] < r[1]):
+                raise TargetError("%s: free takes ranges [start, end], not %r" % (where, r))
         self._payload = None
         self._copies = None
 
@@ -328,6 +336,18 @@ class Image:
     @property
     def limit(self):
         return self._limit if self._limit is not None else self.end
+
+    @property
+    def free(self):
+        """[(start, end)] of the ranges inside the image that hold nothing, checked against it."""
+        out = sorted(tuple(r) for r in self._free)
+        for (lo, hi), nxt in zip(out, out[1:] + [None]):
+            if not (self.base <= lo < hi <= self.end):
+                raise TargetError("image %s: free range 0x%x-0x%x lies outside the image 0x%x-0x%x"
+                                  % (self.name, lo, hi, self.base, self.end))
+            if nxt is not None and nxt[0] < hi:
+                raise TargetError("image %s: free ranges overlap at 0x%x" % (self.name, nxt[0]))
+        return out
 
     @property
     def entry(self):

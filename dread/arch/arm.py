@@ -74,6 +74,7 @@ class Arm:
     default_callee_saved = ("r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11")
     default_result = ("r0", "r1")
     word = 4
+    reg_bits = 32
     link_reg = "lr"         # where a call leaves the return address
     veneer_reg = "r12"      # the register a veneer or a call through a register may go through (ip)
 

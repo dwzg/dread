@@ -6,13 +6,16 @@ function table) replaces it:
 - **in place** when it fits into the run of instructions at the original entry;
 - **behind a literal pool** when it fits into a later run of the original function's own
   instructions, with a branch at the entry;
-- **moved** otherwise: into space other rewritten functions freed inside the image (best fit), or
-  into the free room behind the image up to the image's limit, with a branch at the entry.
+- **moved** otherwise: into space other rewritten functions freed inside the image or into the
+  image's free ranges ([image] free: erased flash inside the image; best fit, freed space first),
+  or into the room behind the image up to the image's limit, with a branch at the entry.
 
 A function may also take its whole extent, from its entry to the next function's, literal pools
 included, when nothing else uses those pools: no other original function loads from them relative
 to pc, no word of the image points into them, and no C function's constants do (--no-extent turns
-this off). Helper functions, string literals and constants of the C go behind the image.
+this off). Helper functions, string literals and constants of the C go behind the image, or
+into the largest free range when that has more room (an image that fills its flash up to a vector
+table at the top).
 
 Every function of the table that no C replaces stays where it is and becomes a linker symbol
 (PROVIDE, with bit 0 set for Thumb code), so C calls into the original code by name and the original
@@ -118,6 +121,11 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
     # Who owns which instruction, and which original code branches into a replaced function
     # behind its entry (the branch would land in whatever lies there afterwards).
     owner = {a: fn.name for fn in prog.functions for a in fn.insns}
+    free = image.free
+    for lo, hi in free:
+        inside = [a for a in owner if lo <= a < hi]
+        if inside:
+            raise OverlayError("the free range 0x%x-0x%x holds code of %s" % (lo, hi, owner[min(inside)]))
     entered = {}
     loaded, loaders, all_loaders = set(), {}, {}
     for fn in prog.functions:
@@ -222,6 +230,8 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             if length >= 8:
                 holes.append([start, start + length])
     hole_space = [tuple(h) for h in holes]
+    free_holes = [[lo, hi] for lo, hi in free]
+    holes += free_holes                 # after the freed holes: best fit takes those first
     in_hole = []
     for fn in sorted(relocated, key=lambda n: (-sizes[n], n)):
         fits = [(h, fit(h[0], h[1] - h[0], fn)) for h in holes]
@@ -233,10 +243,14 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             in_hole.append(fn)
     in_tail = [fn for fn in relocated if fn not in in_hole]
 
-    # Link.
+    # Link. The C's own code and constants go where the most room is left: behind the image, or a
+    # free range inside it.
     os.makedirs(workdir, exist_ok=True)
     script = os.path.join(workdir, "recon.ld")
-    tail = align_up(end_of_image, 8)
+    rooms = [(align_up(end_of_image, 8), max(limit, align_up(end_of_image, 8)))] + \
+        [(align_up(h[0], 8), h[1]) for h in free_holes if align_up(h[0], 8) < h[1]]
+    tail, tail_end = max(rooms, key=lambda r: r[1] - r[0])
+    tail_inside = tail < end_of_image
     with open(script, "w") as f:
         f.write("/* written by dread overlay */\nSECTIONS\n{\n")
         for fn in sorted(in_slot + in_body + in_hole, key=lambda n: place[n][0]):
@@ -252,8 +266,8 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                 " *(.ARM.extab*) }\n}\n"
                 'ASSERT(SIZEOF(.bss) == 0, "the C may not add zero-initialised data")\n'
                 'ASSERT(SIZEOF(.recon.data) == 0, "the C may not add writable initialised data")\n'
-                'ASSERT(ADDR(.recon.tail) + SIZEOF(.recon.tail) <= 0x%x, "the room behind the image is full")\n'
-                % limit)
+                'ASSERT(ADDR(.recon.tail) + SIZEOF(.recon.tail) <= 0x%x, "the room for the C is full")\n'
+                % tail_end)
         names = [(name, fn) for name, fn in sorted(funcs.items(), key=lambda kv: kv[1].entry)
                  if name not in sizes and name.replace("_", "a").isalnum() and not name[0].isdigit()]
         typed = getattr(arch, "symbol_asm", None)
@@ -280,7 +294,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                        + list(objects) + extra, capture_output=True, text=True)
     if r.returncode:
         message = r.stderr
-        if "the room behind the image is full" in r.stderr:
+        if "the room for the C is full" in r.stderr:
             message += "no space for: %s\n" % " ".join(sorted(in_tail))
         raise OverlayError("the link failed:\n" + message)
     linked = Elf(elf_path)
@@ -307,7 +321,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
     allowed = set()
     for fn in in_slot + in_body:
         allowed.update(range(place[fn][0], place[fn][0] + place[fn][1]))
-    for start, stop in hole_space:
+    for start, stop in hole_space + free:
         allowed.update(range(start, stop))
     for fn in in_body + relocated:
         allowed.update(range(funcs[fn].entry, funcs[fn].entry + branch_len[fn]))
@@ -324,7 +338,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
     placement, lines = {}, ["function\taddress\toriginal_bytes\tc_bytes\tplacement"]
     for fn in sorted(sizes, key=lambda n: (funcs[n].entry if n in funcs else syms.get(n, 0), n)):
         if fn in helpers:
-            how, text = "helper", "new helper behind the image"
+            how, text = "helper", "new helper " + ("in the image's free space" if tail_inside else "behind the image")
             lines.append("%s\t0x%x\t-\t%d\t%s" % (fn, syms.get(fn, 0), sizes[fn], text))
             placement[fn] = {"address": syms.get(fn, 0), "c_bytes": sizes[fn], "placement": how}
             continue
@@ -334,20 +348,28 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             text = "in place" + (" over its literal pools" if how == "over its pools" else "")
         elif fn in in_body:
             how, text = "behind a pool", "in place at 0x%x behind a literal pool, branch at original entry" % syms[fn]
+        elif fn in in_hole and any(lo <= syms[fn] < hi for lo, hi in free):
+            how, text = "free space", "moved to 0x%x into the image's free space, branch at original entry" % syms[fn]
         elif fn in in_hole:
             how, text = "freed space", "moved to 0x%x into space freed by other functions, branch at original entry" % syms[fn]
+        elif tail_inside:
+            how, text = "free space", "moved to 0x%x into the image's free space, branch at original entry" % syms[fn]
         else:
             how, text = "behind the image", "moved to 0x%x behind the image, branch at original entry" % syms[fn]
         lines.append("%s\t0x%x\t%d\t%d\t%s" % (fn, f.entry, f.size, sizes[fn], text))
         placement[fn] = {"entry": f.entry, "address": syms[fn], "original_bytes": f.size, "c_bytes": sizes[fn],
                          "placement": how, "branch": fn in in_body + relocated, "isa": f.isa}
     done = len(replaced)
+    tail_size = next((s.size for s in linked.sections if s.name == ".recon.tail"), 0)
+    free_left = sum(h[1] - h[0] for h in free_holes) - (tail_size if tail_inside else 0)
     summary = {"replaced": done, "functions": len(funcs), "image_bytes": len(picture),
                "room_left": limit - base - len(picture), "freed": sum(e - b for b, e in hole_space),
-               "reused": sum(sizes[fn] for fn in in_hole)}
-    lines.append("# %d of %d functions replaced by C; image %d bytes, %d left before the limit; "
+               "reused": sum(sizes[fn] for fn in in_hole if any(lo <= place[fn][0] < hi for lo, hi in hole_space)),
+               "free_left": free_left}
+    lines.append("# %d of %d functions replaced by C; image %d bytes, %d left before the limit%s; "
                  "%d bytes freed inside the image, %d of them reused"
-                 % (done, len(funcs), len(picture), summary["room_left"], summary["freed"], summary["reused"]))
+                 % (done, len(funcs), len(picture), summary["room_left"],
+                    ", %d in its free ranges" % free_left if free else "", summary["freed"], summary["reused"]))
     with open(os.path.join(workdir, "report.tsv"), "w") as f:
         f.write("\n".join(lines) + "\n")
     with open(os.path.join(workdir, "placement.json"), "w") as f:

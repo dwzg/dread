@@ -29,7 +29,8 @@ READS_DST = ("add", "addc", "subc", "sub", "cmp", "dadd", "bit", "bic", "bis", "
 
 
 class Operand:
-    """mode: "reg", "idx" (X(rN)), "sym" (X(pc): the address in `address`), "abs" (&X), "ind" (@rN),
+    """mode: "reg", "idx" (X(rN)), "sym" (X(pc): the address in `address`, X counted from the
+    extension word's own address), "abs" (&X), "ind" (@rN),
     "inc" (@rN+), "imm" (#X, from a constant generator when `cg`). reg: its register number; value:
     X, the immediate, or the absolute address."""
 
@@ -72,7 +73,7 @@ def _source(as_, reg, words, at, address, byte):
         if reg == 2:
             return Operand("abs", 2, x), 1
         if reg == 0:
-            return Operand("sym", 0, _sign16(x), address=(address + 2 * (at + 1) + _sign16(x)) & 0xFFFF), 1
+            return Operand("sym", 0, _sign16(x), address=(address + 2 * at + _sign16(x)) & 0xFFFF), 1
         return Operand("idx", reg, _sign16(x)), 1
     if as_ == 2:
         return Operand("ind", reg), 0
@@ -106,7 +107,7 @@ def decode_fields(code, address):
             if rd == 2:
                 dst = Operand("abs", 2, x)
             elif rd == 0:
-                dst = Operand("sym", 0, _sign16(x), address=(address + 2 * (at + 1) + _sign16(x)) & 0xFFFF)
+                dst = Operand("sym", 0, _sign16(x), address=(address + 2 * at + _sign16(x)) & 0xFFFF)
             else:
                 dst = Operand("idx", rd, _sign16(x))
             at += 1
@@ -244,6 +245,7 @@ class Msp430:
     default_callee_saved = ("r4", "r5", "r6", "r7", "r8", "r9", "r10")
     default_result = ("r12", "r13")
     word = 2
+    reg_bits = 16
     link_reg = None             # a call pushes the return address
     veneer_reg = "r11"
     profile = None
@@ -450,6 +452,80 @@ class Msp430:
     def bound_check(self, insn):
         return None
 
+    # ---- what the case generator learns from the code (dread.autocase) ----
+
+    generator_version = 1       # in the generated-case cache's key: bump when these change
+
+    @staticmethod
+    def _sp_adjust(f):
+        """How far an instruction lowers sp by a constant (sub #N, sp; add #-N, sp), else 0."""
+        if f.dst is None or f.dst.mode != "reg" or f.dst.reg != 1 or f.src is None or f.src.mode != "imm" or f.byte:
+            return 0
+        if f.op == "sub":
+            return f.src.value
+        if f.op == "add" and f.src.value & 0x8000:
+            return 0x10000 - f.src.value
+        return 0
+
+    def prologue_frame(self, program, fn, look=32):
+        """The stack a function's prologue reserves for locals: what sub #N, sp lowers sp by behind
+        the pushes of the registers it keeps (those are not locals)."""
+        total = 0
+        for a in fn.insns[:look]:
+            insn = program.insn(a)
+            if insn is None or self.flow(insn)[0] != "next":
+                break
+            total += self._sp_adjust(insn.fields)
+        return total
+
+    def switch_hints(self, insns):
+        """(bounds, table): small constants a compare uses (cmp #k, rN in front of a switch), and
+        whether the code jumps through a register or a computed pc (a table)."""
+        limits, table = set(), False
+        for ins in insns:
+            f = ins.fields
+            if f.op == "cmp" and f.src is not None and f.src.mode == "imm" and 0 < f.src.value <= 0xFF:
+                limits.add(f.src.value)
+            if self.flow(ins)[0] == "ijump":
+                table = True
+        return limits, table
+
+    def compare_chars(self, insn):
+        """Values that may be characters a parser checks: the constant of cmp (cmp.b #c, rN), of
+        sub #c and of add #-c (rN - c, then compared with a bound)."""
+        f = insn.fields
+        src = f.src
+        if src is None or f.dst is None or src.mode != "imm":
+            return []
+        if f.op in ("cmp", "sub"):
+            return [src.value]
+        if f.op == "add":
+            return [-src.value & (0xFF if f.byte else 0xFFFF)]
+        return []
+
+    def branch_deciders(self, insns):
+        """{conditional jump: (the instruction that sets its flags, first, second, imm, kind, 1)}:
+        a cmp or bit right in front of it. cmp src, dst compares dst with src ("compare": first dst,
+        second src), bit src, dst tests their common bits ("test"); a constant source is imm with
+        second None. Only register operands: a memory operand is in no register to read."""
+        out, prev = {}, None
+        for ins in insns:
+            f = ins.fields
+            if f.target is not None and f.op != "jmp" and prev is not None and \
+                    prev.address + prev.size == ins.address:
+                p = prev.fields
+                if p.op in ("cmp", "bit") and p.dst is not None and p.dst.mode == "reg" and p.dst.reg not in (0, 3):
+                    second = imm = None
+                    if p.src.mode == "reg" and p.src.reg not in (0, 3):
+                        second, imm = p.src.reg, 0
+                    elif p.src.mode == "imm":
+                        imm = p.src.value
+                    if imm is not None:
+                        out[ins.address] = (prev.address, p.dst.reg, second, imm,
+                                            "compare" if p.op == "cmp" else "test", 1)
+            prev = ins
+        return out
+
     def switch_targets(self, insn, program, inside):
         return None
 
@@ -479,6 +555,44 @@ class Msp430:
 
     def asm(self):
         return Msp430Asm(self)
+
+    # ---- the engine (dread.engines.msp430: Unicorn has no MSP430) ----
+
+    def uc_mode(self, isa=None):
+        return None
+
+    def new_uc(self, isa=None):
+        from dread.engines.msp430 import Msp430Engine
+        return Msp430Engine()
+
+    def initial_status(self, engine):
+        """sr clear: no flags, interrupts off, the CPU running."""
+        engine.reg_write(2, 0)
+
+    def status_reg(self):
+        return 2
+
+    def settle_it(self, engine):
+        pass
+
+    def flags_value(self, engine):
+        return engine.reg_read(2) & 0x107
+
+    def pc_reg(self):
+        return 0
+
+    def push_return(self, engine, address, write):
+        """Set up the return to `address` as a call does: pushed below sp (write(address, bytes)
+        writes the memory)."""
+        sp = (engine.reg_read(1) - 2) & 0xFFFE
+        write(sp, struct.pack("<H", address & 0xFFFF))
+        engine.reg_write(1, sp)
+
+    def pop_return(self, engine, read):
+        """Return from a stub at a function's entry as ret does: pc from the stack, sp behind it."""
+        sp = engine.reg_read(1)
+        engine.reg_write(0, int.from_bytes(read(sp, 2), "little"))
+        engine.reg_write(1, sp + 2)
 
 
 class Msp430Asm:

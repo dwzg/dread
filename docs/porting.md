@@ -5,7 +5,8 @@ Everything DREAD knows about an instruction set sits, or should sit, in one modu
 every method in its docstrings, `dread.arch.riscv.RiscV` is the second layer (RV32IMC; every tool runs
 on it, and its port is the worked example of the order below), `dread.arch.msp430.Msp430` the third
 (under way: neither capstone nor Unicorn knows the MSP430, so its layer decodes the instructions
-itself, into objects with capstone's attributes, and its emulator comes next).
+itself, into objects with capstone's attributes, and runs them on an engine of DREAD's own,
+`dread.engines.msp430`).
 This page lists what a new layer has to provide, what is still ARM-specific outside the layer, and
 the order of the work.
 
@@ -45,7 +46,8 @@ generator, the lifter, the reading aids)
 | `literal(insn, isa)`, `pc_address(insn, isa)`, `pc_value(address, isa)` | pc-relative loads and addresses |
 | `bound_check(insn)`, `switch_targets(insn, program, inside)` | switch shapes (dread.switches runs them) |
 | `mark_call(program, insn)`, `link_pair(prev, insn, isa)` | optional: calls that are not plain calls (stubs, switch helpers, two-instruction calls: RISC-V's auipc + jalr, and its auipc/lui + addi addresses) |
-| `link_reg`, `veneer_reg` | the register a call leaves the return address in, and the one veneers go through |
+| `link_reg`, `veneer_reg` | the register a call leaves the return address in (None where the call pushes it: MSP430), and the one veneers go through |
+| `word`, `reg_bits` | the size of a stack argument (bytes) and of a register (bits) |
 
 **Placing C** (the overlay)
 
@@ -62,12 +64,13 @@ generator, the lifter, the reading aids)
 |---|---|
 | `asm()` | the assembler's dialect: comment character, data directives, prelude, instruction-set switches, raw bytes, function labels, and each instruction's operands with labels for places (`ArmAsm`: GNU as; `RiscVAsm`: llvm-mc with `.option exact`) |
 
-**Emulation** (Unicorn today)
+**Emulation** (Unicorn, or an engine of DREAD's own: below)
 
 | Method | What it gives |
 |---|---|
 | `uc_mode(isa)`, `new_uc(isa)`, `pc_reg()`, `status_reg()` | the engine |
 | `initial_status(engine)` | the state a called function expects |
+| `push_return(engine, address, write)`, `pop_return(engine, read)` | only without a link register: a call's return address put where the call instruction puts it (MSP430: pushed), and a stub's return |
 | `settle_it(engine)` | optional: repair after a hook (ARM: Thumb IT state) |
 | `reset`, `interrupts_enabled`, `enter_interrupt`, `exception_return`, `resume_address`, `flags_value` | the system run's core: reset, interrupt entry and return |
 
@@ -100,10 +103,18 @@ IT state only where the layer has one.
 ## The emulator
 
 Unicorn runs ARM, AArch64, MIPS, PowerPC, RISC-V, SPARC, x86, M68K and others: those need only the
-layer. MSP430 and AVR are not among them; they need an emulator interface in front of what
-`dread.emu` uses (map memory, read and write registers, run from an address until a sentinel with
-an instruction budget, hooks per block, per memory access and per unmapped access) and an
-interpreter behind it.
+layer. DREAD drives every engine through a part of Unicorn's Python interface, with the semantics
+its tools rely on (a read hook supplies the value by writing memory, a code hook redirects by
+writing pc, write hooks run before the store, a stop from a code or block hook leaves the
+instruction unrun): the engine contract in the docstring of `dread.engines`, checked on Unicorn and
+on DREAD's engines alike by `tests/test_engines.py`. An architecture Unicorn lacks gets an engine
+there: a subclass of `dread.engines.Engine`, which keeps the memory, the hooks and the run loop,
+with the registers, the decoding and `step()` of its own (`dread.engines.msp430`, a Python
+interpreter of the 16-bit MSP430: about a microsecond an instruction). Check it against an
+independent simulator with random instruction blocks, as `dread.engines.msp430_check` does against
+GDB's (it found seven places where that simulator departs from TI's guide, and none in the
+engine); what the reference gets wrong is stepped around in the check and tested against the
+manual in `tests/test_engines.py`.
 
 ## A gizmo build
 

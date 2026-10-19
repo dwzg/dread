@@ -14,12 +14,6 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
   environment and costs money on that account: gizmo's four small functions take about 5 to 15
   answers of up to 16000 tokens, well under a dollar with a Sonnet-class model. Recommendation: one
   run, to compare with the local model; say which model and whether the key may be used unattended.
-- **A GCC toolchain for MSP430?** clang's MSP430 backend builds gizmo-msp430 now (lld links it), but
-  real MSP430 firmware is built with TI's compiler, IAR or GCC. The AUR has `msp430-elf-gcc` (GCC
-  15.2, built from source, with binutils, newlib and TI's device headers), `msp430-elf-gcc-bin`
-  (TI's prebuilt GCC 8.2) and `ti-cgt-msp430` (TI's own compiler, proprietary, free to download);
-  each needs your password to install (`yay -S ...`). Recommendation: `msp430-elf-gcc`, for a second
-  gizmo-msp430 build next to clang's; TI's compiler later with the "more compilers" items.
 - **IAR-built gizmo?** For the IAR profile: gizmo built with IAR EWARM (Cortex-M3) and, for MSP430,
   EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
   `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
@@ -330,10 +324,32 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 - [x] **Byte-identical rebuild**: dread asm rebuilds gizmo-msp430 with GNU as on the first pass, no
   raw word (the listing links with a script of its own now: a target's default script may impose
   memory regions, MSP430's ends below the vectors).
-- [ ] **Emulator interface beyond Unicorn** (what `dread.emu` needs: memory map, registers, code,
-  block and memory hooks, unmapped accesses, instruction limits) and an MSP430 interpreter behind it,
-  checked against what the compiled C must compute; speed in numbers.
-- [ ] **Every tool on gizmo-msp430** (tests, generator, mutation, integration, regflow).
+- [x] **Emulator interface beyond Unicorn**: Unicorn's interface is DREAD's engine contract
+  (`dread.engines`: the part DREAD uses, with the semantics it relies on, tested on Unicorn and the
+  new engine alike); `dread.engines.Engine` keeps memory, hooks and the run loop, and
+  `dread.engines.msp430` is a Python interpreter of the 16-bit MSP430 behind it (about 1 us an
+  instruction, gizmo's fmt_dec 3500 instructions in 3.5 ms). Checked against GDB's MSP430 simulator
+  (`dread.engines.msp430_check`, msp430-elf-run from TI's GCC): 10000 random blocks agree once seven
+  faults of the simulator are stepped around (V in sr bit 7, sub without V, sxt without C, rrc's V,
+  dadd beyond BCD and its V, the destination read before the source, unaligned words); those are
+  tested against TI's guide. The call without a link register: the layer's push_return and
+  pop_return. Found on the way: a stop from a memory hook leaves Unicorn's pc on the access, so the
+  system run repeated the access it stopped in (a UART character sent twice when an event came due
+  there); it stops at the next block now.
+- [x] **The overlay into the image's free flash**: `[image] free` ranges (written by import-elf from
+  the gaps between sections) take moved functions and the C's own code when there is no room behind
+  the image (gizmo-msp430: 26 KiB between the code and the vectors). Import-elf reads global labels
+  without a type in unmarked code sections as entries (libgcc's MSP430 shift routines and shared
+  epilogues), and noreturn takes a function that falls into the next one's entry as its tail call.
+- [x] **Tests, generator, mutation on gizmo-msp430**: 13 functions, 652 cases, every instruction
+  covered; the mutation check catches every change but two argued ones.
+- [ ] **The other tools on gizmo-msp430**: integration, regflow, recorded cases, switches,
+  callsites, Ghidra, the GUI, the system run with its models (16-bit registers), CI (TI's GCC from
+  its download with a checksum, or the MSP430 tests skip), the test suite's variants.
+- [ ] **The lifter and its fuzzer for MSP430.**
+- [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the
+  5-million-instruction limit (about 5 s per case on the MSP430 engine; two of gizmo's took over 300
+  s). Bound a mutant's case by a multiple of what the original took on it.
 
 ## More architectures (each: a gizmo build with clang, the arch layer, every tool on it)
 
@@ -358,6 +374,11 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 - [ ] Clang builds of gizmo for ARM state and Cortex-M3 (libgcc from arm-none-eabi-gcc for the
   division helpers): every tool on clang's code shapes (switch tables, prologues, no -fipa-ra).
+- [ ] MSP430 with a newer GCC (the AUR's msp430-elf-gcc, GCC 15, needs a root install) and with
+  clang (gizmo's Makefile builds build/msp430clang already): every tool on their code shapes.
+- [ ] A generic engine on Ghidra's SLEIGH (pypcode: p-code for every processor Ghidra knows) behind
+  the engine contract, for architectures without an engine of their own; speed against the MSP430
+  interpreter, faithfulness against it and against Unicorn.
 - [ ] gcc at -O0, -O2 and -O3 for both ARM builds: frame pointers and spills, unrolled loops,
   inlining. The tests run on all of them (marked slow where needed).
 - [ ] **IAR profile** (EWARM, EW430; of interest to the user): IAR's runtime helper names and
