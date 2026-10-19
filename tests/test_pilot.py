@@ -83,6 +83,27 @@ def test_an_answer_that_never_gets_right_is_removed(gizmo):
     assert open(os.path.join(folder, "results.tsv")).read().splitlines()[-1].startswith("led_on\trejected\t2\ttest")
 
 
+def test_prototypes_and_results_take_the_registers_width():
+    """The pilot declares callees with register-wide arguments and a result as wide as their callers
+    read: on the MSP430 u16 arguments, a result in r12:r13 u32 and one in r12-r15 u64; on ARM u32.
+    (Before, every architecture got ARM's: u32 arguments, u64 when r1 was read.)"""
+    from conftest import gizmo_dir
+    found, questions = {}, {}
+    for arch in ("msp430", "m3"):
+        target = Target.load(gizmo_dir(arch))
+        image = target.image()
+        program = Program(target, image)
+        flow = regflow.load(target, image, program)
+        found[arch] = {line for fn in program.functions for line in pilot.prototypes(program, flow, fn)}
+        questions[arch] = pilot.question(target, image, program, program.by_name["checksum"], flow)[1]
+    assert "u64 __mspabi_mpyll(u16 a0, u16 a1, u16 a2, u16 a3);" in found["msp430"]
+    assert "u32 checksum(u16 a0, u16 a1, u16 a2);" in found["msp430"]    # (const u8 *p, u32 n): r12, r13:r14
+    assert not any("u32 a" in line for line in found["msp430"])
+    assert "u32 checksum(u32 a0, u32 a1);" in found["m3"]
+    assert "Its callers read r12 and r13 after it: it returns a 32-bit value (u32)." in questions["msp430"]
+    assert "Its callers read" not in questions["m3"]
+
+
 def test_extract_c():
     assert pilot.extract_c("x\n```c\nint f;\n```\n") == "int f;\n"
     assert pilot.extract_c("```\nint f;\n```") is None and pilot.extract_c("") is None

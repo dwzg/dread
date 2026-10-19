@@ -140,17 +140,35 @@ def candidates(target, image, program, limit=None):
     return names[:limit] if limit else names
 
 
+def result_words(program, flow, name):
+    """How many registers of a function's result its callers read (1, 2 or 4), the way the MSP430
+    lifter sizes results: the last of the first four argument registers (they carry results too:
+    ARM's r0-r3, RISC-V's a0-a3, the MSP430's r12-r15) that callers read after a call and the
+    function does not keep."""
+    if not flow:
+        return 1
+    live = set(flow.kept_regs(name)) - set(flow.preserved_regs(name))
+    n = max((i + 1 for i, r in enumerate(program.arch.arg_regs(4)) if r in live), default=1)
+    return 4 if n > 2 else n
+
+
+def ctype(program, words):
+    """dread.h's unsigned type of so many registers (u16 to u64; C returns no more than 64 bits)."""
+    return "u%d" % min(64, words * program.arch.reg_bits)
+
+
 def prototypes(program, flow, fn):
-    """C declarations of what fn calls, with as many arguments as each callee reads."""
+    """C declarations of what fn calls: as many register-wide arguments as each callee reads (u32
+    on ARM and RISC-V, u16 on the MSP430), and a result as wide as its callers read."""
     from dread.lift import direct_callees
+    word = ctype(program, 1)
     out = []
     for name in sorted(direct_callees(program, fn)):
         args = program.arch.arg_regs(4)
         reads = flow.read_regs(name) if flow else args
         n = max((args.index(r) + 1 for r in reads if r in args), default=0)
-        wide = bool(flow and "r1" in flow.kept_regs(name) and "r1" not in flow.preserved_regs(name))
-        out.append("%s %s(%s);" % ("u64" if wide else "u32", name,
-                                   ", ".join("u32 a%d" % i for i in range(n)) or "void"))
+        out.append("%s %s(%s);" % (ctype(program, result_words(program, flow, name)), name,
+                                   ", ".join("%s a%d" % (word, i) for i in range(n)) or "void"))
     return out
 
 
@@ -165,8 +183,12 @@ def question(target, image, program, fn, flow=None, lifted=None):
     if flow is not None:
         reads = [r for r in flow.read_regs(fn.name) if r in program.arch.arg_regs(4)]
         parts.append("It reads %s at its entry (its arguments)." % (", ".join(reads) or "no argument register"))
-        if "r1" in flow.kept_regs(fn.name) and "r1" not in flow.preserved_regs(fn.name):
-            parts.append("Its callers read r0 and r1 after it: it returns a 64-bit value (u64).")
+        words = result_words(program, flow, fn.name)
+        if words > 1:
+            regs = program.arch.arg_regs(4)[:words]
+            parts.append("Its callers read %s after it: it returns a %d-bit value (%s)." % (
+                " and ".join(regs) if words == 2 else ", ".join(regs), min(64, words * program.arch.reg_bits),
+                ctype(program, words)))
     calls = []
     for callee, caller, address, kind in callsites.sites(program, [fn.name]):
         values = constants.at(program, caller, address, program.arch.arg_regs(4))

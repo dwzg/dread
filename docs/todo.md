@@ -595,6 +595,12 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 - [ ] **The other tools on gizmo-msp430**: regflow, recorded cases, switches,
   callsites, Ghidra, the GUI, the system run with its models (16-bit registers), CI (TI's GCC from
   its download with a checksum, or the MSP430 tests skip), the test suite's variants.
+- [x] **The pilot's prototypes on MSP430 and RISC-V** (found 2026-10-19 while checking how the
+  compiler lab feeds the pilot): the declarations the model is told to use had ARM's types for
+  every architecture (u32 arguments, u64 when r1 was read). Now register-wide arguments (u16 on the
+  MSP430) and a result as wide as the callers read, sized like the MSP430 lifter's (r12:r13 u32,
+  r12-r15 u64): gizmo's `checksum(const u8 *p, u32 n)` is `u32 checksum(u16, u16, u16)` there,
+  where the old text asked for six registers.
 - [x] **The lifter and its fuzzer for MSP430** (`dread.lift_msp430`, `dread liftfuzz --isa msp430`):
   u16 registers, a frame array addressed in bytes, the flags as 0 or 1; GCC's shared epilogues (br
   #__mspabi_func_epilog_N) are returns, a call through a register that holds an entry is a call by
