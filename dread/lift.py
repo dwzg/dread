@@ -2102,13 +2102,20 @@ def main(argv=None):
         print("dread lift: %s" % e, file=sys.stderr)
         return 1
     if args.check:
+        from dread import build
         from dread.util.polite import polite
         polite()
+        before = set(build.read_names(image.table("lifted")))
         try:
             check(target, image, args.names or None)
         except NoLifter as e:
             print("dread lift: %s" % e, file=sys.stderr)
             return 1
+        gone = sorted(before - set(args.names)) if args.names else []
+        if gone:            # (checking one function by name once emptied a target's table unnoticed)
+            print("dread lift: with names given, the lifted table lists only those of them that passed: %d "
+                  "it listed before are built from the original's code again (%s%s); --check without "
+                  "names checks every function" % (len(gone), ", ".join(gone[:4]), ", ..." if len(gone) > 4 else ""))
         return 0
     from dread import regflow
     program = Program(target, image)

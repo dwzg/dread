@@ -35,6 +35,12 @@ def test_refusals_name_their_reason(variant):
         assert refused == {}
         return
     assert "reads r1 behind the call of uart_putc" in refused.pop("uart_puts")     # dread.regflow's finding
+    if variant == "m4":         # the FPU and the DSP extension, not modelled yet (docs/todo.md, Cortex-M4)
+        for name, insn in (("lp_filter", "vsub.f32"), ("mix_sat", "qadd"), ("dot_pairs", "smlad"),
+                           ("clamp12", "ssat"), ("level8", "usat")):
+            assert insn in refused[name] and "is not modelled" in refused.pop(name), name
+        for name in ("average", "to_millivolts", "signal_step"):     # vldr: a literal of the register's size
+            assert "a literal load of 0 bytes" in refused.pop(name), name
     if variant == "a32":
         assert "changes the stack pointer" in refused.pop("reset")
         assert "branches into other code" in refused.pop("__aeabi_uidivmod")
@@ -60,7 +66,7 @@ def test_translation_shapes(variant):
         assert "a0 = ram_crc(a0, a1, a2, a3, a4, a5, a6, a7);" in lifted["main"].text
         assert "(sp0 - " in lifted["apply_config"].text
         return
-    if variant == "m3":
+    if variant in ("m3", "m4"):
         assert "u32 x = r2, a = r1;" in text                            # lsls r2, r1 shifts r2 by r1
     apply = lifted["apply_config"].text
     assert "(sp0 - " in apply                                           # its line buffer is in the frame
@@ -73,6 +79,7 @@ def test_never_returns(variant):
     from dread import noreturn
     target = Target.load(gizmo_dir(variant))
     expected = {"a32": {"hang", "main", "reset"}, "m3": {"Default_Handler", "Reset_Handler", "main"},
+                "m4": {"Default_Handler", "Reset_Handler", "main"},
                 "rv32": {"_start", "main"}}[variant]
     assert noreturn.find(Program(target, target.image())) == expected
 
@@ -103,7 +110,7 @@ def copies(tmp_path_factory):
     example has already cached (they are keyed by what they depend on, so they stay valid)."""
     copy = tmp_path_factory.mktemp("lift") / "gizmo"
     shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
-    for variant in ("a32", "m3", "rv32"):
+    for variant in ("a32", "m3", "m4", "rv32"):
         for cache in ("autocases", "regflow"):
             here = os.path.join(gizmo_dir(variant), "build", cache)
             if os.path.isdir(here):
@@ -114,6 +121,23 @@ def copies(tmp_path_factory):
 def copy_of(copies, variant):
     target = Target.load(str(copies / variant))
     return target, target.image()
+
+
+@pytest.mark.compiles
+def test_a_check_by_name_says_what_left_the_table(tmp_path, capsys):
+    """--check with names writes the lifted table with those of them that passed; the functions it
+    listed before leave it, and the command says so (checking one function once emptied gizmo-m4's
+    table unnoticed)."""
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    for cache in ("autocases", "regflow"):
+        here = os.path.join(gizmo_dir("m3"), "build", cache)
+        if os.path.isdir(here):
+            shutil.copytree(here, copy / "m3" / "build" / cache)
+    before = len(build.read_names(str(copy / "m3" / "config" / "lifted.txt")))
+    assert lift.main(["--target", str(copy / "m3"), "--check", "fmt_dec"]) == 0
+    assert build.read_names(str(copy / "m3" / "config" / "lifted.txt")) == ["fmt_dec"]
+    assert "%d it listed before are built from the original's code again" % (before - 1) in capsys.readouterr().out
 
 
 @pytest.mark.slow
