@@ -98,6 +98,29 @@ class Lifted:
         self.unreached = list(unreached)
 
 
+RETRY_PASSES = 8            # times the lift check tries again what failed through a failing callee
+
+
+def call_trees(program, names):
+    """{name: every function it reaches through direct calls and tail calls} for the names."""
+    direct = {}
+
+    def calls(name):
+        if name not in direct:
+            direct[name] = direct_callees(program, program.by_name[name])
+        return direct[name]
+    out = {}
+    for name in names:
+        seen, work = set(), [name]
+        while work:
+            for c in calls(work.pop()):
+                if c not in seen and c in program.by_name:
+                    seen.add(c)
+                    work.append(c)
+        out[name] = seen - {name}
+    return out
+
+
 def direct_callees(program, fn):
     """The functions fn calls or tail-calls directly, by name."""
     out = set()
@@ -1711,7 +1734,8 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
         except Refused as e:
             refuse(name, e)
     callees = {n: direct_callees(program, program.by_name[n]) for n in candidates}
-    accepted, retry, retried, rounds = list(candidates), [], False, 0
+    tree = call_trees(program, candidates)
+    accepted, suspects, passes, rounds = list(candidates), set(), 0, 0
     while accepted:
         rounds += 1
         try:
@@ -1727,28 +1751,38 @@ def check(target, image, names=None, out=print, jobs=None, system=True):
         runner.prepare(target, image, payload)
         lines = []
         _, uncovered, results = runner.run(accepted, only=True, out=lines.append, jobs=jobs)
+        with open(os.path.join(work, "round-%d.txt" % rounds), "w") as f:     # the runner's words, kept
+            f.write("\n".join(lines) + "\n")
         failing = {name for name, count, bad in results if bad}
         drop = failing | set(uncovered)
         ungenerated = set()                 # no cases from the original (it never returns, say): final
         for text in lines:
-            for line in text.splitlines():
+            text_lines = text.splitlines()
+            for k, line in enumerate(text_lines):
                 for name in drop:
                     if line.startswith(("FAIL %s " % name, "UNCOVERED %s:" % name)):
                         out("dropped  " + line[:200])
                         if name not in verdicts or verdicts[name][0] != "dropped":
                             missed = " ".join("0x%x" % a for a in runner.RUN.get("missed", {}).get(name, ()))
-                            verdicts[name] = ("dropped", line[:300], missed)
+                            detail = text_lines[k + 1].strip() if k + 1 < len(text_lines) and \
+                                text_lines[k + 1].startswith("     ") else ""
+                            verdicts[name] = ("dropped", (line + (" | " + detail if detail else ""))[:300], missed)
                         if "[case generation]" in line:
                             ungenerated.add(name)
-        if not retried:
-            # failed while a lifted callee failed too: perhaps only through that callee
-            retry += [n for n in failing - ungenerated if callees[n] & failing]
+        # Failed while a lifted function it calls (directly or further down) failed too: perhaps only
+        # through that one. Such suspects are tried again from the bottom up: first those none of
+        # whose callees is a suspect; one that fails then fails on its own and stays out, and its
+        # callers come next with its original code (FreeRTOS: every task-creating function failed
+        # through the heap's allocator, two calls down; tried again together, they failed together).
+        suspects |= {n for n in failing - ungenerated if tree[n] & (failing - {n})}
         accepted = [n for n in accepted if n not in drop]
         if not drop:
-            if retry and not retried:
-                out("retry    %s (a lifted callee of each failed too)" % ", ".join(sorted(retry)))
-                accepted += retry
-                retried = True
+            if suspects and passes < RETRY_PASSES:
+                ready = {n for n in suspects if not tree[n] & suspects} or set(suspects)    # (a cycle: all)
+                out("retry    %s (a lifted function each calls failed too)" % ", ".join(sorted(ready)))
+                accepted += sorted(ready)
+                suspects -= ready
+                passes += 1
                 continue
             break
     by_system = system_check(target, image, program, lifter, accepted, endless, out, verdicts) \

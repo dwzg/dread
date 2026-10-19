@@ -73,13 +73,15 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 8       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 10       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
                   # 7: at most MAX_CELLS memory locations per function get values; spins of a cycle
                   # of peripheral reads cut; poll stages may answer with compared constants
                   # 8: a callee a run hung in until the instruction limit is stubbed in later inputs
+                  # 9: those stubs log only the argument registers the callee reads (dread.regflow)
+                  # 10: a run that hangs in a callee that never returns makes a "hang" case instead
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -133,6 +135,8 @@ class Generator:
         self.target, self.image = target, image
         self.program = program or Program(target, image)
         self.layout = layout or Layout(target, image)
+        self._flow = None                   # dread.regflow, when a stub's mask needs it
+        self._endless = None                # dread.noreturn, when a run hangs in a callee
         self.payload = payload if payload is not None else image.payload()
         self.arch = image.arch
         mem = target.memory
@@ -409,6 +413,29 @@ class Generator:
             m.stub(target, lambda m, *a, target=target, nargs=nargs, nstack=nstack:
                    stub(m, *a, target=target, nargs=nargs, nstack=nstack))
 
+    def endless(self):
+        """The functions that never return (dread.noreturn), found once."""
+        if self._endless is None:
+            from dread import noreturn
+            self._endless = set(noreturn.find(self.program))
+        return self._endless
+
+    def reads_mask(self, name):
+        """The argument registers a function reads at its entry (dread.regflow), as a stub's logging
+        mask: the others hold what earlier code left, which a rebuilt caller need not reproduce
+        (lifted C clears the scratch registers behind a call; logged, they made every stubbed
+        assertion call differ)."""
+        if self._flow is None:
+            from dread import regflow
+            try:
+                self._flow = regflow.load(self.target, self.image, self.program)
+            except Exception:
+                self._flow = False
+        if not self._flow:
+            return 1
+        reads = set(self._flow.read_regs(name))
+        return sum(1 << i for i, r in enumerate(self.target.abi.arg_regs) if r in reads)
+
     def machine(self, payload=None, aliases=None):
         return Machine(self.layout, self.payload if payload is None else payload, aliases, isa_of=self.program.isa_at)
 
@@ -657,6 +684,11 @@ class Generator:
                 break
             if (corpus or stepping) and rng.random() < 0.75:
                 case = json.loads(json.dumps(rng.choice(corpus + stepping)))
+                if case.pop("hang", None):          # a mutant hangs or not by its own run
+                    if self.long:
+                        case["limit"] = self.long
+                    else:
+                        case.pop("limit", None)
                 if hung and len(case["calls"]) < len(calls):        # stubs found since it was made
                     case["calls"] = [list(c) for c in calls]
                     case["returns"] = case["returns"] or [value() for _ in range(8)]
@@ -700,15 +732,25 @@ class Generator:
                 faults += 1
                 if m.spinning:
                     spins.setdefault(m.spinning[0], m.spinning[1:])
-                # A run that never came back from a callee (an assertion that waits for a debugger, a
-                # wait for a flag nothing sets): later inputs stub that callee, so the code around the
-                # call can be covered; each case says which stubs it has, for both images alike.
-                if m.timed_out and len(hung) < HUNG_STUBS:
-                    inside = self.program.function_at(m.reg("pc") & ~1)
-                    if inside is not None and inside.entry != entry and inside.entry not in hung \
-                            and all(c[0] != inside.entry for c in calls):
+                # A run that never came back from a callee. One that never returns at all (dread.noreturn:
+                # a hook that spins with interrupts off) makes a case of its own, "hang": both images
+                # run into it and are compared up to the limit (stubbed, the original would go on behind
+                # the call where the lifted C knows better). One that waits for something (an assertion
+                # that waits for a debugger, a flag nothing sets) is stubbed in later inputs, so the code
+                # around the call can be covered; each case says which stubs it has, for both images.
+                inside = self.program.function_at(m.reg("pc") & ~1) if m.timed_out else None
+                if inside is not None and inside.entry != entry:
+                    if inside.name in self.endless():
+                        got = m.covered_insns(words)
+                        if got - covered and not self.touches_image(m):
+                            case["hang"], case["limit"] = True, limit
+                            covered |= got
+                            corpus.append(case)
+                            last_gain = attempt
+                    elif len(hung) < HUNG_STUBS and inside.entry not in hung and all(c[0] != inside.entry
+                                                                                      for c in calls):
                         hung.add(inside.entry)
-                        calls.append([inside.entry, (1 << nregs) - 1, 0])
+                        calls.append([inside.entry, self.reads_mask(inside.name), 0])
                 learn_pointers(m, case)
                 if pointers:
                     went = {m.reg("pc") & ~1, m.reg(self.program.arch.veneer_reg)} - {self.fake_pointer, 0}
@@ -848,7 +890,28 @@ class Generator:
         if len(corpus) + len(extras) < 4:
             raise GenerationError("%s: only %d of %d generated inputs ran to the end (%d faulted); write cases"
                                   % (name, len(corpus) + len(extras), budget, faults))
-        return corpus + extras
+        return self.settle_hangs(entry, corpus + extras)
+
+    def settle_hangs(self, entry, cases):
+        """A case is a "hang" case by its own run, not by the case it was made from: one that returns
+        loses the mark (and the limit that came with it)."""
+        for case in cases:
+            if not case.get("hang"):
+                continue
+            m = self.machine()
+            m.plan = []
+            self.apply(m, case)
+            m.may_hang = False
+            try:
+                m.call(entry, *case["args"], max_instructions=case.get("limit", 200_000))
+            except EmuError:
+                continue                    # it hangs (or faults the same way it did): it stays
+            case.pop("hang", None)
+            if self.long:
+                case["limit"] = self.long
+            else:
+                case.pop("limit", None)
+        return cases
 
     def _solve(self, name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, reach, edge):
         """The compare-guided stage (see the module's docstring); adds to corpus and covered."""

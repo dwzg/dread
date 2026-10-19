@@ -107,3 +107,35 @@ def test_a_callee_that_hangs_is_stubbed(tmp_path):
     assert got == words, sorted(hex(a) for a in words - got)
     trap = g.program.by_name["trap"].entry
     assert any(c[0] == trap for case in cases for c in case.get("calls", ()))
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_callee_that_never_returns_makes_hang_cases(tmp_path):
+    """A failure hook that spins with interrupts off never returns (dread.noreturn), and the lifter
+    puts an endless loop behind a call of it. Stubbed, the original went on behind the call where
+    the lifted C stopped (FreeRTOS's allocator: every lifted caller hung). Such a callee is not
+    stubbed: the input becomes a "hang" case, compared up to the limit."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text("__attribute__((noipa)) void hook(void) { for (;;) ; }\n"
+                                  "int alloc(int n) { if (n < 0) { hook(); return 0; } return n * 2; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "alloc", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    g = Generator(t, t.image())
+    assert "hook" in g.endless()
+    fn = g.program.by_name["alloc"]
+    cases = g.generate("alloc", fn.entry, fn.insns)
+    hook = g.program.by_name["hook"].entry
+    assert not any(c[0] == hook for case in cases for c in case.get("calls", ()))
+    hangs = [c for c in cases if c.get("hang")]
+    assert hangs and all(c["args"][0] & 0x80000000 for c in hangs)
