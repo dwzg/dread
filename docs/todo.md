@@ -177,6 +177,38 @@ The long runs set the pace of everything after them. Measure first, then cut.
   gizmo; measure again on a target with more device traffic before porting `Machine._on_io` (poll
   stages, the replay plan, spin detection, the log) to dread.fasthooks.
 
+## Performance, third pass (2026-10-19, asked for by the user)
+
+- [x] A lift check of FreeRTOS's GCC -Os build with its cases cached: 290 s -> 120 s. The image with
+  every accepted function rebuilt spun 95 % of its system run in an assertion's loop with interrupts
+  masked (the kernel rebuilt from C takes no clock time, and the timer demo asserts): a system run
+  ends as "spins" when an interrupt waits masked and nothing new happens for SPIN clock units (127 s
+  -> 6 s). Failed case generations are cached under their key, as cases are: the eight that always
+  fail took most of the first round every time (62 s -> 3 s). The check keeps one lifter and what it
+  lifted across its builds (21 s -> 5 s); the system check takes its coverage from the run's blocks.
+- [x] Every run's limit was Unicorn's instruction count, which calls a hook before every
+  instruction: a block hook in C keeps a budget of bytes instead (the limit's number of the
+  instruction set's shortest instructions; with four bytes for Thumb a generation found less: runs
+  that had stopped went on), long runs 3.5 times faster; without the C helper a Python hook keeps the
+  same budget. Stub calls per run 2,000 -> 256 (in four slow generations, runs that returned made at
+  most 209; one function spent its time in 7.1 million calls of runs a generated loop count kept
+  going). Three of the slowest generations side by side: 280 s -> 27 s, 323 s -> 57 s, 37 s -> 32 s, with
+  the same cases and coverage. Generator VERSION 17.
+- [x] The test suite in a fresh worktree regenerated gizmo's cases (21 minutes; the MSP430 test 772 s,
+  0.4 s with its cache): `bin/dev-worktree` copies the caches into a new worktree.
+- [ ] The generation of functions that never return is the slowest left (one task's loop: 49,000 runs
+  of 48 stub calls, 331 s under cProfile). About half is Python per stub call (ten register reads
+  through Unicorn's binding, the IT repair), the rest the solver's and the sweep's runs (24,000 and
+  23,000: the sweep steps every stub answer of a loop case). A stub's register reads and IT repair in
+  one C call (fasthooks) would take about a quarter; fewer search runs for loop cases would change the
+  cases and wants its own measurement.
+- [ ] The system check (about a minute of a lift check on that build): one wave of two runs of the
+  scenario per function; all candidates rebuilt together would be two runs, but brings back some of
+  the clock's distortion (their own blocks take no time): try it with a fallback to one at a time.
+- [ ] gizmo's MSP430 cases take ten minutes to generate (the suite's first run after a generator
+  VERSION change: 603 s of its 936), on DREAD's own engine, which the byte budget does not reach;
+  profile that engine's runs.
+
 ## Phase 7: reading aids, plugin, documentation
 
 - [x] Reading aids: `dread flat` (a function's listing with targets and literals by name, texts,
@@ -336,7 +368,11 @@ repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in
   better: from another function's extent, or from the room the overlay fills (behind the image, its
   free ranges): cases had pointed a queue into a pool and behind the image, where the rebuilt image
   has C (disagreements on that build from about 22 to 8).
-- [ ] **What keeps the lifter below two thirds**, from the measurement after loop cases: (1) coverage
+- [ ] **What the lifter leaves**. All builds rebuilt from the recipe and measured on 2026-10-19
+  (afternoon; the scenario 900 ticks): Cortex-M3 GCC -Os 289 of 366, -O0 314 of 437, -O2 227 of 349,
+  clang -Os 266 of 356, -O2 240 of 343; RISC-V GCC -Os 214 of 312, -O2 166 of 296, clang -Os 208 of 304:
+  1,924 of 2,763 functions (70 %); recorded inputs add 7 to 33 a build; the nine builds took 1 h 43 min.
+  From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with
   what other tasks write meanwhile as later stages: on GCC -Os 254 to 265 accepted, the record step

@@ -54,3 +54,31 @@ def test_reset_restores_what_stores_changed(target):
     assert m.read(ram, 64) == b"\x5a" * 64
     again = Machine(layout, image.payload(), isa_of=program.isa_at)     # the same Core, reset
     assert again.core is m.core and again.read(ram, 64) == before
+
+
+def test_the_instruction_limit_is_a_budget_alike_in_c_and_python(target, monkeypatch):
+    """A run's limit is a budget of bytes of code entered (the instruction set's shortest
+    instructions), kept by a C block hook (Unicorn's own count calls a hook before every
+    instruction: long runs went three to six times slower) and by a Python one without the C helper:
+    both stop the same runaway run at the same block, and a run that returns is not cut."""
+    from dread import autocase, emu, fasthooks
+    gen = autocase.Generator(target, target.image())
+    fn = gen.program.by_name["checksum"]
+    scratch = target.memory.scratch_base
+
+    def run(limit):
+        m = gen.machine()
+        m.plan = []
+        m.write(scratch, bytes(range(256)) * 16)
+        try:
+            r = m.call(fn.entry, scratch, 4096, max_instructions=limit)
+            return "returned", r.ret, m.uc.reg_read(m.layout.pc)
+        except emu.EmuError:
+            return "stopped", None, m.uc.reg_read(m.layout.pc)
+    assert run(200_000)[0] == "returned"
+    short = run(50)
+    assert short[0] == "stopped"
+    monkeypatch.setattr(fasthooks, "_LIB", [None])          # as without a C compiler
+    monkeypatch.setattr(emu.Core, "cores", {})
+    assert run(200_000)[0] == "returned"
+    assert run(50) == short

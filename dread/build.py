@@ -89,14 +89,19 @@ def defined_functions(objects):
     return names
 
 
-def lift_sources(target, image, names, outdir, quiet=False):
+def lift_sources(target, image, names, outdir, quiet=False, lifter=None):
     """Lifted C for `names` (dread.lift) in outdir, a file each, written only when it changed;
     returns ({name: the instructions no path from its entry reaches}, [the names that never return:
-    the system run tests them]). A name that no longer lifts is reported and left out."""
+    the system run tests them]). A name that no longer lifts is reported and left out. lifter: one
+    already made for this image (dread lift --check builds many times with one: what it lifts is kept
+    in it, lifter.lifted)."""
     from dread import lift, regflow
     from dread.program import Program
-    program = Program(target, image)
-    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    if lifter is None:
+        program = Program(target, image)
+        lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    program = lifter.prog
+    kept = lifter.__dict__.setdefault("lifted", {})
     os.makedirs(outdir, exist_ok=True)
     made, endless, loops = {}, [], []
     for name in names:
@@ -104,7 +109,14 @@ def lift_sources(target, image, names, outdir, quiet=False):
         if fn is None:
             continue
         try:
-            result = lifter.lift(fn)
+            if name not in kept:
+                try:
+                    kept[name] = lifter.lift(fn)
+                except lift.Refused as e:
+                    kept[name] = e
+            if isinstance(kept[name], lift.Refused):
+                raise kept[name]
+            result = kept[name]
             text = result.text
         except lift.Refused as e:
             if not quiet:
@@ -135,9 +147,9 @@ def system_names(path):
                 and l.split("#", 1)[0].strip()}
 
 
-def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=None):
+def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=None, lifter=None):
     """Compile and link; returns the path of the rebuilt image. lifted: names to build from lifted C
-    (default: the image's lifted table); a name src defines is left to src."""
+    (default: the image's lifted table); a name src defines is left to src. lifter: see lift_sources."""
     workdir = out or recon_dir(target, image)
     objects = compile_all(target, image, src or image.src, os.path.join(workdir, "obj"))
     names = read_names(image.table("lifted")) if lifted is None else list(lifted)
@@ -145,7 +157,7 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
     if names:
         defined = defined_functions(objects)
         made, endless, loops = lift_sources(target, image, [n for n in names if n not in defined],
-                                            os.path.join(workdir, "lifted"), quiet=quiet)
+                                            os.path.join(workdir, "lifted"), quiet=quiet, lifter=lifter)
         if lifted is None:                  # the image's table: the system run's acceptances stay its own
             by_system = system_names(image.table("lifted"))
             loops = [n for n in loops if n not in by_system]

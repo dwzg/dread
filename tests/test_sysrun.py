@@ -373,3 +373,69 @@ limit = 200_000
     assert run.how.startswith("until"), run.how
     assert run.reports["uart"]["sent"] == "aEbTc", run.reports["uart"]["sent"]
     assert run.reports["interrupts"] == {7: 1}, run.reports["interrupts"]
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_run_that_spins_with_its_interrupt_masked_ends(tmp_path):
+    """After three ticks the program masks interrupts and spins (as an assertion's loop does): the
+    tick keeps coming due and is never taken, nothing new runs. The run ends as "spins" a million
+    clock units after its last progress instead of going on to its limit (a FreeRTOS image with every
+    function rebuilt from C spent 95 % of a run so)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(r'''
+#define UART (*(volatile unsigned *)0x40004000)
+#define SYST_CSR (*(volatile unsigned *)0xE000E010)
+#define SYST_RVR (*(volatile unsigned *)0xE000E014)
+#define SYST_CVR (*(volatile unsigned *)0xE000E018)
+volatile unsigned ticks;
+void systick_handler(void) { ticks++; }
+__attribute__((noreturn)) void reset(void) {
+    SYST_RVR = 1000; SYST_CVR = 0; SYST_CSR = 7;
+    while (ticks < 3) ;
+    UART = 'x';
+    __asm volatile ("cpsid i" ::: "memory");
+    for (;;) ;
+}
+__attribute__((section(".vectors"), used)) void (*const vectors[16])(void) = {
+    (void (*)(void))0x20004000, reset, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, systick_handler };
+''')
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) } > FLASH\n"
+                                   " .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "reset", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '''
+[image.main]
+original = "original/t.bin"
+base = 0x08000000
+entry = "reset"
+vectors = 0x08000000
+
+[compiler]
+cross = "arm-none-eabi-"
+
+[models.uart]
+kind = "uart"
+base = 0x40004000
+
+[models.nvic]
+kind = "nvic"
+systick_rate = 1
+
+[scenarios.spin]
+limit = 50_000_000
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    image = t.image()
+    run = sysrun.run_image(t, image, image.payload(), t.scenarios["spin"])
+    assert run.reports["uart"]["sent"] == "x", run.reports
+    assert run.how.startswith("spins"), run.how
+    assert run.clock < 3_000_000, run.clock

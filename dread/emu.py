@@ -21,7 +21,7 @@ Architecture: ARM (A and M profile, ARM state and Thumb) through dread.arch.
 import struct
 
 from unicorn import (UC_HOOK_BLOCK, UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ,
-                     UC_HOOK_MEM_WRITE, UC_MEM_WRITE, UcError)
+                     UC_HOOK_MEM_WRITE, UC_MEM_WRITE, Uc, UcError)
 
 PAGE = 0x1000
 POLL_LOGGED = 2     # reads after a Machine.poll_read stage's start that are still logged one by one
@@ -198,6 +198,7 @@ class Core:
         for start, data in self.initial:
             uc.mem_write(start, data)
         self.pages, self.dirty, self.hooks, self.machine = {}, set(), [], None
+        self.budget_hook = None     # fasthooks.dread_budget, kept across resets (Machine.call)
         # The hot hooks run in C when dread.fasthooks builds (stores here; coverage and load tracing
         # per Machine); otherwise in Python. Both record the same.
         from dread import fasthooks
@@ -413,6 +414,11 @@ class Machine:
         if stage is not None:
             s, v = stage
             uc.mem_write(addr, (v & ((1 << 8 * s) - 1)).to_bytes(s, "little"))
+
+    def _on_budget(self, uc, addr, size, user):
+        self._budget -= size
+        if self._budget <= 0 < self._budget + size:
+            uc.emu_stop()
 
     def _on_stub(self, uc, addr, size, user):
         args = tuple(uc.reg_read(r) for r in self.layout.arg_regs)
@@ -688,8 +694,28 @@ class Machine:
             poll["count"] = 0
         for later in self.laters.values():
             later["count"] = 0
+        # The limit: Unicorn's own count calls a hook before every instruction (long runs went three
+        # to six times slower), so it is a budget of bytes of code entered instead, kept by a block
+        # hook in C (fasthooks.dread_budget) or, without the C helper, in Python, alike: as many
+        # bytes as max_instructions of the instruction set's shortest instructions (exactly the old
+        # limit for code made of them, a little less for longer ones; with four bytes for Thumb a
+        # generation found less: runs that had stopped at the limit went on). DREAD's own engines
+        # count instructions themselves.
+        count, fast = max_instructions, self.core.fast
+        budget = max_instructions * self.arch.min_insn(isa) if max_instructions else 1 << 62
+        if fast is not None:
+            if self.core.budget_hook is None:
+                self.core.budget_hook = fast.add(UC_HOOK_BLOCK, "dread_budget")
+            fast.state.budget, fast.state.budget_hit = budget, 0
+            count = 0
+        elif max_instructions and isinstance(uc, Uc):
+            self._budget = budget
+            if not getattr(self, "_budget_hooked", False):
+                self._budget_hooked = True
+                self.hook_add(UC_HOOK_BLOCK, self._on_budget)
+            count = 0
         try:
-            uc.emu_start(self.arch.start_address(addr, isa), lay.sentinel, count=max_instructions)
+            uc.emu_start(self.arch.start_address(addr, isa), lay.sentinel, count=count)
         except UcError as e:
             raise EmuError("emulation fault at pc=0x%x: %s" % (uc.reg_read(lay.pc), e))
         except Exception as e:              # an exception in a stub or a hook of the case

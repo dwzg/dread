@@ -34,7 +34,8 @@ class State(ctypes.Structure):
                 ("reg_read", ctypes.c_void_p), ("reg_write", ctypes.c_void_p),
                 ("blocks", Set), ("tree_set", Set), ("reads", Set), ("writes", Set), ("pages", Set),
                 ("code_reads", ctypes.c_int32), ("last_block", ctypes.c_uint64),
-                ("owners", ctypes.c_void_p), ("owners_n", ctypes.c_uint64), ("pc_reg", ctypes.c_int32)]
+                ("owners", ctypes.c_void_p), ("owners_n", ctypes.c_uint64), ("pc_reg", ctypes.c_int32),
+                ("budget", ctypes.c_int64), ("budget_hit", ctypes.c_int32), ("emu_stop", ctypes.c_void_p)]
 
 
 def library():
@@ -112,8 +113,9 @@ class Hooks:
         s.it_mask = getattr(layout.arch, "IT_MASK", 0)     # ARM's IT state; other cores have none
         s.reg_read = ctypes.cast(self.uclib.uc_reg_read, ctypes.c_void_p)
         s.reg_write = ctypes.cast(self.uclib.uc_reg_write, ctypes.c_void_p)
+        s.emu_stop = ctypes.cast(self.uclib.uc_emu_stop, ctypes.c_void_p)
         self.fn = {name: ctypes.cast(getattr(self.lib, name), ctypes.c_void_p) for name in
-                   ("dread_block", "dread_read", "dread_write")}
+                   ("dread_block", "dread_read", "dread_write", "dread_budget")}
 
     def set_code(self, code, lo, hi, owners=None, pc_reg=0):
         """The instruction starts in [lo, hi), for telling loads of code as data (built once per

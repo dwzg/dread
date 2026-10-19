@@ -139,7 +139,7 @@ image's `kept_cases/NAME.json` (cases that once showed a difference; `--keep-fai
 | `poll` | `[[address, n, value], ...]`: from the n-th read of that register on it returns value |
 | `later` | `[[address, size, n, value], ...]`: just before the n-th read that starts at address, memory there becomes value, once (the code's own writes stand after it): what other tasks or handlers wrote while a recorded call waited (`dread sysrecord`) |
 | `stops` | `[address, ...]`: callees whose call ends the run (one that never returns, one a run hung in): the case is compared up to that call |
-| `limit`, `stub_calls` | instructions (default 200,000) and stub calls (default 2,000) one run may take |
+| `limit`, `stub_calls` | instructions (default 200,000: a budget of that many of the instruction set's shortest instructions, counted in bytes of code entered) and stub calls (default 256) one run may take |
 | `hang` | true: not returning is the result (compared up to the limit) |
 | `tight` | true: a stub's fill stops at the first stack word the function stored itself |
 | `why`, `by` | where a written case comes from and why (`dread mutate --kill`, `dread record`); nothing reads them but people |

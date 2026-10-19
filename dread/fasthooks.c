@@ -11,6 +11,7 @@
 #include <string.h>
 
 typedef int (*reg_rw_fn)(void *uc, int regid, void *value);
+typedef int (*emu_stop_fn)(void *uc);
 
 typedef struct {
     uint64_t *keys;     /* 0 = empty; stored keys are key + 1 */
@@ -36,6 +37,9 @@ typedef struct {
     const uint16_t *owners;         /* per halfword of the image: 1 + the function whose extent holds it */
     uint64_t owners_n;
     int32_t pc_reg;
+    int64_t budget;                 /* bytes of code a run may still enter (dread_budget) */
+    int32_t budget_hit;             /* the budget ran out and the run was stopped */
+    emu_stop_fn emu_stop;
 } state_t;
 
 static uint64_t mix(uint64_t x)
@@ -180,6 +184,19 @@ void dread_block(void *uc, uint64_t address, uint32_t size, state_t *st)
     } else if (st->tree)
         set_put(&st->tree_set, address, 0, 1);
     settle(uc, st);
+}
+
+/* UC_HOOK_BLOCK over all code: a run's limit, counted in bytes of the blocks it enters. Unicorn's
+ * own instruction count puts a hook call in front of every instruction: runs went six times slower
+ * with it. Deterministic, unlike a time limit; a run may overshoot by the block that crosses it. */
+void dread_budget(void *uc, uint64_t address, uint32_t size, state_t *st)
+{
+    st->budget -= size;
+    if (st->budget <= 0 && !st->budget_hit) {
+        st->budget_hit = 1;
+        st->emu_stop(uc);
+        settle(uc, st);     /* only a hook that calls into the emulator leaves a stale IT state */
+    }
 }
 
 /* UC_HOOK_MEM_READ: bool (uc, type, address, size, value, user) */

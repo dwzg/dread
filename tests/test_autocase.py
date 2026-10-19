@@ -302,3 +302,33 @@ def test_loads_inside_instructions_and_stores_behind_the_image():
         except EmuError:
             pass
         assert g.touches_image(m), what
+
+
+def test_a_failed_generation_is_cached(target, tmp_path, monkeypatch):
+    """The search is deterministic, so a function whose generation failed fails again under the same
+    key: the failure is cached like cases are, and the next run raises at once (a FreeRTOS build's
+    first lift round spent most of its minute generating the eight functions that always fail)."""
+    from dread import autocase
+    from dread.cases import Suite
+    from dread.emu import Layout
+    from dread.program import Program
+    target.build = str(tmp_path / "build")          # not the example's own cache
+    image = target.image()
+    image.extra_cases, image.kept_cases = str(tmp_path / "extra"), str(tmp_path / "kept")   # none written
+    program, layout = Program(target, image), Layout(target, image)
+    suite = Suite(target, image, program, layout)
+    suite.auto["clamp"] = {}
+    run = {"target": target, "image": image, "program": program, "layout": layout, "original": image.payload(),
+           "suite": suite}
+    calls = []
+
+    def failing(self, name, *args, **kwargs):
+        calls.append(name)
+        raise autocase.GenerationError("%s: only 0 of 400 generated inputs ran to the end" % name)
+    monkeypatch.setattr(autocase.Generator, "generate", failing)
+    monkeypatch.setattr(autocase, "_GENERATORS", {})
+    fn = program.by_name["clamp"]
+    for _ in range(2):
+        with pytest.raises(autocase.GenerationError, match="only 0 of 400"):
+            autocase.cases_for(run, "clamp", fn)
+    assert calls == ["clamp"]

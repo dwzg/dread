@@ -73,7 +73,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 16       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 17       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -87,10 +87,14 @@ VERSION = 16       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 13: a load from a function's extent by another function's code is a load of code;
                   # 14: so is one of any halfword of an instruction, and a store behind the image counts;
                   # 15: a callee a run hung in also ends inputs at its call ("stops");
-                  # 16: so in the boundary sweep, for a run that hung in one
+                  # 16: so in the boundary sweep, for a run that hung in one;
+                  # 17: a run's limit is a byte budget (dread.emu.Machine.call), STUB_CALLS 256
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
-STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
+STUB_CALLS = 256            # stub calls per run; beyond that the run is stopped and counts as not returning
+                            # (runs that returned made at most 209 in four of FreeRTOS's slowest
+                            # generations, 99 % at most 7; at 2,000 one function spent its time in
+                            # 7.1 million calls of runs a generated loop count kept going)
 LOOP_CALLS = 48             # a loop case (a function that never returns) ends at this many stub calls
 SOLVE_RUNS = 3000           # emulator runs per function in the compare-guided stage ...
 SOLVE_COST = 1_500_000      # ... and memory values written for them
@@ -1421,15 +1425,20 @@ def cases_for(run, name, fn):
     cached = cache_load(path)
     if not cached or cached.get("key") != key:
         started = time.time()
+        failed = None
         try:
             made = gen.generate(name, fn.entry, fn.insns, calls=calls, frame=frame, **options)
-        except GenerationError:
-            if not extra_load(image, name):
-                raise
-            made = []
+        except GenerationError as e:
+            made, failed = [], str(e)
         cached = {"key": key, "seed": seed_name(fn.entry), "cases": made,
                   "seconds": round(time.time() - started, 2)}      # for reading only; not in the key
+        if failed is not None:
+            # the search is deterministic: under the same key it fails again (it took the eight
+            # slowest functions of a FreeRTOS build's first round, main's loop 80 s, every time)
+            cached["failed"] = failed
         cache_store(path, cached)
+    if cached.get("failed") and not extra_load(image, name):
+        raise GenerationError(cached["failed"])
     out = []
 
     def setup(case):

@@ -66,6 +66,7 @@ CHUNK = 200_000          # instructions per emu_start (stop rules are checked be
 ACCESS = 8               # shared-clock units a device access takes
 QUIET = 200_000          # shared-clock units without a new block or a device access: the firmware waits
 FROZEN = 2_000           # blocks in a row outside shared code with an event due: a wait the clock cannot see
+SPIN = 1_000_000         # shared-clock units without progress while an interrupt waits, masked: the run spins
 LIMIT = 20_000_000       # default shared-clock limit
 
 
@@ -103,8 +104,10 @@ class System:
         self.log, self.clock, self.new, self.stop = [], 0, 0, None
         self.next_event = None
         self.levels = {}
-        self.blocks, self.entered, self.order = set(), collections.Counter(), []
+        self.blocks, self.entered, self.order = {}, collections.Counter(), []    # blocks: address -> size
         self.last_new, self.last_access, self.limit = 0, 0, LIMIT
+        self.progress = 0                   # the clock at the last device access, model note, interrupt taken
+                                            # or new block of shared code: the same in both images
         self.frozen = 0                     # blocks in a row outside shared code
         # A stop asked for by a peripheral access, taken where the next block starts: stopped inside a
         # memory hook, Unicorn leaves pc on the accessing instruction (a store done, a load not), and
@@ -162,7 +165,7 @@ class System:
         """A model reports something (a byte sent): part of the device log."""
         self.log.append((model, what, value))
         self.new += 1
-        self.last_new = self.clock
+        self.last_new = self.progress = self.clock
         until = self.scenario.get("until") or {}
         if model in until:
             m = self.by_name[model]
@@ -215,8 +218,11 @@ class System:
             return
         for o in self.observers:
             o.block(addr, size)
-        if addr not in self.blocks:
-            self.blocks.add(addr)
+        known = self.blocks.get(addr)
+        fresh = known is None
+        if fresh or size > known:
+            self.blocks[addr] = size
+        if fresh:
             self.new += 1
             self.last_new = self.clock
         entry = self.entries.get(addr)
@@ -230,6 +236,8 @@ class System:
                 uc.emu_stop()                                               # clock on to the event
         else:
             self.frozen = 0
+            if fresh:
+                self.progress = self.clock
             self.clock += size
             if (self.next_event is not None and self.clock >= self.next_event) or self.clock >= self.limit:
                 uc.emu_stop()
@@ -255,7 +263,7 @@ class System:
         model, mask = self._owner(addr), (1 << 8 * size) - 1
         who = model.name if model else "-"
         self.clock += ACCESS
-        self.last_access = self.clock
+        self.last_access = self.progress = self.clock
         if access == UC_MEM_WRITE:
             self.log.append(("write", who, addr, size, value & mask))
             self.new += 1
@@ -319,6 +327,7 @@ class System:
             controller, number = wanted
             controller.taken(number)
             self.interrupts[number] += 1
+            self.progress = self.clock
             self.log.append(("interrupt", controller.name, number))
             vectors = controller.vector_base() if hasattr(controller, "vector_base") else self.image.vectors
             cause = controller.core_cause(number) if hasattr(controller, "core_cause") else None
@@ -375,6 +384,14 @@ class System:
             if self.clock >= limit:
                 how = "limit: %d units of shared clock" % limit
                 break
+            if self.clock - self.progress >= SPIN:
+                wanted = self._wanted()
+                if wanted is not None and not self._may_take(*wanted):
+                    # it waits for an interrupt it keeps masked (an assertion's loop with interrupts
+                    # off): nothing can change any more
+                    how = "spins: interrupt %d waits, masked, and nothing new for %d units of shared clock, pc 0x%x" % (
+                        wanted[1], self.clock - self.progress, pc & ~1)
+                    break
             frozen = self.clock == clock_before and self.next_event is not None
             if frozen:
                 self.clock = self.next_event        # a wait outside shared code: on to the next event

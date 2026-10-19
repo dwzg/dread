@@ -1812,7 +1812,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
     while accepted:
         rounds += 1
         try:
-            payload = build.build(target, image, out=work, lifted=accepted, quiet=True)
+            payload = build.build(target, image, out=work, lifted=accepted, quiet=True, lifter=lifter)
         except overlay.OverlayError as e:
             if e.function in accepted:      # one function the overlay cannot place: without it
                 out("dropped  %-24s %s" % (e.function, e))
@@ -1873,7 +1873,8 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
     for name in accepted:
         verdicts[name] = ("accepted", "by " + by_system[name] if name in by_system else
                           "by loop cases" if name in loops else "", "")
-    whole = whole_image(target, image, program, accepted, out) if system and target.scenarios and accepted else None
+    whole = whole_image(target, image, program, accepted, out, lifter) if system and target.scenarios and accepted \
+        else None
     if whole:
         out("the whole image: %s" % whole)
     os.makedirs(work, exist_ok=True)
@@ -1926,6 +1927,12 @@ class Coverage:
     def io(self, addr, size, value):
         pass
 
+    def add(self, blocks):
+        """What a finished run executed ({address: size}, a System's blocks): the same as having
+        watched it, without a call for every block."""
+        for addr, size in blocks.items():
+            self.block(addr, size)
+
 
 G = {}                                      # what a forked system check worker reads (system_check)
 
@@ -1940,7 +1947,7 @@ def _system_one(name):
     try:
         unreached = set(lifter.lift(fn).unreached)
         where = os.path.join(work, name)
-        payload = build.build(target, image, out=where, lifted=[name], quiet=True)
+        payload = build.build(target, image, out=where, lifted=[name], quiet=True, lifter=lifter)
     except (Refused, overlay.OverlayError) as e:
         return name, "dropped", str(e), "", None
     with open(os.path.join(where, "placement.json")) as f:
@@ -1952,8 +1959,8 @@ def _system_one(name):
     for scenario_name, scenario in sorted(target.scenarios.items()):
         scenario = dict(scenario, _name=scenario_name)
         system = sysrun.System(target, image, G["original"], program=program, built=built, scenario=scenario)
-        system.observers.append(coverage)
         a = system.run(int(scenario.get("limit", sysrun.LIMIT)))
+        coverage.add(system.blocks)
         b = sysrun.run_image(target, image, rebuilt, scenario, placement=placed)
         diff = sysrun.compare(a, b)
         if diff:
@@ -2004,7 +2011,7 @@ def system_check(target, image, program, lifter, names, out=print, verdicts=None
     return kept
 
 
-def whole_image(target, image, program, names, out=print):
+def whole_image(target, image, program, names, out=print, lifter=None):
     """Every scenario on the original and on the image with all of `names` built from lifted C: the
     function-level cases test each function on its own, this the whole (a frame that grew in C can
     overflow a task's small stack). Returns None when they agree, else the first difference."""
@@ -2014,7 +2021,7 @@ def whole_image(target, image, program, names, out=print):
         return None
     work = os.path.join(target.build, "lift-whole", image.name)
     try:
-        payload = build.build(target, image, out=work, lifted=list(names), quiet=True)
+        payload = build.build(target, image, out=work, lifted=list(names), quiet=True, lifter=lifter)
     except overlay.OverlayError as e:
         return "the build failed: %s" % e
     with open(os.path.join(work, "placement.json")) as f:
