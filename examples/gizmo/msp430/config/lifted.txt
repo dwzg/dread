@@ -21,7 +21,9 @@ memcpy
 memset
 print_status
 read_line
+script_run
 strlen
+strncpy
 timer_irq
 timer_start
 uart_getc

@@ -184,6 +184,23 @@ def lift_gizmo_msp430():
     return target, image, program, lifter, lifted, refused
 
 
+def test_a_runtime_helper_keeps_its_abi_result():
+    """A runtime helper's result is what the MSP430 EABI says (__mspabi_mpyl: 32 bits in r12:r13),
+    whatever the original's own callers read of it: gizmo's parse_uint, rewritten in C, multiplies
+    through it and reads r13, which no call of the original does. dread.regflow takes the ABI's
+    result as read, so the lifted helper returns all of it and its cases compare it."""
+    from dread import lift, regflow
+    from dread.program import Program
+    from dread.target import Target
+    target = Target.load(gizmo_dir("msp430"))
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    assert flow.kept_regs("__mspabi_mpyl") == ["r12", "r13"]
+    assert "the ABI (its result)" in flow.why("__mspabi_mpyl", "r13")
+    assert lift.make_lifter(program, flow)._width("__mspabi_mpyl") == 2
+
+
 def test_gizmo_msp430_lifts():
     """dread.lift_msp430 on gizmo: of gizmo's own functions it refuses those with stack arguments
     (and a caller of one), a caller of libgcc's 64-bit multiplication (which takes r8-r11 as its

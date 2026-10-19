@@ -418,8 +418,8 @@ ldflags = []
     assert any(c.kind == "load" and c.run == 0xffe0 for c in image.startup())
     lines = directives(t, image, symbols=False)
     assert "entry 0x%x" % p.by_name["reset"].entry in lines and "func 0x%x -" % p.by_name["isr"].entry in lines
-    with pytest.raises(lift.NoLifter):
-        lift.make_lifter(p)
+    from dread.lift_msp430 import Msp430Lifter
+    assert isinstance(lift.make_lifter(p), Msp430Lifter)
 
 
 @needs_gcc

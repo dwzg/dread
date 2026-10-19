@@ -15,6 +15,7 @@ pushes the return address; there is no link register.
 
 Constructed from [arch]: isa ("msp430"), endian, ghidra.
 """
+import re
 import struct
 
 NAMES = ["pc", "sp", "sr", "cg"] + ["r%d" % i for i in range(4, 16)]
@@ -237,6 +238,18 @@ def fields(insn):
     return insn.fields
 
 
+# The MSP430 EABI's integer runtime helpers by the width of their result (TI's "MSP430 Embedded
+# Application Binary Interface"; GCC's libgcc implements them): multiply, divide, remainder and
+# shifts of 16-bit (i, u), 32-bit (l) and 64-bit (ll) operands, and the widening multiplies.
+ABI_RESULTS = {}
+for _regs, _names in ((("r12",), "mpyi divi divu remi remu slli srai srli"),
+                      (("r12", "r13"), "mpyl mpysl mpyul divli divul remli remul slll sral srll"),
+                      (("r12", "r13", "r14", "r15"),
+                       "mpyll mpysll mpyull divlli divull remlli remull sllll srall srlll")):
+    for _n in _names.split():
+        ABI_RESULTS["__mspabi_" + _n] = _regs
+
+
 class Msp430:
     """The MSP430 layer. Constructed from [arch]: isa, endian, ghidra."""
 
@@ -260,6 +273,15 @@ class Msp430:
         return out
     link_reg = None             # a call pushes the return address
     own_epilogues = ("__mspabi_func_epilog_",)  # GCC's shared epilogues, which compiled C jumps to
+
+    def abi_results(self, name):
+        """The registers of a runtime helper's result by the MSP430 EABI (16 bits in r12, 32 in
+        r12:r13, 64 in r12-r15), whatever the original's own callers read of it: compiled C calls
+        the helper by this contract (gizmo's parse_uint, rewritten in C, multiplies through
+        __mspabi_mpyl and reads r13, which the original's callers never did). dread.regflow takes
+        these registers as read after every call. () for anything else."""
+        base = re.sub(r"_\d+$", "", name)      # the fixed-count shifts: __mspabi_srli_4
+        return ABI_RESULTS.get(base, ())
     veneer_reg = "r11"
     profile = None
 

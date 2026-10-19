@@ -53,10 +53,13 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 5                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 6                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
+                            # 6: a call through a register that holds one function's entry (the
+                            # layer's register_call_targets: MSP430) is a call of that function, and
+                            # a runtime helper's result by the ABI (abi_results) counts as read
 
 
 class RegFlow:
@@ -94,7 +97,8 @@ class RegFlow:
     def why(self, name, reg, limit=3):
         """A short text for reports: who reads the register after the call, and how."""
         sites = self.sites_of(name, reg)
-        text = "read after the call by " + ", ".join("%s 0x%x" % s for s in sites[:limit])
+        text = "read after the call by " + ", ".join("%s 0x%x" % s if s[1] else "%s (its result)" % s[0]
+                                                      for s in sites[:limit])
         if len(sites) > limit:
             text += " and %d more" % (len(sites) - limit)
         if not self.always(name, reg):
@@ -263,7 +267,11 @@ class Analysis:
         for fn in program.functions:
             self._neutral_saves(fn)
         self.may = self._may_write()
-        self.kept = {name: 0 for name in self.rows}
+        # a runtime helper's result by the ABI is read, whatever the original's callers do with it:
+        # compiled C calls the helper by that contract (the layer's abi_results)
+        abi = getattr(arch, "abi_results", None)
+        self.abi = {name: self.mask(abi(name)) for name in self.rows} if abi is not None else {}
+        self.kept = {name: self.abi.get(name, 0) for name in self.rows}
         self.reads = {name: 0 for name in self.rows}
 
     def mask(self, regs):
@@ -281,6 +289,11 @@ class Analysis:
         index = {row.address: i for i, row in enumerate(code)}
         succ = [[] for _ in range(n)]
         returns, calls, tails, ijumps, unknown = [], [], [], [], False
+        # a call through a register that holds one function's entry (mov #f, r10; call r10): a call
+        # of f, whose result the code behind it may read (gizmo-msp430's parse_uint reads r13 of
+        # __mspabi_mpyl so; missed, the multiply was lifted with a 16-bit result and accepted)
+        through = getattr(self.program.arch, "register_call_targets", None)
+        resolved = through(self.program, fn) if through is not None else {}
 
         def nxt(i):
             return i + 1 if i + 1 < n and code[i + 1].address == code[i].address + code[i].size else None
@@ -303,8 +316,10 @@ class Analysis:
                 calls.append((i, callee))   # None: not a function's entry, treated as indirect
                 unknown |= callee is None
             elif kind == "icall":
-                calls.append((i, None))
-                unknown = True
+                targets = resolved.get(row.address, ())
+                callee = entry_name(targets[0]) if len(targets) == 1 else None
+                calls.append((i, callee))
+                unknown |= callee is None
             elif kind == "return":
                 returns.append(i)
             elif kind == "ijump":
@@ -619,6 +634,10 @@ class Analysis:
                 for reg in self.names:
                     if self.kept[name] & self.bit[reg]:
                         sites[callee][reg].append([name, code[i].address, True])
+        for name, m in self.abi.items():
+            for reg in self.names:
+                if m & self.bit[reg]:
+                    sites[name][reg].append(["the ABI", 0, True])
         preserved = {name: self.kept[name] & ~self.may[name] for name in self.rows if self.kept[name] & ~self.may[name]}
         return RegFlow(self.names, dict(self.kept), dict(self.reads), {k: dict(v) for k, v in sites.items()},
                        preserved)
