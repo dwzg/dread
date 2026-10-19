@@ -6,6 +6,46 @@ the same commit. What was done and learned goes into the commit message; this fi
 queue. The order was agreed with the user: the ARM phases, then `dread pilot`, then RISC-V. How the
 queue may change while the user is away: CLAUDE.md, "Working unattended".
 
+## Compiler lab (`dread cclab`; the user, 2026-10-19: before anything else)
+
+Put a compiler in and learn how it compiles: a corpus of small probe programs, compiled across a
+matrix of options, each answering one question by running the code in DREAD's emulator (where
+arguments arrive, what survives a call, what a runtime helper computes and clobbers) and by reading
+the object (the helpers each construct calls, prologue and switch shapes, outlined code). First for
+IAR EWARM (ARM). It runs on the user's work computer, which has IAR, GCC, clang and WSL but no LLM
+and no access from here: DREAD runs in WSL there, calls IAR's Windows executables through WSL's
+interop (paths converted with wslpath), and must work without being tried against IAR here. What it
+learns about IAR stays out of this repository (rule 1); the harness is public.
+
+- [ ] **Core** (`dread cclab`): compiler adapters in a TOML file (executables, command templates for
+  compiling, linking and listings, the option matrix); adapters for arm-none-eabi-gcc and clang,
+  tested here; the probe format (C, plus a TOML of what each probe measures); the matrix runner
+  (parallel, cached); a target of its own per build for the emulator; results per probe as JSON.
+  First probes: where arguments and results go (ints, 64-bit, structs, varargs), what a call keeps.
+- [ ] **The IAR adapter**: iccarm and ilinkarm through WSL interop (wslpath, the work directory on
+  the Windows side), an ILINK configuration (.icf) written for the emulator's memory map, the
+  probes kept from ILINK's removal of unreferenced code; written from IAR's documented command
+  line and tested here against a stand-in that speaks it over GCC.
+- [ ] **`dread cclab doctor`**: finds EWARM's compilers (Program Files\IAR Systems\...\arm\bin)
+  and the other compilers, prints their versions, compiles, links and runs a trivial probe, and says
+  which step failed and what to change in the adapter file (no LLM at work).
+- [ ] **The probe set**: calling convention (ints, 64-bit, structs by value and returned, varargs,
+  soft and hard float), callee-saved registers and stack alignment, the runtime helper each operation
+  calls and its register contract, prologue and epilogue shapes, switch encodings, division by
+  constants, memcpy, memset and struct copies, tail calls, literal pools, function alignment and
+  padding, cross-call fragments (IAR's outlined sequences, called without the calling convention).
+- [ ] **Profile, report and bundle**: a profile TOML the tools read (`[compiler] profile`: helper
+  contracts for regflow, switch and epilogue shapes for dread.switches and the lifter, prologue
+  signatures for finding functions), a self-contained report, and a bundle the user brings home,
+  with IAR's runtime code marked as such.
+- [ ] **At home, with an LLM**: on a brought-back bundle, the report's narrative and probes for what
+  the corpus does not answer; only our probes and their compiled code go to the LLM, never IAR's
+  runtime code (the user, 2026-10-19).
+- [ ] **C++ probes**: name mangling, vtables, constructors and static initialisation, new and delete,
+  exceptions.
+- [ ] Later: `dread whatcc` from stored profiles (More compilers), and a search for the options that
+  reproduce a function's bytes.
+
 ## Questions for the user
 
 Decisions that are the user's, with options and a recommendation. Work goes on around them.
