@@ -129,5 +129,7 @@ def write(work, adapter_name=None, out=print):
         path = os.path.join(work, name, "report.md")
         with open(path, "w") as f:
             f.write("\n".join(lines) + "\n")
-        out("dread cclab report: %s" % path)
+        from dread.cclab import profile
+        made = profile.write(work, name)
+        out("dread cclab report: %s%s" % (path, ", " + made if made else ""))
     return 0

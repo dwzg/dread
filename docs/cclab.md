@@ -77,6 +77,23 @@ and its tables also hold the toolchain's runtime library: for IAR, IAR's code.
   the probe sources and objects. No image, binary or table.
 - What the lab learns about IAR stays out of DREAD's public repository (CLAUDE.md, rule 1).
 
+## The profile, for DREAD's other tools
+
+`report` also writes `WORK/ADAPTER/profile.toml`: every runtime helper the probes called, with all
+its names, its result registers (what the compiler's own code reads after a call of it: DREAD's
+register flow on every build's image) and the registers the runs saw it change. A target built by
+that compiler names it in its `dread.toml`:
+
+```toml
+[compiler]
+profile = "iar-arm-profile.toml"
+```
+
+and DREAD's register flow takes each helper's results as read after every call of it, so that a
+lifted helper returns all of its result and its cases compare it (C compiled anew calls the helper
+by that contract, whatever the original's callers read of it). A profile of IAR stays with the
+target it describes, outside DREAD's repository.
+
 ## Adapters
 
 An adapter is a TOML file: the tools (a name on PATH, a path, a glob, or a list of those), the
@@ -96,6 +113,7 @@ lab runs functions without the toolchain's startup code).
 
 Anything about code the probes do not contain; a register a helper did not change in the runs that
 were made may still be changed by other inputs; a probe's C may mean different things to compilers
-where C leaves it open (that is why the probes keep to plain C99). Not yet measured: which
-registers a function keeps (callee-saved use), prologue and epilogue variants as such, literal
-pools and padding, hard-float calling conventions, C++.
+where C leaves it open (that is why the probes keep to plain C99). A helper's result registers in the
+profile are those some probe read: a probe that uses a result is what adds it. Not yet measured:
+prologue and epilogue variants as such, literal pools and padding, hard-float calling conventions,
+C++.

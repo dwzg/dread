@@ -47,7 +47,10 @@ IAR's runtime code marked and left out.
   calls and its register contract, prologue and epilogue shapes, switch encodings, division by
   constants, memcpy, memset and struct copies, tail calls, literal pools, function alignment and
   padding, cross-call fragments (IAR's outlined sequences, called without the calling convention).
-- [ ] **Profile, report and bundle** (the report and the bundle are in; the profile is open): a profile TOML the tools read (`[compiler] profile`: helper
+- [x] **Profile, report and bundle** (the profile so far carries the runtime helpers: names, result
+  registers from the register flow on every build, registers changed; regflow takes the results
+  from `[compiler] profile`; switch and epilogue shapes and prologue signatures for the other tools
+  are open, below): a profile TOML the tools read (`[compiler] profile`: helper
   contracts for regflow, switch and epilogue shapes for dread.switches and the lifter, prologue
   signatures for finding functions), a self-contained report, and a bundle the user brings home,
   with IAR's runtime code marked as such.

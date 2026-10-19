@@ -52,7 +52,7 @@ SCHEMA = {
     "memory": {"regions": list, "io": list, "stack": dict, "sentinel": int, "scratch": dict},
     "abi": {"args": int, "callee_saved": list, "result": list},
     "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "ldflags": list, "include": list,
-                 "idioms": str, "tools": dict},
+                 "idioms": str, "tools": dict, "profile": str},
     "paths": {"build": str, "src": str},
     "host": {"jobs": int, "free_cores": int, "nice": int},
 }
@@ -183,6 +183,8 @@ class Compiler:
     ldflags  flags for the linker (default: --no-warn-rwx-segments for GNU ld, none for lld)
     include  further include directories
     idioms   the lifter's compiler profile
+    profile  a dread cclab profile of the original's compiler (relative to the target's directory):
+             dread.regflow takes its runtime helpers' results as read after every call
     tools    {"cc"|"as"|"ld"|"objcopy"|"nm": a command or a list} overriding the defaults
     """
 
@@ -202,6 +204,17 @@ class Compiler:
         self.include = [target.path(p) for p in data.get("include", [])]
         self.idioms = data.get("idioms")
         self.tools = dict(data.get("tools", {}))
+        self.profile = os.path.join(os.path.dirname(target.file), data["profile"]) if data.get("profile") else None
+        self._profile_results = None
+
+    def profile_results(self):
+        """{helper name: [result registers]} of the compiler profile ({} without one)."""
+        if self._profile_results is None:
+            self._profile_results = {}
+            if self.profile:
+                from dread.cclab import profile
+                self._profile_results = profile.load(self.profile)
+        return self._profile_results
 
     def command(self, name):
         """The command line (a list) that starts one tool: cc (compiles C, and assembly with

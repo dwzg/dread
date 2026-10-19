@@ -36,6 +36,8 @@ void op_memset64(char *d) { memset(d, 0, 64); }
 void op_memcpy_n(char *d, const char *s, size_t n) { memcpy(d, s, n); }
 void op_memcpy16(char *d, const char *s) { memcpy(d, s, 16); }
 unsigned op_tail(unsigned a) { return op_udiv10(a + 1); }
+unsigned op_divmod(unsigned a, unsigned b) { return a / b + a % b * 1000u; }
+u64 op_divmod64(u64 a, u64 b) { return a / b + a % b * 1000u; }
 
 int op_switch_dense(int x)
 {

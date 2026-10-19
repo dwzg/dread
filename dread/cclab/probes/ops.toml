@@ -29,6 +29,8 @@ probes = [
     {function = "op_memcpy_n", measure = "op", args = ["scratch+0x100", "scratch", 24]},
     {function = "op_memcpy16", measure = "op", args = ["scratch+0x100", "scratch"]},
     {function = "op_tail", measure = "op", args = [99]},
+    {function = "op_divmod", measure = "op", args = [1000, 7], note = "quotient and remainder of one division"},
+    {function = "op_divmod64", measure = "op", args = [0x89abcdef, 0x01234567, 7, 0], note = "the same, 64-bit"},
     {function = "op_switch_dense", measure = "op", args = [7]},
     {function = "op_switch_sparse", measure = "op", args = [300]},
 ]

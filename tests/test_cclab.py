@@ -274,3 +274,24 @@ def test_the_bundle_leaves_images_and_tables_behind(tmp_path):
     assert "gcc-arm/cortex-m3-O2/results.json" in names and "gcc-arm/cortex-m3-O2/src/abi.c" in names
     assert "gcc-arm/cortex-m3-O2/obj/abi.o" in names
     assert not any(n.endswith((".elf", ".bin")) or "/config/" in n or "/original/" in n for n in names)
+
+
+def test_a_target_takes_helper_results_from_a_profile(tmp_path):
+    """[compiler] profile names a dread cclab profile: dread.regflow takes each helper's results as
+    read after its calls (what the compiler's own code expects), whatever the image's callers do."""
+    from conftest import GIZMO
+    from dread import regflow
+    from dread.program import Program
+    from dread.target import Target
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    (copy / "m3" / "profile.toml").write_text('[compiler]\nadapter = "test"\n\n[helpers."checksum"]\n'
+                                              'names = ["checksum"]\nresults = ["r0", "r1"]\n')
+    toml = (copy / "m3" / "dread.toml").read_text()
+    assert "[compiler]\n" in toml
+    (copy / "m3" / "dread.toml").write_text(toml.replace("[compiler]\n", '[compiler]\nprofile = "profile.toml"\n', 1))
+    target = Target.load(str(copy / "m3"))
+    image = target.image()
+    flow = regflow.load(target, image, Program(target, image))
+    assert "r1" in flow.kept_regs("checksum")
+    assert "the compiler's profile (its result)" in flow.why("checksum", "r1")

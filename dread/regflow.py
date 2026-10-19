@@ -53,13 +53,14 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 6                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 7                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
                             # 6: a call through a register that holds one function's entry (the
                             # layer's register_call_targets: MSP430) is a call of that function, and
-                            # a runtime helper's result by the ABI (abi_results) counts as read
+                            # a runtime helper's result by the ABI (abi_results) counts as read;
+                            # 7: and by the target's compiler profile (dread cclab)
 
 
 class RegFlow:
@@ -270,7 +271,16 @@ class Analysis:
         # a runtime helper's result by the ABI is read, whatever the original's callers do with it:
         # compiled C calls the helper by that contract (the layer's abi_results)
         abi = getattr(arch, "abi_results", None)
-        self.abi = {name: self.mask(abi(name)) for name in self.rows} if abi is not None else {}
+        compiler = getattr(program.target, "compiler", None)
+        measured = compiler.profile_results() if compiler is not None else {}      # dread cclab
+        self.abi, self.abi_label = {}, {}
+        for name in self.rows:
+            by_abi = self.mask(abi(name)) if abi is not None else 0
+            by_profile = self.mask(measured.get(name, ()))
+            if by_abi | by_profile:
+                self.abi[name] = by_abi | by_profile
+                self.abi_label[name] = {reg: "the ABI" if by_abi & self.bit[reg] else "the compiler's profile"
+                                        for reg in self.names if (by_abi | by_profile) & self.bit[reg]}
         self.kept = {name: self.abi.get(name, 0) for name in self.rows}
         self.reads = {name: 0 for name in self.rows}
 
@@ -634,10 +644,9 @@ class Analysis:
                 for reg in self.names:
                     if self.kept[name] & self.bit[reg]:
                         sites[callee][reg].append([name, code[i].address, True])
-        for name, m in self.abi.items():
-            for reg in self.names:
-                if m & self.bit[reg]:
-                    sites[name][reg].append(["the ABI", 0, True])
+        for name, labels in self.abi_label.items():
+            for reg, label in labels.items():
+                sites[name][reg].append([label, 0, True])
         preserved = {name: self.kept[name] & ~self.may[name] for name in self.rows if self.kept[name] & ~self.may[name]}
         return RegFlow(self.names, dict(self.kept), dict(self.reads), {k: dict(v) for k, v in sites.items()},
                        preserved)
@@ -728,6 +737,10 @@ def cache_key(target, image):
         h.update(b"\0")
     copies = [(c.kind, c.run, c.size, c.stored) for c in image.startup()]
     h.update(repr((target.abi.callee_saved, image.arch.describe(), image.base, copies)).encode())
+    profile = getattr(getattr(target, "compiler", None), "profile", None)
+    if profile and os.path.exists(profile):                 # the compiler's profile (dread cclab)
+        with open(profile, "rb") as f:
+            h.update(f.read())
     return h.hexdigest()
 
 

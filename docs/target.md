@@ -147,6 +147,7 @@ address faults before the run can stop.
 | `kind` | `"gcc"` (default: a GNU cross toolchain, `cross` + gcc, as, ld, objcopy) or `"clang"` (clang `--target=triple` with its integrated assembler, ld.lld, llvm-objcopy) |
 | `cross` | the prefix of the GNU cross tools (default `arm-none-eabi-`) |
 | `triple` | clang's `--target` (`kind = "clang"` needs it), e.g. `"riscv32-unknown-elf"` |
+| `profile` | a `dread cclab` profile of the original's compiler (`docs/cclab.md`), relative to the target's directory: the register flow takes its runtime helpers' results as read after every call |
 | `cflags` | the flags C for this target is compiled with (for clang, also given to the assembler: `-march`) |
 | `ldflags` | flags for the linker (default `--no-warn-rwx-segments` for GNU ld, none for lld) |
 | `tools` | `{cc, as, ld, objcopy, nm}`: a command or a list for a tool, overriding the defaults |
