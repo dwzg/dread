@@ -500,15 +500,18 @@ class Generator:
         """A digest of what a function's cases depend on besides its own instructions: the whole
         image (a literal pool holds the addresses of globals and callees: a rebuild that moved the
         data left a function's instructions alike and its cases stale, setting cells nobody reads),
-        what the loader puts into RAM, and dread.regflow's version (a hung callee's stub logs what
-        it reads)."""
+        what the loader puts into RAM, and what dread.regflow found in the image (a hung callee's
+        stub logs what it reads, a function's float arguments get values): its result, not its
+        version, so that a new version that finds the same in an image keeps that image's cases (a
+        version that changed only what ARM's FPU pushes mean regenerated every image's)."""
         if self._environment is None:
-            from dread import regflow
             h = hashlib.sha1(bytes(self.payload))
             for c in self.image.startup():
                 h.update(repr((c.kind, c.run, c.size, c.stored)).encode())
                 h.update(bytes(getattr(c, "data", None) or b""))
-            h.update(b"regflow %d" % regflow.VERSION)
+            flow = self.flow()
+            found = json.dumps(flow.to_json(), sort_keys=True).encode() if flow else b"none"
+            h.update(b"regflow " + hashlib.sha1(found).digest())
             self._environment = h.hexdigest()
         return self._environment
 

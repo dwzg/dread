@@ -195,6 +195,24 @@ def test_cached_cases_follow_the_whole_image(target):
     assert cache_key(g1.payload, image.base, fn.insns, sizes, fn.entry, {}, g1.program.arch, g1.environment()) == keys[0]
 
 
+def test_cached_cases_follow_what_regflow_finds_not_its_version(target, monkeypatch):
+    """Cases depend on what dread.regflow finds in the image (a stub logs the registers a callee
+    reads), so the key holds its result, not its version: a version that finds the same keeps the
+    cached cases (version 11 changed only what ARM's FPU pushes mean and regenerated every image's
+    cases), a different finding does not."""
+    from dread import regflow
+    image = target.image()
+    g = Generator(target, image)
+    flow, before = g.flow(), g.environment()
+    monkeypatch.setattr(regflow, "VERSION", regflow.VERSION + 100)
+    monkeypatch.setattr(regflow, "load", lambda *a, **k: flow)
+    assert Generator(target, image).environment() == before
+    changed = regflow.RegFlow.from_json(flow.to_json())
+    changed.reads[sorted(changed.reads)[0]] ^= 1
+    monkeypatch.setattr(regflow, "load", lambda *a, **k: changed)
+    assert Generator(target, image).environment() != before
+
+
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_loop_cases_for_a_function_that_never_returns(tmp_path):
     """A task's loop gets no case that returns. Loop cases stub its callees and end at the same stub
