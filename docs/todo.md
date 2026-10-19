@@ -502,6 +502,10 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   from the round of small arguments), and the MSP430 build lifted for the first time: 74 of 250
   (30 %; Ghidra finds 43 of its functions, the ELF all). 57 min, beside other work and with the
   MSP430 lift new (627 s): not comparable with measure-19's 47.
+  After the near-miss repair (generator 22; measure-22, 2026-10-20): 1,930 of 2,763 on the eight ARM
+  and RISC-V builds, +4 against measure-21 (GCC -Os +1, -O2 +2, clang -O2 +3, RISC-V GCC -O2 and clang
+  -Os +1 each; clang -Os -3, RISC-V GCC -Os -1: which ones, no measurement kept; they name them since),
+  MSP430 74 as before; 63 min beside the full suite and the MSP430 tests.
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with
