@@ -400,9 +400,10 @@ class RiscV:
                 reads.add(NAMES[r])
         if f.rd:
             writes.add(NAMES[f.rd])
-        if f.op == "ecall":                 # the handler's arguments and results
-            reads |= {"a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"}
-            writes |= {"a0", "a1"}
+        # ecall reads and writes nothing of its own: its handler's convention is the firmware's (Linux
+        # takes a0-a7, FreeRTOS yields with it and saves every register). Counted as reading a0-a7, it
+        # made every callee in front of a yield look as if it had to leave them (dread.regflow takes
+        # it for an indirect call that reads nothing and ends every scratch register, as ARM's svc).
         return reads, writes
 
     def sets_flags(self, insn):

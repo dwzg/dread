@@ -169,3 +169,42 @@ def test_a_variadic_spill_is_no_use(tmp_path):
     assert stores, "clang spilled with pushes this time: the test shows nothing"
     flow = regflow.analyse(program)
     assert flow.read_regs("sum") == ["r0"], flow.read_regs("sum")
+
+
+@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+def test_an_ecall_reads_nothing(tmp_path):
+    """FreeRTOS's RISC-V port yields with ecall, and its handler saves every register. Counted as a
+    system call that reads a0-a7, the ecall made every callee in front of a yield look as if its
+    callers read a1-a7 after it (most of the lifter's refusals on RISC-V)."""
+    import subprocess
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.c").write_text("__attribute__((noinline)) int helper(int x) { return x + 1; }\n"
+                                  "int yield_after(int x) { int r = helper(x); __asm__ volatile (\"ecall\"); return r; }\n")
+    elf = str(tmp_path / "t.elf")
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text*) } }\n")
+    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac", "-mabi=ilp32", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "yield_after", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text('''[target]
+name = "ecall"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "rom", base = 0x80000000, size = 0x10000, kind = "rom"}]
+stack = {top = 0x80090000, size = 0x1000}
+sentinel = 0x7fff0000
+[image.main]
+original = "original/t.bin"
+base = 0x80000000
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac", "-mabi=ilp32", "-Os"]
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    target = Target.load(str(tmp_path))
+    flow = regflow.analyse(Program(target))
+    assert not set(flow.kept_regs("helper")) - {"a0"}, flow.kept_regs("helper")      # (a0..a7 before)
