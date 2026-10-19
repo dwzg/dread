@@ -35,11 +35,17 @@ The ISAs: a32 (ARMv7-A in ARM state) and t32 (Cortex-M3, Thumb-2), with the cros
 frames a function the same way (ra and s0-s11 saved, every frame slot written, every register set
 from the arguments before the body reads it, s11 the buffer's address, s0 the frame pointer in the
 "fp" style, a return through another register in the "ret" style) and draws from the base, M and
-Zicsr instructions; the assembler compresses what it can, so the compressed forms come along. The
-image, its target directory and the lifted C go to a temporary directory, kept when something fails
-(or with --keep).
+Zicsr instructions; the assembler compresses what it can, so the compressed forms come along; msp430
+(the 16-bit MSP430, dread.lift_msp430), with TI's msp430-elf-gcc: Msp430Generator (r4-r10 pushed,
+the frame written, r10 the buffer's address, r4 the frame pointer in the "fp" style, GCC's shared
+epilogues in the "ret" style; every addressing mode in word and byte form, dadd, rrc, rra, swpb, sxt,
+dint and eint). Its image holds libgcc's shared epilogues and nothing else of libgcc: lifted C that
+called a shift routine fails the build, reported per function and reduced like a difference. Found
+on its first runs: TI's GCC 8.2 deletes a volatile load and a store of the same value back to the
+same address as a move to itself. The image, its target directory and the lifted C go to a temporary
+directory, kept when something fails (or with --keep).
 
-    dread liftfuzz [--isa a32|t32|rv32] [--functions N] [--length L] [--inputs K] [--seed S]
+    dread liftfuzz [--isa a32|t32|rv32|msp430] [--functions N] [--length L] [--inputs K] [--seed S]
                    [--reduce N] [--keep DIR]
 """
 import argparse
@@ -149,6 +155,35 @@ sentinel = 0x1fff0000
 scratch = {base = 0x80100000, size = 0x20000}
 ''',
         "base": 0x20000000, "ram": 0x80000000,
+    },
+    "msp430": {
+        "flags": ["-mcpu=msp430", "-mhwmult=none"],
+        "toml": '''[target]
+name = "liftfuzz-msp430"
+title = "dread liftfuzz, MSP430"
+
+[arch]
+name = "msp430"
+isa = "msp430"
+
+[image.main]
+original = "fuzz.bin"
+base = 0x4000
+limit = 0xff00
+entry = "f0"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x4000, size = 0xc000, kind = "rom"},
+    {name = "ram", base = 0x0200, size = 0x2400},
+    {name = "scratch", base = 0x2800, size = 0x1800},
+]
+io = [[0x0000, 0x0200]]
+stack = {top = 0x1000, size = 0x0400}
+sentinel = 0x3ff0
+scratch = {base = 0x2800, size = 0x1800}
+''',
+        "base": 0x4000, "ram": 0x0200,
     },
 }
 
@@ -756,7 +791,195 @@ class RiscVGenerator:
         return lines + [".size %s, . - %s" % (name, name)]
 
 
-GENERATORS = {"a32": None, "t32": None, "rv32": RiscVGenerator}     # None: Generator (ARM)
+MSP_DOUBLE = ["mov", "add", "addc", "sub", "subc", "cmp", "bit", "bic", "bis", "xor", "and", "dadd"]
+MSP_JUMPS = ["jne", "jeq", "jlo", "jhs", "jn", "jge", "jl", "jmp"]
+MSP_SAVED = ["r4", "r5", "r6", "r7", "r8", "r9", "r10"]
+# libgcc's shared epilogues, which GCC's -Os C jumps to (one object, the pops falling into one
+# another): linked into the image, as a firmware GCC built holds them. The lifted C calls nothing else
+# of libgcc (its flags and rotations are the instructions themselves: dread.lift_msp430's HELPERS); C
+# that did would fail the overlay's link and show here.
+MSP_LIBGCC = ["__mspabi_func_epilog_1"]
+MSP_HELPERS = [
+    ("h0", ["xor r13, r12", "add r14, r12", "ret"]),                           # three registers in
+    ("h1", ["mov r12, r14", "add r13, r12", "addc r14, r13", "ret"]),         # a 32-bit result: r12 and r13
+    ("h2", ["sub r15, r12", "rra r12", "ret"]),                               # the fourth argument
+]
+
+
+class Msp430Generator:
+    """Random 16-bit MSP430 functions (see the module): the same interface as Generator. The
+    function saves r4-r10 (pushes from r10 down, as GCC does), writes every frame slot, sets every
+    register from the arguments, keeps the buffer's address in r10 and, in the "fp" style, sp's
+    value in r4 to address the frame. The body draws the two-operand instructions in word and byte
+    form with every source mode (registers, the constant generators, immediates, indexed, indirect,
+    @r10+ undone behind it, absolute) and the destinations register, indexed, absolute and frame
+    slots; rrc, rra, swpb, sxt; push and pop around a few instructions; dint, eint and nop; forward
+    jumps on the flags (most behind a bit test of a buffer word); calls of three helpers. The "ret"
+    style returns through a chain of shared epilogues (pops that fall into one another, as
+    __mspabi_func_epilog_N), the other pops and returns itself."""
+
+    thumb = False
+
+    def __init__(self, isa, rng):
+        self.isa, self.rng, self.label, self.fp = isa, rng, 0, None
+        self.buf = ISAS[isa]["ram"] + 0x1000 + 4 * (BUF_WORDS // 2)
+
+    def regs(self):
+        out = ["r5", "r6", "r7", "r8", "r9", "r11", "r12", "r13", "r14", "r15"]
+        return out + ([] if self.fp else ["r4"])
+
+    def dst(self):
+        return self.rng.choice(self.regs())
+
+    def imm(self):
+        rng = self.rng
+        if rng.random() < 0.4:
+            return rng.choice([0, 1, 2, 4, 8, -1])          # the constant generators
+        return rng.choice([0x7F, 0x80, 0xFF, 0x100, 0x7FFF, 0x8000, 0xFFFF, 9, 10, 0x99, 0x9999]) \
+            if rng.random() < 0.4 else rng.randrange(0x10000)
+
+    def frame_slot(self):
+        base = "r4" if self.fp and self.rng.random() < 0.5 else "r1"
+        return "%d(%s)" % (2 * self.rng.randrange(FRAME // 2), base)
+
+    def source(self, byte):
+        """(text, lines after it): an operand and what undoes @r10+."""
+        rng = self.rng
+        r = rng.random()
+        if r < 0.55:
+            return self.rng.choice(self.regs()), []
+        if r < 0.8:
+            return "#%d" % self.imm(), []
+        if r < 0.9:
+            return "%d(r10)" % (rng.randrange(-32, 32) if byte else 2 * rng.randrange(-16, 16)), []
+        if r < 0.94:
+            return "@r10", []
+        if r < 0.97:
+            return "@r10+", ["sub #%d, r10" % (1 if byte else 2)]
+        return "&0x%x" % (self.buf + (rng.randrange(-32, 32) if byte else 2 * rng.randrange(-16, 16))), []
+
+    def destination(self, byte):
+        rng = self.rng
+        r = rng.random()
+        if r < 0.75:
+            return self.dst()
+        if r < 0.88:
+            return "%d(r10)" % (rng.randrange(-32, 32) if byte else 2 * rng.randrange(-16, 16))
+        if r < 0.94:
+            return "&0x%x" % (self.buf + (rng.randrange(-32, 32) if byte else 2 * rng.randrange(-16, 16)))
+        return self.frame_slot()
+
+    def one(self):
+        rng = self.rng
+        kind = rng.choices(["double", "single", "frame", "pushpop", "system"], [66, 14, 10, 6, 4])[0]
+        if kind == "double":
+            op = rng.choice(MSP_DOUBLE)
+            byte = rng.random() < 0.3
+            src, after = self.source(byte)
+            return ["%s%s %s, %s" % (op, ".b" if byte else "", src, self.destination(byte))] + after
+        if kind == "single":
+            op = rng.choice(["rrc", "rra", "swpb", "sxt"])
+            byte = op in ("rrc", "rra") and rng.random() < 0.3
+            where = self.dst() if rng.random() < 0.8 else "%d(r10)" % (2 * rng.randrange(-16, 16))
+            return ["%s%s %s" % (op, ".b" if byte else "", where)]
+        if kind == "frame":
+            if rng.random() < 0.5:
+                return ["mov %s, %s" % (self.dst(), self.frame_slot())]
+            return ["mov %s, %s" % (self.frame_slot(), self.dst())]
+        if kind == "pushpop":
+            src, after = self.source(False)
+            middle = []
+            while len(middle) < 2:
+                line = self.one()
+                if not any("r1" in l.replace("r10", "").replace("r11", "").replace("r12", "").replace(
+                        "r13", "").replace("r14", "").replace("r15", "") or "push" in l or "pop" in l for l in line):
+                    middle += line
+            return ["push %s" % src] + after + middle + ["pop %s" % self.dst()]
+        return rng.choice([["dint", "nop"], ["eint"], ["nop"]])
+
+    def unit(self, name):
+        rng = self.rng
+        r = rng.random()
+        if r < 0.2:
+            self.label += 1
+            label = ".L%s_%d" % (name, self.label)
+            if rng.random() < 0.6:
+                lines = ["bit #%d, %d(r10)" % (1 << rng.randrange(16), 2 * rng.randrange(-16, 16)),
+                         "%s %s" % (rng.choice(["jne", "jeq"]), label)]
+            else:
+                lines = ["cmp %s, %s" % (self.source(False)[0].replace("@r10+", "@r10"), self.dst()),
+                         "%s %s" % (rng.choice(MSP_JUMPS), label)]
+            k = rng.randrange(1, 4)
+            for _ in range(k):
+                lines += self.one()
+            return lines + [label + ":"], k
+        if r < 0.25:
+            return self.call(), 1
+        return self.one(), 1
+
+    def call(self):
+        """A call of a helper; the scratch registers it may change are set again afterwards."""
+        rng = self.rng
+        helper = rng.choice(["h0", "h1", "h2"])
+        keep = {"r12", "r13"} if helper == "h1" else {"r12"}
+        saved = ["r5", "r6", "r7", "r8", "r9"]
+        lines = ["call #%s" % helper]
+        for r in ["r11", "r12", "r13", "r14", "r15"]:
+            if r not in keep:
+                lines.append("mov %s, %s" % (rng.choice(saved), r))
+        return lines + ["cmp %s, %s" % (rng.choice(saved), rng.choice(saved))]   # the callee's flags: unknown
+
+    def body(self, name, length):
+        units, n = [], 0
+        while n < length:
+            lines, k = self.unit(name)
+            units.append(lines)
+            n += k
+        return units
+
+    def fp_number(self):
+        return 4
+
+    def prelude(self):
+        return [".text"]
+
+    def helpers(self):
+        lines = []
+        for name, body in MSP_HELPERS:
+            lines += [".p2align 1", ".global %s" % name, ".type %s, @function" % name, "%s:" % name] + body
+            lines += [".size %s, . - %s" % (name, name)]
+        # a chain of shared epilogues as GCC's __mspabi_func_epilog_N: each pops one register and
+        # falls into the next; the last returns
+        for k, reg in enumerate(MSP_SAVED):
+            name = "epilog_%d" % (len(MSP_SAVED) - k)
+            lines += [".global %s" % name, ".type %s, @function" % name, "%s:" % name, "pop %s" % reg,
+                      ".size %s, . - %s" % (name, name)]
+        return lines[:-1] + ["ret", lines[-1]]
+
+    def function(self, name, units, buf, result, style):
+        lines = [".p2align 1", ".global %s" % name, ".type %s, @function" % name, "%s:" % name]
+        lines += ["push %s" % r for r in reversed(MSP_SAVED)]        # r4 on top, as GCC's
+        lines.append("sub #%d, r1" % FRAME)
+        lines += ["mov r12, %d(r1)" % k for k in range(0, FRAME, 2)]
+        lines += ["mov r12, r5", "mov r13, r6", "mov r14, r7", "mov r15, r8", "mov r12, r9", "add r13, r9",
+                  "mov r14, r11", "xor r15, r11", "mov r13, r4", "sub r12, r4", "mov #%d, r10" % buf]
+        if "fp" in style:
+            lines.append("mov r1, r4")                                # the frame: slots at X(r4)
+        lines += [l for unit in units for l in unit]
+        if "fp" in style:
+            lines += ["mov r4, r1", "mov #0, r4"]                     # a stack address differs by design
+        regs = ["r%d" % i for i in range(4, 16)]
+        lines += ["mov %s, &0x%x" % (r, result + 2 * k) for k, r in enumerate(regs)]
+        lines += ["mov r2, r11", "and #0x107, r11", "mov r11, &0x%x" % (result + 2 * len(regs))]
+        lines.append("add #%d, r1" % FRAME)
+        if "ret" in style:
+            lines.append("br #epilog_%d" % len(MSP_SAVED))
+        else:
+            lines += ["pop %s" % r for r in MSP_SAVED] + ["ret"]
+        return lines + [".size %s, . - %s" % (name, name)]
+
+
+GENERATORS = {"a32": None, "t32": None, "rv32": RiscVGenerator, "msp430": Msp430Generator}   # None: ARM
 
 
 def generator(isa, rng):
@@ -800,11 +1023,11 @@ def make(isa, out, bodies, cases):
     conf = ISAS[isa]
     gen = generator(isa, random.Random(0))
     buf, result = conf["ram"] + 0x1000, conf["ram"] + 0x2000
-    riscv = isa == "rv32"
-    text = gen.prelude() if riscv else [".syntax unified", ".thumb" if gen.thumb else ".arm", ".text"]
+    riscv, msp = isa == "rv32", isa == "msp430"
+    text = gen.prelude() if riscv or msp else [".syntax unified", ".thumb" if gen.thumb else ".arm", ".text"]
     for name, (style, units) in bodies.items():
         text += gen.function(name, units, buf, result, style)
-    text += gen.helpers() if riscv else helpers(gen.thumb)
+    text += gen.helpers() if riscv or msp else helpers(gen.thumb)
     os.makedirs(out, exist_ok=True)
     source = os.path.join(out, "fuzz.S")
     with open(source, "w") as f:
@@ -814,6 +1037,13 @@ def make(isa, out, bodies, cases):
     if riscv:
         cmd = ["clang"] + conf["flags"] + ["-nostdlib", "-fuse-ld=lld", "-Wl,-Ttext=0x%x" % conf["base"],
                                            "-Wl,-e," + first, "-o", elf_path, source]
+    elif msp:                           # a script of its own: the default's text region starts at 0x8000
+        script = os.path.join(out, "fuzz.ld")
+        with open(script, "w") as f:
+            f.write("MEMORY { text (rx) : ORIGIN = 0x%x, LENGTH = 0x%x }\n"
+                    "SECTIONS { .text : { *(.text .text.*) } > text }\n" % (conf["base"], 0xff00 - conf["base"]))
+        cmd = ["msp430-elf-gcc"] + conf["flags"] + ["-nostdlib", "-T", script, "-Wl,-e," + first, "-o", elf_path,
+                                                    source] + ["-Wl,-u," + h for h in MSP_LIBGCC] + ["-lgcc"]
     else:
         cmd = ["arm-none-eabi-gcc"] + conf["flags"] + ["-nostdlib", "-Wl,-Ttext=0x%x" % conf["base"],
                                                        "-Wl,-e," + first, "-Wl,--no-warn-rwx-segments", "-o", elf_path,
@@ -824,7 +1054,8 @@ def make(isa, out, bodies, cases):
     cflags = [f for f in conf["flags"] if not f.startswith("--target=")] + \
         ["-Os", "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common"]
     toml = conf["toml"].replace('entry = "f0"', 'entry = "%s"' % first)
-    compiler = 'kind = "clang"\ntriple = "riscv32-unknown-elf"' if riscv else 'cross = "arm-none-eabi-"'
+    compiler = 'kind = "clang"\ntriple = "riscv32-unknown-elf"' if riscv else \
+        'cross = "msp430-elf-"\nldflags = []' if msp else 'cross = "arm-none-eabi-"'
     toml += '\n[compiler]\n%s\ncflags = [%s]\n' % (compiler, ", ".join('"%s"' % f for f in cflags))
     with open(os.path.join(out, "dread.toml"), "w") as f:
         f.write(toml)
@@ -859,9 +1090,19 @@ def check(isa, work, bodies, cases, jobs=None):
         except lift.Refused as e:
             refused[fn.name] = str(e)
     names = [n for n in names if n in bodies]          # the helpers stay as they are
+    refused = {n: r for n, r in refused.items() if n in bodies}
     failures = {}
     if names:
-        payload = build.build(target, image, lifted=names, quiet=True)
+        from dread.overlay import OverlayError
+        try:
+            payload = build.build(target, image, lifted=names, quiet=True)
+        except OverlayError as e:           # the C needs what the image does not hold (a libgcc helper)
+            lines = str(e).splitlines()
+            for name in names:
+                own = [line for line in lines if "/%s.o:" % name in line or "%s.c:" % name in line]
+                if own:
+                    failures[name] = "FAIL %s  the build failed:\n%s" % (name, "\n".join(own))
+            return failures or {n: "FAIL %s  the build failed: %s" % (n, str(e)) for n in names}, refused, []
         runner.prepare(target, image, payload)
         blocks = []
         _, uncovered, results = runner.run(names, only=True, out=blocks.append, jobs=jobs)
@@ -932,7 +1173,7 @@ def run(isa, functions=100, length=40, inputs=16, seed=1, keep=None, out=print, 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread liftfuzz", description=__doc__.split("\n\n")[0])
     parser.add_argument("--isa", choices=sorted(ISAS), action="append",
-                        help="a32, t32, rv32 (default: those whose toolchain is installed)")
+                        help="a32, t32, rv32, msp430 (default: those whose toolchain is installed)")
     parser.add_argument("--functions", type=int, default=100)
     parser.add_argument("--length", type=int, default=40, help="random instructions per function")
     parser.add_argument("--inputs", type=int, default=16, help="written cases per function")
@@ -940,7 +1181,8 @@ def main(argv=None):
     parser.add_argument("--reduce", type=int, default=2, help="failures reduced to their shortest form (default 2)")
     parser.add_argument("--keep", help="work in this directory and keep it")
     args = parser.parse_args(argv)
-    tools = {isa: ("clang", "ld.lld") if isa == "rv32" else ("arm-none-eabi-gcc",) for isa in ISAS}
+    tools = {isa: ("clang", "ld.lld") if isa == "rv32" else ("msp430-elf-gcc",) if isa == "msp430" else
+             ("arm-none-eabi-gcc",) for isa in ISAS}
     isas = args.isa or [isa for isa in sorted(ISAS) if all(shutil.which(t) for t in tools[isa])]
     missing = [t for isa in isas for t in tools[isa] if not shutil.which(t)]
     if missing or not isas:

@@ -571,7 +571,29 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 - [ ] **The other tools on gizmo-msp430**: regflow, recorded cases, switches,
   callsites, Ghidra, the GUI, the system run with its models (16-bit registers), CI (TI's GCC from
   its download with a checksum, or the MSP430 tests skip), the test suite's variants.
-- [ ] **The lifter and its fuzzer for MSP430.**
+- [x] **The lifter and its fuzzer for MSP430** (`dread.lift_msp430`, `dread liftfuzz --isa msp430`):
+  u16 registers, a frame array addressed in bytes, the flags as 0 or 1; GCC's shared epilogues (br
+  #__mspabi_func_epilog_N) are returns, a call through a register that holds an entry is a call by
+  name, a function that returns with reti is an interrupt handler (GCC's interrupt attribute), and a
+  call's result is one, two or four words, as wide as the callers read. What GCC would compute with
+  libgcc's shift routines (a sign bit, x != 0, swpb, two rra in a row) is the original's instruction
+  in inline assembly: a generated case had stubbed __mspabi_srli (a run had hung in it) and the stub
+  answered the C's own flag computations (gizmo's script_run looped); a lift check drops a function
+  whose C calls what its original does not (none on the other gizmo builds or four FreeRTOS builds,
+  1,313 lifted functions). The fuzzer found TI's GCC 8.2 deleting a volatile load and a store of the
+  same value to the same address as a move to itself (an empty asm before every store now). Nine
+  seeds of 16 functions of 60 instructions with 16 inputs each: no difference, nothing refused.
+  gizmo-msp430: 48 of 130 entries lift (62 of the refused are libgcc's shift routines, labels that
+  fall into one another); the lift check accepts 26, 13 more are written by hand; irq_entry lifts but
+  waits for an MSP430 system run.
+- [ ] **Stack arguments on MSP430**: the lifter refuses functions with arguments beyond r12-r15
+  (gizmo's parse_kv and sum6, libgcc's udivmodsi4) and their callers (apply_config); FreeRTOS's
+  task creation takes two on the stack. mul64 calls __mspabi_mpyll, which takes its second operand in
+  r8-r11 (the ABI's 64-bit helper convention): refused as reading what its caller leaves.
+- [ ] **Case generation on MSP430**: every generated input of gizmo's strncpy (its count in r14:r15)
+  and main faults ("only 0 of 100 generated inputs ran to the end"); script_run, gpio_set and
+  handle_key keep instructions uncovered. Find out why before the FreeRTOS build goes through.
+- [ ] **FreeRTOS's MSP430 build through the lift check** (msp430-gcc-Os: 250 functions).
 - [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the
   5-million-instruction limit (about 5 s per case on the MSP430 engine; two of gizmo's took over 300
   s). Bound a mutant's case by a multiple of what the original took on it.

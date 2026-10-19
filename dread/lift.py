@@ -145,10 +145,13 @@ class NoLifter(Exception):
 
 def make_lifter(program, flow=None, endless=None):
     """The lifter for the program's architecture: Lifter for ARM, dread.lift_riscv.RiscVLifter for
-    RISC-V; NoLifter for any other (MSP430 has none yet)."""
+    RISC-V, dread.lift_msp430.Msp430Lifter for the 16-bit MSP430; NoLifter for any other."""
     if program.arch.name == "riscv":
         from dread.lift_riscv import RiscVLifter
         return RiscVLifter(program, flow, endless)
+    if program.arch.name == "msp430":
+        from dread.lift_msp430 import Msp430Lifter
+        return Msp430Lifter(program, flow, endless)
     if program.arch.name != "arm":
         raise NoLifter("no lifter for %s yet" % program.arch.name)
     return Lifter(program, flow, endless)
@@ -235,7 +238,7 @@ class Lifter:
             return self._states[key]
         prog, arch = self.prog, self.arch
         index = {a: i for i, a in enumerate(fn.insns)}
-        states = {fn.insns[0]: (0, {self.arch.link_reg: self.RET})}
+        states = {fn.insns[0]: (0, self.entry_values())}
         work = [fn.insns[0]]
         while work:
             a = work.pop()
@@ -265,6 +268,11 @@ class Lifter:
                     work.append(b)
         self._states[key] = states
         return states
+
+    def entry_values(self):
+        """What is known at a function's entry: the return address (RET) in the link register (on
+        MSP430 in the stack slot the call pushed, depth 0)."""
+        return {self.arch.link_reg: self.RET}
 
     def depths(self, fn, strict=True):
         """{address: depth} of states()."""
@@ -354,7 +362,10 @@ class Lifter:
 
     def decided(self, insn, values):
         """True or False when a conditional branch's way is known from constants (cbz or cbnz of a
-        known register, b<cond> behind a known compare), else None."""
+        known register, b<cond> behind a known compare), else None. ARM's: the other instruction
+        sets' lifters track no constant flags (capstone's instruction ids are per architecture)."""
+        if self.arch.name != "arm":
+            return None
         ops = insn.operands
         if insn.id in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ) and ops and ops[0].type == A.ARM_OP_REG:
             v = values.get(self.arch._name(insn.reg_name(ops[0].reg)))
@@ -1821,6 +1832,15 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                 continue
             out("dread lift: the build failed: %s" % e)
             return []
+        foreign = foreign_calls(program, work, accepted, lifter)
+        if foreign:                         # the C calls what the original does not: drop, build again
+            for name, symbols in sorted(foreign.items()):
+                why = ("its C calls %s, which the original does not call (a case's stub of it would answer "
+                       "the C)" % ", ".join(sorted(symbols)))
+                out("dropped  %-24s %s" % (name, why))
+                verdicts[name] = ("dropped", why, "")
+            accepted = [n for n in accepted if n not in foreign]
+            continue
         runner.prepare(target, image, payload)
         lines = []
         _, uncovered, results = runner.run(accepted, only=True, out=lines.append, jobs=jobs)
@@ -1862,19 +1882,20 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                 continue
             break
     endless = endless + sorted(n for n in loops if n not in accepted)     # what loop cases did not accept
+    runs = system and target.scenarios and hasattr(program.arch, "reset")   # (no system run for MSP430 yet)
     by_system = system_check(target, image, program, lifter, endless, out, verdicts, loop_missed, jobs) \
-        if system and target.scenarios else {}
+        if runs else {}
     for name in endless:
-        verdicts.setdefault(name, ("dropped", "never returns or an exception handler, and the target has no "
-                                              "system-run scenarios to test it", ""))
+        verdicts.setdefault(name, ("dropped", "never returns or an exception handler, and %s" % (
+            "the system run does not run this architecture yet" if target.scenarios and system else
+            "the target has no system-run scenarios to test it"), ""))
     dropped = len(candidates) - len(accepted) + len(endless) - len(by_system) - len(loops - set(accepted))
     by_loops = [n for n in accepted if n in loops]
     accepted = accepted + sorted(by_system)
     for name in accepted:
         verdicts[name] = ("accepted", "by " + by_system[name] if name in by_system else
                           "by loop cases" if name in loops else "", "")
-    whole = whole_image(target, image, program, accepted, out, lifter) if system and target.scenarios and accepted \
-        else None
+    whole = whole_image(target, image, program, accepted, out, lifter) if runs and accepted else None
     if whole:
         out("the whole image: %s" % whole)
     os.makedirs(work, exist_ok=True)
@@ -1896,7 +1917,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
         "loop cases; %d written by hand, %d refused, %d dropped; the whole image %s), into %s" % (
             len(accepted), rounds, len(by_loops), len(by_system),
             sum(1 for h in by_system.values() if h != "the system run"), len(by_hand & set(program.by_name)),
-            refused, dropped, "differs" if whole else "agrees" if target.scenarios and system else "not run",
+            refused, dropped, "differs" if whole else "agrees" if runs else "not run",
             os.path.relpath(path)))
     return accepted
 
@@ -1976,6 +1997,30 @@ def _system_one(name):
             " ".join("0x%x" % a for a in missing[:8])), " ".join("0x%x" % a for a in missing), None
     how = "loop cases and the system run" if by_cases and set(fn.insns) - coverage.ran - unreached else "the system run"
     return name, "accepted", kind, "", how
+
+
+def foreign_calls(program, work, names, lifter):
+    """{name: symbols} of lifted functions whose compiled C calls a function the original does not
+    call: a compiler's helper (GCC on the MSP430 shifts in libgcc, __mspabi_srli). A generated case
+    may stub it (a callee a run hung in is stubbed, however deep: gizmo-msp430's script_run had
+    __mspabi_srli so) and would then answer the C's own calls. Not caught: C that calls a helper its
+    original calls too, more often than the original. The architecture's shared epilogues (jumped
+    to, never stubbed: own_epilogues) are allowed."""
+    from dread.elf import Elf
+    allowed = tuple(getattr(program.arch, "own_epilogues", ()))
+    lifted = lifter.__dict__.get("lifted", {})
+    found = {}
+    for name in names:
+        obj = os.path.join(work, "obj-lifted", name + ".o")
+        result = lifted.get(name)
+        if not os.path.exists(obj) or result is None or isinstance(result, Refused):
+            continue
+        callees = {c[0] if isinstance(c, tuple) else c for c in result.callees}
+        extra = {s.name for s in Elf(obj).symbols if s.shndx == 0 and s.name and s.name not in callees
+                 and not s.name.startswith(allowed)}
+        if extra:
+            found[name] = extra
+    return found
 
 
 def system_check(target, image, program, lifter, names, out=print, verdicts=None, loop_missed=None, jobs=None):

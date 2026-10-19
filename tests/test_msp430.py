@@ -162,3 +162,145 @@ def test_gizmo_msp430_rewritten_functions_agree(tmp_path):
     text = "\n".join(lines)
     assert failed == 0 and not uncovered, text
     assert "ok   checksum" in text and "ok   fmt_hex" in text
+
+
+needs_ti_gcc = pytest.mark.skipif(not shutil.which("msp430-elf-gcc"), reason="needs TI's MSP430 GCC")
+
+
+def lift_gizmo_msp430():
+    from dread import lift, regflow
+    from dread.program import Program
+    from dread.target import Target
+    target = Target.load(gizmo_dir("msp430"))
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    lifted, refused = {}, {}
+    for fn in program.functions:
+        try:
+            lifted[fn.name] = lifter.lift(fn)
+        except lift.Refused as e:
+            refused[fn.name] = str(e)
+    return target, image, program, lifter, lifted, refused
+
+
+def test_gizmo_msp430_lifts():
+    """dread.lift_msp430 on gizmo: of gizmo's own functions it refuses those with stack arguments
+    (and a caller of one), a caller of libgcc's 64-bit multiplication (which takes r8-r11 as its
+    caller leaves them) and the startup; libgcc's shift routines fall into one another."""
+    target, image, program, lifter, lifted, refused = lift_gizmo_msp430()
+    own = {name: why for name, why in refused.items() if not name.startswith("__")}
+    assert own == {
+        "_start": "0x8000 changes the stack pointer in a way not modelled: mov #2560, r1",
+        "apply_config": "0x891c calls parse_kv, which takes stack arguments",
+        "mul64": "0x847c calls __mspabi_mpyll, which reads r10, r11, r8, r9 its caller leaves",
+        "parse_kv": "it takes stack arguments (beyond r12-r15)",
+        "sum6": "it takes stack arguments (beyond r12-r15)",
+        "udivmodsi4": "it takes stack arguments (beyond r12-r15)",
+    }
+    assert "falls through into what follows" in refused["__mspabi_srli_4"]
+    assert len(lifted) == 48
+    # a call through a register that holds a function's entry is a call of that function, and the
+    # width of its result is what the code behind it reads (uart_getc's: r12 alone)
+    assert "r12 = uart_puts(r12, r13, r14, r15);" in lifted["print_status"].text
+    assert "r12 = uart_getc(r12, r13, r14, r15);" in lifted["read_line"].text
+    # a branch to a shared epilogue is a return; a 32-bit result goes through a union
+    assert "return ((dread_w32){ .h = { r12, r13 } }).w;  /* 81ea: br #36442 */" in lifted["checksum"].text
+    # a function that returns with reti: GCC's interrupt attribute writes the entry and the return
+    text = lifted["irq_entry"].text
+    assert "void __attribute__((interrupt)) irq_entry(void)" in text and "return;  /* 8050: reti  */" in text
+
+
+@needs_ti_gcc
+def test_gizmo_msp430_lifted_c_calls_nothing_of_libgcc(tmp_path):
+    """The lifted C compiles, and no object calls what its original does not (GCC would shift in
+    libgcc for a flag, a byte swap or two rotations in a row; dread.lift.foreign_calls refuses that
+    in a lift check); the shared epilogues GCC's own code jumps to are allowed."""
+    from dread import build, lift
+    target, image, program, lifter, lifted, refused = lift_gizmo_msp430()
+    src = tmp_path / "lifted"
+    src.mkdir()
+    for name, result in lifted.items():
+        (src / (name + ".c")).write_text(result.text)
+    objects = build.compile_all(target, image, str(src), str(tmp_path / "obj-lifted"))
+    assert len(objects) == len(lifted)
+    lifter.lifted = lifted
+    assert lift.foreign_calls(program, str(tmp_path), sorted(lifted), lifter) == {}
+    assert any("dread_rra16(" in r.text for r in lifted.values())
+
+
+@pytest.mark.slow
+@needs_ti_gcc
+def test_random_msp430_functions_agree(tmp_path):
+    """dread.lift_msp430 on random MSP430 code: every source and destination mode in word and byte
+    form, the flags, dadd, push and pop, shared epilogues, calls (dread.liftfuzz)."""
+    from dread import liftfuzz
+    lines = []
+    failures, refused, _ = liftfuzz.run("msp430", functions=16, length=60, inputs=16, seed=7,
+                                        keep=str(tmp_path / "msp430"), out=lines.append, jobs=4, reduce=0)
+    assert not failures and not refused, "\n".join(lines)
+
+
+@pytest.mark.slow
+@needs_ti_gcc
+def test_a_planted_msp430_mistake_shows_and_is_reduced(tmp_path, monkeypatch):
+    """jlo taken on carry set instead of clear: the fuzzer finds it and reduces it to a few units."""
+    from dread import liftfuzz, lift_msp430
+    monkeypatch.setitem(lift_msp430.JUMPS, "jlo", "c")
+    lines = []
+    failures, refused, _ = liftfuzz.run("msp430", functions=16, length=60, inputs=16, seed=7,
+                                        keep=str(tmp_path / "msp430"), out=lines.append, jobs=4, reduce=1)
+    assert failures and not refused, "\n".join(lines)
+    reduced = [line for line in lines if line.startswith("reduced")]
+    assert len(reduced) == 1 and "jlo" in reduced[0] and len(reduced[0].split(" to: ")[1].split(" | ")) <= 6, reduced
+
+
+@pytest.mark.slow
+@needs_ti_gcc
+def test_lifted_c_that_calls_libgcc_fails_the_fuzzers_build(tmp_path, monkeypatch):
+    """C that needs a libgcc routine the image does not hold (swpb as GCC's __builtin_bswap16, two
+    shifts) fails the build; the fuzzer says so per function and reduces it to the swpb."""
+    from dread import liftfuzz, lift_msp430
+    monkeypatch.setattr(lift_msp430, "HELPERS", lift_msp430.HELPERS.replace(
+        '__asm__ ("swpb %0" : "+r"(x));\n    return x;', "return __builtin_bswap16(x);"))
+    lines = []
+    failures, refused, _ = liftfuzz.run("msp430", functions=8, length=60, inputs=8, seed=1,
+                                        keep=str(tmp_path / "msp430"), out=lines.append, jobs=4, reduce=1)
+    assert failures and not refused, "\n".join(lines)
+    assert any("undefined reference to `__mspabi_s" in block for block in failures.values())
+    reduced = [line for line in lines if line.startswith("reduced")]
+    assert len(reduced) == 1 and "swpb" in reduced[0].split(" to: ")[1].split(" | ")[-1], reduced
+
+
+MSP_NAMES = ["fmt_dec", "read_line", "timer_irq", "memcmp", "cmd_volume", "__mspabi_mpyl"]
+
+
+def msp430_copy(tmp_path):
+    """gizmo in tmp_path (its builds share sources), with the generated cases and the register flow
+    gizmo-msp430 has cached."""
+    from conftest import GIZMO
+    from dread.target import Target
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    for cache in ("autocases", "regflow"):
+        here = os.path.join(gizmo_dir("msp430"), "build", cache)
+        if os.path.isdir(here):
+            shutil.copytree(here, copy / "msp430" / "build" / cache)
+    target = Target.load(str(copy / "msp430"))
+    return target, target.image()
+
+
+@pytest.mark.slow
+@needs_ti_gcc
+def test_gizmo_msp430_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path, monkeypatch):
+    from dread import build, lift, lift_msp430
+    target, image = msp430_copy(tmp_path)
+    lines = []
+    accepted = lift.check(target, image, MSP_NAMES, out=lines.append, jobs=4)
+    assert sorted(accepted) == sorted(MSP_NAMES), lines
+    assert build.read_names(image.table("lifted")) == sorted(MSP_NAMES)
+    monkeypatch.setitem(lift_msp430.JUMPS, "jne", "z")      # jne taken on Z set
+    lines = []
+    accepted = lift.check(target, image, MSP_NAMES, out=lines.append, jobs=4)
+    dropped = [line.split()[2] for line in lines if line.startswith("dropped  FAIL")]
+    assert dropped and set(accepted) | set(dropped) == set(MSP_NAMES), lines

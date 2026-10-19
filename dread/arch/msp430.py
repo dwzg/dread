@@ -259,6 +259,7 @@ class Msp430:
             out.append((i, word & ~1, "reset" if i == 15 else "handler"))
         return out
     link_reg = None             # a call pushes the return address
+    own_epilogues = ("__mspabi_func_epilog_",)  # GCC's shared epilogues, which compiled C jumps to
     veneer_reg = "r11"
     profile = None
 
@@ -413,7 +414,9 @@ class Msp430:
                 writes |= {"r11", "r12", "r13", "r14", "r15", "flags"}
             return reads - {"cg"}, writes - {"cg"}
         if f.dst.mode == "reg":
-            if op in READS_DST:
+            if op in ("sub", "subc") and f.src.mode == "reg" and f.src.reg == f.dst.reg:
+                reads.discard(NAMES[f.src.reg])     # sub r, r is 0 and subc r, r is C - 1 whatever r
+            elif op in READS_DST:                   # holds (GCC's sign extension); xor's V reads it
                 reads.add(NAMES[f.dst.reg])
             if op in WRITES_DST:
                 writes.add(NAMES[f.dst.reg])

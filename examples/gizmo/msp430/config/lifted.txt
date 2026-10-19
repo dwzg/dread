@@ -1,0 +1,29 @@
+# Functions built from lifted C: their cases (for one that never returns: its loop cases,
+# or every scenario of the system run) agree with the original and run every instruction it
+# can reach. Written by dread lift --check; not edited by hand.
+__clzdi2
+__mspabi_mpyl
+beep_off
+beep_on
+cmd_beep
+cmd_led
+cmd_mode
+cmd_volume
+delay
+fmt_dec
+irq_dispatch
+irq_enable_timer
+keys_read
+led_off
+led_on
+memcmp
+memcpy
+memset
+print_status
+read_line
+strlen
+timer_irq
+timer_start
+uart_getc
+uart_init
+uart_puts

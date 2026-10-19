@@ -53,9 +53,10 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 4                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 5                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
+                            # 5: MSP430's sub and subc of a register with itself read nothing
 
 
 class RegFlow:
