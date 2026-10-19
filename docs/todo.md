@@ -600,7 +600,7 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   of their own (read and written, words and bytes, through sp and the frame pointer) and call a
   helper that takes two: nine seeds of 16 functions of 60 instructions with 16 inputs each, no
   difference, nothing refused. gizmo-msp430: 56 of 130 entries lift (48 before); the lift check
-  accepts 32 (26 before): parse_kv, udivmodsi4 and libgcc's four 32-bit division entries; sum6 lifts
+  accepts 32 (26 before; 34 with the generator's round of small arguments): parse_kv, udivmodsi4 and libgcc's four 32-bit division entries; sum6 lifts
   but src writes it by hand; apply_config lifts and agrees on its 70 cases, which never run the 37
   instructions behind a parse_kv that succeeds (the case-generation item below). Found on the way:
   the test of gizmo-msp430's rewritten functions had failed since the lifter came (two parse_uint
