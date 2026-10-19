@@ -316,6 +316,29 @@ def test_the_bundle_leaves_images_and_tables_behind(tmp_path):
 
 
 @needs_gcc
+def test_probes_of_ones_own_join_the_corpus(tmp_path):
+    """A directory of one's own probes (C files with a TOML of specs) joins DREAD's: --probe-dir. A
+    name used twice, a name the lab keeps for itself and a name that is not there are refused."""
+    from dread.cclab import run
+    own = tmp_path / "own"
+    own.mkdir()
+    (own / "mine.c").write_text("int mine_third(int a, int b, int c) { return c; }\n")
+    (own / "mine.toml").write_text('[[probes]]\nfunction = "mine_third"\nmeasure = "arg"\nnote = "the third int"\n')
+    results = run(ad.load("gcc-arm"), str(tmp_path / "work"), only=["cortex-m3-O2"], names=["mine"], jobs=1,
+                  out=lambda *x: None, probe_dirs=[str(own)])
+    r = results["cortex-m3-O2"]
+    assert r["results"]["mine_third"]["where"] == "r2" and r["probes"] == {"mine_third": "mine"}
+    with pytest.raises(ad.AdapterError, match="no probe file named nothing"):
+        run(ad.load("gcc-arm"), str(tmp_path / "work"), names=["nothing"], out=lambda *x: None, probe_dirs=[str(own)])
+    for clash in ("abi", "entry"):
+        (own / (clash + ".c")).write_text("int x;\n")
+        (own / (clash + ".toml")).write_text("")
+        with pytest.raises(ValueError, match="a probe file named %s" % clash):
+            lab.probes(directories=[str(own)])
+        (own / (clash + ".c")).unlink()
+
+
+@needs_gcc
 def test_compare_names_the_options_that_close_a_difference(tmp_path):
     """Two compilers side by side: GCC with int-sized enums and signed plain char as the original's
     compiler, GCC as it comes (arm-none-eabi: short enums, unsigned char) as the rebuilding one. The

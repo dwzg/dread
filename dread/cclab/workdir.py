@@ -24,7 +24,12 @@ lists under [llm] only (the probes).
 
 Never read, show or send: */*/image.elf, */*/original/, */*/config/ (the linked image and its tables
 hold the toolchain's runtime library, a vendor's code), and nothing outside this directory (the
-user's company code). Fix an adapter in a copy of its TOML and run `dread cclab doctor --adapter
+user's company code).
+
+A question the probes do not answer gets a probe of its own: plain C written for the question,
+never code copied from the company, in own-probes/ (a C file and a TOML of specs of the same name,
+like dread/cclab/probes/*.toml), run with `dread cclab run --probe-dir own-probes ...`. A probe
+counts once it is built and measured, not before. Fix an adapter in a copy of its TOML and run `dread cclab doctor --adapter
 COPY`; every proposal is tried before it counts.
 """
 

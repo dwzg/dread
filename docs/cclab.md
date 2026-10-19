@@ -181,6 +181,11 @@ each function shows (`arg`, `result`, `value`, `op` or `keeps`, see `dread/cclab
 are plain C99, every function external (nothing may inline it away), with no initialised writable
 data (the lab runs functions without the toolchain's startup code).
 
+Probes of one's own live wherever one likes, in a directory of C files with a TOML of specs each,
+and join DREAD's with `--probe-dir DIR` (`--probes NAME` picks files by name). In a guarded work
+directory, its CLAUDE.md asks Claude Code to put a probe it writes for an open question into
+`own-probes/`: plain C written for the question, never code copied from the company.
+
 A spec's values are C-typed, so that one spec serves every architecture: a plain number is an int
 (two bytes on the MSP430, four elsewhere); `"u64:..."`, `"i64:..."`, `"float:BITS"`,
 `"double:BITS"` and `"ptr:scratch+N"` (an address in the lab's scratch memory) say their type; the lab

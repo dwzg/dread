@@ -10,7 +10,8 @@ compares the builds.
 
     dread cclab adapters                         the built-in adapters
     dread cclab doctor --adapter A [--work DIR]  the tools, their versions, one probe built and run
-    dread cclab run --adapter A [--work DIR] [--build KEY...] [--probes NAME...] [--jobs N] [--guard]
+    dread cclab run --adapter A [--work DIR] [--build KEY...] [--probes NAME...] [--probe-dir DIR...]
+                    [--jobs N] [--guard]
     dread cclab report [--work DIR] [--adapter A]
     dread cclab compare [--work DIR] ORIGINAL REBUILD   where two compilers differ, and the options
                                                         of the rebuilding one that close a difference
@@ -20,7 +21,8 @@ For a proprietary toolchain (the adapter's guard = true, or --guard), `run` also
 and Claude Code deny rules into the work directory, and each build's dread.toml limits what an LLM
 may be shown to the probes (dread.cclab.workdir).
 
-The adapter is a built-in name or a TOML file of your own (a copy of a built-in one, edited). WORK
+The adapter is a built-in name or a TOML file of your own (a copy of a built-in one, edited); a
+--probe-dir adds probes of one's own (C files with a TOML of specs each, like dread/cclab/probes). WORK
 defaults to ./cclab-work. Nothing outside the work directory is written; nothing is sent anywhere.
 
 What an LLM may see (the user's rule for IAR at work, 2026-10-19): the probes, their compiled code
@@ -41,9 +43,9 @@ from dread.cclab import lab
 
 def _one(job):
     """One build in a worker: build and measure; returns (key, result or error)."""
-    adapter_path, key, picked, flags, work, names, guard = job
+    adapter_path, key, picked, flags, work, names, guard, probe_dirs = job
     adapter = ad.load(adapter_path)
-    probe_files = lab.probes(names)
+    probe_files = lab.probes(names, probe_dirs)
     try:
         d = lab.build(adapter, key, picked, flags, probe_files, work, guard)
     except lab.BuildError as e:
@@ -62,10 +64,16 @@ def _one(job):
     return key, out
 
 
-def run(adapter, work, only=None, names=None, jobs=None, out=print, guard=None):
+def run(adapter, work, only=None, names=None, jobs=None, out=print, guard=None, probe_dirs=()):
     """Build and measure every build of the adapter's matrix (or those in only); returns
-    {key: results or {"error", "log"}}. guard: as the adapter says unless given."""
+    {key: results or {"error", "log"}}. guard: as the adapter says unless given; probe_dirs:
+    directories of one's own probes besides DREAD's."""
     guard = adapter.guard if guard is None else guard
+    probe_dirs = [os.path.abspath(d) for d in probe_dirs]
+    try:
+        lab.probes(names, probe_dirs)           # a wrong name fails here, not in every build
+    except ValueError as e:
+        raise ad.AdapterError(str(e))
     from dread.util.polite import polite, workers
     builds = [b for b in adapter.builds() if not only or b[0] in only]
     if not builds:
@@ -78,7 +86,7 @@ def run(adapter, work, only=None, names=None, jobs=None, out=print, guard=None):
     version = adapter.version(work)
     with open(os.path.join(work, adapter.name, "version.txt"), "w") as f:
         f.write(version + "\n")
-    jobs_list = [(adapter.path, key, picked, flags, work, names, guard) for key, picked, flags in builds]
+    jobs_list = [(adapter.path, key, picked, flags, work, names, guard, probe_dirs) for key, picked, flags in builds]
     results = {}
     n = jobs or workers()
     if n > 1 and len(jobs_list) > 1:
@@ -168,6 +176,8 @@ def main(argv=None):
     p.add_argument("--work", default="cclab-work")
     p.add_argument("--build", action="append", help="only this build (repeatable)")
     p.add_argument("--probes", action="append", help="only these probe files (repeatable)")
+    p.add_argument("--probe-dir", action="append", default=[], metavar="DIR",
+                   help="a directory of one's own probes besides DREAD's (repeatable)")
     p.add_argument("--jobs", type=int)
     p.add_argument("--guard", action="store_true", default=None,
                    help="guard the work directory and the builds as for a proprietary toolchain")
@@ -202,7 +212,8 @@ def main(argv=None):
         adapter = ad.load(args.adapter)
         if args.action == "doctor":
             return doctor(adapter, args.work, guard=args.guard)
-        results = run(adapter, args.work, args.build, args.probes, args.jobs, guard=args.guard)
+        results = run(adapter, args.work, args.build, args.probes, args.jobs, guard=args.guard,
+                      probe_dirs=args.probe_dir)
         failed = [k for k, r in results.items() if "error" in r]
         print("dread cclab: %d builds measured, %d failed, in %s" % (len(results) - len(failed), len(failed),
                                                                    os.path.join(args.work, adapter.name)))

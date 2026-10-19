@@ -159,14 +159,29 @@ class Probe:
         self.functions = [s["function"] for s in self.specs]
 
 
-def probes(names=None, directory=PROBES):
-    """The probe files (every C file with a TOML of specs), or those named."""
-    out = []
-    for source in sorted(glob.glob(os.path.join(directory, "*.c"))):
-        if os.path.exists(os.path.splitext(source)[0] + ".toml"):
+RESERVED = ("entry", "support")     # the lab's own files in every build's probes/
+
+
+def probes(names=None, directories=()):
+    """The probe files (every C file with a TOML of specs) of DREAD's corpus and of the directories
+    given (probes of one's own, kept wherever one likes), or those named. Two files of one name, or
+    a probe file named like the lab's own (entry, support), are an error (ValueError): a name says
+    which probe file a result came from, and every build copies the sources side by side."""
+    out, seen = [], {}
+    for directory in [PROBES] + list(directories):
+        for source in sorted(glob.glob(os.path.join(directory, "*.c"))):
+            if not os.path.exists(os.path.splitext(source)[0] + ".toml"):
+                continue
             p = Probe(source)
+            if p.name in seen or p.name in RESERVED:
+                raise ValueError("a probe file named %s: %s%s" % (
+                    p.name, source, " and " + seen[p.name] if p.name in seen else " (a name the lab keeps for itself)"))
+            seen[p.name] = source
             if not names or p.name in names:
                 out.append(p)
+    missing = sorted(set(names or ()) - set(seen))
+    if missing:
+        raise ValueError("no probe file named %s (there are: %s)" % (", ".join(missing), ", ".join(sorted(seen))))
     return out
 
 

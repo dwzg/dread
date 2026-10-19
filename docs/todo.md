@@ -62,7 +62,11 @@ IAR's runtime code marked and left out.
   signatures for finding functions), a self-contained report, and a bundle the user brings home,
   with IAR's runtime code marked as such.
 - [ ] **With an LLM** (Claude Code at work, or here on a brought-back bundle): the report's narrative
-  and probes for what the corpus does not answer, each one compiled and run before it counts. A
+  and probes for what the corpus does not answer, each one compiled and run before it counts.
+  Probes of one's own are in (2026-10-19): `--probe-dir DIR` adds a directory of C files with their
+  TOML specs to DREAD's corpus, and a guarded work directory's CLAUDE.md asks Claude Code to write
+  such a probe into own-probes/, plain C for the question, never the company's code. Open: the
+  narrative. A
   CLAUDE.md and deny rules for the lab's work directory keep Claude Code at work to the probes and
   their results: not IAR's runtime code, nothing outside the lab.
 - [x] **`dread cclab compare`** (from the user's question how the lab fits DREAD's workflow, 2026-10-19):
