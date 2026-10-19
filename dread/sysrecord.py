@@ -71,6 +71,7 @@ class Recorder:
                             "mem": {}, "frame": {}, "io": {}, "interrupts": sum(self.system.interrupts.values())})
 
     def _on_read(self, uc, access, addr, size, value, user):
+        self.system.unsettled = True        # the next block repairs the IT state this hook leaves
         try:
             if self.active and not self.system.image.base <= addr < self.system.image.end \
                     and not self.layout.target.memory.is_io(addr):

@@ -111,6 +111,10 @@ class System:
         # going on from pc would repeat the access (dread.engines)
         self.due = False
         self.observers = []                 # tools that watch the run (dread.sysrecord): block(), io()
+        # A memory hook leaves a stale Thumb IT state behind (dread.arch.arm.settle_it): _on_io repairs
+        # it itself; a memory hook of an observer sets this, and the next block repairs it (a repair on
+        # every block took 40 % of a run)
+        self.unsettled = False
         self._shared(placement, built)
         uc.hook_add(UC_HOOK_BLOCK, self._on_block)
         for lo, hi in self.layout.io:
@@ -233,8 +237,10 @@ class System:
                 elif self._may_take(*wanted):
                     self.deliver = True
                     uc.emu_stop()
-        if self.layout.settle_it:
-            self.arch.settle_it(uc)
+        if self.unsettled:
+            self.unsettled = False
+            if self.layout.settle_it:
+                self.arch.settle_it(uc)
 
     def _owner(self, address):
         i = bisect.bisect_right(self.owned_lo, address) - 1
