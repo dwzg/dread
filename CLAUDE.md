@@ -79,6 +79,11 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   the top item (cProfile) and fix what dominates. Prefer the algorithmic fix (work per byte or per
   run that need not be done); move a hot path into C (`dread.fasthooks`) when a Python callback per
   instruction or memory access dominates. Record before and after in the commit message.
+- **A lifter change** (what it lifts, refuses or keeps across calls): run `dread lift --check` on
+  every gizmo build before the suite and commit the regenerated `config/lifted.txt` with the change.
+  A test that plants a fault and shows it through a caller assumes the caller is the original's
+  code; a caller that starts to lift can take the fault out of its reach (2026-10-20: uart_puts,
+  lifted once it kept r1 across uart_putc, made two tests fail).
 - **The loop prompt** only points here and at `docs/todo.md`. It may be rewritten when the way of
   working changes; the plan itself is changed in `docs/todo.md`.
 
