@@ -489,6 +489,11 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   (afternoon; the scenario 900 ticks): Cortex-M3 GCC -Os 289 of 366, -O0 314 of 437, -O2 227 of 349,
   clang -Os 266 of 356, -O2 240 of 343; RISC-V GCC -Os 214 of 312, -O2 166 of 296, clang -Os 208 of 304:
   1,924 of 2,763 functions (70 %); recorded inputs add 7 to 33 a build; the nine builds took 1 h 43 min.
+  Measured again in the evening (generator 20, regflow 6; measure-20): 1,926 of 2,763 on the eight
+  ARM and RISC-V builds (+3 against measure-19: clang -Os, clang -O2 and RISC-V GCC -Os one each,
+  from the round of small arguments), and the MSP430 build lifted for the first time: 74 of 250
+  (30 %; Ghidra finds 43 of its functions, the ELF all). 57 min, beside other work and with the
+  MSP430 lift new (627 s): not comparable with measure-19's 47.
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with
