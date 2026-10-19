@@ -59,7 +59,8 @@ for an RV32IMC core with clang (that build is new; the tools are being ported to
 | Compiler profiles for the lifter and the template families (gcc, older ARM compilers) | next |
 | `dread pilot`: the reconstruction loop run by code, an LLM (local or cloud) only for the judgement: writing C, arguing survivors, proposing inputs and names; every answer checked by the tools | first version |
 | RISC-V (RV32IMC): gizmo-rv32 built with clang; every tool runs on it: listing with byte-identical rebuild, reading aids, the overlay, differential tests, integration, recorded cases, regflow, switches, Ghidra, the system run with interrupts, the lifter and its fuzzer | done |
-| MSP430: gizmo-msp430 built with TI's MSP430 GCC; a decoder of its own (no capstone), an engine of its own (no Unicorn: a Python interpreter behind Unicorn's interface, checked against GDB's simulator), the listing with byte-identical rebuild, the reading aids, the overlay (into the image's free flash), differential tests with generated cases and the mutation check | under way (next: integration, regflow, the system run, the lifter) |
+| MSP430: gizmo-msp430 built with TI's MSP430 GCC; a decoder of its own (no capstone), an engine of its own (no Unicorn: a Python interpreter behind Unicorn's interface, checked against GDB's simulator), the listing with byte-identical rebuild, the reading aids, the overlay (into the image's free flash), differential tests with generated cases, the mutation check, integration, regflow, the lifter (stack arguments included) and its fuzzer | under way (next: the system run's models) |
+| Compiler lab (`dread cclab`): probe programs compiled across a compiler's option matrix and run in the emulator: where arguments and results go, the types, which runtime helper each operation calls and what it changes, the shape of the code; adapters for GCC, clang, Arm's LLVM toolchain, TI's armcl and IAR EWARM (from WSL); `docs/cclab.md` | first version |
 
 ## Layout
 
@@ -86,6 +87,7 @@ bin/dread lift --target examples/gizmo/m3 --check  # lift every function, keep t
 bin/dread liftfuzz --isa t32                        # the lifter on random instructions, against the emulator
 bin/dread test --target examples/gizmo/rv32         # the same tools on the RISC-V build
 bin/dread bench all freertos                        # a real project built many ways, measured (in ~/dread-bench)
+bin/dread cclab run --adapter gcc-arm               # how a compiler compiles: probes run in the emulator
 bin/dread flat --target examples/gizmo/m3 print_status        # one function to read: names, literals, arguments
 bin/dread callsites --target examples/gizmo/m3 --by 0 gpio_set # who calls it, with which constants
 bin/dread callpair --target OTHER --other examples/gizmo/a32 --seed FUN_08000738=main   # names by call order

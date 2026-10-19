@@ -21,25 +21,33 @@ nothing of the user's company, and not IAR's runtime code (the user, 2026-10-19)
 that by construction: what it hands an LLM comes from its probe corpus and its work directory, with
 IAR's runtime code marked and left out.
 
-- [ ] **Core** (`dread cclab`): compiler adapters in a TOML file (executables, command templates for
+- [x] **Core** (`dread cclab`, `docs/cclab.md`): compiler adapters in a TOML file (executables, command templates for
   compiling, linking and listings, the option matrix); adapters for arm-none-eabi-gcc and clang,
   tested here; the probe format (C, plus a TOML of what each probe measures); the matrix runner
   (parallel, cached); a target of its own per build for the emulator; results per probe as JSON.
   First probes: where arguments and results go (ints, 64-bit, structs, varargs), what a call keeps.
-- [ ] **The IAR adapter**: iccarm and ilinkarm through WSL interop (wslpath, the work directory on
+  Done with GCC 16.2, 14.2 and 10.3, clang 23.1, Arm's ATfE 23.1 and TI's armcl 20.2.7 (installed
+  for it in ~/.local/opt; TI's needs its own linker family, a TI linker command file): 70 builds,
+  the AAPCS facts as the standard says. Not yet: caching builds (a run of twelve takes a second).
+- [x] **The IAR adapter**: iccarm and ilinkarm through WSL interop (wslpath, the work directory on
   the Windows side), an ILINK configuration (.icf) written for the emulator's memory map, the
   probes kept from ILINK's removal of unreferenced code; written from IAR's documented command
-  line and tested here against a stand-in that speaks it over GCC.
-- [ ] **`dread cclab doctor`**: finds EWARM's compilers (Program Files\IAR Systems\...\arm\bin)
+  line and tested here against a stand-in that speaks it over GCC. Its options checked against IAR's
+  EWARM 9.70 documentation (`--cpu=`, `--fpu=none`, ILINK's `--config`, `--entry`, `--keep`);
+  EWARM has no cross-call optimisation (that is IAR's MSP430 and 8051 compilers').
+- [x] **`dread cclab doctor`**: finds EWARM's compilers (Program Files\IAR Systems\...\arm\bin)
   and the other compilers, prints their versions, compiles, links and runs a trivial probe, and says
   which step failed and what to change in the adapter file; with an LLM attached it proposes the
-  change from the error and help texts, and the doctor tries it before keeping it.
-- [ ] **The probe set**: calling convention (ints, 64-bit, structs by value and returned, varargs,
+  change from the error and help texts, and the doctor tries it before keeping it. (The LLM is
+  Claude Code at work, reading the doctor's output and editing a copy of the adapter: no client of
+  the lab's own. TI's compiler showed the use: no include path by default, the doctor printed it.)
+- [ ] **The probe set** (calling convention, types, 28 operations with their helpers and code
+  shapes are in; the rest open): calling convention (ints, 64-bit, structs by value and returned, varargs,
   soft and hard float), callee-saved registers and stack alignment, the runtime helper each operation
   calls and its register contract, prologue and epilogue shapes, switch encodings, division by
   constants, memcpy, memset and struct copies, tail calls, literal pools, function alignment and
   padding, cross-call fragments (IAR's outlined sequences, called without the calling convention).
-- [ ] **Profile, report and bundle**: a profile TOML the tools read (`[compiler] profile`: helper
+- [ ] **Profile, report and bundle** (the report and the bundle are in; the profile is open): a profile TOML the tools read (`[compiler] profile`: helper
   contracts for regflow, switch and epilogue shapes for dread.switches and the lifter, prologue
   signatures for finding functions), a self-contained report, and a bundle the user brings home,
   with IAR's runtime code marked as such.
