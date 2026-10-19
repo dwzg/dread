@@ -54,6 +54,11 @@ def results(work, adapter):
                     row["texts"].setdefault(text, []).append(key)
             if entry.get("aligned"):
                 aligned.append(entry["aligned"])
+        notes = dict(report.LAYOUT)
+        for row, text in report.layout_cells(result.get("layout")).items():
+            r = rows.setdefault(("(layout) " + row, "code"), {"note": notes.get(row, ""),
+                                                             "texts": collections.OrderedDict()})
+            r["texts"].setdefault(text, []).append(key)
     return builds, arch, rows, min(aligned) if aligned else None
 
 

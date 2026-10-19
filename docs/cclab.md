@@ -15,7 +15,11 @@ MSP430):
 - what a function keeps across a call: which callee-saved registers it stores in its frame, the
   return address, the frame at its calls, and from that the stack alignment the compiler keeps;
 - the shape of every probe's code: size, calls and tail calls, first and last instructions, the
-  instructions that mark an idiom (a division instruction, a table branch, block transfers).
+  instructions that mark an idiom (a division instruction, a table branch, block transfers);
+- where the functions lie: the alignment of their entries, literal pools between them (a pool counts
+  when any function loads from it or takes its address pc-relatively: TI's armcl shares one per
+  file), the padding in front of a pool or the next function (none, zeros, no-ops), the
+  instructions functions start and end with: what tells a function's start in a stripped image.
 
 The answers come from running the code, not from matching patterns, so they hold for a compiler
 DREAD has never seen. `report` compares the builds of one compiler; a work directory can hold

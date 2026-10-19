@@ -117,6 +117,27 @@ def test_gcc_follows_the_procedure_call_standard(tmp_path):
 
 
 @needs_gcc
+def test_where_the_functions_lie(tmp_path):
+    """Each build's layout: the probes' entries are halfword-aligned at least (Thumb), each function
+    starts and ends with an instruction the report names, and literal pools behind a function are
+    told from padding."""
+    from dread.cclab import run
+    results = run(ad.load("gcc-arm"), str(tmp_path), only=["cortex-m3-O0", "cortex-m3-O2"], jobs=2,
+                  out=lambda *x: None)
+    for key, r in results.items():
+        layout = r["layout"]
+        assert layout["functions"] > 60 and layout["aligned"] in (2, 4, 8, 16)
+        assert sum(layout["padding"].values()) == layout["functions"] and 0 < layout["pools"] < layout["functions"]
+        assert layout["first"] and layout["last"]
+    o0 = dict(results["cortex-m3-O0"]["layout"]["first"])
+    assert o0.get("push", 0) > 30                    # -O0: a frame for nearly every function
+    from dread.cclab import make_report
+    make_report(str(tmp_path), "gcc-arm", out=lambda *x: None)
+    text = (tmp_path / "gcc-arm" / "report.md").read_text()
+    assert "## Where the functions lie" in text and "| where the probes' functions start | multiples of" in text
+
+
+@needs_gcc
 def test_the_report_compares_builds(tmp_path):
     measured(tmp_path, "gcc-arm", ["cortex-m0-Os", "cortex-m3-Os"])
     from dread.cclab import make_report

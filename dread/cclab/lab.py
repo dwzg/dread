@@ -25,7 +25,9 @@ A spec's values are C-typed: a plain number is an int; "u64:0x...", "i64:..", "f
 splits a value into register-wide words, lowest first (an int is two bytes on the MSP430).
 
 Every probe function also gets its shape: size, instructions, calls, the first and last few
-instructions. What this does not establish: that a probe's C means the same to every compiler
+instructions. And each build its layout (layout()): where the probes' functions start, what lies
+between each and the next function (a literal pool it loads from, padding), their first and last
+instructions: what tells a function's start in a stripped image of the same compiler. What this does not establish: that a probe's C means the same to every compiler
 (they are plain C99), anything about code the probes do not contain, big-endian targets.
 """
 import glob
@@ -600,6 +602,70 @@ def measure_keeps(bench, spec):
     if nonzero:
         out["aligned"] = min(lowbit(f) for f in nonzero)
     return out
+
+
+NOPS = {"arm": (b"\x00\xbf", b"\xc0\x46"), "riscv": (b"\x01\x00", b"\x13\x00\x00\x00"),
+        "msp430": (b"\x03\x43",)}    # no-op encodings a compiler pads with (Thumb-2, Thumb-1; c.nop, nop)
+
+
+def padding_kind(data, arch):
+    """What padding bytes are: none, zeros, no-ops (the architecture's), or other bytes."""
+    if not data:
+        return "none"
+    if not data.strip(b"\x00"):
+        return "zeros"
+    for nop in NOPS.get(arch, ()):
+        if len(data) % len(nop) == 0 and data == nop * (len(data) // len(nop)):
+            return "no-ops"
+    return "other bytes"
+
+
+def layout(directory, probe_files):
+    """The probes' functions in a build's image: the alignment of their entries (the largest power
+    of two dividing every entry, at most 64); what lies between each one's last instruction and the
+    next function: a literal pool when some function of the image loads from it or takes its
+    address pc-relatively (adr; a pool may serve a whole file, as TI's does), and the bytes in front
+    of the pool or of the next function as padding, by kind; and how many start and end with each
+    mnemonic."""
+    import bisect
+    import collections
+    bench = Bench(directory)
+    program, arch = bench.program, bench.arch
+    data, base = bench.image.payload(), bench.image.base
+    entries = sorted(f.entry for f in program.functions if f.insns)
+    pc_address = getattr(arch, "pc_address", None)
+    refs = set()
+    for f in program.functions:
+        for insn in program.instructions(f):
+            if insn is None:
+                continue
+            lit = arch.literal(insn, f.isa)
+            if lit:
+                refs.add(lit[0])
+            target = pc_address(insn, f.isa) if pc_address else None
+            if target is not None:
+                refs.add(target)
+    refs = sorted(refs)
+    aligned, pools, padding = 64, 0, collections.Counter()
+    first, last = collections.Counter(), collections.Counter()
+    names = [n for p in probe_files for n in p.functions if n in program.by_name]
+    for name in names:
+        fn = program.by_name[name]
+        insns = [i for i in program.instructions(fn) if i is not None]
+        if not insns:
+            continue
+        aligned = min(aligned, lowbit(fn.entry) or 64)
+        first[insns[0].mnemonic] += 1
+        last[insns[-1].mnemonic] += 1
+        end = program.end(fn)
+        i = bisect.bisect_right(entries, fn.entry)
+        stop = min(entries[i] if i < len(entries) else base + len(data), base + len(data))
+        j = bisect.bisect_left(refs, end)
+        pool = refs[j] if j < len(refs) and refs[j] < stop else None
+        pools += pool is not None
+        padding[padding_kind(bytes(data[end - base:(pool if pool is not None else stop) - base]), arch.name)] += 1
+    return {"functions": len(names), "aligned": aligned, "pools": pools, "padding": dict(padding),
+            "first": first.most_common(), "last": last.most_common()}
 
 
 MEASURES = {"arg": measure_arg, "result": measure_result, "value": measure_value, "op": measure_op,

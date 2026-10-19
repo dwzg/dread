@@ -65,6 +65,28 @@ def keeps_text(entry):
     return text
 
 
+LAYOUT = (("entries", "where the probes' functions start"),
+          ("between", "what lies between a function's last instruction and the next function"),
+          ("first", "the instructions they start with (most often first)"),
+          ("last", "the instructions they end with (most often first)"))
+
+
+def layout_cells(layout):
+    """A build's layout as {row: text}, texts that builds with the same layout share."""
+    if not layout:
+        return {}
+    if "error" in layout:
+        return {"entries": "error: " + layout["error"][:60]}
+    n = layout.get("functions", 0)
+    kinds = ", ".join(k for k, _ in sorted(layout.get("padding", {}).items(), key=lambda kv: -kv[1]))
+    pools = layout.get("pools", 0)
+    return {"entries": "multiples of %d" % layout.get("aligned", 0),
+            "between": "%s; padding: %s" % ("literal pools behind %s" % ("some" if pools < n else "all") if pools
+                                            else "no literal pools", kinds or "none"),
+            "first": ", ".join(m for m, _ in layout.get("first", [])[:4]),
+            "last": ", ".join(m for m, _ in layout.get("last", [])[:4])}
+
+
 def builds_text(keys, every):
     return "all %d" % len(every) if len(keys) == len(every) else ", ".join(keys)
 
@@ -120,6 +142,16 @@ def write(work, adapter_name=None, out=print):
             if aligned:
                 lines += ["", "Every frame at a call is a multiple of %d bytes, over all builds: the stack alignment "
                               "the compiler keeps at calls (given an aligned entry)." % min(aligned)]
+        rows = collections.OrderedDict()
+        for key, result in good.items():
+            for row, text in layout_cells(result.get("layout")).items():
+                rows.setdefault(row, collections.OrderedDict()).setdefault(text, []).append(key)
+        if rows:
+            notes = dict(LAYOUT)
+            lines += ["", "## Where the functions lie", "", "| what | result (builds) |", "|---|---|"]
+            for row, seen in rows.items():
+                lines.append("| %s | %s |" % (notes.get(row, row), "; ".join(
+                    "%s (%s)" % (text, builds_text(keys, good)) for text, keys in seen.items())))
         helpers = collections.OrderedDict()
         for key, result in good.items():
             for fn, entry in result["results"].items():

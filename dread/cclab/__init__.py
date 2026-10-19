@@ -51,7 +51,11 @@ def _one(job):
     except ad.AdapterError as e:
         return key, {"error": str(e), "log": []}
     results = lab.measure(d, probe_files)
-    out = {"adapter": adapter.name, "arch": adapter.arch, "build": key, "picked": picked, "flags": flags,
+    try:
+        layout = lab.layout(d, probe_files)
+    except Exception as e:                  # a layout that cannot be read is a result, not a crash
+        layout = {"error": "%s: %s" % (type(e).__name__, e)}
+    out = {"layout": layout, "adapter": adapter.name, "arch": adapter.arch, "build": key, "picked": picked, "flags": flags,
            "probes": {fn: p.name for p in probe_files for fn in p.functions}, "results": results}
     with open(os.path.join(d, "results.json"), "w") as f:
         json.dump(out, f, indent=1)

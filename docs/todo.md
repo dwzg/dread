@@ -47,7 +47,9 @@ IAR's runtime code marked and left out.
   Claude Code at work, reading the doctor's output and editing a copy of the adapter: no client of
   the lab's own. TI's compiler showed the use: no include path by default, the doctor printed it.)
 - [ ] **The probe set** (calling convention, types, 28 operations with their helpers and code
-  shapes are in; the rest open): calling convention (ints, 64-bit, structs by value and returned, varargs,
+  shapes are in; since 2026-10-19 also where the functions lie: entry alignment, literal pools,
+  padding, first and last instructions; on six compilers, pools and padding fully told apart; the
+  rest open): calling convention (ints, 64-bit, structs by value and returned, varargs,
   soft and hard float), callee-saved registers and stack alignment, the runtime helper each operation
   calls and its register contract, prologue and epilogue shapes, switch encodings, division by
   constants, memcpy, memset and struct copies, tail calls, literal pools, function alignment and
