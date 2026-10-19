@@ -343,9 +343,15 @@ repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in
   868 s to 25 s), longer or more varied scenarios for the rest; (2) functions that never return whose loop cases miss instructions
   (about 30): mostly a path that needs every check of the loop to pass in one case (a stubbed receive
   that must write exactly the value compared), beyond the compare-guided stage's budget on runs that
-  long, and their system check needs every instruction run; (3) a few disagreements per build,
-  each to be traced: one kind is an inconsistent input that makes a real callee read beyond a
-  local of the caller (a queue's item size of 24 for a 4-byte item: memcpy copies the frame behind
+  long; the system check builds each one alone since (with every accepted function rebuilt the
+  kernel took no clock time, the demo's tick-count test asserted, and the scenario ran a third of its
+  code) and counts what its loop cases ran, and the scenario runs ten times as long (at 90 ticks the
+  not-accepted functions ran 3,018 of 10,568 instructions, at 900 7,268); the next step would be loop
+  cases recorded in the system run (a task's callees' answers and what they wrote, as stubs); (3) a few disagreements per build,
+  each to be traced: a stack address taken for a value (a seed, a pointer an index pushed past a
+  local) is refused since (the original's own outcome changes with its stack lower; dread
+  integration does not check that yet); another kind is an inconsistent input that makes a real
+  callee read beyond a local of the caller (a queue's item size of 24 for a 4-byte item: memcpy copies the frame behind
   it, laid out otherwise in the C), which the harness cannot tell yet (it would need to know which
   stack bytes the call wrote); (4) scratch
   registers across calls (a few per build; GCC's -fipa-ra): a build with -fno-ipa-ra to measure what
