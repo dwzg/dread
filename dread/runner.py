@@ -27,7 +27,11 @@ Output, one block per function, in this form (other tools read it):
     ok   NAME                       n/m cases agree
     FAIL NAME [label]               followed by the differences, indented by five spaces
     UNCOVERED NAME: a of b instructions of the original never ran: ADDRESS ...
-    REFUSED NAME [label]: ...       a written case that reads code as data or writes into the image
+    REFUSED NAME [label]: ...       a written case that reads code as data or writes into the image,
+                                    or a case whose two images differ where the original's own
+                                    outcome changes when its stack starts STACK_SHIFT bytes lower
+                                    (it took a stack address for a value: C's frames lie otherwise;
+                                    the case is not compared and runs nothing for coverage)
     UNTESTED NAME
 
 Exit status 1 when anything failed, is uncovered or untested. Functions run in parallel worker
@@ -51,6 +55,7 @@ from dread.util.polite import die_with_parent, polite, workers
 from dread.util.poolorder import longest_first
 
 RUN = {}        # what the workers need; filled before they are forked
+STACK_SHIFT = 0x40      # bytes the stack moves for the check that a case's outcome depends on it
 REBUILT_BUDGET = 10     # the rebuilt image may take this many times a case's limit (C runs slower than
                         # the original: lifted C's loops take more instructions); a hang case gets the same
 
@@ -77,6 +82,31 @@ def kept_for(name):
     return regs, {r: flow.why(name, r) for r in regs}, argued
 
 
+def stack_moves_it(name, addr, args, limit, setup, kept, why, first):
+    """Whether the original's outcome changes when its stack starts STACK_SHIFT bytes lower: then
+    the case made it take a stack address for a value (a seed of a random generator, a pointer
+    past a local array by an index the input made too large), which C, whose frames lie otherwise,
+    cannot reproduce. Writes into the room for stack arguments are left out (that room moves into
+    the stack, whose writes are not compared)."""
+    from dread.emu import ARGS_ROOM, Result
+    lay = RUN["layout"]
+    m = Machine(lay, RUN["original"], isa_of=RUN["isa_of"])
+    m.plan, m.replay, m.function = [], False, name
+    m.kept, m.kept_why = kept, why
+    m.stack_shift = STACK_SHIFT
+    try:
+        setup(m)
+        again = m.call(addr, *args, max_instructions=limit)
+    except Exception:                       # it fails or hangs only there
+        return True
+    lo, hi = lay.stack_top, lay.stack_top + ARGS_ROOM
+
+    def outside(r):
+        return Result(r.ret, {a: v for a, v in r.writes.items() if not lo <= a < hi}, r.calls, r.saved,
+                      r.layout, r.kept, r.why)
+    return bool(outside(first).diff(outside(again)))
+
+
 def run_function(name):
     """All cases of one function: (name, cases, failed, output lines, the instructions of the original
     no case ran)."""
@@ -96,7 +126,7 @@ def run_function(name):
     kept, why, argued = kept_for(name)
     bad, covered, failing, refused = 0, set(), [], 0
     for label, addr, setup, args, limit, generated in cases:
-        out, plan = [], []
+        out, plan, case_covered = [], [], set()
         for which, payload in (("original", RUN["original"]), ("rebuilt", RUN["recon"])):
             m = Machine(layout, payload, RUN["aliases"] if which == "rebuilt" else None, isa_of=RUN["isa_of"])
             m.plan, m.replay = plan, which == "rebuilt"
@@ -128,7 +158,7 @@ def run_function(name):
                 out = None
                 break
             if which == "original":
-                covered |= m.covered_insns(words)
+                case_covered = m.covered_insns(words)
         if out is None:
             refused += 1
             lines.append("REFUSED %s [%s]: the input loads instructions as data or stores into the image; "
@@ -158,6 +188,14 @@ def run_function(name):
             diff = out[0].diff(out[1])
         if depends:
             diff = list(diff) + [depends]
+        if diff and not depends and not isinstance(out[0], Exception) and not isinstance(out[1], Exception) \
+                and stack_moves_it(name, addr, args, limit, setup, kept, why, out[0]):
+            refused += 1
+            lines.append("REFUSED %s [%s]: the original's outcome depends on where the stack lies (it differs "
+                         "with the stack %d bytes lower): a stack address taken for a value; not compared"
+                         % (name, label, STACK_SHIFT))
+            continue
+        covered |= case_covered
         if diff:
             bad += 1
             if generated is not None:
@@ -180,7 +218,7 @@ def run_function(name):
                      % (name, len(missed), len(words), " ".join("0x%x" % a for a in shown)))
     total = len(cases) - refused
     lines.append("%-4s %-26s %d/%d cases agree%s" % ("ok" if not bad else "FAIL", name, total - bad, total,
-                                                    ", %d written refused" % refused if refused else ""))
+                                                    ", %d refused" % refused if refused else ""))
     for reg, argument in sorted(argued.items()):
         lines.append("     %s at the return not compared (kept.tsv): %s" % (reg, argument))
     return name, len(cases), bad, lines, missed

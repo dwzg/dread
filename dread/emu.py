@@ -310,6 +310,7 @@ class Machine:
         self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
         self.timed_out = False      # the last call ran into its instruction limit
         self.stack_preset = set()   # stack bytes call() wrote for the call itself (a pushed return address)
+        self.stack_shift = 0        # bytes below the stack top where call() starts the stack (dread.runner)
         self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
         # A system call (svc, ecall) runs as a no-op, logged in order: its handler is the firmware's and
         # not modelled (FreeRTOS's RISC-V port yields with ecall). Any other CPU exception stops the run
@@ -655,12 +656,13 @@ class Machine:
             uc.reg_write(reg, value)
         for reg, value in zip(lay.arg_regs, regs):
             uc.reg_write(reg, value & 0xFFFFFFFF)
-        uc.reg_write(lay.sp, lay.stack_top)
+        top = lay.stack_top - self.stack_shift
+        uc.reg_write(lay.sp, top)
         word = lay.word
         if word * len(stacked) > ARGS_ROOM:
             raise EmuError("more stack arguments than the %d bytes above the stack top hold" % ARGS_ROOM)
         for i, value in enumerate(stacked):
-            self.write(lay.stack_top + word * i, (value & ((1 << 8 * word) - 1)).to_bytes(word, "little"))
+            self.write(top + word * i, (value & ((1 << 8 * word) - 1)).to_bytes(word, "little"))
         if lay.lr is not None:
             uc.reg_write(lay.lr, self.arch.start_address(lay.sentinel, isa))
         else:                               # pushed below the stack arguments, as a call does

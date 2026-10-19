@@ -90,3 +90,55 @@ def test_a_function_whose_case_generation_fails_is_reported_not_fatal(target, va
     failed, uncovered, _ = runner.run([name], out=lines.append, jobs=1)
     assert failed == 1 and "FAIL %s [case generation]" % name in "\n".join(lines)
     assert runner.RUN["missed"][name] == []
+
+
+def test_a_case_whose_outcome_depends_on_where_the_stack_lies_is_refused(tmp_path):
+    """seed_from_stack stores the address of a local into a global (FreeRTOS's queue set test seeds
+    its random numbers so); C that lays out its frame otherwise stores another address. That is no
+    disagreement: the original's own outcome changes when its stack starts lower, so the case is
+    refused, not failed, and runs nothing for coverage; plain agrees as before."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.target import Target
+    if not shutil.which("arm-none-eabi-gcc"):
+        pytest.skip("needs arm-none-eabi-gcc")
+    (tmp_path / "t.c").write_text(
+        "unsigned seed, other;\n"
+        "__attribute__((noinline)) void touch(volatile unsigned *p) { *p += 1; }\n"
+        "void seed_from_stack(void) { volatile unsigned local = 0; touch(&local); seed = (unsigned)&local; }\n"
+        "void plain(unsigned x) { other = x + 1; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "plain", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    src = tmp_path / "src"
+    src.mkdir()
+    from dread.program import Program
+    data = {name: address for kind, address, name in Program(target, image).symbols() if kind == "d"}
+    (src / "rewritten.c").write_text(       # the same, with its local elsewhere in the frame
+        "#define seed (*(volatile unsigned *)0x%x)\n#define other (*(volatile unsigned *)0x%x)\n"
+        "void touch(volatile unsigned *p);\n" % (data["seed"], data["other"]) +
+        "void seed_from_stack(void) { volatile unsigned pad[4], local = 0; pad[0] = 0; touch(&local);"
+        " seed = (unsigned)&local; }\n"
+        "void plain(unsigned x) { other = x + 1; }\n")
+    cases = tmp_path / "cases"
+    cases.mkdir()
+    (cases / "few.py").write_text('case("seed_from_stack", "once", lambda m: None)\n'
+                                  'case("plain", "x = 1", lambda m: None, 1)\n')
+    payload = build.build(target, image, src=str(src), out=str(tmp_path / "recon"), quiet=True)
+    failed, uncovered, text = run_all(target, payload, cases_dir=cases)
+    assert "REFUSED seed_from_stack [once]: the original's outcome depends on where the stack lies" in text, text
+    assert "FAIL seed_from_stack" not in text and "seed_from_stack" in uncovered, text
+    assert "ok   plain" in text, text

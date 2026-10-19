@@ -30,7 +30,11 @@ Each case calls one function in both images with the same registers and memory. 
 the return value, the callee-saved registers, the scratch registers callers read after the call
 (section 7), every byte written outside the stack and the device log (every peripheral access in
 order). And the cases together must run every instruction of the original function, or the function
-is UNCOVERED; code no input can reach is declared with the reason.
+is UNCOVERED; code no input can reach is declared with the reason. A case whose images differ is run
+once more on the original with the stack starting lower: if the original's own outcome changes, it
+took a stack address for a value (a random generator seeded with the address of a local, a pointer
+an index pushed past a local array), which C, laying out its frames otherwise, cannot reproduce, and
+the case is refused rather than failed.
 
 ## 4. Where inputs come from
 
