@@ -92,22 +92,23 @@ def test_a_function_whose_case_generation_fails_is_reported_not_fatal(target, va
     assert runner.RUN["missed"][name] == []
 
 
-def test_a_case_whose_outcome_depends_on_where_the_stack_lies_is_refused(tmp_path):
-    """seed_from_stack stores the address of a local into a global (FreeRTOS's queue set test seeds
-    its random numbers so); C that lays out its frame otherwise stores another address. That is no
-    disagreement: the original's own outcome changes when its stack starts lower, so the case is
-    refused, not failed, and runs nothing for coverage; plain agrees as before."""
+def stack_seed_target(tmp_path, cases):
+    """A target whose seed_from_stack seeds a random number with the address of a local (FreeRTOS's
+    queue set test does so), with C that is the same but holds its local elsewhere in the frame, and
+    plain beside it; cases: the text of a case file. Returns (target, image, rebuilt payload)."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
+    from dread.program import Program
     from dread.target import Target
     if not shutil.which("arm-none-eabi-gcc"):
         pytest.skip("needs arm-none-eabi-gcc")
+    seed = "seed = (unsigned)&local * 1103515245u + 12345u;"
     (tmp_path / "t.c").write_text(
         "unsigned seed, other;\n"
         "__attribute__((noinline)) void touch(volatile unsigned *p) { *p += 1; }\n"
-        "void seed_from_stack(void) { volatile unsigned local = 0; touch(&local); seed = (unsigned)&local; }\n"
-        "void plain(unsigned x) { other = x + 1; }\n")
+        "void seed_from_stack(void) { volatile unsigned local = 0; touch(&local); %s }\n"
+        "void plain(unsigned x) { other = x + 1; }\n" % seed)
     (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
                                    " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
                                    "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
@@ -125,20 +126,26 @@ def test_a_case_whose_outcome_depends_on_where_the_stack_lies_is_refused(tmp_pat
     image = target.image()
     src = tmp_path / "src"
     src.mkdir()
-    from dread.program import Program
     data = {name: address for kind, address, name in Program(target, image).symbols() if kind == "d"}
     (src / "rewritten.c").write_text(       # the same, with its local elsewhere in the frame
         "#define seed (*(volatile unsigned *)0x%x)\n#define other (*(volatile unsigned *)0x%x)\n"
         "void touch(volatile unsigned *p);\n" % (data["seed"], data["other"]) +
-        "void seed_from_stack(void) { volatile unsigned pad[4], local = 0; pad[0] = 0; touch(&local);"
-        " seed = (unsigned)&local; }\n"
-        "void plain(unsigned x) { other = x + 1; }\n")
-    cases = tmp_path / "cases"
-    cases.mkdir()
-    (cases / "few.py").write_text('case("seed_from_stack", "once", lambda m: None)\n'
-                                  'case("plain", "x = 1", lambda m: None, 1)\n')
+        "void seed_from_stack(void) { volatile unsigned pad[4], local = 0; pad[0] = 0; touch(&local); %s }\n"
+        "void plain(unsigned x) { other = x + 1; }\n" % seed)
+    os.makedirs(image.cases)
+    with open(os.path.join(image.cases, "few.py"), "w") as f:
+        f.write(cases)
     payload = build.build(target, image, src=str(src), out=str(tmp_path / "recon"), quiet=True)
-    failed, uncovered, text = run_all(target, payload, cases_dir=cases)
+    return target, image, payload
+
+
+def test_a_case_whose_outcome_depends_on_where_the_stack_lies_is_refused(tmp_path):
+    """C that lays out its frame otherwise seeds another random number. That is no disagreement:
+    the original's own outcome changes when its stack starts lower, so the case is refused, not
+    failed, and runs nothing for coverage; plain agrees as before."""
+    target, image, payload = stack_seed_target(tmp_path, 'case("seed_from_stack", "once", lambda m: None)\n'
+                                                         'case("plain", "x = 1", lambda m: None, 1)\n')
+    failed, uncovered, text = run_all(target, payload)
     assert "REFUSED seed_from_stack [once]: the original's outcome depends on where the stack lies" in text, text
     assert "FAIL seed_from_stack" not in text and "seed_from_stack" in uncovered, text
     assert "ok   plain" in text, text

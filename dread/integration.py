@@ -14,7 +14,10 @@ calls and differs between builds), nor reads as data a place of the image where 
 differ (a generated pointer into code; loads within 4 KiB of the loading instruction are taken for
 literal pools and allowed). The rebuilt image may take RECON_LIMIT instructions. Then the return
 value, the memory written outside the stack and the log of peripheral accesses must agree; values
-that are addresses inside the stack are not compared (frames lie differently in the two builds).
+that are addresses inside the stack are not compared (frames lie differently in the two builds), and
+an input whose builds differ is left out when the original's own outcome changes with its stack
+starting dread.runner.STACK_SHIFT bytes lower (it took a stack address for a value: a seed, a pointer
+an index pushed past a local).
 
 Runs the functions built from C that have generated cases (auto() in the case files) and, with
 --callers, the original functions that call them directly, with inputs generated for them on the
@@ -48,11 +51,13 @@ LITERAL_REACH = 0x1000
 G = {}
 
 
-def run(payload, aliases, case, addr, name, watch=False, limit=None):
+def run(payload, aliases, case, addr, name, watch=False, limit=None, shift=0):
     """Result of one input with real callees, or None if it does not return. With watch, also
-    whether it read stale stack or differing image bytes as data (result.unusable)."""
+    whether it read stale stack or differing image bytes as data (result.unusable). shift: start
+    the stack that many bytes lower (see check)."""
     gen, lay = G["gen"], G["gen"].layout
     m = Machine(lay, payload, aliases, isa_of=gen.program.isa_at)
+    m.stack_shift = shift
     m.function = name
     m.arg_domains = gen.argument_domains.get(name, [])
     m.kept, m.kept_why, _ = runner.kept_for(name)
@@ -135,6 +140,27 @@ def inputs_for(name):
     return cached["cases"]
 
 
+def compare(a, b, lay, i, skip=None):
+    """The problems of result b against a (case number i): skip, a range of addresses whose writes
+    are left out."""
+    problems = []
+    if a.ret != b.ret and not lay.in_stack(a.ret):
+        problems.append("case %d: return value 0x%x vs 0x%x" % (i, a.ret, b.ret))
+    if a.calls != b.calls:
+        problems.append("case %d: peripheral accesses differ" % i)
+    theirs = dict(b.kept)
+    for reg, value in a.kept:
+        if theirs.get(reg) != value:
+            problems.append("case %d: %s after the return 0x%x vs %s (%s)" % (
+                i, reg, value, "-" if theirs.get(reg) is None else "0x%x" % theirs[reg], a.why.get(reg, "")))
+    diff = [x for x in sorted(set(a.writes) | set(b.writes))
+            if a.writes.get(x) != b.writes.get(x) and not stackish(a.writes, x, lay)
+            and not (skip and skip[0] <= x < skip[1])]
+    if diff:
+        problems.append("case %d: %d bytes of memory differ, first at 0x%x" % (i, len(diff), diff[0]))
+    return problems
+
+
 def check(item):
     name, addr, cases = item
     if cases is None:
@@ -152,19 +178,16 @@ def check(item):
         if b is None:
             problems.append("case %d: the original returns, the rebuilt image faults or hangs" % i)
         else:
-            if a.ret != b.ret and not lay.in_stack(a.ret):
-                problems.append("case %d: return value 0x%x vs 0x%x" % (i, a.ret, b.ret))
-            if a.calls != b.calls:
-                problems.append("case %d: peripheral accesses differ" % i)
-            theirs = dict(b.kept)
-            for reg, value in a.kept:
-                if theirs.get(reg) != value:
-                    problems.append("case %d: %s after the return 0x%x vs %s (%s)" % (
-                        i, reg, value, "-" if theirs.get(reg) is None else "0x%x" % theirs[reg], a.why.get(reg, "")))
-            diff = [x for x in sorted(set(a.writes) | set(b.writes))
-                    if a.writes.get(x) != b.writes.get(x) and not stackish(a.writes, x, lay)]
-            if diff:
-                problems.append("case %d: %d bytes of memory differ, first at 0x%x" % (i, len(diff), diff[0]))
+            problems += compare(a, b, lay, i)
+        if len(problems) > before:
+            # The original's own outcome may follow where the stack lies (a stack address taken
+            # for a value): C, whose frames lie otherwise, cannot agree then (dread.runner)
+            moved = run(G["original"], None, case, addr, name, shift=runner.STACK_SHIFT)
+            from dread.emu import ARGS_ROOM
+            if moved is None or compare(a, moved, lay, i, (lay.stack_top, lay.stack_top + ARGS_ROOM)):
+                del problems[before:]
+                ran -= 1
+                continue
         if len(problems) > before and i >= len(kept):
             differing.append(case)
     if differing and G["keep_failing"]:

@@ -28,3 +28,14 @@ def test_callee_bug_shows_in_a_caller(target, variant, tmp_path, capsys):
     rc = integration.main(["--target", target.root, "--recon", payload, "--cases", "40", caller])
     out = capsys.readouterr().out
     assert rc == 1 and "DIFF " + caller in out and "peripheral accesses differ" in out, out
+
+
+def test_an_input_whose_outcome_follows_the_stack_is_left_out(tmp_path, capsys):
+    """The stack address seed_from_stack seeds its random number with lies elsewhere in the C's
+    frame, and the number is no stack address (which the run leaves uncompared anyway): its inputs
+    are left out, since the original's own outcome changes with its stack lower."""
+    from test_runner import stack_seed_target
+    target, image, payload = stack_seed_target(tmp_path, 'auto("seed_from_stack")\nauto("plain")\n')
+    rc = integration.main(["--target", target.root, "--recon", payload])
+    out = capsys.readouterr().out
+    assert rc == 0 and "DIFF" not in out, out
