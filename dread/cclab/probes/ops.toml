@@ -1,0 +1,34 @@
+# The operations of ops.c (dread cclab), each with the inputs of its one run: words in the argument
+# registers and the stack, a 64-bit value as two words (lowest first), floats as their bits (soft
+# float: in the core registers); "scratch" and "scratch+N" are addresses in the lab's scratch memory.
+
+probes = [
+    {function = "op_udiv", measure = "op", args = [1000, 7]},
+    {function = "op_sdiv", measure = "op", args = [-1000, 7]},
+    {function = "op_umod", measure = "op", args = [1000, 7]},
+    {function = "op_smod", measure = "op", args = [-1000, 7]},
+    {function = "op_udiv64", measure = "op", args = [0x89abcdef, 0x01234567, 7, 0]},
+    {function = "op_sdiv64", measure = "op", args = [0x89abcdef, 0xf1234567, 7, 0]},
+    {function = "op_umod64", measure = "op", args = [0x89abcdef, 0x01234567, 7, 0]},
+    {function = "op_mul64", measure = "op", args = [0x89abcdef, 0x01234567, 0x7, 0x3]},
+    {function = "op_shl64", measure = "op", args = [0x89abcdef, 0x01234567, 5]},
+    {function = "op_shr64", measure = "op", args = [0x89abcdef, 0x01234567, 37]},
+    {function = "op_sar64", measure = "op", args = [0x89abcdef, 0xf1234567, 5]},
+    {function = "op_fadd", measure = "op", args = [0x3f800000, 0x40000000]},
+    {function = "op_fmul", measure = "op", args = [0x3fc00000, 0x40000000]},
+    {function = "op_dadd", measure = "op", args = [0, 0x3ff00000, 0, 0x40000000]},
+    {function = "op_f2i", measure = "op", args = [0x40490fdb]},
+    {function = "op_i2f", measure = "op", args = [42]},
+    {function = "op_f2d", measure = "op", args = [0x3f800000]},
+    {function = "op_fcmp", measure = "op", args = [0x3f800000, 0x40000000]},
+    {function = "op_udiv10", measure = "op", args = [12345]},
+    {function = "op_sdiv7", measure = "op", args = [-1000]},
+    {function = "op_umod10", measure = "op", args = [12345]},
+    {function = "op_struct_copy", measure = "op", args = ["scratch+0x100", "scratch"]},
+    {function = "op_memset64", measure = "op", args = ["scratch"]},
+    {function = "op_memcpy_n", measure = "op", args = ["scratch+0x100", "scratch", 24]},
+    {function = "op_memcpy16", measure = "op", args = ["scratch+0x100", "scratch"]},
+    {function = "op_tail", measure = "op", args = [99]},
+    {function = "op_switch_dense", measure = "op", args = [7]},
+    {function = "op_switch_sparse", measure = "op", args = [300]},
+]

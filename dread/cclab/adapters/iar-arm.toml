@@ -1,0 +1,37 @@
+# IAR C/C++ Compiler for Arm (EWARM) on Windows, run from WSL through its interop. Written from IAR's
+# documented command line where IAR could not be tried: `dread cclab doctor --adapter iar-arm` says
+# which step fails, and a copy of this file with the fix is used as `--adapter FILE`. Linked with
+# ILINK and IAR's own library (its runtime helpers are what the probes find); the lab writes the
+# ILINK configuration (.icf) for the emulator's memory map, and --keep holds every probe function.
+# Keep the work directory on the Windows side (--work /mnt/c/...), where iccarm.exe sees it.
+# The options as IAR's documentation for EWARM 9.70 spells them (--cpu=, --fpu=none, -O[n|l|m|h|hs|hz];
+# ILINK's --config, --entry, --keep): checked against the documentation, not against the tools.
+name = "iar-arm"
+family = "iar"
+windows = true
+support = false
+arch = "arm"
+isa = "t32"
+profile = "m"
+
+[tools]
+cc = "/mnt/c/Program Files*/IAR Systems/*/arm/bin/iccarm.exe"
+ld = "/mnt/c/Program Files*/IAR Systems/*/arm/bin/ilinkarm.exe"
+
+[commands]
+version = ["{cc}", "--version"]
+compile = ["{cc}", "{src}", "-o", "{obj}", "--silent", "{flags}"]
+link = ["{ld}", "{objs}", "-o", "{out}", "--config", "{script}", "--entry", "cclab_entry", "--silent", "{keep}", "{ldflags}"]
+keep = ["--keep", "{symbol}"]
+
+[matrix.cpu]
+cortex-m3 = ["--cpu=Cortex-M3"]
+cortex-m4 = ["--cpu=Cortex-M4", "--fpu=none"]
+
+[matrix.opt]
+On = ["-On"]
+Ol = ["-Ol"]
+Om = ["-Om"]
+Oh = ["-Oh"]
+Ohs = ["-Ohs"]
+Ohz = ["-Ohz"]

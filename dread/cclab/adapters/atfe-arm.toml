@@ -1,0 +1,29 @@
+# Arm Toolchain for Embedded (ATfE: Arm's LLVM-based toolchain, open source) for the Cortex-M:
+# clang compiles, its driver links with lld, its own runtime helpers (compiler-rt) and its own C
+# library (picolibc), chosen per CPU by its multilib configuration.
+name = "atfe-arm"
+family = "gnu"
+support = false
+arch = "arm"
+isa = "t32"
+profile = "m"
+
+[tools]
+cc = ["~/.local/opt/ATfE-*/bin/clang", "/opt/ATfE-*/bin/clang", "/opt/arm/ATfE-*/bin/clang"]
+ld = ["~/.local/opt/ATfE-*/bin/clang", "/opt/ATfE-*/bin/clang", "/opt/arm/ATfE-*/bin/clang"]
+
+[commands]
+version = ["{cc}", "--version"]
+compile = ["{cc}", "--target=arm-none-eabi", "-c", "{src}", "-o", "{obj}", "{flags}"]
+link = ["{ld}", "--target=arm-none-eabi", "{flags}", "{objs}", "-o", "{out}", "-T", "{script}", "-nostartfiles", "{ldflags}"]
+
+[matrix.cpu]
+cortex-m0 = ["-mcpu=cortex-m0", "-mfloat-abi=soft"]
+cortex-m3 = ["-mcpu=cortex-m3", "-mfloat-abi=soft"]
+cortex-m4 = ["-mcpu=cortex-m4", "-mfloat-abi=soft"]
+
+[matrix.opt]
+O0 = ["-O0"]
+Os = ["-Os"]
+Oz = ["-Oz"]
+O2 = ["-O2"]

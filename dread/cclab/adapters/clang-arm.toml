@@ -1,0 +1,30 @@
+# clang (LLVM) for the Cortex-M: compiled by clang, linked by arm-none-eabi-gcc's driver for libgcc's
+# runtime helpers (clang ships none for arm-none-eabi), without a C library: the lab's support file
+# gives memcpy, memset and the AEABI memory helpers.
+name = "clang-arm"
+family = "gnu"
+support = true
+arch = "arm"
+isa = "t32"
+profile = "m"
+support_flags = ["-fno-builtin"]
+
+[tools]
+cc = "clang"
+ld = "arm-none-eabi-gcc"
+
+[commands]
+version = ["{cc}", "--version"]
+compile = ["{cc}", "--target=arm-none-eabi", "-c", "{src}", "-o", "{obj}", "{flags}"]
+link = ["{ld}", "{flags}", "{objs}", "-o", "{out}", "-T", "{script}", "-nostdlib", "{ldflags}", "-lgcc"]
+
+[matrix.cpu]
+cortex-m0 = ["-mcpu=cortex-m0", "-mthumb"]
+cortex-m3 = ["-mcpu=cortex-m3", "-mthumb"]
+cortex-m4 = ["-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=soft"]
+
+[matrix.opt]
+O0 = ["-O0"]
+Os = ["-Os"]
+Oz = ["-Oz"]
+O2 = ["-O2"]

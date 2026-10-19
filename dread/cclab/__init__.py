@@ -1,0 +1,190 @@
+"""dread cclab: a compiler laboratory. Put a compiler in, learn how it compiles.
+
+A corpus of small probe programs (dread/cclab/probes: plain C99, each function asking one
+question) is compiled and linked by a compiler adapter (dread.cclab.adapters) for every
+combination of its option matrix; each build is made a DREAD target and measured in the emulator
+(dread.cclab.lab): where arguments arrive and results come back, the sizes of the basic types,
+which runtime helper each operation calls and what that helper reads, returns and changes, and the
+shape of every probe's code. The results go to WORK/ADAPTER/BUILD/results.json, and `report`
+compares the builds.
+
+    dread cclab adapters                         the built-in adapters
+    dread cclab doctor --adapter A [--work DIR]  the tools, their versions, one probe built and run
+    dread cclab run --adapter A [--work DIR] [--build KEY...] [--probes NAME...] [--jobs N]
+    dread cclab report [--work DIR] [--adapter A]
+    dread cclab bundle [--work DIR] --out FILE.zip   what may leave the work directory
+
+`run` also writes a CLAUDE.md and Claude Code deny rules into the work directory (dread.cclab.workdir).
+
+The adapter is a built-in name or a TOML file of your own (a copy of a built-in one, edited). WORK
+defaults to ./cclab-work. Nothing outside the work directory is written; nothing is sent anywhere.
+
+What an LLM may see (the user's rule for IAR at work, 2026-10-19): the probes, their compiled code
+and the compilers' own messages; never a company's code and never a compiler's runtime library code
+(a build's image holds it beside the probes: results.json says which functions are probes).
+
+What this does not establish: anything about code the probes do not contain, and that a probe's C
+means the same to every compiler (they are plain C99 for that reason).
+"""
+import argparse
+import json
+import os
+import sys
+
+from dread.cclab import adapters as ad
+from dread.cclab import lab
+
+
+def _one(job):
+    """One build in a worker: build and measure; returns (key, result or error)."""
+    adapter_path, key, picked, flags, work, names = job
+    adapter = ad.load(adapter_path)
+    probe_files = lab.probes(names)
+    try:
+        d = lab.build(adapter, key, picked, flags, probe_files, work)
+    except lab.BuildError as e:
+        return key, {"error": str(e), "log": e.log}
+    except ad.AdapterError as e:
+        return key, {"error": str(e), "log": []}
+    results = lab.measure(d, probe_files)
+    out = {"adapter": adapter.name, "build": key, "picked": picked, "flags": flags,
+           "probes": {fn: p.name for p in probe_files for fn in p.functions}, "results": results}
+    with open(os.path.join(d, "results.json"), "w") as f:
+        json.dump(out, f, indent=1)
+    return key, out
+
+
+def run(adapter, work, only=None, names=None, jobs=None, out=print):
+    """Build and measure every build of the adapter's matrix (or those in only); returns
+    {key: results or {"error", "log"}}."""
+    from dread.util.polite import polite, workers
+    builds = [b for b in adapter.builds() if not only or b[0] in only]
+    if not builds:
+        raise ad.AdapterError("no build matches %s (there are: %s)" % (
+            ", ".join(only or []), ", ".join(k for k, _, _ in adapter.builds())))
+    os.makedirs(os.path.join(work, adapter.name), exist_ok=True)
+    from dread.cclab import workdir
+    workdir.guard(work)
+    version = adapter.version(work)
+    with open(os.path.join(work, adapter.name, "version.txt"), "w") as f:
+        f.write(version + "\n")
+    jobs_list = [(adapter.path, key, picked, flags, work, names) for key, picked, flags in builds]
+    results = {}
+    n = jobs or workers()
+    if n > 1 and len(jobs_list) > 1:
+        import multiprocessing
+        polite()
+        with multiprocessing.get_context("fork").Pool(min(n, len(jobs_list))) as pool:
+            for key, result in pool.imap_unordered(_one, jobs_list):
+                results[key] = result
+                out("%-28s %s" % (key, "error: " + result["error"] if "error" in result else "measured"))
+    else:
+        for job in jobs_list:
+            key, result = _one(job)
+            results[key] = result
+            out("%-28s %s" % (key, "error: " + result["error"] if "error" in result else "measured"))
+    return results
+
+
+def doctor(adapter, work, out=print):
+    """The adapter's tools found, the compiler's version, and the first build of the matrix built
+    with the smallest probe and run: what fails is said with the command and its output. Returns 0
+    when all went through."""
+    ok = True
+    out("adapter %s (%s, family %s%s)" % (adapter.name, adapter.path, adapter.family,
+                                         ", Windows tools through WSL" if adapter.windows else ""))
+    for name in adapter.tools:
+        try:
+            path = adapter.tool(name)
+            found = os.path.exists(path) or bool(__import__("shutil").which(path))
+            out("  %-8s %s%s" % (name, path, "" if found else "   NOT FOUND"))
+            ok &= found
+        except ad.AdapterError as e:
+            out("  %-8s %s" % (name, e))
+            ok = False
+    if adapter.windows:
+        here = os.path.abspath(work)
+        if not here.startswith("/mnt/"):
+            out("  the work directory %s is not on the Windows side: a Windows compiler may not reach it "
+                "(use --work /mnt/c/...)" % here)
+    out("version:\n  " + adapter.version(work).replace("\n", "\n  "))
+    if not ok:
+        out("doctor: tools missing; set [tools] in a copy of the adapter and pass --adapter FILE")
+        return 1
+    key, picked, flags = adapter.builds()[0]
+    probe_files = lab.probes(["abi"])
+    try:
+        d = lab.build(adapter, "doctor-" + key, picked, flags, probe_files, work)
+    except (lab.BuildError, ad.AdapterError) as e:
+        out("build %s: %s" % (key, e))
+        for step in getattr(e, "log", []):
+            out("  %s %s: exit %d\n    %s\n    %s" % (step["step"], step["file"], step["code"], " ".join(step["argv"]),
+                                                   step["output"].strip().replace("\n", "\n    ")[:2000]))
+        out("doctor: fix the failing command in a copy of the adapter ([commands]) and pass --adapter FILE")
+        return 1
+    results = lab.measure(d, probe_files)
+    probe = results.get("pick_i5_5", {})
+    out("build %s: compiled, linked and imported into %s" % (key, d))
+    out("run: the 5th of five ints arrives in %s" % probe.get("where", probe.get("error", "?")))
+    if "where" not in probe:
+        out("doctor: the probe did not run; see %s/build.json" % d)
+        return 1
+    out("doctor: all went through")
+    return 0
+
+
+def make_report(work, adapter_name=None, out=print):
+    """Markdown comparing the builds of each adapter in work (written to WORK/ADAPTER/report.md)."""
+    import importlib
+    return importlib.import_module("dread.cclab.report").write(work, adapter_name, out)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="dread cclab", description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("adapters", help="the built-in adapters")
+    p = sub.add_parser("doctor", help="check an adapter: tools, version, one probe built and run")
+    p.add_argument("--adapter", required=True)
+    p.add_argument("--work", default="cclab-work")
+    p = sub.add_parser("run", help="build and measure the probes for every build of an adapter")
+    p.add_argument("--adapter", required=True)
+    p.add_argument("--work", default="cclab-work")
+    p.add_argument("--build", action="append", help="only this build (repeatable)")
+    p.add_argument("--probes", action="append", help="only these probe files (repeatable)")
+    p.add_argument("--jobs", type=int)
+    p = sub.add_parser("report", help="compare the builds measured in the work directory")
+    p.add_argument("--work", default="cclab-work")
+    p.add_argument("--adapter")
+    p = sub.add_parser("bundle", help="zip what may leave the work directory (no images, binaries, tables)")
+    p.add_argument("--work", default="cclab-work")
+    p.add_argument("--out", required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.action == "adapters":
+            for name, path in ad.builtin().items():
+                a = ad.load(path)
+                print("%-12s %-4s %3d builds  %s" % (name, a.family, len(a.builds()),
+                                                     ", ".join("%s: %s" % (d, " ".join(c)) for d, c in a.matrix.items())))
+            return 0
+        if args.action == "report":
+            return make_report(args.work, args.adapter)
+        if args.action == "bundle":
+            from dread.cclab import workdir
+            packed = workdir.bundle(args.work, args.out)
+            print("dread cclab: %d files into %s (no images, binaries or tables)" % (len(packed), args.out))
+            return 0
+        adapter = ad.load(args.adapter)
+        if args.action == "doctor":
+            return doctor(adapter, args.work)
+        results = run(adapter, args.work, args.build, args.probes, args.jobs)
+        failed = [k for k, r in results.items() if "error" in r]
+        print("dread cclab: %d builds measured, %d failed, in %s" % (len(results) - len(failed), len(failed),
+                                                                   os.path.join(args.work, adapter.name)))
+        return 1 if failed else 0
+    except ad.AdapterError as e:
+        print("dread cclab: %s" % e, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

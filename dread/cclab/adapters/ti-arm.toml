@@ -1,0 +1,33 @@
+# TI Arm C/C++ Compiler (armcl: TI's own Code Generation Tools, 20.2 LTS, free from TI) for the
+# Cortex-M: compiled and linked by TI's tools with TI's runtime library (libc.a picks the one that
+# fits the objects), the probes' memory in a TI linker command file. A toolchain of its own kind,
+# like IAR's: its own front end, command line, linker configuration and runtime helpers.
+name = "ti-arm"
+family = "ti"
+support = false
+arch = "arm"
+isa = "t32"
+profile = "m"
+
+[tools]
+cc = ["~/.local/opt/ti-cgt-arm_*/ti-cgt-arm_*/bin/armcl", "~/ti/ccs*/ccs/tools/compiler/ti-cgt-arm_*/bin/armcl", "/opt/ti/ti-cgt-arm_*/bin/armcl", "armcl"]
+ld = ["~/.local/opt/ti-cgt-arm_*/ti-cgt-arm_*/bin/armlnk", "~/ti/ccs*/ccs/tools/compiler/ti-cgt-arm_*/bin/armlnk", "/opt/ti/ti-cgt-arm_*/bin/armlnk", "armlnk"]
+lib = ["~/.local/opt/ti-cgt-arm_*/ti-cgt-arm_*/lib", "~/ti/ccs*/ccs/tools/compiler/ti-cgt-arm_*/lib", "/opt/ti/ti-cgt-arm_*/lib"]
+inc = ["~/.local/opt/ti-cgt-arm_*/ti-cgt-arm_*/include", "~/ti/ccs*/ccs/tools/compiler/ti-cgt-arm_*/include", "/opt/ti/ti-cgt-arm_*/include"]
+
+[commands]
+version = ["{cc}", "--help"]
+compile = ["{cc}", "-c", "{src}", "--output_file={obj}", "--include_path={inc}", "-me", "--code_state=16", "--abi=eabi", "--c99", "{flags}"]
+link = ["{ld}", "{objs}", "--output_file={out}", "--entry_point=cclab_entry", "--search_path={lib}", "--library=libc.a", "{keep}", "{ldflags}", "{script}"]
+keep = ["--retain={symbol}"]
+
+[matrix.cpu]
+cortex-m3 = ["-mv7M3", "--float_support=none"]
+cortex-m4 = ["-mv7M4", "--float_support=none"]
+
+[matrix.opt]
+Ooff = ["-Ooff"]
+O0 = ["-O0"]
+O2 = ["-O2"]
+O3 = ["-O3"]
+O2size = ["-O2", "--opt_for_speed=0"]
