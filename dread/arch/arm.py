@@ -91,6 +91,8 @@ class Arm:
         if cpu is not None and cpu not in CPUS:
             raise ValueError("unknown cpu %r (Unicorn knows: %s)" % (cpu, ", ".join(sorted(CPUS))))
         self.isa, self.profile, self.cpu, self.endian = isa, profile, cpu, endian
+        if profile == "m":
+            self.syscall_exception = 11     # SVCall
         self.thumb2 = thumb2        # whether Thumb code may use 32-bit Thumb-2 (b.w): configure()
         # Ghidra's language id: Cortex for M profile, v4t for an A-profile core that can run Thumb
         # (ARM7TDMI and later), v4 otherwise. Override in [arch] ghidra for another variant.
@@ -552,11 +554,32 @@ class Arm:
     EXC_RETURN = 0xFFFFFFE0                 # M profile: branches at or above this return from an exception
 
     def interrupts_enabled(self, engine):
-        """Whether an interrupt may be taken now: A profile, the I bit is clear; M profile,
-        PRIMASK is clear and the core runs no exception handler (one level, no nesting)."""
+        """Whether an interrupt may be taken now, for a controller that does not decide itself
+        (may_take): A profile, the I bit is clear; M profile, PRIMASK is clear and the core runs no
+        exception handler (one level)."""
         if self.profile == "m":
             return not engine.reg_read(ua.UC_ARM_REG_PRIMASK) & 1 and not engine.reg_read(ua.UC_ARM_REG_XPSR) & 0x1FF
         return not engine.reg_read(ua.UC_ARM_REG_CPSR) & 0x80
+
+    def cpu_masks(self, engine):
+        """M profile: the core's PRIMASK, FAULTMASK and BASEPRI, for a controller with priorities."""
+        if self.profile != "m":
+            return {}
+        return {"primask": engine.reg_read(ua.UC_ARM_REG_PRIMASK) & 1,
+                "faultmask": engine.reg_read(ua.UC_ARM_REG_FAULTMASK) & 1,
+                "basepri": engine.reg_read(ua.UC_ARM_REG_BASEPRI) & 0xFF}
+
+    # Unicorn's exception numbers in a system run: svc (2) and, M profile, the start of an exception
+    # return (8, a branch to EXC_RETURN in handler mode; with an interrupt hook in place Unicorn would
+    # go on at the EXC_RETURN address)
+    syscall_exception = None                # the exception svc raises (M profile: SVCall)
+
+    def system_exception(self, intno):
+        """What an exception Unicorn raised means in a system run: "syscall", "return" or None (a
+        fault). Only the M profile's are modelled."""
+        if self.profile == "m":
+            return {2: "syscall", 8: "return"}.get(intno)
+        return None
 
     def enter_interrupt(self, engine, number, resume, vectors, read_word, write_word):
         """Take interrupt `number` (A profile: the IRQ, number ignored; M profile: the exception
@@ -564,12 +587,18 @@ class Arm:
 
         A profile: SPSR_irq = CPSR, IRQ mode with I set in ARM state, LR_irq = the return address
         + 4, at vectors + 0x18. M profile: r0-r3, r12, lr, the return address and xPSR pushed on the
-        main stack (aligned to 8 bytes, bit 9 of the stacked xPSR telling so), LR = EXC_RETURN for
-        thread mode on the main stack, IPSR = number, at the handler of the vector table. The
-        process stack, priorities and FPU frames are not modelled."""
+        stack in use (the process stack in thread mode with CONTROL.SPSEL, else the main stack;
+        aligned to 8 bytes, bit 9 of the stacked xPSR telling so), the main stack from then on,
+        LR = EXC_RETURN (0xFFFFFFF1 from a handler, 0xFFFFFFF9 from thread mode on the main stack,
+        0xFFFFFFFD on the process stack), IPSR = number, at the handler of the vector table. FPU
+        frames are not modelled."""
         if self.profile == "m":
+            xpsr = engine.reg_read(ua.UC_ARM_REG_XPSR)
+            handler = xpsr & 0x1FF
+            control = engine.reg_read(ua.UC_ARM_REG_CONTROL)
+            process = not handler and control & 2
             sp = engine.reg_read(ua.UC_ARM_REG_SP)
-            xpsr = engine.reg_read(ua.UC_ARM_REG_XPSR) & ~self.IT_MASK
+            xpsr &= ~self.IT_MASK
             if sp & 4:
                 sp -= 4
                 xpsr |= 1 << 9
@@ -579,7 +608,9 @@ class Arm:
             for i, value in enumerate(frame):
                 write_word(sp + 4 * i, value)
             engine.reg_write(ua.UC_ARM_REG_SP, sp)
-            engine.reg_write(ua.UC_ARM_REG_LR, 0xFFFFFFF9)
+            if process:                     # in thread mode, a write of SPSEL switches the stack
+                engine.reg_write(ua.UC_ARM_REG_CONTROL, control & ~2)
+            engine.reg_write(ua.UC_ARM_REG_LR, 0xFFFFFFF1 if handler else 0xFFFFFFFD if process else 0xFFFFFFF9)
             engine.reg_write(ua.UC_ARM_REG_XPSR, 0x01000000 | (number & 0x1FF))
             return read_word(vectors + 4 * number) | 1
         cpsr = engine.reg_read(ua.UC_ARM_REG_CPSR)
@@ -590,18 +621,25 @@ class Arm:
 
     def exception_return(self, engine, read_word):
         """M profile: finish the return the core began by branching to EXC_RETURN (Unicorn stops
-        there): pop the frame of enter_interrupt and return where to go on, or None when pc is no
-        EXC_RETURN value."""
+        there): pop the frame from the stack EXC_RETURN names (bit 2: the process stack), to thread
+        mode (bit 3) or the handler that was interrupted, and return where to go on; None when pc is
+        no EXC_RETURN value."""
         pc = engine.reg_read(ua.UC_ARM_REG_PC)
         if self.profile != "m" or pc < self.EXC_RETURN:
             return None
-        sp = engine.reg_read(ua.UC_ARM_REG_SP)
+        process, thread = pc & 4, pc & 8
+        sp = engine.reg_read(ua.UC_ARM_REG_PSP if process else ua.UC_ARM_REG_MSP)
         frame = [read_word(sp + 4 * i) for i in range(8)]
         for r, value in zip(("R0", "R1", "R2", "R3", "R12", "LR"), frame):
             engine.reg_write(getattr(ua, "UC_ARM_REG_" + r), value)
         sp += 32 + (4 if frame[7] & (1 << 9) else 0)
+        xpsr = frame[7] & ~(1 << 9)
+        if thread:
+            xpsr &= ~0x1FF
+        engine.reg_write(ua.UC_ARM_REG_XPSR, xpsr)      # the mode first: SPSEL changes in thread mode only
+        if process:
+            engine.reg_write(ua.UC_ARM_REG_CONTROL, engine.reg_read(ua.UC_ARM_REG_CONTROL) | 2)
         engine.reg_write(ua.UC_ARM_REG_SP, sp)
-        engine.reg_write(ua.UC_ARM_REG_XPSR, frame[7] & ~(1 << 9))
         return frame[6] | 1
 
     def resume_address(self, engine):

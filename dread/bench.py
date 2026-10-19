@@ -33,6 +33,7 @@ Recipe format:
     includes = ["path", ...]
     defines = ["NAME=VALUE", ...]
     patches = [{file = "path/main.c", old = "...", new = "..."}]   # in a copy, never in the source
+                              # (a source, or a header: its directory is copied, see patched_sources)
     ldscript = "path/x.ld"
     link = ["-nostartfiles", ...]                   # link options after the objects
     base = 0x0                # the image's load address; entry: a symbol name; limit: the end of the
@@ -57,6 +58,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -154,22 +156,42 @@ def the_build(recipe, name):
 
 
 def patched_sources(project, src, work, extra=()):
-    """{source path: the file to compile}: a copy with the project's substitutions (and the build's,
-    extra) for patched ones."""
+    """({source path: the file to compile}, [include directories to search first]): copies with the
+    project's substitutions (and the build's, extra). A patched header's directory is copied whole
+    into the work directory: the sources in it compile from the copy, so a header they include by
+    name is the patched one (the including file's own directory is searched first), and the copy is
+    searched before the project's includes by the others. (A file there that includes another by a
+    relative path upwards would miss it.)"""
     files = {s: os.path.join(src, s) for s in project["sources"]}
-    for p in list(project.get("patches", ())) + list(extra):
-        if p["file"] not in files:
-            raise BenchError("patch of %s, which is not among the sources" % p["file"])
-        with open(files[p["file"]]) as f:      # (a second substitution in one file builds on the first)
+    patches = list(project.get("patches", ())) + list(extra)
+    mirror = os.path.join(work, "patched")
+    shutil.rmtree(mirror, ignore_errors=True)       # an old patch must not shadow anything
+    mirrored = sorted({os.path.dirname(p["file"]) for p in patches if p["file"] not in files})
+    for d in mirrored:
+        if not os.path.isdir(os.path.join(src, d)):
+            raise BenchError("patch of a file in %s, which is not in the project" % (d or "."))
+        os.makedirs(os.path.join(mirror, d), exist_ok=True)
+        for name in sorted(os.listdir(os.path.join(src, d))):
+            if os.path.isfile(os.path.join(src, d, name)):
+                shutil.copyfile(os.path.join(src, d, name), os.path.join(mirror, d, name))
+    for name in files:
+        if os.path.dirname(name) in mirrored:
+            files[name] = os.path.join(mirror, name)
+    for p in patches:
+        copy = os.path.join(mirror, p["file"])
+        path = files.get(p["file"], copy)           # (a second substitution in one file builds on the first)
+        if not os.path.isfile(path):
+            raise BenchError("patch of %s, which is not in the project" % p["file"])
+        with open(path) as f:
             text = f.read()
         if text.count(p["old"]) != 1:
             raise BenchError("patch of %s: the text to replace occurs %d times" % (p["file"], text.count(p["old"])))
-        copy = os.path.join(work, "patched", p["file"])
         os.makedirs(os.path.dirname(copy), exist_ok=True)
         with open(copy, "w") as f:
             f.write(text.replace(p["old"], p["new"]))
-        files[p["file"]] = copy
-    return files
+        if p["file"] in files:
+            files[p["file"]] = copy
+    return files, [os.path.join(mirror, d) for d in mirrored]
 
 
 def dread_compiler(b):
@@ -200,8 +222,8 @@ def build(recipe, name, bench=None, jobs=None, out=print):
     work = os.path.join(where, "work")
     objdir = os.path.join(work, "obj")
     os.makedirs(objdir, exist_ok=True)
-    files = patched_sources(project, src, work, b.get("patches", ()))
-    flags = list(b["cflags"]) + ["-D" + d for d in project.get("defines", ())] + \
+    files, first = patched_sources(project, src, work, b.get("patches", ()))
+    flags = list(b["cflags"]) + ["-D" + d for d in project.get("defines", ())] + ["-I" + d for d in first] + \
         ["-I" + os.path.join(src, i) for i in project.get("includes", ())]
     cc, ld = b["cc"], b.get("ld", b["cc"])
     started = time.time()

@@ -74,6 +74,7 @@ generator, the lifter, the reading aids)
 | `settle_it(engine)` | optional: repair after a hook (ARM: Thumb IT state) |
 | `syscall_numbers` | the engine's exception numbers of a system call (ARM: svc 2; RISC-V: ecall 8, 9, 11). dread.emu runs one as a no-op logged as `("svc",)` (`log_svc()` adds the argument registers); any other exception number is a fault. Unicorn never enters a handler through the vector table, with or without a hook, so a system run that needs the handler models the entry itself |
 | `reset`, `interrupts_enabled`, `enter_interrupt`, `exception_return`, `resume_address`, `flags_value` | the system run's core: reset, interrupt entry and return |
+| `cpu_masks(engine)`, `system_exception(intno)`, `syscall_exception` | optional, for a controller with priorities and a core that raises exceptions itself: the masks the controller weighs (M profile: PRIMASK, FAULTMASK, BASEPRI), what an exception Unicorn raised means in a system run ("syscall", "return" or a fault), and the exception a system call raises (M profile: SVCall, 11) |
 
 ## ARM knowledge outside the layer
 

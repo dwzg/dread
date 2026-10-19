@@ -167,8 +167,10 @@ target's own (`"file.py:Class"`, relative to the target directory); the other ke
 (its docstring). The kinds of `dread.models`: `uart` (serial port: data, status bits, receive queue),
 `timer` (down-counter with load, control, status and an interrupt line), `gpio` (input and output
 pins), `intc` (an A-profile controller with pending, enable and acknowledge registers, taken through
-the IRQ vector), `nvic` (the Cortex-M NVIC's enable and pending registers and SysTick, taken through
-the vector table). Example, a serial port:
+the IRQ vector), `nvic` (the Cortex-M exception controller: the NVIC, the SCB's exception registers
+and SysTick, with priorities of `priority_bits` bits, PRIGROUP, nesting, BASEPRI and PRIMASK, PendSV,
+and SVCall for svc; exceptions are taken through VTOR's vector table, on the main or the process
+stack as the core does). Example, a serial port:
 
 ```toml
 [models.uart]

@@ -94,6 +94,23 @@ def test_a_substitution_goes_into_a_copy(tmp_path, monkeypatch):
         bench.build(bad, "m3-Os", out=lambda *a: None)
 
 
+@needs_gcc
+def test_a_header_substitution(tmp_path, monkeypatch):
+    """A header patched (FreeRTOS's configuration: stacks too small for GCC 16) is found by the
+    sources beside it, which include it by name, and by the others; the tree stays as it was."""
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    patch = '[[projects.m3.patches]]\nfile = "gizmo.h"\nold = "#define UART_BASE  0x40011000u"\n' \
+            'new = "#define UART_BASE  0x40012000u"\n'
+    before = open(os.path.join(GIZMO, "fw", "gizmo.h")).read()
+    where = bench.build(recipe(tmp_path, patch), "m3-Os", out=lambda *a: None)
+    assert open(os.path.join(GIZMO, "fw", "gizmo.h")).read() == before
+    image = open(os.path.join(where, "original", "firmware.bin"), "rb").read()
+    assert (0x40012000).to_bytes(4, "little") in image and (0x40011000).to_bytes(4, "little") not in image
+    with pytest.raises(bench.BenchError, match="not in the project"):
+        bench.build(recipe(tmp_path, '[[projects.m3.patches]]\nfile = "nope.h"\nold = "a"\nnew = "b"\n'),
+                    "m3-Os", out=lambda *a: None)
+
+
 def test_recipes_are_checked(tmp_path):
     path = tmp_path / "bad.toml"
     path.write_text('name = "x"\n[source]\npath = "."\n[projects.p]\nsources = []\n'

@@ -17,7 +17,10 @@ place in both runs, however many instructions the C takes. A wait in code that i
 rebuilt idle loop waiting for an interrupt: FROZEN blocks in a row with an event due, or a chunk in
 which the clock does not move at all) moves the clock to the next scheduled event, in both runs
 alike. Interrupts are taken behind a block of shared code, or, after such a wait, at once: the code
-it interrupts is not shared, so there is no common place to wait for. The device log, every
+it interrupts is not shared, so there is no common place to wait for. A controller with priorities
+(dread.models.nvic) decides with the core's masks whether one is taken (may_take), so a pending one
+waits while masked and comes behind the first shared block after the mask drops, or at once behind
+the return of the handler that held it off. svc raises its exception (Cortex-M: SVCall) at once. The device log, every
 peripheral access with its value in order plus what the models note (bytes sent), is what is
 compared; the functions entered are information (a rewritten function enters what it calls in its
 own way).
@@ -50,7 +53,8 @@ import collections
 import os
 import sys
 
-from unicorn import UC_HOOK_BLOCK, UC_HOOK_MEM_READ, UC_HOOK_MEM_UNMAPPED, UC_HOOK_MEM_WRITE, UC_MEM_WRITE, UcError
+from unicorn import (UC_HOOK_BLOCK, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_UNMAPPED, UC_HOOK_MEM_WRITE,
+                     UC_MEM_WRITE, UcError)
 
 from dread import models as dmodels
 from dread import target as tgt
@@ -113,6 +117,12 @@ class System:
             uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._on_io, begin=lo, end=hi - 1)
         self.fault = None
         uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._on_unmapped)
+        # An exception the core raises itself: svc (taken through a controller with pend(), the M
+        # profile's SVCall) and the start of an M-profile exception return (finished by the layer);
+        # any other is a fault. Without the hook Unicorn stops at each with an error; with it, it
+        # would go on behind the instruction, so the hook stops the run there.
+        self.syscall = False
+        uc.hook_add(UC_HOOK_INTR, self._on_intr)
 
     # ---- what counts ----
 
@@ -176,6 +186,14 @@ class System:
                 return c, number
         return None
 
+    def _may_take(self, controller, number):
+        """Whether the core takes that interrupt now: the controller decides with the core's masks
+        when it has priorities (may_take), else the layer (interrupts_enabled)."""
+        may = getattr(controller, "may_take", None)
+        if may is not None:
+            return may(number, self.arch.cpu_masks(self.uc))
+        return self.arch.interrupts_enabled(self.uc)
+
     def schedule(self):
         times = [t for t in (m.next_event() for m in self.models) if t is not None]
         times += [t for t, _, _ in self.pending_input]
@@ -209,9 +227,10 @@ class System:
             if (self.next_event is not None and self.clock >= self.next_event) or self.clock >= self.limit:
                 uc.emu_stop()
             if self.irq_check:
-                if self._wanted() is None:
+                wanted = self._wanted()
+                if wanted is None:
                     self.irq_check = False
-                elif self.arch.interrupts_enabled(uc):
+                elif self._may_take(*wanted):
                     self.deliver = True
                     uc.emu_stop()
         if self.layout.settle_it:
@@ -254,6 +273,14 @@ class System:
         if self.layout.settle_it:
             self.arch.settle_it(uc)
 
+    def _on_intr(self, uc, intno, user):
+        kind = getattr(self.arch, "system_exception", lambda n: None)(intno)
+        if kind == "syscall":
+            self.syscall = True
+        elif kind != "return" and self.fault is None:
+            self.fault = "CPU exception %d at pc 0x%x" % (intno, uc.reg_read(self.layout.pc))
+        uc.emu_stop()
+
     def _on_unmapped(self, uc, access, addr, size, value, user):
         if self.fault is None:
             self.fault = "access to unmapped memory 0x%x (%d bytes) at pc 0x%x" % (
@@ -274,34 +301,51 @@ class System:
             uc.mem_write(address, (value & 0xFFFFFFFF).to_bytes(4, "little"))
         pc = arch.reset(uc, word, self.image.entry, self.image.vectors)
         self.schedule()
+
+        def take(pc):
+            wanted = self._wanted()
+            if wanted is None or not self._may_take(*wanted):
+                return pc
+            controller, number = wanted
+            controller.taken(number)
+            self.interrupts[number] += 1
+            self.log.append(("interrupt", controller.name, number))
+            vectors = controller.vector_base() if hasattr(controller, "vector_base") else self.image.vectors
+            pc = arch.enter_interrupt(uc, number, pc, vectors, word, write_word)
+            self.interrupts_changed()
+            return pc
         how = None
         while True:
             self.new, clock_before = 0, self.clock
+            error = None
             try:
                 uc.emu_start(pc, self.layout.sentinel, count=CHUNK)
             except UcError as e:
-                back = arch.exception_return(uc, word)
-                if back is None:
-                    how = self.fault or "emulator error at pc 0x%x: %s" % (uc.reg_read(self.layout.pc), e)
-                    break
-                self.fault, pc = None, back     # the M profile's return from an exception, finished here
+                error = e
+            back = arch.exception_return(uc, word)
+            if back is not None:                # the M profile's return from an exception, finished here
+                self.fault, pc = None, back
                 for c in self.controllers:
                     c.returned()
                 self.interrupts_changed()
+                pc = take(pc)                   # one that waited for it comes at once (tail-chaining)
                 continue
+            if error is not None or self.fault is not None:
+                how = self.fault or "emulator error at pc 0x%x: %s" % (uc.reg_read(self.layout.pc), error)
+                break
             pc = arch.resume_address(uc)
-
-            def take(pc):
-                wanted = self._wanted()
-                if wanted is None or not arch.interrupts_enabled(uc):
-                    return pc
-                controller, number = wanted
-                controller.taken(number)
-                self.interrupts[number] += 1
-                self.log.append(("interrupt", controller.name, number))
-                pc = arch.enter_interrupt(uc, number, pc, self.image.vectors, word, write_word)
-                self.interrupts_changed()
-                return pc
+            if self.syscall:                    # svc: its exception, taken at once behind it
+                self.syscall = False
+                number = getattr(arch, "syscall_exception", None)
+                owner = next((c for c in self.controllers if hasattr(c, "pend")), None)
+                if number is None or owner is None:
+                    how = "svc at pc 0x%x: no exception model takes it" % (pc & ~1)
+                    break
+                owner.pend(number)
+                if self._wanted() != (owner, number) or not self._may_take(owner, number):
+                    how = "svc at pc 0x%x while its exception cannot be taken (HardFault, not modelled)" % (pc & ~1)
+                    break
+                pc = take(pc)
             if self.deliver:
                 self.deliver = False
                 pc = take(pc)
