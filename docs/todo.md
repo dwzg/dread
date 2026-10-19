@@ -63,12 +63,14 @@ IAR's runtime code marked and left out.
   and probes for what the corpus does not answer, each one compiled and run before it counts. A
   CLAUDE.md and deny rules for the lab's work directory keep Claude Code at work to the probes and
   their results: not IAR's runtime code, nothing outside the lab.
-- [ ] **LLM providers for work** (the user, 2026-10-19: "We use GitHub Copilot at work. Could we
-  attach that to dread?"): a provider kind that runs a command line with the question and reads the
-  answer (GitHub Copilot CLI's `copilot -p`, Claude Code's `claude -p`, the local model), run in an
-  empty directory; and GitHub Models' OpenAI-compatible endpoint (its path differs from
-  /v1/chat/completions). `dread llm ask` to try a provider. Copilot cannot be tried here: what the
-  presets say comes from GitHub's documentation.
+- [x] **LLM providers for work** (the user, 2026-10-19: "We use GitHub Copilot at work. Could we
+  attach that to dread?"): `kind = "command"` runs a command line with the question (in an argument,
+  a file or on standard input) and reads the answer, in an empty directory without the environment's
+  keys: GitHub Copilot CLI's `copilot -p`, Claude Code's `claude -p`, the local model's wrapper
+  (tried with that: 39 s for one question). GitHub Models through `kind = "openai"` with `path` and
+  `headers`. `dread llm ask` and `dread llm providers`. Copilot and GitHub Models cannot be tried
+  here: their presets come from GitHub's documentation (2026-10). Open: the Copilot SDK (GA since
+  2026-06) if the CLI's headless mode turns out too coarse at work.
 - [ ] **C++ probes**: name mangling, vtables, constructors and static initialisation, new and delete,
   exceptions.
 - [ ] Later: `dread whatcc` from stored profiles (More compilers), and a search for the options that

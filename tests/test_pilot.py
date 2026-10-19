@@ -96,7 +96,7 @@ class Fake(BaseHTTPRequestHandler):
         Fake.seen.append((self.path, dict(self.headers), body))
         reply = ({"choices": [{"message": {"content": "openai says hi", "reasoning_content": "hmm"},
                                "finish_reason": "stop"}], "usage": {"completion_tokens": 12}}
-                 if self.path == "/v1/chat/completions"
+                 if self.path.endswith("/chat/completions")
                  else {"content": [{"type": "thinking", "thinking": "well"}, {"type": "text", "text": "anthropic says hi"}],
                        "stop_reason": "max_tokens", "usage": {"output_tokens": 34, "input_tokens": 50,
                                                                "cache_read_input_tokens": 7}})
@@ -121,6 +121,14 @@ def test_provider_wire_formats(monkeypatch):
         path, headers, body = Fake.seen[-1]
         assert body["messages"][0] == {"role": "system", "content": "be brief"} and body["model"] == "m"
         assert local.last == {"finish": "stop", "tokens": 12, "reasoning": 3, "input": None}
+        github = llm.OpenAICompatible("gh", {"url": url + "/inference/", "path": "/chat/completions", "model": "o/m",
+                                             "headers": {"x-github-api-version": "2022-11-28"}})
+        assert github.ask("be brief", [{"role": "user", "content": "hello"}]) == "openai says hi"
+        path, headers, body = Fake.seen[-1]
+        assert path == "/inference/chat/completions" and body["model"] == "o/m"
+        assert {k.lower(): v for k, v in headers.items()}["x-github-api-version"] == "2022-11-28"
+        with pytest.raises(llm.ProviderError, match="environment"):
+            llm.OpenAICompatible("gh", {"url": url, "headers": {"Authorization": "Bearer x"}}).ask("s", [])
         monkeypatch.setenv("TEST_KEY", "secret")
         remote = llm.Anthropic("claude", {"url": url, "model": "c", "key_env": "TEST_KEY"})
         assert remote.ask("be brief", [{"role": "user", "content": "hello"}]) == "anthropic says hi"

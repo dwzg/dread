@@ -18,6 +18,39 @@ Configured in ~/.config/dread/llm.toml (or the file $DREAD_LLM names):
     key_env = "ANTHROPIC_API_KEY"     # the key comes from the environment, never from a file
     max_tokens = 16000
 
+    [providers.github-models]         # GitHub Models: OpenAI's format at a path of its own
+    kind = "openai"
+    url = "https://models.github.ai/inference"     # an organisation's: .../orgs/ORG/inference
+    path = "/chat/completions"        # default /v1/chat/completions
+    model = "openai/gpt-4.1"
+    key_env = "GITHUB_MODELS_TOKEN"   # a fine-grained token with the models:read permission
+    headers = {"x-github-api-version" = "2022-11-28"}   # sent as they are; never a key
+
+    [providers.copilot]               # a command line that answers: GitHub Copilot CLI, headless
+    kind = "command"
+    command = ["copilot", "-p", "{prompt}", "-s", "--no-ask-user", "--model={model}",
+               "--deny-tool=shell", "--deny-tool=write", "--deny-tool=url"]
+    model = "claude-sonnet-4.5"       # one the Copilot plan offers
+    timeout = 1800
+
+A command provider runs its command with the conversation as one text (the system part, then each
+message under its role): in {prompt} (one argument, 128 KiB at most on Linux), in a file named by
+{prompt_file}, or on standard input when the command names neither; {model} is the provider's
+model. Its standard output is the answer. It runs in a new, empty directory, removed afterwards,
+without the environment's keys (drop_env: patterns, default DREAD_*KEY* and *_API_KEY), with no
+terminal to ask on: an agent's headless mode finds nothing there to read, and the question is all it
+is given. An agent's own tools are its command's business: turn them off there (the Copilot preset
+denies its shell, write and url tools as GitHub's documentation describes; not tried here, where
+there is no Copilot). An agent's headless mode still reads its user's own instructions (Claude
+Code's ~/.claude/CLAUDE.md shaped an answer when it was tried with `claude -p`): they travel with
+the question. Tokens are not known: the ledger counts its answers.
+
+The two GitHub presets follow GitHub's documentation (2026-10): the CLI's programmatic mode
+(`-p`, `-s`, `--no-ask-user`, `--model=`, `--deny-tool=`; a Business or Enterprise plan switches
+the CLI on by policy) and GitHub Models' inference endpoint (a token with models:read; the
+organisation must allow models). Neither was tried here. `dread llm ask` tries a provider with one
+question; `dread llm providers` lists them.
+
 Requests go out with urllib (no SDK). Keys are read from the environment only; nothing here writes a
 key anywhere.
 
@@ -95,8 +128,11 @@ class OpenAICompatible(Provider):
     kind = "openai"
 
     def ask(self, system, messages):
-        url = self.config.get("url", "http://127.0.0.1:8080").rstrip("/") + "/v1/chat/completions"
-        headers = {}
+        url = self.config.get("url", "http://127.0.0.1:8080").rstrip("/") + self.config.get("path",
+                                                                                       "/v1/chat/completions")
+        headers = dict(self.config.get("headers", {}))
+        if any(k.lower() in ("authorization", "x-api-key", "api-key") for k in headers):
+            raise ProviderError("%s: a key comes from the environment (key_env), not from headers" % self.name)
         key_env = self.config.get("key_env")
         if key_env and os.environ.get(key_env):
             headers["authorization"] = "Bearer " + os.environ[key_env]
@@ -141,6 +177,70 @@ class Anthropic(Provider):
             raise ProviderError("%s: unexpected reply %s" % (self.name, json.dumps(reply)[:300]))
 
 
+def conversation_text(system, messages):
+    """A conversation as one text, for a provider that takes one: the system part, then the
+    question; a longer conversation with each message under its role."""
+    if len(messages) == 1 and messages[0]["role"] == "user":
+        return system + "\n\n" + messages[0]["content"]
+    parts = [system, "The conversation so far follows, oldest first; your earlier answers are marked ASSISTANT. "
+                     "Answer the last USER message."]
+    parts += ["=== %s ===\n%s" % (m["role"].upper(), m["content"]) for m in messages]
+    return "\n\n".join(parts)
+
+
+class Command(Provider):
+    """A command line that answers (see the module): an agent's headless mode (GitHub Copilot
+    CLI, Claude Code), a local model's wrapper, any program that prints an answer."""
+
+    kind = "command"
+    ARG_MAX = 128 * 1024 - 1            # Linux's limit for one argument (MAX_ARG_STRLEN)
+    DROP_ENV = ("DREAD_*KEY*", "*_API_KEY")
+
+    def ask(self, system, messages):
+        import fnmatch
+        import shutil
+        import subprocess
+        import tempfile
+        spec = self.config.get("command")
+        if not isinstance(spec, list) or not spec or not all(isinstance(a, str) for a in spec):
+            raise ProviderError("%s: command is a list of arguments" % self.name)
+        text = conversation_text(system, messages)
+        joined = "\0".join(spec)
+        inline, as_file = "{prompt}" in joined, "{prompt_file}" in joined
+        if inline and len(text.encode()) > self.ARG_MAX:
+            raise ProviderError("%s: the question is %d KiB, too long for one argument: name {prompt_file} "
+                                "or leave the prompt to standard input" % (self.name, len(text.encode()) // 1024))
+        drop = self.config.get("drop_env", self.DROP_ENV)
+        env = {k: v for k, v in os.environ.items() if not any(fnmatch.fnmatchcase(k, p) for p in drop)}
+        timeout = float(self.config.get("timeout", 1800))
+        work = tempfile.mkdtemp(prefix="dread-llm-")
+        try:
+            question = os.path.join(work, "question.txt")
+            if as_file:
+                with open(question, "w") as f:
+                    f.write(text)
+            argv = [a.replace("{model}", self.model).replace("{prompt_file}", question).replace("{prompt}", text)
+                    for a in spec]
+            feed = {"stdin": subprocess.DEVNULL} if inline or as_file else {"input": text}
+            try:
+                done = subprocess.run(argv, cwd=work, env=env, capture_output=True, text=True, timeout=timeout,
+                                      **feed)
+            except FileNotFoundError:
+                raise ProviderError("%s: no command %s" % (self.name, argv[0]))
+            except subprocess.TimeoutExpired:
+                raise ProviderError("%s: no answer within %.0f s" % (self.name, timeout))
+            except OSError as e:
+                raise ProviderError("%s: %s" % (self.name, e))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if done.returncode:
+            said = (done.stderr.strip() or done.stdout.strip())[-300:]
+            raise ProviderError("%s: exit %d: %s" % (self.name, done.returncode, said))
+        self.last = {"finish": "stop", "tokens": None, "input": None, "reasoning": 0}
+        self.record()
+        return done.stdout
+
+
 class Scripted(Provider):
     """Answers given in advance (a list, used in order, or a function of the messages): for tests. An
     answer may be a dict {"text": ..., "finish": ..., "tokens": ...} to play how it ended."""
@@ -167,7 +267,7 @@ class Scripted(Provider):
         return answer
 
 
-KINDS = {"openai": OpenAICompatible, "anthropic": Anthropic}
+KINDS = {"openai": OpenAICompatible, "anthropic": Anthropic, "command": Command}
 
 
 def usage_summary(month=None, path=None, config_path=None):
@@ -219,3 +319,49 @@ def load(name=None, path=None):
     if kind is None:
         raise ProviderError("provider %s: unknown kind %r (known: %s)" % (name, spec.get("kind"), ", ".join(KINDS)))
     return kind(name, spec)
+
+
+def main(argv=None):
+    """dread llm providers | dread llm ask [--provider NAME] [--system TEXT] TEXT...: the configured
+    providers, or one question to one of them with its answer (to try a provider before a pilot run)."""
+    import argparse
+    import sys
+    import time
+    parser = argparse.ArgumentParser(prog="dread llm", description="the language-model providers: list them, "
+                                                                   "or ask one a question")
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("providers", help="the providers of the configuration file")
+    p = sub.add_parser("ask", help="ask a provider one question and print its answer")
+    p.add_argument("--provider", help="a provider of the configuration (default: its default)")
+    p.add_argument("--system", default="Answer in one short paragraph.")
+    p.add_argument("text", nargs="+")
+    args = parser.parse_args(argv)
+    if args.action == "providers":
+        import tomllib
+        path = os.environ.get("DREAD_LLM") or CONFIG
+        if not os.path.exists(path):
+            print("dread llm: no configuration %s (see dread.llm)" % path, file=sys.stderr)
+            return 1
+        with open(path, "rb") as f:
+            config = tomllib.load(f)
+        for name, spec in sorted(config.get("providers", {}).items()):
+            print("%-16s %-9s %s%s" % (name, spec.get("kind", "?"), spec.get("model", "?"),
+                                       "   (default)" if name == config.get("default") else ""))
+        return 0
+    try:
+        provider = load(args.provider)
+        started = time.time()
+        answer = provider.ask(args.system, [{"role": "user", "content": " ".join(args.text)}])
+    except ProviderError as e:
+        print("dread llm: %s" % e, file=sys.stderr)
+        return 1
+    print(answer.strip())
+    info = provider.last
+    print("(%s, %.0f s, %s%s)" % (provider.label(), time.time() - started, info.get("finish") or "?",
+                                   ", %d tokens" % info["tokens"] if info.get("tokens") else ""), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

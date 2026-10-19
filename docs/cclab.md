@@ -94,6 +94,26 @@ do), and `--guard` asks for it with any adapter:
   the probe sources and objects. No image, binary or table. (It does so with or without the guard.)
 - What the lab learns about IAR stays out of DREAD's public repository (CLAUDE.md, rule 1).
 
+## A language model at work
+
+`dread pilot` (and so the lab's builds) asks its questions through a provider of
+`~/.config/dread/llm.toml` (`dread/llm.py` has every key). Three fit a workplace that already has an
+approved service:
+
+- GitHub Copilot's CLI in its headless mode (`kind = "command"`, the `copilot` preset): the
+  question goes to Copilot under the company's plan; DREAD runs the CLI in an empty directory with
+  its shell, write and url tools denied. On a Business or Enterprise plan the CLI is switched on by
+  an administrator's policy.
+- GitHub Models (`kind = "openai"` with `path = "/chat/completions"`, the `github-models` preset):
+  a plain chat endpoint, no agent, a token with `models:read`; the organisation must allow it.
+- Claude Code's headless mode (`command = ["claude", "-p", "{prompt}"]`): tried here through the
+  local model's wrapper; it reads the user's own CLAUDE.md along with the question.
+
+Both GitHub presets follow GitHub's documentation and were not tried here. `dread llm ask
+"question"` tries a provider with one question and prints the answer and the time it took;
+`dread llm providers` lists them. Whatever the provider, a guarded build's `[llm] only` decides
+which functions reach it.
+
 ## The profile, for DREAD's other tools
 
 `report` also writes `WORK/ADAPTER/profile.toml`: every runtime helper the probes called, with all
