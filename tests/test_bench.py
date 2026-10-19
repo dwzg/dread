@@ -82,6 +82,32 @@ def test_a_local_recipe_builds_and_measures(tmp_path, monkeypatch):
 
 
 @needs_gcc
+def test_a_measurement_names_what_it_gained_and_lost(tmp_path, monkeypatch):
+    """The lift step keeps the accepted names; a later measurement says which it gained and lost
+    against the last one (in metrics.json and its output), and the last metrics.json goes to
+    history/."""
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    r = recipe(tmp_path)
+    where = bench.build(r, "m3-Os", out=lambda *a: None)
+    runs = iter([["a", "b", "c"], ["b", "c", "d"]])
+
+    def lift_step(target, image, where, log):
+        names = next(runs)
+        return {"ran": True, "verdicts": {"accepted": len(names), "dropped": 1}, "reasons": {},
+                "accepted": names, "seconds": 0.0}
+    monkeypatch.setattr(bench, "lift_step", lift_step)
+    first = bench.measure(r, "m3-Os", steps=("lift",), out=lambda *a: None)
+    assert "against_last" not in first["lift"] and not os.path.exists(os.path.join(where, "history"))
+    lines = []
+    second = bench.measure(r, "m3-Os", steps=("lift",), out=lines.append)
+    assert second["lift"]["against_last"] == {"gained": ["d"], "lost": ["a"]}
+    assert "lifted 3 of 4 (+1 -1 against the last measurement)" in lines[0]
+    assert lines[1] == "m3-Os: against the last measurement, gained d; lost a"
+    kept = os.listdir(os.path.join(where, "history"))
+    assert len(kept) == 1 and json.load(open(os.path.join(where, "history", kept[0])))["lift"]["accepted"] == ["a", "b", "c"]
+
+
+@needs_gcc
 def test_a_substitution_goes_into_a_copy(tmp_path, monkeypatch):
     monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
     patch = '[[projects.m3.patches]]\nfile = "main.c"\nold = "READY"\nnew = "STEADY"\n'

@@ -14,7 +14,9 @@ it measures what DREAD makes of the image, running its tools as they are run on 
 - Ghidra: the function starts its analysis finds without the ELF's symbols (dread ghidra
   --no-symbols), against the ELF's: found, missed, extra;
 - the lifter: dread lift --check, the functions whose lifted C agrees with the original on
-  generated cases that run every instruction (accepted), and why the others are not;
+  generated cases that run every instruction (accepted, by name), and why the others are not; the
+  names gained and lost against the build's previous measurement (against_last), so that a change
+  of a few functions can be traced to them;
 - recorded inputs (when the target has system-run scenarios): dread sysrecord records calls of the
   functions the lifter left uncovered or got no inputs for in each scenario, and the lift check
   runs again with the cases kept (a rebuild whose image differs drops them);
@@ -24,8 +26,8 @@ it measures what DREAD makes of the image, running its tools as they are run on 
 A build keeps a digest of what in the recipe made it (build.json, made_from): measuring a build
 whose recipe changed since builds it again first, so a figure always belongs to the recipe as it is.
 
-A build's figures go to BENCH/NAME/BUILD/metrics.json, and `report` gathers every build's into
-BENCH/NAME/report.md. BENCH is ~/dread-bench (or $DREAD_BENCH). Only recipes are kept in DREAD's
+A build's figures go to BENCH/NAME/BUILD/metrics.json (the previous one to BUILD/history/, named
+by its time), and `report` gathers every build's into BENCH/NAME/report.md. BENCH is ~/dread-bench (or $DREAD_BENCH). Only recipes are kept in DREAD's
 repository; sources, builds and reports stay in BENCH.
 
 Recipe format:
@@ -348,6 +350,7 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
     if os.path.exists(previous):                # the steps not run now keep their figures
         with open(previous) as f:
             metrics = {k: v for k, v in json.load(f).items() if k in STEPS}
+    earlier = metrics.get("lift", {}).get("accepted")
     metrics.update({"build": name, "functions": len(program.functions),
                     "instruction_bytes": sum(e - s for s, e, _ in program.ranges),
                     "image_bytes": len(image.payload())})
@@ -386,9 +389,20 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
         seconds, code, text = dread("noreturn", "--target", where, log=os.path.join(where, "work", "noreturn.log"))
         metrics["noreturn"] = {"functions": len([l for l in text.splitlines() if l.strip()]) if code == 0 else None,
                                "seconds": round(seconds, 1)}
+    if "lift" in steps and earlier is not None and "accepted" in metrics.get("lift", {}):
+        now = set(metrics["lift"]["accepted"])
+        metrics["lift"]["against_last"] = {"gained": sorted(now - set(earlier)), "lost": sorted(set(earlier) - now)}
+    if os.path.exists(previous):
+        os.makedirs(os.path.join(where, "history"), exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(os.path.getmtime(previous)))
+        shutil.copy2(previous, os.path.join(where, "history", "metrics-%s.json" % stamp))
     with open(os.path.join(where, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=1, sort_keys=True)
     out("%s: %s" % (name, summary_line(metrics)))
+    against = metrics.get("lift", {}).get("against_last") if "lift" in steps else None
+    if against and (against["gained"] or against["lost"]):
+        out("%s: against the last measurement, gained %s; lost %s" % (
+            name, ", ".join(against["gained"]) or "none", ", ".join(against["lost"]) or "none"))
     return metrics
 
 
@@ -405,13 +419,16 @@ def verdicts_of(target, image):
 def lift_step(target, image, where, log):
     """dread lift --check, and its verdicts counted."""
     seconds, code, text = dread("lift", "--target", where, "--check", log=os.path.join(where, "work", log))
-    verdicts, reasons = {}, {}
+    verdicts, reasons, accepted = {}, {}, []
     for fn, verdict, reason in verdicts_of(target, image):
         verdicts[verdict] = verdicts.get(verdict, 0) + 1
         if verdict != "accepted":
             key = verdict + ": " + reason_kind(reason)
             reasons[key] = reasons.get(key, 0) + 1
-    return {"ran": code == 0, "verdicts": verdicts, "reasons": reasons, "seconds": round(seconds, 1)}
+        else:
+            accepted.append(fn)
+    return {"ran": code == 0, "verdicts": verdicts, "reasons": reasons, "accepted": sorted(accepted),
+            "seconds": round(seconds, 1)}
 
 
 def record_step(target, image, where):
@@ -451,6 +468,9 @@ def summary_line(m):
     if "lift" in m:
         v = m["lift"]["verdicts"]
         parts.append("lifted %d of %d" % (v.get("accepted", 0), sum(v.values())))
+        against = m["lift"].get("against_last")
+        if against:
+            parts[-1] += " (+%d -%d against the last measurement)" % (len(against["gained"]), len(against["lost"]))
     r = m.get("record", {})
     if r.get("kept"):
         parts.append("%d recorded cases (%d before them)" % (r["kept"], r.get("accepted_before") or 0))
