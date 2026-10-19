@@ -67,3 +67,23 @@ int op_switch_sparse(int x)
     default: return -1;
     }
 }
+
+/* A switch whose cases do different work: no value table can stand for it, so the compiler's own
+   dispatch shows (a table branch, a jump through a table of addresses, a switch helper, a chain). */
+int op_switch_jump(int x, int *out)
+{
+    switch (x) {
+    case 0: out[0] = 10; break;
+    case 1: out[1] = out[0] + 20; break;
+    case 2: out[2] = out[1] ^ 3; break;
+    case 3: out[3] = out[2] - 7; break;
+    case 4: out[0] = out[3] << 2; break;
+    case 5: out[1] = 9; out[2] = 1; break;
+    case 6: out[2] = out[0] * 5; break;
+    case 7: out[3] = out[1] | 64; break;
+    case 8: out[0] = out[2] >> 1; break;
+    case 9: out[1] = -out[3]; break;
+    default: return -1;
+    }
+    return x;
+}

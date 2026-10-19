@@ -33,4 +33,5 @@ probes = [
     {function = "op_divmod64", measure = "op", args = ["u64:0x0123456789abcdef", "u64:7"], note = "the same, 64-bit"},
     {function = "op_switch_dense", measure = "op", args = [7]},
     {function = "op_switch_sparse", measure = "op", args = [300]},
+    {function = "op_switch_jump", measure = "op", args = [5, "ptr:scratch"], note = "cases that do different work"},
 ]

@@ -34,7 +34,8 @@ def load(work, adapter):
 
 
 NOTABLE = {      # instructions that mark an idiom in inline code, per architecture
-    "arm": ("udiv", "sdiv", "umull", "smull", "smmul", "tbb", "tbh", "ldrd", "strd", "umlal", "mla", "mls"),
+    "arm": ("udiv", "sdiv", "umull", "smull", "smmul", "ldrd", "strd", "umlal", "mla", "mls"),   # (tbb, tbh:
+                                                                                             # the shape's ijumps)
     "riscv": ("mul", "mulh", "mulhu", "mulhsu", "div", "divu", "rem", "remu"),
 }
 NOTABLE_PREFIXES = {"arm": ("ldm", "stm")}
@@ -51,7 +52,9 @@ def op_text(entry, arch="arm"):
         return ", ".join(dict.fromkeys(direct))
     notable = [m for m in entry.get("shape", {}).get("mnemonics", [])
                if m in NOTABLE.get(arch, ()) or m.startswith(NOTABLE_PREFIXES.get(arch, ()))]
-    return "inline" + (" (%s)" % ", ".join(notable) if notable else "")
+    jumps = sorted(set(entry.get("shape", {}).get("ijumps", [])))
+    return "inline" + (" (%s)" % ", ".join(notable) if notable else "") + (
+        ", a jump through a table (%s)" % ", ".join(jumps) if jumps else "")
 
 
 def keeps_text(entry):

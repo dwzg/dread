@@ -50,7 +50,8 @@ IAR's runtime code marked and left out.
   shapes are in; since 2026-10-19 also where the functions lie: entry alignment, literal pools,
   padding, first and last instructions; on six compilers, pools and padding fully told apart; and
   soft and hard float on ARM, with a `cortex-m4f` build in every ARM adapter: GCC, clang and ATfE
-  follow AAPCS's VFP variant exactly, TI's armcl does not back-fill; the rest open): calling convention (ints, 64-bit, structs by value and returned, varargs,
+  follow AAPCS's VFP variant exactly, TI's armcl does not back-fill; and how a switch dispatches,
+  on a switch whose cases do different work; the rest open): calling convention (ints, 64-bit, structs by value and returned, varargs,
   soft and hard float), callee-saved registers and stack alignment, the runtime helper each operation
   calls and its register contract, prologue and epilogue shapes, switch encodings, division by
   constants, memcpy, memset and struct copies, tail calls, literal pools, function alignment and

@@ -109,6 +109,8 @@ def test_gcc_follows_the_procedure_call_standard(tmp_path):
     assert len(udiv) == 1 and "__aeabi_uidiv" in udiv[0]["function"]   # libgcc's alias of __udivsi3
     assert udiv[0]["args"][:2] == ["0x%08x" % 1000, "0x%08x" % 7] and udiv[0]["results"][0] == "0x%08x" % 142
     assert m3["op_udiv"]["helpers"] == [] and "udiv" in m3["op_udiv"]["shape"]["mnemonics"]
+    assert m3["op_switch_jump"]["shape"]["ijumps"] == ["tbb"]                 # a table branch on v7-M,
+    assert m0["op_switch_jump"]["shape"]["ijumps"] == ["mov pc"]              # a computed pc on v6-M
     for r in got.values():                                              # what a call keeps
         assert r["keeps_pressure"]["kept"] == "all" and all(f % 8 == 0 for f in r["keeps_pressure"]["frames_at_calls"])
         assert {"r4", "return address"} <= set(r["keeps_pressure"]["saved"])

@@ -421,7 +421,7 @@ def shape(bench, name):
     if fn is None:
         return {"missing": True}
     insns = [i for i in program.instructions(fn) if i is not None]
-    calls, tails = [], []
+    calls, tails, ijumps = [], [], []
     for insn in insns:
         kind, target, _ = arch.flow(insn)
         callee = program.by_entry.get(target & ~1) if isinstance(target, int) else None
@@ -431,8 +431,16 @@ def shape(bench, name):
             calls.append("(through a register)")
         elif kind == "jump" and callee is not None and callee is not fn:
             tails.append(bench.names(callee.entry))
+        elif kind == "ijump":           # a switch's dispatch: tbb, a computed pc, a bl to a switch helper
+            helper = None
+            if insn.mnemonic in ("bl", "blx") and hasattr(arch, "target"):
+                t = arch.target(insn)
+                helper = program.by_entry.get(t & ~1) if isinstance(t, int) else None
+            ijumps.append(bench.names(helper.entry) if helper is not None else
+                          insn.mnemonic + (" pc" if insn.op_str.startswith("pc") else ""))
     text = ["%s %s" % (i.mnemonic, i.op_str) for i in insns]
     return {"size": program.end(fn) - fn.entry, "instructions": len(insns), "calls": calls, "tails": tails,
+            "ijumps": ijumps,
             "head": text[:6], "tail": text[-4:], "mnemonics": sorted({i.mnemonic for i in insns})}
 
 

@@ -16,7 +16,9 @@ MSP430):
 - what a function keeps across a call: which callee-saved registers it stores in its frame, the
   return address, the frame at its calls, and from that the stack alignment the compiler keeps;
 - the shape of every probe's code: size, calls and tail calls, first and last instructions, the
-  instructions that mark an idiom (a division instruction, a table branch, block transfers);
+  instructions that mark an idiom (a division instruction, block transfers), and how a switch
+  dispatches: a table branch (tbb), a computed pc (mov pc, add pc, c.jr), a switch helper (GCC's
+  `__gnu_thumb1_case_uqi` on the Cortex-M0 at -Os), or a chain of compares;
 - where the functions lie: the alignment of their entries, literal pools between them (a pool counts
   when any function loads from it or takes its address pc-relatively: TI's armcl shares one per
   file), the padding in front of a pool or the next function (none, zeros, no-ops), the
