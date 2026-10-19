@@ -86,6 +86,21 @@ STATUS = ("apsr", "cpsr", "xpsr", "iapsr", "eapsr")     # status registers whose
 # The DSP extension (ARMv7E-M; ARMv5TE and later in ARM state): the instruction itself, in inline
 # assembly (Lifter._dsp)
 from dread.arch.arm import DSP_IDS as DSP  # noqa: E402
+# The FPU (VFPv4-SP, the Cortex-M4F's): s0-s31 are the C variables f0-f31 (bit patterns; d<n> is the
+# pair f<2n>, f<2n+1>). Moves, loads and stores are copies of bits; arithmetic, conversions and
+# compares are the instruction itself in inline assembly on scratch registers (Lifter._vfp_asm)
+VFP_ASM = {getattr(A, "ARM_INS_" + n) for n in (
+    "VADD VSUB VMUL VDIV VNMUL VMLA VMLS VNMLA VNMLS VFMA VFMS VFNMA VFNMS VNEG VABS VSQRT VCVT VCVTR VCVTB "
+    "VCVTT VCMP VCMPE").split() if hasattr(A, "ARM_INS_" + n)}
+VFP_ACCUMULATE = {getattr(A, "ARM_INS_" + n) for n in "VMLA VMLS VNMLA VNMLS VFMA VFMS VFNMA VFNMS".split()
+                  if hasattr(A, "ARM_INS_" + n)}
+VFP_COMPARE = {getattr(A, "ARM_INS_" + n) for n in ("VCMP", "VCMPE") if hasattr(A, "ARM_INS_" + n)}
+VFP_MEMORY = {getattr(A, "ARM_INS_" + n) for n in "VLDR VSTR VLDMIA VLDMDB VSTMIA VSTMDB VPUSH VPOP".split()
+              if hasattr(A, "ARM_INS_" + n)}
+VFP_MOVES = {getattr(A, "ARM_INS_" + n) for n in ("VMOV", "FCONSTS", "FCONSTD") if hasattr(A, "ARM_INS_" + n)}
+VFP = VFP_ASM | VFP_MEMORY | VFP_MOVES | {A.ARM_INS_VMRS, A.ARM_INS_VMSR, A.ARM_INS_FMSTAT}
+# (capstone's ids: FCONSTS is vmov.f32 sN, #const; FMSTAT is vmrs APSR_nzcv, fpscr)
+FP_SCRATCH = ("s15", "s14", "s13", "s12")    # the inline assembly's own registers (caller-saved)
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
@@ -177,6 +192,10 @@ class Lifter:
         self.prog, self.arch, self.flow = program, program.arch, flow
         self._stack_args, self._entry, self._resolved, self._states, self._handlers = {}, {}, {}, {}, {}
         self._noreturn = set(endless) if endless is not None else None
+        # Lift a function that leaves values in the FPU's argument registers (s0-s15), which a
+        # caller may read: only where they are compared (dread liftfuzz stores them to memory); the
+        # test runner does not compare them yet (the hard-float calling convention, docs/todo.md)
+        self.fp_results = False
         path = program.image.table("asm_only")
         self.asm_only = read_ranges(path) if path and os.path.exists(path) else []
 
@@ -535,7 +554,8 @@ class Lifter:
             args = self.ARGS
         link = self.arch.link_reg                                # the C knows the return address
         fixed = tuple(self.prog.image.fixed)                    # one value everywhere ([image] fixed)
-        start = frozenset(r for r in self.REGS + ["flags"] if r not in tuple(args) + ("sp", "pc", link) + fixed)
+        fpu = ["s%d" % k for k in range(32)] if getattr(self.arch, "fp_arg_regs", None) else []    # (ARM)
+        start = frozenset(r for r in self.REGS + ["flags"] + fpu if r not in tuple(args) + ("sp", "pc", link) + fixed)
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
         work = [fn.insns[0]]
         while work:
@@ -556,10 +576,12 @@ class Lifter:
             copy = self.plain_move(insn)
             if copy is not None and copy[1] in undef:
                 reads = set(reads) - {copy[1]}   # a copy of what the caller left (mov r8, r8 is a nop;
-            bad = (reads & undef) - {"sp", "pc"}  # mov r3, r8 before push {r3} saves r8)
+            pred = arch.predicate(insn)            # mov r3, r8 before push {r3} saves r8)
+            # read under the condition it was written under (vmovgt s15, r1; vcvtgt.f32.s32 s15, s15):
+            # the flags have not changed since, or the pair would be gone from partial
+            bad = {r for r in reads & undef if pred is None or (r, pred) not in partial} - {"sp", "pc"}
             if bad:
                 found[a] = bad
-            pred = arch.predicate(insn)
             if pred is None:
                 after_u = undef - writes
                 after_p = frozenset(x for x in partial if x[0] not in writes)
@@ -660,6 +682,7 @@ class Lifter:
                 raise Refused("0x%x writes %s, which holds one value in the whole program ([image] fixed)"
                               % (insn.address, ", ".join(sorted(changed))))
         self._check_kept(fn)
+        self._check_fpu(fn, insns)
         handler = self.handler_kind(fn)
         self._check_returns(fn, states, handler)
         stack_params = self.stack_args(fn)
@@ -690,6 +713,34 @@ class Lifter:
         stubs = {self.arch.target(i) & ~1 for i in insns if getattr(i, "call_via", None)}   # bl into a bx rN
         return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]), frame, stack_params,
                       [a for a in fn.insns if a not in depth and a not in stubs])
+
+    def _check_fpu(self, fn, insns):
+        """Refuse what the FPU's registers cannot carry yet: in a function that uses them, a call of
+        one that uses them too (a hard-float callee takes and returns floats in s0-s15, which the C
+        call does not pass) or through a register; and,
+        unless fp_results, a value left in s0-s15 (a caller may read it, the runner does not
+        compare it). Reading one before writing it (a float argument) is refused with the other
+        registers a caller leaves (entry_states)."""
+        if not any(i.id in VFP for i in insns):
+            return
+        for insn in insns:
+            kind, target, _ = self.arch.flow(insn)
+            if kind == "icall":
+                raise Refused("0x%x calls through a register while it uses the FPU: the hard-float calling "
+                              "convention is not modelled yet" % insn.address)
+            callee = self.prog.by_entry.get(target & ~1) if kind in ("call", "jump") and isinstance(target, int) \
+                else None
+            if callee is not None and callee is not fn and any(
+                    c is not None and c.id in VFP for c in self.prog.instructions(callee)):
+                raise Refused("0x%x calls %s, which uses the FPU (float arguments and results in s0-s15): the "
+                              "hard-float calling convention is not modelled yet" % (insn.address, callee.name))
+        if not self.fp_results:
+            for insn in insns:
+                left = sorted(r for r in self.arch.reg_effects(insn)[1]
+                              if r[:1] == "s" and r[1:].isdigit() and int(r[1:]) < 16)
+                if left:
+                    raise Refused("0x%x leaves a value in %s, which a caller may read (the hard-float calling "
+                                  "convention is not modelled yet)" % (insn.address, left[0]))
 
     def handler_kind(self, fn):
         """"IRQ" or "SWI" when the function is an A-profile exception handler (its returns are
@@ -777,6 +828,8 @@ class Lifter:
             lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
                          " r10 = 0, r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
         lines.append("    u32 n = 0, z = 0, c = 0, v = 0;")
+        if ctx.get("fp"):                   # the FPU's registers, as bit patterns (see VFP)
+            lines.append("    __attribute__((unused)) u32 %s;" % ", ".join("f%d = 0" % k for k in range(32)))
         lines += self.fixed_lines()
         if ctx.get("flags_in"):             # read before written (mrs r0, cpsr first): the caller's flags
             lines.append('    { u32 t; __asm__ volatile ("mrs %0, apsr" : "=r"(t)); n = t >> 31; z = t >> 30 & 1; '
@@ -1015,6 +1068,8 @@ class Lifter:
             return self._switch_jump(insn)
         if kind == "stop":
             raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
+        if i in VFP:
+            return self._vfp(insn, ops, isa)
         stack = arch.stack_kind(insn)
         if stack == "push":
             return self._push(insn)
@@ -1143,6 +1198,169 @@ class Lifter:
             outputs.append('"%sr"(%s)' % ("+" if r in read else "=", name))
         inputs = ['"r"(%s)' % self.reg(r) for r in ins]
         return '__asm__ volatile ("%s %s" : %s : %s : "cc");' % (mnemonic, text, ", ".join(outputs), ", ".join(inputs))
+
+    # the FPU
+
+    def fp_lanes(self, o, insn):
+        """The C variables of a VFP register operand: [f<n>] for s<n>, [f<2n>, f<2n+1>] for d<n>
+        (d<n>[k], a scalar: [f<2n+k>]); None for another operand."""
+        if o.type != A.ARM_OP_REG:
+            return None
+        name = insn.reg_name(o.reg) or ""
+        if name[:1] == "s" and name[1:].isdigit():
+            return ["f%d" % int(name[1:])]
+        if name[:1] == "d" and name[1:].isdigit() and int(name[1:]) < 16:
+            k = int(name[1:])
+            index = getattr(o, "vector_index", -1)
+            if index is not None and index >= 0:
+                return ["f%d" % (2 * k + index)]
+            return ["f%d" % (2 * k), "f%d" % (2 * k + 1)]
+        return None
+
+    def _vfp(self, insn, ops, isa):
+        """An FPU instruction: see VFP above. The FPU's own state (the rounding mode, the cumulative
+        exception flags, the flags of a compare until vmrs moves them) stays in the core, which the
+        lifted C runs on as well."""
+        i, a = insn.id, insn.address
+        self.ctx["fp"] = True
+        if i in VFP_MOVES:
+            return self._vmov(insn, ops)
+        if i in VFP_MEMORY:
+            return self._vfp_memory(insn, ops, isa)
+        if i == A.ARM_INS_FMSTAT or i == A.ARM_INS_VMRS:
+            if i == A.ARM_INS_FMSTAT or insn.op_str.lower().startswith("apsr_nzcv"):   # a compare's flags
+                return ('{ u32 t; __asm__ volatile ("vmrs %0, fpscr" : "=r"(t)); n = t >> 31; z = t >> 30 & 1; '
+                        'c = t >> 29 & 1; v = t >> 28 & 1; }')
+            sysreg = insn.op_str.split(",", 1)[1].strip()
+            return '__asm__ volatile ("vmrs %%0, %s" : "=r"(%s));' % (sysreg, self.dest(ops[0]))
+        if i == A.ARM_INS_VMSR:
+            sysreg = insn.op_str.split(",", 1)[0].strip()
+            return '__asm__ volatile ("vmsr %s, %%0" :: "r"(%s) : "memory");' % (sysreg, self.reg(ops[-1].reg))
+        if i in VFP_ASM:
+            return self._vfp_asm(insn, ops)
+        raise Refused("0x%x: %s %s is not modelled" % (a, insn.mnemonic, insn.op_str))
+
+    def _vmov(self, insn, ops):
+        """vmov in every form: between core and FPU registers, register pairs, a float constant,
+        FPU registers: the destination's 32-bit lanes take the source's bits."""
+        import struct
+        lanes = []
+        for o in ops:
+            fp = self.fp_lanes(o, insn)
+            if fp is not None:
+                lanes.append(("f", fp, o))
+            elif o.type == A.ARM_OP_REG:
+                lanes.append(("r", [self.name(o.reg)], o))
+            elif o.type == A.ARM_OP_FP:
+                lanes.append(("c", ["0x%xu" % struct.unpack("<I", struct.pack("<f", o.fp))[0]], o))
+            elif o.type == A.ARM_OP_IMM:
+                lanes.append(("c", ["0x%xu" % (o.imm & 0xFFFFFFFF)], o))
+            else:
+                raise Refused("0x%x: %s %s is not modelled" % (insn.address, insn.mnemonic, insn.op_str))
+        for k in range(1, len(lanes)):
+            dst = [x for kind, xs, o in lanes[:k] for x in xs]
+            src = [(kind, x, o) for kind, xs, o in lanes[k:] for x in xs]
+            if len(dst) == len(src) and all(kind != "c" for kind, _, _ in lanes[:k]):
+                break
+        else:
+            raise Refused("0x%x: %s %s is not modelled" % (insn.address, insn.mnemonic, insn.op_str))
+        for kind, xs, o in lanes[:k]:
+            if kind == "r":
+                self.dest(o)                # (refuses sp and pc)
+        values = [self.reg(o.reg) if kind == "r" else x for kind, x, o in src]
+        if len(dst) == 1:
+            return "%s = %s;" % (dst[0], values[0])
+        return "{ %s %s }" % (" ".join("u32 t%d = %s;" % (j, v) for j, v in enumerate(values)),
+                              " ".join("%s = t%d;" % (d, j) for j, d in enumerate(dst)))
+
+    def _vfp_memory(self, insn, ops, isa):
+        """vldr and vstr (a literal too: the constant's bits), vldm and vstm through a base register
+        with or without writeback. Refused: vpush, vpop and the other stack forms (the FPU's saved
+        registers in the frame are not modelled yet)."""
+        i, a = insn.id, insn.address
+        regs = [x for o in ops for x in (self.fp_lanes(o, insn) or [])]
+        if i in (A.ARM_INS_VLDR, A.ARM_INS_VSTR):
+            lit = self.arch.literal(insn, isa) if i == A.ARM_INS_VLDR else None
+            if lit is not None:
+                size = 4 * len(regs)
+                if not self.prog.in_image(lit[0], size):
+                    raise Refused("0x%x: a literal load of %d bytes at 0x%x" % (a, size, lit[0]))
+                raw = self.prog.read(lit[0], size)
+                return " ".join("%s = 0x%xu;" % (r, int.from_bytes(raw[4 * k:4 * k + 4], "little"))
+                                for k, r in enumerate(regs))
+            addr, newbase, base = self._mem(insn)
+            if newbase is not None:
+                raise Refused("0x%x: %s with writeback is not modelled" % (a, insn.mnemonic))
+            if i == A.ARM_INS_VLDR:
+                return "{ u32 a = %s; %s }" % (addr, " ".join("%s = *(volatile u32 *)(a + %d);" % (r, 4 * k)
+                                                               for k, r in enumerate(regs)))
+            return "{ u32 a = %s; %s }" % (addr, " ".join("*(volatile u32 *)(a + %d) = %s;" % (4 * k, r)
+                                                           for k, r in enumerate(regs)))
+        if i in (A.ARM_INS_VPUSH, A.ARM_INS_VPOP):
+            raise Refused("0x%x: %s %s (the FPU's registers in the frame are not modelled yet)" % (
+                a, insn.mnemonic, insn.op_str))
+        base_op = ops[0]
+        base = self.name(base_op.reg)
+        if base in ("sp", "pc"):
+            raise Refused("0x%x: %s %s (the FPU's registers in the frame are not modelled yet)" % (
+                a, insn.mnemonic, insn.op_str))
+        b = self.reg(base_op.reg)
+        n = 4 * len(regs)
+        down = i in (A.ARM_INS_VLDMDB, A.ARM_INS_VSTMDB)
+        start = "%s - %d" % (b, n) if down else b
+        if i in (A.ARM_INS_VLDMIA, A.ARM_INS_VLDMDB):
+            body = " ".join("%s = *(volatile u32 *)(a + %d);" % (r, 4 * k) for k, r in enumerate(regs))
+        else:
+            body = " ".join("*(volatile u32 *)(a + %d) = %s;" % (4 * k, r) for k, r in enumerate(regs))
+        back = (" %s = %s %s %d;" % (base, base, "-" if down else "+", n)) if insn.writeback else ""
+        return "{ u32 a = %s; %s%s }" % (start, body, back)
+
+    def _vfp_asm(self, insn, ops):
+        """An FPU computation (arithmetic, a conversion, a compare) as the instruction itself in
+        inline assembly: its FPU registers are moved into scratch registers (FP_SCRATCH), it runs on
+        those, and what it writes is moved back; exact by construction. The first register is
+        written (and read too by the multiply-accumulates); a compare writes none, only the FPU's
+        flags."""
+        import re
+        mnemonic, _, dtype = insn.mnemonic.partition(".")
+        cond = self.arch.condition(insn)
+        if cond and mnemonic.endswith(cond):
+            mnemonic = mnemonic[:-len(cond)]
+        order, reads, writes = [], set(), set()
+        half = insn.id in (A.ARM_INS_VCVTB, A.ARM_INS_VCVTT) and dtype.startswith("f16")   # half a register
+        position = 0
+        for o in ops:
+            lanes = self.fp_lanes(o, insn)
+            if lanes is None:
+                continue
+            if len(lanes) != 1:
+                raise Refused("0x%x: %s %s (double precision) is not modelled" % (
+                    insn.address, insn.mnemonic, insn.op_str))
+            name = insn.reg_name(o.reg)
+            if name not in [x for x, _ in order]:
+                order.append((name, lanes[0]))
+            # the first register is written (a compare writes none); every other is read, the first
+            # too where the instruction accumulates into it, converts it in place (fixed point: it
+            # appears again) or writes only half of it (vcvtb and vcvtt to half precision)
+            if position == 0 and insn.id not in VFP_COMPARE:
+                writes.add(name)
+                if insn.id in VFP_ACCUMULATE or half:
+                    reads.add(name)
+            else:
+                reads.add(name)
+            position += 1
+        if len(order) > len(FP_SCRATCH):
+            raise Refused("0x%x: %s %s uses too many registers" % (insn.address, insn.mnemonic, insn.op_str))
+        scratch = {name: FP_SCRATCH[k] for k, (name, _) in enumerate(order)}
+        text = re.sub(r"\b[sd]\d+\b", lambda m: scratch.get(m.group(0), m.group(0)), insn.op_str)
+        outs = [(name, var) for name, var in order if name in writes]
+        ins = [(name, var) for name, var in order if name in reads]
+        lines = ["vmov %s, %%%d" % (scratch[name], len(outs) + k) for k, (name, _) in enumerate(ins)]
+        lines.append("%s%s %s" % (mnemonic, "." + dtype if dtype else "", text))
+        lines += ["vmov %%%d, %s" % (k, scratch[name]) for k, (name, _) in enumerate(outs)]
+        return '__asm__ volatile ("%s" : %s : %s : %s);' % (
+            "\\n\\t".join(lines), ", ".join('"=r"(%s)' % var for _, var in outs),
+            ", ".join('"r"(%s)' % var for _, var in ins), ", ".join('"%s"' % r for r in FP_SCRATCH[:len(order)]))
 
     def _svc(self, insn, ops):
         """svc #n with r0-r3 bound to the handler (its arguments and results); r12, lr and the flags

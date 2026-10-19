@@ -30,9 +30,12 @@ first runs: capstone reports adc, sbc and rsc without s as setting the flags, an
 carry of movs r1, r1, lsl #7 was taken after r1 was written. Its returns through r3 also made
 dread.switches crash the process inside Unicorn (pages unmapped after a run, written by a later one).
 
-The ISAs: a32 (ARMv7-A in ARM state), t32 (Cortex-M3, Thumb-2) and m4 (Cortex-M4: Thumb-2 with the
-DSP extension, whose saturating, packed and halfword-multiply instructions it draws as well), with
-the cross toolchain (arm-none-eabi-); rv32 (RV32IMC, dread.lift_riscv), with clang and ld.lld: RiscVGenerator, which
+The ISAs: a32 (ARMv7-A in ARM state), t32 (Cortex-M3, Thumb-2), m4 (Cortex-M4: Thumb-2 with the DSP
+extension, whose saturating, packed and halfword-multiply instructions it draws as well) and m4f
+(the Cortex-M4F: the FPU as well, on s0-s15, which the function sets from the arguments at its
+start and stores into the result buffer at its end with FPSCR; its arithmetic, multiply-
+accumulates, conversions of every kind, compares with vmrs APSR_nzcv, moves and constants, loads
+and stores), with the cross toolchain (arm-none-eabi-); rv32 (RV32IMC, dread.lift_riscv), with clang and ld.lld: RiscVGenerator, which
 frames a function the same way (ra and s0-s11 saved, every frame slot written, every register set
 from the arguments before the body reads it, s11 the buffer's address, s0 the frame pointer in the
 "fp" style, a return through another register in the "ret" style) and draws from the base, M and
@@ -48,7 +51,7 @@ the build, reported per function and reduced like a difference. Found on its fir
 itself. The image, its target directory and the lifted C go to a temporary directory, kept when
 something fails (or with --keep).
 
-    dread liftfuzz [--isa a32|t32|m4|rv32|msp430] [--functions N] [--length L] [--inputs K] [--seed S]
+    dread liftfuzz [--isa a32|t32|m4|m4f|rv32|msp430] [--functions N] [--length L] [--inputs K] [--seed S]
                    [--reduce N] [--keep DIR]
 """
 import argparse
@@ -161,6 +164,37 @@ scratch = {base = 0x20100000, size = 0x20000}
 ''',
         "base": 0x08000000, "ram": 0x20000000,
     },
+    "m4f": {
+        "flags": ["-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16"], "thumb": True, "dsp": True, "fpu": True,
+        "toml": '''[target]
+name = "liftfuzz-m4f"
+title = "dread liftfuzz, Thumb-2 with the DSP extension and the FPU (Cortex-M4F)"
+
+[arch]
+name = "arm"
+isa = "t32"
+profile = "m"
+cpu = "cortex-m4"
+
+[image.main]
+original = "fuzz.bin"
+base = 0x08000000
+limit = 0x08080000
+entry = "f0"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x08000000, size = 0x100000, kind = "rom"},
+    {name = "sram", base = 0x20000000, size = 0x10000},
+    {name = "scratch", base = 0x20100000, size = 0x20000},
+]
+io = [[0x40000000, 0x40020000], [0xe000e000, 0xe000f000]]
+stack = {top = 0x20010000, size = 0x2000}
+sentinel = 0x1fff0000
+scratch = {base = 0x20100000, size = 0x20000}
+''',
+        "base": 0x08000000, "ram": 0x20000000,
+    },
     "rv32": {
         "flags": ["--target=riscv32-unknown-elf", "-march=rv32imc", "-mabi=ilp32", "-mno-relax"],
         "toml": '''[target]
@@ -234,6 +268,7 @@ class Generator:
         self.isa, self.rng = isa, rng
         self.thumb = ISAS[isa].get("thumb", isa == "t32")
         self.has_dsp = ISAS[isa].get("dsp", False)  # the DSP extension (the Cortex-M4's)
+        self.has_fpu = ISAS[isa].get("fpu", False)  # the FPU (the Cortex-M4F's): s0-s15 in the body
         self.label = 0
         self.r12 = ISAS[isa]["ram"] + 0x1000 + 4 * (BUF_WORDS // 2)
         self.fp = None              # the frame pointer's number in a function that has one
@@ -450,6 +485,48 @@ class Generator:
             return ["%s%s %s, %s, %s%s" % (rng.choice(["sxtab16", "uxtab16"]), cond, d, a, b, rot)]
         return ["%s%s %s, %s%s" % (rng.choice(["sxtb16", "uxtb16"]), cond, d, a, rot)]
 
+    def vfp(self, cond):
+        """The FPU (VFPv4-SP) on s0-s15: arithmetic, the multiply-accumulates (chained and fused),
+        negation, absolute value, square root, conversions (to and from integers, rounded both ways,
+        to and from fixed point, to and from half precision), compares with the flags moved to APSR,
+        moves between core and FPU registers and of float constants, loads and stores on the
+        buffer. One conditional instruction under `cond` (an IT block's slot), more freely without."""
+        rng = self.rng
+        d, a, b = ("s%d" % rng.randrange(16) for _ in range(3))
+        k = rng.randrange(11 if cond else 13)
+        if k == 0:
+            return ["%s%s.f32 %s, %s, %s" % (rng.choice(["vadd", "vsub", "vmul", "vdiv", "vnmul"]), cond, d, a, b)]
+        if k == 1:
+            return ["%s%s.f32 %s, %s, %s" % (rng.choice(["vmla", "vmls", "vnmla", "vnmls", "vfma", "vfms", "vfnma",
+                                                          "vfnms"]), cond, d, a, b)]
+        if k == 2:
+            return ["%s%s.f32 %s, %s" % (rng.choice(["vneg", "vabs", "vsqrt"]), cond, d, a)]
+        if k == 3:
+            op = rng.choice(["vcvt.s32.f32", "vcvtr.s32.f32", "vcvt.u32.f32", "vcvtr.u32.f32", "vcvt.f32.s32",
+                             "vcvt.f32.u32"])
+            m, _, dt = op.partition(".")
+            return ["%s%s.%s %s, %s" % (m, cond, dt, d, a)]
+        if k == 4:
+            dt = rng.choice(["s32.f32", "u32.f32", "f32.s32", "f32.u32", "s16.f32", "u16.f32", "f32.s16", "f32.u16"])
+            return ["vcvt%s.%s %s, %s, #%d" % (cond, dt, d, d, rng.randrange(1, 17 if "16" in dt else 33))]
+        if k == 5:
+            return ["%s%s.%s %s, %s" % (rng.choice(["vcvtb", "vcvtt"]), cond, rng.choice(["f32.f16", "f16.f32"]), d, a)]
+        if k == 6:
+            return ["vmov%s %s, %s" % (cond, self.dst(), a)]
+        if k == 7:
+            return ["vmov%s %s, %s" % (cond, d, self.src())]
+        if k == 8:
+            return ["vmov%s.f32 %s, #%s" % (cond, d, rng.choice(VFP_CONSTANTS))]
+        if k == 9:
+            return ["vmov%s.f32 %s, %s" % (cond, d, a)]
+        if k == 10:
+            return ["%s%s.f32 %s, %s" % (rng.choice(["vcmp", "vcmpe"]), cond, a, rng.choice([b, "#0"]))]
+        if k == 11:                         # (unconditional) a compare and its flags in APSR
+            return ["%s.f32 %s, %s" % (rng.choice(["vcmp", "vcmpe"]), a, rng.choice([b, "#0"])),
+                    "vmrs APSR_nzcv, fpscr"]
+        off = 4 * rng.randrange(-8, 8)
+        return ["%s %s, [r12, #%d]" % (rng.choice(["vldr", "vstr"]), d, off)]
+
     def base(self, size, span=0):
         """(set-up lines, base register): a register pointing into the buffer, aligned for `size`."""
         rng = self.rng
@@ -588,7 +665,8 @@ class Generator:
     def one(self, cond=""):
         rng = self.rng
         kind = rng.choices(["data", "move", "compare", "shifts", "multiply", "misc", "memory", "double", "block",
-                            "frame", "system", "dsp"], [26, 8, 10, 10, 6, 8, 12, 4, 4, 6, 3, 12 if self.has_dsp else 0])[0]
+                            "frame", "system", "dsp", "vfp"], [26, 8, 10, 10, 6, 8, 12, 4, 4, 6, 3, 12 if self.has_dsp else 0,
+                                                     18 if self.has_fpu else 0])[0]
         return getattr(self, kind)("" if kind == "system" else cond)
 
     def unit(self, name):
@@ -665,7 +743,8 @@ class Generator:
         """One instruction of an IT block, under `cond`: its set-up lines, then the instruction. No
         memory access: set-up lines go in front of the IT instruction, where an earlier instruction
         of the block could move a base register out of the buffer."""
-        kind = self.rng.choices(["data", "move", "compare", "shifts", "multiply", "misc"], [30, 10, 10, 10, 6, 8])[0]
+        kind = self.rng.choices(["data", "move", "compare", "shifts", "multiply", "misc", "vfp"],
+                                [30, 10, 10, 10, 6, 8, 12 if self.has_fpu else 0])[0]
         return getattr(self, kind)(cond)
 
     def function(self, name, units, buf, result, style):
@@ -681,6 +760,9 @@ class Generator:
         lines += ["mov r4, r0", "eor r5, r1, r0", "add r6, r2, r1", "sub r7, r3, r2", "orr r8, r0, r3",
                   "bic r9, r1, r2", "rsb r10, r2, r3", "eor r11, r3, r0, ror #7",
                   "ldr r12, =0x%x" % (buf + 4 * (BUF_WORDS // 2))]
+        if self.has_fpu:                    # s0-s15 from the arguments too (some float constants)
+            lines += ["vmov s%d, r%d" % (k, (5 * k + 3) % 12) for k in range(16)]
+            lines += ["vmov.f32 s%d, #%s" % (k, self.rng.choice(VFP_CONSTANTS)) for k in self.rng.sample(range(16), 3)]
         fp = self.fp_number() if "fp" in style else None
         if fp is not None:
             lines.append(self.rng.choice(["mov r%d, sp" % fp, "add r%d, sp, #0" % fp]))
@@ -695,6 +777,8 @@ class Generator:
                 lines.append("it %s" % c)
             lines.append("orr%s r0, r0, #%d" % (c, bit))
         lines.append("str r0, [lr, #52]")
+        if self.has_fpu:                    # s0-s15 and FPSCR (its flags, its cumulative exceptions) as well
+            lines += ["add lr, lr, #56", "vstmia lr, {s0-s15}", "vmrs r0, fpscr", "str r0, [lr, #64]"]
         if "ret" in style:
             lines += ["pop {r4-r11}", "pop {r3}", "bx r3"]
         else:
@@ -704,6 +788,8 @@ class Generator:
     def fp_number(self):
         return 7 if self.thumb else 11
 
+
+VFP_CONSTANTS = ["1.0", "-1.0", "0.5", "2.0", "0.125", "31.0", "-0.25", "1.5", "3.0", "-16.0"]
 
 HELPERS = [
     ("h0", ["eor r0, r0, r1", "add r0, r0, r2, ror #3", "bx lr"]),
@@ -1086,7 +1172,8 @@ class Msp430Generator:
         return lines + [".size %s, . - %s" % (name, name)]
 
 
-GENERATORS = {"a32": None, "t32": None, "m4": None, "rv32": RiscVGenerator, "msp430": Msp430Generator}   # None: ARM
+GENERATORS = {"a32": None, "t32": None, "m4": None, "m4f": None, "rv32": RiscVGenerator,
+              "msp430": Msp430Generator}   # None: ARM
 
 
 def generator(isa, rng):
@@ -1190,6 +1277,7 @@ def check(isa, work, bodies, cases, jobs=None):
     target, image = make(isa, work, bodies, cases)
     program = Program(target, image)
     lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    lifter.fp_results = True    # s0-s15 are stored into the result buffer: compared as memory
     names, refused = [], {}
     for fn in program.functions:
         try:
@@ -1203,7 +1291,7 @@ def check(isa, work, bodies, cases, jobs=None):
     if names:
         from dread.overlay import OverlayError
         try:
-            payload = build.build(target, image, lifted=names, quiet=True)
+            payload = build.build(target, image, lifted=names, quiet=True, lifter=lifter)
         except OverlayError as e:           # the C needs what the image does not hold (a libgcc helper)
             lines = str(e).splitlines()
             for name in names:
@@ -1281,7 +1369,7 @@ def run(isa, functions=100, length=40, inputs=16, seed=1, keep=None, out=print, 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread liftfuzz", description=__doc__.split("\n\n")[0])
     parser.add_argument("--isa", choices=sorted(ISAS), action="append",
-                        help="a32, t32, m4, rv32, msp430 (default: those whose toolchain is installed)")
+                        help="a32, t32, m4, m4f, rv32, msp430 (default: those whose toolchain is installed)")
     parser.add_argument("--functions", type=int, default=100)
     parser.add_argument("--length", type=int, default=40, help="random instructions per function")
     parser.add_argument("--inputs", type=int, default=16, help="written cases per function")

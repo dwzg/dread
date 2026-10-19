@@ -72,9 +72,13 @@ DSP_IDS = {getattr(csarm, "ARM_INS_" + n) for n in (
 ACCUMULATE_PAIR = {getattr(csarm, "ARM_INS_" + n) for n in (
     "UMLAL SMLAL SMLALD SMLALDX SMLSLD SMLSLDX SMLALBB SMLALBT SMLALTB SMLALTT UMAAL").split()
     if hasattr(csarm, "ARM_INS_" + n)}
+# The FPU's block transfers: capstone lists vldm's registers as not written, vstm's as not read and
+# vpush's and vpop's as both (operand_roles replaces its lists for these)
+FPU_BLOCK = {getattr(csarm, "ARM_INS_" + n) for n in "VLDMIA VLDMDB VSTMIA VSTMDB VPUSH VPOP".split()
+             if hasattr(csarm, "ARM_INS_" + n)}
 # Where capstone's own access lists are wrong (operand_roles): the accumulating pairs, which it
-# lists as written only, and ssat16 and usat16, whose source it does not list at all
-OWN_ROLES = DSP_IDS | ACCUMULATE_PAIR
+# lists as written only, ssat16 and usat16, whose source it does not list at all, and FPU_BLOCK
+OWN_ROLES = DSP_IDS | ACCUMULATE_PAIR | FPU_BLOCK
 CONDITION_NAMES = {
     csarm.ARM_CC_EQ: "eq", csarm.ARM_CC_NE: "ne", csarm.ARM_CC_HS: "hs", csarm.ARM_CC_LO: "lo",
     csarm.ARM_CC_MI: "mi", csarm.ARM_CC_PL: "pl", csarm.ARM_CC_VS: "vs", csarm.ARM_CC_VC: "vc",
@@ -523,6 +527,12 @@ class Arm:
         None for other instructions."""
         if insn.id not in OWN_ROLES:
             return None
+        if insn.id in FPU_BLOCK:            # the base register (or sp), then the registers moved
+            regs = [o.reg for o in insn.operands if o.type == csarm.ARM_OP_REG]
+            load = insn.id in (csarm.ARM_INS_VLDMIA, csarm.ARM_INS_VLDMDB, csarm.ARM_INS_VPOP)
+            if insn.id in (csarm.ARM_INS_VPUSH, csarm.ARM_INS_VPOP):
+                return [(csarm.ARM_REG_SP, True, True)] + [(r, not load, load) for r in regs]
+            return [(regs[0], True, bool(insn.writeback))] + [(r, not load, load) for r in regs[1:]]
         pair = 2 if insn.id in ACCUMULATE_PAIR else 1
         regs = [o.reg for o in insn.operands if o.type == csarm.ARM_OP_REG]
         return [(r, k >= 1 or pair == 2, k < pair) for k, r in enumerate(regs)]
@@ -537,18 +547,32 @@ class Arm:
         r, w = insn.regs_access()
         reads = {self._name(insn.reg_name(x)) for x in r}
         writes = {self._name(insn.reg_name(x)) for x in w}
+        if insn.id in FPU_BLOCK:
+            reads, writes = set(), set()   # (capstone's lists are wrong both ways: ours alone)
         for reg, read, written in self.operand_roles(insn) or ():       # capstone's gaps
             if read:
                 reads.add(self._name(insn.reg_name(reg)))
             if written:
                 writes.add(self._name(insn.reg_name(reg)))
-        if self.sets_flags(insn):
+        reads, writes = self._singles(reads), self._singles(writes)    # d<n> as s<2n>, s<2n+1>
+        if self.sets_flags(insn) or insn.id == csarm.ARM_INS_FMSTAT:     # (vmrs APSR_nzcv, fpscr)
             writes.add("flags")
         if self.is_conditional(insn) and insn.id != csarm.ARM_INS_IT:
             reads.add("flags")
         reads.discard(None)
         writes.discard(None)
         return reads, writes
+
+    @staticmethod
+    def _singles(names):
+        """FPU register names in single-precision units: d<n> (n < 16) as s<2n> and s<2n+1>."""
+        out = set()
+        for name in names:
+            if name and name[0] == "d" and name[1:].isdigit() and int(name[1:]) < 16:
+                out.update(("s%d" % (2 * int(name[1:])), "s%d" % (2 * int(name[1:]) + 1)))
+            else:
+                out.add(name)
+        return out
 
     COMPARES = (csarm.ARM_INS_CMP, csarm.ARM_INS_CMN, csarm.ARM_INS_TST, csarm.ARM_INS_TEQ)
 

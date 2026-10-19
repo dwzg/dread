@@ -574,10 +574,20 @@ of the MSP430 section comes after this one.
   Found on the way: capstone 5 lists umlal's and smlal's RdLo and RdHi as written only and ssat16's
   source not at all; the ARM layer has its own roles for those (operand_roles), so the register
   flow sees the reads now (regflow 8) on every ARM target, the M3's and ARM state's included.
-- [ ] **The FPU in the lifter**: single-precision VFP (arithmetic, fused multiply-add, conversions,
-  compares with vmrs APSR_nzcv, loads, stores, vpush, vpop) and FPSCR (rounding mode, flush to zero:
-  honoured or refused), exact either way (C floats with -ffp-contract=off, or the instruction itself
-  in inline assembly where C cannot say it, as dread.lift_msp430 does); in the fuzzer.
+- [x] **The FPU in the lifter** (2026-10-19): s0-s31 are the C variables f0-f31 (bit patterns; d<n>
+  the pair f<2n>, f<2n+1>); moves (every vmov form and float constants), loads and stores (literals
+  too, vldm and vstm) copy bits; arithmetic, the multiply-accumulates, conversions (integer, fixed
+  point, half precision, both roundings) and compares are the instruction itself in inline assembly
+  on scratch registers, so FPSCR (rounding, flush to zero, the cumulative flags) is the core's own
+  and exact by construction; vmrs APSR_nzcv moves a compare's flags into n, z, c, v. The fuzzer's
+  m4f target draws all of it and compares s0-s15 and FPSCR: 300 functions agree. Refused until the
+  next item: a float argument (an FPU register read before written), a float result (a value left
+  in s0-s15, unless the caller compares it as the fuzzer does), a call of a function that uses the
+  FPU; and vpush, vpop and double precision. Found on the way: capstone names vmov.f32 sN, #const
+  FCONSTS and vmrs APSR_nzcv FMSTAT, lists vldm's registers as not written, vstm's as not read and
+  vpush's and vpop's as both (the ARM layer replaces those lists); and the lifter's entry analysis
+  refused a register read under the condition it was written under in the same IT block (vmovgt
+  s15, r1; vcvtgt s15, s15), core registers alike.
 - [ ] **The hard-float calling convention**: the s0-s15 arguments and the s0 result in the harness,
   regflow, the case generator (float inputs: NaNs, infinities, denormals, boundaries) and stubs.
 - [ ] **The system run with an FPU**: the extended exception frame, lazy stacking (FPCCR) and the

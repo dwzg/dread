@@ -35,10 +35,11 @@ def test_refusals_name_their_reason(variant):
         assert refused == {}
         return
     assert "reads r1 behind the call of uart_putc" in refused.pop("uart_puts")     # dread.regflow's finding
-    if variant == "m4":         # the FPU, not modelled yet (docs/todo.md, Cortex-M4); the DSP extension is
-        assert "vsub.f32" in refused["lp_filter"] and "is not modelled" in refused.pop("lp_filter")
-        for name in ("average", "to_millivolts", "signal_step"):     # vldr: a literal of the register's size
-            assert "a literal load of 0 bytes" in refused.pop(name), name
+    if variant == "m4":         # the hard-float calling convention, not modelled yet (docs/todo.md, Cortex-M4)
+        assert "reads s0, s1 before anything writes it" in refused.pop("lp_filter")         # float arguments
+        assert "reads s0 before anything writes it" in refused.pop("to_millivolts")
+        assert "leaves a value in s14" in refused.pop("average")                            # a float result
+        assert "calls to_millivolts, which uses the FPU" in refused.pop("signal_step")
     if variant == "a32":
         assert "changes the stack pointer" in refused.pop("reset")
         assert "branches into other code" in refused.pop("__aeabi_uidivmod")
