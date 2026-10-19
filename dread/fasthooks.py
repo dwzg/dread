@@ -33,7 +33,8 @@ class State(ctypes.Structure):
                 ("it_mask", ctypes.c_uint32),
                 ("reg_read", ctypes.c_void_p), ("reg_write", ctypes.c_void_p),
                 ("blocks", Set), ("tree_set", Set), ("reads", Set), ("writes", Set), ("pages", Set),
-                ("code_reads", ctypes.c_int32), ("last_block", ctypes.c_uint64)]
+                ("code_reads", ctypes.c_int32), ("last_block", ctypes.c_uint64),
+                ("owners", ctypes.c_void_p), ("owners_n", ctypes.c_uint64), ("pc_reg", ctypes.c_int32)]
 
 
 def library():
@@ -103,6 +104,7 @@ class Hooks:
         image = layout.image
         s.image_lo, s.image_hi = image.base, image.end
         self.bits, self.code_id = None, None
+        self.owners_buf, self.owners_id = None, None
         if code is not None:
             self.set_code(code, image.base, image.end)
         s.settle = 1 if layout.settle_it else 0
@@ -113,11 +115,19 @@ class Hooks:
         self.fn = {name: ctypes.cast(getattr(self.lib, name), ctypes.c_void_p) for name in
                    ("dread_block", "dread_read", "dread_write")}
 
-    def set_code(self, code, lo, hi):
+    def set_code(self, code, lo, hi, owners=None, pc_reg=0):
         """The instruction starts in [lo, hi), for telling loads of code as data (built once per
-        set of addresses)."""
+        set of addresses), and the image's extent owners (dread.program.Program.extent_owners: a
+        load from a function's extent by another function's instruction is one too)."""
         s = self.state
         s.image_lo, s.image_hi = lo, hi
+        if owners is not None:
+            if self.owners_id != id(owners):
+                self.owners_buf = (ctypes.c_uint16 * len(owners)).from_buffer(owners)
+                self.owners_id = id(owners)
+            s.owners, s.owners_n, s.pc_reg = ctypes.cast(self.owners_buf, ctypes.c_void_p), len(owners), pc_reg
+        else:
+            s.owners, s.owners_n = None, 0
         if self.code_id == (id(code), lo, hi):
             return
         nbits = (hi - lo + 1) // 2

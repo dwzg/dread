@@ -114,7 +114,7 @@ def run_function(name):
                 m.cover(words[0], prog.end(fn))
             written = label.startswith("written")
             if which == "original" and written:
-                m.trace_reads(image.base, image.end, RUN["code"])
+                m.trace_reads(image.base, image.end, RUN["code"], RUN["owners"])
             # a loop case ends at a stub call, not at the limit: the C may take more instructions to get there
             loop_case = bool(generated and generated.get("hang") and generated.get("stub_calls"))
             budget = limit if which == "original" or (getattr(m, "may_hang", False) and not loop_case) \
@@ -219,7 +219,8 @@ def prepare(target, image, recon_path, keep_failing=False):
     RUN.update(system=system)
     RUN.update(target=target, image=image, program=prog, layout=layout, suite=suite, original=image.payload(),
                recon=recon, aliases=aliases, built=built, keep_failing=keep_failing,
-               isa_of=prog.isa_at, code=frozenset(prog.code), regflow=flow, kept_argued=kept_argued)
+               isa_of=prog.isa_at, code=frozenset(prog.code), owners=prog.extent_owners(), regflow=flow,
+               kept_argued=kept_argued)
     return suite
 
 

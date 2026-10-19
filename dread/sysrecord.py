@@ -169,7 +169,7 @@ def record(target, image, names, scenario, per=PER, keep_all=False, dry_run=Fals
             m.plan, m.function = [], name
             gen.apply(m, case)
             m.cover(fn.insns[0], program.end(fn))
-            m.trace_reads(image.base, image.end, gen.code)
+            m.trace_reads(image.base, image.end, gen.code, gen.owners)
             try:
                 result = m.call(fn.entry, *case["args"], max_instructions=case["limit"])
             except Exception:

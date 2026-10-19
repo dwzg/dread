@@ -73,7 +73,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 12       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 13       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -83,7 +83,8 @@ VERSION = 12       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 9: those stubs log only the argument registers the callee reads (dread.regflow)
                   # 10: a run that hangs in a callee that never returns makes a "hang" case instead
                   # 11: system calls run as logged no-ops (dread.emu), no longer faults;
-                  # 12: a run caught in a hook that never returns stubs the callee it went in by
+                  # 12: a run caught in a hook that never returns stubs the callee it went in by;
+                  # 13: a load from a function's extent by another function's code is a load of code
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -153,6 +154,7 @@ class Generator:
                                             0x80000000, 0xFFFFFFFE, 0xFFFFFFFF, self.scratch, self.scratch + 0x40,
                                             self.scratch + 0x104)
         self.code = frozenset(self.program.code)
+        self.owners = self.program.extent_owners()  # a load from another function's extent is one of code
         self.entries = {fn.name: fn.entry for fn in self.program.functions}
         self.real = {self.entries[n] for n in REAL_LIBRARY if n in self.entries}
         self.wide = self._wide_results()
@@ -484,7 +486,7 @@ class Generator:
             m.cover(words[0], self.program.end(self.program.by_entry[entry]) if entry in self.program.by_entry
                     else words[-1] + 4)
             if check_image:
-                m.trace_reads(self.image.base, self.image.end, self.code)
+                m.trace_reads(self.image.base, self.image.end, self.code, self.owners)
             m.call(entry, *case["args"], max_instructions=limit)
         except Exception:
             return set()
@@ -718,7 +720,7 @@ class Generator:
             m.spin_limit = SPIN_READS
             self.apply(m, case)
             m.cover(words[0], end)
-            m.trace_reads(image.base, image.end, self.code)
+            m.trace_reads(image.base, image.end, self.code, self.owners)
             m.call(entry, *case["args"], max_instructions=max_instructions)
             if self.loop and not m.stopped_at:
                 raise EmuError("a loop case ended at the instruction limit")
@@ -777,7 +779,7 @@ class Generator:
             m.spin_limit = SPIN_READS
             self.apply(m, case)
             m.cover(words[0], end, tree=True)
-            m.trace_reads(image.base, image.end, self.code)
+            m.trace_reads(image.base, image.end, self.code, self.owners)
             try:
                 m.call(entry, *case["args"], max_instructions=limit)
             except EmuError:
@@ -924,7 +926,7 @@ class Generator:
                         m.plan = []
                         self.apply(m, case)
                         m.cover(words[0], end)
-                        m.trace_reads(image.base, image.end, self.code)
+                        m.trace_reads(image.base, image.end, self.code, self.owners)
                         r = m.call(entry, *case["args"], max_instructions=limit)
                     except EmuError:
                         continue
@@ -1015,7 +1017,7 @@ class Generator:
             m.plan = []
             self.apply(m, case)
             m.cover(words[0], end)
-            m.trace_reads(image.base, image.end, self.code)
+            m.trace_reads(image.base, image.end, self.code, self.owners)
             seen = {}
             m.after, m.filled = {}, {}
             if record and calls:

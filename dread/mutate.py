@@ -384,7 +384,7 @@ def kill(gen, name, fn, mutant, aliases, unchanged, base_cases, label):
                     m = gen.machine()
                     m.plan, m.function = [], name
                     gen.apply(m, case)
-                    m.trace_reads(gen.image.base, gen.image.end, gen.code)
+                    m.trace_reads(gen.image.base, gen.image.end, gen.code, gen.owners)
                     try:
                         m.call(fn.entry, *case["args"], max_instructions=case.get("limit", 200_000))
                     except Exception:

@@ -239,3 +239,40 @@ def test_loop_cases_for_a_function_that_never_returns(tmp_path):
         ends.add(m.stopped_at)
         assert r.calls[-1] == ("did not return",)
     assert ends == {"calls", "never returns"}
+
+
+def test_loads_from_another_functions_pool_are_code_reads():
+    """A case that pointed into another function's literal pool read other bytes in the rebuilt
+    image, where the overlay had put C over that pool (FreeRTOS: a queue at an address in code).
+    A load from a function's extent by an instruction of another function is a load of code; a
+    function's own literal loads are not (its constants), and loads of instructions are."""
+    from dread.emu import EmuError
+    t = Target.load(gizmo_dir("m3"))
+    g = Generator(t, t.image())
+    p, owners = g.program, g.owners
+    pools = [(k, a) for k, f in enumerate(p.functions) if f.insns
+             for a in range(p.end(f), p.end(f) + 64, 2) if a not in p.code and 0 <= (a - p.base) >> 1 < len(owners)
+             and owners[(a - p.base) >> 1] == k + 1]
+    assert pools, "gizmo-m3 has functions with literal pools behind them"
+    k, pool = pools[0]
+    assert owners[(p.functions[k].entry - p.base) >> 1] == k + 1
+    # uart_puts calls uart_putc, which loads the UART's address from its own pool: no load of code
+    fn = g.program.by_name["uart_puts"]
+    s = t.memory.scratch_base
+    case = {"args": [s, 0, 0, 0], "mem": [[s, 1, 65], [s + 1, 1, 0]], "returns": [], "calls": [], "frame": 0}
+    m = g.machine(); m.plan = []; g.apply(m, case)
+    m.trace_reads(t.image().base, t.image().end, g.code, owners)
+    try:
+        m.call(fn.entry, *case["args"], max_instructions=100_000)
+    except EmuError:
+        pass
+    assert not m.code_reads
+    # the same function handed a pointer into another function's pool loads code
+    case["args"][0] = pool
+    m = g.machine(); m.plan = []; g.apply(m, case)
+    m.trace_reads(t.image().base, t.image().end, g.code, owners)
+    try:
+        m.call(fn.entry, *case["args"], max_instructions=100_000)
+    except EmuError:
+        pass
+    assert m.code_reads

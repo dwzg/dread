@@ -468,22 +468,31 @@ class Machine:
                 i += 1
         return out
 
-    def trace_reads(self, image_lo, image_hi, code=frozenset()):
+    def trace_reads(self, image_lo, image_hi, code=frozenset(), owners=None):
         """Record {address: size} of every load outside the stack and the image, and in
-        self.code_reads whether an instruction (an address in `code`) was loaded as data."""
+        self.code_reads whether code was loaded as data: an instruction (an address in `code`), or,
+        with owners (dread.program.Program.extent_owners), a byte of a function's extent loaded by
+        an instruction of another function (a function's own literal pools are its constants)."""
         self.reads = {}
         self.code_reads = False
         fast = self.core.fast
         if fast is not None:
-            fast.set_code(code, image_lo, image_hi)
+            fast.set_code(code, image_lo, image_hi, owners, self.layout.pc)
             self.core.fast_hooks.append(fast.add(UC_HOOK_MEM_READ, "dread_read"))
             self._fast_reads = True
             return
         in_stack = self.layout.in_stack
+        pc_reg = self.layout.pc
+
+        def owner(a):
+            h = (a - image_lo) >> 1
+            return owners[h] if owners is not None and 0 <= h < len(owners) else 0
 
         def on_read(uc, access, addr, size, value, user):
             if image_lo <= addr < image_hi:
                 if any(a in code for a in range(addr & ~1, addr + size, 2)):
+                    self.code_reads = True
+                elif owner(addr) and owner(uc.reg_read(pc_reg) & ~1) != owner(addr):
                     self.code_reads = True
             elif not in_stack(addr):
                 self.reads.setdefault(addr, size)

@@ -16,6 +16,7 @@ that has pools inside.
 Code the startup copies to RAM is analysed at its run address (where it executes); `read()` and
 `stored()` map such addresses to where the bytes lie in the image.
 """
+import bisect
 import os
 import struct
 
@@ -272,6 +273,38 @@ class Program:
     def isa_at(self, address):
         c = self.code.get(address)
         return c[1] if c else self.isa
+
+    def extent_owners(self):
+        """An array with one entry per halfword of the image: 1 + the index in self.functions of the
+        function whose extent holds it (its instructions and the literal pools behind them, up to the
+        next function: dread.overlay may place C over all of it), 0 elsewhere. A tail behind the last
+        instruction that a word of the image points into is data the overlay keeps (a string between
+        two functions), not part of the extent. With it a load of code as data is told from a load
+        of a function's own constants (dread.emu.Machine.trace_reads): a case of FreeRTOS that pointed
+        into another function's pool read other bytes in the rebuilt image."""
+        if getattr(self, "_owners", None) is None:
+            import array
+            from dread.overlay import EXTENT_TAIL
+            end = self.base + len(self.data)
+            entries = sorted(f.entry for f in self.functions if f.insns)
+            words = sorted({v & ~1 for v in struct.unpack_from("<%dI" % (len(self.data) // 4), self.data)
+                            if self.base < v < end})
+            owners = array.array("H", bytes(2 * ((len(self.data) + 1) // 2)))
+            for k, f in enumerate(self.functions):
+                if not f.insns:
+                    continue
+                last = self.end(f)
+                i = bisect.bisect_right(entries, f.entry)
+                stop = min(entries[i], end) if i < len(entries) else last
+                if stop - last > EXTENT_TAIL or stop < last:
+                    stop = last
+                j = bisect.bisect_left(words, last)
+                if j < len(words) and words[j] < stop:
+                    stop = last
+                for a in range(max(f.insns[0] & ~1, self.base), min(stop, end), 2):
+                    owners[(a - self.base) >> 1] = min(k + 1, 0xFFFF)
+            self._owners = owners
+        return self._owners
 
     def end(self, fn):
         """The address behind a function's last instruction (not behind a pool that follows it)."""

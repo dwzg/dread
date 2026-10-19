@@ -33,6 +33,9 @@ typedef struct {
     set_t blocks, tree_set, reads, writes, pages;
     int32_t code_reads;
     uint64_t last_block;            /* address << 16 | size of the last block run inside the range */
+    const uint16_t *owners;         /* per halfword of the image: 1 + the function whose extent holds it */
+    uint64_t owners_n;
+    int32_t pc_reg;
 } state_t;
 
 static uint64_t mix(uint64_t x)
@@ -185,13 +188,28 @@ int dread_read(void *uc, int type, uint64_t address, int size, int64_t value, st
     (void)type;
     (void)value;
     if (address >= st->image_lo && address < st->image_hi) {
+        int code = 0;
         if (st->code_bits) {
             for (uint64_t a = address & ~1ULL; a < address + (uint64_t)size; a += 2) {
                 uint64_t h = (a - st->image_lo) >> 1;
                 if (a < st->image_hi && (st->code_bits[h >> 3] >> (h & 7) & 1)) {
                     st->code_reads = 1;
+                    code = 1;
                     break;
                 }
+            }
+        }
+        if (!code && st->owners) {      /* a function's extent, loaded by another function's code */
+            uint64_t h = (address - st->image_lo) >> 1;
+            uint16_t owner = h < st->owners_n ? st->owners[h] : 0;
+            if (owner) {
+                uint64_t pc = 0;
+                st->reg_read(uc, st->pc_reg, &pc);
+                pc &= ~1ULL;
+                uint64_t ph = (pc - st->image_lo) >> 1;
+                uint16_t mine = (pc >= st->image_lo && ph < st->owners_n) ? st->owners[ph] : 0;
+                if (mine != owner)
+                    st->code_reads = 1;
             }
         }
     } else if (!(address >= st->stack_lo && address < st->stack_hi)) {
