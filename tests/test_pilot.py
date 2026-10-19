@@ -169,6 +169,19 @@ def test_an_answer_cut_off_by_the_token_limit_gets_its_own_feedback(gizmo):
     assert "## Answer 1 (finish: length, 32000 tokens, 98000 characters of reasoning)" in log
 
 
+@needs_gcc
+def test_a_refusal_ends_the_function_at_once(gizmo):
+    """A provider that declines (Anthropic's stop reason "refusal", OpenAI's "content_filter") gives
+    the same answer to the same question: no second try, and the outcome says who declined."""
+    refused = {"text": "", "finish": "refusal", "tokens": 0}
+    (outcome, answers, stage), provider, lines = run(gizmo, [refused, RIGHT], tries=3)
+    assert (outcome, answers, stage) == ("refused", 1, "provider refusal"), lines
+    assert len(provider.asked) == 1
+    target, image, _, _ = gizmo
+    results = open(os.path.join(target.build, "pilot", image.name, "results.tsv")).read()
+    assert "led_on\trefused\t1\tprovider refusal" in results
+
+
 def test_the_providers_say_how_an_answer_ended():
     scripted = llm.Scripted([{"text": "x", "finish": "length", "tokens": 7}, "y"])
     assert scripted.ask("s", []) == "x" and scripted.last == {"finish": "length", "tokens": 7, "reasoning": 0}

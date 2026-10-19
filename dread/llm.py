@@ -41,6 +41,8 @@ class Provider:
 
     kind = None
     CUT = ("length", "max_tokens")          # finish reasons that mean: out of room
+    REFUSED = ("refusal", "content_filter")  # finish reasons that mean: the provider declined (asking the
+                                             # same again gets the same: Anthropic's classifiers answer so)
 
     def __init__(self, name, config):
         self.name, self.config = name, dict(config)

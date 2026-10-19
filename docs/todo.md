@@ -10,10 +10,11 @@ queue may change while the user is away: CLAUDE.md, "Working unattended".
 
 Decisions that are the user's, with options and a recommendation. Work goes on around them.
 
-- **A pilot run with a cloud model?** It needs `ANTHROPIC_API_KEY` (or another provider's key) in the
-  environment and costs money on that account: gizmo's four small functions take about 5 to 15
-  answers of up to 16000 tokens, well under a dollar with a Sonnet-class model. Recommendation: one
-  run, to compare with the local model; say which model and whether the key may be used unattended.
+- **The cloud key unattended?** The user gave an Anthropic key for supervised pilot runs on gizmo
+  (2026-10-19, `~/.config/dread/anthropic-key`, handed to the process as DREAD_ANTHROPIC_KEY;
+  provider `sonnet` in ~/.config/dread/llm.toml). Whether it may be used in unattended iterations,
+  and with what limit, is open: until then only runs the user starts or watches. Never on private
+  projects' code.
 - **IAR-built gizmo?** For the IAR profile: gizmo built with IAR EWARM (Cortex-M3) and, for MSP430,
   EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
   `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
@@ -343,7 +344,10 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   epilogues), and noreturn takes a function that falls into the next one's entry as its tail call.
 - [x] **Tests, generator, mutation on gizmo-msp430**: 13 functions, 652 cases, every instruction
   covered; the mutation check catches every change but two argued ones.
-- [ ] **The other tools on gizmo-msp430**: integration, regflow, recorded cases, switches,
+- [x] **Integration on gizmo-msp430**: every rewritten function runs with its real callees and agrees
+  (a call that pushes its return address leaves a stack slot the run did not see written: Machine
+  keeps it in stack_preset; the engine's memory hooks see the registers of the instruction's start).
+- [ ] **The other tools on gizmo-msp430**: regflow, recorded cases, switches,
   callsites, Ghidra, the GUI, the system run with its models (16-bit registers), CI (TI's GCC from
   its download with a checksum, or the MSP430 tests skip), the test suite's variants.
 - [ ] **The lifter and its fuzzer for MSP430.**

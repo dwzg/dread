@@ -8,7 +8,9 @@ The semantics follow TI's MSP430x2xx family user's guide (SLAU144), chapter 3:
 - @rN+ adds 1 after a byte access and 2 after a word access; sp and pc always add 2.
 - Extension words are fetched in order, the source's before the destination's: pc as an operand
   reads the address behind the words fetched so far (add r15, pc: behind the instruction; the
-  source pc of mov pc, 2(r4): behind the first word).
+  source pc of mov pc, 2(r4): behind the first word). While an instruction runs, the engine's pc
+  stays on it, and register write-backs come as late as the semantics allow (see the operands'
+  comment): memory hooks see the registers of the instruction's start, as on Unicorn.
 - mov does not read its destination; cmp and bit do not write it. push evaluates its operand before
   sp moves (push sp pushes the old sp); push.b writes one byte at the new sp. call evaluates its
   target before it pushes the return address. reti pops sr, then pc.
@@ -192,44 +194,44 @@ class Msp430Engine(Engine):
         return size
 
     # ---- operands ----
+    # pc stays on the instruction while it runs (a hook reads the instruction's address there, as on
+    # Unicorn); where the instruction reads pc as an operand, the value is the address behind the
+    # words fetched up to then, known when it is decoded: pc + 2 for a source register or @pc, pc +
+    # size for a destination register. Register write-backs come as late as the semantics allow, so
+    # that a memory hook sees the registers of the instruction's start: @rN+ adds after its load
+    # (before the destination's address is formed), push and call move sp after their store, reti
+    # after both loads.
 
-    def _source(self, o, byte):
-        """The source operand's value: fetches its extension word (pc moves on) and makes @rN+'s
-        increment."""
+    def _source(self, o, byte, pc):
+        """The source operand's value (and @rN+'s increment, after the load)."""
         r = self.r
         mode = o.mode
         if mode == "reg":
-            v = r[o.reg]
+            v = r[o.reg] if o.reg else (pc + 2) & 0xFFFF
             return v & 0xFF if byte else v
         if mode == "imm":
-            if o.reg == 0:                  # #N: the extension word
-                r[0] = (r[0] + 2) & 0xFFFF
             return o.value & 0xFF if byte else o.value
         if mode == "idx":
-            r[0] = (r[0] + 2) & 0xFFFF
             a = (r[o.reg] + o.value) & 0xFFFF
         elif mode == "sym":
-            r[0] = (r[0] + 2) & 0xFFFF
             a = o.address
         elif mode == "abs":
-            r[0] = (r[0] + 2) & 0xFFFF
             a = o.value
         elif mode == "ind":
+            a = r[o.reg] if o.reg else (pc + 2) & 0xFFFF
+        else:                               # inc (@pc+ is an immediate)
             a = r[o.reg]
-        else:                               # inc
-            a = r[o.reg]
+            v = self.load(a, 1) if byte else self.load(a & 0xFFFE, 2)
             r[o.reg] = (a + (1 if byte and o.reg > 1 else 2)) & (0xFFFF if o.reg > 1 else 0xFFFE)
+            return v
         if byte:
             return self.load(a, 1)
         return self.load(a & 0xFFFE, 2)
 
     def _destination(self, o):
-        """The memory address of an indexed, symbolic or absolute destination; fetches its
-        extension word."""
-        r = self.r
-        r[0] = (r[0] + 2) & 0xFFFF
+        """The memory address of an indexed, symbolic or absolute destination."""
         if o.mode == "idx":
-            return (r[o.reg] + o.value) & 0xFFFF
+            return (self.r[o.reg] + o.value) & 0xFFFF
         if o.mode == "sym":
             return o.address
         return o.value
@@ -239,7 +241,7 @@ class Msp430Engine(Engine):
             return
         if byte:
             value &= 0xFF
-        self.r[n] = value & 0xFFFE if n < 2 else value
+        self.r[n] = value & 0xFFFE if n == 1 else value
 
     def _flags(self, c, z, n, v):
         self.r[2] = (self.r[2] & ~FLAGS) | (CF if c else 0) | (ZF if z else 0) | (NF if n else 0) | (VF if v else 0)
@@ -283,37 +285,36 @@ class Msp430Engine(Engine):
                 taken = ((sr >> 2) ^ (sr >> 8)) & 1
             r[0] = f.target if taken else (pc + 2) & 0xFFFF
             return True
-        r[0] = (pc + 2) & 0xFFFF
         if op == "reti":
             sp = r[1]
-            r[2] = self.load(sp, 2)
-            r[1] = sp = (sp + 2) & 0xFFFE
-            r[0] = self.load(sp, 2) & 0xFFFE
-            r[1] = (sp + 2) & 0xFFFE
+            sr = self.load(sp, 2)
+            back = self.load((sp + 2) & 0xFFFF, 2)
+            r[2], r[1], r[0] = sr, (sp + 4) & 0xFFFE, back & 0xFFFE
             self._sr_written()
             return True
         if f.dst is None:
-            self._single(f, op, f.byte)
+            r[0] = self._single(f, op, f.byte, pc, size)
         else:
-            self._double(f, op, f.byte)
+            r[0] = self._double(f, op, f.byte, pc, size)
         return ends
 
-    def _double(self, f, op, byte):
+    def _double(self, f, op, byte, pc, size):
+        """A two-operand instruction; returns where execution goes on."""
         r = self.r
-        s = self._source(f.src, byte)
+        s = self._source(f.src, byte, pc)
         d = f.dst
         if byte:
-            mask, msb, size = 0xFF, 0x80, 1
+            mask, msb, width = 0xFF, 0x80, 1
         else:
-            mask, msb, size = 0xFFFF, 0x8000, 2
+            mask, msb, width = 0xFFFF, 0x8000, 2
         if d.mode == "reg":
             n, address = d.reg, None
-            dv = r[n] & mask
+            dv = (r[n] if n else pc + size) & mask
         else:
             n, address = None, self._destination(d)
             if not byte:
                 address &= 0xFFFE
-            dv = self.load(address, size) if op != "mov" else 0
+            dv = self.load(address, width) if op != "mov" else 0
         flags = None
         if op == "mov":
             res = s
@@ -344,62 +345,64 @@ class Msp430Engine(Engine):
         else:                               # and
             res = s & dv
             flags = (res != 0, res == 0, res & msb, 0)
+        nxt = (pc + size) & 0xFFFF
         if res is not None:
             if n is None:
-                self.store(address, size, res)
+                self.store(address, width, res)
+            elif n == 0:
+                nxt = (res & mask) & 0xFFFE
             else:
                 self._write_reg(n, res, byte)
         if flags is not None:
             self._flags(*flags)
         if n == 2 and (res is not None or flags is not None):
             self._sr_written()
+        return nxt
 
-    def _single(self, f, op, byte):
+    def _single(self, f, op, byte, pc, size):
+        """A one-operand instruction; returns where execution goes on."""
         r = self.r
         o = f.src
+        nxt = (pc + size) & 0xFFFF
         if op in ("push", "call"):
-            v = self._source(o, byte)
-            sp = r[1] = (r[1] - 2) & 0xFFFE
+            v = self._source(o, byte and op == "push", pc)
+            sp = (r[1] - 2) & 0xFFFE
             if op == "push":
                 self.store(sp, 1 if byte else 2, v)
             else:
-                self.store(sp, 2, r[0])     # the return address: behind the instruction
-                r[0] = v & 0xFFFE
-            return
+                self.store(sp, 2, nxt)      # the return address: behind the instruction
+                nxt = v & 0xFFFE
+            r[1] = sp
+            return nxt
         if byte:
-            mask, msb, size = 0xFF, 0x80, 1
+            mask, msb, width = 0xFF, 0x80, 1
         else:
-            mask, msb, size = 0xFFFF, 0x8000, 2
+            mask, msb, width = 0xFFFF, 0x8000, 2
         # rrc, swpb, rra, sxt: the result goes back where the operand came from
         mode, n, address = o.mode, None, None
         if mode == "reg":
             n = o.reg
-            v = r[n] & mask
+            v = (r[n] if n else (pc + 2) & 0xFFFF) & mask
         elif mode == "imm":
             if o.reg == 0:                  # #N: the result overwrites the extension word
-                address = r[0]
-                r[0] = (r[0] + 2) & 0xFFFF
+                address = (pc + 2) & 0xFFFF
             else:
                 n = 3                       # a constant generator: the result goes nowhere
             v = o.value & mask
         else:
             if mode == "idx":
-                r[0] = (r[0] + 2) & 0xFFFF
                 address = (r[o.reg] + o.value) & 0xFFFF
             elif mode == "sym":
-                r[0] = (r[0] + 2) & 0xFFFF
                 address = o.address
             elif mode == "abs":
-                r[0] = (r[0] + 2) & 0xFFFF
                 address = o.value
-            elif mode == "ind":
-                address = r[o.reg]
-            else:                           # inc
-                address = r[o.reg]
-                r[o.reg] = (address + (1 if byte and o.reg > 1 else 2)) & (0xFFFF if o.reg > 1 else 0xFFFE)
+            else:                           # ind, inc
+                address = r[o.reg] if o.reg else (pc + 2) & 0xFFFF
             if not byte:
                 address &= 0xFFFE
-            v = self.load(address, size)
+            v = self.load(address, width)
+            if mode == "inc":
+                r[o.reg] = (r[o.reg] + (1 if byte and o.reg > 1 else 2)) & (0xFFFF if o.reg > 1 else 0xFFFE)
         flags = None
         if op == "rrc":
             res = (v >> 1) | ((r[2] & CF) * msb)
@@ -414,11 +417,14 @@ class Msp430Engine(Engine):
             if res & 0x80:
                 res |= 0xFF00
             flags = (res != 0, res == 0, res & 0x8000, 0)
-        if n is not None:
+        if n == 0:
+            nxt = res & 0xFFFE
+        elif n is not None:
             self._write_reg(n, res, byte)
         else:
-            self.store(address, size, res)
+            self.store(address, width, res)
         if flags is not None:
             self._flags(*flags)
         if n == 2:
             self._sr_written()
+        return nxt

@@ -79,7 +79,7 @@ def run(payload, aliases, case, addr, name, watch=False, limit=None):
             last[0] = sp
             if access == UC_MEM_WRITE:
                 written.update(range(a, a + size))
-            elif not stale and any(x not in written for x in range(a, a + size)):
+            elif not stale and any(x not in written and x not in m.stack_preset for x in range(a, a + size)):
                 stale.append(a)
         m.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, on_stack, begin=base, end=top - 1)
         differs, image_base = G["differs"], G["image"].base
@@ -99,10 +99,12 @@ def run(payload, aliases, case, addr, name, watch=False, limit=None):
 
 
 def stackish(writes, addr, lay):
-    """Whether the byte at addr belongs to a written word that is an address inside the stack."""
-    for base in (addr & ~3, addr, addr - 1, addr - 2, addr - 3):
-        if all(base + i in writes for i in range(4)):
-            if lay.in_stack(sum(writes[base + i] << 8 * i for i in range(4))):
+    """Whether the byte at addr belongs to a written word (an address: the layer's word) that is an
+    address inside the stack."""
+    word = lay.word
+    for base in sorted({addr & ~(word - 1)} | {addr - i for i in range(word)}, reverse=True):
+        if all(base + i in writes for i in range(word)):
+            if lay.in_stack(sum(writes[base + i] << 8 * i for i in range(word))):
                 return True
     return False
 

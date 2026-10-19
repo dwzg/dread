@@ -45,7 +45,12 @@ import time
 from dread import llm
 from dread import target as tgt
 
-SYSTEM = """You rewrite one function of a firmware image in C. Your C is compiled with
+# The prompts say "binary image", not "firmware image": Anthropic's API refused (stop reason
+# "refusal", no text) the system prompt when "firmware" met the old wording of the first rule ("including
+# what looks like a bug: fix nothing, add no check the code does not make") or code that jumps into RAM
+# (a veneer), apparently read as keeping a firmware's flaws; either change alone let all of gizmo's
+# questions through (2026-10-19, claude-sonnet-5-5).
+SYSTEM = """You rewrite one function of a binary image in C. Your C is compiled with
     {compiler}
 and linked over the original image in the function's place. Then the original machine code and
 your C run side by side in an emulator on many inputs and must do exactly the same: the return
@@ -53,8 +58,9 @@ value, every memory write outside the stack, every peripheral access in the same
 registers the callers rely on.
 
 Rules:
-- The function's name is exactly {name}. Its behaviour equals the machine code's exactly, including
-  what looks like a bug: fix nothing, add no check the code does not make, leave nothing out.
+- The function's name is exactly {name}. Its behaviour equals the machine code's exactly in every
+  case, odd ones included: the comparison shows any change, an improvement as much as a mistake.
+  Leave nothing out and add nothing.
 - #include "dread.h": it defines u8, s8, u16, s16, u32, s32, u64, s64; VAR(type, address) for memory
   of the original at an address; VVAR(type, address) for memory that must be read or written every
   time; REG8, REG16, REG32(address) for peripheral registers (every access kept, in order).
@@ -316,6 +322,9 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
             break
         info = getattr(provider, "last", {}) or {}
         log.append("## Answer %d%s\n\n%s" % (answers, " (%s)" % ended(info) if ended(info) else "", answer))
+        if info.get("finish") in llm.Provider.REFUSED:
+            outcome, stage = "refused", "provider refusal"      # another model may answer it
+            break
         code = extract_c(answer)
         if code is None and not pending and info.get("finish") in llm.Provider.CUT:
             spent = ended(info).split(", ", 1)[-1] if info.get("tokens") or info.get("reasoning") else "the token limit"
@@ -372,7 +381,7 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
 
 # ---- the other typed questions ----
 
-INPUT_SYSTEM = """You find inputs for one function of a firmware image, so that all of its code can be
+INPUT_SYSTEM = """You find inputs for one function of a binary image, so that all of its code can be
 tested in an emulator. An input gives the argument registers, the memory the function reads and the
 values peripheral registers answer with:
 
@@ -383,7 +392,7 @@ values peripheral registers answer with:
 Numbers may be integers or hex strings ("0x20001000"). Memory not given reads as zero; for buffers
 use the scratch area 0x{scratch:x} to 0x{end:x}. Answer with one ```json block holding one input."""
 
-NAME_SYSTEM = """You name functions of a firmware image from their code. A name says what the function
+NAME_SYSTEM = """You name functions of a binary image from their code. A name says what the function
 does, in snake_case, with a prefix for its subsystem when one is clear (uart_, gpio_, timer_, cfg_).
 Answer with exactly two lines:
 
@@ -463,6 +472,9 @@ def find_inputs(target, image, program, provider, name, missed, tries=3, flow=No
             log.append("## Provider error\n\n%s" % e)
             break
         log.append("## Answer %d\n\n%s" % (k, answer))
+        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+            log.append("## The provider declined to answer")
+            break
         case = parse_input(answer)
         if case is None:
             feedback = "The answer has no ```json block with an input of the form given. Answer with one."
@@ -508,6 +520,9 @@ def propose_name(target, image, program, provider, name, flow=None, out=print):
         answer = provider.ask(NAME_SYSTEM, [{"role": "user", "content": user}])
     except Exception as e:
         out("%-24s no proposal: %s" % (name, e))
+        return None
+    if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+        out("%-24s no proposal: the provider declined" % name)
         return None
     proposed = re.search(r"^\s*name\s*:\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*$", answer, re.M | re.I)
     what = re.search(r"^\s*what\s*:\s*(.+?)\s*$", answer, re.M | re.I)

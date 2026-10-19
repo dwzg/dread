@@ -304,6 +304,7 @@ class Machine:
         self._reads, self._cycle = [], [0] * (SPIN_PERIOD + 1)
         self.kept_why = {}          # register -> who reads it after the call, for the report
         self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
+        self.stack_preset = set()   # stack bytes call() wrote for the call itself (a pushed return address)
         self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
 
     # ---- hooks ----
@@ -595,7 +596,12 @@ class Machine:
         if lay.lr is not None:
             uc.reg_write(lay.lr, self.arch.start_address(lay.sentinel, isa))
         else:                               # pushed below the stack arguments, as a call does
-            self.arch.push_return(uc, self.arch.start_address(lay.sentinel, isa), self.write)
+            preset = self.stack_preset = set()
+
+            def write(address, data):
+                preset.update(range(address, address + len(data)))
+                self.write(address, data)
+            self.arch.push_return(uc, self.arch.start_address(lay.sentinel, isa), write)
         for i, reg in enumerate(lay.saved_regs):
             if uc.reg_read(reg) == 0:
                 uc.reg_write(reg, POISON + 0x11 * (i + 1))
