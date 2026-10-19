@@ -56,8 +56,8 @@ def test_reset_restores_what_stores_changed(target):
     assert again.core is m.core and again.read(ram, 64) == before
 
 
-UNDEFINED = {"a32": b"\xf0\x00\xf0\xe7", "m3": b"\x00\xde", "rv32": b"\x00\x00\x00\x00"}     # udf, udf, unimp
-LOAD = {"a32": b"\x00\x00\x90\xe5\x1e\xff\x2f\xe1", "m3": b"\x00\x68\x70\x47",          # a load through r0/a0
+UNDEFINED = {"a32": b"\xf0\x00\xf0\xe7", "m3": b"\x00\xde", "m4": b"\x00\xde", "rv32": b"\x00\x00\x00\x00"}     # udf, udf, unimp
+LOAD = {"a32": b"\x00\x00\x90\xe5\x1e\xff\x2f\xe1", "m3": b"\x00\x68\x70\x47", "m4": b"\x00\x68\x70\x47",          # a load through r0/a0
         "rv32": b"\x03\x25\x05\x00\x67\x80\x00\x00"}        # and a return (the block stays short)
 
 

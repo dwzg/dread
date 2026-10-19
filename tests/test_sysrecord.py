@@ -51,7 +51,7 @@ def test_a_handler_is_recorded_up_to_its_exception_return(variant, tmp_path):
     """On the M profile a handler returns through EXC_RETURN, not to an address of its caller: the
     recorder ends its call at the exception return (its r0 is not compared), so the timer's handler
     gets cases from the keys scenario (it got none: its call never ended)."""
-    if variant != "m3":
+    if variant not in ("m3", "m4"):
         pytest.skip("the M profile's exception return")
     from dread.target import Target
     from conftest import gizmo_dir

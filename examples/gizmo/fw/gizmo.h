@@ -130,6 +130,18 @@ void delay(u32 ticks);
 void timer_irq(void);
 void irq_enable_timer(void);
 u32 ram_crc(const u8 *p, u32 n);
+
+#ifdef GIZMO_M4
+/* dsp.c: the Cortex-M4 build's signal path (floats, the DSP extension) */
+float lp_filter(float state, float sample, float alpha);
+float average(const float *v, int n);
+int to_millivolts(float volts);
+s32 mix_sat(s32 a, s32 b);
+s32 dot_pairs(s32 a, s32 b, s32 acc);
+s32 clamp12(s32 x);
+u32 level8(s32 x);
+int signal_step(u32 volume);
+#endif
 void irq_dispatch(void);
 
 /* main.c */

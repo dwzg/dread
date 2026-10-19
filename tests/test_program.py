@@ -67,7 +67,7 @@ def test_ram_function_reads_its_stored_bytes(program, variant):
 
 def test_isa_comes_from_the_code_ranges(program, variant):
     isas = {fn.isa for fn in program.functions}
-    assert isas == {{"m3": "t32", "rv32": "rv32"}.get(variant, "a32")}
+    assert isas == {{"m3": "t32", "m4": "t32", "rv32": "rv32"}.get(variant, "a32")}
 
 
 def test_veneer_to_the_ram_function(program, variant):

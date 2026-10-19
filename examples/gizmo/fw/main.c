@@ -90,6 +90,15 @@ void handle_key(int c)
             apply_config(line);
         break;
     }
+#ifdef GIZMO_M4
+    case 'f': {
+        char buf[12];
+        fmt_dec(buf, (u32)signal_step(g_config.volume));
+        uart_puts(buf);
+        uart_puts("\r\n");
+        break;
+    }
+#endif
     default:
         if (c >= '0' && c <= '9')
             dispatch(3, c - '0');

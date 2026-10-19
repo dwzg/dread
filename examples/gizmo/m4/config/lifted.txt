@@ -1,0 +1,37 @@
+# Functions built from lifted C: their cases (for one that never returns: its loop cases,
+# or every scenario of the system run) agree with the original and run every instruction it
+# can reach. Written by dread lift --check; not edited by hand.
+Reset_Handler
+TIMER_IRQHandler
+__ram_crc_veneer
+apply_config
+beep_off
+beep_on
+cmd_beep
+cmd_led
+cmd_mode
+cmd_volume
+copy_words
+delay
+fmt_dec
+gpio_set
+handle_key
+irq_enable_timer
+keys_read
+led_off
+led_on
+main
+memcmp
+memcpy
+memset
+parse_kv
+print_status
+read_line
+script_run
+strlen
+strncpy
+timer_irq
+timer_start
+uart_getc
+uart_init
+zero_words_constprop_0

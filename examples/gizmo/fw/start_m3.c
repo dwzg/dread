@@ -1,4 +1,5 @@
-/* Gizmo, Cortex-M3 build: the vector table and the reset handler. */
+/* Gizmo, Cortex-M3 and Cortex-M4 builds: the vector table and the reset handler (on the M4, which
+   enables the FPU first). */
 #include "gizmo.h"
 
 extern u32 _estack[];
@@ -24,6 +25,10 @@ __attribute__((noinline)) static void zero_words(u32 *dst, u32 *end)
 
 void Reset_Handler(void)
 {
+#ifdef GIZMO_M4
+    *(volatile u32 *)0xE000ED88u |= 0xFu << 20;        /* CPACR: CP10 and CP11, the FPU, full access */
+    __asm volatile ("dsb\n\tisb" ::: "memory");
+#endif
     copy_words(__data_start, __data_load, __data_end);
     copy_words(__ramfunc_start, __ramfunc_load, __ramfunc_end);
     zero_words(__bss_start, __bss_end);

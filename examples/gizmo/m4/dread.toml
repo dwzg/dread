@@ -1,0 +1,86 @@
+# Gizmo 1000, Cortex-M4 build: DREAD's test firmware (examples/gizmo/fw), built for Thumb-2 with hard
+# float on FPv4-SP and the DSP extension (fw/dsp.c, only in this build).
+# Not a real device. The tables in config/ come from the ELF (`make -C ../fw targets`).
+
+[target]
+name = "gizmo-m4"
+title = "Gizmo 1000 (Cortex-M4F)"
+
+[arch]
+name = "arm"
+isa = "t32"
+profile = "m"
+cpu = "cortex-m4"
+
+[image.main]
+original = "original/gizmo.bin"
+base = 0x08000000
+limit = 0x08010000              # 64 KiB of flash
+entry = "Reset_Handler"
+startup = [
+    {kind = "code", run = 0x20000000, size = 0x30, stored = 0x8000960},
+    {kind = "data", run = 0x20000030, size = 0x1c, stored = 0x8000990},
+    {kind = "zero", run = 0x2000004c, size = 0x30},
+]
+
+[memory]
+regions = [
+    {name = "flash", base = 0x08000000, size = 0x100000, kind = "rom"},
+    {name = "sram", base = 0x20000000, size = 0x5000},
+    {name = "scratch", base = 0x20100000, size = 0x20000},
+]
+io = [[0x40000000, 0x40020000], [0xe000e000, 0xe000f000]]
+stack = {top = 0x20005000, size = 0x1000}
+sentinel = 0x1fff0000           # in the code region: on M profile, 0xe0000000 and up is execute-never
+scratch = {base = 0x20100000, size = 0x20000}
+
+[compiler]
+cross = "arm-none-eabi-"
+cflags = ["-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16", "-Os", "-ffreestanding", "-fno-builtin",
+          "-ffunction-sections", "-fno-common"]
+
+# Devices for the system run (dread sysrun): gizmo's serial port (examples/gizmo/fw/gizmo.h).
+[models.uart]
+kind = "uart"
+base = 0x40011000
+data = 0x0
+status = 0x4
+tx_ready = 0x1
+rx_ready = 0x2
+
+[models.timer]
+kind = "timer"
+base = 0x40000400
+irq = 0
+
+[models.nvic]
+kind = "nvic"
+
+[models.gpio]
+kind = "gpio"
+base = 0x40010800
+
+[scenarios.boot]
+until = {uart = "READY"}
+limit = 5_000_000
+
+[scenarios.keys]
+input = [[40_000, "uart", "s"]]
+until = {uart = "READY\r\nmode run volume 7"}
+limit = 5_000_000
+
+[scenarios.config]
+input = [[40_000, "uart", "cvolume=3\r\n"], [200_000, "uart", "s"]]
+until = {uart = "mode run volume 3"}
+limit = 5_000_000
+
+[scenarios.signal]                  # key 'f': one step of dsp.c's signal path on the volume (7: 58 mV)
+input = [[40_000, "uart", "f"]]
+until = {uart = "READY\r\n58\r\n"}
+limit = 5_000_000
+
+[scenarios.tour]                    # the keys once, the status last, so that each key's call returns
+input = [[40_000, "uart", "f"], [140_000, "uart", "l"], [240_000, "uart", "L"], [340_000, "uart", "k"],
+         [540_000, "uart", "1"], [640_000, "uart", "s"], [840_000, "uart", "2"], [940_000, "uart", "s"]]
+until = {uart = "mode run volume 2"}   # ('b' waits for a timer nothing starts)
+limit = 20_000_000

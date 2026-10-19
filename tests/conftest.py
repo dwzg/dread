@@ -1,7 +1,7 @@
 """Fixtures shared by DREAD's tests: the gizmo targets.
 
-A test that takes `variant` (or `target`, `program`) runs on every build: a32 and m3 (GCC), rv32
-(clang). Marked with @pytest.mark.compiles, a test is skipped when its build's compiler is missing."""
+A test that takes `variant` (or `target`, `program`) runs on every build: a32, m3 and m4 (GCC; m4 with
+hard float and the DSP extension), rv32 (clang). Marked with @pytest.mark.compiles, a test is skipped when its build's compiler is missing."""
 import os
 import shutil
 
@@ -9,8 +9,9 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GIZMO = os.path.join(ROOT, "examples", "gizmo")
-VARIANTS = ("a32", "m3", "rv32")
-COMPILERS = {"a32": "arm-none-eabi-gcc", "m3": "arm-none-eabi-gcc", "rv32": "clang", "msp430": "msp430-elf-gcc"}
+VARIANTS = ("a32", "m3", "m4", "rv32")
+COMPILERS = {"a32": "arm-none-eabi-gcc", "m3": "arm-none-eabi-gcc", "m4": "arm-none-eabi-gcc", "rv32": "clang",
+             "msp430": "msp430-elf-gcc"}
 
 
 def gizmo_dir(variant):

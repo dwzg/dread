@@ -61,7 +61,7 @@ def test_indirect_jumps_are_resolved(target, variant):
     if variant == "rv32":
         assert jumps(program, "dispatch")[1] == [] and "__ram_crc_veneer" not in program.by_name
         return
-    if variant == "m3":     # the emulated dispatch agrees with decoding the tbb table
+    if variant in ("m3", "m4"):     # the emulated dispatch agrees with decoding the tbb table
         decoded = program.arch.switch_targets(program.insn(jump), program, lambda a: (a & ~1) in set(fn.insns))
         assert sorted(decoded) == inside
     fn, (jump,) = jumps(program, "dispatch")

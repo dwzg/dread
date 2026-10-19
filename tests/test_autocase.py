@@ -366,6 +366,32 @@ def test_a_round_of_small_arguments(monkeypatch):
     assert len(cases) >= 4 and all(a <= 1 for c in cases for a in c["args"])
 
 
+def test_a_near_miss_is_repaired():
+    """gizmo-m4's script_run dispatches on keys_read() & 7 and loops over its length argument in two
+    of the cases. The generator took that length for a pointer (the address a loop faulted at lay
+    just behind it) and aimed it at a buffer from then on, so the loops ran off memory or to the
+    instruction limit, and those cases stayed unrun: 60 cases in 22 s, 8 instructions missed. An
+    input that runs new code and then faults (or loops to the limit in the function itself) is now
+    repaired, each argument in turn set small: every instruction runs."""
+    from dread import autocase
+    from dread.emu import Machine
+    from dread.target import Target
+    from conftest import gizmo_dir
+    target = Target.load(gizmo_dir("m4"))
+    gen = autocase.Generator(target, target.image())
+    fn = gen.program.by_name["script_run"]
+    cases = gen.generate("script_run", fn.entry, fn.insns)
+    covered = set()
+    for case in cases:
+        m = gen.machine()
+        m.plan = []
+        gen.apply(m, case)
+        m.cover(fn.insns[0], gen.program.end(fn))
+        m.call(fn.entry, *case["args"], max_instructions=200000)
+        covered |= m.covered_insns(fn.insns)
+    assert covered == set(fn.insns)
+
+
 def test_msp430_calls_through_a_register_are_callees():
     """GCC for the MSP430 loads a function it calls more than once into a register (mov #uart_puts,
     r10; call r10): the layer names such callees, and the generator stubs them in loop cases (gizmo's

@@ -17,7 +17,7 @@ def test_directives_from_the_target(target, variant):
     assert "io" in kinds and "ram" in kinds and "entry" in kinds
     funcs = [l for l in lines if l.startswith("func ")]
     assert any(l.endswith(" main") for l in funcs)
-    if variant == "m3":
+    if variant in ("m3", "m4"):
         handlers = ghidra.vector_handlers(image)
         assert handlers[0][1] == image.entry                # the reset vector is the entry
         assert [i for i, _ in handlers] == [1, 2, 3, 4, 5, 6, 11, 12, 14, 15, 16]   # reserved slots are 0

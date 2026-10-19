@@ -34,7 +34,7 @@ def test_listing_rebuilds_identically(target, variant, tmp_path):
 
 def test_thumb_it_conditions_survive_decoding(variant, program):
     """Instructions inside an IT block carry the IT's condition when decoded through Program."""
-    if variant != "m3":
+    if variant not in ("m3", "m4"):
         pytest.skip("Thumb only")
     seen = 0
     for fn in program.functions:

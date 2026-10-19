@@ -34,7 +34,7 @@ def test_gizmo_targets_load(target, variant):
     assert target.abi.arg_regs == target.arch.arg_regs(target.arch.default_args)
     assert target.memory.is_io(target.memory.io[0][0])
     assert target.memory.region(target.memory.stack_top - 4) is not None
-    if variant == "m3":
+    if variant in ("m3", "m4"):
         assert target.arch.profile == "m" and target.arch.isa == "t32"
         assert image.entry & 1 == 0 and image.base <= image.entry < image.end   # from the symbol
     elif variant == "rv32":
