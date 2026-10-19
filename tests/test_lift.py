@@ -203,3 +203,37 @@ def test_an_exception_handler_is_lifted_with_the_interrupt_attribute(copies):
     lines = []
     assert lift.check(target, image, ["irq_entry"], out=lines.append, jobs=4) == ["irq_entry"], lines
     assert any(line.startswith("accepted irq_entry") and "an exception handler" in line for line in lines)
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_branch_on_a_constant_the_function_stored_is_decided(tmp_path):
+    """FreeRTOS's static-creation functions store a size into a volatile local, load it back and
+    assert that it equals itself: no input runs the assertion's call, and the functions stayed
+    UNCOVERED. The walk knows the constant through the frame slot and the compare; the other way of
+    the branch is unreached (left out of the C and of the coverage it needs)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.c").write_text("__attribute__((noipa)) void fail(void) { for (;;) ; }\n"
+                                  "int check(int n) { volatile int x = 92; if (x != 92) fail(); return n + 1; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "check", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    fn = p.by_name["check"]
+    fail = p.by_name["fail"].entry
+    calls = [a for a in fn.insns if p.arch.flow(p.insn(a))[0] == "call" and p.arch.target(p.insn(a)) == fail]
+    assert calls, "the check calls fail"
+    result = lift.make_lifter(p).lift(fn)
+    assert set(calls) <= set(result.unreached), [hex(a) for a in result.unreached]
+    assert "fail" not in result.text

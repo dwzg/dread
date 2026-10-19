@@ -201,14 +201,15 @@ class Lifter:
         if values is not None and self.ret_jump(insn, values):
             kind = "return"
         out = []
-        if (kind in ("next", "call", "icall") or falls) and not self.dead_end(insn):
+        decided = self.decided(insn, values) if kind == "jump" and falls and values is not None else None
+        if (kind in ("next", "call", "icall") or falls) and not self.dead_end(insn) and decided is not True:
             i = index[address]
             if i + 1 < len(fn.insns) and fn.insns[i + 1] == address + insn.size:
                 out.append(fn.insns[i + 1])
             elif strict:
                 raise Refused("0x%x falls through into what follows (data or other code; a call that does not "
                               "return?)" % address)
-        if kind == "jump" and target is not None and (target & ~1) in index:
+        if kind == "jump" and target is not None and (target & ~1) in index and decided is not False:
             out.append(target & ~1)
         if kind == "ijump":
             got = self.resolve(fn, address)
@@ -319,7 +320,54 @@ class Lifter:
         for r, key in loaded or ():
             if r not in ("sp", "pc"):
                 self._put(after, r, values.get(key))
+        # The flags, when they compare two known constants (a volatile local written and read back:
+        # FreeRTOS asserts that a size it stored equals itself); a branch on them is decided. A call
+        # may write any frame slot whose address got out, so constants kept in the frame end there.
+        if "flags" in writes or arch.sets_flags(insn) or arch.flow(insn)[0] in ("call", "icall"):
+            after.pop("flags", None)
+        if arch.flow(insn)[0] in ("call", "icall"):
+            for key in [k for k, v in after.items() if isinstance(k, int) and v and v[0] == "const"]:
+                del after[key]
+        compared = self.const_compare(insn, values)
+        if compared is not None:
+            after["flags"] = compared
         return new, after
+
+    def const_compare(self, insn, values):
+        """("cmp", a, b) for cmp rN, #imm or cmp rN, rM of known constants, unconditional; else None."""
+        ops = insn.operands
+        if insn.id != A.ARM_INS_CMP or self.arch.predicate(insn) is not None or len(ops) != 2 \
+                or ops[0].type != A.ARM_OP_REG:
+            return None
+        a = values.get(self.arch._name(insn.reg_name(ops[0].reg)))
+        if ops[1].type == A.ARM_OP_IMM:
+            b = ("const", ops[1].imm & 0xFFFFFFFF)
+        elif ops[1].type == A.ARM_OP_REG and ops[1].shift.type in (0, A.ARM_SFT_INVALID):
+            b = values.get(self.arch._name(insn.reg_name(ops[1].reg)))
+        else:
+            return None
+        if not (a and b and a[0] == "const" and b[0] == "const"):
+            return None
+        return ("cmp", a[1], b[1])
+
+    def decided(self, insn, values):
+        """True or False when a conditional branch's way is known from constants (cbz or cbnz of a
+        known register, b<cond> behind a known compare), else None."""
+        ops = insn.operands
+        if insn.id in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ) and ops and ops[0].type == A.ARM_OP_REG:
+            v = values.get(self.arch._name(insn.reg_name(ops[0].reg)))
+            if v and v[0] == "const":
+                return (v[1] == 0) == (insn.id == A.ARM_INS_CBZ)
+            return None
+        flags = values.get("flags")
+        if not flags or flags[0] != "cmp":
+            return None
+        a, b = flags[1], flags[2]
+        sa, sb = (a ^ 0x80000000) - 0x80000000, (b ^ 0x80000000) - 0x80000000
+        outcome = {A.ARM_CC_EQ: a == b, A.ARM_CC_NE: a != b, A.ARM_CC_HS: a >= b, A.ARM_CC_LO: a < b,
+                   A.ARM_CC_HI: a > b, A.ARM_CC_LS: a <= b, A.ARM_CC_GE: sa >= sb, A.ARM_CC_LT: sa < sb,
+                   A.ARM_CC_GT: sa > sb, A.ARM_CC_LE: sa <= sb}
+        return outcome.get(insn.cc)
 
     def frame_value(self, insn, reg, depth, values):
         """("sp", k) when the register holds an address in the frame (sp itself included)."""
@@ -331,11 +379,15 @@ class Lifter:
 
     def made_value(self, insn, depth, values):
         """(register, value) for the instructions that make a frame address or copy a known value:
-        mov rX, sp; mov rX, rY; add or sub rX, sp or a frame address, #imm; ldr rX from a frame slot."""
+        mov rX, sp; mov rX, rY; add or sub rX, sp or a frame address, #imm; ldr rX from a frame slot;
+        and mov rX, #imm, a constant ("const", value)."""
         if self.arch.predicate(insn) is not None:
             return None
         i, ops = insn.id, insn.operands
         rname = lambda r: self.arch._name(insn.reg_name(r))
+        if i in (A.ARM_INS_MOV, A.ARM_INS_MOVS, A.ARM_INS_MOVW) and len(ops) == 2 and ops[0].type == A.ARM_OP_REG \
+                and ops[1].type == A.ARM_OP_IMM:
+            return rname(ops[0].reg), ("const", ops[1].imm & 0xFFFFFFFF)
         if i == A.ARM_INS_LDR and len(ops) == 2 and ops[1].type == A.ARM_OP_MEM and not ops[1].mem.index \
                 and not insn.writeback:
             v = self.frame_value(insn, ops[1].mem.base, depth, values)
