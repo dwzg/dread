@@ -295,7 +295,10 @@ class Arm:
 
     def _computes_return(self, program, address, limit=16):
         """Whether the straight code at `address` reads lr and then writes it, or leaves through a
-        register other than lr: a helper that returns behind its call site, not to it."""
+        register other than lr: a helper that returns behind its call site, not to it. A call ends
+        the search with no: its bl writes lr by calling, and a dispatcher calls nothing (libgcc's
+        __aeabi_dcmpgt, str lr, [sp, #-8]! then bl __aeabi_cdrcmple, was taken for one, and every
+        call of it for a jump through a table)."""
         read = False
         for _ in range(limit):
             insn = program.insn(address)
@@ -304,7 +307,7 @@ class Arm:
             kind = self.flow(insn)[0]
             reads, writes = self.reg_effects(insn)
             stack = self.stack_kind(insn)
-            if kind == "return":
+            if kind in ("return", "call", "icall"):
                 return False
             if stack != "push" and "lr" in reads:
                 read = True
@@ -499,25 +502,38 @@ class Arm:
         return None
 
     def stack_kind(self, insn):
-        """"push" for push, stmdb sp! and str rN, [sp, #-4]!; "pop" for pop, ldm sp! and
-        ldr rN, [sp], #4; else None. (Capstone shows the single-register forms as str/ldr or as
-        push/pop depending on the encoding.)"""
+        """"push" for push, vpush, stmdb sp! and str rN, [sp, #-4]! (or #-8); "pop" for pop, vpop,
+        ldm sp! and ldr rN, [sp], #4 (or #8); else None. (Capstone shows the single-register forms as
+        str/ldr or as push/pop depending on the encoding.) stack_bytes says how far sp moves."""
         i = insn.id
-        if i == csarm.ARM_INS_PUSH:
+        if i in (csarm.ARM_INS_PUSH, csarm.ARM_INS_VPUSH):
             return "push"
-        if i == csarm.ARM_INS_POP:
+        if i in (csarm.ARM_INS_POP, csarm.ARM_INS_VPOP):
             return "pop"
         ops = insn.operands
         if i in (csarm.ARM_INS_STR, csarm.ARM_INS_LDR) and insn.writeback and len(ops) >= 2 \
                 and ops[1].type == csarm.ARM_OP_MEM and ops[1].mem.base == csarm.ARM_REG_SP and not ops[1].mem.index:
-            if i == csarm.ARM_INS_STR and ops[1].mem.disp == -4 and len(ops) == 2:
+            if i == csarm.ARM_INS_STR and ops[1].mem.disp in (-4, -8) and len(ops) == 2:
                 return "push"
-            if i == csarm.ARM_INS_LDR and len(ops) == 3 and ops[2].type == csarm.ARM_OP_IMM and ops[2].imm == 4:
+            if i == csarm.ARM_INS_LDR and len(ops) == 3 and ops[2].type == csarm.ARM_OP_IMM and ops[2].imm in (4, 8):
                 return "pop"
         if i in (csarm.ARM_INS_STMDB, csarm.ARM_INS_LDM) and insn.writeback and insn.operands \
                 and insn.operands[0].type == csarm.ARM_OP_REG and insn.operands[0].reg == csarm.ARM_REG_SP:
             return "push" if i == csarm.ARM_INS_STMDB else "pop"
         return None
+
+    def stack_bytes(self, insn):
+        """The bytes a push or pop (stack_kind) moves sp by: four for each core or single-precision
+        register and eight for each double one (vpush {d8}), or the offset of the single-register
+        forms (str rN, [sp, #-8]! and ldr rN, [sp], #8, with which libgcc's assembly helpers keep the
+        stack aligned to eight bytes: the word above the register is left as it was)."""
+        ops = insn.operands
+        if insn.id == csarm.ARM_INS_STR:
+            return -ops[1].mem.disp
+        if insn.id == csarm.ARM_INS_LDR:
+            return ops[2].imm
+        return sum(8 if (insn.reg_name(o.reg) or "")[:1] == "d" else 4
+                   for o in ops if o.type == csarm.ARM_OP_REG and o.reg != csarm.ARM_REG_SP)
 
     def operand_roles(self, insn):
         """[(capstone register id, read, written)] of an instruction's register operands, in order,
@@ -814,10 +830,11 @@ class Arm:
             insn = program.insn(a)
             if insn is None or self.flow(insn)[0] != "next":
                 break
-            if not pushed and self.stack_kind(insn) == "push":
+            regs = [self.reg_name(insn.reg_name(o.reg)) for o in insn.operands if o.type == csarm.ARM_OP_REG
+                    and o.reg != csarm.ARM_REG_SP]
+            if not pushed and self.stack_kind(insn) == "push" and insn.id != csarm.ARM_INS_VPUSH \
+                    and self.stack_bytes(insn) == 4 * len(regs):    # (a core push of registers only)
                 pushed = True
-                regs = [self.reg_name(insn.reg_name(o.reg)) for o in insn.operands if o.type == csarm.ARM_OP_REG
-                        and o.reg != csarm.ARM_REG_SP]
                 total += 4 * sum(1 for r in regs if r in scratch)
                 continue
             ops = insn.operands

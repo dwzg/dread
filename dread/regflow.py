@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 10                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 11                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -67,6 +67,9 @@ VERSION = 10                # 3: entry spills (variadic functions) are no use; 4
                             # 9: the FPU's block transfers (vldm writes, vstm reads, vpush and vpop),
                             # vmrs APSR_nzcv writes the flags, d<n> is s<2n> and s<2n+1>
                             # 10: with hard float, s0-s15 are followed like the scratch registers
+                            # 11: vpush and vpop, and libgcc's eight-byte push and pop of one register
+                            # (str lr, [sp, #-8]!; ldr pc, [sp], #8: a return), are pushes and pops;
+                            # a bl to a helper that calls another is a call, not a switch's dispatch
 
 
 class RegFlow:

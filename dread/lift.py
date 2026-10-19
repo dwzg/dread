@@ -331,15 +331,18 @@ class Lifter:
         after = dict(values)
         stack = arch.stack_kind(insn)
         if stack in ("push", "pop"):
-            regs = [rname(o.reg) for o in ops if o.type == A.ARM_OP_REG and o.reg != A.ARM_REG_SP]
+            words = [r for r, _ in self.stack_words(insn)]
+            size = arch.stack_bytes(insn)
             if stack == "push":
-                new = depth + 4 * len(regs)
-                for k, r in enumerate(regs):
-                    self._put(after, new - 4 * k, values.get(r))
+                new = depth + size
+                for k, r in enumerate(words):
+                    if r is not None:
+                        self._put(after, new - 4 * k, values.get(r))
                 return new, after
-            for k, r in enumerate(regs):
-                self._put(after, r, values.get(depth - 4 * k))
-            return depth - 4 * len(regs), after
+            for k, r in enumerate(words):
+                if r is not None:
+                    self._put(after, r, values.get(depth - 4 * k))
+            return depth - size, after
         reads, writes = arch.reg_effects(insn)
         new = self.new_depth(insn, depth, values) if "sp" in writes else depth
         known = self.made_value(insn, depth, values)
@@ -1287,8 +1290,9 @@ class Lifter:
 
     def _vfp_memory(self, insn, ops, isa):
         """vldr and vstr (a literal too: the constant's bits), vldm and vstm through a base register
-        with or without writeback. Refused: vpush, vpop and the other stack forms (the FPU's saved
-        registers in the frame are not modelled yet)."""
+        with or without writeback; vpush and vpop are pushes and pops (the frame's words, stack_words:
+        a save of what the caller left in s16-s31 stores nothing, as for the core's registers).
+        Refused: vldm and vstm through sp or pc."""
         i, a = insn.id, insn.address
         regs = [x for o in ops for x in (self.fp_lanes(o, insn) or [])]
         if i in (A.ARM_INS_VLDR, A.ARM_INS_VSTR):
@@ -1308,9 +1312,10 @@ class Lifter:
                                                                for k, r in enumerate(regs)))
             return "{ u32 a = %s; %s }" % (addr, " ".join("*(volatile u32 *)(a + %d) = %s;" % (4 * k, r)
                                                            for k, r in enumerate(regs)))
-        if i in (A.ARM_INS_VPUSH, A.ARM_INS_VPOP):
-            raise Refused("0x%x: %s %s (the FPU's registers in the frame are not modelled yet)" % (
-                a, insn.mnemonic, insn.op_str))
+        if i == A.ARM_INS_VPUSH:
+            return self._push(insn)
+        if i == A.ARM_INS_VPOP:
+            return self._pop(insn)
         base_op = ops[0]
         base = self.name(base_op.reg)
         if base in ("sp", "pc"):
@@ -1449,22 +1454,38 @@ class Lifter:
                 raise Refused("0x%x reads %s behind the call of %s (what the callee leaves)" % (
                     insn.address, reg, callee.name))
 
-    def _regs_of(self, insn):
-        return [self.name(o.reg) for o in insn.operands if o.type == A.ARM_OP_REG and o.reg != A.ARM_REG_SP]
+    def stack_words(self, insn):
+        """A push's or pop's words from the lowest address up: (register, C variable) each, an FPU
+        register a word a lane (vpush {d8}: s16 and s17, the C's f16 and f17), and (None, None) for
+        a word the instruction leaves alone (str lr, [sp, #-8]!: the word above lr)."""
+        words = []
+        for o in insn.operands:
+            if o.type != A.ARM_OP_REG or o.reg == A.ARM_REG_SP:
+                continue
+            lanes = self.fp_lanes(o, insn)
+            if lanes:
+                words += [("s" + v[1:], v) for v in lanes]
+            else:
+                r = self.arch._name(insn.reg_name(o.reg))
+                words.append((r, r))
+        return words + [(None, None)] * (self.arch.stack_bytes(insn) // 4 - len(words))
 
     def _push(self, insn):
         """The pushed registers into the frame, except those still holding what the caller left
-        (the saved callee-saved registers and lr: nothing reads them back but the pop)."""
-        regs = self._regs_of(insn)
-        d = self.ctx["depth"][insn.address] + 4 * len(regs)
+        (the saved callee-saved registers, s16-s31 too, and lr: nothing reads them back but the
+        pop)."""
+        words = self.stack_words(insn)
+        d = self.ctx["depth"][insn.address] + self.arch.stack_bytes(insn)
         undef = self.ctx["undef"].get(insn.address, frozenset())
         values = self.values()
         out = []
-        for k, r in enumerate(regs):
+        for k, (r, var) in enumerate(words):
+            if r is None:
+                continue                    # a word the push leaves alone
             if r == "pc":                   # an APCS frame: the address of the push, plus 8
                 out.append("*(volatile u32 *)(sp0 - %d) = 0x%xu;" % (d - 4 * k, insn.address + 8))
             elif r not in undef and values.get(r) != self.RET:     # a pop of the return address
-                out.append("*(volatile u32 *)(sp0 - %d) = %s;" % (d - 4 * k, r))  # uses the builtin
+                out.append("*(volatile u32 *)(sp0 - %d) = %s;" % (d - 4 * k, var))  # uses the builtin
         return " ".join(out)
 
     def _frame_ldm(self, insn, returning=False):
@@ -1494,13 +1515,13 @@ class Lifter:
         keep = ({"r0", "r1"} if self._wide(self.ctx["fn"].name) else {"r0"}) if returning else None
         values = self.values()
         out = []
-        for k, r in enumerate(self._regs_of(insn)):
-            if r == "pc" or (keep is not None and r not in keep):
+        for k, (r, var) in enumerate(self.stack_words(insn)):
+            if r is None or r == "pc" or (keep is not None and r not in keep):
                 continue
             if values.get(d - 4 * k) == self.RET:   # Thumb-1: pop {r0}; bx r0 leaves the address in r0
-                out.append("%s = (u32)__builtin_return_address(0);" % r)
+                out.append("%s = (u32)__builtin_return_address(0);" % var)
             else:
-                out.append("%s = *(volatile u32 *)(sp0 - %d);" % (r, d - 4 * k))
+                out.append("%s = *(volatile u32 *)(sp0 - %d);" % (var, d - 4 * k))
         return " ".join(out)
 
     # data processing

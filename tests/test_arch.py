@@ -255,3 +255,80 @@ def test_an_interrupt_inside_an_it_block_keeps_the_blocks_state():
     engine.emu_start(resume, 0x802)
     assert engine.reg_read(ua.UC_ARM_REG_PC) == 0x802 and starts.count(0x800) == 2
     assert not engine.reg_read(ua.UC_ARM_REG_XPSR) & (1 << 30)              # Z clear: cmpcs skipped
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_pushes_their_sizes_and_a_helper_that_calls_is_no_dispatcher(tmp_path):
+    """libgcc's assembly helpers push one register in eight bytes (str lr, [sp, #-8]!; ldr pc, [sp],
+    #8: a push and a return), and vpush and vpop move four bytes a single and eight a double
+    register. A bl to a helper that reads lr and then writes it is a switch helper's call (GCC's
+    __gnu_thumb1_case_uqi: the table follows the call), an indirect jump; a helper that saves lr and
+    calls another (__aeabi_dcmpgt: str lr, [sp, #-8]!; bl __aeabi_cdrcmple) was taken for one, and
+    every call of it for a jump through a table; so is one that keeps lr in a register across its
+    call (mov ip, lr; bl ...; bx ip): a call ends the search."""
+    import subprocess
+    from dread import arch as archmod
+    arm = archmod.get({"name": "arm", "isa": "t32", "profile": "m", "cpu": "cortex-m4"})
+    (tmp_path / "s.S").write_text("""
+        .syntax unified
+        .thumb
+        .fpu fpv4-sp-d16
+        .org 0x0
+        bl dcmpgt
+        bl case_uqi
+        .byte 0, 1
+        bl keeper
+        .org 0x10
+        vpush {d8}
+        vpush {s16-s19}
+        vpop {d8-d9}
+        push {r4, lr}
+        .org 0x100
+dcmpgt: str lr, [sp, #-8]!
+        bl cdrcmple
+        ite cc
+        movcc r0, #1
+        movcs r0, #0
+        ldr pc, [sp], #8
+        .org 0x180
+cdrcmple:
+        bx lr
+        .org 0x1C0
+keeper: mov ip, lr
+        bl cdrcmple
+        bx ip
+        .org 0x200
+case_uqi:
+        push {r1}
+        mov r1, lr
+        lsrs r1, r1, #1
+        lsls r1, r1, #1
+        ldrb r1, [r1, r0]
+        lsls r1, r1, #1
+        add lr, lr, r1
+        pop {r1}
+        bx lr
+""")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m4", "-mthumb", "-c", "-o", str(tmp_path / "s.o"),
+                    str(tmp_path / "s.S")], check=True)
+    subprocess.run(["arm-none-eabi-objcopy", "-O", "binary", str(tmp_path / "s.o"), str(tmp_path / "s.bin")],
+                   check=True)
+    blob = (tmp_path / "s.bin").read_bytes()
+
+    class Program:                          # what mark_call and the helper's scan ask of a program
+        cache = {}
+
+        def insn(self, address):
+            if address not in self.cache:
+                insn = self.cache[address] = arm.decode(blob[address:address + 4], address, "t32")
+                arm.mark_call(self, insn)
+            return self.cache[address]
+    program = Program()
+    assert arm.flow(program.insn(0x0)) == ("call", 0x100, True)
+    assert arm.flow(program.insn(0x4))[0] == "ijump"
+    assert arm.flow(program.insn(0xA)) == ("call", 0x1C0, True)
+    shapes = {a: (arm.stack_kind(program.insn(a)), arm.stack_bytes(program.insn(a)))
+              for a in (0x10, 0x14, 0x18, 0x1C, 0x100, 0x10E)}
+    assert shapes == {0x10: ("push", 8), 0x14: ("push", 16), 0x18: ("pop", 16), 0x1C: ("push", 8),
+                      0x100: ("push", 8), 0x10E: ("pop", 8)}, shapes
+    assert arm.flow(program.insn(0x10E))[0] == "return"

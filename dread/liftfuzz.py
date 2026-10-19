@@ -16,7 +16,8 @@ mode (offsets, register offsets with shifts, writeback, post-index) on the buffe
 block transfers, frame slots and addresses of them; forward branches on a bit of the buffer (so
 that inputs go both ways; cbz and cbnz on Thumb) and on the flags; calls of three helpers (one takes
 three registers, one returns r0 and r1, one takes a stack argument); push and pop around a few
-instructions; IT blocks on Thumb-2; instructions that act on the core (interrupt masks, the flags through APSR,
+instructions (also libgcc's eight-byte push of one register, str rN, [sp, #-8]!, and with an FPU
+vpush and vpop); IT blocks on Thumb-2; instructions that act on the core (interrupt masks, the flags through APSR,
 barriers, an exclusive load and store). About a third of the functions keep a frame pointer (r7 on
 Thumb, r11 in ARM state) that addresses the frame and restores sp at the end, and about a third
 return the Thumb-1 way (pop {r3}; bx r3). At the end the registers are stored into a result buffer
@@ -704,14 +705,33 @@ class Generator:
             return self.call(), 1
         if r < 0.31:
             # push and pop around a few units, into other registers: the stack pointer moves inside
-            # the function and frame slots are addressed from the moved pointer
-            pushed = sorted(rng.sample(self.regs(), 2))
-            popped = sorted(rng.sample(self.regs(), 2))
-            lines = ["push {r%d, r%d}" % tuple(pushed)]
+            # the function and frame slots are addressed from the moved pointer (the pushed words
+            # read back among them). Also the single-register form of libgcc's assembly helpers
+            # (str rN, [sp, #-8]!; ldr rM, [sp], #8: eight bytes for one register) and, with an
+            # FPU, vpush and vpop of s0-s15 by single or double registers
+            form = rng.choices(["pair", "single8", "fpu"], [6, 2, 2 if self.has_fpu else 0])[0]
+            if form == "pair":
+                pushed = sorted(rng.sample(self.regs(), 2))
+                popped = sorted(rng.sample(self.regs(), 2))
+                lines, end = ["push {r%d, r%d}" % tuple(pushed)], ["pop {r%d, r%d}" % tuple(popped)]
+            elif form == "single8":
+                lines = ["str r%d, [sp, #-8]!" % rng.choice(self.regs())]
+                end = ["ldr r%d, [sp], #8" % rng.choice(self.regs())]
+            else:
+                n = rng.choice([1, 2, 3, 4])
+                double = n % 2 == 0 and rng.random() < 0.5
+
+                def registers():
+                    if double:
+                        d = rng.randrange(0, 8 - n // 2 + 1)
+                        return "{d%d}" % d if n == 2 else "{d%d-d%d}" % (d, d + n // 2 - 1)
+                    s = rng.randrange(0, 16 - n + 1)
+                    return "{s%d}" % s if n == 1 else "{s%d-s%d}" % (s, s + n - 1)
+                lines, end = ["vpush %s" % registers()], ["vpop %s" % registers()]
             k = rng.randrange(1, 3)
             for _ in range(k):
                 lines += self.one()
-            return lines + ["pop {r%d, r%d}" % tuple(popped)], k
+            return lines + end, k
         return self.one(self.cond()), 1
 
     def call(self):

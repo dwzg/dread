@@ -601,7 +601,8 @@ of the MSP430 section comes after this one.
   around every call), so float arguments, results and what a callee changes are exact. gizmo-m4: all
   four float functions pass the lift check (42 accepted, what gizmo-m3's does and more). Not yet: a
   generic stub's log of a callee's float arguments; a float result that nothing in the image reads
-  is not compared (as an integer register beyond r0); vpush, vpop and double precision stay refused.
+  is not compared (as an integer register beyond r0); double precision stays refused (vpush and
+  vpop lift since: FreeRTOS on it, below).
 - [x] **The system run with an FPU** (2026-10-19): where the FPU's state is active (CONTROL.FPCA,
   which Unicorn's Cortex-M4 sets when it runs an FPU instruction, as the hardware does) an exception
   pushes the extended frame, s0-s15, FPSCR and a reserved word behind the eight (0x68 bytes),
@@ -623,8 +624,22 @@ of the MSP430 section comes after this one.
   cleared the state of a block that starts inside an IT block, so an interrupt taken there while
   recording stacked it cleared again. Any Thumb-2 system run could hit this where a block boundary
   splits an IT block; the measurements up to 22 ran with it.
-- [ ] **FreeRTOS on it**: the ARM_CM4F port on QEMU's mps2-an386 (Cortex-M4) in the benchmark's
-  matrix, with GCC and clang.
+- [x] **FreeRTOS on it** (2026-10-20): the full demo with the ARM_CM4F port for the AN386 board,
+  built by GCC and clang -Os with hard float (bench/freertos.toml, project mps2f; flop.c's math tasks
+  run too, their arithmetic in single precision). Both rebuild byte for byte; the lift check accepts
+  293 of 394 functions (GCC) and 275 of 384 (clang), recorded inputs adding 36 each; 13 minutes for
+  both. fabs, the FPU's enable and the math tasks' start and check lift; the port's PendSV and SVC
+  handlers are context switches (refused, as on the M3). Found and fixed on the way: a bl to a
+  helper that saves lr and calls another (libgcc's __aeabi_dcmpgt) was taken for a switch helper's
+  dispatch, an indirect jump, in every caller; libgcc's eight-byte push and pop of one register
+  (str lr, [sp, #-8]!; ldr pc, [sp], #8), vpush and vpop were refused: they are pushes and pops now
+  (the size from the ARM layer, stack_bytes; the fuzzer draws all three, 0 differ on a32, t32, m4
+  and m4f, and a size planted wrong shows). That gains nothing in these builds yet: libgcc's
+  __aeabi_dcmp* read the flags __aeabi_cdcmple returns (a result in the flags, which a C call cannot
+  take), and regflow follows libgcc's conditional code without its conditions (__aeabi_f2d reads r3
+  only where it wrote it under the same flags, __aeabi_dmul r5 likewise), so the math tasks, which
+  call them in loops, are refused for reading what a callee leaves. Besides, the disagreements the
+  M3 builds have (What the lifter leaves).
 
 ## MSP430 (of special interest to the user; right after RISC-V)
 
