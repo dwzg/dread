@@ -565,10 +565,15 @@ of the MSP430 section comes after this one.
   Found on the way: case generation missed script_run's loops over a length it took for a pointer
   (fixed: near misses repaired, generator 22) and `dread lift --check NAME` replaced the lifted table
   unnoticed (now said). Not yet: a clang build of it.
-- [ ] **The DSP instructions in the lifter** (refused as "not modelled" today): saturating arithmetic
-  (qadd, qsub, ssat, usat and their 16-bit forms), packed adds and subtracts with the GE flags and
-  sel, the packed multiply-accumulates (smlad, smlsd, smuad and the rest), packing and extending
-  (pkhbt, uxtab16 and the rest); in the fuzzer.
+- [x] **The DSP instructions in the lifter** (2026-10-19): saturating arithmetic (qadd, qsub, ssat,
+  usat and their 16-bit forms), packed adds and subtracts with the GE flags and sel, the packed and
+  halfword multiplies with and without accumulation, packing and extending, sums of absolute
+  differences: 88 instructions, each as itself in inline assembly (Q and GE stay the core's own;
+  the C is compiled for the same core). The fuzzer has a Cortex-M4 target (`--isa m4`) that draws
+  them: 300 functions agree. gizmo-m4's four DSP functions lift and pass the check (38 accepted).
+  Found on the way: capstone 5 lists umlal's and smlal's RdLo and RdHi as written only and ssat16's
+  source not at all; the ARM layer has its own roles for those (operand_roles), so the register
+  flow sees the reads now (regflow 8) on every ARM target, the M3's and ARM state's included.
 - [ ] **The FPU in the lifter**: single-precision VFP (arithmetic, fused multiply-add, conversions,
   compares with vmrs APSR_nzcv, loads, stores, vpush, vpop) and FPSCR (rounding mode, flush to zero:
   honoured or refused), exact either way (C floats with -ffp-contract=off, or the instruction itself

@@ -10,7 +10,7 @@ needs_gcc = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-
 
 @pytest.mark.slow
 @needs_gcc
-@pytest.mark.parametrize("isa", ["a32", "t32"])
+@pytest.mark.parametrize("isa", ["a32", "t32", "m4"])
 def test_random_functions_agree(isa, tmp_path):
     lines = []
     failures, refused, _ = liftfuzz.run(isa, functions=40, length=30, inputs=12, seed=7, keep=str(tmp_path / isa),

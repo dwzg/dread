@@ -7,12 +7,14 @@ __ram_crc_veneer
 apply_config
 beep_off
 beep_on
+clamp12
 cmd_beep
 cmd_led
 cmd_mode
 cmd_volume
 copy_words
 delay
+dot_pairs
 fmt_dec
 gpio_set
 handle_key
@@ -20,10 +22,12 @@ irq_enable_timer
 keys_read
 led_off
 led_on
+level8
 main
 memcmp
 memcpy
 memset
+mix_sat
 parse_kv
 print_status
 read_line

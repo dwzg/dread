@@ -83,6 +83,9 @@ SYSTEM = {getattr(A, "ARM_INS_" + n) for n in (
     "MRC2").split()
     if hasattr(A, "ARM_INS_" + n)}
 STATUS = ("apsr", "cpsr", "xpsr", "iapsr", "eapsr")     # status registers whose top bits are the flags
+# The DSP extension (ARMv7E-M; ARMv5TE and later in ARM state): the instruction itself, in inline
+# assembly (Lifter._dsp)
+from dread.arch.arm import DSP_IDS as DSP  # noqa: E402
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
@@ -1027,6 +1030,8 @@ class Lifter:
             return "%s = 0x%xu;" % (self.dest(ops[0]), at)
         if i in SYSTEM:
             return self._system(insn, ops)
+        if i in DSP:
+            return self._dsp(insn, ops)
         if i in self.LDMS and any(o.type == A.ARM_OP_REG and o.reg == A.ARM_REG_SP for o in ops[1:]):
             return self._frame_ldm(insn)
         handler = getattr(self, "op_" + OPS[i], None) if i in OPS else None
@@ -1104,6 +1109,40 @@ class Lifter:
                 return '__asm__ volatile ("%s" : "=r"(%s) :: "memory");' % (asm, self.dest(regs[0]))
             return '__asm__ volatile ("%s" :: "r"(%s) : "memory");' % (asm, self.reg(regs[0].reg))
         raise Refused("0x%x: %s %s is not modelled" % (a, insn.mnemonic, insn.op_str))
+
+    def _dsp(self, insn, ops):
+        """An instruction of the DSP extension as the instruction itself in inline assembly: its
+        saturation and the Q flag, the GE flags of the packed additions that sel reads, and the
+        packed and halfword multiplies are the core's own, exact by construction (the C is compiled
+        for the same core; reading APSR takes Q and GE from the core, see _system). The registers it
+        writes are outputs and those it reads inputs; one it reads and
+        writes (an accumulator pair) is both. The condition is the caller's (Lifter.cond)."""
+        import re
+        mnemonic = insn.mnemonic.split(".")[0]
+        cond = self.arch.condition(insn)
+        if cond and mnemonic.endswith(cond):
+            mnemonic = mnemonic[:-len(cond)]
+        roles, order = {}, []           # (the arch layer's operand_roles: capstone's lists are wrong
+        for r, read, written in self.arch.operand_roles(insn):     # for ssat16 and the pairs)
+            if r not in roles:
+                roles[r] = [False, False]
+                order.append(r)
+            roles[r][0] |= read
+            roles[r][1] |= written
+        read = {r for r in order if roles[r][0]}
+        outs = [r for r in order if roles[r][1]]
+        ins = [r for r in order if roles[r][0] and not roles[r][1]]
+        text = insn.op_str
+        for k, r in enumerate(outs + ins):
+            text = re.sub(r"\b%s\b" % re.escape(insn.reg_name(r)), "%%%d" % k, text)
+        outputs = []
+        for r in outs:
+            name = self.name(r)
+            if name in ("sp", "pc") or name not in REGS:
+                raise Refused("0x%x writes %s" % (insn.address, name))
+            outputs.append('"%sr"(%s)' % ("+" if r in read else "=", name))
+        inputs = ['"r"(%s)' % self.reg(r) for r in ins]
+        return '__asm__ volatile ("%s %s" : %s : %s : "cc");' % (mnemonic, text, ", ".join(outputs), ", ".join(inputs))
 
     def _svc(self, insn, ops):
         """svc #n with r0-r3 bound to the handler (its arguments and results); r12, lr and the flags

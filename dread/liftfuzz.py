@@ -30,8 +30,9 @@ first runs: capstone reports adc, sbc and rsc without s as setting the flags, an
 carry of movs r1, r1, lsl #7 was taken after r1 was written. Its returns through r3 also made
 dread.switches crash the process inside Unicorn (pages unmapped after a run, written by a later one).
 
-The ISAs: a32 (ARMv7-A in ARM state) and t32 (Cortex-M3, Thumb-2), with the cross toolchain
-(arm-none-eabi-); rv32 (RV32IMC, dread.lift_riscv), with clang and ld.lld: RiscVGenerator, which
+The ISAs: a32 (ARMv7-A in ARM state), t32 (Cortex-M3, Thumb-2) and m4 (Cortex-M4: Thumb-2 with the
+DSP extension, whose saturating, packed and halfword-multiply instructions it draws as well), with
+the cross toolchain (arm-none-eabi-); rv32 (RV32IMC, dread.lift_riscv), with clang and ld.lld: RiscVGenerator, which
 frames a function the same way (ra and s0-s11 saved, every frame slot written, every register set
 from the arguments before the body reads it, s11 the buffer's address, s0 the frame pointer in the
 "fp" style, a return through another register in the "ret" style) and draws from the base, M and
@@ -47,7 +48,7 @@ the build, reported per function and reduced like a difference. Found on its fir
 itself. The image, its target directory and the lifted C go to a temporary directory, kept when
 something fails (or with --keep).
 
-    dread liftfuzz [--isa a32|t32|rv32|msp430] [--functions N] [--length L] [--inputs K] [--seed S]
+    dread liftfuzz [--isa a32|t32|m4|rv32|msp430] [--functions N] [--length L] [--inputs K] [--seed S]
                    [--reduce N] [--keep DIR]
 """
 import argparse
@@ -109,6 +110,37 @@ name = "arm"
 isa = "t32"
 profile = "m"
 cpu = "cortex-m3"
+
+[image.main]
+original = "fuzz.bin"
+base = 0x08000000
+limit = 0x08080000
+entry = "f0"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x08000000, size = 0x100000, kind = "rom"},
+    {name = "sram", base = 0x20000000, size = 0x10000},
+    {name = "scratch", base = 0x20100000, size = 0x20000},
+]
+io = [[0x40000000, 0x40020000], [0xe000e000, 0xe000f000]]
+stack = {top = 0x20010000, size = 0x2000}
+sentinel = 0x1fff0000
+scratch = {base = 0x20100000, size = 0x20000}
+''',
+        "base": 0x08000000, "ram": 0x20000000,
+    },
+    "m4": {
+        "flags": ["-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=soft"], "thumb": True, "dsp": True,
+        "toml": '''[target]
+name = "liftfuzz-m4"
+title = "dread liftfuzz, Thumb-2 with the DSP extension (Cortex-M4)"
+
+[arch]
+name = "arm"
+isa = "t32"
+profile = "m"
+cpu = "cortex-m4"
 
 [image.main]
 original = "fuzz.bin"
@@ -200,7 +232,8 @@ class Generator:
 
     def __init__(self, isa, rng):
         self.isa, self.rng = isa, rng
-        self.thumb = isa == "t32"
+        self.thumb = ISAS[isa].get("thumb", isa == "t32")
+        self.has_dsp = ISAS[isa].get("dsp", False)  # the DSP extension (the Cortex-M4's)
         self.label = 0
         self.r12 = ISAS[isa]["ram"] + 0x1000 + 4 * (BUF_WORDS // 2)
         self.fp = None              # the frame pointer's number in a function that has one
@@ -352,7 +385,7 @@ class Generator:
         if k == 1:
             rot = rng.choice(["", ", ror #8", ", ror #16", ", ror #24"])
             return ["%s%s %s, %s%s" % (rng.choice(["uxtb", "uxth", "sxtb", "sxth"]), cond, d, self.src(), rot)]
-        if k == 2 and not self.thumb:
+        if k == 2 and (not self.thumb or self.has_dsp):
             rot = rng.choice(["", ", ror #8", ", ror #16", ", ror #24"])
             return ["%s%s %s, %s, %s%s" % (rng.choice(["uxtab", "uxtah", "sxtab", "sxtah"]), cond, d, self.src(),
                                            self.src(), rot)]
@@ -370,6 +403,52 @@ class Generator:
             return ["%s%s %s, #%d" % (rng.choice(["movw", "movt"]), cond, d, rng.choice(
                 [0, 1, 0x7FFF, 0x8000, 0xFFFF, rng.randrange(0x10000)]))]
         return self.data(cond)
+
+    def dsp(self, cond):
+        """The DSP extension: saturating arithmetic (the Q flag), packed additions and subtractions
+        (the GE flags) and sel, which reads them; the dual, halfword and most-significant-word
+        multiplies with and without accumulation; packing, extending of byte pairs, sums of absolute
+        differences. One instruction each, so that it also fills an IT block's slot."""
+        rng = self.rng
+        d, a, b, c = self.dst(), self.src(), self.src(), self.src()
+        k = rng.randrange(10)
+        if k == 0:
+            return ["%s%s %s, %s, %s" % (rng.choice(["qadd", "qsub", "qdadd", "qdsub"]), cond, d, a, b)]
+        if k == 1:
+            shift = rng.choice(["", ", lsl #%d" % rng.randrange(1, 32), ", asr #%d" % rng.randrange(1, 32)])
+            if rng.random() < 0.5:
+                return ["ssat%s %s, #%d, %s%s" % (cond, d, rng.randrange(1, 33), a, shift)]
+            return ["usat%s %s, #%d, %s%s" % (cond, d, rng.randrange(0, 32), a, shift)]
+        if k == 2:
+            if rng.random() < 0.5:
+                return ["ssat16%s %s, #%d, %s" % (cond, d, rng.randrange(1, 17), a)]
+            return ["usat16%s %s, #%d, %s" % (cond, d, rng.randrange(0, 16), a)]
+        if k == 3:
+            op = rng.choice(["s", "q", "sh", "u", "uq", "uh"]) + rng.choice(["add16", "sub16", "asx", "sax", "add8", "sub8"])
+            return ["%s%s %s, %s, %s" % (op, cond, d, a, b)]
+        if k == 4:
+            return ["sel%s %s, %s, %s" % (cond, d, a, b)]
+        if k == 5:
+            op = rng.choice(["smlad", "smladx", "smlsd", "smlsdx", "smmla", "smmlar", "smmls", "smmlsr", "smlabb",
+                             "smlabt", "smlatb", "smlatt", "smlawb", "smlawt", "usada8"])
+            return ["%s%s %s, %s, %s, %s" % (op, cond, d, a, b, c)]
+        if k == 6:
+            op = rng.choice(["smuad", "smuadx", "smusd", "smusdx", "smmul", "smmulr", "smulbb", "smulbt", "smultb",
+                             "smultt", "smulwb", "smulwt", "usad8"])
+            return ["%s%s %s, %s, %s" % (op, cond, d, a, b)]
+        if k == 7:
+            lo, hi = rng.sample(self.regs(), 2)
+            op = rng.choice(["smlald", "smlaldx", "smlsld", "smlsldx", "smlalbb", "smlalbt", "smlaltb", "smlaltt",
+                             "umaal"])
+            return ["%s%s r%d, r%d, %s, %s" % (op, cond, lo, hi, a, b)]
+        if k == 8:
+            if rng.random() < 0.5:
+                return ["pkhbt%s %s, %s, %s%s" % (cond, d, a, b, rng.choice(["", ", lsl #%d" % rng.randrange(1, 32)]))]
+            return ["pkhtb%s %s, %s, %s, asr #%d" % (cond, d, a, b, rng.randrange(1, 32))]
+        rot = rng.choice(["", ", ror #8", ", ror #16", ", ror #24"])
+        if rng.random() < 0.5:
+            return ["%s%s %s, %s, %s%s" % (rng.choice(["sxtab16", "uxtab16"]), cond, d, a, b, rot)]
+        return ["%s%s %s, %s%s" % (rng.choice(["sxtb16", "uxtb16"]), cond, d, a, rot)]
 
     def base(self, size, span=0):
         """(set-up lines, base register): a register pointing into the buffer, aligned for `size`."""
@@ -509,7 +588,7 @@ class Generator:
     def one(self, cond=""):
         rng = self.rng
         kind = rng.choices(["data", "move", "compare", "shifts", "multiply", "misc", "memory", "double", "block",
-                            "frame", "system"], [26, 8, 10, 10, 6, 8, 12, 4, 4, 6, 3])[0]
+                            "frame", "system", "dsp"], [26, 8, 10, 10, 6, 8, 12, 4, 4, 6, 3, 12 if self.has_dsp else 0])[0]
         return getattr(self, kind)("" if kind == "system" else cond)
 
     def unit(self, name):
@@ -1007,7 +1086,7 @@ class Msp430Generator:
         return lines + [".size %s, . - %s" % (name, name)]
 
 
-GENERATORS = {"a32": None, "t32": None, "rv32": RiscVGenerator, "msp430": Msp430Generator}   # None: ARM
+GENERATORS = {"a32": None, "t32": None, "m4": None, "rv32": RiscVGenerator, "msp430": Msp430Generator}   # None: ARM
 
 
 def generator(isa, rng):
@@ -1202,7 +1281,7 @@ def run(isa, functions=100, length=40, inputs=16, seed=1, keep=None, out=print, 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread liftfuzz", description=__doc__.split("\n\n")[0])
     parser.add_argument("--isa", choices=sorted(ISAS), action="append",
-                        help="a32, t32, rv32, msp430 (default: those whose toolchain is installed)")
+                        help="a32, t32, m4, rv32, msp430 (default: those whose toolchain is installed)")
     parser.add_argument("--functions", type=int, default=100)
     parser.add_argument("--length", type=int, default=40, help="random instructions per function")
     parser.add_argument("--inputs", type=int, default=16, help="written cases per function")
