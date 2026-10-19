@@ -1017,6 +1017,8 @@ class Lifter:
             return (loads + " " if loads else "") + self._fp_sync("out") + "return %s;" % self._ret()
         if kind == "jump":
             t = target & ~1
+            if t not in self.ctx["depth"] and falls and self.decided(insn, self.values()) is False:
+                return None                 # decided never taken (states): its target is unreached
             if i in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ):
                 if t not in self.ctx["depth"]:
                     raise Refused("0x%x: %s out of the function" % (insn.address, insn.mnemonic))
