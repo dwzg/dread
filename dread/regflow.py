@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 8                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 9                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -64,6 +64,8 @@ VERSION = 8                 # 3: entry spills (variadic functions) are no use; 4
                             # 8: umlal and smlal (and the DSP extension's accumulating pairs) read
                             # their RdLo and RdHi, ssat16 and usat16 their source: capstone's lists
                             # left those out (dread.arch.arm.operand_roles)
+                            # 9: the FPU's block transfers (vldm writes, vstm reads, vpush and vpop),
+                            # vmrs APSR_nzcv writes the flags, d<n> is s<2n> and s<2n+1>
 
 
 class RegFlow:
