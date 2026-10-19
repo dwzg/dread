@@ -244,11 +244,16 @@ class RiscVLifter(lift.Lifter):
                 written[0], flow.why(fn.name, written[0])))
 
     def _check_after_call(self, callee, insn):
+        """As the ARM translator's: a register the callee never writes keeps the caller's value."""
         flow = self.flow
         if flow is None:
             return
         result = {"a0", "a1"} if self._wide(callee.name) else {"a0"}
+        preserved = set(flow.preserved_regs(callee.name))
+        undef = self.ctx["undef"].get(insn.address, frozenset())
         for reg in flow.kept_regs(callee.name):
+            if reg in preserved and reg not in undef:
+                continue
             if reg not in result and (self.ctx["fn"].name, insn.address) in flow.sites_of(callee.name, reg):
                 raise Refused("0x%x reads %s behind the call of %s (what the callee leaves)" % (
                     insn.address, reg, callee.name))
@@ -411,7 +416,9 @@ class RiscVLifter(lift.Lifter):
         wide = self._wide(callee.name)
         self.ctx["callees"].add((callee.name, 0, wide))
         call = "%s(%s)" % (callee.name, ", ".join(args))
-        clear = " = ".join(r for r in SCRATCH if r not in (("a0", "a1") if wide else ("a0",))) + " = 0;"
+        keep = set(self.flow.preserved_regs(callee.name)) if self.flow else set()
+        cleared = [r for r in SCRATCH if r not in (("a0", "a1") if wide else ("a0",)) and r not in keep]
+        clear = " = ".join(cleared) + " = 0;" if cleared else ""
         if wide:
             return "{ u64 r = %s; a0 = (u32)r; a1 = (u32)(r >> 32); } %s" % (call, clear)
         return "a0 = %s; %s" % (call, clear)

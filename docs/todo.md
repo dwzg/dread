@@ -537,8 +537,13 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   callee read beyond a local of the caller (a queue's item size of 24 for a 4-byte item: memcpy copies the frame behind
   it, laid out otherwise in the C), which the harness cannot tell yet (it would need to know which
   stack bytes the call wrote); (4) scratch
-  registers across calls (a few per build; GCC's -fipa-ra): a build with -fno-ipa-ra to measure what
-  is left. The RISC-V port's untyped handlers (labels in a section with mapping symbols) are missing
+  registers across calls (a few per build; GCC's -fipa-ra): a register the callee never writes, its
+  callees included (regflow's preserved), keeps the caller's value in the C since 2026-10-20 (13 of
+  the 52 refusals for reading a register behind a call on the ARM and RISC-V builds; on copies of
+  GCC -Os, 291 to 295 on the MPS2 build, printf's printi and prints among them, and 214 to 215 on
+  RISC-V, none lost); the other 39 read what the callee left, where regflow takes a variadic
+  callee's save area as read (sprintf behind memset reads r3 only as far as its format goes) or
+  follows libgcc's conditional code without its conditions (__aeabi_f2d). The RISC-V port's untyped handlers (labels in a section with mapping symbols) are missing
   from the ground truth. (Three instructions of each static-creation function cannot run, a volatile
   size asserted equal to itself: the lifter decides such branches since, and they are unreached.)
 - [x] **The rest of the matrix**: clang for RISC-V (virt-clang-Os: built with -mno-relax, since clang's

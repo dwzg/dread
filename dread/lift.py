@@ -1429,9 +1429,12 @@ class Lifter:
             else:
                 raise Refused("0x%x passes %s a stack word it does not have" % (insn.address, callee.name))
         call = "%s(%s)" % (callee.name, ", ".join(args))
+        keep = set(self.flow.preserved_regs(callee.name)) if self.flow else set()
+        clear = [r for r in (("r2", "r3", "r12") if wide else ("r1", "r2", "r3", "r12")) if r not in keep]
+        tail = " = ".join(clear) + " = 0;" if clear else ""   # (one the callee never writes keeps its value)
         if wide:
-            return "{ u64 t = %s; r0 = (u32)t; r1 = (u32)(t >> 32); } r2 = r3 = r12 = 0;" % call
-        return "r0 = %s; r1 = r2 = r3 = r12 = 0;" % call
+            return "{ u64 t = %s; r0 = (u32)t; r1 = (u32)(t >> 32); } %s" % (call, tail)
+        return "r0 = %s; %s" % (call, tail)
 
     def _icall(self, insn, fp):
         d = self.ctx["depth"][insn.address]
@@ -1442,14 +1445,21 @@ class Lifter:
 
     def _check_after_call(self, callee, insn):
         """Refuse when the caller reads a scratch register or the flags behind the call that the
-        callee leaves (the C cannot know them)."""
+        callee leaves (the C cannot know them). One the callee never writes, its callees included
+        (regflow's preserved: GCC's -fipa-ra keeps a value in it across such a call), still holds
+        the caller's own value, which the C keeps in its variable (_call does not clear it), unless
+        it held what the function's own caller left at the call (undefined there: refused)."""
         flow = self.flow
         if flow is None:
             return
         result = {"r0", "r1"} if self._wide(callee.name) else {"r0"}
+        preserved = set(flow.preserved_regs(callee.name))
+        undef = self.ctx["undef"].get(insn.address, frozenset())
         for reg in flow.kept_regs(callee.name):
             if reg in FPU_MIRRORED:
                 continue                    # read back after the call (FPU_MIRROR)
+            if reg in preserved and reg not in undef:
+                continue
             if reg not in result and (self.ctx["fn"].name, insn.address) in flow.sites_of(callee.name, reg):
                 raise Refused("0x%x reads %s behind the call of %s (what the callee leaves)" % (
                     insn.address, reg, callee.name))

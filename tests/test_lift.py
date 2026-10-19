@@ -300,3 +300,35 @@ def test_a_branch_on_a_constant_the_function_stored_is_decided(tmp_path):
     result = lift.make_lifter(p).lift(fn)
     assert set(calls) <= set(result.unreached), [hex(a) for a in result.unreached]
     assert "fail" not in result.text
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_register_the_callee_never_writes_keeps_its_value_across_the_call(tmp_path):
+    """GCC's -fipa-ra keeps a value in a scratch register across the call of a function that never
+    writes it: use keeps d in r3 across twice and reads it behind the call. The lifted C keeps its
+    variable instead of clearing it after the call, and use passes the lift check (it was refused
+    for reading r3 behind the call)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.target import Target
+    (tmp_path / "t.c").write_text("__attribute__((noinline)) unsigned twice(unsigned x) { return x + x; }\n"
+                                  "unsigned use(unsigned a, unsigned b, unsigned c, unsigned d)"
+                                  " { return twice(a) + d * 3; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "use", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    image = t.image()
+    lines = []
+    accepted = lift.check(t, image, ["use"], out=lines.append, jobs=2)
+    assert accepted == ["use"], "\n".join(lines)
