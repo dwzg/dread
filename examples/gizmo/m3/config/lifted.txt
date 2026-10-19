@@ -1,6 +1,6 @@
-# Functions built from lifted C: their cases (for one that never returns: every scenario
-# of the system run) agree with the original and run every instruction it can reach.
-# Written by dread lift --check; not edited by hand.
+# Functions built from lifted C: their cases (for one that never returns: its loop cases,
+# or every scenario of the system run) agree with the original and run every instruction it
+# can reach. Written by dread lift --check; not edited by hand.
 Reset_Handler
 TIMER_IRQHandler
 __ram_crc_veneer
@@ -34,4 +34,5 @@ timer_irq
 timer_start
 uart_getc
 uart_init
+uart_puts
 zero_words_constprop_0

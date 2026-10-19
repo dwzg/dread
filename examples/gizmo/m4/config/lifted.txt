@@ -42,4 +42,5 @@ timer_start
 to_millivolts
 uart_getc
 uart_init
+uart_puts
 zero_words_constprop_0

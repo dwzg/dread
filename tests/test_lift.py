@@ -34,7 +34,10 @@ def test_refusals_name_their_reason(variant):
         assert "changes the stack pointer in a way not modelled: auipc sp" in refused.pop("_start")
         assert refused == {}
         return
-    assert "reads r1 behind the call of uart_putc" in refused.pop("uart_puts")     # dread.regflow's finding
+    # uart_puts reads r1 behind the call of uart_putc, which never writes it (GCC's -fipa-ra kept a
+    # value there; dread.regflow's preserved): the C keeps its r1 across the call (it was refused)
+    assert "uart_puts" not in refused and "r0 = uart_putc(r0, r1, r2, r3); r2 = r3 = r12 = 0;" in \
+        lifted["uart_puts"].text
     if variant == "a32":
         assert "changes the stack pointer" in refused.pop("reset")
         assert "branches into other code" in refused.pop("__aeabi_uidivmod")

@@ -1,6 +1,6 @@
-# Functions built from lifted C: their cases (for one that never returns: every scenario
-# of the system run) agree with the original and run every instruction it can reach.
-# Written by dread lift --check; not edited by hand.
+# Functions built from lifted C: their cases (for one that never returns: its loop cases,
+# or every scenario of the system run) agree with the original and run every instruction it
+# can reach. Written by dread lift --check; not edited by hand.
 __aeabi_ldiv0
 __ram_crc_veneer
 apply_config
@@ -16,7 +16,7 @@ gpio_set
 handle_key
 irq_dispatch
 irq_enable_timer
-irq_entry
+irq_entry  # accepted by the system run
 keys_read
 led_off
 led_on
@@ -34,3 +34,4 @@ timer_irq
 timer_start
 uart_getc
 uart_init
+uart_puts
