@@ -303,22 +303,49 @@ Decompile a real project built by ourselves in many ways, with the ELF as ground
 repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in `~/dread-bench`.
 
 - [x] **Recipe and harness**: `dread bench` and `bench/freertos.toml`: fetch, build with our flags,
-  import (ground truth), measure (listing, Ghidra against the ELF, the lifter's acceptance, noreturn,
-  seconds), report. It found five faults in DREAD so far (a listing file that began with the last
-  one's tail, an extent over a free range, a crash after a failed generation, the RISC-V listing and
-  link with GNU binutils, gp read as an argument) and brought the "load" startup kind (QEMU's ELF
-  loader filling RAM) and fixed registers ([image] fixed).
+  import (ground truth), measure (listing, Ghidra against the ELF, the lifter's acceptance, recorded
+  inputs, noreturn, seconds), report. Faults it found in DREAD: a listing file that began with the
+  last one's tail, an extent over a free range, a crash after a failed generation, the RISC-V
+  listing and link with GNU binutils, gp read as an argument, stubs logging dead registers, a hook
+  that never returns stubbed, hang marks inherited by mutants, clang's variadic spill taken for
+  reads, ecall taken for a system call that reads a0-a7, every -O0 function reading nothing (the
+  spill rule), saves around a call of an unset register taken for reads, a hang deep in a callee
+  stubbing nothing. It brought the "load" startup kind (QEMU's ELF loader filling RAM), fixed
+  registers ([image] fixed), header patches, and functions declared without a size.
 - [x] **The matrix, first part**: Cortex-M3 GCC -O0/-Os/-O2, clang -Os/-O2; RISC-V GCC -Os/-O2. Every
-  listing rebuilds byte for byte; Ghidra finds 235-419 of 295-437 function starts without symbols;
-  the lifter accepts 30-31 % (GCC, ARM), 21-22 % (clang, ARM), 5-6 % (GCC, RISC-V).
-- [ ] **What keeps the lifter at a third**, in order of size: (1) functions that never return (the
-  demo's tasks, 63-78 per build) or are handlers: accepted only through system-run scenarios, so the
-  bench targets need device models of the MPS2 and virt boards (UART, timers, NVIC/SysTick, CLINT)
-  and scenarios; (2) callers that keep values in scratch registers across a call or read what a
-  callee leaves (GCC's -fipa-ra; on RISC-V most of the rest): a build with -fno-ipa-ra to measure
-  it, and C that leaves those registers as the original does (the lifted C knows their values);
-  (3) a few disagreements and failed generations per build (FAIL [generated N], [case generation]):
-  each to be traced (lifter bug or harness).
+  listing rebuilds byte for byte; Ghidra finds 235-419 of 295-437 function starts without symbols.
+  The lifter, first measurement against the latest one before the system run (2026-10-19): GCC ARM
+  30-31 % to 46-51 %, clang ARM 21-22 % to 46-47 %, RISC-V -Os 5 % to 42 %, -O2 6 % to 35 %.
+- [x] **System runs of both boards**: the Cortex-M exception model (dread.models.nvic: priorities,
+  nesting, BASEPRI, PendSV, SVCall, the process stack; Unicorn enters no handler itself) with QEMU's
+  MPS2 board (CMSDK UART, two timers), and RISC-V's traps (dread.models.clint: mtime/mtimecmp, ecall
+  and timer traps through mtvec) with the virt board (NS16550, CLINT); a boot scenario of about 90
+  ticks each (3 s on ARM, 0.4 s on RISC-V). Over 5000 ticks of the full ARM demo its own check task
+  reports that every test passes (at four clock units per count; at one, one test that its source
+  says may fail when the idle task starves). The recipe doubles the ARM demo's stacks: GCC 16 gives
+  one task a frame of 192 of its 320 bytes. `dread bench measure` has a record step: the functions
+  left uncovered get inputs recorded in the scenarios (dread sysrecord), and the lift check runs again.
+- [x] **Loop cases** for functions that never return (a task's loop, a main loop: 63-78 per build):
+  their callees stubbed, each case compared at the same stub call in both images (or at the call of
+  a callee that never returns, which ends the run); dread lift --check tries them first and leaves
+  the rest to the system run. On the GCC -Os build: 40 accepted so, against 12 by the system run,
+  and 226 of 366 functions lifted (62 %; 187 before loop cases and the two fixes below). The
+  benchmark also brought: generated cases cached against the whole image (a configuration change
+  kept stale cases of byte-identical functions whose globals had moved), and loads of code told
+  better: from another function's extent, or from the room the overlay fills (behind the image, its
+  free ranges): cases had pointed a queue into a pool and behind the image, where the rebuilt image
+  has C (disagreements on that build from about 22 to 8).
+- [ ] **What keeps the lifter below two thirds**, from the measurement after loop cases: (1) coverage
+  misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
+  reaches the code (a yielding function records nothing: every call takes PendSV), longer or more
+  varied scenarios for the rest; (2) functions that never return whose loop cases miss instructions
+  (about 30): mostly a path that needs every check of the loop to pass in one case (a stubbed receive
+  that must write exactly the value compared), beyond the compare-guided stage's budget on runs that
+  long, and their system check needs every instruction run; (3) a few disagreements per build,
+  each to be traced (several are callees lifted together whose own cases agree); (4) scratch
+  registers across calls (a few per build; GCC's -fipa-ra): a build with -fno-ipa-ra to measure what
+  is left. The RISC-V port's untyped handlers (labels in a section with mapping symbols) are missing
+  from the ground truth.
 - [ ] **The rest of the matrix**: clang for RISC-V; MSP430 (16-bit port) with TI's GCC -Os.
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger).
