@@ -30,8 +30,13 @@ Output, one block per function, in this form (other tools read it):
     REFUSED NAME [label]: ...       a written case that reads code as data or writes into the image,
                                     or a case whose two images differ where the original's own
                                     outcome changes when its stack starts STACK_SHIFT bytes lower
-                                    (it took a stack address for a value: C's frames lie otherwise;
-                                    the case is not compared and runs nothing for coverage)
+                                    (it took a stack address for a value: C's frames lie otherwise),
+                                    or where every difference changes in the original too when what
+                                    lies below the stack pointer at its function entries changes
+                                    (it read stale stack data, an uninitialised local: what earlier
+                                    frames left there, which C, laying out its frames and saving
+                                    other values in them, leaves otherwise; stale_explains); such a
+                                    case is not compared and runs nothing for coverage
     UNTESTED NAME
 
 Exit status 1 when anything failed, is uncovered or untested. Functions run in parallel worker
@@ -56,6 +61,8 @@ from dread.util.poolorder import longest_first
 
 RUN = {}        # what the workers need; filled before they are forked
 STACK_SHIFT = 0x40      # bytes the stack moves for the check that a case's outcome depends on it
+STALE_SPAN = 0x400      # bytes below the stack pointer the stale-data check fills at every function entry
+STALE_FILLS = (0xA5, 0x5A)  # the bytes it fills them with, one run each
 REBUILT_BUDGET = 10     # the rebuilt image may take this many times a case's limit (C runs slower than
                         # the original: lifted C's loops take more instructions); a hang case gets the same
 
@@ -105,6 +112,48 @@ def stack_moves_it(name, addr, args, limit, setup, kept, why, first):
         return Result(r.ret, {a: v for a, v in r.writes.items() if not lo <= a < hi}, r.calls, r.saved,
                       r.layout, r.kept, r.why)
     return bool(outside(first).diff(outside(again)))
+
+
+def stale_explains(name, addr, args, limit, setup, kept, why, first, rebuilt):
+    """Whether stale stack data the original read explains every difference between the images: the
+    original runs again with STALE_SPAN bytes below the stack pointer filled at every function entry
+    (once with each of STALE_FILLS), so that an uninitialised local, of the function or of a callee,
+    reads the fill instead of what earlier frames left; when every output in which the images differ
+    changes there too, C cannot be held to it (it lays out its frames otherwise and saves other
+    values in them; FreeRTOS's timer commands carry a union member nobody set into the timer queue).
+    Returns a short text of those outputs, or None. A difference the fills do not move, or an
+    original that fails with a fill, keeps the case compared."""
+    images = first.differences(rebuilt)
+    if not images:
+        return None
+    lay = RUN["layout"]
+    entries = frozenset(e & ~1 for e in Machine.entries.get((lay.target.file, lay.image.name), ()))
+    moved = set()
+    for fill in STALE_FILLS:
+        m = Machine(lay, RUN["original"], isa_of=RUN["isa_of"])
+        m.plan, m.replay, m.function = [], False, name
+        m.kept, m.kept_why = kept, why
+        m.stale_fill = (fill, STALE_SPAN, entries | {addr & ~1})
+        try:
+            setup(m)
+            again = m.call(addr, *args, max_instructions=limit)
+        except Exception:
+            return None
+        moved |= first.differences(again)
+    if not images <= moved:
+        return None
+    memory = sorted(k[1] for k in images if isinstance(k, tuple) and k[0] == "memory")
+    runs = []
+    for a in memory:
+        if runs and a == runs[-1][1] + 1:
+            runs[-1][1] = a
+        else:
+            runs.append([a, a])
+    shown = ["memory " + ", ".join("0x%x" % lo if lo == hi else "0x%x-0x%x" % (lo, hi) for lo, hi in runs[:4])
+             + (", ..." if len(runs) > 4 else "")] if runs else []
+    shown += sorted(k if isinstance(k, str) else "%s %s" % k for k in images if not (isinstance(k, tuple)
+                                                                                    and k[0] == "memory"))
+    return "; ".join(shown)
 
 
 def run_function(name):
@@ -194,6 +243,15 @@ def run_function(name):
             lines.append("REFUSED %s [%s]: the original's outcome depends on where the stack lies (it differs "
                          "with the stack %d bytes lower): a stack address taken for a value; not compared"
                          % (name, label, STACK_SHIFT))
+            continue
+        stale = stale_explains(name, addr, args, limit, setup, kept, why, out[0], out[1]) \
+            if diff and not depends and not isinstance(out[0], Exception) and not isinstance(out[1], Exception) \
+            else None
+        if stale:
+            refused += 1
+            lines.append("REFUSED %s [%s]: the original read stale stack data (an uninitialised local): every "
+                         "difference between the images (%s) changes in the original too when what lies below "
+                         "the stack pointer at its function entries changes; not compared" % (name, label, stale))
             continue
         covered |= case_covered
         if diff:

@@ -34,7 +34,13 @@ is UNCOVERED; code no input can reach is declared with the reason. A case whose 
 once more on the original with the stack starting lower: if the original's own outcome changes, it
 took a stack address for a value (a random generator seeded with the address of a local, a pointer
 an index pushed past a local array), which C, laying out its frames otherwise, cannot reproduce, and
-the case is refused rather than failed.
+the case is refused rather than failed. Likewise when the original read stale stack data, an
+uninitialised local whose bytes are what earlier frames left: the original runs again with the
+stack below the stack pointer filled at every function entry (twice, with two bytes), and when every
+difference between the images changes there too, C cannot be held to it (it lays out its frames
+otherwise and saves other values in them) and the case is refused. FreeRTOS's timer commands carry
+a union member nobody set into the timer queue so. A difference the fills do not move keeps the case
+failed; a refused case is not compared and runs nothing for coverage.
 
 ## 4. Where inputs come from
 

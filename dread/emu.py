@@ -148,6 +148,25 @@ class Result:
             self._ranges = [(lo, bytes(data)) for lo, data in self._ranges]
         return self._ranges
 
+    def differences(self, other):
+        """What differs from another result, every item named, as diff() decides: "return",
+        "calls", ("saved", register), ("kept", register), ("memory", address); empty when they
+        agree. (dread.runner compares the differences of two pairs of results.)"""
+        keys = set()
+        in_stack = self.layout.in_stack if self.layout else (lambda a: False)
+        if self.ret != other.ret and not all(in_stack(r & 0xFFFFFFFF) for r in (self.ret, other.ret)):
+            keys.add("return")
+        if self.calls != other.calls:
+            keys.add("calls")
+        names = self.layout.saved_names if self.layout else ["r%d" % (i + 4) for i in range(len(self.saved))]
+        keys |= {("saved", n) for n, a, b in zip(names, self.saved, other.saved) if a != b}
+        mine, theirs = dict(self.kept), dict(other.kept)
+        keys |= {("kept", n) for n in set(mine) | set(theirs) if mine.get(n) != theirs.get(n)}
+        if self.ranges != other.ranges:
+            keys |= {("memory", a) for a in set(self.writes) | set(other.writes)
+                     if self.writes.get(a) != other.writes.get(a)}
+        return keys
+
     def diff(self, other):
         """Readable differences to another result; empty when they agree."""
         out = []
@@ -339,6 +358,9 @@ class Machine:
         self.timed_out = False      # the last call ran into its instruction limit
         self.stack_preset = set()   # stack bytes call() wrote for the call itself (a pushed return address)
         self.stack_shift = 0        # bytes below the stack top where call() starts the stack (dread.runner)
+        self.stale_fill = None      # (byte, span, entries): at every block that starts at one of the
+                                    # entries, span bytes below sp (down to the stack's bottom) become
+                                    # byte: what earlier frames left there is gone (dread.runner)
         self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
         # A system call (svc, ecall) runs as a no-op, logged in order: its handler is the firmware's and
         # not modelled (FreeRTOS's RISC-V port yields with ecall). Any other CPU exception stops the run
@@ -728,6 +750,18 @@ class Machine:
             poll["count"] = 0
         for later in self.laters.values():
             later["count"] = 0
+        if self.stale_fill is not None and not getattr(self, "_stale_hooked", False):
+            self._stale_hooked = True
+            fill, span, entries = self.stale_fill
+            bottom = lay.stack_top - lay.stack_size
+
+            def stale(uc, address, size, user):
+                if address in entries:
+                    sp = uc.reg_read(lay.sp)
+                    low = max(bottom, sp - span)
+                    if low < sp:
+                        uc.mem_write(low, bytes([fill]) * (sp - low))
+            self.hook_add(UC_HOOK_BLOCK, stale)
         # The limit: Unicorn's own count calls a hook before every instruction (long runs went three
         # to six times slower), so it is a budget of bytes of code entered instead, kept by a block
         # hook in C (fasthooks.dread_budget) or, without the C helper, in Python, alike: as many

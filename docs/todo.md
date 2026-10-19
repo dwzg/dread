@@ -104,6 +104,16 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
   EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
   `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
   and optimisation levels matter to you?
+- **Compare a stale-data case except its stale bytes?** (2026-10-20) A case whose every difference
+  is bytes the original wrote from stale stack data (an uninitialised local; FreeRTOS's timer
+  commands carry a union member nobody set into the timer queue) is refused now, as a case whose
+  original took a stack address for a value is: rule 6, nothing compared is taken away. Where every
+  case carries such bytes, the function is left uncovered (vStartTimerDemoTask, and
+  xTaskIncrementTick by its recorded case: FAIL became UNCOVERED, about two functions on each MPS2
+  build). Options: (a) keep refusing; (b) compare such a case except the bytes the fills moved in
+  the original (the bytes whose value the original itself does not define), every other output as
+  before, the bytes left out named in the report. Recommended: (b); it takes from a comparison,
+  so it is yours to decide.
 
 ## Phase 4: cases, mutation, coverage (rest)
 
@@ -520,7 +530,10 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   cases recorded in the system run (a task's callees' answers and what they wrote, as stubs); (3) a few disagreements per build,
   each to be traced: a stack address taken for a value (a seed, a pointer an index pushed past a
   local) is refused since (the original's own outcome changes with its stack lower; dread
-  integration does not check that yet); another kind is an inconsistent input that makes a real
+  integration does not check that yet), and so is a case whose differences are all stale stack
+  data the original read (2026-10-20: FreeRTOS's timer commands copy an unset union member into the
+  timer queue, which was most of the disagreements of the MPS2 builds: vStartTimerDemoTask,
+  xTaskIncrementTick, the tick hooks; a question for the user whether to compare the rest); another kind is an inconsistent input that makes a real
   callee read beyond a local of the caller (a queue's item size of 24 for a 4-byte item: memcpy copies the frame behind
   it, laid out otherwise in the C), which the harness cannot tell yet (it would need to know which
   stack bytes the call wrote); (4) scratch

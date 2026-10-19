@@ -149,3 +149,73 @@ def test_a_case_whose_outcome_depends_on_where_the_stack_lies_is_refused(tmp_pat
     assert "REFUSED seed_from_stack [once]: the original's outcome depends on where the stack lies" in text, text
     assert "FAIL seed_from_stack" not in text and "seed_from_stack" in uncovered, text
     assert "ok   plain" in text, text
+
+
+def stale_target(tmp_path, cases):
+    """A target whose send copies a message with two members nobody set into a queue (FreeRTOS's
+    timer commands do so), behind leave, which leaves data in the stack; start and start2 call them.
+    The C of start leaves other data there (leave(x + 1): leave writes only its own frame), start2's
+    sends 3 where the original sends 2; plain is plain. Returns (target, image, rebuilt payload)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    if not shutil.which("arm-none-eabi-gcc"):
+        pytest.skip("needs arm-none-eabi-gcc")
+    (tmp_path / "t.c").write_text(
+        "struct msg { unsigned id, a, b, c; };\n"
+        "unsigned queue[4], other; volatile unsigned done;\n"
+        "__attribute__((noinline)) void put(const struct msg *m)\n"
+        "{ queue[0] = m->id; queue[1] = m->a; queue[2] = m->b; queue[3] = m->c; }\n"
+        "__attribute__((noinline)) void send(unsigned id, unsigned a) { struct msg m; m.id = id; m.a = a; put(&m); }\n"
+        "__attribute__((noinline)) void leave(unsigned x)\n"
+        "{ volatile unsigned junk[16]; for (int i = 0; i < 16; i++) junk[i] = x * 3 + i; }\n"
+        "void start(unsigned x) { leave(x); send(1, x); done = 1; }\n"     # (no tail call: send's frame
+        "void start2(unsigned x) { leave(x); send(2, x); done = 2; }\n"    # lies where leave's did)
+        "void plain(unsigned x) { other = x + 1; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-Wno-uninitialized", "-Wno-maybe-uninitialized", "-T", str(tmp_path / "t.ld"), "-e", "plain",
+                    "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    src = tmp_path / "src"
+    src.mkdir()
+    data = {name: address for kind, address, name in Program(target, image).symbols() if kind == "d"}
+    (src / "rewritten.c").write_text(
+        "#define other (*(volatile unsigned *)0x%x)\n#define done (*(volatile unsigned *)0x%x)\n"
+        % (data["other"], data["done"]) +
+        "void leave(unsigned x); void send(unsigned id, unsigned a);\n"
+        "void start(unsigned x) { leave(x + 1); send(1, x); done = 1; }\n"
+        "void start2(unsigned x) { leave(x + 1); send(3, x); done = 2; }\n"
+        "void plain(unsigned x) { other = x + 1; }\n")
+    os.makedirs(image.cases)
+    with open(os.path.join(image.cases, "few.py"), "w") as f:
+        f.write(cases)
+    payload = build.build(target, image, src=str(src), out=str(tmp_path / "recon"), quiet=True)
+    return target, image, payload
+
+
+def test_a_case_whose_differences_are_stale_stack_data_is_refused(tmp_path):
+    """start's C leaves other data where send's unset members lie, so the queue's last two words
+    differ; with the stack below the stack pointer filled at every function entry they change in
+    the original too: stale data, the case is refused, not failed (it runs nothing for coverage).
+    start2's C sends a 3 for a 2 besides: a difference the fills do not move, so it fails."""
+    target, image, payload = stale_target(tmp_path, 'case("start", "x = 5", lambda m: None, 5)\n'
+                                                    'case("start2", "x = 5", lambda m: None, 5)\n'
+                                                    'case("plain", "x = 1", lambda m: None, 1)\n')
+    failed, uncovered, text = run_all(target, payload)
+    assert "REFUSED start [x = 5]: the original read stale stack data" in text, text
+    assert "FAIL start " not in text and "start" in uncovered, text
+    assert "FAIL start2 [x = 5]" in text and "ok   plain" in text, text
