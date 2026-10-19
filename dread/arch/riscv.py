@@ -424,6 +424,16 @@ class RiscV:
             return {NAMES[f.rs2]}
         return set()
 
+    def frame_slot(self, insn):
+        """("store" or "load", register, offset) of sw rs2, imm(sp) and lw rd, imm(sp) (their compressed
+        forms too), else None (dread.regflow: saves and restores around a call)."""
+        f = fields(insn)
+        if f.rs1 == 2 and f.op == "sw" and f.rs2:
+            return "store", NAMES[f.rs2], f.imm
+        if f.rs1 == 2 and f.op == "lw" and f.rd:
+            return "load", NAMES[f.rd], f.imm
+        return None
+
     def stack_kind(self, insn):
         """RISC-V has no push and pop (frames are made with addi sp and single stores)."""
         return None
@@ -647,18 +657,38 @@ class RiscV:
         return bool(engine.reg_read(ur.UC_RISCV_REG_MSTATUS) & self.MSTATUS_MIE) and \
             bool(engine.reg_read(ur.UC_RISCV_REG_MIE) & self.MIE_MEIE)
 
-    def enter_interrupt(self, engine, number, resume, vectors, read_word, write_word):
-        """Take the machine external interrupt as the core does, returning to `resume`: mepc =
-        resume, mcause = 11 with the interrupt bit, MPIE = MIE, MIE = 0, MPP = machine; on at mtvec
-        (vectored mode: base + 4 * 11). `number` is the controller's line, not the core's cause.
-        mret, at the handler's end, runs in the emulator itself."""
+    def cpu_masks(self, engine):
+        """mstatus and mie, for a controller that decides itself (dread.models.clint)."""
+        return {"mstatus": engine.reg_read(ur.UC_RISCV_REG_MSTATUS), "mie": engine.reg_read(ur.UC_RISCV_REG_MIE)}
+
+    def system_exception(self, intno):
+        """ecall (from U, S or M mode: Unicorn's exception numbers are the causes) is a system call;
+        any other exception is a fault of the run."""
+        return "syscall" if intno in self.syscall_numbers else None
+
+    def _trap(self, engine, epc, cause):
         status = engine.reg_read(ur.UC_RISCV_REG_MSTATUS)
-        engine.reg_write(ur.UC_RISCV_REG_MEPC, resume)
-        engine.reg_write(ur.UC_RISCV_REG_MCAUSE, 0x80000000 | self.EXTERNAL)
+        engine.reg_write(ur.UC_RISCV_REG_MEPC, epc)
+        engine.reg_write(ur.UC_RISCV_REG_MCAUSE, cause)
         engine.reg_write(ur.UC_RISCV_REG_MSTATUS, (status & ~(self.MSTATUS_MIE | self.MSTATUS_MPIE))
                          | (self.MSTATUS_MPIE if status & self.MSTATUS_MIE else 0) | 3 << 11)
-        vector = engine.reg_read(ur.UC_RISCV_REG_MTVEC)
-        return (vector & ~3) + (4 * self.EXTERNAL if vector & 3 == 1 else 0)
+        return engine.reg_read(ur.UC_RISCV_REG_MTVEC)
+
+    def enter_interrupt(self, engine, number, resume, vectors, read_word, write_word, cause=None):
+        """Take an interrupt as the core does, returning to `resume`: mepc = resume, mcause = the
+        cause with the interrupt bit, MPIE = MIE, MIE = 0, MPP = machine; on at mtvec (vectored mode:
+        base + 4 * cause). cause: the core's (a controller's core_cause: the CLINT's timer 7 and
+        software 3); without it the machine external interrupt (11), `number` being the controller's
+        line. mret, at the handler's end, runs in the emulator itself."""
+        cause = self.EXTERNAL if cause is None else cause
+        vector = self._trap(engine, resume, 0x80000000 | cause)
+        return (vector & ~3) + (4 * cause if vector & 3 == 1 else 0)
+
+    def enter_syscall(self, engine, resume, read_word, write_word):
+        """ecall as the core takes it: mepc = the ecall's own address (resume is behind it: Unicorn
+        stopped there; ecall has no compressed form), mcause = 11 (from machine mode), on at mtvec's
+        base in either mode."""
+        return self._trap(engine, resume - 4, 11) & ~3
 
     def exception_return(self, engine, read_word):
         """Nothing to finish: mret runs in the emulator."""

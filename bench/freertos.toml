@@ -189,6 +189,26 @@ io = [[0x02000000, 0x02010000], [0x0c000000, 0x0c400000], [0x10000000, 0x1000100
 stack = {top = 0x80100000, size = 0x4000}
 sentinel = 0x7fff0000
 scratch = {base = 0x800e0000, size = 0x10000}
+
+# QEMU's virt board: the NS16550 UART and the CLINT's machine timer (mtime at rate 1: about 10,000
+# instructions a tick, the demo counting 25,000 mtime counts a tick)
+[models.uart]
+kind = "uart"
+base = 0x10000000
+data = 0x0
+status = 0x5                            # LSR
+tx_ready = 0x20                         # THRE
+rx_ready = 0x1                          # DR
+size = 0x8
+
+[models.clint]
+kind = "clint"
+base = 0x02000000
+rate = 1
+
+# From reset: the start-up, the tasks created, the scheduler started, the first ticks
+[scenarios.boot]
+limit = 3_000_000
 '''
 
 [[builds]]

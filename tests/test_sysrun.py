@@ -254,3 +254,122 @@ limit = 200_000
     assert run.how.startswith("until"), run.how
     assert run.reports["uart"]["sent"] == "aSsPbcQIqd", run.reports["uart"]["sent"]
     assert run.reports["interrupts"] == {11: 1, 14: 2, 16: 1}, run.reports["interrupts"]
+
+
+def test_clint_timer_and_software_interrupts():
+    """mtime counts the shared clock; the timer interrupt is a level while mtime >= mtimecmp (two
+    words, a half written alone keeps the other); msip comes first; MIE and the mie bit decide."""
+    from dread.models.clint import Clint
+    system = Clock()
+    c = Clint(system, "clint", {"base": 0x02000000, "rate": 10})
+    system.clock = 1000
+    assert c.read(0x0200BFF8, 4) == 100 and c.read(0x0200BFFC, 4) == 0
+    c.write(0x02004004, 4, 0)
+    c.write(0x02004000, 4, 150)
+    assert c.pending_interrupt() is None and c.next_event() == 1500
+    system.clock = 1500
+    assert c.pending_interrupt() == 7
+    assert not c.may_take(7, {"mstatus": 8, "mie": 0}) and c.may_take(7, {"mstatus": 8, "mie": 0x80})
+    c.write(0x02004004, 4, 1)                                  # the high word: far away again
+    assert c.read(0x02004000, 4) == 150 and c.pending_interrupt() is None
+    c.write(0x02000000, 4, 1)
+    assert c.pending_interrupt() == 3 and not c.may_take(3, {"mstatus": 0, "mie": 8})
+    c.write(0x0200BFF8, 4, 5)                                  # mtime set: counts on from there
+    system.clock = 1600
+    assert c.read(0x0200BFF8, 4) == 15
+
+
+@pytest.mark.skipif(not __import__("shutil").which("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+def test_riscv_traps_from_reset(tmp_path):
+    """A program with a vectored mtvec: ecall traps to the base with mepc on the ecall (the handler
+    steps over it), the timer interrupt comes at base + 4 * 7 once mtime reaches mtimecmp and MTIE
+    and MIE are set, and ends when the handler moves mtimecmp away."""
+    import subprocess
+    from dread import elfimport
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(r'''
+#define THR (*(volatile unsigned char *)0x10000000)
+#define LSR (*(volatile unsigned char *)0x10000005)
+#define MTIMECMP_LO (*(volatile unsigned *)0x02004000)
+#define MTIMECMP_HI (*(volatile unsigned *)0x02004004)
+#define MTIME_LO (*(volatile unsigned *)0x0200bff8)
+__attribute__((noinline)) void put(int c) { while (!(LSR & 0x20)) ; THR = c; }
+volatile int done;
+__attribute__((interrupt("machine"))) void sync_trap(void) {
+    unsigned epc;
+    __asm volatile ("csrr %0, mepc" : "=r"(epc));
+    put('E');
+    __asm volatile ("csrw mepc, %0" :: "r"(epc + 4));
+}
+__attribute__((interrupt("machine"))) void timer_trap(void) { put('T'); MTIMECMP_HI = 0xffffffff; done = 1; }
+__attribute__((interrupt("machine"))) void bad_trap(void) { put('?'); for (;;) ; }
+extern char vectors[];
+__asm__(".section .text.vectors\n.balign 64\n.option push\n.option norvc\n.global vectors\nvectors:\n"
+        " j sync_trap\n j bad_trap\n j bad_trap\n j bad_trap\n j bad_trap\n j bad_trap\n j bad_trap\n j timer_trap\n"
+        ".option pop\n");
+__attribute__((noreturn)) void cmain(void) {
+    __asm volatile ("csrw mtvec, %0" :: "r"((unsigned)vectors | 1));
+    put('a');
+    __asm volatile ("ecall" ::: "memory");
+    put('b');
+    MTIMECMP_HI = 0;
+    MTIMECMP_LO = MTIME_LO + 50;
+    __asm volatile ("csrs mie, %0" :: "r"(0x80));
+    __asm volatile ("csrs mstatus, %0" :: "r"(8));
+    while (!done) ;
+    put('c');
+    for (;;) ;
+}
+__asm__(".section .text.start\n.global _start\n.type _start, @function\n_start:\n li sp, 0x80090000\n j cmain\n"
+        ".size _start, . - _start\n");
+''')
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text.start) *(.text*) }\n"
+                                   " . = 0x80080000; .bss : { *(.sbss*) *(.bss*) } }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac_zicsr", "-mabi=ilp32", "-O2", "-nostdlib",
+                    "-ffunction-sections", "-T", str(tmp_path / "t.ld"), "-e", "_start", "-o", elf, str(tmp_path / "t.c")],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text('''[target]
+name = "traps"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "rom", base = 0x80000000, size = 0x10000, kind = "rom"},
+           {name = "ram", base = 0x80080000, size = 0x10000}]
+io = [[0x02000000, 0x02010000], [0x10000000, 0x10001000]]
+stack = {top = 0x80090000, size = 0x1000}
+sentinel = 0x7fff0000
+[image.main]
+original = "original/t.bin"
+base = 0x80000000
+entry = "_start"
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-O2"]
+[models.uart]
+kind = "uart"
+base = 0x10000000
+data = 0x0
+status = 0x5
+tx_ready = 0x20
+rx_ready = 0x1
+size = 0x8
+[models.clint]
+kind = "clint"
+base = 0x02000000
+rate = 1
+[scenarios.traps]
+until = {uart = "c"}
+limit = 200_000
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    image = t.image()
+    run = sysrun.run_image(t, image, image.payload(), t.scenarios["traps"])
+    assert run.how.startswith("until"), run.how
+    assert run.reports["uart"]["sent"] == "aEbTc", run.reports["uart"]["sent"]
+    assert run.reports["interrupts"] == {7: 1}, run.reports["interrupts"]

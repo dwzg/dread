@@ -31,25 +31,30 @@ STB_GLOBAL, STB_WEAK, STT_NOTYPE = 1, 2, 0
 
 
 def entry_labels(elf):
-    """[(entry, end, name)] of the global and weak labels without a type in executable sections
-    that have no mapping symbols: the entries of hand-written assembly where the assembler marks
-    nothing (GNU as for MSP430: libgcc's shift routines and shared epilogues have no .type). Each
-    runs to the next label or function of its section; one inside a sized function is left out.
-    Sections with mapping symbols (ARM, RISC-V) are left alone: a label there (an ARM vector table
-    named _start) is not a function."""
+    """[(entry, end, name)] of functions hand-written assembly marks only partly: in every executable
+    section, functions declared without a size (.type without .size: FreeRTOS's RISC-V start-up
+    names _start so); in executable sections without mapping symbols also the global and weak labels
+    without a type (GNU as for MSP430: libgcc's shift routines and shared epilogues have no .type).
+    Each runs to the next label or function of its section; one inside a sized function is left
+    out. Untyped labels in sections with mapping symbols (ARM, RISC-V) are left alone: one there (an
+    ARM vector table named _start) is not a function."""
     marked = set(elf.mapping())
     out = []
     for index, s in enumerate(elf.sections):
-        if not (s.alloc and s.code and s.size) or s.nobits or index in marked:
+        if not (s.alloc and s.code and s.size) or s.nobits:
             continue
         funcs = [(sym.value & ~1, (sym.value & ~1) + sym.size) for sym in elf.symbols
                  if sym.kind == STT_FUNC and sym.size and sym.shndx == index]
         labels = {}
         for sym in elf.symbols:
-            if sym.shndx == index and sym.kind == STT_NOTYPE and sym.bind in (STB_GLOBAL, STB_WEAK) and \
-                    sym.name and sym.name[0] not in ".$" and s.addr <= sym.value < s.addr + s.size and \
-                    not any(lo <= sym.value < hi for lo, hi in funcs):
-                labels.setdefault(sym.value, sym.name)
+            if sym.shndx != index or not sym.name or sym.name[0] in ".$":
+                continue
+            value = sym.value & ~1 if sym.kind == STT_FUNC else sym.value
+            if not s.addr <= value < s.addr + s.size or any(lo <= value < hi for lo, hi in funcs):
+                continue
+            if (sym.kind == STT_FUNC and not sym.size) or \
+                    (index not in marked and sym.kind == STT_NOTYPE and sym.bind in (STB_GLOBAL, STB_WEAK)):
+                labels.setdefault(value, sym.name)
         starts = sorted(set(labels) | {lo for lo, _ in funcs})
         for entry, name in sorted(labels.items()):
             later = [a for a in starts if a > entry]

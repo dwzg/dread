@@ -253,6 +253,7 @@ class System:
             self.last_new = self.clock
             if model is not None:
                 model.write(addr, size, value & mask)
+                self.schedule()             # a write may set when the model acts next (a timer's compare)
         else:
             if model is not None:
                 got = model.read(addr, size)
@@ -311,7 +312,8 @@ class System:
             self.interrupts[number] += 1
             self.log.append(("interrupt", controller.name, number))
             vectors = controller.vector_base() if hasattr(controller, "vector_base") else self.image.vectors
-            pc = arch.enter_interrupt(uc, number, pc, vectors, word, write_word)
+            cause = controller.core_cause(number) if hasattr(controller, "core_cause") else None
+            pc = arch.enter_interrupt(uc, number, pc, vectors, word, write_word, cause=cause)
             self.interrupts_changed()
             return pc
         how = None
@@ -334,6 +336,10 @@ class System:
                 how = self.fault or "emulator error at pc 0x%x: %s" % (uc.reg_read(self.layout.pc), error)
                 break
             pc = arch.resume_address(uc)
+            if self.syscall and hasattr(arch, "enter_syscall"):    # a trap the layer takes alone (ecall)
+                self.syscall = False
+                self.log.append(("syscall",))     # (not its address: code that moved is elsewhere)
+                pc = arch.enter_syscall(uc, pc, word, write_word)
             if self.syscall:                    # svc: its exception, taken at once behind it
                 self.syscall = False
                 number = getattr(arch, "syscall_exception", None)

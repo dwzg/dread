@@ -455,6 +455,18 @@ class Arm:
             return {self._name(insn.reg_name(o.reg)) for o in ops[1:] if o.type == csarm.ARM_OP_REG}
         return set()
 
+    def frame_slot(self, insn):
+        """("store" or "load", register, offset) of str rN, [sp, #imm] and ldr rN, [sp, #imm] without
+        writeback, index or condition (not ldr pc), else None (dread.regflow: saves and restores around
+        a call)."""
+        ops = insn.operands
+        if insn.id in (csarm.ARM_INS_STR, csarm.ARM_INS_LDR) and not insn.writeback and self.predicate(insn) is None \
+                and len(ops) == 2 and ops[0].type == csarm.ARM_OP_REG and ops[1].type == csarm.ARM_OP_MEM \
+                and not ops[1].mem.index and ops[1].mem.base == csarm.ARM_REG_SP and ops[0].reg != csarm.ARM_REG_PC:
+            return ("store" if insn.id == csarm.ARM_INS_STR else "load"), self._name(insn.reg_name(ops[0].reg)), \
+                ops[1].mem.disp
+        return None
+
     def stack_kind(self, insn):
         """"push" for push, stmdb sp! and str rN, [sp, #-4]!; "pop" for pop, ldm sp! and
         ldr rN, [sp], #4; else None. (Capstone shows the single-register forms as str/ldr or as
@@ -581,7 +593,7 @@ class Arm:
             return {2: "syscall", 8: "return"}.get(intno)
         return None
 
-    def enter_interrupt(self, engine, number, resume, vectors, read_word, write_word):
+    def enter_interrupt(self, engine, number, resume, vectors, read_word, write_word, cause=None):
         """Take interrupt `number` (A profile: the IRQ, number ignored; M profile: the exception
         number, 16 + the line) as the core does, returning to `resume`. Returns where to go on.
 

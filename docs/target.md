@@ -170,7 +170,9 @@ pins), `intc` (an A-profile controller with pending, enable and acknowledge regi
 the IRQ vector), `nvic` (the Cortex-M exception controller: the NVIC, the SCB's exception registers
 and SysTick, with priorities of `priority_bits` bits, PRIGROUP, nesting, BASEPRI and PRIMASK, PendSV,
 and SVCall for svc; exceptions are taken through VTOR's vector table, on the main or the process
-stack as the core does). Example, a serial port:
+stack as the core does), `clint` (RISC-V's core-local interruptor: mtime from the shared clock,
+mtimecmp and msip, the machine timer and software interrupts under mstatus.MIE and mie; ecall traps
+to mtvec, mret runs in the emulator). Example, a serial port:
 
 ```toml
 [models.uart]

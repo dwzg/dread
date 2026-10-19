@@ -208,3 +208,123 @@ cflags = ["-march=rv32imac", "-mabi=ilp32", "-Os"]
     target = Target.load(str(tmp_path))
     flow = regflow.analyse(Program(target))
     assert not set(flow.kept_regs("helper")) - {"a0"}, flow.kept_regs("helper")      # (a0..a7 before)
+
+
+def _rv_flow(tmp_path, files, cflags=("-O2",)):
+    """regflow of a small RV32 program built from {name: text} (C or assembly)."""
+    import subprocess
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text*) } }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac_zicsr", "-mabi=ilp32", "-nostdlib", "-ffunction-sections",
+                    *cflags, "-T", str(tmp_path / "t.ld"), "-Wl,-e,0", "-o", elf] + [str(tmp_path / n) for n in files],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text('''[target]
+name = "flow"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "rom", base = 0x80000000, size = 0x10000, kind = "rom"}]
+stack = {top = 0x80090000, size = 0x1000}
+sentinel = 0x7fff0000
+[image.main]
+original = "original/t.bin"
+base = 0x80000000
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32"]
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    return regflow.analyse(Program(Target.load(str(tmp_path))))
+
+
+@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+def test_arguments_kept_in_the_frame_are_read(tmp_path):
+    """-O0 keeps every argument in its frame at the entry and loads it later: a use, not a variadic
+    save area (the rule for those made every -O0 function read nothing)."""
+    flow = _rv_flow(tmp_path, {"t.c": "int add(int a, int b) { return a + b; }\n"}, ("-O0",))
+    assert flow.read_regs("add") == ["a0", "a1"], flow.read_regs("add")
+
+
+@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+def test_a_variadic_save_area_beside_a_named_argument(tmp_path):
+    """sprintf keeps its unnamed argument registers and its first argument in its frame (the first
+    one's address goes to a callee): the save area is no use, the first argument is."""
+    flow = _rv_flow(tmp_path, {"t.c": '''#include <stdarg.h>
+__attribute__((noinline)) int sink(char **out, const char *fmt, va_list ap) { return **out + *fmt + va_arg(ap, int); }
+int fmt2(char *buf, const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r = sink(&buf, fmt, ap); va_end(ap); return r; }
+'''})
+    assert flow.read_regs("fmt2") == ["a0", "a1"], flow.read_regs("fmt2")
+
+
+@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+def test_a_save_around_a_call_of_a_register_never_set(tmp_path):
+    """GCC saves a register it believes live around a call also where nothing set it (FreeRTOS's
+    tick on RISC-V: t1 around its assertion call, and 135 functions looked as if their callers read
+    t1). Such a save and its restore are neither a read nor a write; an argument register so only in
+    a function that takes no frame address (g(&a) keeps an argument there for the callee)."""
+    flow = _rv_flow(tmp_path, {"t.S": '''
+    .text
+    .globl g, f, h, k
+    .type g, @function
+g:  li t1, 7
+    li a3, 9
+    ret
+    .size g, .-g
+    .type f, @function
+f:  addi sp, sp, -16
+    sw ra, 12(sp)
+    beqz a0, 1f
+    sw t1, 8(sp)
+    sw a3, 4(sp)
+    call g
+    lw t1, 8(sp)
+    lw a3, 4(sp)
+1:  lw ra, 12(sp)
+    addi sp, sp, 16
+    ret
+    .size f, .-f
+    .type h, @function
+h:  addi sp, sp, -16
+    sw ra, 12(sp)
+    addi a1, sp, 4
+    sw a3, 8(sp)
+    call g
+    lw a3, 8(sp)
+    lw ra, 12(sp)
+    addi sp, sp, 16
+    ret
+    .size h, .-h
+    .type k, @function
+k:  addi sp, sp, -16
+    sw ra, 12(sp)
+    li t1, 3
+    li a0, 1
+    call f
+    mv a0, t1
+    lw ra, 12(sp)
+    addi sp, sp, 16
+    ret
+    .size k, .-k
+'''})
+    assert flow.read_regs("f") == ["a0"], flow.read_regs("f")
+    assert "a3" in flow.read_regs("h"), flow.read_regs("h")      # it takes a frame address
+    assert flow.read_regs("k") == [], flow.read_regs("k")        # f leaves t1 as it found it
+
+
+def test_arm_frame_slots():
+    """The ARM layer's frame slots: single-register str/ldr at sp plus a constant; writeback forms
+    (pushes and pops) and loads of pc are none."""
+    from dread.arch.arm import Arm
+    a = Arm(isa="t32", profile="m", cpu="cortex-m3")
+    slot = lambda code: a.frame_slot(a.decode(code, 0x1000, "t32"))
+    assert slot(b"\xcd\xf8\x08\xc0") == ("store", "r12", 8) and slot(b"\xdd\xf8\x08\xc0") == ("load", "r12", 8)
+    assert slot(b"\x02\x93") == ("store", "r3", 8) and slot(b"\x02\x9b") == ("load", "r3", 8)
+    assert slot(b"\x4d\xf8\x04\x3d") is None and slot(b"\x5d\xf8\x04\xfb") is None

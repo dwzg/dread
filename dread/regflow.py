@@ -53,7 +53,9 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 3                 # 3: entry spills (variadic functions) are no use
+VERSION = 4                 # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+                            # is (-O0 keeps its arguments so and uses them), and a save around a call of a
+                            # register never set before is neither a read nor a write
 
 
 class RegFlow:
@@ -150,12 +152,14 @@ def _rows(program, fn, mask, entry_name):
                 joins.add(target & ~1)
     out, state = [], {}
     flags = mask(["flags"])
-    # The entry's straight run: a store of a register nothing has written yet where sp points (or a
-    # copy of sp plus a constant) is a spill, no use, like a push: clang's variadic functions keep
-    # r1-r3 so (add r0, sp, #12; stm r0!, {r1, r2, r3}) where GCC pushes them, and printf made every
-    # caller of an assertion handler look as if it read r3.
+    # The entry's straight run: a variadic function's save area, the unnamed argument registers
+    # stored where sp points (or a copy of sp plus a constant) before anything writes them, is no use,
+    # like a push: clang's variadic functions keep r1-r3 so (add r0, sp, #12; stm r0!, {r1, r2, r3})
+    # where GCC pushes them, and printf made every caller of an assertion handler look as if it read
+    # r3. Other stores so stay uses: -O0 keeps every argument in its frame and loads it later.
     entry, sp_based, written = True, {"sp"}, set()
     spills = hasattr(arch, "frame_stores")
+    save_area = variadic_save_area(program, fn, insns, joins) if spills else set()
     for a, insn in zip(fn.insns, insns):
         if a != fn.entry and a in joins:
             entry = False
@@ -169,7 +173,7 @@ def _rows(program, fn, mask, entry_name):
         reads, writes = arch.reg_effects(insn)
         stack = arch.stack_kind(insn)
         if entry and spills:
-            spilled = {r for r in arch.frame_stores(insn, sp_based) if r not in written}
+            spilled = {r for r in arch.frame_stores(insn, sp_based) if r not in written} & save_area
             if spilled:
                 reads = set(reads) - spilled
             copy = arch.sp_copy(insn)
@@ -193,6 +197,37 @@ def _rows(program, fn, mask, entry_name):
         if wm & flags or kind in ("call", "icall"):
             state = {}
     return out
+
+
+def variadic_save_area(program, fn, insns, joins):
+    """The argument registers a variadic function stores in its frame on the entry's straight run
+    before anything writes them: the run of stored ones that ends with the last argument register and
+    has an argument register below it that is not stored (r1-r3 or a1-a7 behind one named argument;
+    sprintf also keeps its first argument there, a use: its address goes to a callee); else the empty
+    set. -O0 stores every argument register from the first on, and those stay uses."""
+    arch = program.arch
+    args = list(program.target.abi.arg_regs)
+    sp_based, written, stored = {"sp"}, set(), set()
+    for a, insn in zip(fn.insns, insns):
+        if insn is None or (a != fn.entry and a in joins):
+            break
+        kind, _, _ = arch.flow(insn)
+        _, writes = arch.reg_effects(insn)
+        stored |= {r for r in arch.frame_stores(insn, sp_based) if r not in written}
+        copy = arch.sp_copy(insn)
+        sp_based -= set(writes)
+        if copy is not None:
+            sp_based.add(copy)
+        written |= set(writes)
+        if kind != "next":
+            break
+    saved = stored & set(args)
+    if args[-1] not in saved:
+        return set()
+    first = len(args) - 1
+    while first > 0 and args[first - 1] in saved:
+        first -= 1
+    return set(args[first:]) if first > 0 else set()     # (all of them stored: -O0 keeping its arguments)
 
 
 def scratch_names(target, arch):
@@ -224,6 +259,8 @@ class Analysis:
         self.graphs = {fn.name: self._graph(fn, self.rows[fn.name], entry_name,
                                             following.get(fn.entry, program.end(fn)))
                        for fn in program.functions}
+        for fn in program.functions:
+            self._neutral_saves(fn)
         self.may = self._may_write()
         self.kept = {name: 0 for name in self.rows}
         self.reads = {name: 0 for name in self.rows}
@@ -404,6 +441,78 @@ class Analysis:
         for i in left:
             succ[i].extend(roots)
         return lost or not roots
+
+    SAVE_RUN = 64                       # instructions from a save to its restore at most
+
+    def _neutral_saves(self, fn):
+        """A scratch register stored in the frame while it still holds its value from the entry on every
+        path, and loaded back from that slot behind a call, all on one straight run, is neither read by
+        the store nor written by the load: GCC saves a register it believes live around a call so, also
+        where nothing has set it (FreeRTOS's tick on RISC-V saved t1 around its assertion call, and 135
+        functions looked as if their callers read t1). Every load of the slot must be the restore of such
+        a pair (GCC reuses a slot for several registers' saves), no frame address may be taken on the
+        run, and an argument register only counts in a function that takes no frame address at all
+        (g(&a) keeps an argument so for a callee to read)."""
+        arch = self.program.arch
+        slot_of = getattr(arch, "frame_slot", None)
+        code = self.rows[fn.name]
+        if slot_of is None or not code:
+            return
+        succ = self.graphs[fn.name][0]
+        insns = [self.program.insn(row.address) for row in code]
+        addressed = any(i is not None and arch.sp_copy(i) not in (None, "sp") for i in insns)
+        args = set(self.program.target.abi.arg_regs) if addressed else set()
+        slots = [slot_of(i) if i is not None else None for i in insns]
+        preds = [0] * len(code)
+        for i in range(len(code)):
+            for j in succ[i]:
+                preds[j] += 1
+        pairs = []                          # (save, restore, register, slot) on one run around a call
+        for i, s in enumerate(slots):
+            if not s or s[0] != "store" or not self.bit.get(s[1]):
+                continue
+            reg, offset, bit = s[1], s[2], self.bit[s[1]]
+            j, called = i, False
+            for _ in range(self.SAVE_RUN):
+                if len(succ[j]) != 1 or preds[succ[j][0]] != 1:
+                    break                   # a branch, or something joins in
+                called = called or code[j].kind in ("call", "icall")
+                j = succ[j][0]
+                if slots[j] == ("load", reg, offset):
+                    if called:
+                        pairs.append((i, j, reg, offset))
+                    break
+                if code[j].writes & bit or "sp" in code[j].written or (slots[j] and slots[j][2] == offset) or \
+                        (insns[j] is not None and arch.sp_copy(insns[j]) not in (None, "sp")):
+                    break
+        restores = {j for _, j, _, _ in pairs}
+        held = {s[2] for k, s in enumerate(slots) if s and s[0] == "load" and k not in restores}
+        pairs = [p for p in pairs if p[3] not in held]      # a slot another load reads holds a value
+        restored = {j: (i, self.bit[reg]) for i, j, reg, _ in pairs}
+        start = next((i for i, row in enumerate(code) if row.address == fn.entry), None)
+        if start is None or not pairs:
+            return
+        # Forward: the registers that may be written on some path to each row (a call writes every
+        # scratch register; a restore puts back what its save found)
+        before = [None] * len(code)
+        before[start], work = 0, [start]
+        while work:
+            i = work.pop()
+            out = before[i] | code[i].writes | (self.everything if code[i].kind in ("call", "icall") else 0)
+            if i in restored:
+                save, bit = restored[i]
+                out = (out & ~bit) | ((before[save] or 0) & bit)
+            for j in succ[i]:
+                new = out if before[j] is None else before[j] | out
+                if new != before[j]:
+                    before[j] = new
+                    work.append(j)
+        for i, j, reg, offset in pairs:
+            bit = self.bit[reg]
+            if before[i] is None or before[i] & bit or reg in args:
+                continue
+            code[i] = code[i]._replace(uses=code[i].uses & ~bit)
+            code[j] = code[j]._replace(kills=code[j].kills & ~bit, writes=code[j].writes & ~bit)
 
     def _may_write(self):
         """Registers each function may write, its callees included (least fixpoint)."""

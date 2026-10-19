@@ -48,6 +48,7 @@ generator, the lifter, the reading aids)
 | `mark_call(program, insn)`, `link_pair(prev, insn, isa)` | optional: calls that are not plain calls (stubs, switch helpers, two-instruction calls: RISC-V's auipc + jalr, and its auipc/lui + addi addresses) |
 | `link_reg`, `veneer_reg` | the register a call leaves the return address in (None where the call pushes it: MSP430), and the one veneers go through |
 | `word`, `reg_bits` | the size of a stack argument (bytes) and of a register (bits) |
+| `frame_stores(insn, sp_based)`, `sp_copy(insn)`, `frame_slot(insn)` | optional, for dread.regflow: the registers a store puts where sp (or a copy of it) points, the register an instruction sets to sp plus a constant, and ("store" or "load", register, offset) of a single-register access at sp plus a constant (a variadic save area at the entry, and saves around a call, are no reads) |
 
 **Placing C** (the overlay)
 
@@ -74,7 +75,7 @@ generator, the lifter, the reading aids)
 | `settle_it(engine)` | optional: repair after a hook (ARM: Thumb IT state) |
 | `syscall_numbers` | the engine's exception numbers of a system call (ARM: svc 2; RISC-V: ecall 8, 9, 11). dread.emu runs one as a no-op logged as `("svc",)` (`log_svc()` adds the argument registers); any other exception number is a fault. Unicorn never enters a handler through the vector table, with or without a hook, so a system run that needs the handler models the entry itself |
 | `reset`, `interrupts_enabled`, `enter_interrupt`, `exception_return`, `resume_address`, `flags_value` | the system run's core: reset, interrupt entry and return |
-| `cpu_masks(engine)`, `system_exception(intno)`, `syscall_exception` | optional, for a controller with priorities and a core that raises exceptions itself: the masks the controller weighs (M profile: PRIMASK, FAULTMASK, BASEPRI), what an exception Unicorn raised means in a system run ("syscall", "return" or a fault), and the exception a system call raises (M profile: SVCall, 11) |
+| `cpu_masks(engine)`, `system_exception(intno)`, `syscall_exception`, `enter_syscall(engine, resume, read_word, write_word)` | optional, for a controller that decides itself and a core that raises exceptions itself: the masks the controller weighs (M profile: PRIMASK, FAULTMASK, BASEPRI; RISC-V: mstatus, mie), what an exception Unicorn raised means in a system run ("syscall", "return" or a fault), and a system call either as an exception a controller takes (M profile: SVCall, 11) or as a trap the layer takes alone (RISC-V: ecall to mtvec, mepc on the ecall). A controller whose numbers are the core's causes says so with `core_cause(number)`, passed to `enter_interrupt` as `cause` |
 
 ## ARM knowledge outside the layer
 
