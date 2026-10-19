@@ -586,18 +586,47 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   gizmo-msp430: 48 of 130 entries lift (62 of the refused are libgcc's shift routines, labels that
   fall into one another); the lift check accepts 26, 13 more are written by hand; irq_entry lifts but
   waits for an MSP430 system run.
-- [ ] **Stack arguments on MSP430**: the lifter refuses functions with arguments beyond r12-r15
-  (gizmo's parse_kv and sum6, libgcc's udivmodsi4) and their callers (apply_config); FreeRTOS's
-  task creation takes two on the stack. mul64 calls __mspabi_mpyll, which takes its second operand in
-  r8-r11 (the ABI's 64-bit helper convention): refused as reading what its caller leaves.
+- [x] **Stack arguments on MSP430**: the lifter refused functions with arguments beyond r12-r15
+  (gizmo's parse_kv and sum6, libgcc's udivmodsi4) and their callers (apply_config); FreeRTOS's task
+  creation takes two on the stack. Now they are parameters sa0, sa1, ... of the lifted C behind
+  p12-p15, read and written through their addresses, which TI's GCC 8.2 keeps in the slots the
+  caller passed them in (the original's places; it makes no sibling calls that could write them). A
+  call passes the frame words that lie where its callee reads them (a tail call its own stack
+  arguments), a call through an unknown register the lowest four frame words, as on ARM. Refused:
+  the address of a stack argument in a register (va_start), a frame word read again behind the call
+  it was passed to (the callee may change it, the C passed a copy; GCC's callers store anew), a tail
+  call with a frame, the return address (GCC's prologue moves it when a 32-bit argument is split
+  between r15 and the stack), what an interrupt saved. The fuzzer's functions take two stack words
+  of their own (read and written, words and bytes, through sp and the frame pointer) and call a
+  helper that takes two: nine seeds of 16 functions of 60 instructions with 16 inputs each, no
+  difference, nothing refused. gizmo-msp430: 56 of 130 entries lift (48 before); the lift check
+  accepts 32 (26 before): parse_kv, udivmodsi4 and libgcc's four 32-bit division entries; sum6 lifts
+  but src writes it by hand; apply_config lifts and agrees on its 70 cases, which never run the 37
+  instructions behind a parse_kv that succeeds (the case-generation item below). Found on the way:
+  the test of gizmo-msp430's rewritten functions had failed since the lifter came (two parse_uint
+  cases, a wrong upper word): the lifted __mspabi_mpyl returned r12 alone, the width the original's
+  callers read (it has none), while the rewritten parse_uint reads its 32-bit product. dread.build
+  now tells the lifter what the hand-written C calls (Lifter.src_calls), and the MSP430 lifter
+  returns r12-r15 from those (ARM and RISC-V do not use it yet); dread.regflow takes a runtime
+  helper's result by the ABI as read besides, so its cases compare it. A bench test still expected no
+  MSP430 lifter (failing since the lifter came too); it checks that the lifter takes the image now.
+  Not done: the stubs of generated cases log no stack words on any architecture (a wrong word passed
+  to a stubbed callee goes unseen), and written cases' stubs read them as ARM's 4-byte words at sp
+  (on MSP430 they lie above the return address); generated cases pass stack arguments in cells at
+  the stack top, which dread.runner.stack_moves_it does not move with the stack, so a case that
+  differs through one is refused, not failed (a planted mistake in udivmodsi4's flag shows as
+  UNCOVERED there, as FAIL in __mspabi_remul, which passes the flag from its frame).
+- [ ] **mul64 on MSP430** (from the item above): mul64 calls __mspabi_mpyll, which takes its second
+  operand in r8-r11 (the ABI's 64-bit helper convention): refused as reading what its caller leaves.
 - [ ] **Case generation on MSP430**: every generated input of gizmo's strncpy and main failed ("only 0
   of 100 generated inputs ran to the end"). strncpy's count is a u32 in r14:r15, small only when both
   halves are: a round of small arguments when fewer than four inputs finished (strncpy: 69 cases, all
   31 instructions). main's loop calls only through registers (mov #f, r10; call r10), which the
   generator's callee list missed, so no loop case could end at a stub: the layer names such callees
   now (register_call_targets; main: 6 loop cases, 38 of 51 instructions). Generator VERSION 20.
-  Left: script_run, gpio_set and handle_key keep instructions uncovered; why, before the FreeRTOS
-  build goes through. Generation on the MSP430 engine is slow (strncpy 193 s, main 322 s, with a
+  Left: script_run, gpio_set and handle_key keep instructions uncovered; so does apply_config, 55 of
+  whose 70 cases pass its text at 0x11, in the I/O region, and none in a buffer of the generator's
+  (its pointer argument not learned as one?); why, before the FreeRTOS build goes through. Generation on the MSP430 engine is slow (strncpy 193 s, main 322 s, with a
   benchmark running beside it).
 - [ ] **FreeRTOS's MSP430 build through the lift check** (msp430-gcc-Os: 250 functions).
 - [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the

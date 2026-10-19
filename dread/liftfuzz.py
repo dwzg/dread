@@ -39,11 +39,13 @@ Zicsr instructions; the assembler compresses what it can, so the compressed form
 (the 16-bit MSP430, dread.lift_msp430), with TI's msp430-elf-gcc: Msp430Generator (r4-r10 pushed,
 the frame written, r10 the buffer's address, r4 the frame pointer in the "fp" style, GCC's shared
 epilogues in the "ret" style; every addressing mode in word and byte form, dadd, rrc, rra, swpb, sxt,
-dint and eint). Its image holds libgcc's shared epilogues and nothing else of libgcc: lifted C that
-called a shift routine fails the build, reported per function and reduced like a difference. Found
-on its first runs: TI's GCC 8.2 deletes a volatile load and a store of the same value back to the
-same address as a move to itself. The image, its target directory and the lifted C go to a temporary
-directory, kept when something fails (or with --keep).
+dint and eint; two stack arguments of its own, which the cases pass and the body reads and writes
+through sp and the frame pointer, and a helper that takes two stack words). Its image holds
+libgcc's shared epilogues and nothing else of libgcc: lifted C that called a shift routine fails
+the build, reported per function and reduced like a difference. Found on its first runs: TI's GCC
+8.2 deletes a volatile load and a store of the same value back to the same address as a move to
+itself. The image, its target directory and the lifted C go to a temporary directory, kept when
+something fails (or with --keep).
 
     dread liftfuzz [--isa a32|t32|rv32|msp430] [--functions N] [--length L] [--inputs K] [--seed S]
                    [--reduce N] [--keep DIR]
@@ -803,7 +805,9 @@ MSP_HELPERS = [
     ("h0", ["xor r13, r12", "add r14, r12", "ret"]),                           # three registers in
     ("h1", ["mov r12, r14", "add r13, r12", "addc r14, r13", "ret"]),         # a 32-bit result: r12 and r13
     ("h2", ["sub r15, r12", "rra r12", "ret"]),                               # the fourth argument
+    ("h3", ["add 2(r1), r12", "mov.b 5(r1), r13", "xor r13, r12", "ret"]),    # stack word 0, word 1's top
 ]
+MSP_STACK_ARGS = 2          # stack words each function takes beyond r12-r15: the cases pass them
 
 
 class Msp430Generator:
@@ -814,11 +818,16 @@ class Msp430Generator:
     form with every source mode (registers, the constant generators, immediates, indexed, indirect,
     @r10+ undone behind it, absolute) and the destinations register, indexed, absolute and frame
     slots; rrc, rra, swpb, sxt; push and pop around a few instructions; dint, eint and nop; forward
-    jumps on the flags (most behind a bit test of a buffer word); calls of three helpers. The "ret"
-    style returns through a chain of shared epilogues (pops that fall into one another, as
-    __mspabi_func_epilog_N), the other pops and returns itself."""
+    jumps on the flags (most behind a bit test of a buffer word); calls of four helpers, one of which
+    takes two stack words (pushed, or stored below the frame, as GCC's callers do: never read again).
+    The function takes MSP_STACK_ARGS stack words of its own: a quarter of the frame-slot operands
+    address them (read and written, words and either byte). The "ret" style returns through a chain of
+    shared epilogues (pops that fall into one another, as __mspabi_func_epilog_N), the other pops and
+    returns itself."""
 
     thumb = False
+    stack_words = MSP_STACK_ARGS
+    TOP = 2 * len(MSP_SAVED) + FRAME        # the body's sp: bytes below the entry's
 
     def __init__(self, isa, rng):
         self.isa, self.rng, self.label, self.fp = isa, rng, 0, None
@@ -838,9 +847,16 @@ class Msp430Generator:
         return rng.choice([0x7F, 0x80, 0xFF, 0x100, 0x7FFF, 0x8000, 0xFFFF, 9, 10, 0x99, 0x9999]) \
             if rng.random() < 0.4 else rng.randrange(0x10000)
 
-    def frame_slot(self):
-        base = "r4" if self.fp and self.rng.random() < 0.5 else "r1"
-        return "%d(%s)" % (2 * self.rng.randrange(FRAME // 2), base)
+    def frame_slot(self, byte=False):
+        """A word of the frame or, a quarter of the time, one of the function's stack arguments
+        (above the return address), through sp or the frame pointer; for a byte either half."""
+        rng = self.rng
+        base = "r4" if self.fp and rng.random() < 0.5 else "r1"
+        if rng.random() < 0.25:
+            at = self.TOP + 2 + 2 * rng.randrange(MSP_STACK_ARGS)
+        else:
+            at = 2 * rng.randrange(FRAME // 2)
+        return "%d(%s)" % (at + (rng.randrange(2) if byte else 0), base)
 
     def source(self, byte):
         """(text, lines after it): an operand and what undoes @r10+."""
@@ -867,7 +883,7 @@ class Msp430Generator:
             return "%d(r10)" % (rng.randrange(-32, 32) if byte else 2 * rng.randrange(-16, 16))
         if r < 0.94:
             return "&0x%x" % (self.buf + (rng.randrange(-32, 32) if byte else 2 * rng.randrange(-16, 16)))
-        return self.frame_slot()
+        return self.frame_slot(byte)
 
     def one(self):
         rng = self.rng
@@ -883,9 +899,11 @@ class Msp430Generator:
             where = self.dst() if rng.random() < 0.8 else "%d(r10)" % (2 * rng.randrange(-16, 16))
             return ["%s%s %s" % (op, ".b" if byte else "", where)]
         if kind == "frame":
+            byte = rng.random() < 0.3
+            op = "mov.b" if byte else "mov"
             if rng.random() < 0.5:
-                return ["mov %s, %s" % (self.dst(), self.frame_slot())]
-            return ["mov %s, %s" % (self.frame_slot(), self.dst())]
+                return ["%s %s, %s" % (op, self.dst(), self.frame_slot(byte))]
+            return ["%s %s, %s" % (op, self.frame_slot(byte), self.dst())]
         if kind == "pushpop":
             src, after = self.source(False)
             middle = []
@@ -918,12 +936,22 @@ class Msp430Generator:
         return self.one(), 1
 
     def call(self):
-        """A call of a helper; the scratch registers it may change are set again afterwards."""
+        """A call of a helper; the scratch registers it may change are set again afterwards. h3's
+        two stack words are pushed, or stored into room made below the frame, and dropped behind
+        the call: a caller that read them again would see what the callee left there, which the
+        lifter refuses (dread.lift_msp430: the C passes copies)."""
         rng = self.rng
-        helper = rng.choice(["h0", "h1", "h2"])
+        helper = rng.choice(["h0", "h1", "h2", "h3"])
         keep = {"r12", "r13"} if helper == "h1" else {"r12"}
         saved = ["r5", "r6", "r7", "r8", "r9"]
         lines = ["call #%s" % helper]
+        if helper == "h3":
+            words = [rng.choice(saved) if rng.random() < 0.7 else "#%d" % self.imm() for _ in range(2)]
+            if rng.random() < 0.5:
+                lines = ["push %s" % words[1], "push %s" % words[0]] + lines
+            else:
+                lines = ["sub #4, r1", "mov %s, 2(r1)" % words[1], "mov %s, 0(r1)" % words[0]] + lines
+            lines.append("add #4, r1")
         for r in ["r11", "r12", "r13", "r14", "r15"]:
             if r not in keep:
                 lines.append("mov %s, %s" % (rng.choice(saved), r))
@@ -1008,7 +1036,8 @@ def generate(isa, functions, length, inputs, seed):
         bodies[name] = (style, gen.body(name, length))
         cases[name] = []
         for _ in range(inputs):
-            args = [rng.choice(EDGES) if rng.random() < 0.4 else rng.getrandbits(32) for _ in range(4)]
+            args = [rng.choice(EDGES) if rng.random() < 0.4 else rng.getrandbits(32)
+                    for _ in range(4 + getattr(gen, "stack_words", 0))]
             mem = [[buf + 4 * k, 4, rng.choice(EDGES) if rng.random() < 0.2 else rng.getrandbits(32)]
                    for k in range(BUF_WORDS)]
             cases[name].append({"args": args, "mem": mem, "limit": 100_000})

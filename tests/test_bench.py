@@ -370,7 +370,7 @@ def test_msp430_vectors_in_a_region_of_their_own(tmp_path):
     """FreeRTOS's MSP430 build: the vectors lie in a flash region above the scratch, apart from the
     image. They are loader data, no code range lies outside the image (GCC emits each vector as an
     executable section without symbols), Ghidra's analysis starts at the reset vector and the
-    handlers, and the lifter, which has no MSP430 yet, says so."""
+    handlers, and the MSP430 lifter (dread.lift_msp430) takes the image."""
     import subprocess
     from dread import elfimport, lift
     from dread.ghidra import directives
@@ -418,8 +418,9 @@ ldflags = []
     assert any(c.kind == "load" and c.run == 0xffe0 for c in image.startup())
     lines = directives(t, image, symbols=False)
     assert "entry 0x%x" % p.by_name["reset"].entry in lines and "func 0x%x -" % p.by_name["isr"].entry in lines
-    from dread.lift_msp430 import Msp430Lifter
-    assert isinstance(lift.make_lifter(p), Msp430Lifter)
+    lifter = lift.make_lifter(p)
+    assert type(lifter).__name__ == "Msp430Lifter"
+    assert "isr(u16 p12, u16 p13, u16 p14, u16 p15)" in lifter.lift(p.by_name["isr"]).text
 
 
 @needs_gcc

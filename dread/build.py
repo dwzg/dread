@@ -89,12 +89,19 @@ def defined_functions(objects):
     return names
 
 
-def lift_sources(target, image, names, outdir, quiet=False, lifter=None):
+def called_functions(objects):
+    """The symbols the objects use without defining them: the functions their C calls (GCC's libcalls
+    among them) and the data it addresses."""
+    from dread.elf import Elf
+    return {sym.name for obj in objects for sym in Elf(obj).symbols if sym.shndx == 0 and sym.name}
+
+
+def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_calls=None):
     """Lifted C for `names` (dread.lift) in outdir, a file each, written only when it changed;
     returns ({name: the instructions no path from its entry reaches}, [the names that never return:
     the system run tests them]). A name that no longer lifts is reported and left out. lifter: one
     already made for this image (dread lift --check builds many times with one: what it lifts is kept
-    in it, lifter.lifted)."""
+    in it, lifter.lifted). src_calls: what the hand-written C calls (dread.lift.Lifter.src_calls)."""
     from dread import lift, regflow
     from dread.program import Program
     if lifter is None:
@@ -102,6 +109,9 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None):
         lifter = lift.make_lifter(program, regflow.load(target, image, program))
     program = lifter.prog
     kept = lifter.__dict__.setdefault("lifted", {})
+    if src_calls is not None and frozenset(src_calls) != lifter.src_calls:
+        lifter.src_calls = frozenset(src_calls)
+        kept.clear()                        # what was lifted for other callers
     os.makedirs(outdir, exist_ok=True)
     made, endless, loops = {}, [], []
     for name in names:
@@ -157,7 +167,8 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
     if names:
         defined = defined_functions(objects)
         made, endless, loops = lift_sources(target, image, [n for n in names if n not in defined],
-                                            os.path.join(workdir, "lifted"), quiet=quiet, lifter=lifter)
+                                            os.path.join(workdir, "lifted"), quiet=quiet, lifter=lifter,
+                                            src_calls=called_functions(objects))
         if lifted is None:                  # the image's table: the system run's acceptances stay its own
             by_system = system_names(image.table("lifted"))
             loops = [n for n in loops if n not in by_system]

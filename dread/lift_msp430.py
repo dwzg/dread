@@ -15,23 +15,47 @@ at an odd address stays one in the C (the hardware ignores bit 0 either way).
 
 The return address lies in the slot the call pushed (depth 0): ret is a return from there, and a
 branch to one of GCC's shared epilogues (br #__mspabi_func_epilog_N: pops that fall into one another,
-then ret) is a return at the depth of the registers it pops. A call passes r12-r15 and takes r12, or
-r12 and r13, or r12-r15 when the callers read a wider result (dread.regflow); r11, the other result
-registers and the flags are 0 behind it. A call through a register that holds a known constant
-(mov #uart_puts, r10; call r10) is a call of that function. An instruction that reads or writes sr
-beyond its flags (dint, eint, the low-power modes, push sr, mov r15, sr) runs on the real register
-in inline assembly, the flags merged in and taken back. A function that returns with reti is an
-interrupt handler: GCC's interrupt attribute writes its entry and its return.
+then ret) is a return at the depth of the registers it pops. Arguments beyond r12-r15 lie above the
+return address, a word each (TI's GCC packs two char arguments into one word). The words a function
+reads or writes there, directly or through a register that holds a frame address, or passes on to a
+tail call (stack_args), are parameters sa0, sa1, ... behind p12-p15, and an access of one goes
+through the parameter's address: TI's GCC 8.2 keeps a stack parameter whose address is taken in the
+slot its caller passed it in, so the C reads and writes where the original does (and it makes no
+sibling calls, which could write those slots). A call passes r12-r15 and, to a callee that takes
+stack arguments, the words of its frame that lie where the callee reads them (above the return
+address the call pushes; for a tail call its own stack arguments); it takes r12, or r12 and r13, or
+r12-r15 when the callers read a wider result (dread.regflow); r11, the other result registers and
+the flags are 0 behind it. A function that the hand-written C calls (src_calls, from dread.build)
+returns r12-r15: that caller is not the original's and may read more than the original's callers.
+A call through a register that holds a known constant (mov #uart_puts, r10; call r10) is a call of
+that function; through another register it passes r12-r15 and the lowest frame words
+(dread.lift.INDIRECT_STACK_WORDS), where the original's callee would find stack arguments. An
+instruction that reads or writes sr beyond its flags (dint, eint, the low-power modes, push sr, mov
+r15, sr) runs on the real register in inline assembly, the flags merged in and taken back. A
+function that returns with reti is an interrupt handler: GCC's interrupt attribute writes its entry
+and its return.
 
 Refused, with the reason: a write of sp that is not a frame adjustment the analysis follows, an
-access at or above the entry's stack pointer (the return address, stack arguments), a jump through
-a register (a switch table: not yet), a call of a function that takes stack arguments, MSP430X, and
-what dread.lift refuses for every architecture (a stack pointer that differs between paths, a
-fall-through out of the function, a register read before written).
+access of the return address (GCC's prologue moves it when a 32-bit argument is split between r15
+and the stack), the address of a stack argument or of the return address in a register (va_start,
+&argument: the C's arguments do not lie above its frame array), a frame word read again behind the
+call it was passed to (the callee owns its stack arguments and may change them: in the original the
+caller's frame word, in the C a copy; GCC's callers store them anew before every call), a tail call
+with a frame, an interrupt handler that touches what the interrupt saved (sr, the return address), a
+jump through a register (a switch table: not yet), MSP430X, and what dread.lift refuses for every
+architecture (a stack pointer that differs between paths, a fall-through out of the function, a
+register read before written).
+
+Not established: an access of a stack argument through a register whose frame address the analysis
+does not know (it differs between paths, it was computed with an unknown index) goes to the C's frame
+array, and a callee called through an unknown register that changes a stack argument it was passed
+changes the C's copy only; nothing refuses these, the cases have to notice. A function the
+hand-written C calls returns its callees' results in r13-r15 only as wide as the original's callers
+read those callees' results (their own lifted C is narrowed to that).
 """
 from dread import lift
 from dread.arch.msp430 import NAMES
-from dread.lift import IDENT, Refused
+from dread.lift import IDENT, INDIRECT_STACK_WORDS, Refused
 
 REGS = ["r%d" % i for i in range(4, 16)]     # sr is no C variable: a read of it is the real register
 ARGS = ("r12", "r13", "r14", "r15")
@@ -275,11 +299,13 @@ class Msp430Lifter(lift.Lifter):
         return None
 
     def stack_args(self, fn):
-        """Bytes above the entry's return address the function reads or writes (its stack
-        arguments, which the translation refuses): 0, the count of words, or None."""
+        """How many words above its return address a function reads or writes, or passes on to a
+        tail call: its stack arguments (0, the count, or None when its stack pointer is not static).
+        Counted from what _accesses knows, by the highest byte: a byte at 3(sp) at the entry is
+        the second half of the first word (TI's GCC packs char arguments two to a word)."""
         if fn.name in self._stack_args:
             return self._stack_args[fn.name]
-        self._stack_args[fn.name] = 0
+        self._stack_args[fn.name] = 0           # a recursive call counts nothing while this is worked out
         try:
             states = self.states(fn, strict=False)
         except Refused:
@@ -287,20 +313,58 @@ class Msp430Lifter(lift.Lifter):
             return None
         top = 0
         for a, (depth, values) in states.items():
-            f = self.prog.insn(a).fields
-            for o in (f.src, f.dst):
-                base = self._frame(o, depth, values)
-                if base is not None and o.mode == "idx" and o.value - base[1] >= 2:
-                    top = max(top, (o.value - base[1]) // 2)
+            for s, size, read, written in self._accesses(fn, self.prog.insn(a), depth, values):
+                if s <= -2:
+                    top = max(top, -s // 2)
         self._stack_args[fn.name] = top
         return top
+
+    def _accesses(self, fn, insn, depth, values):
+        """[(slot, size, read, written)]: the stack bytes an instruction reads or writes whose place
+        the analysis knows: operands through sp or through a register that holds a frame address,
+        a push's and a call's store, and the stack words a call passes (its callee's stack
+        arguments; for a tail call those above our own return address). slot: how many bytes
+        below the entry's stack pointer the access starts (0 and -1: the return address; -2 and
+        below: the stack arguments). Accesses through a pointer the analysis does not follow are
+        not seen."""
+        f = insn.fields
+        size = 1 if f.byte else 2
+        kind, target, falls = self.arch.flow(insn)
+        out = []
+        for o, source in ((f.src, True), (f.dst, False)):
+            if o is None or o.mode not in ("idx", "ind", "inc"):
+                continue
+            base = self._frame(o, depth, values)
+            if base is None:
+                continue
+            s = base[1] - (o.value if o.mode == "idx" else 0)
+            if source:                      # rrc, rra, swpb and sxt write back where they read
+                back = f.dst is None and f.op in ("rrc", "rra", "swpb", "sxt")
+                out.append((s, size, True, back))
+            else:
+                out.append((s, size, f.op != "mov", f.op not in ("cmp", "bit")))
+        if f.op == "push" or kind in ("call", "icall"):
+            out.append((depth + 2, size if f.op == "push" else 2, False, True))
+        callee, tail = None, False
+        if kind == "call":
+            callee = self.prog.by_entry.get(target)
+        elif kind == "icall":
+            callee = self._known_callee(insn, (depth, values))
+        elif kind == "jump" and not falls and target is not None and self.epilogue(insn) is None:
+            callee, tail = self.prog.by_entry.get(target), True
+            if callee is fn:
+                callee = None
+        if callee is not None:
+            for k in range(self.stack_args(callee) or 0):
+                out.append((depth - 2 - 2 * k if tail else depth - 2 * k, 2, True, False))
+        return out
 
     # ---- what kind of function ----
 
     def lift(self, fn):
-        n = self.stack_args(fn)
-        if n:
-            raise Refused("it takes stack arguments (beyond r12-r15)")
+        if self.stack_args(fn) and self.handler_kind(fn):
+            raise Refused("an interrupt handler that reads or writes the return address the interrupt saved or "
+                          "the stack above it: not modelled")
         return super().lift(fn)
 
     def compiled_isa(self):
@@ -341,7 +405,12 @@ class Msp430Lifter(lift.Lifter):
                 raise Refused("0x%x returns to an address it computed, not to its caller" % a)
 
     def _width(self, name):
-        """How many result registers the callers read: 1 (r12), 2 (r12:r13) or 4 (r12-r15)."""
+        """How many result registers the callers read: 1 (r12), 2 (r12:r13) or 4 (r12-r15); all four
+        for a function that the hand-written C calls (src_calls): a caller the original does not
+        have, which may read more (gizmo's rewritten parse_uint multiplies by a variable and reads
+        the 32-bit product of __mspabi_mpyl, which no original function calls)."""
+        if name in self.src_calls:
+            return 4
         flow = self.flow
         if not flow:
             return 1
@@ -420,21 +489,50 @@ class Msp430Lifter(lift.Lifter):
 
     # ---- the translation ----
 
+    def _slot(self, s):
+        """The C address of the stack byte s bytes below the entry's stack pointer: in the frame
+        array for s > 0, in a stack argument for s <= -2 (the parameter's own address: GCC keeps a
+        stack parameter whose address is taken in the slot its caller passed it in, so the access
+        lands where the original's does); the return address (0, -1) is refused."""
+        a = self.insn_now.address
+        if s > 0:
+            return "(u16)(sp0 - %d)" % s
+        if s > -2:
+            if self.ctx.get("handler"):     # an interrupt pushes pc, then sr: sr is on top
+                raise Refused("0x%x reads or writes the status register the interrupt saved (a low-power "
+                              "mode left on the return?): not modelled" % a)
+            raise Refused("0x%x reads or writes its return address" % a)
+        word, odd = (-s - 2) // 2, (-s - 2) % 2
+        if word >= self.ctx["stack_params"]:
+            raise Refused("0x%x reads or writes a stack word beyond its arguments" % a)
+        return "(u16)((u16)&sa%d + 1u)" % word if odd else "(u16)&sa%d" % word
+
     def _sp(self, k=0):
-        """The C address k bytes above sp now (refused at or above the entry's stack pointer)."""
-        depth = self.ctx["depth"][self.insn_now.address]
-        off = k - depth
-        if off >= 0:
-            raise Refused("0x%x reads or writes at or above its entry's stack pointer (the return address, "
-                          "stack arguments)" % self.insn_now.address)
-        return "(u16)(sp0 - %d)" % -off
+        """The C address k bytes above sp now."""
+        return self._slot(self.ctx["depth"][self.insn_now.address] - k)
+
+    def _through(self, o):
+        """The C address of an access through a register that holds a frame address (states) when
+        it lands at or above the entry's stack pointer (a stack argument), else None: below it the
+        register's C value, an address in the frame array, is the original's layout."""
+        if o.reg < 4:
+            return None
+        depth, values = self.ctx["states"][self.insn_now.address]
+        base = self._frame(o, depth, values)
+        if base is None:
+            return None
+        s = base[1] - (o.value if o.mode == "idx" else 0)
+        return self._slot(s) if s <= 0 else None
 
     def _reg(self, n):
         """A register's value as a source (sp: its address in the frame; pc: behind the first word)."""
         if n == 0:
             return "0x%xu" % ((self.insn_now.address + 2) & 0xFFFF)
         if n == 1:                          # a value (add r1, r14: a frame address), not an access
-            return "(u16)(sp0 - %d)" % self.ctx["depth"][self.insn_now.address]
+            depth = self.ctx["depth"][self.insn_now.address]
+            if depth <= 0:                  # the address of the return address: no place in the C
+                raise Refused("0x%x takes the stack pointer's value at or above its entry's" % self.insn_now.address)
+            return "(u16)(sp0 - %d)" % depth
         if n == 2:
             return self._sr()
         if n == 3:
@@ -458,6 +556,9 @@ class Msp430Lifter(lift.Lifter):
             return self._sp(o.value if o.mode == "idx" else 0)
         if o.reg == 0:
             return "0x%xu" % (((self.insn_now.address + 2) + (o.value if o.mode == "idx" else 0)) & 0xFFFF)
+        through = self._through(o)
+        if through is not None:
+            return through
         base = self._reg(o.reg)
         if o.mode == "idx" and o.value:
             return "(u16)(%s + 0x%xu)" % (base, o.value & 0xFFFF)
@@ -483,7 +584,7 @@ class Msp430Lifter(lift.Lifter):
             if o.reg in (0, 2, 3):
                 raise Refused("0x%x: @%s+ is not modelled" % (self.insn_now.address, NAMES[o.reg]))
             r = NAMES[o.reg]
-            pre.append("s0 = %s; %s += %d;" % (self._load(r, byte), r, 1 if byte else 2))
+            pre.append("s0 = %s; %s += %d;" % (self._load(self._through(o) or r, byte), r, 1 if byte else 2))
             return "s0"
         return self._load(self._address(o), byte)
 
@@ -520,6 +621,12 @@ class Msp430Lifter(lift.Lifter):
         depth = self.ctx["depth"]
         if op == "unknown":
             raise Refused("0x%x: an instruction the decoder does not know (MSP430X?)" % a)
+        made = self.made_value(insn, *self.ctx["states"][a])
+        if made is not None and made[1] and made[1][0] == "sp" and made[1][1] <= 0:
+            # the address of a stack argument (or of the return address) in a register: the C's
+            # arguments lie elsewhere than its frame array's top (va_start, &argument)
+            raise Refused("0x%x takes the address of %s" % (a, "a stack argument" if made[1][1] < -1
+                                                            else "its return address"))
         if kind == "return":
             if self.exception_return(insn):
                 if self.ctx.get("handler"):
@@ -551,9 +658,8 @@ class Msp430Lifter(lift.Lifter):
         if op == "push":
             pre = []
             v = self._source(f.src, f.byte, pre)
-            new = depth[a] + 2
-            store = "*(volatile %s *)((u16)(sp0 - %d)) = %s;" % ("u8" if f.byte else "u16", new,
-                                                                 "(u8)(%s)" % v if f.byte else v)
+            store = "*(volatile %s *)(%s) = %s;" % ("u8" if f.byte else "u16", self._slot(depth[a] + 2),
+                                                    "(u8)(%s)" % v if f.byte else v)
             return " ".join(pre + [store]) if pre else store
         if f.dst is None:
             return self._single(insn, f)
@@ -576,8 +682,7 @@ class Msp430Lifter(lift.Lifter):
             if o.mode == "inc":
                 if o.reg in (0, 1, 2, 3):
                     raise Refused("0x%x: %s of @%s+ is not modelled" % (insn.address, op, NAMES[o.reg]))
-                address = NAMES[o.reg]
-                pre.append("a0 = %s;" % address)
+                pre.append("a0 = %s;" % (self._through(o) or NAMES[o.reg]))
                 pre.append("%s += %d;" % (NAMES[o.reg], 1 if byte else 2))
                 address = "a0"
             else:
@@ -691,11 +796,13 @@ class Msp430Lifter(lift.Lifter):
                     out.append(stored)
         return "{ %s }" % " ".join(out)
 
-    def _known_callee(self, insn):
+    def _known_callee(self, insn, state=None):
         """The function a call through a register calls when the register holds its entry (mov
-        #uart_puts, r10; call r10), else None."""
+        #uart_puts, r10; call r10), else None. state: (depth, values) before the call (default:
+        the states of the function being translated)."""
         f = insn.fields
-        state = self.ctx["states"].get(insn.address)
+        if state is None:
+            state = self.ctx["states"].get(insn.address)
         if f.src is None or f.src.mode != "reg" or state is None:
             return None
         known = self._known(f.src, state[0], state[1])
@@ -734,16 +841,28 @@ class Msp430Lifter(lift.Lifter):
         nstack = self.stack_args(callee)
         if nstack is None:
             raise Refused("0x%x calls %s, whose stack arguments are not known" % (insn.address, callee.name))
-        if nstack:
-            raise Refused("0x%x calls %s, which takes stack arguments" % (insn.address, callee.name))
         leaves = self.leaves(callee)
         if leaves:
             raise Refused("0x%x calls %s, which reads %s its caller leaves" % (
                 insn.address, callee.name, ", ".join(leaves)))
         self._check_after_call(callee, insn)
         width = self._site_width(callee, insn)
-        self.ctx["callees"].add((callee.name, 0, width))
-        call = "%s(r12, r13, r14, r15)" % callee.name
+        d = self.ctx["depth"][insn.address]
+        tail = self.arch.flow(insn)[0] == "jump"
+        if tail and d:
+            raise Refused("0x%x jumps to %s with %d bytes of its own on the stack (the callee returns through "
+                          "them)" % (insn.address, callee.name, d))
+        # the callee's stack word k: the frame word k words above sp at the call (above the return
+        # address the call pushes), or for a tail call our own stack argument k
+        slots = [d - 2 - 2 * k if tail else d - 2 * k for k in range(nstack)]
+        words = [self._load(self._slot(s), False) for s in slots]
+        if nstack and not tail:
+            back = self._read_back(insn, slots)
+            if back is not None:
+                raise Refused("0x%x reads a stack word that the call at 0x%x passed to %s, which may change it "
+                              "(the C passed a copy)" % (back, insn.address, callee.name))
+        self.ctx["callees"].add((callee.name, nstack, width))
+        call = "%s(%s)" % (callee.name, ", ".join(list(ARGS) + words))
         results = RESULTS[width]
         clear = " = ".join(r for r in SCRATCH if r not in results) + " = 0; c = z = n = v = 0;"
         if width == 4:
@@ -753,9 +872,42 @@ class Msp430Lifter(lift.Lifter):
             return "{ dread_w32 x_; x_.w = %s; r12 = x_.h[0]; r13 = x_.h[1]; } %s" % (call, clear)
         return "r12 = %s; %s" % (call, clear)
 
+    def _read_back(self, insn, slots):
+        """The first instruction behind a call that reads one of the frame words the call passed as
+        stack arguments before something writes the whole word again, or None. A callee owns its
+        stack arguments and may change them: in the original that changes the caller's frame, in
+        the C the copy GCC passed (GCC's callers store them anew before every call)."""
+        fn, states = self.ctx["fn"], self.ctx["states"]
+        index = {a: i for i, a in enumerate(fn.insns)}
+        # by word, keyed by its depth: a byte (or a word access) at an odd depth is in the word one
+        # byte deeper (the hardware ignores bit 0 of a word's address)
+        live = frozenset(s + (s & 1) for s in slots)
+        work = [(b, live) for b in self.successors(fn, index, insn.address, insn, False, states[insn.address][1])]
+        seen = set()
+        while work:
+            a, live = work.pop()
+            if not live or (a, live) in seen or a not in states:
+                continue
+            seen.add((a, live))
+            i = self.prog.insn(a)
+            depth, values = states[a]
+            written = set()
+            for s, size, read, wrote in self._accesses(fn, i, depth, values):
+                if read and s + (s & 1) in live:
+                    return a
+                if wrote and size == 2:
+                    written.add(s + (s & 1))
+            for b in self.successors(fn, index, a, i, False, values):
+                work.append((b, live - written))
+        return None
+
     def _icall(self, fp):
-        return ("r12 = ((u16 (*)(u16, u16, u16, u16))(%s))(r12, r13, r14, r15); r11 = r13 = r14 = r15 = 0; "
-                "c = z = n = v = 0;" % fp)
+        """A call through a register: r12-r15 and the lowest frame words (at most
+        dread.lift.INDIRECT_STACK_WORDS), where the original's callee would find stack arguments."""
+        d = self.ctx["depth"][self.insn_now.address]
+        words = [self._load(self._slot(d - 2 * k), False) for k in range(min(d // 2, INDIRECT_STACK_WORDS))]
+        return ("r12 = ((u16 (*)(%s))(%s))(%s); r11 = r13 = r14 = r15 = 0; c = z = n = v = 0;"
+                % (", ".join(["u16"] * (4 + len(words))), fp, ", ".join(list(ARGS) + words)))
 
     def _switches(self, fn):
         pass                                # jumps through tables are refused (insn)
@@ -765,11 +917,12 @@ class Msp430Lifter(lift.Lifter):
         lines = ["/* %s at 0x%x, lifted by dread lift: one statement per instruction. */" % (fn.name, fn.entry),
                  '#include "dread.h"', "typedef union { u32 w; u16 h[2]; } dread_w32;",
                  "typedef union { u64 w; u16 h[4]; } dread_w64;"]
-        widest = {}
+        widest, words = {}, {}
         for name, nstack, width in ctx["callees"]:       # one declaration: the widest of its calls
             widest[name] = max(widest.get(name, 1), width)
+            words[name] = nstack
         for name, width in sorted(widest.items()):
-            lines.append("extern %s %s(u16, u16, u16, u16);" % (CTYPES[width], name))
+            lines.append("extern %s %s(%s);" % (CTYPES[width], name, ", ".join(["u16"] * (4 + words[name]))))
         if ctx.get("helpers"):
             lines.append(HELPERS)
         if ctx.get("sr"):
@@ -782,7 +935,8 @@ class Msp430Lifter(lift.Lifter):
             lines.append("{")
             init = ["%s = 0" % r for r in regs]
         else:
-            lines.append("%s %s(u16 p12, u16 p13, u16 p14, u16 p15)" % (CTYPES[self._width(fn.name)], fn.name))
+            params = ["u16 p%d" % i for i in range(12, 16)] + ["u16 sa%d" % k for k in range(ctx["stack_params"])]
+            lines.append("%s %s(%s)" % (CTYPES[self._width(fn.name)], fn.name, ", ".join(params)))
             lines.append("{")
             init = ["%s = p%s" % (r, r[1:]) if r in ARGS else "%s = 0" % r for r in regs]
         lines.append("    u16 %s;" % ", ".join(init))

@@ -163,6 +163,10 @@ class Lifter:
     acceptance. Another instruction set subclasses it (dread.lift_riscv)."""
 
     REGS, ARGS, AFTER_CALL = REGS, ARGS, AFTER_CALL     # the architecture's names (class attributes)
+    # The functions the hand-written C calls (dread.build sets it before it lifts): callers the original
+    # does not have, which may read more of a result than the original's callers do. dread.lift_msp430
+    # gives them all four result registers; this translator and dread.lift_riscv do not use it.
+    src_calls = frozenset()
 
     def __init__(self, program, flow=None, endless=None):
         """flow: the image's RegFlow (dread.regflow); endless: the names of the functions that never

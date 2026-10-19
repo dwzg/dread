@@ -2,7 +2,11 @@
 # or every scenario of the system run) agree with the original and run every instruction it
 # can reach. Written by dread lift --check; not edited by hand.
 __clzdi2
+__mspabi_divli
+__mspabi_divul
 __mspabi_mpyl
+__mspabi_remli
+__mspabi_remul
 beep_off
 beep_on
 cmd_beep
@@ -19,6 +23,7 @@ led_on
 memcmp
 memcpy
 memset
+parse_kv
 print_status
 read_line
 script_run
@@ -29,3 +34,4 @@ timer_start
 uart_getc
 uart_init
 uart_puts
+udivmodsi4

@@ -90,7 +90,10 @@ needed on it):
   each instruction, the rendering and the kinds of handlers are its own. `make_lifter` picks it.
   `dread.liftfuzz` takes a generator per ISA (`RiscVGenerator` beside the ARM `Generator`).
   `dread.lift_msp430` needed one more hook, `entry_values` (what lies in the frame at the entry: the
-  MSP430's return address), and uses `ret_jump` (a branch that returns: GCC's shared epilogues). Where the compiler has no
+  MSP430's return address), and uses `ret_jump` (a branch that returns: GCC's shared epilogues) and
+  `src_calls` (the functions the hand-written C calls, which `dread.build` sets before it lifts: the
+  MSP430 translator returns all four result registers from them, since such a caller may read more
+  of a result than the original's callers, from whom the width is taken). Where the compiler has no
   instruction for what the C says (the MSP430 has no barrel shifter, and GCC shifts in libgcc), the
   translation writes the original's instruction in inline assembly: a generated case may stub such
   a routine (one a run hung in, deeper in the tree), and the stub would answer the C's own calls;

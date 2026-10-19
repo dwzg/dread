@@ -202,21 +202,17 @@ def test_a_runtime_helper_keeps_its_abi_result():
 
 
 def test_gizmo_msp430_lifts():
-    """dread.lift_msp430 on gizmo: of gizmo's own functions it refuses those with stack arguments
-    (and a caller of one), a caller of libgcc's 64-bit multiplication (which takes r8-r11 as its
-    caller leaves them) and the startup; libgcc's shift routines fall into one another."""
+    """dread.lift_msp430 on gizmo: of gizmo's own functions it refuses a caller of libgcc's 64-bit
+    multiplication (which takes r8-r11 as its caller leaves them) and the startup; libgcc's shift
+    routines fall into one another."""
     target, image, program, lifter, lifted, refused = lift_gizmo_msp430()
     own = {name: why for name, why in refused.items() if not name.startswith("__")}
     assert own == {
         "_start": "0x8000 changes the stack pointer in a way not modelled: mov #2560, r1",
-        "apply_config": "0x891c calls parse_kv, which takes stack arguments",
         "mul64": "0x847c calls __mspabi_mpyll, which reads r10, r11, r8, r9 its caller leaves",
-        "parse_kv": "it takes stack arguments (beyond r12-r15)",
-        "sum6": "it takes stack arguments (beyond r12-r15)",
-        "udivmodsi4": "it takes stack arguments (beyond r12-r15)",
     }
     assert "falls through into what follows" in refused["__mspabi_srli_4"]
-    assert len(lifted) == 48
+    assert len(lifted) == 56
     # a call through a register that holds a function's entry is a call of that function, and the
     # width of its result is what the code behind it reads (uart_getc's: r12 alone)
     assert "r12 = uart_puts(r12, r13, r14, r15);" in lifted["print_status"].text
@@ -226,6 +222,123 @@ def test_gizmo_msp430_lifts():
     # a function that returns with reti: GCC's interrupt attribute writes the entry and the return
     text = lifted["irq_entry"].text
     assert "void __attribute__((interrupt)) irq_entry(void)" in text and "return;  /* 8050: reti  */" in text
+
+
+def test_gizmo_msp430_stack_arguments():
+    """Arguments beyond r12-r15 come on the stack, above the return address: the lifted function
+    has them as parameters after p12-p15 and reads them through the parameters' addresses, where its
+    caller put them (TI's GCC keeps a stack parameter whose address is taken in the slot it came
+    in); a caller passes the words of its frame that lie where the callee reads them."""
+    target, image, program, lifter, lifted, refused = lift_gizmo_msp430()
+    sum6 = lifted["sum6"].text          # u32 sum6(u32 a, ..., u32 f): c to f are eight stack words
+    assert "u16 sum6(u16 p12, u16 p13, u16 p14, u16 p15, %s)" % ", ".join("u16 sa%d" % k for k in range(8)) in sum6
+    assert "{ s0 = *(volatile u16 *)((u16)&sa2); d0 = s0; r11 = d0; }  /* 83f6: mov 20(r1), r11 */" in sum6
+    assert lifted["sum6"].stack_params == 8
+    assert "u16 parse_kv(u16 p12, u16 p13, u16 p14, u16 p15, u16 sa0)" in lifted["parse_kv"].text
+    # apply_config stores &value at 0(r1), the bottom of its 68 bytes, and calls parse_kv
+    apply = lifted["apply_config"].text
+    assert "extern u16 parse_kv(u16, u16, u16, u16, u16);" in apply
+    assert "r12 = parse_kv(r12, r13, r14, r15, *(volatile u16 *)((u16)(sp0 - 68)));" in apply
+    # libgcc's 32-bit division entries tell udivmodsi4 on the stack whether they want the remainder
+    assert "x_.w = udivmodsi4(r12, r13, r14, r15, *(volatile u16 *)((u16)(sp0 - 2)));" in lifted["__mspabi_remul"].text
+    assert "{ s0 = 0x0u; a0 = (u16)&sa0; e0 = *(volatile u16 *)(a0);" in lifted["udivmodsi4"].text
+
+
+STACK_ARGUMENT_CODE = """
+.text
+.macro fn name
+.global \\name
+.type \\name, @function
+\\name:
+.endm
+fn takes_one
+    mov 2(r1), r13
+    add r13, r12
+    ret
+fn high_byte
+    push r4
+    mov r1, r4
+    mov.b 5(r4), r12
+    pop r4
+    ret
+fn passes_on
+    br #takes_one
+fn calls_one
+    push #7
+    call #takes_one
+    add #2, r1
+    ret
+fn address_of
+    push r10
+    mov r1, r15
+    add #4, r15
+    mov @r15, r12
+    pop r10
+    ret
+fn reads_back
+    sub #2, r1
+    mov #5, 0(r1)
+    call #takes_one
+    mov 0(r1), r12
+    add #2, r1
+    ret
+fn tail_with_frame
+    push r10
+    br #takes_one
+fn return_address
+    mov 0(r1), r12
+    ret
+fn wakes_up
+    bic #16, 0(r1)
+    reti
+"""
+
+
+@needs_ti_gcc
+def test_msp430_stack_argument_rules(tmp_path):
+    """Hand-written cases of what the lifter does with the stack above a function's return address:
+    a stack word read directly, a byte of one through a frame pointer, a tail call that passes its
+    own stack word on, a call that pushes one; refused: the address of a stack argument in a
+    register, a word read again behind the call it was passed to (the callee may have changed it;
+    the C passed a copy), a tail call with a frame, the return address, an interrupt handler's
+    saved status register."""
+    from dread import elfimport, liftfuzz, lift
+    from dread.elf import Elf
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.S").write_text(STACK_ARGUMENT_CODE)
+    (tmp_path / "t.ld").write_text("MEMORY { text (rx) : ORIGIN = 0x4000, LENGTH = 0xbf00 }\n"
+                                   "SECTIONS { .text : { *(.text .text.*) } > text }\n")
+    elf_path = str(tmp_path / "t.elf")
+    subprocess.run(["msp430-elf-gcc", "-mcpu=msp430", "-nostdlib", "-T", str(tmp_path / "t.ld"), "-Wl,-e,takes_one",
+                    "-o", elf_path, str(tmp_path / "t.S")], check=True)
+    (tmp_path / "dread.toml").write_text(liftfuzz.ISAS["msp430"]["toml"].replace(
+        'original = "fuzz.bin"', 'original = "t.bin"').replace('entry = "f0"', 'entry = "takes_one"'))
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    elf = Elf(elf_path)
+    elfimport.write_tables(image, *elfimport.tables(elf, isa="msp430"))
+    (tmp_path / "t.bin").write_bytes(elf.payload(image.base, image.erased)[0])
+    program = Program(target, image)
+    lifter = lift.make_lifter(program)
+    lifted, refused = {}, {}
+    for fn in program.functions:
+        try:
+            lifted[fn.name] = lifter.lift(fn)
+        except lift.Refused as e:
+            refused[fn.name] = str(e)
+    assert sorted(lifted) == ["calls_one", "high_byte", "passes_on", "takes_one"], refused
+    assert "u16 takes_one(u16 p12, u16 p13, u16 p14, u16 p15, u16 sa0)" in lifted["takes_one"].text
+    assert "s0 = *(volatile u16 *)((u16)&sa0); d0 = s0; r13 = d0;" in lifted["takes_one"].text
+    assert "s0 = (u16)*(volatile u8 *)((u16)((u16)&sa0 + 1u));" in lifted["high_byte"].text     # 5(r4), r4 = sp + 2
+    assert "r12 = takes_one(r12, r13, r14, r15, *(volatile u16 *)((u16)&sa0));" in lifted["passes_on"].text
+    assert lifted["passes_on"].stack_params == 1
+    assert "r12 = takes_one(r12, r13, r14, r15, *(volatile u16 *)((u16)(sp0 - 2)));" in lifted["calls_one"].text
+    assert "takes the address of a stack argument" in refused["address_of"]
+    assert re.search(r"0x\w+ reads a stack word that the call at 0x\w+ passed to takes_one", refused["reads_back"])
+    assert "jumps to takes_one with 2 bytes of its own on the stack" in refused["tail_with_frame"]
+    assert "reads or writes its return address" in refused["return_address"]
+    assert "the status register the interrupt saved" in refused["wakes_up"]
 
 
 @needs_ti_gcc
@@ -289,7 +402,8 @@ def test_lifted_c_that_calls_libgcc_fails_the_fuzzers_build(tmp_path, monkeypatc
     assert len(reduced) == 1 and "swpb" in reduced[0].split(" to: ")[1].split(" | ")[-1], reduced
 
 
-MSP_NAMES = ["fmt_dec", "read_line", "timer_irq", "memcmp", "cmd_volume", "__mspabi_mpyl"]
+MSP_NAMES = ["fmt_dec", "read_line", "timer_irq", "memcmp", "cmd_volume", "__mspabi_mpyl",
+             "udivmodsi4", "__mspabi_remul", "parse_kv"]        # (the last three: stack arguments)
 
 
 def msp430_copy(tmp_path):
@@ -321,3 +435,21 @@ def test_gizmo_msp430_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_pat
     accepted = lift.check(target, image, MSP_NAMES, out=lines.append, jobs=4)
     dropped = [line.split()[2] for line in lines if line.startswith("dropped  FAIL")]
     assert dropped and set(accepted) | set(dropped) == set(MSP_NAMES), lines
+
+
+@pytest.mark.slow
+@needs_ti_gcc
+def test_a_stack_argument_read_from_the_wrong_place_shows(tmp_path, monkeypatch):
+    """udivmodsi4 takes on the stack whether its callers want the remainder. Read from the frame's
+    top word instead (a planted mistake), __mspabi_remul, which passes 1 there from its frame,
+    differs, and udivmodsi4 is not accepted. (Its own cases pass the word in a cell at the stack top,
+    which the check that moves the stack does not move, dread.runner.stack_moves_it: those that
+    differ are refused, and udivmodsi4 is dropped as uncovered.)"""
+    from dread import lift, lift_msp430
+    target, image = msp430_copy(tmp_path)
+    slot = lift_msp430.Msp430Lifter._slot
+    monkeypatch.setattr(lift_msp430.Msp430Lifter, "_slot", lambda self, s: slot(self, s if s > -2 else 2))
+    lines = []
+    accepted = lift.check(target, image, ["udivmodsi4", "__mspabi_remul"], out=lines.append, jobs=4)
+    assert "udivmodsi4" not in accepted, lines
+    assert any(line.startswith("dropped  FAIL __mspabi_remul") for line in lines), lines
