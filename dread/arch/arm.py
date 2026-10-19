@@ -427,6 +427,31 @@ class Arm:
             return targets
         return None
 
+    def sp_copy(self, insn):
+        """rd of an instruction that sets rd to sp plus a constant (add rd, sp, #imm; mov rd, sp), else
+        None (dread.regflow follows such copies through a function's entry)."""
+        ops = insn.operands
+        if insn.id in (csarm.ARM_INS_ADD, csarm.ARM_INS_MOV) and self.predicate(insn) is None and len(ops) >= 2 \
+                and ops[0].type == csarm.ARM_OP_REG and ops[1].type == csarm.ARM_OP_REG \
+                and ops[1].reg == csarm.ARM_REG_SP and (len(ops) == 2 or ops[2].type == csarm.ARM_OP_IMM):
+            return self._name(insn.reg_name(ops[0].reg))
+        return None
+
+    def frame_stores(self, insn, sp_based):
+        """The registers a store puts where a register of sp_based (sp, or a copy of it plus a
+        constant) points: str, strd, strh, strb, stm and stmdb. An entry spill (a variadic function
+        keeps r1-r3 next to its stack arguments) is no use of them (dread.regflow)."""
+        ops = insn.operands
+        i = insn.id
+        if i in (csarm.ARM_INS_STR, csarm.ARM_INS_STRD, csarm.ARM_INS_STRH, csarm.ARM_INS_STRB) and ops \
+                and ops[-1].type == csarm.ARM_OP_MEM and not ops[-1].mem.index:
+            if self._name(insn.reg_name(ops[-1].mem.base)) in sp_based:
+                return {self._name(insn.reg_name(o.reg)) for o in ops[:-1] if o.type == csarm.ARM_OP_REG}
+        if i in (csarm.ARM_INS_STM, csarm.ARM_INS_STMDB) and ops and ops[0].type == csarm.ARM_OP_REG \
+                and self._name(insn.reg_name(ops[0].reg)) in sp_based:
+            return {self._name(insn.reg_name(o.reg)) for o in ops[1:] if o.type == csarm.ARM_OP_REG}
+        return set()
+
     def stack_kind(self, insn):
         """"push" for push, stmdb sp! and str rN, [sp, #-4]!; "pop" for pop, ldm sp! and
         ldr rN, [sp], #4; else None. (Capstone shows the single-register forms as str/ldr or as

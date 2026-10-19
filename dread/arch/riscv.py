@@ -408,6 +408,20 @@ class RiscV:
     def sets_flags(self, insn):
         return False
 
+    def sp_copy(self, insn):
+        """rd of addi rd, sp, imm (and mv rd, sp), else None (dread.regflow)."""
+        f = fields(insn)
+        if f.op == "addi" and f.rs1 == 2 and f.rd:
+            return NAMES[f.rd]
+        return None
+
+    def frame_stores(self, insn, sp_based):
+        """The register sw, sh or sb puts where a register of sp_based points (an entry spill)."""
+        f = fields(insn)
+        if f.op in ("sw", "sh", "sb") and f.rs2 and NAMES[f.rs1] in sp_based:
+            return {NAMES[f.rs2]}
+        return set()
+
     def stack_kind(self, insn):
         """RISC-V has no push and pop (frames are made with addi sp and single stores)."""
         return None

@@ -133,3 +133,39 @@ def test_switch_fallback_without_resolution(target, monkeypatch):
     jump = next(i for i, row in enumerate(code) if row.kind == "ijump")
     assert len(analysis.graphs["script_run"][0][jump]) >= 2
     assert extra(analysis.result()) == reference
+
+
+@pytest.mark.skipif(not (have("clang") and have("ld.lld")), reason="needs clang and ld.lld")
+def test_a_variadic_spill_is_no_use(tmp_path):
+    """clang's variadic functions keep r1-r3 next to their stack arguments with stores (add r0, sp,
+    #12; stm r0!, {r1, r2, r3}) where GCC pushes them; counted as uses, they made every caller of an
+    assertion handler that calls printf look as if it read r3 (FreeRTOS's clang builds: most of the
+    lifter's refusals). A store of a register nothing has written yet where sp points, in the entry's
+    straight run, is a spill like a push."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(
+        "#include <stdarg.h>\n"
+        "int sink(int);\n"
+        "int sum(int n, ...) { va_list ap; va_start(ap, n); int s = 0; while (n--) s += va_arg(ap, int);"
+        " va_end(ap); return sink(s); }\n"
+        "int sink(int x) { return x + 1; }\n"
+        "int caller(int a) { return sum(1, a); }\n")
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["clang", "--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-O2", "-ffreestanding", "-c",
+                    "-ffunction-sections", "-o", obj, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x08000000; .text : { *(.text*) } }\n")
+    subprocess.run(["ld.lld", "-T", str(tmp_path / "t.ld"), "-e", "caller", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\nkind = "clang"\ntriple = "thumbv7m-none-eabi"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    target = Target.load(str(tmp_path))
+    program = Program(target)
+    stores = [i for i in program.instructions(program.by_name["sum"]) if i.mnemonic.startswith(("stm", "str"))]
+    assert stores, "clang spilled with pushes this time: the test shows nothing"
+    flow = regflow.analyse(program)
+    assert flow.read_regs("sum") == ["r0"], flow.read_regs("sum")

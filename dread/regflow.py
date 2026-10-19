@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 2
+VERSION = 3                 # 3: entry spills (variadic functions) are no use
 
 
 class RegFlow:
@@ -150,7 +150,15 @@ def _rows(program, fn, mask, entry_name):
                 joins.add(target & ~1)
     out, state = [], {}
     flags = mask(["flags"])
+    # The entry's straight run: a store of a register nothing has written yet where sp points (or a
+    # copy of sp plus a constant) is a spill, no use, like a push: clang's variadic functions keep
+    # r1-r3 so (add r0, sp, #12; stm r0!, {r1, r2, r3}) where GCC pushes them, and printf made every
+    # caller of an assertion handler look as if it read r3.
+    entry, sp_based, written = True, {"sp"}, set()
+    spills = hasattr(arch, "frame_stores")
     for a, insn in zip(fn.insns, insns):
+        if a != fn.entry and a in joins:
+            entry = False
         if a in joins or (out and out[-1].kind not in ("next",) and not out[-1].falls):
             state = {}
         if insn is None:
@@ -160,6 +168,17 @@ def _rows(program, fn, mask, entry_name):
         kind, target, falls = arch.flow(insn)
         reads, writes = arch.reg_effects(insn)
         stack = arch.stack_kind(insn)
+        if entry and spills:
+            spilled = {r for r in arch.frame_stores(insn, sp_based) if r not in written}
+            if spilled:
+                reads = set(reads) - spilled
+            copy = arch.sp_copy(insn)
+            sp_based -= set(writes)
+            if copy is not None:
+                sp_based.add(copy)
+            written |= set(writes)
+            if kind != "next":
+                entry = False
         rm, wm = (0 if stack == "push" else mask(reads)), mask(writes)
         pred = arch.predicate(insn)
         covered = 0
