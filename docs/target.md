@@ -68,7 +68,7 @@ cflags = ["-mcpu=cortex-m3", "-mthumb", "-Os", "-ffreestanding", "-fno-builtin",
 | `isa` | the instruction set of code the code ranges do not mark. ARM: `"a32"` (ARM state, default) or `"t32"` (Thumb, 16- and 32-bit); RISC-V: `"rv32"`; MSP430: `"msp430"` |
 | `profile` | ARM: `"a"` (classic cores with CPSR: ARM7, ARM9, ARM11; default) or `"m"` (Cortex-M, Thumb only) |
 | `extensions` | RISC-V: the standard extensions, default `"imc"` (the C extension decides whether instructions may be 2 bytes long; `-march` in `[compiler] cflags` overrides it) |
-| `cpu` | Unicorn's CPU model (`cortex-m3`, `arm926`, `arm1176`, ...); default: Unicorn's choice for the mode |
+| `cpu` | Unicorn's CPU model (`cortex-m3`, `cortex-m4`, `arm926`, `arm1176`, ...), with its own features (an M3 has no DSP extension or FPU; an M0 is ARMv6-M); default: Unicorn's choice for the mode (on the M profile a Cortex-M33) |
 | `endian` | `"little"` (the only one supported) |
 | `ghidra` | Ghidra's language id (default `ARM:LE:32:Cortex` for M profile, `ARM:LE:32:v4t` otherwise, `RISCV:LE:32:default` for RISC-V, analysed with Ghidra's `gcc` compiler spec) |
 

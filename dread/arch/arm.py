@@ -809,8 +809,12 @@ class Arm:
     # ---- Unicorn ----
 
     def uc_mode(self, isa=None):
+        """M profile with a cpu: Thumb only. Unicorn 2.1.4 builds a Cortex-M33 for UC_MODE_MCLASS
+        whatever ctl_set_cpu_model asked for (cpu_arm_init), so a cortex-m3 target ran on a v8-M
+        core with the Security Extension, DSP and FPU; without the flag the model decides, and
+        the model's own features make the core M profile. Without a cpu, Unicorn's M33 as before."""
         if self.profile == "m":
-            return uc.UC_MODE_THUMB | uc.UC_MODE_MCLASS
+            return uc.UC_MODE_THUMB if self.cpu else uc.UC_MODE_THUMB | uc.UC_MODE_MCLASS
         return uc.UC_MODE_ARM if (isa or self.isa) == "a32" else uc.UC_MODE_THUMB
 
     def new_uc(self, isa=None):

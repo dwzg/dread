@@ -75,7 +75,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 20       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 21       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -96,6 +96,8 @@ VERSION = 20       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # cases made in a broken worker were cached), a quick failure is not cached;
                   # 20: a round of small arguments when fewer than four inputs ran to the end, and
                   # the callees a layer names for calls through a register (MSP430)
+                  # 21: the Cortex-M a target names is the core cases run on (dread.arch.arm.uc_mode:
+                  # with UC_MODE_MCLASS Unicorn built a Cortex-M33 whatever the target named)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
