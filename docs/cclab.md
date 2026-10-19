@@ -7,7 +7,8 @@ MSP430):
 
 - where each argument arrives and where results come back (registers, stack words, memory through
   a pointer: a struct passed or returned by reference), for ints, 64-bit values, structs of every
-  size and varargs;
+  size and varargs, and floats and doubles with soft and hard float (on ARM: s0-s15, back-filling,
+  structs of floats, variadic doubles);
 - the basic types: sizes, alignments, plain char's sign, sign extension of narrow results, bit
   field order;
 - which runtime helper each operation calls (division, 64-bit arithmetic, soft float, copies), with
@@ -36,6 +37,12 @@ came out as written, including its fine print: on RV32 a 64-bit argument takes a
 pair but a variadic one an even pair; on the MSP430 a 64-bit argument takes r12-r15 or the stack and
 a later int fills the register left free; the stack is kept 8-byte aligned at calls on ARM,
 16-byte on RISC-V, 2-byte on the MSP430.
+
+Hard float (Cortex-M4 with FPv4-SP, each ARM adapter's `cortex-m4f`, run on the emulator's own
+Cortex-M4): GCC, clang and Arm's LLVM toolchain follow AAPCS's VFP variant to the letter. TI's armcl
+20.2.7 with `--float_support=FPv4SPD16` does not back-fill: the float after a double, a float and a
+double arrives in s6, where the others put it in s3; `compare` lists it, with no option to close
+it. (TI also leaves a returned double in r0:r1 beside d0; the lab reads d0, the VFP registers first.)
 
 IAR (`iar-arm`) could not be tried here: its adapter follows IAR's documented command line (EWARM
 9.70: `--cpu=`, `--fpu=none`, `-O[n|l|m|h|hs|hz]`; ILINK's `--config`, `--entry`, `--keep`) and was
@@ -208,6 +215,6 @@ were made may still be changed by other inputs; a probe's C may mean different t
 where C leaves it open (that is why the probes keep to plain C99). A helper's result registers in the
 profile are those some probe read: a probe that uses a result is what adds it. The stack alignment
 is the largest power of two that divided every frame at a call: a measurement, from an aligned
-entry. Not yet measured: prologue and epilogue variants as such, literal pools and padding,
-hard-float calling conventions, C++. Not yet possible: big-endian targets, and the 8-bit cores of
+entry. Not yet measured: prologue and epilogue variants as such, the VFP registers a call keeps
+(s16-s31), C++. Not yet possible: big-endian targets, and the 8-bit cores of
 compilers such as SDCC, which need an engine of DREAD's own first (docs/todo.md: Z80, then 8051).

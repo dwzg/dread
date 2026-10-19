@@ -385,6 +385,25 @@ def test_probes_of_ones_own_join_the_corpus(tmp_path):
 
 
 @needs_gcc
+def test_hard_float_follows_the_vfp_variant(tmp_path):
+    """Floats and doubles measured on GCC's Cortex-M4 with hard float (on the emulator's own M4,
+    which has the FPU) and with soft float: s0-s15, doubles in even pairs, back-filling, a struct of
+    floats in consecutive registers and a variadic double in the core registers, returned there
+    too (AAPCS: a variadic function uses the base standard throughout); soft float as integers."""
+    got = measured(tmp_path, "gcc-arm", ["cortex-m4f-O2", "cortex-m4-O2"])
+    hard, soft = got["cortex-m4f-O2"], got["cortex-m4-O2"]
+    expect = {"ret_f": ("s0", "r0"), "ret_d": ("s0:s1", "r0:r1"), "pick_f_3": ("s2", "r2"),
+              "pick_f_17": ("stack+0", "stack+48"), "pick_if_f": ("s0", "r1"), "pick_i5_f": ("s0", "stack+4"),
+              "pick_d_2": ("s2:s3", "r2:r3"), "pick_fd_d": ("s2:s3", "r2:r3"), "pick_dfdf_f": ("s3", "stack+8"),
+              "pick_hfa_c": ("s2", "r2"), "pick_va_d": ("r2:r3", "r2:r3")}
+    for fn, (h, s) in expect.items():
+        assert (hard[fn].get("where"), soft[fn].get("where")) == (h, s), (fn, hard[fn], soft[fn])
+    assert hard["pick_va_d"]["returned"] == "r0:r1" and "returned" not in soft["pick_va_d"]
+    from dread.cclab import compare
+    assert compare.hint("pick_dfdf_f", "s6", "s3").startswith("no option")
+
+
+@needs_gcc
 def test_compare_names_the_options_that_close_a_difference(tmp_path):
     """Two compilers side by side: GCC with int-sized enums and signed plain char as the original's
     compiler, GCC as it comes (arm-none-eabi: short enums, unsigned char) as the rebuilding one. The

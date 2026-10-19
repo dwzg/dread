@@ -22,9 +22,13 @@ link = ["{ld}", "{flags}", "{objs}", "-o", "{out}", "-T", "{script}", "-nostdlib
 cortex-m0 = ["-mcpu=cortex-m0", "-mthumb"]
 cortex-m3 = ["-mcpu=cortex-m3", "-mthumb"]
 cortex-m4 = ["-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=soft"]
+cortex-m4f = ["-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16"]
 
 [matrix.opt]
 O0 = ["-O0"]
 Os = ["-Os"]
 O2 = ["-O2"]
 O3 = ["-O3"]
+
+[cpus]                    # the hard-float build runs on the emulator's Cortex-M4 (it has the FPU)
+cortex-m4f = "cortex-m4"

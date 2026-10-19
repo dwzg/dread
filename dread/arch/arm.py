@@ -23,6 +23,8 @@ from unicorn import arm_const as ua
 REGS = tuple("r%d" % i for i in range(13)) + ("sp", "lr", "pc")
 ALIASES = {"sb": "r9", "sl": "r10", "fp": "r11", "ip": "r12", "r13": "sp", "r14": "lr", "r15": "pc"}
 UC_REGS = {name: getattr(ua, "UC_ARM_REG_" + name.upper()) for name in REGS}
+FP_REGS = tuple("s%d" % i for i in range(32)) + tuple("d%d" % i for i in range(16))   # VFP (FPv4-SP and up)
+UC_REGS.update({name: getattr(ua, "UC_ARM_REG_" + name.upper()) for name in FP_REGS})
 
 
 def _cpus():
@@ -124,11 +126,17 @@ class Arm:
         return name
 
     def reg_id(self, name):
-        """The Unicorn register id of a register name (r0-r12, sp, lr, pc and the aliases)."""
+        """The Unicorn register id of a register name (r0-r12, sp, lr, pc and the aliases; the VFP
+        registers s0-s31 and d0-d15, which the core's own model has or has not)."""
         return UC_REGS[self.reg_name(name)]
 
     def arg_regs(self, n):
         return ["r%d" % i for i in range(n)]
+
+    def fp_arg_regs(self):
+        """The floating-point argument registers of the procedure call standard's VFP variant
+        (s0-s15, which are d0-d7): where a hard-float build passes float and double arguments."""
+        return ["s%d" % i for i in range(16)]
 
     # ---- instruction sets ----
 

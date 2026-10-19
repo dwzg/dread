@@ -79,6 +79,10 @@ def hint(fn, original, rebuild):
         if fn in ("size_double", "size_long_double") and a < b:
             return ("no option: GCC and clang keep it %d bytes on this target; where the original's is %d "
                     "bytes, the C has to use float" % (b, a))
+    if fn == "pick_dfdf_f" and original.startswith("s") and rebuild.startswith("s"):
+        return ("no option: the two fill the VFP registers differently (one leaves the single a double "
+                "skipped unused, the other back-fills it, as AAPCS's VFP variant says); a function with "
+                "floats after doubles so cannot be called across the two as it is")
     if fn.startswith("ret_s"):
         if original.startswith("memory") and not rebuild.startswith("memory"):
             return "-fpcc-struct-return (every struct returned through memory)"

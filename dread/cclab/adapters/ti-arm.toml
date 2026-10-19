@@ -25,6 +25,7 @@ keep = ["--retain={symbol}"]
 [matrix.cpu]
 cortex-m3 = ["-mv7M3", "--float_support=none"]
 cortex-m4 = ["-mv7M4", "--float_support=none"]
+cortex-m4f = ["-mv7M4", "--float_support=FPv4SPD16"]
 
 [matrix.opt]
 Ooff = ["-Ooff"]
@@ -32,3 +33,6 @@ O0 = ["-O0"]
 O2 = ["-O2"]
 O3 = ["-O3"]
 O2size = ["-O2", "--opt_for_speed=0"]
+
+[cpus]                    # the hard-float build runs on the emulator's Cortex-M4 (it has the FPU)
+cortex-m4f = "cortex-m4"

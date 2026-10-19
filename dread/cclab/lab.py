@@ -280,6 +280,11 @@ def reg_mark(i, nbytes):
     return int.from_bytes(bytes([0x10 + i]) * nbytes, "little")
 
 
+def fp_mark(i):
+    """The marker of floating-point argument register i (32 bits): the byte 0x60 + i four times."""
+    return int.from_bytes(bytes([0x60 + i]) * 4, "little")
+
+
 def stack_mark(k, nbytes):
     """The marker of the k-th word of stack arguments: the byte 0x40 + k across the word."""
     return int.from_bytes(bytes([0x40 + k]) * nbytes, "little")
@@ -302,6 +307,8 @@ class Bench:
         self.width = max(1, self.arch.reg_bits // 8)       # bytes in a register (2 on the MSP430)
         self.word = self.layout.word                       # bytes in a stack argument word
         self.args = list(self.target.abi.arg_regs)         # names, in order: they carry results too
+        self.fp_args = list(getattr(self.arch, "fp_arg_regs", lambda: [])())   # ARM: s0-s15
+        self.float_results = None                          # {"float": regs, "double": regs}: calibrate()
         self.saved = list(self.layout.saved_names)
         self.regs = list(self.arch.general_regs()) + ["sp"] + ([self.arch.link_reg] if self.arch.link_reg else [])
         mem = {}
@@ -326,6 +333,42 @@ class Bench:
         m = Machine(self.layout, self.image.payload(), isa_of=self.program.isa_at)
         m.plan = []
         return m
+
+    def mark_fp(self, m):
+        """A marker in every floating-point argument register (a core without an FPU keeps them
+        in Unicorn's state all the same; its code never reads them)."""
+        for i, name in enumerate(self.fp_args):
+            m.uc.reg_write(self.arch.reg_id(name), fp_mark(i))
+
+    def calibrate(self):
+        """Where this build returns a float and a double: the registers in which the probes ret_f
+        and ret_d leave 1.5 (r0 and r0:r1 with soft float; s0 and s0:s1 with the VFP variant),
+        the VFP registers first where both hold it. Without those probes, or where neither holds
+        it, the core result registers."""
+        if self.float_results is not None:
+            return self.float_results
+        out = {"float": self.args[:max(1, 4 // self.width)], "double": self.args[:max(1, 8 // self.width)]}
+        for kind, name, value in (("float", "ret_f", 0x3FC00000), ("double", "ret_d", 0x3FF8000000000000)):
+            fn = self.program.by_name.get(name)
+            if fn is None:
+                continue
+            m = self.machine()
+            self.mark_fp(m)
+            if _run(self, m, fn, [reg_mark(i, self.width) for i in range(len(self.args))]):
+                continue
+            n = self.sizes()[kind]
+            # the VFP registers first: a soft-float build never writes them, and a hard-float one
+            # may leave a copy in the core ones too (TI's armcl: ldm r0, {r0, r1}; vmov d0, r0, r1)
+            for regs, width in ((self.fp_args, 4), (self.args, self.width)):
+                if not regs:
+                    continue
+                k = max(1, n // width)
+                got = sum(self.reg(m, r) << (8 * width * i) for i, r in enumerate(regs[:k]))
+                if got == value:
+                    out[kind] = list(regs[:k])
+                    break
+        self.float_results = out
+        return out
 
     def reg(self, m, name):
         return m.uc.reg_read(self.arch.reg_id(name))
@@ -356,12 +399,14 @@ class Bench:
         return [(v >> (8 * self.width * i)) & ((1 << 8 * self.width) - 1) for i in range(n)]
 
     def place(self, word, nbytes):
-        """Where a marker came from (an argument register's name, "stack+N"), from its low nbytes
-        bytes; None if no marker."""
+        """Where a marker came from (an argument register's name, a floating-point argument
+        register's, "stack+N"), from its low nbytes bytes; None if no marker."""
         low = word & 0xFF
         mask = (1 << 8 * nbytes) - 1
         if 0x10 <= low < 0x10 + len(self.args) and (word & mask) == (reg_mark(low - 0x10, self.width) & mask):
             return self.args[low - 0x10]
+        if 0x60 <= low < 0x60 + len(self.fp_args) and (word & mask) == (fp_mark(low - 0x60) & mask):
+            return self.fp_args[low - 0x60]
         if 0x40 <= low < 0x40 + STACK_WORDS and (word & mask) == (stack_mark(low - 0x40, self.word) & mask):
             return "stack+%d" % (self.word * (low - 0x40))
         return None
@@ -415,17 +460,37 @@ def measure_arg(bench, spec):
     than two words on RISC-V), a second run points every argument register at a buffer of its own
     whose bytes name the register and the offset (ref_byte), and the answer is "memory at r12+2"."""
     fn = bench.program.by_name[spec["function"]]
-    size = bench.sizes()[spec.get("type", "int")]
+    kind = spec.get("type", "int")
+    size = bench.sizes()[kind]
     n = max(1, -(-size // bench.width))
+    core = bench.args[:n]
+    candidates = [core]
+    if kind in ("float", "double"):             # where this build returns one, then the core registers:
+        candidates = [bench.calibrate()[kind]]  # a variadic function returns by the base standard
+        if candidates[0] != core:               # (AAPCS), whatever the build's float variant
+            candidates.append(core)
     m = bench.machine()
+    bench.mark_fp(m)
     args = [reg_mark(i, bench.width) for i in range(len(bench.args))]
     args += [stack_mark(k, bench.word) for k in range(STACK_WORDS)]
     error = _run(bench, m, fn, args)
     if not error:
-        words = [bench.reg(m, r) for r in bench.args[:n]]
-        places = [bench.place(w, min(size, bench.width)) for w in words]
-        if all(places):
-            return {"where": ":".join(places), "words": ["0x%0*x" % (2 * bench.width, w) for w in words]}
+        found = []
+        for regs in candidates:
+            width = bench.width if regs[0] in bench.args else 4
+            words = [bench.reg(m, r) for r in regs]
+            places = [bench.place(w, min(size, width)) for w in words]
+            if all(places):
+                found.append((regs, places, words, width))
+        # a location holding another register's marker is where the value went; one holding its
+        # own markers may just be untouched (with soft float the VFP registers keep theirs)
+        moved = [f for f in found if f[1] != f[0]]
+        if found:
+            regs, places, words, width = (moved or found)[0]
+            out = {"where": ":".join(places), "words": ["0x%0*x" % (2 * width, w) for w in words]}
+            if regs != candidates[0]:
+                out["returned"] = ":".join(regs)
+            return out
     m = bench.machine()
     for i in range(min(8, len(bench.args))):
         m.write(bench.scratch + i * REF_SPAN, bytes(ref_byte(i, j) for j in range(REF_SPAN)))
@@ -463,6 +528,7 @@ def measure_result(bench, spec):
     fn = bench.program.by_name[spec["function"]]
     want = expected_bytes(bench, spec)
     m = bench.machine()
+    bench.mark_fp(m)
     m.write(bench.scratch, bytes(64))
     args = [bench.scratch] + [reg_mark(i, bench.width) for i in range(1, len(bench.args))]
     error = _run(bench, m, fn, args)
@@ -472,10 +538,17 @@ def measure_result(bench, spec):
         # first: a value stored through the pointer (registers may hold it by the way: strd r2, r3)
         returned = " (%s returns the address)" % bench.args[0] if bench.reg(m, bench.args[0]) == bench.scratch else ""
         return {"where": "memory at the address in %s%s" % (bench.args[0], returned)}
-    n = -(-len(want) // bench.width)
-    got = b"".join(bench.reg(m, r).to_bytes(bench.width, "little") for r in bench.args[:n])
-    if n <= len(bench.args) and got[:len(want)] == want:
-        return {"where": ":".join(bench.args[:n])}
+    places = [(bench.args, bench.width)]
+    if bench.fp_args:                               # a float or double in the VFP registers: looked at
+        fp = (bench.fp_args, 4)                     # first for those (a soft-float build never writes
+        places = [fp] + places if spec.get("type") in ("float", "double") else places + [fp]
+    for regs, width in places:                      # them; a hard-float one may leave a copy in r0:r1)
+        n = -(-len(want) // width)
+        if n > len(regs):
+            continue
+        got = b"".join(bench.reg(m, r).to_bytes(width, "little") for r in regs[:n])
+        if got[:len(want)] == want:
+            return {"where": ":".join(regs[:n])}
     return {"where": "?", "regs": ["0x%0*x" % (2 * bench.width, bench.reg(m, r)) for r in bench.args[:4]]}
 
 

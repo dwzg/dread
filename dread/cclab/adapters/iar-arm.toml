@@ -29,6 +29,7 @@ keep = ["--keep", "{symbol}"]
 [matrix.cpu]
 cortex-m3 = ["--cpu=Cortex-M3"]
 cortex-m4 = ["--cpu=Cortex-M4", "--fpu=none"]
+cortex-m4f = ["--cpu=Cortex-M4", "--fpu=VFPv4_sp"]   # the FPU's name as IAR's guide spells it; not tried
 
 [matrix.opt]
 On = ["-On"]
@@ -37,3 +38,6 @@ Om = ["-Om"]
 Oh = ["-Oh"]
 Ohs = ["-Ohs"]
 Ohz = ["-Ohz"]
+
+[cpus]                    # the hard-float build runs on the emulator's Cortex-M4 (it has the FPU)
+cortex-m4f = "cortex-m4"

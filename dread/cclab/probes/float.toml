@@ -1,0 +1,18 @@
+# What each function of float.c shows (dread cclab): where a float or double argument arrives
+# ("arg", read where the build returns one: ret_f and ret_d calibrate that), where a result comes
+# back ("result"). Soft float: core registers and stack, as integers of their size. AAPCS's VFP
+# variant: s0-s15, doubles in d0-d7 (s2:s3 is d1), back-filling, variadic arguments in the core.
+probes = [
+    {function = "ret_f", measure = "result", value = 0x3fc00000, type = "float", note = "a float (1.5)"},
+    {function = "ret_d", measure = "result", value = 0x3ff8000000000000, type = "double", note = "a double (1.5)"},
+    {function = "pick_f_1", measure = "arg", type = "float", note = "the 1st float"},
+    {function = "pick_f_3", measure = "arg", type = "float", note = "the 3rd of three floats"},
+    {function = "pick_f_17", measure = "arg", type = "float", note = "the 17th of seventeen floats"},
+    {function = "pick_if_f", measure = "arg", type = "float", note = "a float after an int"},
+    {function = "pick_i5_f", measure = "arg", type = "float", note = "a float after five ints"},
+    {function = "pick_d_2", measure = "arg", type = "double", note = "the 2nd of two doubles"},
+    {function = "pick_fd_d", measure = "arg", type = "double", note = "a double after a float"},
+    {function = "pick_dfdf_f", measure = "arg", type = "float", note = "the float after double, float, double (back-filling)"},
+    {function = "pick_hfa_c", measure = "arg", type = "float", note = "the 3rd float of a struct of three floats"},
+    {function = "pick_va_d", measure = "arg", type = "double", note = "a variadic double after an int"},
+]
