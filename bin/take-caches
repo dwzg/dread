@@ -1,0 +1,30 @@
+#!/bin/sh
+# The examples' caches (generated cases, register flow) of a worktree whose suite has run, copied
+# into this checkout: the reverse of bin/dev-worktree. After a change that invalidates them (a
+# generator or register-flow VERSION), the worktree's suite made them anew; without this copy the
+# push's fast tests make them a second time in the checkout (more than ten minutes on 2026-10-19).
+# The caches are keyed by what they depend on, so a copy never stands for something that changed:
+# entries this checkout's code would not make are never read.
+#
+#   bin/take-caches WORKTREE
+set -e
+src=$1
+if [ -z "$src" ] || [ ! -d "$src/examples" ]; then
+    echo "usage: bin/take-caches WORKTREE (a DREAD worktree whose suite has run)" >&2
+    exit 2
+fi
+root=$(cd "$(dirname "$0")/.." && pwd)
+src=$(cd "$src" && pwd)
+n=0
+for build in "$src"/examples/*/*/build; do
+    [ -d "$build" ] || continue
+    rel=${build#"$src"/}
+    for cache in autocases regflow; do
+        if [ -d "$build/$cache" ]; then
+            mkdir -p "$root/$rel/$cache"
+            cp -a "$build/$cache/." "$root/$rel/$cache/"
+            n=$((n + 1))
+        fi
+    done
+done
+echo "bin/take-caches: $n caches from $src"

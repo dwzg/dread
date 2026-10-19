@@ -72,6 +72,8 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   changes made meanwhile go into a worktree (`bin/dev-worktree NAME`: a branch, the `.venv` linked,
   the examples' caches copied; without them the suite regenerates gizmo's cases, fifteen minutes
   more), are tested there in full and come onto `main` when the measurement is done or stopped.
+  Before the push, `bin/take-caches WORKTREE` copies the caches the worktree's suite made back
+  into the checkout; without it the push's fast tests make them again after a VERSION change.
 - **Look for performance regularly** (the user, 2026-10-18): every few items, measure what is slow
   now (`pytest --durations=15`, `BUILD/times/`, the `seconds` of `BUILD/autocases/*.json`), profile
   the top item (cProfile) and fix what dominates. Prefer the algorithmic fix (work per byte or per
