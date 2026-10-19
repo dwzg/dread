@@ -111,6 +111,44 @@ def test_a_header_substitution(tmp_path, monkeypatch):
                     "m3-Os", out=lambda *a: None)
 
 
+def test_the_record_step(monkeypatch):
+    """The functions left uncovered or without inputs are recorded in every scenario, the cases
+    kept are counted from sysrecord's lines, and the lift check runs again only when some were."""
+    class T:
+        scenarios = {"boot": {}, "long": {}}
+    calls = []
+
+    def fake(*args, **kw):
+        calls.append(args)
+        return 1.0, 0, "f  3 calls recorded, 2 replay with the same result, 1 kept; 4 -> 9 of 9 instructions\n" \
+                       "g  0 calls recorded, 0 replay with the same result, 0 kept; 1 -> 1 of 5 instructions\n"
+    monkeypatch.setattr(bench, "dread", fake)
+    monkeypatch.setattr(bench, "verdicts_of", lambda t, i: [
+        ("f", "dropped", "UNCOVERED 5 of 9"), ("g", "dropped", "FAIL x [case generation]: no input ran"),
+        ("h", "dropped", "never returns or an exception handler"), ("k", "accepted", "")])
+    image = type("I", (), {"name": "main"})()
+    got = bench.record_step(T(), image, "/nowhere")
+    assert got == {"ran": True, "functions": 2, "kept": 2, "seconds": 2.0}
+    assert [c[:7] for c in calls] == [("sysrecord", "--target", "/nowhere", "--image", "main", "--scenario", s)
+                                      for s in ("boot", "long")] and all(c[7:] == ("f", "g") for c in calls)
+    T.scenarios = {}
+    assert bench.record_step(T(), image, "/nowhere") == {"ran": False, "functions": 2}
+
+
+@needs_gcc
+def test_a_rebuild_that_changes_the_image_drops_recorded_cases(tmp_path, monkeypatch):
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    where = bench.build(recipe(tmp_path), "m3-Os", out=lambda *a: None)
+    recorded = os.path.join(where, "tests", "extra_cases", "main.json")
+    os.makedirs(os.path.dirname(recorded))
+    open(recorded, "w").write("{}")
+    bench.build(recipe(tmp_path), "m3-Os", out=lambda *a: None)                 # the same image: kept
+    assert os.path.exists(recorded)
+    patch = '[[projects.m3.patches]]\nfile = "main.c"\nold = "READY"\nnew = "STEADY"\n'
+    bench.build(recipe(tmp_path, patch), "m3-Os", out=lambda *a: None)          # another image: dropped
+    assert not os.path.exists(recorded)
+
+
 def test_recipes_are_checked(tmp_path):
     path = tmp_path / "bad.toml"
     path.write_text('name = "x"\n[source]\npath = "."\n[projects.p]\nsources = []\n'

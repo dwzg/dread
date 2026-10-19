@@ -15,6 +15,9 @@ it measures what DREAD makes of the image, running its tools as they are run on 
   --no-symbols), against the ELF's: found, missed, extra;
 - the lifter: dread lift --check, the functions whose lifted C agrees with the original on
   generated cases that run every instruction (accepted), and why the others are not;
+- recorded inputs (when the target has system-run scenarios): dread sysrecord records calls of the
+  functions the lifter left uncovered or got no inputs for in each scenario, and the lift check
+  runs again with the cases kept (a rebuild whose image differs drops them);
 - noreturn: the functions found never to return;
 - the seconds each step took.
 
@@ -50,7 +53,7 @@ Recipe format:
 
     dread bench fetch RECIPE
     dread bench build RECIPE [BUILD...]
-    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,noreturn]
+    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,noreturn]
     dread bench report RECIPE
     dread bench all RECIPE [BUILD...] [--steps ...]
 """
@@ -63,7 +66,8 @@ import subprocess
 import sys
 import time
 
-STEPS = ("asm", "ghidra", "lift", "noreturn")
+STEPS = ("asm", "ghidra", "lift", "record", "noreturn")
+RECORDABLE = ("UNCOVERED", "[case generation]")     # refusals that recorded inputs may lift
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -255,9 +259,15 @@ def build(recipe, name, bench=None, jobs=None, out=print):
             f.write("vectors = 0x%x\n" % project["vectors"])
         f.write("\n" + dread_compiler(b))
     from dread import elfimport
-    if elfimport.main(["--target", where, "--payload", os.path.join(where, "original", "firmware.bin"),
-                       "--write-startup", elf]):
+    payload = os.path.join(where, "original", "firmware.bin")
+    old = open(payload, "rb").read() if os.path.exists(payload) else None
+    if elfimport.main(["--target", where, "--payload", payload, "--write-startup", elf]):
         raise BenchError("dread import-elf failed on %s" % elf)
+    if old is not None and open(payload, "rb").read() != old:     # cases of the old image fit it only
+        from dread.target import Target
+        image = Target.load(where).image()
+        for stale in (image.extra_cases, image.kept_cases):
+            shutil.rmtree(stale, ignore_errors=True)
     with open(os.path.join(where, "build.json"), "w") as f:
         json.dump({"recipe": recipe["name"], "build": name, "project": b["project"], "cc": cc,
                    "cflags": b["cflags"], "sources": len(files), "seconds": round(seconds, 1)}, f, indent=1)
@@ -327,19 +337,13 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
         metrics["ghidra"] = {"ran": code == 0, "found": len(found & truth), "missed": len(truth - found),
                              "extra": len(found - truth), "seconds": round(seconds, 1)}
     if "lift" in steps:
-        seconds, code, text = dread("lift", "--target", where, "--check", log=os.path.join(where, "work", "lift.log"))
-        verdicts, reasons = {}, {}
-        path = os.path.join(target.build, "lift-check", image.name, "verdicts.tsv")
-        if os.path.exists(path):
-            with open(path) as f:
-                next(f)
-                for line in f:
-                    fn, verdict, reason = (line.rstrip("\n").split("\t") + ["", ""])[:3]
-                    verdicts[verdict] = verdicts.get(verdict, 0) + 1
-                    if verdict != "accepted":
-                        key = verdict + ": " + reason_kind(reason)
-                        reasons[key] = reasons.get(key, 0) + 1
-        metrics["lift"] = {"ran": code == 0, "verdicts": verdicts, "reasons": reasons, "seconds": round(seconds, 1)}
+        metrics["lift"] = lift_step(target, image, where, "lift.log")
+    if "record" in steps:
+        metrics["record"] = record_step(target, image, where)
+        if metrics["record"].get("kept"):
+            before = metrics.get("lift", {}).get("verdicts", {}).get("accepted")
+            metrics["lift"] = lift_step(target, image, where, "lift-recorded.log")
+            metrics["record"]["accepted_before"] = before
     if "noreturn" in steps:
         seconds, code, text = dread("noreturn", "--target", where, log=os.path.join(where, "work", "noreturn.log"))
         metrics["noreturn"] = {"functions": len([l for l in text.splitlines() if l.strip()]) if code == 0 else None,
@@ -348,6 +352,47 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
         json.dump(metrics, f, indent=1, sort_keys=True)
     out("%s: %s" % (name, summary_line(metrics)))
     return metrics
+
+
+def verdicts_of(target, image):
+    """[(function, verdict, reason)] of the image's last lift check."""
+    path = os.path.join(target.build, "lift-check", image.name, "verdicts.tsv")
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        next(f)
+        return [tuple((line.rstrip("\n").split("\t") + ["", ""])[:3]) for line in f]
+
+
+def lift_step(target, image, where, log):
+    """dread lift --check, and its verdicts counted."""
+    seconds, code, text = dread("lift", "--target", where, "--check", log=os.path.join(where, "work", log))
+    verdicts, reasons = {}, {}
+    for fn, verdict, reason in verdicts_of(target, image):
+        verdicts[verdict] = verdicts.get(verdict, 0) + 1
+        if verdict != "accepted":
+            key = verdict + ": " + reason_kind(reason)
+            reasons[key] = reasons.get(key, 0) + 1
+    return {"ran": code == 0, "verdicts": verdicts, "reasons": reasons, "seconds": round(seconds, 1)}
+
+
+def record_step(target, image, where):
+    """dread sysrecord in every scenario of the target for the functions the last lift check left
+    uncovered or got no inputs for (RECORDABLE): {functions, kept, seconds} (kept: the cases kept,
+    which add instructions), or {"ran": False} without scenarios or verdicts."""
+    import re
+    names = sorted(fn for fn, verdict, reason in verdicts_of(target, image)
+                   if verdict != "accepted" and any(k in reason for k in RECORDABLE))
+    if not target.scenarios or not names:
+        return {"ran": False, "functions": len(names)}
+    kept, seconds, ran = 0, 0.0, True
+    for scenario in sorted(target.scenarios):
+        s, code, text = dread("sysrecord", "--target", where, "--image", image.name, "--scenario", scenario, *names,
+                              log=os.path.join(where, "work", "record-%s.log" % scenario))
+        seconds += s
+        ran = ran and code == 0
+        kept += sum(int(n) for n in re.findall(r"(\d+) kept;", text))
+    return {"ran": ran, "functions": len(names), "kept": kept, "seconds": round(seconds, 1)}
 
 
 def reason_kind(reason):
@@ -368,6 +413,9 @@ def summary_line(m):
     if "lift" in m:
         v = m["lift"]["verdicts"]
         parts.append("lifted %d of %d" % (v.get("accepted", 0), sum(v.values())))
+    r = m.get("record", {})
+    if r.get("kept"):
+        parts.append("%d recorded cases (%d before them)" % (r["kept"], r.get("accepted_before") or 0))
     return ", ".join(parts)
 
 
@@ -382,12 +430,13 @@ def report(recipe, bench=None, out=print):
     lines = ["# %s: what DREAD makes of it" % recipe["name"], "",
              "Made by `dread bench report` from each build's metrics.json; figures only.", "",
              "| build | compiler | functions | code bytes | listing | Ghidra found / missed / extra | lifted | "
-             "never return | seconds (asm, ghidra, lift) |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "recorded cases (lifted before them) | never return | seconds (asm, ghidra, lift) |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for m in rows:
         g, lf = m.get("ghidra", {}), m.get("lift", {})
         v = lf.get("verdicts", {})
-        lines.append("| %s | %s | %d | %d | %s | %s | %s | %s | %s |" % (
+        r = m.get("record", {})
+        lines.append("| %s | %s | %d | %d | %s | %s | %s | %s | %s | %s |" % (
             m["build"], os.path.basename(m.get("cc", "")), m["functions"], m["instruction_bytes"],
             ("identical" if m["asm"]["identical"] else "differs") + (" (%d raw)" % m["asm"]["raw_words"]
                                                                      if m["asm"]["raw_words"] else "")
@@ -395,6 +444,7 @@ def report(recipe, bench=None, out=print):
             "%d / %d / %d" % (g["found"], g["missed"], g["extra"]) if g.get("ran") else "-",
             "%d of %d (%.0f %%)" % (v.get("accepted", 0), sum(v.values()), 100.0 * v.get("accepted", 0) /
                                     max(1, sum(v.values()))) if v else "-",
+            "%d (%s)" % (r["kept"], r.get("accepted_before", "-")) if r.get("kept") else "-",
             m.get("noreturn", {}).get("functions", "-"),
             ", ".join("%.0f" % m[s]["seconds"] if s in m else "-" for s in ("asm", "ghidra", "lift"))))
     for m in rows:
