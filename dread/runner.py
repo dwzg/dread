@@ -115,8 +115,9 @@ def run_function(name):
             written = label.startswith("written")
             if which == "original" and written:
                 m.trace_reads(image.base, image.end, RUN["code"], RUN["owners"])
-            # a loop case ends at a stub call, not at the limit: the C may take more instructions to get there
-            loop_case = bool(generated and generated.get("hang") and generated.get("stub_calls"))
+            # a case that ends at a call (a loop case's stub call, a stop) not at the limit: the C may take
+            # more instructions to get there
+            loop_case = bool(generated and generated.get("hang") and (generated.get("stub_calls") or generated.get("stops")))
             budget = limit if which == "original" or (getattr(m, "may_hang", False) and not loop_case) \
                 else limit * REBUILT_BUDGET
             try:

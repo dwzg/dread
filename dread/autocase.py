@@ -73,7 +73,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 14       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 15       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -85,7 +85,8 @@ VERSION = 14       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 11: system calls run as logged no-ops (dread.emu), no longer faults;
                   # 12: a run caught in a hook that never returns stubs the callee it went in by;
                   # 13: a load from a function's extent by another function's code is a load of code;
-                  # 14: so is one of any halfword of an instruction, and a store behind the image counts
+                  # 14: so is one of any halfword of an instruction, and a store behind the image counts;
+                  # 15: a callee a run hung in also ends inputs at its call ("stops")
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -101,6 +102,7 @@ SWEEP_RUNS = 600            # emulator runs per base input in the boundary sweep
 LONG_SECONDS = 120          # the last-resort search gives up after this long without one input that finished
 KEPT_MAX = 6
 HUNG_STUBS = 4              # callees at most that get stubbed because runs hung in them
+HUNG_STOP = 0.5             # share of fresh inputs in which such a callee ends the run instead ("stops")
 POINTER_REACH = 0x1000      # a fault this far behind an input's value makes the input a learned pointer
 POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTER_BASE ...
 POINTER_STEP = 0x400        # ... this far apart ...
@@ -363,6 +365,7 @@ class Generator:
         count = [0]
         made = m.stub_calls = [0]
         m.stopped_at = None                 # "calls" or "never returns" when a stub ended the run
+        m.ends_at_call = bool(case.get("stops") or (case.get("hang") and case.get("stub_calls")))
         effects = case.get("effects", ())
         fills = case.get("fills", ())
         own = set() if case.get("tight") else None
@@ -476,6 +479,13 @@ class Generator:
     def touches_image(self, m):
         return m.code_reads or m.wrote_into(self.image.base, self.program.writable_end())
 
+    @staticmethod
+    def ends_badly(m):
+        """Whether a run of a case that ends at a call (stops, a loop case) ended neither by a return
+        nor at that call (at the instruction limit, or spinning on a register): no common place to
+        compare it, so it is no case; it may still teach the compare-guided stage."""
+        return getattr(m, "ends_at_call", False) and not m.stopped_at and bool(m.timed_out or m.spinning)
+
     def coverage(self, entry, words, case, limit=200_000, check_image=False):
         """The function's instructions this input executes; empty if it does not finish (or, with
         check_image, when it loads instructions as data or stores into the image)."""
@@ -490,7 +500,7 @@ class Generator:
             m.call(entry, *case["args"], max_instructions=limit)
         except Exception:
             return set()
-        if check_image and self.touches_image(m):
+        if check_image and (self.touches_image(m) or self.ends_badly(m)):
             return set()
         return m.covered_insns(words)
 
@@ -692,11 +702,18 @@ class Generator:
             return fresh_text()
 
         def fresh():
-            return {"args": [value() for _ in range(nregs)],
+            case = {"args": [value() for _ in range(nregs)],
                     "mem": [[a, s, value()] for a, s in sorted(known.items())],
                     "returns": [value() for _ in range(8)] if calls else [], "calls": [list(c) for c in calls],
                     "frame": frame, **({"io": "fixed"} if self.io_fixed else {}), **({"limit": self.long} if self.long else {}),
                     **({"hang": True, "limit": limit, "stub_calls": LOOP_CALLS, "stops": list(stops)} if self.loop else {})}
+            # A callee a run hung in either returns from its stub (the code behind the call runs) or
+            # ends the run at its call: an assertion handler that waits for a debugger, stubbed, let
+            # the run go on into the null pointer it was called for, and the run faulted, so the path
+            # into the assertion stayed unrun (FreeRTOS: most functions the lifter left uncovered)
+            if hung and not self.loop and rng.random() < HUNG_STOP:
+                case.update({"hang": True, "limit": limit, "stops": sorted(hung)})
+            return case
 
         spins = {}                          # register -> (size, value) a run spun on
 
@@ -722,8 +739,8 @@ class Generator:
             m.cover(words[0], end)
             m.trace_reads(image.base, image.end, self.code, self.owners)
             m.call(entry, *case["args"], max_instructions=max_instructions)
-            if self.loop and not m.stopped_at:
-                raise EmuError("a loop case ended at the instruction limit")
+            if self.loop and self.ends_badly(m):
+                raise EmuError("a loop case ended neither at a stub call nor by a return")
             return m
 
         stepping, tree_seen = [], set()     # inputs that only reached new code in callees
@@ -738,7 +755,7 @@ class Generator:
                 break
             if (corpus or stepping) and rng.random() < 0.75:
                 case = json.loads(json.dumps(rng.choice(corpus + stepping)))
-                if not self.loop and case.pop("hang", None):    # a mutant hangs or not by its own run
+                if not self.loop and not case.get("stops") and case.pop("hang", None):  # (by its own run)
                     if self.long:
                         case["limit"] = self.long
                     else:
@@ -746,6 +763,8 @@ class Generator:
                 if hung and len(case["calls"]) < len(calls):        # stubs found since it was made
                     case["calls"] = [list(c) for c in calls]
                     case["returns"] = case["returns"] or [value() for _ in range(8)]
+                if hung and not self.loop and not case.get("stops") and rng.random() < HUNG_STOP:
+                    case.update({"hang": True, "limit": limit, "stops": sorted(hung)})     # (see fresh)
                 present = {a for a, _, _ in case["mem"]}
                 case["mem"] += [[a, s, value()] for a, s in sorted(known.items()) if a not in present]
                 texts = buffers(case) if strings or chars else ()
@@ -831,8 +850,10 @@ class Generator:
                             continue
                         known.setdefault(a, n)
                 continue
-            if self.touches_image(m) or (self.loop and not m.stopped_at):
-                faults += 1                     # (a loop run that ended at the limit: no common place)
+            if m.spinning:                      # (a case that ends at a call came back spinning: the
+                spins.setdefault(m.spinning[0], m.spinning[1:])     # next inputs get a poll stage)
+            if self.touches_image(m) or (self.loop and self.ends_badly(m)):
+                faults += 1
                 continue
             known.learn(m.reads)
             got = m.covered_insns(words)
@@ -952,7 +973,7 @@ class Generator:
         if len(corpus) + len(extras) < 4:
             raise GenerationError("%s: only %d of %d generated inputs ran to the end (%d faulted); write cases"
                                   % (name, len(corpus) + len(extras), budget, faults))
-        return self.settle_hangs(entry, corpus + extras)
+        return self.settle_hangs(entry, self.drop_bad_ends(entry, corpus + extras))
 
     def left_through(self, m, words):
         """The function a run that ended elsewhere left the tested one for: the destination of the
@@ -972,6 +993,27 @@ class Generator:
         if kind not in ("call", "jump") or target is None:
             return None
         return self.program.function_at(target)
+
+    def drop_bad_ends(self, entry, cases):
+        """The cases without those that should end at a call (stops, loop cases) and end otherwise
+        (ends_badly: no common place to compare them). The search keeps them while it runs (one that
+        spins in a wait it cannot leave is where the compare-guided stage finds the callee effect
+        that ends the wait), the result does not."""
+        out = []
+        for case in cases:
+            if case.get("stops") or (case.get("hang") and case.get("stub_calls")):
+                m = self.machine()
+                m.plan = []
+                m.spin_limit = SPIN_READS
+                self.apply(m, case)
+                try:
+                    m.call(entry, *case["args"], max_instructions=case.get("limit", 200_000))
+                except EmuError:
+                    continue
+                if self.ends_badly(m):
+                    continue
+            out.append(case)
+        return out
 
     def settle_hangs(self, entry, cases):
         """A case is a "hang" case by its own run, not by the case it was made from: one that returns

@@ -394,6 +394,11 @@ class Machine:
     def _on_stub(self, uc, addr, size, user):
         args = tuple(uc.reg_read(r) for r in self.layout.arg_regs)
         ret = self.stubs[addr](self, *args)
+        if getattr(self, "stopped_at", None):
+            # The stub ended the run at this call (a stop, a loop case's last stub call): no return
+            # from it, so the run ends at the callee's entry however the caller got there (behind a
+            # tail jump in the original, lr is the harness's own return and a return went there)
+            return
         if isinstance(ret, tuple):          # (r0, r1): a stub of a function with a wide result
             for reg, v in zip(self.layout.result_regs, ret):
                 uc.reg_write(reg, (v or 0) & 0xFFFFFFFF)
@@ -672,7 +677,7 @@ class Machine:
             if poll["count"] > poll["stages"][-1][0] + POLL_LOGGED:
                 self.calls.append(("io poll reads", register, poll["count"]))
         if uc.reg_read(lay.pc) != lay.sentinel:
-            self.timed_out = self.spinning is None
+            self.timed_out = self.spinning is None and not getattr(self, "stopped_at", None)
             if self.may_hang:
                 return Result(0, writes, list(self.calls) + [("did not return",)], layout=lay)
             raise EmuError("function at 0x%x did not return within %d instructions" % (addr, max_instructions))
