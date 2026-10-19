@@ -26,7 +26,7 @@ whose recipe changed since builds it again first, so a figure always belongs to 
 
 A build's figures go to BENCH/NAME/BUILD/metrics.json, and `report` gathers every build's into
 BENCH/NAME/report.md. BENCH is ~/dread-bench (or $DREAD_BENCH). Only recipes are kept in DREAD's
-repository; sources, builds and reports stay in BENCH (CLAUDE.md, rule 1).
+repository; sources, builds and reports stay in BENCH.
 
 Recipe format:
 

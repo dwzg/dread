@@ -1,6 +1,6 @@
 # FreeRTOS (MIT licence), release 202411.00 with kernel V11.1.0: a realistic benchmark for DREAD
 # (dread bench). Only this recipe is in DREAD's repository; the sources, the builds and the reports
-# live in ~/dread-bench (CLAUDE.md, rule 1).
+# live in ~/dread-bench.
 
 name = "freertos"
 

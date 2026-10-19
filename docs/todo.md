@@ -357,7 +357,7 @@ tool, the page shows its records; the only changes are the command line's own.
 ## A realistic benchmark: FreeRTOS (asked for by the user, 2026-10-19; before the rest of MSP430)
 
 Decompile a real project built by ourselves in many ways, with the ELF as ground truth. The
-repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in `~/dread-bench`.
+repository holds the recipe; the sources, builds and results live in `~/dread-bench`.
 
 - [x] **Recipe and harness**: `dread bench` and `bench/freertos.toml`: fetch, build with our flags,
   import (ground truth), measure (listing, Ghidra against the ELF, the lifter's acceptance, recorded
