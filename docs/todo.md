@@ -310,7 +310,8 @@ repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in
   that never returns stubbed, hang marks inherited by mutants, clang's variadic spill taken for
   reads, ecall taken for a system call that reads a0-a7, every -O0 function reading nothing (the
   spill rule), saves around a call of an unset register taken for reads, a hang deep in a callee
-  stubbing nothing. It brought the "load" startup kind (QEMU's ELF loader filling RAM), fixed
+  stubbing nothing, five builds measured as they were made from an older recipe (without the
+  device models it had gained: measure builds again what the recipe changed since). It brought the "load" startup kind (QEMU's ELF loader filling RAM), fixed
   registers ([image] fixed), header patches, and functions declared without a size.
 - [x] **The matrix, first part**: Cortex-M3 GCC -O0/-Os/-O2, clang -Os/-O2; RISC-V GCC -Os/-O2. Every
   listing rebuilds byte for byte; Ghidra finds 235-419 of 295-437 function starts without symbols.
@@ -337,8 +338,9 @@ repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in
   has C (disagreements on that build from about 22 to 8).
 - [ ] **What keeps the lifter below two thirds**, from the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
-  reaches the code (a yielding function records nothing: every call takes PendSV), longer or more
-  varied scenarios for the rest; (2) functions that never return whose loop cases miss instructions
+  reaches the code (the recorder follows calls across task switches and into handlers since, with
+  what other tasks write meanwhile as later stages: on GCC -Os 254 to 265 accepted, the record step
+  868 s to 25 s), longer or more varied scenarios for the rest; (2) functions that never return whose loop cases miss instructions
   (about 30): mostly a path that needs every check of the loop to pass in one case (a stubbed receive
   that must write exactly the value compared), beyond the compare-guided stage's budget on runs that
   long, and their system check needs every instruction run; (3) a few disagreements per build,
