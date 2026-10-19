@@ -277,3 +277,18 @@ project = "virt"
 cc = "riscv64-elf-gcc"
 cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
           "-fno-builtin-printf", "-O2", "-g"]
+
+[[builds]]
+name = "virt-clang-Os"
+project = "virt"
+cc = "clang"
+# -mno-relax: clang's assembler marks the vector table's jumps relaxable in spite of .option norvc, GNU
+# ld then shrinks them to two bytes, and the timer's vector lands in the next entry (the system run
+# took the tick into the handler for unexpected interrupts)
+cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-mno-relax",
+          "--sysroot=/usr/riscv64-elf", "-ffreestanding", "-ffunction-sections", "-fdata-sections",
+          "-fno-builtin-printf", "-Os", "-g"]
+ld = "riscv64-elf-gcc"                  # newlib and libgcc from GNU's toolchain (its rv32imac/ilp32 multilib)
+lflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow"]
+dread_cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mno-relax", "-ffreestanding",
+                "-Os", "-ffunction-sections"]
