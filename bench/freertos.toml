@@ -114,10 +114,11 @@ lines = 32
 systick_rate = 1
 priority_bits = 8                       # QEMU implements all eight (the demo's configuration says so)
 
-# From reset: the start-up, the tasks created, the scheduler started, about 90 ticks of the demo
-# (about 3 s on one core); every function that never returns is checked with it
-[scenarios.boot]
-limit = 3_000_000
+# From reset: the start-up, the tasks created, the scheduler started, about 900 ticks of the demo
+# (about 16 s on one core); every function that never returns is checked with it, and the recorder
+# records in it (at 90 ticks the test tasks had run a third of their code, at 900 more than two thirds)
+[scenarios.run]
+limit = 30_000_000
 '''
 
 [[projects.mps2.patches]]               # the full demo, not the blinky one
@@ -207,8 +208,8 @@ base = 0x02000000
 rate = 1
 
 # From reset: the start-up, the tasks created, the scheduler started, the first ticks
-[scenarios.boot]
-limit = 3_000_000
+[scenarios.run]
+limit = 30_000_000
 '''
 
 # The MSP430F449 demo (written for mspgcc), built with TI's msp430-elf-gcc and TI's support files

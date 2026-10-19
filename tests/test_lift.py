@@ -188,8 +188,38 @@ def test_a_main_loop_is_accepted_by_loop_cases(variant, copies):
     accepted = lift.check(target, image, ["main", "fmt_dec"], out=lines.append, jobs=4)
     assert sorted(accepted) == ["fmt_dec", "main"], lines
     assert any("(1 by loop cases, 0 by the system run" in line for line in lines), lines[-3:]
+    assert "the whole image agrees" in lines[-1], lines[-1]
     marked = open(image.table("lifted")).read()
     assert "\nmain\n" in marked and "accepted by the system run" not in marked
+
+
+@pytest.mark.slow
+@pytest.mark.compiles
+def test_loop_cases_and_the_system_run_together(variant, copies):
+    """A function that never returns may be accepted by what its loop cases ran (when they all
+    agreed) and what the scenarios ran, together; it is built alone for that. In the boot scenario
+    alone main never handles a key: with the key path given as run by its loop cases, the two run
+    all of it; with loop cases that ran nothing, the key path keeps it out."""
+    from dread import sysrun
+    target, image = copy_of(copies, variant)
+    target.scenarios = {"boot": target.scenarios["boot"]}          # no key comes
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    fn = program.by_name["main"]
+    coverage = lift.Coverage(program, ["main"])
+    system = sysrun.System(target, image, image.payload(), program=program,
+                           scenario=dict(target.scenarios["boot"], _name="boot"))
+    system.observers.append(coverage)
+    system.run(int(target.scenarios["boot"].get("limit", sysrun.LIMIT)))
+    unrun = set(fn.insns) - coverage.ran - set(lifter.lift(fn).unreached)
+    assert unrun                                                    # the key path
+    lines, verdicts = [], {}
+    kept = lift.system_check(target, image, program, lifter, ["main"], out=lines.append, verdicts=verdicts,
+                             loop_missed={"main": set(fn.insns) - unrun}, jobs=2)
+    assert kept == {"main": "loop cases and the system run"}, lines
+    kept = lift.system_check(target, image, program, lifter, ["main"], out=lines.append, verdicts=verdicts,
+                             loop_missed={"main": set(fn.insns)}, jobs=2)
+    assert kept == {} and "the system run and its loop cases never ran" in verdicts["main"][1], verdicts
 
 
 @pytest.mark.slow

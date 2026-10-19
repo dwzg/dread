@@ -41,8 +41,10 @@ that failed while a callee of it was lifted and failed too gets one more round w
 A function that never returns gets no case that ends: it gets loop cases (dread.autocase, loop=True:
 its callees stubbed, compared at the same stub call in both images), and what they do not accept,
 and every A-profile exception handler, the system run decides when the target has scenarios
-(system_check: every scenario agrees on the original and the rebuilt image, and the original's runs
-execute every instruction a path reaches; the lifted table marks those). What stays is written to
+(system_check: built alone, every scenario agrees on the original and the rebuilt image, and the
+original's runs execute every instruction a path reaches that its loop cases, if they all agreed,
+did not; the lifted table marks those). Last, every scenario runs on the image with all accepted
+functions rebuilt (whole_image): a difference there is reported (lift-check/IMAGE/whole.txt). What stays is written to
 the image's lifted table (config/lifted.txt), which dread recon builds from then on (it lifts those
 functions again at every build: the C is not kept).
 
@@ -1805,6 +1807,8 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
     callees = {n: direct_callees(program, program.by_name[n]) for n in candidates}
     tree = call_trees(program, candidates)
     accepted, suspects, passes, rounds = list(candidates), set(), 0, 0
+    loop_missed = {}                        # a function that never returns whose loop cases agreed: what
+                                            # they left unrun (the system run may run it, system_check)
     while accepted:
         rounds += 1
         try:
@@ -1844,6 +1848,9 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
         # callers come next with its original code (FreeRTOS: every task-creating function failed
         # through the heap's allocator, two calls down; tried again together, they failed together).
         suspects |= {n for n in failing - ungenerated if tree[n] & (failing - {n})}
+        for name in set(uncovered) - failing:
+            if name in loops:
+                loop_missed[name] = set(runner.RUN.get("missed", {}).get(name, ()))
         accepted = [n for n in accepted if n not in drop]
         if not drop:
             if suspects and passes < RETRY_PASSES:
@@ -1855,17 +1862,20 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                 continue
             break
     endless = endless + sorted(n for n in loops if n not in accepted)     # what loop cases did not accept
-    by_system = system_check(target, image, program, lifter, accepted, endless, out, verdicts) \
-        if system and target.scenarios else []
+    by_system = system_check(target, image, program, lifter, endless, out, verdicts, loop_missed, jobs) \
+        if system and target.scenarios else {}
     for name in endless:
         verdicts.setdefault(name, ("dropped", "never returns or an exception handler, and the target has no "
                                               "system-run scenarios to test it", ""))
     dropped = len(candidates) - len(accepted) + len(endless) - len(by_system) - len(loops - set(accepted))
     by_loops = [n for n in accepted if n in loops]
-    accepted = accepted + by_system
+    accepted = accepted + sorted(by_system)
     for name in accepted:
-        verdicts[name] = ("accepted", "by the system run" if name in by_system else
+        verdicts[name] = ("accepted", "by " + by_system[name] if name in by_system else
                           "by loop cases" if name in loops else "", "")
+    whole = whole_image(target, image, program, accepted, out) if system and target.scenarios and accepted else None
+    if whole:
+        out("the whole image: %s" % whole)
     os.makedirs(work, exist_ok=True)
     with open(os.path.join(work, "verdicts.tsv"), "w") as f:
         f.write("function\tverdict\treason\tmissed\n")
@@ -1877,12 +1887,16 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
         f.write("# Functions built from lifted C: their cases (for one that never returns: its loop cases,\n"
                 "# or every scenario of the system run) agree with the original and run every instruction it\n"
                 "# can reach. Written by dread lift --check; not edited by hand.\n")
-        f.write("".join(n + ("  # accepted by the system run" if n in by_system else "") + "\n"
+        f.write("".join(n + ("  # accepted by %s" % by_system[n] if n in by_system else "") + "\n"
                         for n in sorted(accepted)))
-    out("dread lift --check: %d accepted after %d rounds (%d by loop cases, %d by the system run; %d written by hand, "
-        "%d refused, %d dropped), into %s" % (len(accepted), rounds, len(by_loops), len(by_system),
-                                             len(by_hand & set(program.by_name)), refused, dropped,
-                                             os.path.relpath(path)))
+    with open(os.path.join(work, "whole.txt"), "w") as f:
+        f.write((whole or "agrees") + "\n")
+    out("dread lift --check: %d accepted after %d rounds (%d by loop cases, %d by the system run, %d of them with "
+        "loop cases; %d written by hand, %d refused, %d dropped; the whole image %s), into %s" % (
+            len(accepted), rounds, len(by_loops), len(by_system),
+            sum(1 for h in by_system.values() if h != "the system run"), len(by_hand & set(program.by_name)),
+            refused, dropped, "differs" if whole else "agrees" if target.scenarios and system else "not run",
+            os.path.relpath(path)))
     return accepted
 
 
@@ -1913,57 +1927,110 @@ class Coverage:
         pass
 
 
-def system_check(target, image, program, lifter, accepted, names, out=print, verdicts=None):
-    """Functions that never return (a main loop, a reset handler) get no function-level case. Each
-    one is built from lifted C on its own (with the functions already accepted), and every scenario
-    of the target runs on the original and on the rebuilt image (dread.sysrun): accepted when the
-    device logs, model reports and endings agree and the original's runs executed every instruction
-    of it that a path reaches. Returns the accepted names; verdicts, a dict, gets the reason of each
-    one dropped (see check)."""
+G = {}                                      # what a forked system check worker reads (system_check)
+
+
+def _system_one(name):
+    """One function's system check (see system_check): (name, verdict, reason, missed, how)."""
     import json
-    verdicts = {} if verdicts is None else verdicts
     from dread import build, overlay, sysrun
-    work = os.path.join(target.build, "lift-system", image.name)
-    original = image.payload()
-    kept = []
-    for name in names:
-        fn = program.by_name[name]
-        try:
-            unreached = set(lifter.lift(fn).unreached)
-            payload = build.build(target, image, out=work, lifted=list(accepted) + kept + [name], quiet=True)
-        except (Refused, overlay.OverlayError) as e:
-            out("dropped  %-24s %s" % (name, e))
-            verdicts[name] = ("dropped", str(e), "")
-            continue
-        with open(os.path.join(work, "placement.json")) as f:
-            placed = json.load(f)["functions"]
-        built = [n for n, p in placed.items() if p["placement"] != "helper"]
-        with open(payload, "rb") as f:
-            rebuilt = f.read()
-        coverage, why = Coverage(program, [name]), None
-        for scenario_name, scenario in sorted(target.scenarios.items()):
-            scenario = dict(scenario, _name=scenario_name)
-            system = sysrun.System(target, image, original, program=program, built=built, scenario=scenario)
-            system.observers.append(coverage)
-            a = system.run(int(scenario.get("limit", sysrun.LIMIT)))
-            b = sysrun.run_image(target, image, rebuilt, scenario, placement=placed)
-            diff = sysrun.compare(a, b)
-            if diff:
-                why = "scenario %s: %s" % (scenario_name, " ".join(diff)[:200])
-                break
-        missing = sorted(set(fn.insns) - coverage.ran - unreached) if why is None else []
-        if why is None and missing:
-            why = "the system run never ran %d of its %d instructions: %s" % (
-                len(missing), len(fn.insns), " ".join("0x%x" % a for a in missing[:8]))
-        if why:
-            kind = "an exception handler" if lifter.handler_kind(fn) else "never returns"
-            out("dropped  %-24s %s; %s" % (name, kind, why))
-            verdicts[name] = ("dropped", "%s; %s" % (kind, why), " ".join("0x%x" % a for a in missing))
+    target, image, program, lifter, work = G["target"], G["image"], G["program"], G["lifter"], G["work"]
+    fn = program.by_name[name]
+    kind = "an exception handler" if lifter.handler_kind(fn) else "never returns"
+    try:
+        unreached = set(lifter.lift(fn).unreached)
+        where = os.path.join(work, name)
+        payload = build.build(target, image, out=where, lifted=[name], quiet=True)
+    except (Refused, overlay.OverlayError) as e:
+        return name, "dropped", str(e), "", None
+    with open(os.path.join(where, "placement.json")) as f:
+        placed = json.load(f)["functions"]
+    built = [n for n, p in placed.items() if p["placement"] != "helper"]
+    with open(payload, "rb") as f:
+        rebuilt = f.read()
+    coverage = Coverage(program, [name])
+    for scenario_name, scenario in sorted(target.scenarios.items()):
+        scenario = dict(scenario, _name=scenario_name)
+        system = sysrun.System(target, image, G["original"], program=program, built=built, scenario=scenario)
+        system.observers.append(coverage)
+        a = system.run(int(scenario.get("limit", sysrun.LIMIT)))
+        b = sysrun.run_image(target, image, rebuilt, scenario, placement=placed)
+        diff = sysrun.compare(a, b)
+        if diff:
+            return name, "dropped", "%s; scenario %s: %s" % (kind, scenario_name, " ".join(diff)[:200]), "", None
+    missing = set(fn.insns) - coverage.ran - unreached
+    by_cases = G["loop_missed"].get(name)
+    if by_cases is not None:
+        missing &= by_cases                 # what its loop cases ran (all of them agreed) counts too
+    if missing:
+        missing = sorted(missing)
+        return name, "dropped", "%s; the system run%s never ran %d of its %d instructions: %s" % (
+            kind, " and its loop cases" if by_cases is not None else "", len(missing), len(fn.insns),
+            " ".join("0x%x" % a for a in missing[:8])), " ".join("0x%x" % a for a in missing), None
+    how = "loop cases and the system run" if by_cases and set(fn.insns) - coverage.ran - unreached else "the system run"
+    return name, "accepted", kind, "", how
+
+
+def system_check(target, image, program, lifter, names, out=print, verdicts=None, loop_missed=None, jobs=None):
+    """Functions that never return (a main loop, a task, a reset handler) and exception handlers get
+    no function-level case that ends. Each one is built from lifted C alone over the original image
+    and every scenario of the target runs on the original and on the rebuilt image (dread.sysrun):
+    accepted when the device logs, model reports and endings agree and the original's runs executed
+    every instruction of it that a path reaches; loop_missed ({name: the instructions its loop cases,
+    which all agreed, left unrun}) lets them count what loop cases ran. Alone, since the clock of a
+    system run counts only code both images share: with every accepted function rebuilt, FreeRTOS's
+    kernel took no time, the demo's timing tests asserted, and the scenarios ran a third of what they
+    run on the original. The checks run in parallel. Returns {name: "the system run" or "loop cases
+    and the system run"}; verdicts, a dict, gets the reason of each one dropped (see check)."""
+    import multiprocessing
+    from dread.util.polite import die_with_parent, workers
+    verdicts = {} if verdicts is None else verdicts
+    kept = {}
+    if not names:
+        return kept
+    G.update(target=target, image=image, program=program, lifter=lifter, original=image.payload(),
+             work=os.path.join(target.build, "lift-system", image.name), loop_missed=loop_missed or {})
+    with multiprocessing.get_context("fork").Pool(min(len(names), jobs or workers()),
+                                                  initializer=die_with_parent) as pool:
+        results = pool.map(_system_one, list(names))
+    for name, verdict, reason, missed, how in results:
+        if verdict == "accepted":
+            out("accepted %-24s %s; every scenario agrees, and %s runs all of it" % (
+                name, reason, "with its loop cases it" if how != "the system run" else "it"))
+            kept[name] = how
         else:
-            out("accepted %-24s %s; every scenario agrees and runs all of it" % (
-                name, "an exception handler" if lifter.handler_kind(fn) else "never returns"))
-            kept.append(name)
+            out("dropped  %-24s %s" % (name, reason))
+            verdicts[name] = ("dropped", reason, missed)
     return kept
+
+
+def whole_image(target, image, program, names, out=print):
+    """Every scenario on the original and on the image with all of `names` built from lifted C: the
+    function-level cases test each function on its own, this the whole (a frame that grew in C can
+    overflow a task's small stack). Returns None when they agree, else the first difference."""
+    import json
+    from dread import build, overlay, sysrun
+    if not names or not target.scenarios:
+        return None
+    work = os.path.join(target.build, "lift-whole", image.name)
+    try:
+        payload = build.build(target, image, out=work, lifted=list(names), quiet=True)
+    except overlay.OverlayError as e:
+        return "the build failed: %s" % e
+    with open(os.path.join(work, "placement.json")) as f:
+        placed = json.load(f)["functions"]
+    built = [n for n, p in placed.items() if p["placement"] != "helper"]
+    with open(payload, "rb") as f:
+        rebuilt = f.read()
+    for scenario_name, scenario in sorted(target.scenarios.items()):
+        scenario = dict(scenario, _name=scenario_name)
+        system = sysrun.System(target, image, image.payload(), program=program, built=built, scenario=scenario)
+        a = system.run(int(scenario.get("limit", sysrun.LIMIT)))
+        b = sysrun.run_image(target, image, rebuilt, scenario, placement=placed)
+        diff = sysrun.compare(a, b)
+        if diff:
+            return "scenario %s: %s" % (scenario_name, " ".join(diff)[:300])
+    return None
 
 
 def main(argv=None):
