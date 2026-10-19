@@ -139,6 +139,160 @@ file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/FreeRTOSConfig.h"
 old = "#define configTOTAL_HEAP_SIZE                    ( ( size_t ) ( 60 * 1024 ) )"
 new = "#define configTOTAL_HEAP_SIZE                    ( ( size_t ) ( 160 * 1024 ) )"
 
+# The same full demo for the Cortex-M4F on QEMU's MPS2 AN386 board (the AN385's peripherals, a Cortex-M4
+# with the FPU), with the ARM_CM4F port, built with hard float. The demo's math tasks (flop.c) run as
+# well, their arithmetic in single precision (portDOUBLE float), so that tasks with the FPU's state are
+# switched; the system run found the IT-state fault this way (an interrupt in newlib's strcmp).
+[projects.mps2f]
+sources = [
+    "FreeRTOS/Source/tasks.c", "FreeRTOS/Source/list.c", "FreeRTOS/Source/queue.c", "FreeRTOS/Source/timers.c",
+    "FreeRTOS/Source/event_groups.c", "FreeRTOS/Source/stream_buffer.c",
+    "FreeRTOS/Source/portable/MemMang/heap_4.c", "FreeRTOS/Source/portable/GCC/ARM_CM4F/port.c",
+    "FreeRTOS/Demo/Common/Minimal/AbortDelay.c", "FreeRTOS/Demo/Common/Minimal/BlockQ.c",
+    "FreeRTOS/Demo/Common/Minimal/blocktim.c", "FreeRTOS/Demo/Common/Minimal/countsem.c",
+    "FreeRTOS/Demo/Common/Minimal/death.c", "FreeRTOS/Demo/Common/Minimal/dynamic.c",
+    "FreeRTOS/Demo/Common/Minimal/EventGroupsDemo.c", "FreeRTOS/Demo/Common/Minimal/GenQTest.c",
+    "FreeRTOS/Demo/Common/Minimal/integer.c", "FreeRTOS/Demo/Common/Minimal/IntQueue.c", "FreeRTOS/Demo/Common/Minimal/flop.c",
+    "FreeRTOS/Demo/Common/Minimal/IntSemTest.c", "FreeRTOS/Demo/Common/Minimal/MessageBufferAMP.c",
+    "FreeRTOS/Demo/Common/Minimal/MessageBufferDemo.c", "FreeRTOS/Demo/Common/Minimal/PollQ.c",
+    "FreeRTOS/Demo/Common/Minimal/QPeek.c", "FreeRTOS/Demo/Common/Minimal/QueueOverwrite.c",
+    "FreeRTOS/Demo/Common/Minimal/QueueSet.c", "FreeRTOS/Demo/Common/Minimal/QueueSetPolling.c",
+    "FreeRTOS/Demo/Common/Minimal/recmutex.c", "FreeRTOS/Demo/Common/Minimal/semtest.c",
+    "FreeRTOS/Demo/Common/Minimal/StaticAllocation.c", "FreeRTOS/Demo/Common/Minimal/StreamBufferDemo.c",
+    "FreeRTOS/Demo/Common/Minimal/StreamBufferInterrupt.c", "FreeRTOS/Demo/Common/Minimal/TaskNotify.c",
+    "FreeRTOS/Demo/Common/Minimal/TaskNotifyArray.c", "FreeRTOS/Demo/Common/Minimal/TimerDemo.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main.c", "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main_blinky.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main_full.c", "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/IntQueueTimer.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/RegTest.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/printf-stdarg.c",
+]
+includes = ["FreeRTOS/Source/include", "FreeRTOS/Source/portable/GCC/ARM_CM4F", "FreeRTOS/Demo/Common/include",
+            "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC", "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/CMSIS"]
+ldscript = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/mps2_m3.ld"
+link = ["-nostartfiles", "-specs=nano.specs", "-specs=nosys.specs", "-Wl,--gc-sections", "-lm"]   # (flop.c: fabs)
+base = 0x0
+limit = 0x400000                        # QEMU's MPS2: 4 MiB of flash
+entry = "Reset_Handler"
+vectors = 0x0
+target = '''
+[target]
+name = "freertos-mps2f"
+title = "FreeRTOS full demo, Cortex-M4F (QEMU MPS2 AN386)"
+
+[arch]
+name = "arm"
+isa = "t32"
+profile = "m"
+cpu = "cortex-m4"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x00000000, size = 0x400000, kind = "rom"},
+    {name = "ram", base = 0x20000000, size = 0x400000},
+]
+io = [[0x40000000, 0x40100000], [0xe000e000, 0xe000f000]]
+stack = {top = 0x20400000, size = 0x4000}
+sentinel = 0x00f00000
+scratch = {base = 0x20300000, size = 0x40000}
+
+# QEMU's MPS2 AN386 board (ARM's CMSDK peripherals, as the AN385's): UART0, the two timers (their interrupts are
+# lines 8 and 9), the core's NVIC and SysTick. Rate 1 (a count per shared-clock unit) makes the
+# emulated core slow against its clocks (about 10,000 instructions a tick), so the runs stay short.
+[models.uart]
+kind = "uart"
+base = 0x40004000
+data = 0x0
+status = 0x4
+tx_ready = 0x0                          # STATE bit 0 means "transmit buffer full": never set
+rx_ready = 0x2
+size = 0x1000
+
+[models.timer0]
+kind = "timer"
+base = 0x40000000
+ctrl = 0x0
+count = 0x4
+load = 0x8
+stat = 0xc
+run = 0x1
+irq_enable = 0x8
+expired = 0x1
+rate = 1
+irq = 8
+size = 0x1000
+
+[models.timer1]
+kind = "timer"
+base = 0x40001000
+ctrl = 0x0
+count = 0x4
+load = 0x8
+stat = 0xc
+run = 0x1
+irq_enable = 0x8
+expired = 0x1
+rate = 1
+irq = 9
+size = 0x1000
+
+[models.nvic]
+kind = "nvic"
+lines = 32
+systick_rate = 1
+priority_bits = 8                       # QEMU implements all eight (the demo's configuration says so)
+
+# From reset: the start-up, the tasks created, the scheduler started, about 900 ticks of the demo
+# (about 16 s on one core); every function that never returns is checked with it, and the recorder
+# records in it (at 90 ticks the test tasks had run a third of their code, at 900 more than two thirds)
+[scenarios.run]
+limit = 30_000_000
+'''
+
+[[projects.mps2f.patches]]               # the full demo, not the blinky one
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main.c"
+old = "#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY    1"
+new = "#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY    0"
+
+# The demo's stacks were sized with an older GCC: GCC 16 at -Os gives one test task a frame of 192 of
+# its 320 bytes, and the overflow check stops the demo (found by the system run). Twice the stacks,
+# and a heap that holds them (QEMU's MPS2 has 4 MiB of RAM).
+[[projects.mps2f.patches]]
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/FreeRTOSConfig.h"
+old = "#define configMINIMAL_STACK_SIZE                 ( ( unsigned short ) 80 )"
+new = "#define configMINIMAL_STACK_SIZE                 ( ( unsigned short ) 160 )"
+
+[[projects.mps2f.patches]]
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/FreeRTOSConfig.h"
+old = "#define configTOTAL_HEAP_SIZE                    ( ( size_t ) ( 60 * 1024 ) )"
+new = "#define configTOTAL_HEAP_SIZE                    ( ( size_t ) ( 160 * 1024 ) )"
+
+[[projects.mps2f.patches]]              # the demo's CMSIS is the Cortex-M3's, which refuses an FPU
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/CMSIS/core_cm3.h"
+old = "#if defined (__VFP_FP__) && !defined(__SOFTFP__)"
+new = "#if 0  /* dread bench: built for the AN386's Cortex-M4F, which has the FPU */"
+
+[[projects.mps2f.patches]]              # the math tasks' arithmetic in single precision, on the FPU (fabs
+                                        # and the tolerance compares stay double: libgcc's helpers)
+file = "FreeRTOS/Source/portable/GCC/ARM_CM4F/portmacro.h"
+old = "#define portDOUBLE        double"
+new = "#define portDOUBLE        float"
+
+[[projects.mps2f.patches]]              # the math tasks started ...
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main_full.c"
+old = "    vStartInterruptSemaphoreTasks();"
+new = "    vStartInterruptSemaphoreTasks();\n    vStartMathTasks( tskIDLE_PRIORITY );"
+
+[[projects.mps2f.patches]]              # ... with their header ...
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main_full.c"
+old = "static void prvCheckTask( void * pvParameters );"
+new = "#include \"flop.h\"\nstatic void prvCheckTask( void * pvParameters );"
+
+[[projects.mps2f.patches]]              # ... and checked by the check task
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main_full.c"
+old = "        if( xAreGenericQueueTasksStillRunning() != pdTRUE )"
+new = "        if( xAreMathsTaskStillRunning() != pdTRUE )\n        {\n            pcMessage = \"xAreMathsTaskStillRunning() returned false\";\n        }\n        else if( xAreGenericQueueTasksStillRunning() != pdTRUE )"
+
 # The full demo for RV32IMAC on QEMU's virt board (its main.c builds the full demo already).
 [projects.virt]
 sources = [
@@ -308,6 +462,29 @@ ld = "arm-none-eabi-gcc"
 lflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft"]
 dread_cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-O2",
                 "-ffunction-sections"]
+
+[[builds.patches]]                      # clang allows no C statement in a naked function
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c"
+old = "void Reset_Handler( void ) __attribute__( ( naked ) );"
+new = "void Reset_Handler( void );"
+
+[[builds]]
+name = "mps2f-gcc-Os"
+project = "mps2f"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m4", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16", "-ffreestanding", "-Os",
+          "-ffunction-sections", "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2f-clang-Os"
+project = "mps2f"
+cc = "clang"
+cflags = ["--target=thumbv7em-none-eabihf", "-mcpu=cortex-m4", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16",
+          "--sysroot=/usr/arm-none-eabi", "-ffreestanding", "-Os", "-ffunction-sections", "-fdata-sections", "-g"]
+ld = "arm-none-eabi-gcc"                # newlib and libgcc from GNU's toolchain
+lflags = ["-mthumb", "-mcpu=cortex-m4", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16"]
+dread_cflags = ["--target=thumbv7em-none-eabihf", "-mcpu=cortex-m4", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16",
+                "-ffreestanding", "-Os", "-ffunction-sections"]
 
 [[builds.patches]]                      # clang allows no C statement in a naked function
 file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c"
