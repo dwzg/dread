@@ -215,6 +215,5 @@ were made may still be changed by other inputs; a probe's C may mean different t
 where C leaves it open (that is why the probes keep to plain C99). A helper's result registers in the
 profile are those some probe read: a probe that uses a result is what adds it. The stack alignment
 is the largest power of two that divided every frame at a call: a measurement, from an aligned
-entry. Not yet measured: prologue and epilogue variants as such, the VFP registers a call keeps
-(s16-s31), C++. Not yet possible: big-endian targets, and the 8-bit cores of
+entry. Not yet measured: prologue and epilogue variants as such, C++. Not yet possible: big-endian targets, and the 8-bit cores of
 compilers such as SDCC, which need an engine of DREAD's own first (docs/todo.md: Z80, then 8051).

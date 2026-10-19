@@ -637,7 +637,8 @@ def lowbit(n):
 
 def measure_keeps(bench, spec):
     """Run with a marker in every register a call must keep (the ABI's callee-saved registers, the
-    i-th the byte 0x20 + i across the register): which came back changed; which of them, and the
+    i-th the byte 0x20 + i across the register; the floating-point ones, ARM's s16-s31, 0x70 + i):
+    which came back changed; which of them, and the
     return address, the function stored in its own frame (read after the run, between the stack
     pointer at its entry and the lowest its own instructions set); and its frame at every call it
     makes (bytes below the entry's stack pointer, before the call pushes anything). The largest
@@ -653,6 +654,9 @@ def measure_keeps(bench, spec):
     marks = {}
     for i, name in enumerate(bench.saved):
         marks[name] = int.from_bytes(bytes([0x20 + i]) * bench.width, "little")
+        m.uc.reg_write(arch.reg_id(name), marks[name])
+    for i, name in enumerate(getattr(arch, "fp_saved_regs", lambda: [])()):    # ARM: s16-s31
+        marks[name] = int.from_bytes(bytes([0x70 + i]) * 4, "little")
         m.uc.reg_write(arch.reg_id(name), marks[name])
     sp_id = arch.reg_id("sp")
     state = {"prev": None, "entry": None, "low": None}
@@ -689,7 +693,7 @@ def measure_keeps(bench, spec):
             elif arch.link_reg and (v & ~1) == (bench.sentinel & ~1):
                 ret = True
     out = {"kept": "all" if not broken else "not " + " ".join(broken),
-           "saved": [n for n in bench.saved if n in found] + (["return address"] if ret else []),
+           "saved": [n for n in list(marks) if n in found] + (["return address"] if ret else []),
            "frames_at_calls": sorted(set(frames))}
     nonzero = [f for f in frames if f]
     if nonzero:

@@ -3,6 +3,7 @@
    the lab runs them with a marker in every register that a call must keep and reports which ones
    came back changed, and the stack pointer's alignment at each call. */
 unsigned op_udiv10(unsigned a);
+float op_fmul(float a, float b);
 
 int keeps_leaf(int a, int b)
 {
@@ -27,4 +28,11 @@ long long keeps_ll(long long a, long long b)
 {
     unsigned k = op_udiv10((unsigned)a);
     return a * b + k;
+}
+
+float keeps_fp(float a, float b, float c, float d)
+{
+    float p = a * b, q = c * d, r = a + c, s = b + d, t = a - d, u = b - c;
+    float k = op_fmul(p, q);
+    return k + p * q + r * s + t * u + p + q + r + s + t + u;
 }

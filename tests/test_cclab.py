@@ -399,6 +399,8 @@ def test_hard_float_follows_the_vfp_variant(tmp_path):
     for fn, (h, s) in expect.items():
         assert (hard[fn].get("where"), soft[fn].get("where")) == (h, s), (fn, hard[fn], soft[fn])
     assert hard["pick_va_d"]["returned"] == "r0:r1" and "returned" not in soft["pick_va_d"]
+    assert hard["keeps_fp"]["kept"] == "all" and any(r.startswith("s1") for r in hard["keeps_fp"]["saved"])
+    assert soft["keeps_fp"]["kept"] == "all" and not any(r.startswith("s") for r in soft["keeps_fp"]["saved"])
     from dread.cclab import compare
     assert compare.hint("pick_dfdf_f", "s6", "s3").startswith("no option")
 

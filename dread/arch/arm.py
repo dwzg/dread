@@ -138,6 +138,10 @@ class Arm:
         (s0-s15, which are d0-d7): where a hard-float build passes float and double arguments."""
         return ["s%d" % i for i in range(16)]
 
+    def fp_saved_regs(self):
+        """The floating-point registers a call keeps (AAPCS: s16-s31, d8-d15)."""
+        return ["s%d" % i for i in range(16, 32)]
+
     # ---- instruction sets ----
 
     def isas(self):
