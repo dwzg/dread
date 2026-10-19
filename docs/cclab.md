@@ -29,6 +29,9 @@ with GCC below (tests/test_cclab.py). The doctor is there for what that leaves o
 
 ## At work: IAR EWARM on Windows, DREAD in WSL
 
+DREAD needs Python 3.11 or newer (Ubuntu 24.04's `python3` in WSL; on 22.04, 3.11 from the
+deadsnakes PPA) and installs unicorn and capstone from PyPI.
+
 ```sh
 # in WSL
 git clone https://github.com/dwzg/dread.git && cd dread
