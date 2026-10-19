@@ -435,9 +435,38 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   instructions run, 74,000 tokens in and 352,000 out, 28 minutes. Most misses were failed
   assertions, which the generator covers itself since (stops): the next runs, with Sonnet and the
   local model too, go on what the measurement after that leaves.
-- [ ] **New architectures through it**: MSP430X with TI's cl430 (FreeRTOS's MSP430X port), AVR (its
-  ATmega ports), each as its own item below.
+- [ ] **New architectures through it**: Cortex-M4F first (FreeRTOS's ARM_CM4F port, below), then MSP430X
+  with TI's cl430 (FreeRTOS's MSP430X port), AVR (its ATmega ports), each as its own item below.
 - [ ] (Later) a compute-heavy library (littlefs) for the case generator on parsers and data structures.
+
+## Cortex-M4 (ARMv7E-M with FPv4-SP; the user, 2026-10-19: first among the new architectures)
+
+Integer M4 code is the M3's instruction set and goes through every tool today. Missing: the DSP
+extension, the FPU, the hard-float calling convention and their place in every tool, and a real M4
+in the emulator. The MSP430 work in flight (its lifter, stack arguments) is finished first; the rest
+of the MSP430 section comes after this one.
+
+- [ ] **The configured core** (with "The configured Cortex-M model" above, measured first):
+  Unicorn's cortex-m4 (DSP, FPv4-SP) for a target that names it; every Cortex-M runs on Unicorn's
+  M33 today.
+- [ ] **gizmo-m4**: gizmo built for the Cortex-M4 with hard float (`-mcpu=cortex-m4 -mfpu=fpv4-sp-d16
+  -mfloat-abi=hard`, GCC and clang), with C of its own that uses floats (a filter, a conversion with
+  rounding) and the DSP extension (saturating and packed arithmetic through ACLE intrinsics); every
+  test runs on it.
+- [ ] **The DSP instructions in the lifter** (refused as "not modelled" today): saturating arithmetic
+  (qadd, qsub, ssat, usat and their 16-bit forms), packed adds and subtracts with the GE flags and
+  sel, the packed multiply-accumulates (smlad, smlsd, smuad and the rest), packing and extending
+  (pkhbt, uxtab16 and the rest); in the fuzzer.
+- [ ] **The FPU in the lifter**: single-precision VFP (arithmetic, fused multiply-add, conversions,
+  compares with vmrs APSR_nzcv, loads, stores, vpush, vpop) and FPSCR (rounding mode, flush to zero:
+  honoured or refused), exact either way (C floats with -ffp-contract=off, or the instruction itself
+  in inline assembly where C cannot say it, as dread.lift_msp430 does); in the fuzzer.
+- [ ] **The hard-float calling convention**: the s0-s15 arguments and the s0 result in the harness,
+  regflow, the case generator (float inputs: NaNs, infinities, denormals, boundaries) and stubs.
+- [ ] **The system run with an FPU**: the extended exception frame, lazy stacking (FPCCR) and the
+  EXC_RETURN values with FP context in dread.models.nvic.
+- [ ] **FreeRTOS on it**: the ARM_CM4F port on QEMU's mps2-an386 (Cortex-M4) in the benchmark's
+  matrix, with GCC and clang.
 
 ## MSP430 (of special interest to the user; right after RISC-V)
 
@@ -506,10 +535,8 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## Floating point
 
-- [ ] A gizmo build with floating point (Cortex-M4F, hard float; and VFP in ARM state): the lifter's
-  VFP translation (C float and double with -ffp-contract=off, or inline assembly per instruction;
-  FPSCR flags through vmrs), the case generator's float inputs (NaNs, infinities, denormals,
-  boundaries), the s0-s15/d0-d7 argument registers in the harness and regflow.
+- [ ] VFP in ARM state and double precision (VFPv3/v4-D16 and wider): what the Cortex-M4 section
+  leaves, on the A profile (a gizmo build with hard float; d0-d7 arguments).
 
 ## More compilers
 
