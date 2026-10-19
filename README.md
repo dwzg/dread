@@ -85,6 +85,7 @@ bin/dread sysrecord --target examples/gizmo/m3 --scenario config read_line   # c
 bin/dread lift --target examples/gizmo/m3 --check  # lift every function, keep those whose cases agree
 bin/dread liftfuzz --isa t32                        # the lifter on random instructions, against the emulator
 bin/dread test --target examples/gizmo/rv32         # the same tools on the RISC-V build
+bin/dread bench all freertos                        # a real project built many ways, measured (in ~/dread-bench)
 bin/dread flat --target examples/gizmo/m3 print_status        # one function to read: names, literals, arguments
 bin/dread callsites --target examples/gizmo/m3 --by 0 gpio_set # who calls it, with which constants
 bin/dread callpair --target OTHER --other examples/gizmo/a32 --seed FUN_08000738=main   # names by call order

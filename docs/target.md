@@ -102,7 +102,13 @@ default. `--image NAME` or `$DREAD_IMAGE` selects another.
 
 - `"code"`: bytes stored at `stored` that run at `run`;
 - `"data"`: data stored at `stored` that is used at `run`;
-- `"zero"`: a range the startup clears, with no `stored`.
+- `"zero"`: a range the startup clears, with no `stored`;
+- `"load"`: bytes a loader puts into memory beside the image, `{kind = "load", run, size, file}`, with
+  no `stored`: an ELF whose initialised data lies in RAM with no copy in flash (QEMU's ELF loader
+  fills RAM so, and the startup copies nothing). The emulator and the system run put the file's
+  bytes at `run` before any code runs. `dread import-elf` takes every section with contents outside
+  the memory region the image's base lies in for such bytes, writes each run to `load-RUN.bin`
+  beside the payload, and leaves them out of the payload.
 
 Code that runs from RAM is analysed at its run address. The program database reads its bytes at
 the stored address. `dread import-elf` prints the list for an image with an ELF; with

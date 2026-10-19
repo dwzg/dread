@@ -11,7 +11,12 @@ changing a table, case or report format.
    no disassembly, no addresses, function or variable names, register maps or other facts of a real
    target. That also holds for comments, docstrings, tests, examples and commit messages. Examples
    use gizmo (`examples/gizmo`), which is our own code. A real target's facts live in that target's
-   repository, in its `dread.toml`, its tables and its plugins.
+   repository, in its `dread.toml`, its tables and its plugins. Open-source projects used as
+   benchmarks (FreeRTOS first; decided by the user on 2026-10-19): the repository holds only their
+   recipe (a pinned download, the build configurations, the measuring scripts); everything built or
+   derived from them (ELFs, images, tables, written C, reports with their names or addresses) stays
+   outside, in `~/dread-bench`. Commit messages and docs give figures (rates, times, counts), not
+   their functions' names or addresses.
 2. **Facts come from the target, not from the logic.** A tool takes load addresses, the memory map,
    the calling convention, the compiler and the paths of its tables from `dread.target`. A constant
    in a tool that describes a firmware is a bug. Constants of the method (limits, search budgets)

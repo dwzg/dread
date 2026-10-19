@@ -242,28 +242,57 @@ def tables(elf, unnamed=False, keep=(), isa="a32"):
     return functions, code, symbols
 
 
-def startup(elf):
+def startup(elf, region=None):
     """The copies a startup makes, read from the sections: [(kind, run, size, stored)], kind
     "code" or "data" for a section loaded at one address and run at another, "zero" for an
-    allocated section without contents (stored None)."""
+    allocated section without contents (stored None). With region (lo, hi), the memory the image
+    lies in: a section with contents loaded outside it is "load" (stored None), bytes a loader puts
+    into memory beside the image (QEMU's ELF loader fills RAM so, and the startup copies nothing;
+    load_bytes() reads them). Entries of one kind that follow each other are merged."""
     out = []
-    for s in elf.sections:
-        if not s.alloc or not s.size:
-            continue
+    for s in sorted((s for s in elf.sections if s.alloc and s.size), key=lambda s: s.addr):
         if s.nobits:
-            out.append(("zero", s.addr, s.size, None))
+            entry = ["zero", s.addr, s.size, None]
+        elif region is not None and not region[0] <= s.lma < region[1]:
+            entry = ["load", s.addr, s.size, None]
         elif s.lma != s.addr:
-            out.append(("code" if s.code else "data", s.addr, s.size, s.lma))
-    return out
+            entry = ["code" if s.code else "data", s.addr, s.size, s.lma]
+        else:
+            continue
+        last = out[-1] if out else None
+        if last and last[0] == entry[0] and last[1] + last[2] == entry[1] and \
+                (last[3] is None or last[3] + last[2] == entry[3]):
+            last[2] += entry[2]
+        else:
+            out.append(entry)
+    return [tuple(e) for e in out]
+
+
+def load_bytes(elf, run, size):
+    """The bytes the sections hold at run addresses [run, run + size) (zero between them)."""
+    out = bytearray(size)
+    for s in elf.sections:
+        if s.alloc and not s.nobits and s.size and s.addr < run + size and run < s.addr + s.size:
+            lo, hi = max(s.addr, run), min(s.addr + s.size, run + size)
+            out[lo - run:hi - run] = elf.data(s)[lo - s.addr:hi - s.addr]
+    return bytes(out)
+
+
+def image_region(target, image):
+    """(lo, hi) of the memory region the image's base lies in (its flash), or None."""
+    for r in target.memory.regions:
+        if r.base <= image.base < r.end:
+            return r.base, r.end
+    return None
 
 
 FREE_MIN = 16           # smaller gaps between sections are alignment, not room
 
 
-def free_ranges(elf, base):
-    """[(start, end)] of the gaps between the sections loaded into the payload from `base` (none
-    behind the last one: that is the room behind the image)."""
-    spans = sorted((lma, lma + len(data)) for lma, data, _ in elf.loaded() if lma >= base)
+def free_ranges(elf, base, end=None):
+    """[(start, end)] of the gaps between the sections loaded into the payload from `base` (below
+    `end`, when given; none behind the last one: that is the room behind the image)."""
+    spans = sorted((lma, lma + len(data)) for lma, data, _ in elf.loaded() if lma >= base and (end is None or lma < end))
     out, at = [], None
     for lo, hi in spans:
         if at is not None and lo - at >= FREE_MIN:
@@ -290,10 +319,13 @@ def write_tables(image, functions, code, symbols, header="dread import-elf"):
             f.write("%s 0x%x %s\n" % (kind, address, name))
 
 
-def startup_toml(copies):
+def startup_toml(copies, files=None):
+    """The startup list as TOML; files: {run address: file} of the "load" entries."""
     lines = ["startup = ["]
     for kind, run, size, stored in copies:
-        if stored is None:
+        if kind == "load":
+            lines.append('    {kind = "load", run = 0x%x, size = 0x%x, file = "%s"},' % (run, size, files[run]))
+        elif stored is None:
             lines.append('    {kind = "%s", run = 0x%x, size = 0x%x},' % (kind, run, size))
         else:
             lines.append('    {kind = "%s", run = 0x%x, size = 0x%x, stored = 0x%x},' % (kind, run, size, stored))
@@ -359,19 +391,31 @@ def main(argv=None):
     write_tables(image, functions, code, symbols)
     print("%d functions, %d code ranges, %d symbols written to %s"
           % (len(functions), len(code), len(symbols), os.path.relpath(image.config)))
+    region = image_region(target, image)
+    copies = startup(elf, region)
+    files = {}
     if args.payload:
-        data, base = elf.payload(image.base, image.erased)
+        data, base = elf.payload(image.base, image.erased, region[1] if region else None)
         with open(args.payload, "wb") as f:
             f.write(data)
         print("%d bytes from 0x%x written to %s" % (len(data), base, args.payload))
-    copies = startup(elf)
+        for kind, run, size, _ in copies:       # what the loader puts beside the image, next to it
+            if kind == "load":
+                path = os.path.join(os.path.dirname(os.path.abspath(args.payload)), "load-%x.bin" % run)
+                with open(path, "wb") as f:
+                    f.write(load_bytes(elf, run, size))
+                files[run] = os.path.relpath(path, target.root)
+                print("%d bytes the loader puts at 0x%x written to %s" % (size, run, path))
+    elif any(kind == "load" for kind, _, _, _ in copies):
+        print("dread import-elf: the image needs bytes a loader puts beside it: give --payload", file=sys.stderr)
+        files = {run: "original/load-%x.bin" % run for kind, run, _, _ in copies if kind == "load"}
     if copies and args.write_startup:
-        changed = write_startup(target.file, image.name, copies)
+        changed = write_startup(target.file, image.name, None, "startup", startup_toml(copies, files))
         print("startup list of [image.%s] %s in %s" % (image.name, "updated" if changed else "unchanged",
                                                          os.path.relpath(target.file)))
     elif copies:
-        print("startup copies for [image.%s] in dread.toml:\n%s" % (image.name, startup_toml(copies)))
-    free = free_ranges(elf, image.base)
+        print("startup copies for [image.%s] in dread.toml:\n%s" % (image.name, startup_toml(copies, files)))
+    free = free_ranges(elf, image.base, region[1] if region else None)
     if free and args.write_startup:
         changed = write_startup(target.file, image.name, None, "free", free_toml(free))
         print("free ranges of [image.%s] %s in %s" % (image.name, "updated" if changed else "unchanged",

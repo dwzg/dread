@@ -31,6 +31,7 @@ COMMANDS = {
     "lift": ("dread.lift", "translate functions to C instruction by instruction"),
     "liftfuzz": ("dread.liftfuzz", "check the lifter on random instructions against the emulator"),
     "pilot": ("dread.pilot", "the reconstruction loop run by code, a language model only for the judgement"),
+    "bench": ("dread.bench", "build a real project in many ways and measure what DREAD makes of it"),
     "leakcheck": ("dread.leakcheck", "look for a private project's names and addresses before publishing"),
 }
 

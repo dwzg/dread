@@ -121,10 +121,11 @@ class Elf:
                 out.append((s.lma, self.raw[s.offset:s.offset + s.size], s))
         return sorted(out, key=lambda x: x[0])
 
-    def payload(self, base=None, fill=0xFF):
+    def payload(self, base=None, fill=0xFF, end=None):
         """The image as `objcopy -O binary` writes it: every allocated section with contents at its
-        load address, gaps filled with `fill`, from `base` (default: the lowest load address)."""
-        parts = self.loaded()
+        load address, gaps filled with `fill`, from `base` (default: the lowest load address); with
+        `end`, only the sections loaded below it (the rest: what a loader puts elsewhere)."""
+        parts = [p for p in self.loaded() if end is None or p[0] < end]
         if not parts:
             return b"", base or 0
         start = parts[0][0] if base is None else base

@@ -180,7 +180,7 @@ class Program:
         self.arch = self.image.arch
         self.base = self.image.base
         self.data = payload if payload is not None else self.image.payload()
-        self.copies = [c for c in self.image.startup() if c.kind != "zero"]
+        self.copies = [c for c in self.image.startup() if c.kind in ("code", "data")]    # in the image
         self.isa = self.arch.isa
         self.code = {}                  # instruction address -> (length, isa)
         self.ranges = read_code_ranges(self.image.table("code_ranges"), self.isa, self.arch.isas())

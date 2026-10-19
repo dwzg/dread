@@ -1,0 +1,144 @@
+"""dread bench on a local recipe built from gizmo's own sources (no network): the harness compiles,
+links, imports the ELF and measures the listing and noreturn; a substitution goes into a copy, never
+into the source; and the "load" kind of startup entry: bytes a loader puts into RAM beside the image
+(a QEMU-style ELF whose initialised data has no copy in flash)."""
+import json
+import os
+import subprocess
+
+import pytest
+
+from dread import bench
+from conftest import GIZMO, have
+
+needs_gcc = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+
+TARGET = '''
+[target]
+name = "bench-gizmo"
+
+[arch]
+name = "arm"
+isa = "t32"
+profile = "m"
+cpu = "cortex-m3"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x08000000, size = 0x100000, kind = "rom"},
+    {name = "sram", base = 0x20000000, size = 0x5000},
+    {name = "scratch", base = 0x20100000, size = 0x20000},
+]
+io = [[0x40000000, 0x40020000], [0xe000e000, 0xe000f000]]
+stack = {top = 0x20005000, size = 0x1000}
+sentinel = 0x1fff0000
+scratch = {base = 0x20100000, size = 0x20000}
+'''
+
+
+def recipe(tmp_path, patches=""):
+    path = tmp_path / "gizmo.toml"
+    path.write_text('''name = "gizmo"
+
+[source]
+path = "%s"
+
+[projects.m3]
+sources = ["start_m3.c", "lib.c", "util.c", "hw.c", "main.c"]
+includes = ["."]
+defines = ["GIZMO_M3"]
+ldscript = "m3.ld"
+link = ["-nostdlib", "-lgcc"]
+base = 0x08000000
+limit = 0x08010000
+entry = "Reset_Handler"
+target = \'\'\'%s\'\'\'
+%s
+[[builds]]
+name = "m3-Os"
+project = "m3"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mcpu=cortex-m3", "-mthumb", "-mfloat-abi=soft", "-Os", "-ffreestanding", "-fno-builtin",
+          "-ffunction-sections", "-fno-common", "-g", "-Wall"]
+''' % (os.path.join(GIZMO, "fw"), TARGET, patches))
+    return bench.load(str(path))
+
+
+@needs_gcc
+def test_a_local_recipe_builds_and_measures(tmp_path, monkeypatch):
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    r = recipe(tmp_path)
+    where = bench.build(r, "m3-Os", out=lambda *a: None)
+    assert os.path.exists(os.path.join(where, "firmware.elf"))
+    toml = open(os.path.join(where, "dread.toml")).read()
+    assert 'cross = "arm-none-eabi-"' in toml and '"-g"' not in toml and "startup = [" in toml
+    metrics = bench.measure(r, "m3-Os", steps=("asm", "noreturn"), out=lambda *a: None)
+    assert metrics["functions"] > 30 and metrics["asm"]["identical"] and metrics["asm"]["raw_words"] <= 2
+    assert metrics["noreturn"]["functions"] >= 2          # main's loop, and the reset handler that calls it
+    assert json.load(open(os.path.join(where, "metrics.json")))["functions"] == metrics["functions"]
+    report = open(bench.report(r, out=lambda *a: None)).read()
+    assert "| m3-Os | arm-none-eabi-gcc |" in report and "identical" in report
+
+
+@needs_gcc
+def test_a_substitution_goes_into_a_copy(tmp_path, monkeypatch):
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    patch = '[[projects.m3.patches]]\nfile = "main.c"\nold = "READY"\nnew = "STEADY"\n'
+    r = recipe(tmp_path, patch)
+    before = open(os.path.join(GIZMO, "fw", "main.c")).read()
+    where = bench.build(r, "m3-Os", out=lambda *a: None)
+    assert open(os.path.join(GIZMO, "fw", "main.c")).read() == before
+    assert b"STEADY" in open(os.path.join(where, "original", "firmware.bin"), "rb").read()
+    bad = recipe(tmp_path, '[[projects.m3.patches]]\nfile = "main.c"\nold = "no such text"\nnew = "x"\n')
+    with pytest.raises(bench.BenchError):
+        bench.build(bad, "m3-Os", out=lambda *a: None)
+
+
+def test_recipes_are_checked(tmp_path):
+    path = tmp_path / "bad.toml"
+    path.write_text('name = "x"\n[source]\npath = "."\n[projects.p]\nsources = []\n'
+                    '[[builds]]\nname = "b"\nproject = "nope"\ncc = "gcc"\ncflags = []\n')
+    with pytest.raises(bench.BenchError, match="names no project"):
+        bench.load(str(path))
+    assert bench.load("freertos")["name"] == "freertos"           # the recipes in DREAD's bench/
+
+
+def test_the_compiler_section_for_rewritten_c():
+    gcc = bench.dread_compiler({"name": "b", "cc": "arm-none-eabi-gcc", "cflags": ["-mthumb", "-Os", "-g3", "-Wall",
+                                                                                   "-DX=1", "-Iinc"]})
+    assert gcc == '[compiler]\ncross = "arm-none-eabi-"\ncflags = ["-mthumb", "-Os"]\n'
+    clang = bench.dread_compiler({"name": "b", "cc": "clang", "cflags": ["--target=thumbv7m-none-eabi", "-Os"]})
+    assert clang == '[compiler]\nkind = "clang"\ntriple = "thumbv7m-none-eabi"\ncflags = ["-Os"]\n'
+
+
+@needs_gcc
+def test_data_a_loader_puts_into_ram(tmp_path):
+    """An ELF whose initialised data lies in RAM with no copy in flash (QEMU loads it so): the image
+    is the flash part, the data a startup entry of kind load with its bytes in a file, and a called
+    function finds them."""
+    from dread import elfimport
+    from dread.emu import Layout, Machine
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.c").write_text("int counter = 0x1234567;\nint next(void) { return counter++; }\n")
+    (tmp_path / "t.ld").write_text(
+        "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+        "SECTIONS { .text : { *(.text*) } > FLASH\n .data : { *(.data*) } > RAM\n .bss : { *(.bss*) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "next", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    assert len(image.payload()) < 0x100                          # the flash part only
+    (load,) = [c for c in image.startup() if c.kind == "load"]
+    assert (load.run, load.size, load.data) == (0x20000000, 4, (0x1234567).to_bytes(4, "little"))
+    assert 'file = "original/load-20000000.bin"' in (tmp_path / "dread.toml").read_text()
+    program = Program(target, image)
+    machine = Machine(Layout(target, image), image.payload())
+    result = machine.call(program.by_name["next"].entry)
+    assert result.ret == 0x1234567 and result.writes[0x20000000] == 0x68       # counter + 1, written back

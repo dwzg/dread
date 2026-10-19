@@ -99,7 +99,9 @@ class Layout:
         """[(address, bytes)]: what memory holds before any code runs."""
         out = [(self.base, payload)]
         for c in self.image.startup():
-            if c.kind != "zero":
+            if c.kind == "load":                # the loader's bytes, not in the image
+                out.append((c.run, c.data))
+            elif c.kind != "zero":
                 lo = c.stored - self.base
                 out.append((c.run, payload[lo:lo + c.size]))
         return out

@@ -235,16 +235,20 @@ class Compiler:
 
 
 class Copy:
-    """What the startup copies to its run address before the code runs: code or data from `stored`
-    in the image to `run`, or a range it zeroes ("zero", no stored)."""
+    """What memory holds at `run` before the code runs, besides the image: code or data the startup
+    copies from `stored` in the image, a range it zeroes ("zero"), or bytes the loader puts there
+    ("load", `data`: an ELF loader such as QEMU's fills RAM from the file directly, and the startup
+    copies nothing; the bytes come from a file of the target)."""
 
-    def __init__(self, kind, run, size, stored=None):
-        if kind not in ("code", "data", "zero"):
-            raise TargetError("startup copy kind is code, data or zero, not %r" % kind)
-        if (stored is None) != (kind == "zero"):
+    def __init__(self, kind, run, size, stored=None, data=None):
+        if kind not in ("code", "data", "zero", "load"):
+            raise TargetError("startup copy kind is code, data, zero or load, not %r" % kind)
+        if (stored is None) != (kind in ("zero", "load")):
             raise TargetError("a startup copy of kind %s %s a stored address"
-                              % (kind, "needs" if kind != "zero" else "has no"))
-        self.kind, self.run, self.size, self.stored = kind, run, size, stored
+                              % (kind, "needs" if kind in ("code", "data") else "has no"))
+        if (data is None) != (kind != "load") or (data is not None and len(data) != size):
+            raise TargetError("a startup copy of kind load needs its %d bytes (and only that kind has bytes)" % size)
+        self.kind, self.run, self.size, self.stored, self.data = kind, run, size, stored, data
 
     def __contains__(self, address):
         return self.run <= address < self.run + self.size
@@ -271,8 +275,9 @@ class Image:
               system run takes the stack pointer and the reset handler from it); default: base
     config    the directory of the image's tables (default "config")
     cases, extra_cases, kept_cases, record_specs, src: where its test cases and its C live
-    startup   the startup's copies, as a list of {kind, run, size, stored}, or {plugin = "..."}
-              naming a function plugin(image) that reads them from the image
+    startup   the startup's copies, as a list of {kind, run, size, stored}, {kind = "load", run, size,
+              file} for bytes the loader puts into memory, or {plugin = "..."} naming a function
+              plugin(image) that reads them from the image
     tables    {key: file name} overriding TABLES
     arch      keys of [arch] that differ for this image
     """
@@ -371,10 +376,18 @@ class Image:
             else:
                 copies = []
                 for i, c in enumerate(spec):
-                    unknown = set(c) - {"kind", "run", "size", "stored"}
+                    unknown = set(c) - {"kind", "run", "size", "stored", "file"}
                     if unknown or not {"kind", "run", "size"} <= set(c):
-                        raise TargetError("image %s: startup[%d] has kind, run, size and stored" % (self.name, i))
-                    copies.append(Copy(c["kind"], c["run"], c["size"], c.get("stored")))
+                        raise TargetError("image %s: startup[%d] has kind, run, size, stored and file"
+                                          % (self.name, i))
+                    data = None
+                    if "file" in c:
+                        try:
+                            with open(self.target.path(c["file"]), "rb") as f:
+                                data = f.read()
+                        except OSError as e:
+                            raise TargetError("image %s: startup[%d]: %s" % (self.name, i, e))
+                    copies.append(Copy(c["kind"], c["run"], c["size"], c.get("stored"), data))
             self._copies = list(copies)
         return self._copies
 

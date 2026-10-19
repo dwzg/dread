@@ -1,0 +1,128 @@
+# FreeRTOS (MIT licence), release 202411.00 with kernel V11.1.0: a realistic benchmark for DREAD
+# (dread bench). Only this recipe is in DREAD's repository; the sources, the builds and the reports
+# live in ~/dread-bench (CLAUDE.md, rule 1).
+
+name = "freertos"
+
+[source]
+git = "https://github.com/FreeRTOS/FreeRTOS.git"
+commit = "152cf36d6775bce6026a791845af12201aae703d"          # tag 202411.00
+sparse = [
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC", "FreeRTOS/Demo/Common", "FreeRTOS/Demo/RISC-V_RV32_QEMU_VIRT_GCC",
+    "FreeRTOS/Demo/msp430_GCC", "FreeRTOS/Demo/MSP430X_MSP430F5438_CCS", "FreeRTOS/Demo/AVR_ATmega328PB_Xplained_mini_GCC",
+    "FreeRTOS/Source", "/*.md", "/*.txt",
+]
+submodules = ["FreeRTOS/Source"]                              # the kernel, V11.1.0 at that commit
+
+# The full demo (the kernel and every common test task) for Cortex-M3 on QEMU's MPS2 AN385 board.
+[projects.mps2]
+sources = [
+    "FreeRTOS/Source/tasks.c", "FreeRTOS/Source/list.c", "FreeRTOS/Source/queue.c", "FreeRTOS/Source/timers.c",
+    "FreeRTOS/Source/event_groups.c", "FreeRTOS/Source/stream_buffer.c",
+    "FreeRTOS/Source/portable/MemMang/heap_4.c", "FreeRTOS/Source/portable/GCC/ARM_CM3/port.c",
+    "FreeRTOS/Demo/Common/Minimal/AbortDelay.c", "FreeRTOS/Demo/Common/Minimal/BlockQ.c",
+    "FreeRTOS/Demo/Common/Minimal/blocktim.c", "FreeRTOS/Demo/Common/Minimal/countsem.c",
+    "FreeRTOS/Demo/Common/Minimal/death.c", "FreeRTOS/Demo/Common/Minimal/dynamic.c",
+    "FreeRTOS/Demo/Common/Minimal/EventGroupsDemo.c", "FreeRTOS/Demo/Common/Minimal/GenQTest.c",
+    "FreeRTOS/Demo/Common/Minimal/integer.c", "FreeRTOS/Demo/Common/Minimal/IntQueue.c",
+    "FreeRTOS/Demo/Common/Minimal/IntSemTest.c", "FreeRTOS/Demo/Common/Minimal/MessageBufferAMP.c",
+    "FreeRTOS/Demo/Common/Minimal/MessageBufferDemo.c", "FreeRTOS/Demo/Common/Minimal/PollQ.c",
+    "FreeRTOS/Demo/Common/Minimal/QPeek.c", "FreeRTOS/Demo/Common/Minimal/QueueOverwrite.c",
+    "FreeRTOS/Demo/Common/Minimal/QueueSet.c", "FreeRTOS/Demo/Common/Minimal/QueueSetPolling.c",
+    "FreeRTOS/Demo/Common/Minimal/recmutex.c", "FreeRTOS/Demo/Common/Minimal/semtest.c",
+    "FreeRTOS/Demo/Common/Minimal/StaticAllocation.c", "FreeRTOS/Demo/Common/Minimal/StreamBufferDemo.c",
+    "FreeRTOS/Demo/Common/Minimal/StreamBufferInterrupt.c", "FreeRTOS/Demo/Common/Minimal/TaskNotify.c",
+    "FreeRTOS/Demo/Common/Minimal/TaskNotifyArray.c", "FreeRTOS/Demo/Common/Minimal/TimerDemo.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main.c", "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main_blinky.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main_full.c", "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/IntQueueTimer.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/RegTest.c",
+    "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/printf-stdarg.c",
+]
+includes = ["FreeRTOS/Source/include", "FreeRTOS/Source/portable/GCC/ARM_CM3", "FreeRTOS/Demo/Common/include",
+            "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC", "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/CMSIS"]
+ldscript = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/mps2_m3.ld"
+link = ["-nostartfiles", "-specs=nano.specs", "-specs=nosys.specs", "-Wl,--gc-sections"]
+base = 0x0
+limit = 0x400000                        # QEMU's MPS2: 4 MiB of flash
+entry = "Reset_Handler"
+vectors = 0x0
+target = '''
+[target]
+name = "freertos-mps2"
+title = "FreeRTOS full demo, Cortex-M3 (QEMU MPS2 AN385)"
+
+[arch]
+name = "arm"
+isa = "t32"
+profile = "m"
+cpu = "cortex-m3"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x00000000, size = 0x400000, kind = "rom"},
+    {name = "ram", base = 0x20000000, size = 0x400000},
+]
+io = [[0x40000000, 0x40100000], [0xe000e000, 0xe000f000]]
+stack = {top = 0x20400000, size = 0x4000}
+sentinel = 0x00f00000
+scratch = {base = 0x20300000, size = 0x40000}
+'''
+
+[[projects.mps2.patches]]               # the full demo, not the blinky one
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/main.c"
+old = "#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY    1"
+new = "#define mainCREATE_SIMPLE_BLINKY_DEMO_ONLY    0"
+
+[[builds]]
+name = "mps2-gcc-Os"
+project = "mps2"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc-O0"
+project = "mps2"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-O0", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc-O2"
+project = "mps2"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-O2", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-clang-Os"
+project = "mps2"
+cc = "clang"
+cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "--sysroot=/usr/arm-none-eabi",
+          "-ffreestanding", "-Os", "-ffunction-sections", "-fdata-sections", "-g"]
+ld = "arm-none-eabi-gcc"                # newlib and libgcc from GNU's toolchain
+lflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft"]
+dread_cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os",
+                "-ffunction-sections"]
+
+[[builds.patches]]                      # clang allows no C statement in a naked function
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c"
+old = "void Reset_Handler( void ) __attribute__( ( naked ) );"
+new = "void Reset_Handler( void );"
+
+[[builds]]
+name = "mps2-clang-O2"
+project = "mps2"
+cc = "clang"
+cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "--sysroot=/usr/arm-none-eabi",
+          "-ffreestanding", "-O2", "-ffunction-sections", "-fdata-sections", "-g"]
+ld = "arm-none-eabi-gcc"
+lflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft"]
+dread_cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-O2",
+                "-ffunction-sections"]
+
+[[builds.patches]]                      # clang allows no C statement in a naked function
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c"
+old = "void Reset_Handler( void ) __attribute__( ( naked ) );"
+new = "void Reset_Handler( void );"

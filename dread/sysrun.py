@@ -85,6 +85,9 @@ class System:
         for lo, hi in self.layout.maps:
             uc.mem_map(lo, hi - lo)
         uc.mem_write(image.base, bytes(payload))
+        for c in image.startup():               # what the loader puts into memory besides the image
+            if c.kind == "load":
+                uc.mem_write(c.run, c.data)
         self.scenario = dict(scenario or {})
         names = list(self.scenario["models"]) if "models" in self.scenario else sorted(target.models)
         self.models = [dmodels.create(self, n, target.models[n], target.root) for n in names]

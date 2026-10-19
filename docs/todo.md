@@ -10,11 +10,6 @@ queue may change while the user is away: CLAUDE.md, "Working unattended".
 
 Decisions that are the user's, with options and a recommendation. Work goes on around them.
 
-- **The cloud key unattended?** The user gave an Anthropic key for supervised pilot runs on gizmo
-  (2026-10-19, `~/.config/dread/anthropic-key`, handed to the process as DREAD_ANTHROPIC_KEY;
-  provider `sonnet` in ~/.config/dread/llm.toml). Whether it may be used in unattended iterations,
-  and with what limit, is open: until then only runs the user starts or watches. Never on private
-  projects' code.
 - **IAR-built gizmo?** For the IAR profile: gizmo built with IAR EWARM (Cortex-M3) and, for MSP430,
   EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
   `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
@@ -301,6 +296,23 @@ tool, the page shows its records; the only changes are the command line's own.
   page through `dread rename` and argued.tsv).
 - [ ] (Later) v3: the call graph around a function, the system run's timeline (device logs of both
   images side by side).
+
+## A realistic benchmark: FreeRTOS (asked for by the user, 2026-10-19; before the rest of MSP430)
+
+Decompile a real project built by ourselves in many ways, with the ELF as ground truth. The
+repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in `~/dread-bench`.
+
+- [ ] **Recipe and harness**: `bench/freertos.toml` (pinned sources, build configurations) and a tool
+  that fetches, builds, imports (ground truth), and measures per build: the listing's byte-identical
+  rebuild, Ghidra's functions against the ELF's, the lifter's acceptance, coverage, the mutation
+  check, noreturn and regflow; times. First build: the QEMU MPS2 demo for Cortex-M3, GCC -Os.
+- [ ] **The matrix**: Cortex-M3 with GCC -O0/-Os/-O2 and clang -Os/-O2; RISC-V (QEMU virt demo) with
+  GCC and clang -Os; MSP430 (16-bit port) with TI's GCC -Os. Figures per build in a report.
+- [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
+  and cost per function (the usage ledger).
+- [ ] **New architectures through it**: MSP430X with TI's cl430 (FreeRTOS's MSP430X port), AVR (its
+  ATmega ports), each as its own item below.
+- [ ] (Later) a compute-heavy library (littlefs) for the case generator on parsers and data structures.
 
 ## MSP430 (of special interest to the user; right after RISC-V)
 

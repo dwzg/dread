@@ -92,7 +92,7 @@ def directives(target, image, symbols=True, options=()):
     copies = image.startup()
     taken = [(base, end)]
     for i, c in enumerate(copies):
-        if c.kind != "zero":
+        if c.kind in ("code", "data"):          # (a loader's bytes, kind load, stay plain RAM here)
             out.append("copy %s_%x 0x%x 0x%x 0x%x %d" % (c.kind, c.run, c.run, c.stored, c.size, c.kind == "code"))
             taken.append((c.run, c.run + c.size))
     for r in target.memory.regions:
