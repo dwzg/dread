@@ -83,6 +83,19 @@ def vector_handlers(image):
     return out
 
 
+def loaded_word(image, address, size=2):
+    """The little-endian word at address in the image, or in what the loader puts beside it (the
+    startup's "load" entries: an MSP430's vectors in a flash region of their own), or None."""
+    data, base = image.payload(), image.base
+    if base <= address and address + size <= base + len(data):
+        return int.from_bytes(data[address - base:address - base + size], "little")
+    for c in image.startup():
+        stored = getattr(c, "data", None)
+        if c.kind == "load" and stored and c.run <= address and address + size <= c.run + len(stored):
+            return int.from_bytes(stored[address - c.run:address - c.run + size], "little")
+    return None
+
+
 def directives(target, image, symbols=True, options=()):
     """The lines of DreadSetup.java's directive file."""
     out = ["# written by dread ghidra: %s, image %s" % (target.name, image.name)]
@@ -108,12 +121,22 @@ def directives(target, image, symbols=True, options=()):
     for start, stop, _ in read_ranges(image.table("data_ranges")):
         if stop is not None:
             out.append("data 0x%x 0x%x" % (start, stop))
+    entries = getattr(image.arch, "vector_entries", None)
     if image.arch.profile == "m":
         handlers = vector_handlers(image)
         if handlers:
             out.append("entry 0x%x" % handlers[0][1])
         for _, address in handlers[1:]:
             out.append("func 0x%x -" % address)
+    elif entries is not None and image.vectors is not None:     # a vector table the layer reads (MSP430)
+        table = entries(lambda a: loaded_word(image, a), image.vectors)
+        for _, address, kind in table:
+            out.append(("entry 0x%x" if kind == "reset" else "func 0x%x -") % address)
+        if not any(kind == "reset" for _, _, kind in table):
+            try:
+                out.append("entry 0x%x" % image.entry)
+            except tgt.TargetError:
+                pass
     else:
         try:
             out.append("entry 0x%x" % image.entry)

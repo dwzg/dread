@@ -294,17 +294,23 @@ def image_region(target, image):
 FREE_MIN = 16           # smaller gaps between sections are alignment, not room
 
 
-def free_ranges(elf, base, end=None):
+def free_ranges(elf, base, end=None, reserved=()):
     """[(start, end)] of the gaps between the sections loaded into the payload from `base` (below
-    `end`, when given; none behind the last one: that is the room behind the image)."""
+    `end`, when given; none behind the last one: that is the room behind the image), without the
+    reserved ranges (the target's scratch memory: on a 16-bit MSP430 the generated inputs' buffers
+    can only lie in the erased flash between the code and the vectors)."""
     spans = sorted((lma, lma + len(data)) for lma, data, _ in elf.loaded() if lma >= base and (end is None or lma < end))
-    out, at = [], None
+    gaps, at = [], None
     for lo, hi in spans:
         if at is not None and lo - at >= FREE_MIN:
-            start = (at + 7) & ~7
-            if lo - start >= FREE_MIN:
-                out.append((start, lo))
+            gaps.append(((at + 7) & ~7, lo))
         at = hi if at is None else max(at, hi)
+    out = []
+    for lo, hi in gaps:
+        pieces = [(lo, hi)]
+        for rlo, rhi in reserved:
+            pieces = [p for a, b in pieces for p in ((a, min(b, rlo)), (max(a, rhi), b)) if p[1] > p[0]]
+        out += [((a + 7) & ~7, b) for a, b in pieces if b - ((a + 7) & ~7) >= FREE_MIN]
     return out
 
 
@@ -398,11 +404,21 @@ def main(argv=None):
         print("dread import-elf: %s" % e, file=sys.stderr)
         return 1
     functions, code, symbols = tables(elf, args.unnamed, set(filter(None, args.keep.split(","))), image.arch.isa)
+    region = image_region(target, image)
+    copies = startup(elf, region)
+    if region is not None:
+        # Code lies in the image's region, or runs from RAM where a startup copy puts it. A section
+        # loaded elsewhere is loader data ("load" in the startup list): MSP430's interrupt vectors are
+        # executable sections without symbols, in a flash region of their own above the scratch.
+        spans = [region] + [(run, run + size) for kind, run, size, _ in copies if kind == "code"]
+        inside = lambda lo, hi=None: any(a <= lo and (hi or lo + 1) <= b for a, b in spans)
+        code = [c for c in code if inside(c[0], c[1])]
+        dropped = {e for e, _, _ in functions if not inside(e)}
+        functions = [f for f in functions if f[0] not in dropped]
+        symbols = [y for y in symbols if not (y[0] == "f" and y[1] in dropped)]
     write_tables(image, functions, code, symbols)
     print("%d functions, %d code ranges, %d symbols written to %s"
           % (len(functions), len(code), len(symbols), os.path.relpath(image.config)))
-    region = image_region(target, image)
-    copies = startup(elf, region)
     files = {}
     if args.payload:
         data, base = elf.payload(image.base, image.erased, region[1] if region else None)
@@ -433,7 +449,9 @@ def main(argv=None):
                                                             os.path.relpath(target.file)))
     elif fixed:
         print("fixed registers for [image.%s] in dread.toml:\n%s" % (image.name, fixed_toml(fixed)))
-    free = free_ranges(elf, image.base, region[1] if region else None)
+    mem = target.memory
+    reserved = [(mem.scratch_base, mem.scratch_base + mem.scratch_size)] if mem.scratch_base is not None else []
+    free = free_ranges(elf, image.base, region[1] if region else None, reserved)
     if free and args.write_startup:
         changed = write_startup(target.file, image.name, None, "free", free_toml(free))
         print("free ranges of [image.%s] %s in %s" % (image.name, "updated" if changed else "unchanged",

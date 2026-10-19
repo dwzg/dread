@@ -37,7 +37,7 @@ Recipe format:
     defines = ["NAME=VALUE", ...]
     patches = [{file = "path/main.c", old = "...", new = "..."}]   # in a copy, never in the source
                               # (a source, or a header: its directory is copied, see patched_sources)
-    ldscript = "path/x.ld"
+    ldscript = "path/x.ld"   # optional (a toolchain may pick the device's script itself: -mmcu)
     link = ["-nostartfiles", ...]                   # link options after the objects
     base = 0x0                # the image's load address; entry: a symbol name; limit: the end of the
     entry = "Reset_Handler"   # room behind the image (its flash), for C that moves
@@ -159,6 +159,19 @@ def the_build(recipe, name):
                                                             ", ".join(b["name"] for b in recipe["builds"])))
 
 
+def home(flags):
+    """Flags with ~ expanded where a path starts (-I~/..., -L~/..., ~/...): a toolchain's files that
+    lie in the user's home (TI's MSP430 support files)."""
+    out = []
+    for f in flags:
+        for prefix in ("-I", "-L", "-T", "--sysroot=", ""):
+            if f.startswith(prefix + "~"):
+                f = prefix + os.path.expanduser(f[len(prefix):])
+                break
+        out.append(f)
+    return out
+
+
 def patched_sources(project, src, work, extra=()):
     """({source path: the file to compile}, [include directories to search first]): copies with the
     project's substitutions (and the build's, extra). A patched header's directory is copied whole
@@ -213,6 +226,8 @@ def dread_compiler(b):
             raise BenchError("build %s: cannot tell the compiler kind of %s" % (b["name"], cc))
         lines, rest = ['cross = "%s"' % cc[:-3]], flags
     lines.append("cflags = [%s]" % ", ".join(json.dumps(f) for f in rest))
+    if "dread_ldflags" in b:                # (TI's MSP430 binutils predate --no-warn-rwx-segments)
+        lines.append("ldflags = [%s]" % ", ".join(json.dumps(f) for f in b["dread_ldflags"]))
     return "[compiler]\n" + "\n".join(lines) + "\n"
 
 
@@ -227,7 +242,7 @@ def build(recipe, name, bench=None, jobs=None, out=print):
     objdir = os.path.join(work, "obj")
     os.makedirs(objdir, exist_ok=True)
     files, first = patched_sources(project, src, work, b.get("patches", ()))
-    flags = list(b["cflags"]) + ["-D" + d for d in project.get("defines", ())] + ["-I" + d for d in first] + \
+    flags = home(b["cflags"]) + ["-D" + d for d in project.get("defines", ())] + ["-I" + d for d in first] + \
         ["-I" + os.path.join(src, i) for i in project.get("includes", ())]
     cc, ld = b["cc"], b.get("ld", b["cc"])
     started = time.time()
@@ -241,9 +256,9 @@ def build(recipe, name, bench=None, jobs=None, out=print):
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs or os.cpu_count() or 4) as pool:
         objects = list(pool.map(compile_one, sorted(files.items())))
     elf = os.path.join(where, "firmware.elf")
-    run([ld] + list(b.get("lflags", b["cflags"])) + ["-T", os.path.join(src, project["ldscript"]),
-                                                                 "-Wl,-Map=" + os.path.join(work, "firmware.map"),
-                                                                 "-o", elf] + objects + list(project.get("link", ())),
+    script = ["-T", os.path.join(src, project["ldscript"])] if project.get("ldscript") else []
+    run([ld] + home(b.get("lflags", b["cflags"])) + script + ["-Wl,-Map=" + os.path.join(work, "firmware.map"),
+                                                              "-o", elf] + objects + home(project.get("link", ())),
         cwd=src)
     seconds = time.time() - started
     os.makedirs(os.path.join(where, "original"), exist_ok=True)

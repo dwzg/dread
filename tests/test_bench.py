@@ -4,6 +4,7 @@ into the source; and the "load" kind of startup entry: bytes a loader puts into 
 (a QEMU-style ELF whose initialised data has no copy in flash)."""
 import json
 import os
+import shutil
 import subprocess
 
 import pytest
@@ -346,3 +347,76 @@ def test_a_system_call_runs_as_a_logged_no_op(tmp_path):
     with pytest.raises(EmuError, match="CPU exception|INSN_INVALID|Unhandled"):
         Machine(Layout(target, image), image.payload()).call(program.by_name["broken"].entry)
     assert '__asm__ volatile ("ecall"' in make_lifter(program).lift(program.by_name["yield"]).text
+
+
+def test_paths_in_the_home_and_free_ranges_beside_the_scratch():
+    """A toolchain's files in the user's home (TI's MSP430 support files: -I~/..., -L~/...), and free
+    ranges that leave the target's scratch memory out (on a 16-bit MSP430 the generated inputs'
+    buffers lie in the erased flash between code and vectors, which the overlay must not fill)."""
+    from dread import elfimport
+    home = os.path.expanduser("~")
+    assert bench.home(["-I~/x", "-L~/y", "-Os", "~/z", "-T~/a.ld"]) == \
+        ["-I%s/x" % home, "-L%s/y" % home, "-Os", "%s/z" % home, "-T%s/a.ld" % home]
+
+    class Elf:
+        def loaded(self):
+            return [(0x1100, b"\0" * 0x100, None), (0xF000, b"\0" * 0x20, None)]
+    assert elfimport.free_ranges(Elf(), 0x1100) == [(0x1200, 0xF000)]
+    assert elfimport.free_ranges(Elf(), 0x1100, reserved=[(0x8000, 0xC000)]) == [(0x1200, 0x8000), (0xC000, 0xF000)]
+
+
+@pytest.mark.skipif(not shutil.which("msp430-elf-gcc"), reason="needs msp430-elf-gcc")
+def test_msp430_vectors_in_a_region_of_their_own(tmp_path):
+    """FreeRTOS's MSP430 build: the vectors lie in a flash region above the scratch, apart from the
+    image. They are loader data, no code range lies outside the image (GCC emits each vector as an
+    executable section without symbols), Ghidra's analysis starts at the reset vector and the
+    handlers, and the lifter, which has no MSP430 yet, says so."""
+    import subprocess
+    from dread import elfimport, lift
+    from dread.ghidra import directives
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.c").write_text("volatile int n;\nvoid isr(void) { n++; }\nvoid reset(void) { for (;;) n--; }\n"
+                                  "__attribute__((section(\".vec\"), used)) void (* const vec[16])(void) = "
+                                  "{ [3] = isr, [15] = reset };\n")
+    (tmp_path / "t.ld").write_text("SECTIONS { .text 0x1100 : { *(.text*) }\n .vec 0xffe0 : { KEEP(*(.vec)) }\n"
+                                   " .bss 0x200 : { *(.bss*) *(COMMON) } }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["msp430-elf-gcc", "-mcpu=msp430", "-Os", "-nostdlib", "-T", str(tmp_path / "t.ld"),
+                    "-e", "reset", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text('''[target]
+name = "vec"
+[arch]
+name = "msp430"
+isa = "msp430"
+[memory]
+regions = [{name = "flash", base = 0x1100, size = 0x6f00, kind = "rom"},
+           {name = "scratch", base = 0x8000, size = 0x4000},
+           {name = "flash2", base = 0xc000, size = 0x4000, kind = "rom"},
+           {name = "ram", base = 0x0200, size = 0x0800}]
+io = [[0x0000, 0x0200]]
+stack = {top = 0x0a00, size = 0x0200}
+sentinel = 0x0ff0
+scratch = {base = 0x8000, size = 0x4000}
+[image.main]
+original = "original/t.bin"
+base = 0x1100
+limit = 0x8000
+entry = "reset"
+vectors = 0xffe0
+[compiler]
+cross = "msp430-elf-"
+cflags = ["-mcpu=msp430"]
+ldflags = []
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    image = t.image()
+    p = Program(t, image)                   # (it refused code ranges outside the image)
+    assert any(c.kind == "load" and c.run == 0xffe0 for c in image.startup())
+    lines = directives(t, image, symbols=False)
+    assert "entry 0x%x" % p.by_name["reset"].entry in lines and "func 0x%x -" % p.by_name["isr"].entry in lines
+    with pytest.raises(lift.NoLifter):
+        lift.make_lifter(p)

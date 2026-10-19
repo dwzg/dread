@@ -246,6 +246,18 @@ class Msp430:
     default_result = ("r12", "r13")
     word = 2
     reg_bits = 16
+
+    def vector_entries(self, read_word, vectors):
+        """[(index, address, "reset" or "handler")] of the vector table at `vectors` (16 words below
+        0x10000, the reset vector last); unprogrammed words (0xffff, 0) are left out. read_word(address)
+        gives a word or None where nothing is loaded."""
+        out = []
+        for i in range(16):
+            word = read_word(vectors + 2 * i)
+            if word is None or word in (0, 0xFFFF):
+                continue
+            out.append((i, word & ~1, "reset" if i == 15 else "handler"))
+        return out
     link_reg = None             # a call pushes the return address
     veneer_reg = "r11"
     profile = None

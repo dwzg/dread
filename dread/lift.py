@@ -137,12 +137,18 @@ def direct_callees(program, fn):
     return out
 
 
+class NoLifter(Exception):
+    """The architecture has no lifter yet."""
+
+
 def make_lifter(program, flow=None, endless=None):
     """The lifter for the program's architecture: Lifter for ARM, dread.lift_riscv.RiscVLifter for
-    RISC-V."""
+    RISC-V; NoLifter for any other (MSP430 has none yet)."""
     if program.arch.name == "riscv":
         from dread.lift_riscv import RiscVLifter
         return RiscVLifter(program, flow, endless)
+    if program.arch.name != "arm":
+        raise NoLifter("no lifter for %s yet" % program.arch.name)
     return Lifter(program, flow, endless)
 
 
@@ -1923,11 +1929,19 @@ def main(argv=None):
     if args.check:
         from dread.util.polite import polite
         polite()
-        check(target, image, args.names or None)
+        try:
+            check(target, image, args.names or None)
+        except NoLifter as e:
+            print("dread lift: %s" % e, file=sys.stderr)
+            return 1
         return 0
     from dread import regflow
     program = Program(target, image)
-    lifter = make_lifter(program, regflow.load(target, image, program))
+    try:
+        lifter = make_lifter(program, regflow.load(target, image, program))
+    except NoLifter as e:
+        print("dread lift: %s" % e, file=sys.stderr)
+        return 1
     out = args.out or os.path.join(target.build, "lifted", image.name)
     os.makedirs(out, exist_ok=True)
     lifted = refused = 0

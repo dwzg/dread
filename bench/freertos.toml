@@ -211,6 +211,55 @@ rate = 1
 limit = 3_000_000
 '''
 
+# The MSP430F449 demo (written for mspgcc), built with TI's msp430-elf-gcc and TI's support files
+# (device headers and linker scripts, a package apart from the compiler: here in ~/.local/opt). The
+# lifter has no MSP430 yet: the listing, Ghidra and noreturn are measured.
+[projects.msp430]
+sources = [
+    "FreeRTOS/Source/tasks.c", "FreeRTOS/Source/list.c", "FreeRTOS/Source/queue.c",
+    "FreeRTOS/Source/portable/MemMang/heap_1.c", "FreeRTOS/Source/portable/GCC/MSP430F449/port.c",
+    "FreeRTOS/Demo/Common/Minimal/flash.c", "FreeRTOS/Demo/Common/Minimal/integer.c",
+    "FreeRTOS/Demo/Common/Minimal/comtest.c", "FreeRTOS/Demo/Common/Minimal/PollQ.c",
+    "FreeRTOS/Demo/msp430_GCC/main.c", "FreeRTOS/Demo/msp430_GCC/ParTest/ParTest.c",
+    "FreeRTOS/Demo/msp430_GCC/serial/serial.c",
+]
+includes = ["FreeRTOS/Demo/msp430_GCC", "FreeRTOS/Source/include", "FreeRTOS/Demo/Common/include",
+            "FreeRTOS/Source/portable/GCC/MSP430F449"]
+defines = ["GCC_MSP430"]
+base = 0x1100
+limit = 0x8000                          # the room for C ends where the scratch begins (the vectors at
+entry = "__crt0_start"                  # the top are loader data of the region above it)
+vectors = 0xffe0
+target = '''
+[target]
+name = "freertos-msp430"
+title = "FreeRTOS demo, MSP430F449"
+
+[arch]
+name = "msp430"
+isa = "msp430"
+
+[memory]
+# The F449: peripherals below 0x200, 2 KiB of RAM, 60 KiB of flash up to the vectors. The generated
+# inputs' buffers (scratch) take 16 KiB of the erased flash between the code and the vectors: a
+# 16-bit address space has no other room (dread import-elf leaves it out of the free ranges).
+regions = [
+    {name = "flash", base = 0x1100, size = 0x6f00, kind = "rom"},
+    {name = "scratch", base = 0x8000, size = 0x4000},
+    {name = "flash2", base = 0xc000, size = 0x4000, kind = "rom"},
+    {name = "ram", base = 0x0200, size = 0x0800},
+]
+io = [[0x0000, 0x0200]]
+stack = {top = 0x0a00, size = 0x0200}
+sentinel = 0x0ff0
+scratch = {base = 0x8000, size = 0x4000}
+'''
+
+[[projects.msp430.patches]]             # mspgcc's interrupt syntax, for TI's compiler
+file = "FreeRTOS/Demo/msp430_GCC/FreeRTOSConfig.h"
+old = "#include <msp430x44x.h>"
+new = "#include <msp430x44x.h>\n#define interrupt( vector )    __attribute__( ( interrupt( vector ) ) )\n#define wakeup                 __attribute__( ( wakeup ) )"
+
 [[builds]]
 name = "mps2-gcc-Os"
 project = "mps2"
@@ -292,3 +341,12 @@ ld = "riscv64-elf-gcc"                  # newlib and libgcc from GNU's toolchain
 lflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow"]
 dread_cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mno-relax", "-ffreestanding",
                 "-Os", "-ffunction-sections"]
+
+[[builds]]
+name = "msp430-gcc-Os"
+project = "msp430"
+cc = "msp430-elf-gcc"
+cflags = ["-mmcu=msp430f449", "-I~/.local/opt/msp430-gcc-support-files/include",
+          "-L~/.local/opt/msp430-gcc-support-files/include", "-Os", "-ffunction-sections", "-fdata-sections", "-g"]
+dread_cflags = ["-mcpu=msp430", "-mhwmult=16bit", "-Os", "-ffunction-sections"]
+dread_ldflags = []
