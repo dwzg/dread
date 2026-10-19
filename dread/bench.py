@@ -21,6 +21,9 @@ it measures what DREAD makes of the image, running its tools as they are run on 
 - noreturn: the functions found never to return;
 - the seconds each step took.
 
+A build keeps a digest of what in the recipe made it (build.json, made_from): measuring a build
+whose recipe changed since builds it again first, so a figure always belongs to the recipe as it is.
+
 A build's figures go to BENCH/NAME/BUILD/metrics.json, and `report` gathers every build's into
 BENCH/NAME/report.md. BENCH is ~/dread-bench (or $DREAD_BENCH). Only recipes are kept in DREAD's
 repository; sources, builds and reports stay in BENCH (CLAUDE.md, rule 1).
@@ -59,6 +62,7 @@ Recipe format:
 """
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import os
 import shutil
@@ -231,6 +235,16 @@ def dread_compiler(b):
     return "[compiler]\n" + "\n".join(lines) + "\n"
 
 
+def made_from(recipe, name):
+    """A digest of what in the recipe makes a build (the pinned source, its project with the
+    target's models and scenarios, the build's own entry): build.json keeps it, and measure() builds
+    again when it changed since."""
+    b = the_build(recipe, name)
+    blob = json.dumps({"source": recipe.get("source"), "project": recipe["projects"][b["project"]], "build": b},
+                      sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode()).hexdigest()
+
+
 def build(recipe, name, bench=None, jobs=None, out=print):
     """Compile and link one build, make its DREAD target and import the ELF; returns the target
     directory."""
@@ -285,7 +299,8 @@ def build(recipe, name, bench=None, jobs=None, out=print):
             shutil.rmtree(stale, ignore_errors=True)
     with open(os.path.join(where, "build.json"), "w") as f:
         json.dump({"recipe": recipe["name"], "build": name, "project": b["project"], "cc": cc,
-                   "cflags": b["cflags"], "sources": len(files), "seconds": round(seconds, 1)}, f, indent=1)
+                   "cflags": b["cflags"], "sources": len(files), "seconds": round(seconds, 1),
+                   "made_from": made_from(recipe, name)}, f, indent=1)
     out("%s: built %d sources in %.0f s" % (name, len(files), seconds))
     return where
 
@@ -317,6 +332,14 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
     where = build_dir(recipe, name, bench)
     if not os.path.exists(os.path.join(where, "dread.toml")):
         raise BenchError("%s is not built yet" % name)
+    try:
+        with open(os.path.join(where, "build.json")) as f:
+            known = json.load(f).get("made_from")
+    except (OSError, ValueError):
+        known = None
+    if known != made_from(recipe, name):        # (five builds were once measured without the models
+        out("%s: the recipe changed since it was built; building it again" % name)  # they lacked)
+        build(recipe, name, bench, out=out)
     target = Target.load(where)
     image = target.image()
     program = Program(target, image)

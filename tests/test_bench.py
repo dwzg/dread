@@ -420,3 +420,20 @@ ldflags = []
     assert "entry 0x%x" % p.by_name["reset"].entry in lines and "func 0x%x -" % p.by_name["isr"].entry in lines
     with pytest.raises(lift.NoLifter):
         lift.make_lifter(p)
+
+
+@needs_gcc
+def test_measuring_builds_again_what_the_recipe_changed(tmp_path, monkeypatch):
+    """A build made from an older recipe (other flags, patches, models or scenarios) is built again
+    before it is measured: five builds were once measured without the device models their recipe
+    had gained since."""
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    where = bench.build(recipe(tmp_path), "m3-Os", out=lambda *a: None)
+    lines = []
+    bench.measure(recipe(tmp_path), "m3-Os", steps=("asm",), out=lines.append)
+    assert not any("building it again" in line for line in lines), lines
+    patch = '[[projects.m3.patches]]\nfile = "main.c"\nold = "READY"\nnew = "STEADY"\n'
+    lines = []
+    bench.measure(recipe(tmp_path, patch), "m3-Os", steps=("asm",), out=lines.append)
+    assert any("building it again" in line for line in lines), lines
+    assert b"STEADY" in open(os.path.join(where, "original", "firmware.bin"), "rb").read()
