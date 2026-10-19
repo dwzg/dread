@@ -699,7 +699,7 @@ class Lifter:
             if kind == "jump" and target is not None and (target & ~1) in depth:
                 targets.add(target & ~1)
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
-                    "flags_in": flags_in, "handler": handler, "fp": any(i.id in VFP for i in insns),
+                    "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns),
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
         body = []
@@ -718,12 +718,17 @@ class Lifter:
         return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]), frame, stack_params,
                       [a for a in fn.insns if a not in depth and a not in stubs])
 
+    def uses_fpu(self, insns):
+        """Whether the instructions use ARM's FPU. VFP holds capstone's ARM ids: on another
+        architecture the same numbers are other instructions (RISC-V's lifter subclasses this one),
+        and MSP430's own decoder gives no ids at all."""
+        return self.arch.name == "arm" and any(i.id in VFP for i in insns)
+
     def _check_fpu(self, fn, insns):
         """Refuse what the FPU's registers cannot carry: an exception handler that uses them. The rest
-        is the mirror (FPU_MIRROR); once,
-        reading s16-s31 before writing them is refused with the other registers a caller leaves
-        (entry_states)."""
-        if any(i.id in VFP for i in insns) and self.handler_kind(fn):
+        is carried by the mirror (FPU_MIRRORED); reading s16-s31 before writing them is refused with
+        the other registers a caller leaves (entry_states)."""
+        if self.uses_fpu(insns) and self.handler_kind(fn):
             raise Refused("an exception handler that uses the FPU (its lazily stacked context is not modelled)")
 
     def handler_kind(self, fn):
