@@ -2,7 +2,8 @@
 # documented command line where IAR could not be tried: `dread cclab doctor --adapter iar-arm` says
 # which step fails, and a copy of this file with the fix is used as `--adapter FILE`. Linked with
 # ILINK and IAR's own library (its runtime helpers are what the probes find); the lab writes the
-# ILINK configuration (.icf) for the emulator's memory map, and --keep holds every probe function.
+# ILINK configuration (.icf) for the emulator's memory map (a copy of this file may bring its own as
+# `script`, see dread/cclab/adapters.py), and --keep holds every probe function.
 # Keep the work directory on the Windows side (--work /mnt/c/...), where iccarm.exe sees it.
 # The options as IAR's documentation for EWARM 9.70 spells them (--cpu=, --fpu=none, -O[n|l|m|h|hs|hz];
 # ILINK's --config, --entry, --keep): checked against the documentation, not against the tools.

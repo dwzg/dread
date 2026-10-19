@@ -40,7 +40,9 @@ a later int fills the register left free; the stack is kept 8-byte aligned at ca
 IAR (`iar-arm`) could not be tried here: its adapter follows IAR's documented command line (EWARM
 9.70: `--cpu=`, `--fpu=none`, `-O[n|l|m|h|hs|hz]`; ILINK's `--config`, `--entry`, `--keep`) and was
 run against a stand-in that takes exactly those option forms and links with GCC below
-(tests/test_cclab.py). The doctor is there for what that leaves open.
+(tests/test_cclab.py). An image whose sections carry ILINK's kind of names (P1, P2 instead of
+.text) imports the same (the importer goes by section flags and segments). The doctor is there for
+what that leaves open.
 
 ## At work: IAR EWARM on Windows, DREAD in WSL
 
@@ -60,7 +62,8 @@ bin/dread cclab doctor --adapter iar-arm --work /mnt/c/cclab-work
 The doctor finds `iccarm.exe` and `ilinkarm.exe` (under `C:\Program Files*\IAR Systems\*\arm\bin`,
 the newest installation), prints the compiler's version, then compiles, links and runs one probe.
 When a step fails it prints the command and the tool's output. The fix goes into a copy of the
-adapter:
+adapter (commands, options, tools, and if ILINK rejects the lab's configuration, a `script`
+template of its own, see `dread/cclab/adapters.py`):
 
 ```sh
 cp dread/cclab/adapters/iar-arm.toml /mnt/c/cclab-work/iar-arm.toml   # edit [tools] or [commands]

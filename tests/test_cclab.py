@@ -316,6 +316,52 @@ def test_the_bundle_leaves_images_and_tables_behind(tmp_path):
 
 
 @needs_gcc
+def test_an_adapter_brings_its_own_linker_script(tmp_path):
+    """An adapter's script replaces the family's: a copy of an adapter can fix what a linker
+    rejects in the lab's own (for IAR's ILINK, untried here) without touching DREAD. A template
+    that names a placeholder the lab does not have is the build's error, with the ones it has."""
+    from dread.cclab import run
+    text = open(ad.builtin()["gcc-arm"]).read().replace('name = "gcc-arm"', 'name = "scripted"')
+    script = lab.GNU_SCRIPT.replace("/* dread cclab: the probes' memory; the emulator maps the same */",
+                                    "/* the adapter's own */")
+    path = tmp_path / "scripted.toml"
+    path.write_text(text.replace('support_flags = ["-fno-builtin"]',
+                                 'support_flags = ["-fno-builtin"]\nscript = """%s"""' % script))
+    results = run(ad.load(str(path)), str(tmp_path / "work"), only=["cortex-m3-O2"], names=["abi"], jobs=1,
+                  out=lambda *x: None)
+    assert "error" not in results["cortex-m3-O2"]
+    assert (tmp_path / "work" / "scripted" / "cortex-m3-O2" / "link.ld").read_text().startswith("/* the adapter's own */")
+    path.write_text(text.replace('support_flags = ["-fno-builtin"]',
+                                 'support_flags = ["-fno-builtin"]\nscript = "ORIGIN = {nowhere:x}"'))
+    results = run(ad.load(str(path)), str(tmp_path / "work"), only=["cortex-m3-O2"], names=["abi"], jobs=1,
+                  out=lambda *x: None)
+    assert "placeholders: flash, flash_end, flash_size" in results["cortex-m3-O2"]["error"]
+
+
+@needs_gcc
+def test_an_image_with_iar_like_section_names_imports_the_same(tmp_path):
+    """IAR's linker names its output sections after placement blocks (P1, P2, ...), not .text: the
+    import goes by section flags and segments, so the same image under other names gives the same
+    tables and payload (a stand-in for IAR's output, which cannot be tried here)."""
+    import subprocess
+    from dread import elfimport
+    from dread.cclab import run
+    run(ad.load("gcc-arm"), str(tmp_path / "work"), only=["cortex-m3-O2"], names=["abi"], jobs=1, out=lambda *x: None)
+    build, copy = tmp_path / "work" / "gcc-arm" / "cortex-m3-O2", tmp_path / "iar-like"
+    (copy / "original").mkdir(parents=True)
+    shutil.copy(build / "dread.toml", copy / "dread.toml")
+    subprocess.run(["arm-none-eabi-objcopy", "--rename-section", ".text=P1", "--rename-section", ".ARM.exidx=P2",
+                    str(build / "image.elf"), str(copy / "image.elf")], check=True)
+    from dread.elf import Elf
+    names = [sec.name for sec in Elf(str(copy / "image.elf")).sections]
+    assert "P1" in names and ".text" not in names
+    assert elfimport.main(["--target", str(copy), "--payload", str(copy / "original" / "image.bin"),
+                           "--write-startup", str(copy / "image.elf")]) == 0
+    for name in ("config/functions.tsv", "config/code_ranges.tsv", "original/image.bin"):
+        assert (copy / name).read_bytes() == (build / name).read_bytes(), name
+
+
+@needs_gcc
 def test_probes_of_ones_own_join_the_corpus(tmp_path):
     """A directory of one's own probes (C files with a TOML of specs) joins DREAD's: --probe-dir. A
     name used twice, a name the lab keeps for itself and a name that is not there are refused."""

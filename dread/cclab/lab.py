@@ -235,8 +235,13 @@ def build(adapter, key, picked, flags, probe_files, work, guard=None):
         objs.append(obj)
     template, script_name = SCRIPTS[adapter.family]
     script = os.path.join(d, script_name)
+    try:
+        text = (adapter.script or template).format(**mem)
+    except (KeyError, IndexError, ValueError) as e:
+        raise BuildError("the adapter's script template: %s (placeholders: %s; a brace of the script "
+                         "itself is doubled)" % (e, ", ".join(sorted(mem))), [])
     with open(script, "w") as f:
-        f.write(template.format(**mem))
+        f.write(text)
     elf = os.path.join(d, "image.elf")
     keep = ["cclab_entry"] + [fn for p in probe_files for fn in p.functions]
     argv = adapter.command("link", objs=objs, out=elf, script=script, flags=list(flags), ldflags=adapter.ldflags,

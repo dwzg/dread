@@ -43,6 +43,11 @@ other options. Its fields:
     cflags = []               # options of every compile, after the matrix's
     ldflags = []              # options of every link
     support_flags = []        # options for the support file only
+    script = ""               # the linker script or configuration, if the family's does not suit:
+                              # a template with {flash:x}, {flash_size:x}, {ram:x}, {ram_size:x},
+                              # {stack:x}, {stack_top:x}, {scratch:x}, {scratch_size:x} and
+                              # {sentinel:x} (braces of the script itself doubled: {{ }}); the lab's
+                              # own for each family is in dread/cclab/lab.py (GNU_SCRIPT, ICF, TI_CMD)
 
 What an adapter does not establish: that the options mean what their names say. The doctor
 (`dread cclab doctor`) compiles, links and runs a trivial probe with the first build of the matrix,
@@ -115,6 +120,7 @@ class Adapter:
         self.cflags = list(data.get("cflags", []))
         self.ldflags = list(data.get("ldflags", []))
         self.support_flags = list(data.get("support_flags", []))
+        self.script = data.get("script") or None
         self._resolved = {}
 
     # ---- the builds ----
