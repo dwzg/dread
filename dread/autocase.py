@@ -73,7 +73,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 17       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 18       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -88,13 +88,14 @@ VERSION = 17       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 14: so is one of any halfword of an instruction, and a store behind the image counts;
                   # 15: a callee a run hung in also ends inputs at its call ("stops");
                   # 16: so in the boundary sweep, for a run that hung in one;
-                  # 17: a run's limit is a byte budget (dread.emu.Machine.call), STUB_CALLS 256
+                  # 17: a run's limit is a byte budget (dread.emu.Machine.call), STUB_CALLS 256;
+                  # 18: STUB_CALLS 2,000 again (at 256 FreeRTOS's -O0 build lost coverage)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
-STUB_CALLS = 256            # stub calls per run; beyond that the run is stopped and counts as not returning
-                            # (runs that returned made at most 209 in four of FreeRTOS's slowest
-                            # generations, 99 % at most 7; at 2,000 one function spent its time in
-                            # 7.1 million calls of runs a generated loop count kept going)
+STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
+                            # (256 sped one function's generation up ten times, runs a generated loop
+                            # count kept going; but a -O0 build's functions lost coverage: a loop that
+                            # empties a list a generated count long, calling a hung callee each time)
 LOOP_CALLS = 48             # a loop case (a function that never returns) ends at this many stub calls
 SOLVE_RUNS = 3000           # emulator runs per function in the compare-guided stage ...
 SOLVE_COST = 1_500_000      # ... and memory values written for them

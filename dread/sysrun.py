@@ -108,6 +108,7 @@ class System:
         self.last_new, self.last_access, self.limit = 0, 0, LIMIT
         self.progress = 0                   # the clock at the last device access, model note, interrupt taken
                                             # or new block of shared code: the same in both images
+        self.spin_check = 0                 # the clock from which the spin rule looks again (_on_block)
         self.frozen = 0                     # blocks in a row outside shared code
         # A stop asked for by a peripheral access, taken where the next block starts: stopped inside a
         # memory hook, Unicorn leaves pc on the accessing instruction (a store done, a load not), and
@@ -239,6 +240,17 @@ class System:
             if fresh:
                 self.progress = self.clock
             self.clock += size
+            if self.clock - self.progress >= SPIN and self.clock >= self.spin_check:
+                # Here, in a block of code both images share, at a clock both have: a check between
+                # the emulator's chunks came at other points in the two images, which then ended with
+                # logs of different lengths. Every SPIN // 16 units while the rule holds.
+                self.spin_check = self.clock + SPIN // 16
+                wanted = self._wanted()
+                if wanted is not None and not self._may_take(*wanted):
+                    # it waits for an interrupt it keeps masked (an assertion's loop with interrupts
+                    # off): nothing can change any more
+                    self.request_stop("spins: interrupt %d waits, masked, and nothing new for %d units of shared "
+                                      "clock, at 0x%x" % (wanted[1], self.clock - self.progress, addr))
             if (self.next_event is not None and self.clock >= self.next_event) or self.clock >= self.limit:
                 uc.emu_stop()
             if self.irq_check:
@@ -384,14 +396,6 @@ class System:
             if self.clock >= limit:
                 how = "limit: %d units of shared clock" % limit
                 break
-            if self.clock - self.progress >= SPIN:
-                wanted = self._wanted()
-                if wanted is not None and not self._may_take(*wanted):
-                    # it waits for an interrupt it keeps masked (an assertion's loop with interrupts
-                    # off): nothing can change any more
-                    how = "spins: interrupt %d waits, masked, and nothing new for %d units of shared clock, pc 0x%x" % (
-                        wanted[1], self.clock - self.progress, pc & ~1)
-                    break
             frozen = self.clock == clock_before and self.next_event is not None
             if frozen:
                 self.clock = self.next_event        # a wait outside shared code: on to the next event

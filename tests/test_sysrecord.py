@@ -204,3 +204,20 @@ def test_later_stages_in_the_harness(tmp_path):
     assert run([]) == 304
     assert run([[cell, 4, 1, 7]]) == 708
     assert run([[cell, 4, 2, 9]]) == 309
+
+
+def test_a_later_stage_leaves_nothing_for_the_next_case(tmp_path):
+    """The emulator is reused from case to case and reset by the pages that were written; a later
+    stage's write comes from a hook, past the code's own writes, and once stayed for the next case
+    (so did a poll stage's and a fixed peripheral value's): take_flag only reads flag."""
+    target, image = two_tasks(tmp_path)
+    program = Program(target, image)
+    gen = autocase.Generator(target, image, program=program)
+    fn = program.by_name["take_flag"]
+    flag = {name: address for kind, address, name in program.symbols() if kind == "d"}["flag"]
+    case = {"args": [], "mem": [], "returns": [], "calls": [], "frame": 0, "later": [[flag, 4, 2, 5]]}
+    m = gen.machine()
+    m.plan, m.function = [], "take_flag"
+    gen.apply(m, case)
+    assert m.call(fn.entry).ret == 5
+    assert int.from_bytes(gen.machine().read(flag, 4), "little") == 0

@@ -348,7 +348,7 @@ class Machine:
             self._reads, self._cycle = [], [0] * (SPIN_PERIOD + 1)
             return
         if self.io_fixed is not None:
-            uc.mem_write(addr, bytes(self.io_fixed.get(addr + i, 0) for i in range(size)))
+            self._poke(uc, addr, bytes(self.io_fixed.get(addr + i, 0) for i in range(size)))
         poll, logged = self.polls.get(addr), True
         if poll:
             poll["count"] += 1
@@ -358,7 +358,7 @@ class Machine:
                 if at <= n:
                     value = v
             if value is not None:
-                uc.mem_write(addr, (value & ((1 << 8 * size) - 1)).to_bytes(size, "little"))
+                self._poke(uc, addr, (value & ((1 << 8 * size) - 1)).to_bytes(size, "little"))
             logged = n <= poll["stages"][-1][0] + POLL_LOGGED     # later ones are counted; call() logs the total
         if not (logged or self.spin_limit):
             return
@@ -394,6 +394,13 @@ class Machine:
         poll = self.polls.setdefault(addr, {"stages": [], "count": 0})
         poll["stages"] = sorted(poll["stages"] + [(n, value)])
 
+    def _poke(self, uc, addr, data):
+        """A write from a hook (a poll stage, a later stage, a fixed peripheral value): its pages are
+        marked for the reset like the code's own writes, or the next case on this emulator started
+        from what this one left."""
+        self.core.dirty.update(range(addr >> 12, ((addr + len(data) - 1) >> 12) + 1))
+        uc.mem_write(addr, data)
+
     def later_read(self, addr, size, n, value):
         """Just before the n-th read that starts at addr (1 is the first), memory there becomes
         value (size bytes): what another context (a task, an interrupt handler) wrote there while a
@@ -413,7 +420,7 @@ class Machine:
         stage = later["stages"].get(later["count"])
         if stage is not None:
             s, v = stage
-            uc.mem_write(addr, (v & ((1 << 8 * s) - 1)).to_bytes(s, "little"))
+            self._poke(uc, addr, (v & ((1 << 8 * s) - 1)).to_bytes(s, "little"))
 
     def _on_budget(self, uc, addr, size, user):
         self._budget -= size

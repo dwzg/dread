@@ -190,10 +190,21 @@ The long runs set the pace of everything after them. Measure first, then cut.
   instruction: a block hook in C keeps a budget of bytes instead (the limit's number of the
   instruction set's shortest instructions; with four bytes for Thumb a generation found less: runs
   that had stopped went on), long runs 3.5 times faster; without the C helper a Python hook keeps the
-  same budget. Stub calls per run 2,000 -> 256 (in four slow generations, runs that returned made at
-  most 209; one function spent its time in 7.1 million calls of runs a generated loop count kept
-  going). Three of the slowest generations side by side: 280 s -> 27 s, 323 s -> 57 s, 37 s -> 32 s, with
-  the same cases and coverage. Generator VERSION 17.
+  same budget. Three of the slowest generations of the GCC -Os build make the same cases with the same
+  coverage as before in 112 s instead of 280, 59 instead of 323, 35 instead of 37 (with the stub limit
+  of the next item as it is again).
+- [x] **Taken back** (VERSION 18): stub calls per run went from 2,000 to 256 with the budget, measured
+  on four slow functions of the GCC -Os build alone (runs that returned made at most 209 calls; one
+  function spent its time in 7.1 million calls of runs a generated loop count kept going; 280 s -> 27 s,
+  323 s -> 57 s with the same coverage). The next benchmark run accepted 240 of the -O0 build's 437
+  functions against 314: a -O0 function that empties a list a generated count long calls stubs for
+  each element (one fell from 33 of 35 instructions covered to 14). The same run showed two faults of
+  this pass: the spin rule was checked between the emulator's chunks, which ended the two images'
+  system runs at different points (19 "device logs differ" on -O0; it is checked in a block of shared
+  code now, at the same clock in both), and writes from hooks (later stages, poll stages, fixed
+  peripheral values) were not marked for the reset between cases (a later stage's write stayed for
+  the next case on the emulator). Lesson: a change to what generation finds is measured on every
+  build of the matrix, -O0 included, before it is kept.
 - [x] The test suite in a fresh worktree regenerated gizmo's cases (21 minutes; the MSP430 test 772 s,
   0.4 s with its cache): `bin/dev-worktree` copies the caches into a new worktree.
 - [ ] The generation of functions that never return is the slowest left (one task's loop: 49,000 runs
