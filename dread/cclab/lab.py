@@ -159,7 +159,7 @@ class Probe:
         self.functions = [s["function"] for s in self.specs]
 
 
-RESERVED = ("entry", "support")     # the lab's own files in every build's probes/
+RESERVED = ("entry", "support", "cxx_support")     # the lab's own files in a build's probes/
 
 
 def probes(names=None, directories=()):
@@ -169,7 +169,7 @@ def probes(names=None, directories=()):
     which probe file a result came from, and every build copies the sources side by side."""
     out, seen = [], {}
     for directory in [PROBES] + list(directories):
-        for source in sorted(glob.glob(os.path.join(directory, "*.c"))):
+        for source in sorted(glob.glob(os.path.join(directory, "*.c")) + glob.glob(os.path.join(directory, "*.cpp"))):
             if not os.path.exists(os.path.splitext(source)[0] + ".toml"):
                 continue
             p = Probe(source)
@@ -216,18 +216,27 @@ def build(adapter, key, picked, flags, probe_files, work, guard=None):
     for sub in ("probes", "obj", "original"):
         os.makedirs(os.path.join(d, sub))
     mem = memory(adapter)
+    cxx = "compile_cxx" in adapter.commands
     sources = [os.path.join(PROBES, "entry.c")]
     if adapter.support:
         sources.append(os.path.join(PROBES, "support.c"))
+    if cxx and adapter.cxx_support and any(p.source.endswith(".cpp") for p in probe_files):
+        sources.append(os.path.join(PROBES, "cxx_support.c"))
     sources += [p.source for p in probe_files]
-    log, objs = [], []
+    log, objs, skipped = [], [], []
     for source in sources:
         name = os.path.splitext(os.path.basename(source))[0]
+        if source.endswith(".cpp") and not cxx:          # C++ probes need the adapter's compile_cxx
+            log.append({"step": "compile", "file": name, "argv": [], "code": 0,
+                        "output": "skipped: the adapter has no compile_cxx command"})
+            skipped.append(name)
+            continue
         local = os.path.join(d, "probes", os.path.basename(source))   # where a Windows tool sees it
         shutil.copyfile(source, local)
         obj = os.path.join(d, "obj", name + ".o")
-        extra = adapter.support_flags if name == "support" else []
-        argv = adapter.command("compile", src=local, obj=obj, flags=list(flags) + adapter.cflags + extra)
+        extra = adapter.support_flags if name in ("support", "cxx_support") else []
+        argv = adapter.command("compile_cxx" if source.endswith(".cpp") else "compile", src=local, obj=obj,
+                               flags=list(flags) + adapter.cflags + extra)
         code, text = adapter.run(argv, d)
         log.append({"step": "compile", "file": name, "argv": argv, "code": code, "output": text})
         if code or not os.path.exists(obj):
@@ -243,7 +252,7 @@ def build(adapter, key, picked, flags, probe_files, work, guard=None):
     with open(script, "w") as f:
         f.write(text)
     elf = os.path.join(d, "image.elf")
-    keep = ["cclab_entry"] + [fn for p in probe_files for fn in p.functions]
+    keep = ["cclab_entry"] + [fn for p in probe_files if p.name not in skipped for fn in p.functions]
     argv = adapter.command("link", objs=objs, out=elf, script=script, flags=list(flags), ldflags=adapter.ldflags,
                            keep=keep)
     code, text = adapter.run(argv, d)
@@ -268,8 +277,8 @@ def build(adapter, key, picked, flags, probe_files, work, guard=None):
     if code:
         raise BuildError("importing the image failed (%d)" % code, log)
     with open(os.path.join(d, "build.json"), "w") as f:
-        json.dump({"adapter": adapter.name, "build": key, "picked": picked, "flags": list(flags), "log": log}, f,
-                  indent=1)
+        json.dump({"adapter": adapter.name, "build": key, "picked": picked, "flags": list(flags), "log": log,
+                   "skipped": skipped}, f, indent=1)
     return d
 
 
@@ -323,6 +332,15 @@ class Bench:
             if sym.kind == 2 and sym.name and (sym.value & ~1) in self.aliases \
                     and sym.name not in self.aliases[sym.value & ~1]:
                 self.aliases[sym.value & ~1].append(sym.name)
+        self.entries = {n: a for a, names in self.aliases.items() for n in names}
+
+    def function(self, name):
+        """The image's function of a name, also by an alias (another symbol at its entry, such as a
+        C++ constructor's complete and base variants, which GCC emits at one address); or None."""
+        fn = self.program.by_name.get(name)
+        if fn is None and name in self.entries:
+            fn = self.program.by_entry.get(self.entries[name])
+        return fn
 
     def names(self, address):
         """Every function name at an address, joined with " = "."""
@@ -349,7 +367,7 @@ class Bench:
             return self.float_results
         out = {"float": self.args[:max(1, 4 // self.width)], "double": self.args[:max(1, 8 // self.width)]}
         for kind, name, value in (("float", "ret_f", 0x3FC00000), ("double", "ret_d", 0x3FF8000000000000)):
-            fn = self.program.by_name.get(name)
+            fn = self.function(name)
             if fn is None:
                 continue
             m = self.machine()
@@ -417,7 +435,7 @@ class Bench:
 def shape(bench, name):
     """{size, instructions, calls, tails, head, tail, mnemonics}: a probe function's code."""
     program, arch = bench.program, bench.arch
-    fn = program.by_name.get(name)
+    fn = bench.function(name)
     if fn is None:
         return {"missing": True}
     insns = [i for i in program.instructions(fn) if i is not None]
@@ -467,7 +485,7 @@ def measure_arg(bench, spec):
     When none does (an ABI that passes the value by reference: a struct on the MSP430, one wider
     than two words on RISC-V), a second run points every argument register at a buffer of its own
     whose bytes name the register and the offset (ref_byte), and the answer is "memory at r12+2"."""
-    fn = bench.program.by_name[spec["function"]]
+    fn = bench.function(spec["function"])
     kind = spec.get("type", "int")
     size = bench.sizes()[kind]
     n = max(1, -(-size // bench.width))
@@ -533,7 +551,7 @@ def expected_bytes(bench, spec):
 
 
 def measure_result(bench, spec):
-    fn = bench.program.by_name[spec["function"]]
+    fn = bench.function(spec["function"])
     want = expected_bytes(bench, spec)
     m = bench.machine()
     bench.mark_fp(m)
@@ -544,7 +562,8 @@ def measure_result(bench, spec):
         return {"error": error}
     if bytes(m.read(bench.scratch, len(want))) == want:
         # first: a value stored through the pointer (registers may hold it by the way: strd r2, r3)
-        returned = " (%s returns the address)" % bench.args[0] if bench.reg(m, bench.args[0]) == bench.scratch else ""
+        returned = " (%s holds the address afterwards)" % bench.args[0] if bench.reg(m, bench.args[0]) == bench.scratch \
+            else ""
         return {"where": "memory at the address in %s%s" % (bench.args[0], returned)}
     places = [(bench.args, bench.width)]
     if bench.fp_args:                               # a float or double in the VFP registers: looked at
@@ -561,7 +580,7 @@ def measure_result(bench, spec):
 
 
 def measure_value(bench, spec):
-    fn = bench.program.by_name[spec["function"]]
+    fn = bench.function(spec["function"])
     m = bench.machine()
     error = _run(bench, m, fn, [])
     if error:
@@ -587,7 +606,7 @@ def measure_op(bench, spec):
     call returns where the probe would, so its frame closes when the run ends."""
     from unicorn import UC_HOOK_CODE
     program, arch = bench.program, bench.arch
-    fn = program.by_name[spec["function"]]
+    fn = bench.function(spec["function"])
     fn_end = program.end(fn)
     names = bench.regs
     ids = [arch.reg_id(n) for n in names]
@@ -597,7 +616,9 @@ def measure_op(bench, spec):
     if any(isinstance(a, str) and "scratch" in a for a in spec.get("args", [])):
         m.write(bench.scratch, bytes(range(256)) * 2)
     frames, seen = [], []
-    state = {"prev": None}              # (address, flow kind) of the instruction before
+    state = {"prev": None}              # (address, flow kind, mnemonic) of the instruction before
+    tables = []                         # the probe's indirect jumps that ran as a switch's dispatch
+    icalls = []                         # the probe's own calls through a register that ran
 
     def close(frame, after):
         frame["changed"] = [n for n, a, b in zip(names, frame["regs"], after) if a != b and n != link]
@@ -614,17 +635,24 @@ def measure_op(bench, spec):
                 break
         prev = state["prev"]
         callee = program.by_entry.get(address)
+        own = prev is not None and fn.entry <= prev[0] < fn_end and not frames
+        helper_bl = prev is not None and prev[2] in ("bl", "blx")
+        if own and prev[1] == "ijump" and (helper_bl or callee is None or callee is fn):
+            tables.append(prev[2])      # a table branch, a computed pc, a bl into a switch helper
         if callee is not None and callee is not fn and prev is not None:
             regs = [uc.reg_read(r) for r in ids]
             entry_args = ["0x%0*x" % (2 * bench.width, regs[names.index(r)]) for r in bench.args[:4]]
             if prev[1] in ("call", "icall"):
+                if prev[1] == "icall" and not frames:
+                    icalls.append(address)
                 frames.append({"function": bench.names(address), "depth": len(frames) + 1, "regs": regs,
                                "ret": return_address(bench, uc), "args": entry_args})
-            elif prev[1] == "jump" and fn.entry <= prev[0] < fn_end and not frames:
-                frames.append({"function": bench.names(address), "depth": 1, "regs": regs,
-                               "ret": bench.sentinel, "tail": True, "args": entry_args})
-        insn = program.insn(address)
-        state["prev"] = (address, arch.flow(insn)[0] if insn is not None else "next")
+            elif own and (prev[1] == "jump" or (prev[1] == "ijump" and not helper_bl)):
+                frames.append({"function": bench.names(address), "depth": 1, "regs": regs,   # a tail call,
+                               "ret": bench.sentinel, "tail": True, "args": entry_args})    # also through a
+        insn = program.insn(address)                                                         # register
+        state["prev"] = (address, arch.flow(insn)[0] if insn is not None else "next",
+                         insn.mnemonic if insn is not None else "")
     m.hook_add(UC_HOOK_CODE, on_code, begin=bench.image.base, end=bench.image.base + len(bench.image.payload()) - 1)
     error = _run(bench, m, fn, args)
     if error:
@@ -632,7 +660,8 @@ def measure_op(bench, spec):
     after = [m.uc.reg_read(r) for r in ids]
     for frame in frames:                # tail calls: they return where the probe returns
         close(frame, after)
-    out = {"result": ["0x%0*x" % (2 * bench.width, after[names.index(r)]) for r in bench.args[:2]], "helpers": []}
+    out = {"result": ["0x%0*x" % (2 * bench.width, after[names.index(r)]) for r in bench.args[:2]], "helpers": [],
+           "table_jumps": len(tables), "icalls": len(icalls)}
     for frame in seen:
         out["helpers"].append({k: frame[k] for k in ("function", "depth", "args", "results", "changed")}
                               | ({"tail": True} if frame.get("tail") else {}))
@@ -654,7 +683,7 @@ def measure_keeps(bench, spec):
     AAPCS asks for 8, RISC-V for 16, the MSP430 for 2)."""
     from unicorn import UC_HOOK_CODE
     program, arch = bench.program, bench.arch
-    fn = program.by_name[spec["function"]]
+    fn = bench.function(spec["function"])
     fn_end = program.end(fn)
     m = bench.machine()
     lay = bench.layout
@@ -753,9 +782,9 @@ def layout(directory, probe_files):
     refs = sorted(refs)
     aligned, pools, padding = 64, 0, collections.Counter()
     first, last = collections.Counter(), collections.Counter()
-    names = [n for p in probe_files for n in p.functions if n in program.by_name]
+    names = [n for p in probe_files for n in p.functions if bench.function(n) is not None]
     for name in names:
-        fn = program.by_name[name]
+        fn = bench.function(name)
         insns = [i for i in program.instructions(fn) if i is not None]
         if not insns:
             continue
@@ -780,13 +809,21 @@ MEASURES = {"arg": measure_arg, "result": measure_result, "value": measure_value
 def measure(directory, probe_files):
     """{function: {measure, note, shape, and what the measure found}} of one build."""
     bench = Bench(directory)
+    skipped = set()
+    try:
+        with open(os.path.join(directory, "build.json")) as f:
+            skipped = set(json.load(f).get("skipped", []))
+    except (OSError, ValueError):
+        pass
     out = {}
     for p in probe_files:
+        if p.name in skipped:           # not built by this adapter (C++ without compile_cxx)
+            continue
         for spec in p.specs:
             name = spec["function"]
             entry = {"probe": p.name, "measure": spec["measure"], "note": spec.get("note", ""),
                      "shape": shape(bench, name)}
-            if name in bench.program.by_name:
+            if bench.function(name) is not None:
                 try:
                     entry.update(MEASURES[spec["measure"]](bench, spec))
                 except Exception as e:          # a measurement that breaks is a result, not a crash

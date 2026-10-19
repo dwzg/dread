@@ -1,0 +1,5 @@
+# What cxx2.cpp shows (dread cclab): where a pointer argument of a C++ function arrives.
+probes = [
+    {function = "_Z10cxx_opaquePK1V", measure = "arg", note = "a pointer to a class (cxx_opaque)"},
+    {function = "_Z9cxx_sevenv", measure = "value", note = "a function of another file (returns 7)"},
+]

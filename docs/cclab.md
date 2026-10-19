@@ -19,6 +19,12 @@ MSP430):
   instructions that mark an idiom (a division instruction, block transfers), and how a switch
   dispatches: a table branch (tbb), a computed pc (mov pc, add pc, c.jr), a switch helper (GCC's
   `__gnu_thumb1_case_uqi` on the Cortex-M0 at -Os), or a chain of compares;
+- C++ (probes by their mangled names): where `this` and a member function's arguments arrive,
+  whether a constructor returns `this` (the ARM C++ ABI says it does; a constructor that calls a
+  function first tells it from a register left alone), how a class with a destructor comes back
+  (through memory, however small), how a virtual call is made (GCC at -O2 devirtualises it on a
+  guess and keeps the indirect call for other types: "a call through a register in its code, not
+  taken"), what new and delete call;
 - where the functions lie: the alignment of their entries, literal pools between them (a pool counts
   when any function loads from it or takes its address pc-relatively: TI's armcl shares one per
   file), the padding in front of a pool or the next function (none, zeros, no-ops), the
@@ -193,6 +199,13 @@ each function shows (`arg`, `result`, `value`, `op` or `keeps`, see `dread/cclab
 are plain C99, every function external (nothing may inline it away), with no initialised writable
 data (the lab runs functions without the toolchain's startup code).
 
+A probe file may be C++ (`.cpp`): an adapter compiles it with its `compile_cxx` command (without
+one, its builds leave the C++ probes out and say so in build.json), without exceptions and RTTI, and
+links the lab's C++ pieces (`cxx_support.c`: operator new and delete by their mangled names,
+`__cxa_pure_virtual`) where the toolchain's library is not linked (`cxx_support`, by default as
+`support`). Every compiler tried here mangles as the Itanium C++ ABI does, and on ARM every one
+returns `this` from a constructor.
+
 Probes of one's own live wherever one likes, in a directory of C files with a TOML of specs each,
 and join DREAD's with `--probe-dir DIR` (`--probes NAME` picks files by name). In a guarded work
 directory, its CLAUDE.md asks Claude Code to put a probe it writes for an open question into
@@ -217,5 +230,6 @@ were made may still be changed by other inputs; a probe's C may mean different t
 where C leaves it open (that is why the probes keep to plain C99). A helper's result registers in the
 profile are those some probe read: a probe that uses a result is what adds it. The stack alignment
 is the largest power of two that divided every frame at a call: a measurement, from an aligned
-entry. Not yet measured: prologue and epilogue variants as such, C++. Not yet possible: big-endian targets, and the 8-bit cores of
+entry. Not yet measured: prologue and epilogue variants as such; C++ exceptions, RTTI and static
+construction. Not yet possible: big-endian targets, and the 8-bit cores of
 compilers such as SDCC, which need an engine of DREAD's own first (docs/todo.md: Z80, then 8051).

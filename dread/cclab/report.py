@@ -46,15 +46,18 @@ def op_text(entry, arch="arm"):
     instructions (division, table branches)."""
     if "error" in entry:
         return "error: " + entry["error"][:60]
-    direct = [h["function"] + (" (tail call)" if h.get("tail") else "") for h in entry.get("helpers", [])
-              if h.get("depth", 1) == 1]
+    unrun = ""
+    if "(through a register)" in entry.get("shape", {}).get("calls", []) and entry.get("icalls", 1) == 0:
+        unrun = "; a call through a register in its code, not taken"   # (GCC -O2: a virtual call
+    direct = [h["function"] + (" (tail call)" if h.get("tail") else "") for h in entry.get("helpers", [])  # devirtualised
+              if h.get("depth", 1) == 1]                                                                  # on a guess)
     if direct:
-        return ", ".join(dict.fromkeys(direct))
+        return ", ".join(dict.fromkeys(direct)) + unrun
     notable = [m for m in entry.get("shape", {}).get("mnemonics", [])
                if m in NOTABLE.get(arch, ()) or m.startswith(NOTABLE_PREFIXES.get(arch, ()))]
-    jumps = sorted(set(entry.get("shape", {}).get("ijumps", [])))
+    jumps = sorted(set(entry.get("shape", {}).get("ijumps", []))) if entry.get("table_jumps", 1) else []
     return "inline" + (" (%s)" % ", ".join(notable) if notable else "") + (
-        ", a jump through a table (%s)" % ", ".join(jumps) if jumps else "")
+        ", a jump through a table (%s)" % ", ".join(jumps) if jumps else "") + unrun
 
 
 def keeps_text(entry):

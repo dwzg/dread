@@ -17,6 +17,7 @@ ld = ["riscv64-elf-gcc", "riscv64-unknown-elf-gcc", "riscv32-unknown-elf-gcc"]
 [commands]
 version = ["{cc}", "--version"]
 compile = ["{cc}", "-c", "{src}", "-o", "{obj}", "{flags}"]
+compile_cxx = ["{cc}", "-x", "c++", "-c", "{src}", "-o", "{obj}", "{flags}", "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics"]
 link = ["{ld}", "{flags}", "{objs}", "-o", "{out}", "-T", "{script}", "-nostdlib", "-Wl,--no-relax", "{ldflags}", "-lgcc"]
 
 [matrix.march]

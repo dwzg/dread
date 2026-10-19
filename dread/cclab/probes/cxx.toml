@@ -1,0 +1,12 @@
+# What each function of cxx.cpp shows (dread cclab), by mangled name (the Itanium C++ ABI's: a
+# compiler that mangles otherwise shows "not in the linked image"): "arg": where 'this' and a member
+# function's argument arrive; "result": what a constructor fills and whether it returns 'this', how a
+# non-trivial class comes back; "op": a virtual call, new and delete.
+probes = [
+    {function = "_ZNK1S4selfEv", measure = "arg", note = "this (S::self)"},
+    {function = "_ZNK1S5thirdEii", measure = "arg", note = "the 2nd argument of a member function (S::third)"},
+    {function = "_ZN3NT2C1Ev", measure = "result", fields = [7], note = "a constructor that calls a function first (NT2::NT2): whether it returns this (the ARM C++ ABI)"},
+    {function = "_Z7make_ntv", measure = "result", fields = [5], note = "a class with a destructor and a copy constructor, returned (make_nt)"},
+    {function = "_Z11cxx_virtuali", measure = "op", args = [7], note = "a virtual call (W::f through V's vtable)"},
+    {function = "_Z14cxx_new_deletei", measure = "op", args = [9], note = "new and delete of a class"},
+]

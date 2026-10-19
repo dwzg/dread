@@ -17,6 +17,7 @@ ld = ["msp430-elf-gcc", "~/.local/opt/msp430-gcc-*/bin/msp430-elf-gcc"]
 [commands]
 version = ["{cc}", "--version"]
 compile = ["{cc}", "-c", "{src}", "-o", "{obj}", "{flags}"]
+compile_cxx = ["{cc}", "-x", "c++", "-c", "{src}", "-o", "{obj}", "{flags}", "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics"]
 link = ["{ld}", "{flags}", "{objs}", "-o", "{out}", "-T", "{script}", "-nostdlib", "{ldflags}", "-lgcc", "-lmul_none", "-lgcc"]
 
 [matrix.core]

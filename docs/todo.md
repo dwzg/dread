@@ -85,8 +85,14 @@ IAR's runtime code marked and left out.
   `headers`. `dread llm ask` and `dread llm providers`. Copilot and GitHub Models cannot be tried
   here: their presets come from GitHub's documentation (2026-10). Open: the Copilot SDK (GA since
   2026-06) if the CLI's headless mode turns out too coarse at work.
-- [ ] **C++ probes**: name mangling, vtables, constructors and static initialisation, new and delete,
-  exceptions.
+- [x] **C++ probes** (2026-10-19): `.cpp` probe files compiled by an adapter's `compile_cxx`, the
+  lab's C++ pieces (operator new and delete, __cxa_pure_virtual) where no library is linked, probe
+  functions by mangled name (aliases at one entry found: GCC's complete and base constructors).
+  Measured on six ARM toolchains, RISC-V and MSP430 GCC: `this` in the first argument register; a
+  constructor returns `this` on ARM (the ARM C++ ABI), not on RISC-V (plain Itanium); a class with a
+  destructor returned through memory; a virtual call (GCC -O2 devirtualises it on a guess); new and
+  delete. Open: exceptions (an unwinder in the build), RTTI, static construction (the startup's
+  init_array, which the lab does not run).
 - [ ] Later: `dread whatcc` from stored profiles (More compilers), and a search for the options that
   reproduce a function's bytes.
 

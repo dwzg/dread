@@ -19,6 +19,7 @@ inc = ["~/.local/opt/ti-cgt-arm_*/ti-cgt-arm_*/include", "~/ti/ccs*/ccs/tools/co
 [commands]
 version = ["{cc}", "--help"]
 compile = ["{cc}", "-c", "{src}", "--output_file={obj}", "--include_path={inc}", "-me", "--code_state=16", "--abi=eabi", "--c99", "{flags}"]
+compile_cxx = ["{cc}", "-c", "{src}", "--output_file={obj}", "--include_path={inc}", "-me", "--code_state=16", "--abi=eabi", "--cpp_default", "{flags}"]
 link = ["{ld}", "{objs}", "--output_file={out}", "--entry_point=cclab_entry", "--search_path={lib}", "--library=libc.a", "{keep}", "{ldflags}", "{script}"]
 keep = ["--retain={symbol}"]
 

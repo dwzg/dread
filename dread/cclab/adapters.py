@@ -13,6 +13,8 @@ other options. Its fields:
                               # Windows side (/mnt/c/...), where the Windows program sees it
     support = true            # link the lab's support file (memcpy and the like, for a link without
                               # a C library); false where the toolchain's own library is linked
+    cxx_support = true        # link the lab's C++ pieces with C++ probes (operator new and delete,
+                              # __cxa_pure_virtual); default: as support
     guard = false             # a proprietary toolchain: its runtime library must not reach an LLM;
                               # `run` then writes the work directory's CLAUDE.md and deny rules, and
                               # each build's dread.toml limits an LLM to the probes (dread.cclab.workdir)
@@ -30,6 +32,7 @@ other options. Its fields:
                               # several arguments ({keep}: [keep] once per probe function)
     version = ["{cc}", "--version"]
     compile = ["{cc}", "-c", "{src}", "-o", "{obj}", "{flags}"]
+    compile_cxx = [...]       # how a C++ probe (.cpp) is compiled; without it C++ probes are skipped
     link = ["{ld}", "{objs}", "-o", "{out}", "-T", "{script}", "-nostdlib", "{ldflags}", "-lgcc"]
     keep = []                 # the arguments that keep one function in the link ("{symbol}")
 
@@ -107,6 +110,7 @@ class Adapter:
         self.windows = bool(data.get("windows", False))
         self.guard = bool(data.get("guard", False))
         self.support = bool(data.get("support", self.family == "gnu"))
+        self.cxx_support = bool(data.get("cxx_support", self.support))
         self.arch = data.get("arch", "arm")
         self.isa = data.get("isa", "t32")
         self.profile = data.get("profile", "m")

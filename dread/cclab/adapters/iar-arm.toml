@@ -23,6 +23,7 @@ ld = "/mnt/c/Program Files*/IAR Systems/*/arm/bin/ilinkarm.exe"
 [commands]
 version = ["{cc}", "--version"]
 compile = ["{cc}", "{src}", "-o", "{obj}", "--silent", "{flags}"]
+compile_cxx = ["{cc}", "{src}", "-o", "{obj}", "--silent", "--c++", "--no_exceptions", "--no_rtti", "{flags}"]   # from IAR's guide; not tried
 link = ["{ld}", "{objs}", "-o", "{out}", "--config", "{script}", "--entry", "cclab_entry", "--silent", "{keep}", "{ldflags}"]
 keep = ["--keep", "{symbol}"]
 

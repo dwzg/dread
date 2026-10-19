@@ -167,7 +167,7 @@ ICCARM = r"""#!/usr/bin/env python3
 import subprocess, sys
 OPT = {"-On": "-O0", "-Ol": "-O1", "-Om": "-O2", "-Oh": "-O2", "-Ohs": "-O3", "-Ohz": "-Os"}
 CPU = {"Cortex-M3": "cortex-m3", "Cortex-M4": "cortex-m4"}
-args, src, out, flags = sys.argv[1:], None, None, ["-mthumb"]
+args, src, out, flags, lang = sys.argv[1:], None, None, ["-mthumb"], []
 i = 0
 while i < len(args):
     a = args[i]
@@ -182,7 +182,13 @@ while i < len(args):
         flags.append("-mfloat-abi=soft")
     elif a in OPT:
         flags.append(OPT[a])
-    elif a.endswith(".c") and not a.startswith("-"):
+    elif a == "--c++":
+        lang = ["-x", "c++"]
+    elif a == "--no_exceptions":
+        flags.append("-fno-exceptions")
+    elif a == "--no_rtti":
+        flags.append("-fno-rtti")
+    elif a.endswith((".c", ".cpp")) and not a.startswith("-"):
         src = a
     else:
         print("Error[Pe999]: iccarm stand-in: unknown option %s" % a)
@@ -191,7 +197,7 @@ while i < len(args):
 if not src or not out:
     print("Error: iccarm stand-in: a source and -o are needed")
     sys.exit(1)
-sys.exit(subprocess.call(["arm-none-eabi-gcc", "-c", src, "-o", out] + flags))
+sys.exit(subprocess.call(["arm-none-eabi-gcc"] + lang + ["-c", src, "-o", out] + flags))
 """
 
 ILINKARM = r"""#!/usr/bin/env python3
@@ -228,7 +234,8 @@ open(script, "w").write("MEMORY { ROM (rx) : ORIGIN = 0x%x, LENGTH = 0x%x\n RAM 
                         "SECTIONS { .text : { KEEP(*(.text*)) *(.rodata*) } > ROM .data : { *(.data*) } > RAM AT > ROM"
                         " .bss : { *(.bss*) *(COMMON) } > RAM }\n" % (regions["ROM_region"] + regions["RAM_region"]))
 support = os.path.join(here, "obj", "standin_support.c")
-open(support, "w").write(open(os.environ["STANDIN_SUPPORT"]).read())
+open(support, "w").write(open(os.environ["STANDIN_SUPPORT"]).read()
+                         + open(os.environ["STANDIN_SUPPORT"].replace("support.c", "cxx_support.c")).read())
 flags = ["-mthumb", "-mcpu=cortex-m3"]
 sys.exit(subprocess.call(["arm-none-eabi-gcc"] + flags + ["-nostdlib", "-T", script, "-e", entry, "-o", out] + objs
                          + [support, "-lgcc"] + ["-Wl,--undefined=" + k for k in keep]))
@@ -408,6 +415,39 @@ def test_hard_float_follows_the_vfp_variant(tmp_path):
 
 
 @needs_gcc
+def test_cxx_on_the_arm_cxx_abi(tmp_path):
+    """C++ probes by their mangled names, on GCC for the Cortex-M3: 'this' in r0 and a member
+    function's arguments behind it; a constructor that calls a function first has 'this' back in r0
+    afterwards (the ARM C++ ABI: constructors return this); a class with a destructor comes back
+    through memory although it holds one int; new and delete call operator new and the sized
+    delete at -O0; at -O2 GCC devirtualises the virtual call on a guess, leaving an indirect call
+    that the run does not take."""
+    got = measured(tmp_path, "gcc-arm", ["cortex-m3-O0", "cortex-m3-O2"])
+    for r in got.values():
+        assert r["_ZNK1S4selfEv"]["where"] == "r0" and r["_ZNK1S5thirdEii"]["where"] == "r2"
+        assert r["_ZN3NT2C1Ev"]["where"] == "memory at the address in r0 (r0 holds the address afterwards)"
+        assert r["_Z7make_ntv"]["where"].startswith("memory at the address in r0")
+    o0, o2 = got["cortex-m3-O0"], got["cortex-m3-O2"]
+    called = [h["function"] for h in o0["_Z14cxx_new_deletei"]["helpers"] if h["depth"] == 1]
+    assert called[0] == "_Znwj" and called[-1] == "_ZdlPvj"
+    assert "(through a register)" in o2["_Z11cxx_virtuali"]["shape"]["calls"] and o2["_Z11cxx_virtuali"]["icalls"] == 0
+
+
+@needs_gcc
+def test_an_adapter_without_compile_cxx_skips_the_cxx_probes(tmp_path):
+    from dread.cclab import run
+    text = open(ad.builtin()["gcc-arm"]).read().replace('name = "gcc-arm"', 'name = "c-only"')
+    text = "\n".join(line for line in text.splitlines() if not line.startswith("compile_cxx"))
+    (tmp_path / "c-only.toml").write_text(text)
+    results = run(ad.load(str(tmp_path / "c-only.toml")), str(tmp_path / "work"), only=["cortex-m3-O2"],
+                  names=["abi", "cxx", "cxx2"], jobs=1, out=lambda *x: None)
+    r = results["cortex-m3-O2"]
+    assert "error" not in r and "pick_i5_5" in r["results"] and not any(n.startswith("_Z") for n in r["results"])
+    build = json.loads((tmp_path / "work" / "c-only" / "cortex-m3-O2" / "build.json").read_text())
+    assert build["skipped"] == ["cxx", "cxx2"]
+
+
+@needs_gcc
 def test_compare_names_the_options_that_close_a_difference(tmp_path):
     """Two compilers side by side: GCC with int-sized enums and signed plain char as the original's
     compiler, GCC as it comes (arm-none-eabi: short enums, unsigned char) as the rebuilding one. The
@@ -469,6 +509,8 @@ def test_riscv_gcc_follows_its_psabi(tmp_path):
     from dread.cclab import make_report
     make_report(str(tmp_path), "gcc-riscv", out=lambda *x: None)
     assert "a multiple of 16 bytes" in (tmp_path / "gcc-riscv" / "report.md").read_text()
+    for r in got.values():              # the Itanium C++ ABI: a constructor returns nothing
+        assert r["_ZN3NT2C1Ev"]["where"] == "memory at the address in a0"
 
 
 @needs_msp430
