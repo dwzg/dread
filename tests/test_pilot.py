@@ -227,3 +227,27 @@ def test_the_usage_ledger(tmp_path, monkeypatch):
     assert abs(summary["cloud"]["cost"] - (3.0 + 0.03)) < 1e-9
     assert summary["local"]["cost"] is None and summary["local"]["output"] == 10
     assert "\tcloud\tm\t500000\t1000\tend_turn" in ledger.read_text()
+
+
+def test_inputs_for_what_the_lift_check_left_uncovered(tmp_path):
+    """--task input also asks for the functions the last lift check dropped as UNCOVERED, with the
+    instructions its verdicts list; a function that never returns is left out (its cases are loop
+    cases, which an input of the plain form cannot make)."""
+    import shutil
+    from conftest import gizmo_dir
+    from dread.program import Program
+    from dread.target import Target
+    copy = tmp_path / "m3"
+    shutil.copytree(gizmo_dir("m3"), copy, ignore=shutil.ignore_patterns("build"))
+    t = Target.load(str(copy))
+    image = t.image()
+    p = Program(t, image)
+    kv, main = p.by_name["parse_kv"], p.by_name["main"]
+    folder = os.path.join(t.build, "lift-check", image.name)
+    os.makedirs(folder)
+    with open(os.path.join(folder, "verdicts.tsv"), "w") as f:
+        f.write("function\tverdict\treason\tmissed\n")
+        f.write("parse_kv\tdropped\tUNCOVERED parse_kv: 2 of 40 instructions\t0x%x 0x%x\n" % (kv.insns[3], kv.insns[4]))
+        f.write("main\tdropped\tUNCOVERED main: 1 of 30\t0x%x\n" % main.insns[2])
+        f.write("fmt_dec\taccepted\t\t\n")
+    assert pilot.lift_missed(t, image, p) == {"parse_kv": [kv.insns[3], kv.insns[4]]}

@@ -25,9 +25,11 @@ Without names, the candidates are the functions of the image's lifted table that
 Model-written C is its own kind: checked by cases, mutation and integration, but nobody has read it.
 Count it apart from C people wrote, and read it before calling it understood.
 
-Two more typed questions: --task input asks, for each function whose cases leave instructions unrun,
-for one input at a time (JSON: argument registers, memory, peripheral answers); the emulator decides,
-and an input that runs some of them becomes a written case. --task name asks for a name and a
+Two more typed questions: --task input asks, for each function whose cases leave instructions unrun
+(those of the lifted table, and those the last dread lift --check dropped as UNCOVERED, fewest missed
+first), for one input at a time (JSON: argument registers, memory, peripheral answers); the emulator
+decides, and an input that runs some of them becomes a written case; the run ends with what it ran
+and what it cost. --task name asks for a name and a
 sentence for FUN_ functions and collects the proposals in BUILD/pilot/IMAGE/names.tsv: no tool can
 check a name, so none is applied.
 
@@ -456,6 +458,27 @@ def missed_instructions(target, image, names):
     return out
 
 
+def lift_missed(target, image, program):
+    """{name: [addresses]} the last dread lift --check dropped because its cases left them unrun
+    (UNCOVERED in its verdicts), functions that never return left out (their cases are loop cases):
+    what the lifter leaves for want of inputs."""
+    path = os.path.join(target.build, "lift-check", image.name, "verdicts.tsv")
+    if not os.path.exists(path):
+        return {}
+    from dread import noreturn
+    endless = set(noreturn.find(program))
+    out = {}
+    with open(path) as f:
+        next(f, None)
+        for line in f:
+            row = (line.rstrip("\n").split("\t") + ["", "", ""])[:4]
+            name, verdict, reason, missed = row
+            if verdict == "dropped" and reason.startswith("UNCOVERED") and missed and name in program.by_name \
+                    and name not in endless:
+                out[name] = [int(a, 16) for a in missed.split()]
+    return out
+
+
 def find_inputs(target, image, program, provider, name, missed, tries=3, flow=None, out=print):
     """Ask for inputs that run the missed instructions; each one that runs some becomes a written
     case of the function (extra_cases, "by" the pilot). Returns the addresses still unrun."""
@@ -613,8 +636,23 @@ def main(argv=None):
                 propose_name(target, image, program, provider, name, flow)
             return 0
         missed = missed_instructions(target, image, args.names or [fn.name for fn in program.functions])
-        for name, addresses in sorted(missed.items())[:args.limit]:
-            find_inputs(target, image, program, provider, name, addresses, args.tries, flow)
+        for name, addresses in lift_missed(target, image, program).items():      # what the lifter left
+            if not args.names or name in args.names:
+                missed.setdefault(name, addresses)
+        started, before = time.time(), llm.usage_summary().get(provider.name, {})
+        asked = sorted(missed.items(), key=lambda kv: (len(kv[1]), kv[0]))[:args.limit]     # fewest first
+        whole, ran, total = 0, 0, 0
+        for name, addresses in asked:
+            still = find_inputs(target, image, program, provider, name, addresses, args.tries, flow)
+            whole += not still
+            ran += len(addresses) - len(still)
+            total += len(addresses)
+        after = llm.usage_summary().get(provider.name, {})
+        spent = {k: (after.get(k) or 0) - (before.get(k) or 0) for k in ("answers", "input", "output", "cost")}
+        print("dread pilot --task input: %d functions, %d with every missed instruction run, %d of %d missed "
+              "instructions run; %d answers, %d tokens in, %d out%s, %.0f s" % (
+                  len(asked), whole, ran, total, spent["answers"], spent["input"], spent["output"],
+                  ", $%.2f" % spent["cost"] if after.get("cost") is not None else "", time.time() - started))
         return 0
     names = args.names or candidates(target, image, program, args.limit)
     if not names:
