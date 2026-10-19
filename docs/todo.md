@@ -348,10 +348,8 @@ repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in
   stack bytes the call wrote); (4) scratch
   registers across calls (a few per build; GCC's -fipa-ra): a build with -fno-ipa-ra to measure what
   is left. The RISC-V port's untyped handlers (labels in a section with mapping symbols) are missing
-  from the ground truth. Three instructions of each static-creation function cannot run: FreeRTOS
-  stores a size into a volatile local, loads it back and asserts it equals itself; the lifter's walk
-  knows stack slots' values and could decide such a branch (unreached), where no slot's address has
-  left the function.
+  from the ground truth. (Three instructions of each static-creation function cannot run, a volatile
+  size asserted equal to itself: the lifter decides such branches since, and they are unreached.)
 - [x] **The rest of the matrix**: clang for RISC-V (virt-clang-Os: built with -mno-relax, since clang's
   assembler and GNU ld turned the vector table's jumps into two-byte ones, which the system run showed)
   and the MSP430F449 demo built by TI's msp430-elf-gcc -Os with TI's support files (installed in
