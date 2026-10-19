@@ -46,16 +46,15 @@ IAR's runtime code marked and left out.
   change from the error and help texts, and the doctor tries it before keeping it. (The LLM is
   Claude Code at work, reading the doctor's output and editing a copy of the adapter: no client of
   the lab's own. TI's compiler showed the use: no include path by default, the doctor printed it.)
-- [ ] **The probe set** (calling convention, types, 28 operations with their helpers and code
-  shapes are in; since 2026-10-19 also where the functions lie: entry alignment, literal pools,
-  padding, first and last instructions; on six compilers, pools and padding fully told apart; and
-  soft and hard float on ARM, with a `cortex-m4f` build in every ARM adapter: GCC, clang and ATfE
-  follow AAPCS's VFP variant exactly, TI's armcl does not back-fill; and how a switch dispatches,
-  on a switch whose cases do different work; the rest open): calling convention (ints, 64-bit, structs by value and returned, varargs,
-  soft and hard float), callee-saved registers and stack alignment, the runtime helper each operation
-  calls and its register contract, prologue and epilogue shapes, switch encodings, division by
-  constants, memcpy, memset and struct copies, tail calls, literal pools, function alignment and
-  padding, cross-call fragments (IAR's outlined sequences, called without the calling convention).
+- [x] **The probe set**: calling convention (ints, 64-bit, structs by value and returned, varargs,
+  soft and hard float: s0-s15, back-filling, structs of floats, variadic doubles), callee-saved
+  registers (s16-s31 too) and the stack alignment kept at calls, the runtime helper each operation
+  calls and its register contract, entry and exit instructions, how a switch dispatches (on a switch
+  whose cases do different work), division by constants, memcpy, memset and struct copies, tail
+  calls, literal pools, function alignment and padding. Measured on six compilers and three
+  architectures, every standard's fine print as written; where one compiler departs (TI's armcl
+  does not back-fill), compare names it. Cross-call fragments are IAR's MSP430 and 8051 compilers'
+  (not EWARM's): under More compilers, "IAR profile".
 - [x] **Profile, report and bundle** (the profile so far carries the runtime helpers: names, result
   registers from the register flow on every build, registers changed; regflow takes the results
   from `[compiler] profile`; switch and epilogue shapes and prologue signatures for the other tools
@@ -63,14 +62,14 @@ IAR's runtime code marked and left out.
   contracts for regflow, switch and epilogue shapes for dread.switches and the lifter, prologue
   signatures for finding functions), a self-contained report, and a bundle the user brings home,
   with IAR's runtime code marked as such.
-- [ ] **With an LLM** (Claude Code at work, or here on a brought-back bundle): the report's narrative
+- [x] **With an LLM** (Claude Code at work, or here on a brought-back bundle): the report's narrative
   and probes for what the corpus does not answer, each one compiled and run before it counts.
-  Probes of one's own are in (2026-10-19): `--probe-dir DIR` adds a directory of C files with their
-  TOML specs to DREAD's corpus, and a guarded work directory's CLAUDE.md asks Claude Code to write
-  such a probe into own-probes/, plain C for the question, never the company's code. Open: the
-  narrative. A
-  CLAUDE.md and deny rules for the lab's work directory keep Claude Code at work to the probes and
-  their results: not IAR's runtime code, nothing outside the lab.
+  `--probe-dir DIR` adds a directory of one's own probes (C files with their TOML specs); a guarded
+  work directory's CLAUDE.md asks Claude Code to write such a probe into own-probes/ (plain C for
+  the question, never the company's code), says how to read the reports and the comparisons, and
+  asks for every claim of an explanation to cite the probe and the measured values, or to become a
+  new probe. No client of the lab's own: Claude Code is the one at work. Its deny rules keep it to
+  the probes and their results: not IAR's runtime code, nothing outside the lab.
 - [x] **`dread cclab compare`** (from the user's question how the lab fits DREAD's workflow, 2026-10-19):
   two compilers side by side, where the calling convention, the types and what a call keeps differ
   (what linking rebuilt C into another compiler's image depends on), the options of the rebuilding

@@ -26,6 +26,13 @@ Never read, show or send: */*/image.elf, */*/original/, */*/config/ (the linked 
 hold the toolchain's runtime library, a vendor's code), and nothing outside this directory (the
 user's company code).
 
+Reading the results: ADAPTER/report.md compares one compiler's builds ("all N": every build
+agrees); compare-A-B.md (`dread cclab compare A B`) lists where two compilers differ in what
+linking their code together depends on, with the options that close a difference; ADAPTER/
+profile.toml holds the runtime helpers' contracts for DREAD's other tools. An explanation cites the
+probe (its C in */*/probes/) and the measured values for every claim; a claim the measurements do
+not support is said to be unverified, or becomes a probe.
+
 A question the probes do not answer gets a probe of its own: plain C written for the question,
 never code copied from the company, in own-probes/ (a C file and a TOML of specs of the same name,
 like dread/cclab/probes/*.toml), run with `dread cclab run --probe-dir own-probes ...`. A probe
