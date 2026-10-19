@@ -110,8 +110,15 @@ def test_a_clobbered_kept_register_fails(target, variant, tmp_path, capsys, monk
     failed, uncovered, text = run_all(target, payload, names=["uart_putc"])
     assert not failed and "r1 at the return not compared (kept.tsv): the planted change" in text, text
     monkeypatch.undo()
-    # through the caller it shows only for strings of two or more characters: all generated inputs
-    assert integration.main(["--target", target.root, "--recon", payload, "--cases", "40", "uart_puts"]) == 1
+    # through the caller it shows only for strings of two or more characters: all generated inputs,
+    # while uart_puts is the original's code; lifted, it keeps its r1 across the call itself (the C's
+    # variable: uart_putc never writes r1 in the original) and the clobber cannot reach it
+    assert integration.main(["--target", target.root, "--recon", payload, "--cases", "40", "uart_puts"]) == 0
+    capsys.readouterr()
+    names = [n for n in build.read_names(target.image().table("lifted")) if n != "uart_puts"]
+    original = build.build(target, target.image(), src=str(src), out=str(tmp_path / "recon-original-caller"),
+                           quiet=True, lifted=names)
+    assert integration.main(["--target", target.root, "--recon", original, "--cases", "40", "uart_puts"]) == 1
     assert "DIFF uart_puts" in capsys.readouterr().out
 
 
