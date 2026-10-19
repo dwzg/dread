@@ -273,9 +273,14 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
     target = Target.load(where)
     image = target.image()
     program = Program(target, image)
-    metrics = {"build": name, "functions": len(program.functions),
-               "instruction_bytes": sum(e - s for s, e, _ in program.ranges),
-               "image_bytes": len(image.payload())}
+    metrics = {}
+    previous = os.path.join(where, "metrics.json")
+    if os.path.exists(previous):                # the steps not run now keep their figures
+        with open(previous) as f:
+            metrics = {k: v for k, v in json.load(f).items() if k in STEPS}
+    metrics.update({"build": name, "functions": len(program.functions),
+                    "instruction_bytes": sum(e - s for s, e, _ in program.ranges),
+                    "image_bytes": len(image.payload())})
     with open(os.path.join(where, "build.json")) as f:
         info = json.load(f)
     metrics.update(cc=info["cc"], cflags=" ".join(info["cflags"]))

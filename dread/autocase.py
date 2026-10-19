@@ -30,7 +30,10 @@ no valid addresses (a Cortex-M's) random pointers fault almost always. A run tha
 where an input pointed pins that input to the stub for calls through pointers instead.
 
 Callees run for real unless auto() names stubs: calls=((callee, register mask[, stack words]), ...),
-callee a name or an address. A generic stub returns a generated value (the first eight calls of a
+callee a name or an address. A callee a run hangs in until the instruction limit (an assertion that
+waits for a debugger, a wait for a flag nothing sets) is stubbed in later inputs: each case lists
+its stubs, so both images get the same (FreeRTOS's demo: configASSERT's handler spins, and every
+null-pointer check stayed uncovered). A generic stub returns a generated value (the first eight calls of a
 run, later ones 0) and logs the argument registers in the mask and the stack words, with addresses
 inside the stack replaced by the word "stack". Peripheral registers are inputs like memory; with
 "io": "fixed" they read what the case says whatever was written.
@@ -70,12 +73,13 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 7       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 8       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
                   # 7: at most MAX_CELLS memory locations per function get values; spins of a cycle
                   # of peripheral reads cut; poll stages may answer with compared constants
+                  # 8: a callee a run hung in until the instruction limit is stubbed in later inputs
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -89,6 +93,7 @@ SOLVE_LIMIT = 20_000        # instructions per run there
 SWEEP_RUNS = 600            # emulator runs per base input in the boundary sweep
 LONG_SECONDS = 120          # the last-resort search gives up after this long without one input that finished
 KEPT_MAX = 6
+HUNG_STUBS = 4              # callees at most that get stubbed because runs hung in them
 POINTER_REACH = 0x1000      # a fault this far behind an input's value makes the input a learned pointer
 POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTER_BASE ...
 POINTER_STEP = 0x400        # ... this far apart ...
@@ -505,6 +510,8 @@ class Generator:
         image = self.image
         end = self.program.end(self.program.by_entry[entry]) if entry in self.program.by_entry else words[-1] + 4
         known, covered, corpus, extras, faults, last_gain = Cells(), set(), [], [], 0, 0
+        calls = [list(c) for c in calls]    # grows by the callees runs hang in (hung, below)
+        hung = set()
         pointers = any(c[0] == self.fake_pointer for c in calls)
         pin_args, pin_mem = set(), set()
         data_args, data_mem = {}, {}        # inputs learned to be data pointers -> their buffer
@@ -650,6 +657,9 @@ class Generator:
                 break
             if (corpus or stepping) and rng.random() < 0.75:
                 case = json.loads(json.dumps(rng.choice(corpus + stepping)))
+                if hung and len(case["calls"]) < len(calls):        # stubs found since it was made
+                    case["calls"] = [list(c) for c in calls]
+                    case["returns"] = case["returns"] or [value() for _ in range(8)]
                 present = {a for a, _, _ in case["mem"]}
                 case["mem"] += [[a, s, value()] for a, s in sorted(known.items()) if a not in present]
                 texts = buffers(case) if strings or chars else ()
@@ -690,6 +700,15 @@ class Generator:
                 faults += 1
                 if m.spinning:
                     spins.setdefault(m.spinning[0], m.spinning[1:])
+                # A run that never came back from a callee (an assertion that waits for a debugger, a
+                # wait for a flag nothing sets): later inputs stub that callee, so the code around the
+                # call can be covered; each case says which stubs it has, for both images alike.
+                if m.timed_out and len(hung) < HUNG_STUBS:
+                    inside = self.program.function_at(m.reg("pc") & ~1)
+                    if inside is not None and inside.entry != entry and inside.entry not in hung \
+                            and all(c[0] != inside.entry for c in calls):
+                        hung.add(inside.entry)
+                        calls.append([inside.entry, (1 << nregs) - 1, 0])
                 learn_pointers(m, case)
                 if pointers:
                     went = {m.reg("pc") & ~1, m.reg(self.program.arch.veneer_reg)} - {self.fake_pointer, 0}

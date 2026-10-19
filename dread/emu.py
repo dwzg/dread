@@ -307,6 +307,7 @@ class Machine:
         self._reads, self._cycle = [], [0] * (SPIN_PERIOD + 1)
         self.kept_why = {}          # register -> who reads it after the call, for the report
         self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
+        self.timed_out = False      # the last call ran into its instruction limit
         self.stack_preset = set()   # stack bytes call() wrote for the call itself (a pushed return address)
         self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
 
@@ -615,6 +616,7 @@ class Machine:
             if reg is not None and reg not in lay.arg_regs[:len(regs)]:
                 uc.reg_write(reg, KEPT_POISON + 0x11 * (i + 1))
         self.calls, self.written, self.written_ranges = [], set(), None
+        self.timed_out = False
         if self.core.fast is not None:
             from dread import fasthooks
             self.core.fast.clear(fasthooks.WRITES)
@@ -633,6 +635,7 @@ class Machine:
             if poll["count"] > poll["stages"][-1][0] + POLL_LOGGED:
                 self.calls.append(("io poll reads", register, poll["count"]))
         if uc.reg_read(lay.pc) != lay.sentinel:
+            self.timed_out = self.spinning is None
             if self.may_hang:
                 return Result(0, writes, list(self.calls) + [("did not return",)], layout=lay)
             raise EmuError("function at 0x%x did not return within %d instructions" % (addr, max_instructions))

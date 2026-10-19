@@ -76,3 +76,34 @@ def test_thumb_it_state_after_hooked_store():
     result = m.call(g.program.by_name["parse_kv"].entry, *case["args"], max_instructions=10_000)
     assert result.ret == 0xFFFFFFFD          # -3: no number behind the '='
     assert m.read(s, 2) == b"A\0"            # one character of the key (keymax 2) and its end
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_callee_that_hangs_is_stubbed(tmp_path):
+    """A null check that calls an assertion handler which waits for a debugger: every input that
+    took it ran into the instruction limit inside the handler and was dropped, so the check stayed
+    uncovered. The generator stubs a callee a run hung in, and the cases say so."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text("volatile int go;\nvoid trap(int line) { while (!go) ; }\n"
+                                  "int get(int *p) { if (!p) trap(42); return 5; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "get", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    g = Generator(t, t.image())
+    fn = g.program.by_name["get"]
+    cases = g.generate("get", fn.entry, fn.insns)
+    got, words = covered(g, "get", cases)
+    assert got == words, sorted(hex(a) for a in words - got)
+    trap = g.program.by_name["trap"].entry
+    assert any(c[0] == trap for case in cases for c in case.get("calls", ()))
