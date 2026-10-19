@@ -11,7 +11,11 @@ Stages, each only for what the one before left uncovered:
 
 1. random inputs and mutations of those that gained coverage; when fewer than four ran to the end,
    a second round with small arguments (half of them 0: a count split over two registers is small
-   only when both halves are);
+   only when both halves are); an input that ran code no input ran before and then faulted, or ran
+   to the instruction limit in a loop of the function's own, is a near miss and is repaired: each
+   argument in turn set to 0 and the small values, the first that finishes with new code kept
+   (REPAIR_RUNS runs per function). A loop over a length that the generator took for a pointer
+   (the address that faulted lay just behind it) is reached so: gizmo-m4's script_run;
 2. mutations of the inputs that reach a conditional branch whose other way was never taken;
 3. the compare-guided stage: for such a branch it finds the instruction that set the flags (or the
    compare-and-branch itself), changes every input once to learn which ones the compared values
@@ -75,7 +79,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 21       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 22       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -97,7 +101,9 @@ VERSION = 21       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 20: a round of small arguments when fewer than four inputs ran to the end, and
                   # the callees a layer names for calls through a register (MSP430)
                   # 21: the Cortex-M a target names is the core cases run on (dread.arch.arm.uc_mode:
-                  # with UC_MODE_MCLASS Unicorn built a Cortex-M33 whatever the target named)
+                  # with UC_MODE_MCLASS Unicorn built a Cortex-M33 whatever the target named);
+                  # 22: near misses repaired (an input that ran new code, then faulted or looped to the
+                  # limit in the function itself: each argument in turn set small)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -137,6 +143,7 @@ TEXT_MAX = 96               # bytes of text at most
 TEXT_TOKENS = 8             # tokens per text at most
 STRING_MAX = 64             # longest string constant taken into the dictionary
 STEPPING_MAX = 48           # inputs kept for new code in callees only (mutated further, not cases)
+REPAIR_RUNS = 256           # runs per function to repair near misses (an input that ran new code, then faulted)
 SPIN_READS = 256            # one register read this often in a row with one value: the run spins
 SPIN_POLL = 0.5             # share of inputs that get a poll stage for a register runs spun on
 # String and memory routines that generated cases do not stub: small, pure, and what they write is
@@ -791,6 +798,35 @@ class Generator:
             return m
 
         stepping, tree_seen = [], set()     # inputs that only reached new code in callees
+        repairs = [REPAIR_RUNS, set()]     # runs left; the new code of near misses already tried
+
+        def repair(case, new):
+            """A near miss: the input ran code no input ran before and then faulted, or ran to the
+            instruction limit in a loop of the function's own (a loop over a length the generator
+            took for a pointer: the address that faulted lay just behind it, and every later input
+            aimed it at a buffer). Each argument in turn is set to 0 and the
+            small values; the first that finishes with new code is kept. None if none does. A near
+            miss to code an earlier one was repaired for (or tried for) is not tried again."""
+            if new in repairs[1]:
+                return None
+            repairs[1].add(new)
+            for i in range(nregs):
+                for v in (0,) + SMALL_ARGS:
+                    if case["args"][i] == v or repairs[0] <= 0:
+                        continue
+                    repairs[0] -= 1
+                    trial = json.loads(json.dumps(case))
+                    trial["args"][i] = v
+                    try:
+                        m = run(trial)
+                    except EmuError:
+                        continue
+                    if self.touches_image(m):
+                        continue
+                    got = m.covered_insns(words)
+                    if got - covered:
+                        return trial, got
+            return None
         started = time.time()
         for attempt in range(budget * 5):
             patience = budget * 2 if (data_args or data_mem) and (strings or chars) else budget
@@ -854,6 +890,14 @@ class Generator:
                 faults += 1
                 if m.spinning:
                     spins.setdefault(m.spinning[0], m.spinning[1:])
+                new = frozenset(m.covered_insns(words) - covered)
+                stuck = self.program.function_at(m.reg("pc") & ~1) if m.timed_out else None
+                if new and repairs[0] > 0 and (not m.timed_out or (stuck is not None and stuck.entry == entry)):
+                    fixed = repair(case, new)       # a fault, or a loop of its own that ran to the limit
+                    if fixed is not None:
+                        covered |= fixed[1]
+                        corpus.append(fixed[0])
+                        last_gain = attempt
                 # A run that never came back from a callee. One caught in a function that never
                 # returns at all (dread.noreturn: a hook that spins with interrupts off) makes a case of
                 # its own, "hang": both images run into it and are compared up to the limit (stubbed,
