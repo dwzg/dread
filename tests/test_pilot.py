@@ -51,7 +51,7 @@ def test_an_answer_the_tools_accept_stays(gizmo):
     target, image, _, _ = gizmo
     assert (outcome, answers, stage) == ("accepted", 2, "argued"), lines
     survivors = provider.asked[1][1][-1]["content"]         # the survivors question: gpio_set(1, 1) -> (1, 2)
-    assert "N: equivalent:" in survivors and "gpio_set(1, 1);" in survivors
+    assert "1: equivalent: <one sentence" in survivors and "gpio_set(1, 1);" in survivors
     from dread import mutate
     argued = open(mutate.argued_path(image)).read()
     assert "led_on\tgpio_set(1, 1);\t1 -> 2\targued by dread pilot (scripted (scripted)), not reviewed:" in argued
@@ -98,7 +98,8 @@ class Fake(BaseHTTPRequestHandler):
                                "finish_reason": "stop"}], "usage": {"completion_tokens": 12}}
                  if self.path == "/v1/chat/completions"
                  else {"content": [{"type": "thinking", "thinking": "well"}, {"type": "text", "text": "anthropic says hi"}],
-                       "stop_reason": "max_tokens", "usage": {"output_tokens": 34}})
+                       "stop_reason": "max_tokens", "usage": {"output_tokens": 34, "input_tokens": 50,
+                                                               "cache_read_input_tokens": 7}})
         data = json.dumps(reply).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
@@ -119,13 +120,13 @@ def test_provider_wire_formats(monkeypatch):
         assert local.ask("be brief", [{"role": "user", "content": "hello"}]) == "openai says hi"
         path, headers, body = Fake.seen[-1]
         assert body["messages"][0] == {"role": "system", "content": "be brief"} and body["model"] == "m"
-        assert local.last == {"finish": "stop", "tokens": 12, "reasoning": 3}
+        assert local.last == {"finish": "stop", "tokens": 12, "reasoning": 3, "input": None}
         monkeypatch.setenv("TEST_KEY", "secret")
         remote = llm.Anthropic("claude", {"url": url, "model": "c", "key_env": "TEST_KEY"})
         assert remote.ask("be brief", [{"role": "user", "content": "hello"}]) == "anthropic says hi"
         path, headers, body = Fake.seen[-1]
         assert path == "/v1/messages" and body["system"] == "be brief"
-        assert remote.last == {"finish": "max_tokens", "tokens": 34, "reasoning": 4}
+        assert remote.last == {"finish": "max_tokens", "tokens": 34, "reasoning": 4, "input": 57}
         assert {k.lower(): v for k, v in headers.items()}["x-api-key"] == "secret"
     finally:
         server.shutdown()
@@ -170,6 +171,14 @@ def test_an_answer_cut_off_by_the_token_limit_gets_its_own_feedback(gizmo):
 
 
 @needs_gcc
+def test_an_argument_with_the_templates_n_counts_when_one_change_is_asked(gizmo):
+    """deepseek-flash wrote "N: equivalent: ..." as the old template stood; with one survivor the N
+    can only be 1, so it counts (the template shows the real numbers now)."""
+    (outcome, answers, stage), provider, lines = run(gizmo, [RIGHT, "N: " + ARGUE.split(": ", 1)[1]])
+    assert (outcome, answers, stage) == ("accepted", 2, "argued"), lines
+
+
+@needs_gcc
 def test_a_refusal_ends_the_function_at_once(gizmo):
     """A provider that declines (Anthropic's stop reason "refusal", OpenAI's "content_filter") gives
     the same answer to the same question: no second try, and the outcome says who declined."""
@@ -195,5 +204,26 @@ def test_a_correction_that_keeps_the_survivor_is_asked_for_the_argument(gizmo):
     survivor: the second time the tools say that the code is not the reason and ask for the argument."""
     (outcome, answers, stage), provider, lines = run(gizmo, [RIGHT, RIGHT, ARGUE], tries=3)
     assert (outcome, answers, stage) == ("accepted", 3, "argued"), lines
-    assert "N: equivalent:" in provider.asked[1][1][-1]["content"]
+    assert "1: equivalent: <one sentence" in provider.asked[1][1][-1]["content"]
     assert "leaves the same change unnoticed as before" in provider.asked[2][1][-1]["content"]
+
+
+def test_the_usage_ledger(tmp_path, monkeypatch):
+    """Every answer adds its tokens to the ledger; the month's summary sums them per provider and
+    prices them where the configuration gives prices."""
+    ledger, config = tmp_path / "usage.tsv", tmp_path / "llm.toml"
+    config.write_text('[providers.cloud]\nkind = "anthropic"\nmodel = "m"\nprice_in = 3\nprice_out = 15\n')
+    monkeypatch.setattr(llm, "USAGE", str(ledger))
+    monkeypatch.setenv("DREAD_LLM", str(config))
+    p = llm.Provider("cloud", {"model": "m"})
+    for i in range(2):
+        p.last = {"finish": "end_turn", "tokens": 1000, "input": 500000}
+        p.record()
+    other = llm.Provider("local", {"model": "q"})
+    other.last = {"finish": "stop", "tokens": 10, "input": 20}
+    other.record()
+    summary = llm.usage_summary()
+    assert summary["cloud"]["answers"] == 2 and summary["cloud"]["input"] == 1000000
+    assert abs(summary["cloud"]["cost"] - (3.0 + 0.03)) < 1e-9
+    assert summary["local"]["cost"] is None and summary["local"]["output"] == 10
+    assert "\tcloud\tm\t500000\t1000\tend_turn" in ledger.read_text()

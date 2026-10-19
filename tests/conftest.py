@@ -17,6 +17,13 @@ def gizmo_dir(variant):
     return os.path.join(GIZMO, variant)
 
 
+@pytest.fixture(autouse=True)
+def _usage_ledger(tmp_path, monkeypatch):
+    """Tests never write to the real usage ledger of language-model answers (dread.llm.USAGE)."""
+    from dread import llm
+    monkeypatch.setattr(llm, "USAGE", str(tmp_path / "llm-usage.tsv"))
+
+
 @pytest.fixture(params=VARIANTS)
 def variant(request):
     return request.param

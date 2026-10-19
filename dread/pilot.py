@@ -74,10 +74,10 @@ changes to it, and a search for an input that would tell them apart found none:
 
 {items}
 
-For each of them, either argue on a line of its own why the change cannot alter what the function
-does:
+For each of them, either argue on a line of its own, with its number, why the change cannot alter
+what the function does:
 
-    N: equivalent: <one sentence>
+{template}
 
 or, when the C has something the machine code does not, answer with the whole corrected file in a
 ```c block instead."""
@@ -87,9 +87,9 @@ SURVIVORS_AGAIN = """The corrected C leaves the same change unnoticed as before:
 {items}
 
 The code is not the reason: no case and no search for an input tells the change apart. When you are
-sure the C does what the machine code does, argue each of them, on a line of its own:
+sure the C does what the machine code does, argue each of them, on a line of its own, with its number:
 
-    N: equivalent: <one sentence>"""
+{template}"""
 
 ARGUED = "argued by dread pilot ({label}), not reviewed: "
 
@@ -102,8 +102,8 @@ FEEDBACK = {
     "test": "The C builds, but differs from the machine code (original against your C):\n\n{text}\n\n"
             "Answer with the whole corrected file.",
     "mutate": "The mutation check of the C fails:\n\n{text}\n\nAnswer with the whole corrected file.",
-    "argue": "Not every change has an argument yet:\n\n{text}\n\nArgue each (N: equivalent: ...) or answer "
-             "with the whole corrected file.",
+    "argue": "Not every change has an argument yet:\n\n{text}\n\nArgue each on a line of its own that begins "
+             "with its number, like this:\n\n{template}\n\nor answer with the whole corrected file.",
     "integration": "Run through its callers with the real callees, the C differs:\n\n{text}\n\n"
                    "Answer with the whole corrected file.",
 }
@@ -244,13 +244,23 @@ def check(target, image, name, mutate_check=True, integration_check=True, jobs=N
     return True, "accepted", "", []
 
 
+def argue_template(numbers):
+    """The lines an argument answer consists of, with the changes' own numbers (a template that says
+    "N" gets copied as it stands)."""
+    return "\n".join("    %d: equivalent: <one sentence: why change %d alters nothing>" % (k, k) for k in numbers)
+
+
 def argue(image, name, pending, answer, label):
     """Record the model's arguments for the survivors (argued.tsv, marked as the pilot's and not
     reviewed); returns the survivors still without one, as text."""
     from dread import mutate
     given = {}
-    for m in re.finditer(r"^\s*(\d+)\s*[:.)]\s*equivalent\s*:\s*(.+?)\s*$", answer, re.M | re.I):
-        given[int(m.group(1))] = m.group(2).replace("\t", " ")
+    for m in re.finditer(r"^[\s>*_`-]*(\d+|N)[*_`]*\s*[:.)]\s*[*_`]*equivalent[*_`]*\s*:\s*(.+?)\s*$", answer,
+                         re.M | re.I):
+        if m.group(1).isdigit():
+            given[int(m.group(1))] = m.group(2).replace("\t", " ")
+        elif len(pending) == 1:              # the template's N copied: with one change it can only mean 1
+            given.setdefault(1, m.group(2).replace("\t", " "))
     missing = ["%d. `%s`: %s" % (k, line, what) for k, (line, what) in enumerate(pending, 1) if k not in given]
     if missing:
         return missing
@@ -339,6 +349,7 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
                 outcome, stage = "accepted", "argued"
                 break
             ok, stage, report = False, "argue", "\n".join(missing)
+            numbers = [int(line.split(".", 1)[0]) for line in missing]
         elif code is None:
             ok, stage, report = False, "code", ""
         else:
@@ -351,11 +362,12 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
             again = sorted(pending) == sorted(asked)
             asked = list(pending)
             feedback = (SURVIVORS_AGAIN if again else SURVIVORS).format(
-                items="\n".join("%d. `%s`: %s" % (k, line, what) for k, (line, what) in enumerate(pending, 1)))
+                items="\n".join("%d. `%s`: %s" % (k, line, what) for k, (line, what) in enumerate(pending, 1)),
+                template=argue_template(range(1, len(pending) + 1)))
             if answers == limit and not extra:      # the arguments get an answer of their own
                 limit, extra = limit + 1, True
         else:
-            feedback = FEEDBACK[stage].format(text=report)
+            feedback = FEEDBACK[stage].format(text=report, template=argue_template(numbers) if stage == "argue" else "")
         log.append("## The tools, after answer %d (%s)\n\n%s" % (answers, stage, feedback))
         messages += [{"role": "assistant", "content": answer}, {"role": "user", "content": feedback}]
     if outcome != "accepted":
@@ -542,6 +554,24 @@ def propose_name(target, image, program, provider, name, flow=None, out=print):
     return proposed.group(1), what.group(1)
 
 
+def print_usage(month=None):
+    """The usage ledger's figures for a month, per provider (dread.llm.usage_summary)."""
+    import time
+    month = month or time.strftime("%Y-%m")
+    summary = llm.usage_summary(month)
+    if not summary:
+        print("dread pilot: no answers recorded in %s (%s)" % (month, llm.USAGE))
+        return 0
+    total = 0.0
+    for name, e in sorted(summary.items()):
+        cost = "$%.2f" % e["cost"] if e["cost"] is not None else "no prices in llm.toml"
+        total += e["cost"] or 0
+        print("%-16s %-22s %5d answers %10d tokens in %9d out  %s" % (name, e["model"], e["answers"], e["input"],
+                                                                     e["output"], cost))
+    print("%s: $%.2f where prices are known (%s)" % (month, total, llm.USAGE))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread pilot", description=__doc__.split("\n\n")[0])
     tgt.add_arguments(parser)
@@ -552,10 +582,14 @@ def main(argv=None):
     parser.add_argument("--no-mutate", action="store_true", help="skip the mutation check")
     parser.add_argument("--no-integration", action="store_true", help="skip the integration run")
     parser.add_argument("--dry-run", action="store_true", help="print the question for each function, ask nothing")
+    parser.add_argument("--usage", nargs="?", const="", metavar="YYYY-MM",
+                        help="print the tokens (and costs, where llm.toml gives prices) of a month's answers; ask nothing")
     parser.add_argument("--task", choices=("write", "input", "name"), default="write",
                         help="write C (default), find inputs for unrun instructions, or propose names")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
+    if args.usage is not None:
+        return print_usage(args.usage or None)
     try:
         target, image = tgt.from_args(args)
     except tgt.TargetError as e:
