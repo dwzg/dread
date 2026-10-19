@@ -676,14 +676,20 @@ class Arm:
         bytes), EXC_RETURN's bit 4 is clear (0xFFFFFFE1, E9, ED) and FPCA is cleared for the
         handler. The hardware's lazy stacking (space reserved, the registers written when the
         handler first uses the FPU) is modelled as eager stacking: the registers come out the same;
-        only the reserved words' memory differs when a handler never uses the FPU."""
+        only the reserved words' memory differs when a handler never uses the FPU.
+
+        Both profiles keep the interrupted code's IT state (in the stacked xPSR, in SPSR) and clear it
+        for the handler: an interrupt can come between the instructions of an IT block, since the
+        system run takes interrupts where translation blocks start and QEMU's 1 KiB pages end one
+        inside an IT block (FreeRTOS's Cortex-M4F build, newlib's strcmp: `it cs` at 0x7fe,
+        `cmpcs` at 0x800). Stacked cleared, the rest of the block ran unconditionally, and strcmp
+        compared past the end of equal strings."""
         if self.profile == "m":
             xpsr = engine.reg_read(ua.UC_ARM_REG_XPSR)
             handler = xpsr & 0x1FF
             control = engine.reg_read(ua.UC_ARM_REG_CONTROL)
             process = not handler and control & 2
             sp = engine.reg_read(ua.UC_ARM_REG_SP)
-            xpsr &= ~self.IT_MASK
             if sp & 4:
                 sp -= 4
                 xpsr |= 1 << 9
@@ -704,7 +710,7 @@ class Arm:
             engine.reg_write(ua.UC_ARM_REG_XPSR, 0x01000000 | (number & 0x1FF))
             return read_word(vectors + 4 * number) | 1
         cpsr = engine.reg_read(ua.UC_ARM_REG_CPSR)
-        engine.reg_write(ua.UC_ARM_REG_CPSR, (cpsr & ~0x3F) | 0x12 | 0x80)
+        engine.reg_write(ua.UC_ARM_REG_CPSR, (cpsr & ~0x3F & ~self.IT_MASK) | 0x12 | 0x80)
         engine.reg_write(ua.UC_ARM_REG_SPSR, cpsr)
         engine.reg_write(ua.UC_ARM_REG_LR, (resume & ~1) + 4)
         return vectors + 0x18

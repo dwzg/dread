@@ -211,3 +211,47 @@ def test_an_exception_with_the_fpus_state_takes_the_extended_frame():
         assert engine.reg_read(ua.UC_ARM_REG_SP) == 0x20008000
         assert bool(engine.reg_read(ua.UC_ARM_REG_CONTROL) & 4) == fpu
         assert engine.reg_read(ua.UC_ARM_REG_S15) == (0x4000000F if fpu else 0)
+
+
+def test_an_interrupt_inside_an_it_block_keeps_the_blocks_state():
+    """An interrupt taken between the instructions of an IT block (here where QEMU's 1 KiB pages end
+    a translation block, at 0x800, as in FreeRTOS's Cortex-M4F build in newlib's strcmp) stacks the
+    IT state with xPSR and gets it back on the return: the rest of the block stays conditional. With
+    r2 = 0, `cmp r2, #1; it cs; cmpcs r2, r3` skips the cmpcs and leaves Z clear; run unconditionally
+    it would set Z."""
+    import unicorn as uc
+    from unicorn import arm_const as ua
+    from dread import arch as archmod
+    arm = archmod.get({"name": "arm", "isa": "t32", "profile": "m", "cpu": "cortex-m4"})
+    engine = uc.Uc(uc.UC_ARCH_ARM, arm.uc_mode())
+    engine.ctl_set_cpu_model(ua.UC_CPU_ARM_CORTEX_M4)
+    engine.mem_map(0, 0x10000)
+    engine.mem_map(0x20000000, 0x10000)
+    engine.mem_write(0x7FC, bytes.fromhex("012a" "28bf" "9a42" "fee7"))   # cmp; it cs; cmpcs (0x800); b .
+    engine.reg_write(ua.UC_ARM_REG_SP, 0x20008000)
+    for reg in (ua.UC_ARM_REG_R2, ua.UC_ARM_REG_R3):
+        engine.reg_write(reg, 0)
+    starts = []
+
+    def block(engine, address, size, user):
+        starts.append(address)
+        if address == 0x800 and starts.count(0x800) == 1:     # the first time only: the resumed run goes on
+            engine.emu_stop()
+    engine.hook_add(uc.UC_HOOK_BLOCK, block)
+    engine.emu_start(0x7FD, 0x804)
+    assert engine.reg_read(ua.UC_ARM_REG_PC) == 0x800 and 0x800 in starts
+
+    def read_word(address):
+        return int.from_bytes(engine.mem_read(address, 4), "little")
+
+    def write_word(address, value):
+        engine.mem_write(address, (value & 0xFFFFFFFF).to_bytes(4, "little"))
+    engine.mem_write(16 * 4, (0x901).to_bytes(4, "little"))
+    arm.enter_interrupt(engine, 16, 0x801, 0, read_word, write_word)
+    assert not engine.reg_read(ua.UC_ARM_REG_XPSR) & arm.IT_MASK          # the handler runs outside it
+    engine.reg_write(ua.UC_ARM_REG_PC, engine.reg_read(ua.UC_ARM_REG_LR))
+    resume = arm.exception_return(engine, read_word)
+    assert resume == 0x801
+    engine.emu_start(resume, 0x802)
+    assert engine.reg_read(ua.UC_ARM_REG_PC) == 0x802 and starts.count(0x800) == 2
+    assert not engine.reg_read(ua.UC_ARM_REG_XPSR) & (1 << 30)              # Z clear: cmpcs skipped

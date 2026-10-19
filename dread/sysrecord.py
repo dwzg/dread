@@ -156,7 +156,6 @@ class Recorder:
         return "mem"
 
     def _on_read(self, uc, access, addr, size, value, user):
-        self.system.unsettled = True        # the next block repairs the IT state this hook leaves
         try:
             if self.running and not self.image.base <= addr < self.image.end and not self.memory.is_io(addr):
                 data = bytes(uc.mem_read(addr, size))
@@ -179,7 +178,6 @@ class Recorder:
                 self.arch.settle_it(uc)
 
     def _on_write(self, uc, access, addr, size, value, user):
-        self.system.unsettled = True
         try:
             if self.running and not self.image.base <= addr < self.image.end and not self.memory.is_io(addr):
                 data = (value & ((1 << 8 * size) - 1)).to_bytes(size, "little")

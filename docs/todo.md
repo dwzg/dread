@@ -605,6 +605,20 @@ of the MSP430 section comes after this one.
   restores them and FPCA. Lazy stacking is modelled eagerly (the registers come out the same; the
   reserved words' memory differs only when a handler never uses the FPU). Tested on the core
   directly; gizmo's scenarios interrupt no float code: FreeRTOS's ARM_CM4F port (next) will.
+- [x] **An interrupt inside an IT block** (2026-10-20, found by FreeRTOS's Cortex-M4F build): since
+  the first exception model (2026-10-18) the M profile's entry stacked xPSR with the IT state
+  cleared, so an interrupt taken between the instructions of an IT block came back with the rest of
+  the block unconditional. The system run takes interrupts where translation blocks start, and
+  QEMU's 1 KiB pages end one inside newlib's strcmp (`it cs` at 0x7fe, `cmpcs` at 0x800): three
+  interrupts a run landed there, and one at the strings' terminator made strcmp compare past the
+  end of equal strings (MessageBufferDemo.c line 868 asserted). The extended frames had only moved
+  the timing onto it. The IT state goes into the stacked xPSR now, and the A profile's IRQ entry
+  clears it for the handler as the core does; a test splits an IT block at 0x800 and takes an
+  interrupt there (it fails on the old entry). Gone as well: the repair of a stale IT state at the
+  next block's start (2026-10-19, for the recorder's memory hooks, which repair it themselves): it
+  cleared the state of a block that starts inside an IT block, so an interrupt taken there while
+  recording stacked it cleared again. Any Thumb-2 system run could hit this where a block boundary
+  splits an IT block; the measurements up to 22 ran with it.
 - [ ] **FreeRTOS on it**: the ARM_CM4F port on QEMU's mps2-an386 (Cortex-M4) in the benchmark's
   matrix, with GCC and clang.
 

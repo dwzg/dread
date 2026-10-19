@@ -118,10 +118,11 @@ class System:
                                             # if they have them entered(resume, sp) before an exception is taken
                                             # (where the interrupted code goes on, its stack pointer) and
                                             # returned(resume) after a return this run finishes (the M profile's)
-        # A memory hook leaves a stale Thumb IT state behind (dread.arch.arm.settle_it): _on_io repairs
-        # it itself; a memory hook of an observer sets this, and the next block repairs it (a repair on
-        # every block took 40 % of a run)
-        self.unsettled = False
+        # A memory hook leaves a stale Thumb IT state behind (dread.arch.arm.settle_it): every memory
+        # hook repairs it itself before it returns, _on_io and an observer's (dread.sysrecord) alike. A
+        # repair at the next block's start instead cleared the state of an IT block that a translation
+        # block boundary splits (QEMU's 1 KiB pages do: FreeRTOS's strcmp, `it cs` at 0x7fe), and an
+        # interrupt taken there stacked it cleared (a repair at every block took 40 % of a run anyway)
         self._shared(placement, built)
         uc.hook_add(UC_HOOK_BLOCK, self._on_block)
         for lo, hi in self.layout.io:
@@ -260,10 +261,6 @@ class System:
                 elif self._may_take(*wanted):
                     self.deliver = True
                     uc.emu_stop()
-        if self.unsettled:
-            self.unsettled = False
-            if self.layout.settle_it:
-                self.arch.settle_it(uc)
 
     def _owner(self, address):
         i = bisect.bisect_right(self.owned_lo, address) - 1
