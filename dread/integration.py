@@ -64,6 +64,8 @@ def run(payload, aliases, case, addr, name, watch=False, limit=None):
     # the peripheral answers are inputs too (stubs are not: the callees run for real)
     for at, nth, value in case.get("poll", ()):
         m.poll_read(at, nth, value)
+    for at, size, nth, value in case.get("later", ()):
+        m.later_read(at, size, nth, value)
     if case.get("io") == "fixed":
         m.io_fixed = {a + i: b for a, size, value in case["mem"] if lay.target.memory.is_io(a)
                       for i, b in enumerate((value & ((1 << 8 * size) - 1)).to_bytes(size, "little"))}

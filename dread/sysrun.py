@@ -110,7 +110,10 @@ class System:
         # memory hook, Unicorn leaves pc on the accessing instruction (a store done, a load not), and
         # going on from pc would repeat the access (dread.engines)
         self.due = False
-        self.observers = []                 # tools that watch the run (dread.sysrecord): block(), io()
+        self.observers = []                 # tools that watch the run (dread.sysrecord): block(), io(), and
+                                            # if they have them entered(resume, sp) before an exception is taken
+                                            # (where the interrupted code goes on, its stack pointer) and
+                                            # returned(resume) after a return this run finishes (the M profile's)
         # A memory hook leaves a stale Thumb IT state behind (dread.arch.arm.settle_it): _on_io repairs
         # it itself; a memory hook of an observer sets this, and the next block repairs it (a repair on
         # every block took 40 % of a run)
@@ -319,6 +322,7 @@ class System:
             self.log.append(("interrupt", controller.name, number))
             vectors = controller.vector_base() if hasattr(controller, "vector_base") else self.image.vectors
             cause = controller.core_cause(number) if hasattr(controller, "core_cause") else None
+            self._entering(pc)
             pc = arch.enter_interrupt(uc, number, pc, vectors, word, write_word, cause=cause)
             self.interrupts_changed()
             return pc
@@ -335,6 +339,9 @@ class System:
                 self.fault, pc = None, back
                 for c in self.controllers:
                     c.returned()
+                for o in self.observers:
+                    if hasattr(o, "returned"):
+                        o.returned(back)
                 self.interrupts_changed()
                 pc = take(pc)                   # one that waited for it comes at once (tail-chaining)
                 continue
@@ -345,6 +352,7 @@ class System:
             if self.syscall and hasattr(arch, "enter_syscall"):    # a trap the layer takes alone (ecall)
                 self.syscall = False
                 self.log.append(("syscall",))     # (not its address: code that moved is elsewhere)
+                self._entering(pc)
                 pc = arch.enter_syscall(uc, pc, word, write_word)
             if self.syscall:                    # svc: its exception, taken at once behind it
                 self.syscall = False
@@ -386,6 +394,14 @@ class System:
         if self.interrupts:
             reports["interrupts"] = dict(sorted(self.interrupts.items()))
         return Outcome(how, self.clock, list(self.log), reports, dict(self.entered), list(self.order))
+
+    def _entering(self, resume):
+        """Tell the observers an exception is about to be taken (see observers)."""
+        if self.observers:
+            sp = self.uc.reg_read(self.layout.sp)
+            for o in self.observers:
+                if hasattr(o, "entered"):
+                    o.entered(resume, sp)
 
     def service(self):
         """Inputs and model events that are due, then the next stop."""

@@ -298,6 +298,7 @@ class Machine:
         self.may_hang = False       # running into the instruction limit is a result, not an error
         self.io_fixed = None        # {byte address: value}: peripheral reads return these, see _on_io
         self.polls = {}             # see poll_read()
+        self.laters = {}            # see later_read()
         self.arg_domains = []       # [(register number, values)] applied by call()
         self.function = ""          # the name of the function under test, for stubs that look it up
         self.kept = ()              # scratch registers compared at the return (dread.regflow)
@@ -390,6 +391,27 @@ class Machine:
         number of reads must still agree. Opt-in: it changes the input, it compares no less."""
         poll = self.polls.setdefault(addr, {"stages": [], "count": 0})
         poll["stages"] = sorted(poll["stages"] + [(n, value)])
+
+    def later_read(self, addr, size, n, value):
+        """Just before the n-th read that starts at addr (1 is the first), memory there becomes
+        value (size bytes): what another context (a task, an interrupt handler) wrote there while a
+        recorded call waited (dread sysrecord). Unlike a poll stage it is written once, so the
+        code's own writes stand after it. Opt-in: it changes the input, it compares no less."""
+        later = self.laters.get(addr)
+        if later is None:
+            later = self.laters[addr] = {"stages": {}, "count": 0}
+            self.hook_add(UC_HOOK_MEM_READ, self._on_later, begin=addr, end=addr)
+        later["stages"][n] = (size, value)
+
+    def _on_later(self, uc, access, addr, size, value, user):
+        later = self.laters.get(addr)
+        if later is None:
+            return
+        later["count"] += 1
+        stage = later["stages"].get(later["count"])
+        if stage is not None:
+            s, v = stage
+            uc.mem_write(addr, (v & ((1 << 8 * s) - 1)).to_bytes(s, "little"))
 
     def _on_stub(self, uc, addr, size, user):
         args = tuple(uc.reg_read(r) for r in self.layout.arg_regs)
@@ -662,6 +684,8 @@ class Machine:
             self.core.fast.clear(fasthooks.WRITES)
         for poll in self.polls.values():
             poll["count"] = 0
+        for later in self.laters.values():
+            later["count"] = 0
         try:
             uc.emu_start(self.arch.start_address(addr, isa), lay.sentinel, count=max_instructions)
         except UcError as e:

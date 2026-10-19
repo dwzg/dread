@@ -361,6 +361,8 @@ class Generator:
             m.io_fixed = fixed
         for at, nth, value in case.get("poll", ()):
             m.poll_read(at, nth, value)
+        for at, size, nth, value in case.get("later", ()):
+            m.later_read(at, size, nth, value)
         returns = list(case.get("returns", ()))
         frame = case.get("frame", 0)
         count = [0]

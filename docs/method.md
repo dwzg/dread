@@ -42,7 +42,9 @@ is UNCOVERED; code no input can reach is declared with the reason.
   forever with poll stages, and gives at most a few hundred memory locations values per input.
 - **Written** cases for what the generator cannot reach.
 - **Recorded**: `dread record` from Python models of a function's callees (parsers fed by a reader),
-  `dread sysrecord` from a system run (real arguments, real device answers).
+  `dread sysrecord` from a system run (real arguments, real device answers; a call that waits for
+  another task or an interrupt replays with what they wrote meanwhile, and handlers are recorded up
+  to their exception return).
 
 ## 5. Are the cases strong enough? `dread mutate`
 
