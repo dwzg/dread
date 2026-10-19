@@ -139,6 +139,7 @@ class Generator:
         self.layout = layout or Layout(target, image)
         self._flow = None                   # dread.regflow, when a stub's mask needs it
         self._endless = None                # dread.noreturn, when a run hangs in a callee
+        self._environment = None            # see environment()
         self.payload = payload if payload is not None else image.payload()
         self.arch = image.arch
         mem = target.memory
@@ -421,6 +422,22 @@ class Generator:
             from dread import noreturn
             self._endless = set(noreturn.find(self.program))
         return self._endless
+
+    def environment(self):
+        """A digest of what a function's cases depend on besides its own instructions: the whole
+        image (a literal pool holds the addresses of globals and callees: a rebuild that moved the
+        data left a function's instructions alike and its cases stale, setting cells nobody reads),
+        what the loader puts into RAM, and dread.regflow's version (a hung callee's stub logs what
+        it reads)."""
+        if self._environment is None:
+            from dread import regflow
+            h = hashlib.sha1(bytes(self.payload))
+            for c in self.image.startup():
+                h.update(repr((c.kind, c.run, c.size, c.stored)).encode())
+                h.update(bytes(getattr(c, "data", None) or b""))
+            h.update(b"regflow %d" % regflow.VERSION)
+            self._environment = h.hexdigest()
+        return self._environment
 
     def reads_mask(self, name):
         """The argument registers a function reads at its entry (dread.regflow), as a stub's logging
@@ -1215,15 +1232,17 @@ def resolve_calls(generator, calls):
     return out
 
 
-def cache_key(payload, base, words, sizes, entry, options, arch=None):
-    """The key of a function's cached cases: its bytes, VERSION, the options, and the architecture
+def cache_key(payload, base, words, sizes, entry, options, arch=None, environment=""):
+    """The key of a function's cached cases: its bytes, VERSION, the options, the architecture
     layer's generator_version when it is not 0 (what the generator learns from that architecture's
-    code: changing it renews only that architecture's caches)."""
+    code: changing it renews only that architecture's caches) and the environment (the generator's
+    environment(): the image as a whole)."""
     blob = b"".join(payload[a - base:a - base + sizes[a]] for a in words if 0 <= a - base < len(payload))
     version = VERSION
     if arch is not None and getattr(arch, "generator_version", 0):
         version = (VERSION, arch.name, arch.generator_version)
-    return hashlib.sha1(blob + repr((version, entry, sorted((k, repr(v)) for k, v in options.items()))).encode()).hexdigest()
+    return hashlib.sha1(blob + repr((version, entry, sorted((k, repr(v)) for k, v in options.items()),
+                                     environment)).encode()).hexdigest()
 
 
 def cache_load(path):
@@ -1303,7 +1322,7 @@ def cases_for(run, name, fn):
     prog = gen.program
     sizes = {a: prog.insn_size(a) for a in fn.insns}
     key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, dict(options, calls=calls, frame=frame),
-                    prog.arch)
+                    prog.arch, gen.environment())
     path = os.path.join(run["target"].build, "autocases", image.name, name + ".json")
     cached = cache_load(path)
     if not cached or cached.get("key") != key:

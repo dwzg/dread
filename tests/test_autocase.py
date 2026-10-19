@@ -173,3 +173,23 @@ def test_a_hook_deeper_down_stubs_the_callee_it_was_reached_by(tmp_path):
     assert got == words, sorted(hex(a) for a in words - got)
     stubs = {c[0] for case in cases for c in case.get("calls", ())}
     assert g.program.by_name["alloc"].entry in stubs and g.program.by_name["hook"].entry not in stubs
+
+
+def test_cached_cases_follow_the_whole_image(target):
+    """A rebuild that moves data leaves a function's instructions alike while its literal pool (or
+    any global it reads) changes: its cached cases set cells nobody reads any more (FreeRTOS's ARM
+    builds failed on the original after a configuration change). The key covers the whole image."""
+    from dread.autocase import cache_key
+    image = target.image()
+    g1 = Generator(target, image)
+    fn = g1.program.by_name["parse_kv"]
+    sizes = {a: g1.program.insn_size(a) for a in fn.insns}
+    payload = bytearray(g1.payload)
+    at = len(payload) - 1                       # a byte outside the function: its instructions stay alike
+    assert not any(a <= image.base + at < a + sizes[a] for a in fn.insns)
+    payload[at] ^= 0xFF
+    g2 = Generator(target, image, payload=bytes(payload))
+    keys = [cache_key(g.payload, image.base, fn.insns, sizes, fn.entry, {}, g.program.arch, g.environment())
+            for g in (g1, g2)]
+    assert keys[0] != keys[1]
+    assert cache_key(g1.payload, image.base, fn.insns, sizes, fn.entry, {}, g1.program.arch, g1.environment()) == keys[0]
