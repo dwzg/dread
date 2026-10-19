@@ -315,9 +315,10 @@ The long runs set the pace of everything after them. Measure first, then cut.
   from one call into the next (BASEPRI did, FreeRTOS's critical sections set it). retire stays as
   a backstop. Lesson: a cache of failures assumes they recur; check that the same key gives the
   same result in a second run before caching what a fault elsewhere could have caused.
-- [ ] **The configured Cortex-M model**: without UC_MODE_MCLASS Unicorn builds the cpu the target
+- [x] **The configured Cortex-M model**: without UC_MODE_MCLASS Unicorn builds the cpu the target
   names (a real M3 for cortex-m3: no Security Extension, DSP or FPU; an M0 would be ARMv6-M). The
-  Cortex-M tests pass on it; the suite and a measurement of the matrix decide.
+  suite passes on it, and measure-21 (generator 21) lifted exactly what measure-20 did on every
+  build of the FreeRTOS matrix, in the same time (57 min beside other work).
 - [x] The test suite in a fresh worktree regenerated gizmo's cases (21 minutes; the MSP430 test 772 s,
   0.4 s with its cache): `bin/dev-worktree` copies the caches into a new worktree.
 - [ ] The generation of functions that never return is the slowest left (one task's loop: 49,000 runs
@@ -550,9 +551,9 @@ extension, the FPU, the hard-float calling convention and their place in every t
 in the emulator. The MSP430 work in flight (its lifter, stack arguments) is finished first; the rest
 of the MSP430 section comes after this one.
 
-- [ ] **The configured core** (with "The configured Cortex-M model" above, measured first):
-  Unicorn's cortex-m4 (DSP, FPv4-SP) for a target that names it; every Cortex-M runs on Unicorn's
-  M33 today.
+- [x] **The configured core** (with "The configured Cortex-M model" above): Unicorn's cortex-m4 (DSP,
+  FPv4-SP) for a target that names it, which runs VFP code with nothing to enable (an M3 faults on
+  it, as the hardware does).
 - [x] **gizmo-m4** (2026-10-19): gizmo built with GCC for the Cortex-M4 with hard float
   (`-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard`) and C of its own in fw/dsp.c (a low-pass
   filter, an average and a conversion with rounding on floats; saturating and packed arithmetic
