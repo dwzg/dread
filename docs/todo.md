@@ -342,7 +342,10 @@ repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in
   (about 30): mostly a path that needs every check of the loop to pass in one case (a stubbed receive
   that must write exactly the value compared), beyond the compare-guided stage's budget on runs that
   long, and their system check needs every instruction run; (3) a few disagreements per build,
-  each to be traced (several are callees lifted together whose own cases agree); (4) scratch
+  each to be traced: one kind is an inconsistent input that makes a real callee read beyond a
+  local of the caller (a queue's item size of 24 for a 4-byte item: memcpy copies the frame behind
+  it, laid out otherwise in the C), which the harness cannot tell yet (it would need to know which
+  stack bytes the call wrote); (4) scratch
   registers across calls (a few per build; GCC's -fipa-ra): a build with -fno-ipa-ra to measure what
   is left. The RISC-V port's untyped handlers (labels in a section with mapping symbols) are missing
   from the ground truth.
