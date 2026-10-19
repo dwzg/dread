@@ -310,6 +310,11 @@ class Machine:
         self.timed_out = False      # the last call ran into its instruction limit
         self.stack_preset = set()   # stack bytes call() wrote for the call itself (a pushed return address)
         self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
+        # A system call (svc, ecall) runs as a no-op, logged in order: its handler is the firmware's and
+        # not modelled (FreeRTOS's RISC-V port yields with ecall). Any other CPU exception stops the run
+        # as a fault (with a hook in place, Unicorn would take an undefined instruction as handled).
+        self.svc_regs, self.exception = False, None
+        self.hook_add(UC_HOOK_INTR, self._on_intr)
 
     # ---- hooks ----
 
@@ -525,11 +530,22 @@ class Machine:
             self.reads = dict(fast.items(fasthooks.READS, values=True))
             self.code_reads = bool(fast.state.code_reads)
 
+    def _on_intr(self, uc, intno, user):
+        if intno in getattr(self.arch, "syscall_numbers", ()):
+            if self.svc_regs:
+                self.log("svc", *(uc.reg_read(r) for r in self.layout.arg_regs))
+            else:
+                self.log("svc")
+            return
+        if self.exception is None:
+            self.exception = intno
+        uc.emu_stop()
+
     def log_svc(self):
-        """Let svc instructions run as no-ops and log the argument registers at each. Without
-        this an svc is an emulation fault; the firmware's handler is not modelled."""
-        self.hook_add(UC_HOOK_INTR, lambda uc, intno, user:
-                      self.log("svc", *(uc.reg_read(r) for r in self.layout.arg_regs)))
+        """Log the argument registers at each system call too (svc, ecall), for a case that knows the
+        handler reads them; by default a system call is logged without registers, which may hold
+        what earlier code left."""
+        self.svc_regs = True
 
     def log(self, *event):
         self.calls.append(event)
@@ -616,7 +632,7 @@ class Machine:
             if reg is not None and reg not in lay.arg_regs[:len(regs)]:
                 uc.reg_write(reg, KEPT_POISON + 0x11 * (i + 1))
         self.calls, self.written, self.written_ranges = [], set(), None
-        self.timed_out = False
+        self.timed_out, self.exception = False, None
         if self.core.fast is not None:
             from dread import fasthooks
             self.core.fast.clear(fasthooks.WRITES)
@@ -630,6 +646,8 @@ class Machine:
             raise EmuError("%s in a stub or hook at pc=0x%x: %s" % (type(e).__name__, uc.reg_read(lay.pc), e))
         finally:
             self._collect()
+        if self.exception is not None:
+            raise EmuError("CPU exception %d at pc=0x%x" % (self.exception, uc.reg_read(lay.pc)))
         writes = self._read_written()
         for register, poll in sorted(self.polls.items()):
             if poll["count"] > poll["stages"][-1][0] + POLL_LOGGED:

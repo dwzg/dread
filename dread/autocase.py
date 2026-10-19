@@ -73,7 +73,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 10       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 11       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -82,6 +82,7 @@ VERSION = 10       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 8: a callee a run hung in until the instruction limit is stubbed in later inputs
                   # 9: those stubs log only the argument registers the callee reads (dread.regflow)
                   # 10: a run that hangs in a callee that never returns makes a "hang" case instead
+                  # 11: system calls run as logged no-ops (dread.emu), no longer faults
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning

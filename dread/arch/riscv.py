@@ -224,6 +224,7 @@ class RiscV:
     default_result = ("a0", "a1")
     word = 4
     reg_bits = 32
+    syscall_numbers = (8, 9, 11)    # ecall from U, S and M mode (dread.emu runs it as a logged no-op)
     link_reg = "ra"
     veneer_reg = "t1"       # the overlay's far branch and the linker's call stubs go through t1
 

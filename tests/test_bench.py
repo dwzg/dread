@@ -237,3 +237,57 @@ cflags = ["-march=rv32imac", "-mabi=ilp32", "-Os"]
     assert machine.call(fn.entry).ret == 8
     text = make_lifter(program).lift(fn).text
     assert "gp = 0x%x;" % image.fixed["gp"] in text
+
+
+RV_TARGET = '''[target]
+name = "rv"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "rom", base = 0x80000000, size = 0x10000, kind = "rom"},
+           {name = "ram", base = 0x80080000, size = 0x10000}]
+stack = {top = 0x80090000, size = 0x1000}
+sentinel = 0x7fff0000
+[image.main]
+original = "original/t.bin"
+base = 0x80000000
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac", "-mabi=ilp32", "-Os"]
+'''
+
+
+def tiny_rv(tmp_path, source):
+    from dread import elfimport
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(source)
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text*) } }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac", "-mabi=ilp32", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(RV_TARGET)
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    return Target.load(str(tmp_path))
+
+
+@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+def test_a_system_call_runs_as_a_logged_no_op(tmp_path):
+    """FreeRTOS's RISC-V port yields with ecall: in the emulator it was a fault (no input of such a
+    function finished) and the lifter refused it. A system call now runs as a no-op logged in order,
+    and lifts to inline assembly with a0-a7 bound; another CPU exception still stops the run."""
+    from dread.emu import EmuError, Layout, Machine
+    from dread.lift import make_lifter
+    from dread.program import Program
+    target = tiny_rv(tmp_path, "int yield(int x) { __asm__ volatile (\"ecall\"); return x + 1; }\n"
+                               "int broken(void) { __asm__ volatile (\".word 0\"); return 0; }\n")
+    image = target.image()
+    program = Program(target, image)
+    machine = Machine(Layout(target, image), image.payload())
+    result = machine.call(program.by_name["yield"].entry, 41)
+    assert result.ret == 42 and result.calls == [("svc",)]
+    with pytest.raises(EmuError, match="CPU exception|INSN_INVALID|Unhandled"):
+        Machine(Layout(target, image), image.payload()).call(program.by_name["broken"].entry)
+    assert '__asm__ volatile ("ecall"' in make_lifter(program).lift(program.by_name["yield"]).text

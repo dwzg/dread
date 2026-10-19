@@ -72,6 +72,7 @@ generator, the lifter, the reading aids)
 | `initial_status(engine)` | the state a called function expects |
 | `push_return(engine, address, write)`, `pop_return(engine, read)` | only without a link register: a call's return address put where the call instruction puts it (MSP430: pushed), and a stub's return |
 | `settle_it(engine)` | optional: repair after a hook (ARM: Thumb IT state) |
+| `syscall_numbers` | the engine's exception numbers of a system call (ARM: svc 2; RISC-V: ecall 8, 9, 11). dread.emu runs one as a no-op logged as `("svc",)` (`log_svc()` adds the argument registers); any other exception number is a fault. Unicorn never enters a handler through the vector table, with or without a hook, so a system run that needs the handler models the entry itself |
 | `reset`, `interrupts_enabled`, `enter_interrupt`, `exception_return`, `resume_address`, `flags_value` | the system run's core: reset, interrupt entry and return |
 
 ## ARM knowledge outside the layer

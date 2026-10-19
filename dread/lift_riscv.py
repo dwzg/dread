@@ -14,7 +14,7 @@ function whose returns are mret is a machine-mode trap handler: clang's interrup
 its entry and its return.
 
 Refused, with the reason: a write of sp that is not a frame adjustment the analysis follows (the
-startup's la sp, ...), an access above the entry's stack pointer (stack arguments), ecall, ebreak,
+startup's la sp, ...), an access above the entry's stack pointer (stack arguments), ebreak,
 gp or tp read before written, and what dread.lift refuses for every architecture (a stack pointer
 that differs between paths, a fall-through out of the function, a register read before written).
 """
@@ -91,7 +91,7 @@ class RiscVLifter(lift.Lifter):
             if r != "sp":
                 after.pop(r, None)
         if self.arch.flow(insn)[0] in ("call", "icall"):
-            for r in self.AFTER_CALL:
+            for r in self.after_call(insn):
                 after.pop(r, None)
         if known is not None:
             self._put(after, known[0], known[1])
@@ -316,6 +316,8 @@ class RiscVLifter(lift.Lifter):
             text = self._call(callee, insn)
             return text + " for (;;) { }" if self.never_returns(callee.name) else text
         if kind == "icall":
+            if op == "ecall":
+                return self._ecall()
             if op != "jalr" or f.rd != 1:
                 raise Refused("0x%x: %s is not modelled" % (a, insn.mnemonic))
             fp = self.reg(f.rs1) + (" + 0x%xu" % (f.imm & 0xFFFFFFFF) if f.imm else "")
@@ -430,6 +432,21 @@ class RiscVLifter(lift.Lifter):
         check, reg, values = got
         cases = " ".join("case %d: goto L_%x;" % (k, t) for k, t in sorted(values.items()))
         return "switch (index) { %s default: return %s; }" % (cases, self._ret() or "")
+
+    def after_call(self, insn):
+        """An ecall leaves ra alone (a trap returns by mepc); it may change the other scratch registers."""
+        if fields(insn).op == "ecall":
+            return self.AFTER_CALL - {"ra"}
+        return self.AFTER_CALL
+
+    def _ecall(self):
+        """ecall with a0-a7 bound to the handler (its arguments and results); the other scratch
+        registers and ra are taken as changed, as a call may change them."""
+        binds = ", ".join('x%d __asm__("a%d") = a%d' % (i, i, i) for i in range(8))
+        outs = ", ".join('"+r"(x%d)' % i for i in range(8))
+        back = " ".join("a%d = x%d;" % (i, i) for i in range(8))
+        return ('{ register u32 %s; __asm__ volatile ("ecall" : %s :: "t0", "t1", "t2", "t3", "t4", "t5", "t6", '
+                '"ra", "memory"); %s }' % (binds, outs, back))
 
     def render(self, fn, body):
         ctx = self.ctx

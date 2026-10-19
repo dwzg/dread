@@ -75,6 +75,7 @@ class Arm:
     default_result = ("r0", "r1")
     word = 4
     reg_bits = 32
+    syscall_numbers = (2,)      # Unicorn's exception number of svc (dread.emu runs it as a logged no-op)
     link_reg = "lr"         # where a call leaves the return address
     veneer_reg = "r12"      # the register a veneer or a call through a register may go through (ip)
 

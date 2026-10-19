@@ -300,7 +300,7 @@ class Lifter:
             if r not in ("sp", "pc", "flags"):
                 after.pop(r, None)
         if arch.flow(insn)[0] in ("call", "icall"):
-            for r in self.AFTER_CALL:
+            for r in self.after_call(insn):
                 after.pop(r, None)
         if known is not None:
             self._put(after, known[0], known[1])
@@ -472,7 +472,7 @@ class Lifter:
             if saved is not None and saved in undef:
                 reads = set(reads) - {saved}    # stored into the frame to be restored: a save, no use
             if kind in ("call", "icall"):
-                writes = set(writes) | self.AFTER_CALL
+                writes = set(writes) | self.after_call(insn)
             copy = self.plain_move(insn)
             if copy is not None and copy[1] in undef:
                 reads = set(reads) - {copy[1]}   # a copy of what the caller left (mov r8, r8 is a nop;
@@ -527,6 +527,10 @@ class Lifter:
             return None
         rd, rs = (self.arch._name(insn.reg_name(o.reg)) for o in ops)
         return (rd, rs) if rd in REGS and rs in REGS and "pc" not in (rd, rs) else None
+
+    def after_call(self, insn):
+        """The registers a call or indirect call (svc included) leaves written."""
+        return self.AFTER_CALL
 
     def fixed_lines(self, name=lambda r: r):
         """The lifted C's assignments of the registers that hold one value ([image] fixed)."""
