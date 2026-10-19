@@ -349,7 +349,12 @@ repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in
   registers across calls (a few per build; GCC's -fipa-ra): a build with -fno-ipa-ra to measure what
   is left. The RISC-V port's untyped handlers (labels in a section with mapping symbols) are missing
   from the ground truth.
-- [ ] **The rest of the matrix**: clang for RISC-V; MSP430 (16-bit port) with TI's GCC -Os.
+- [ ] **The rest of the matrix**: clang for RISC-V is in (virt-clang-Os: built with -mno-relax, since
+  clang's assembler and GNU ld turned the vector table's jumps into two-byte ones, which the system run
+  showed). MSP430 (FreeRTOS's msp430_GCC demo for the MSP430F449, written for mspgcc) with TI's GCC
+  -Os: waits for TI's MSP430 GCC support files (device headers and linker scripts, a package apart
+  from the compiler; neither it nor CCS is installed here), then patches for mspgcc's interrupt
+  syntax and its first-argument register (r15 there, r12 in TI's ABI) in the port.
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger).
 - [ ] **New architectures through it**: MSP430X with TI's cl430 (FreeRTOS's MSP430X port), AVR (its
