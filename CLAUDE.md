@@ -68,6 +68,10 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   tree: once a push went out because the command that ran the tests went on after they failed.
 - **Stay polite on the machine**: long runs go to the background (polite, as the tools are);
   nothing that fills memory or runs without a bound.
+- **Beside a long run**: a bench measurement runs from the checkout and starts every step anew, so
+  changes made meanwhile go into a worktree (`bin/dev-worktree NAME`: a branch, the `.venv` linked,
+  the examples' caches copied; without them the suite regenerates gizmo's cases, fifteen minutes
+  more), are tested there in full and come onto `main` when the measurement is done or stopped.
 - **Look for performance regularly** (the user, 2026-10-18): every few items, measure what is slow
   now (`pytest --durations=15`, `BUILD/times/`, the `seconds` of `BUILD/autocases/*.json`), profile
   the top item (cProfile) and fix what dominates. Prefer the algorithmic fix (work per byte or per

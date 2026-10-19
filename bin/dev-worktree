@@ -1,0 +1,30 @@
+#!/bin/sh
+# A git worktree of DREAD for work beside a long run that uses this checkout (a bench measurement
+# starts each of its steps anew from it): a new branch NAME at HEAD in DIR (default: beside this
+# checkout, dread-NAME), this checkout's .venv linked, and the examples' caches copied (generated
+# cases, register flow). A worktree without them regenerates them: the test suite took about
+# fifteen minutes longer, most of it gizmo's MSP430 cases on the slow engine. The caches are keyed
+# by what they depend on, so a copy never stands for something that changed.
+#
+#   bin/dev-worktree NAME [DIR]
+set -e
+name=$1
+if [ -z "$name" ]; then
+    echo "usage: bin/dev-worktree NAME [DIR]" >&2
+    exit 2
+fi
+root=$(cd "$(dirname "$0")/.." && pwd)
+dir=${2:-$(dirname "$root")/dread-$name}
+git -C "$root" worktree add -q -b "$name" "$dir" HEAD
+ln -sfn "$root/.venv" "$dir/.venv"
+for build in "$root"/examples/*/*/build; do
+    [ -d "$build" ] || continue
+    rel=${build#"$root"/}
+    for cache in autocases regflow; do
+        if [ -d "$build/$cache" ]; then
+            mkdir -p "$dir/$rel"
+            cp -a "$build/$cache" "$dir/$rel/"
+        fi
+    done
+done
+echo "$dir"
