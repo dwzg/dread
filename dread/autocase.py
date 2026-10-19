@@ -73,7 +73,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 15       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 16       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -86,7 +86,8 @@ VERSION = 15       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 12: a run caught in a hook that never returns stubs the callee it went in by;
                   # 13: a load from a function's extent by another function's code is a load of code;
                   # 14: so is one of any halfword of an instruction, and a store behind the image counts;
-                  # 15: a callee a run hung in also ends inputs at its call ("stops")
+                  # 15: a callee a run hung in also ends inputs at its call ("stops");
+                  # 16: so in the boundary sweep, for a run that hung in one
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
@@ -929,6 +930,19 @@ class Generator:
         # are kept. A value whose every step changes the result is data and gets a sample only.
         ladder = sorted(exact | near | set(range(17)) | {0xFF, 0x100, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF})
         swept = []
+
+        def sweep_run(case):
+            """(machine, result) of one run of the sweep; result None when it did not return (the
+            machine says why), machine None when it failed otherwise."""
+            m = self.machine()
+            m.plan = []
+            try:
+                self.apply(m, case)
+                m.cover(words[0], end)
+                m.trace_reads(image.base, image.end, self.code, self.owners)
+                return m, m.call(entry, *case["args"], max_instructions=limit)
+            except EmuError:
+                return (m, None) if m.timed_out else (None, None)
         for base in (corpus[:first_stages][-sweep:] + corpus[first_stages:][-sweep:] if corpus else extras[:1]):
             slots = [("args", i) for i in range(nregs)] + [("mem", i) for i in range(len(base["mem"]))] \
                 + [("returns", i) for i in range(len(base["returns"]))]
@@ -942,16 +956,17 @@ class Generator:
                         case["mem"][i][2] = v
                     else:
                         case[kind][i] = v
-                    try:
-                        m = self.machine()
-                        m.plan = []
-                        self.apply(m, case)
-                        m.cover(words[0], end)
-                        m.trace_reads(image.base, image.end, self.code, self.owners)
-                        r = m.call(entry, *case["args"], max_instructions=limit)
-                    except EmuError:
-                        continue
-                    if self.touches_image(m):
+                    m, r = sweep_run(case)
+                    if m is not None and m.timed_out and not case.get("stops") and not self.loop:
+                        # It hung in a callee (a null pointer into an assertion that waits for a
+                        # debugger: the sweep is where a pointer becomes 0): once more, ending there
+                        inside = self.program.function_at(m.reg("pc") & ~1)
+                        if inside is not None and inside.entry != entry:
+                            case.update({"hang": True, "limit": limit, "stops": [inside.entry]})
+                            m, r = sweep_run(case)
+                            if m is not None and not m.stopped_at:
+                                m = None
+                    if m is None or r is None or self.touches_image(m) or self.ends_badly(m):
                         continue
                     got = m.covered_insns(words)
                     if got - covered:
