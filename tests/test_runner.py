@@ -72,3 +72,21 @@ def test_missing_coverage_and_wrong_unreachable(target, variant, tmp_path):
     failed, uncovered, text = run_all(target, payload, cases_dir=cases)
     assert "UNCOVERED parse_uint" in text and "parse_uint" in uncovered
     assert "FAIL mode_name [unreachable]" in text
+
+
+def test_a_function_whose_case_generation_fails_is_reported_not_fatal(target, variant, tmp_path, monkeypatch):
+    """The generator failing for a function with no written cases: FAIL for it, and the run goes on to
+    the summary file (its missed list was False once, and writing the summary crashed: found on
+    FreeRTOS by dread bench)."""
+    payload = build.build(target, target.image(), src=str(src_copy(tmp_path, variant)), out=str(tmp_path / "recon"),
+                          quiet=True)
+    suite = runner.prepare(target, target.image(), payload)
+    name = next(n for n in suite.auto if not suite.cases.get(n))
+
+    def broken(*args, **kw):
+        raise RuntimeError("the generator gave up")
+    monkeypatch.setattr(runner, "generated_cases", broken)
+    lines = []
+    failed, uncovered, _ = runner.run([name], out=lines.append, jobs=1)
+    assert failed == 1 and "FAIL %s [case generation]" % name in "\n".join(lines)
+    assert runner.RUN["missed"][name] == []

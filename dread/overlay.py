@@ -166,6 +166,9 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             stop = min(entries[i] if i < len(entries) else last, end_of_image)
             if stop - last > EXTENT_TAIL:
                 stop = last
+            for lo, hi in free:                 # a free range is handed out as such, not as an extent
+                if f.entry < lo < stop:         # (the alignment gap in front of an aligned section:
+                    stop = lo                   # given twice once, and the link failed)
             if stop <= slots[fn][0][0] + slots[fn][0][1]:
                 continue
             inside = set(range(f.entry, stop, step))
@@ -242,6 +245,12 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             h[0] = align_up(at + sizes[fn], 2)
             in_hole.append(fn)
     in_tail = [fn for fn in relocated if fn not in in_hole]
+
+    # No two placements may overlap (a fault in the placement above, said here rather than by the linker).
+    spans = sorted((place[fn][0], place[fn][0] + sizes[fn], fn) for fn in in_slot + in_body + in_hole)
+    for (a_lo, a_hi, a), (b_lo, b_hi, b) in zip(spans, spans[1:]):
+        if b_lo < a_hi:
+            raise OverlayError("internal: %s at 0x%x-0x%x overlaps %s at 0x%x" % (a, a_lo, a_hi, b, b_lo))
 
     # Link. The C's own code and constants go where the most room is left: behind the image, or a
     # free range inside it.

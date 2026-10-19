@@ -142,3 +142,44 @@ def test_data_a_loader_puts_into_ram(tmp_path):
     machine = Machine(Layout(target, image), image.payload())
     result = machine.call(program.by_name["next"].entry)
     assert result.ret == 0x1234567 and result.writes[0x20000000] == 0x68       # counter + 1, written back
+
+
+@needs_gcc
+def test_an_extent_does_not_take_a_free_range(tmp_path):
+    """The gap in front of an aligned section is a free range (import-elf) and lay inside the
+    function before it, whose extent the overlay hands out too: FreeRTOS's -O2 build placed a moved
+    function in the gap and the extended one over it, and the link failed. An extent now stops at a
+    free range, and overlapping placements are refused before the link."""
+    from dread import build, elfimport
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(
+        "int first(int x) { return x * 3 + 1; }\n"
+        "__attribute__((aligned(32))) int second(int x) { return x - 1; }\n"
+        "int third(int x) { return second(x) + first(x); }\n")
+    (tmp_path / "t.ld").write_text(
+        "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
+        "SECTIONS { .text.first : { *(.text.first) } > FLASH\n .text.second : { *(.text.second) } > FLASH\n"
+        " .text.third : { *(.text.third) } > FLASH }\n")        # separate sections: the gap lies between them
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "third", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08000400\n\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-Os", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    assert image.free, "the gap in front of the aligned function is free"
+    src = tmp_path / "src"
+    src.mkdir()
+    # first grows past its own instructions (an extent would hold it); second grows and has to move
+    (src / "c.c").write_text('#include "dread.h"\n'
+                             "int first(int x) { volatile int k = 3; int r = x * k; return r + 1; }\n"
+                             "int second(int x) { volatile int k = 1; volatile int j = 0; return x - k + j; }\n")
+    payload = build.build(target, image, src=str(src), out=str(tmp_path / "recon"), quiet=True)
+    placed = json.load(open(tmp_path / "recon" / "placement.json"))["functions"]
+    spans = sorted((p["address"], p["address"] + p["c_bytes"]) for p in placed.values())
+    assert all(a_hi <= b_lo for (_, a_hi), (b_lo, _) in zip(spans, spans[1:])), spans
+    assert os.path.getsize(payload) > 0

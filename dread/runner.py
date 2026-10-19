@@ -90,7 +90,7 @@ def run_function(name):
             cases += generated_cases(name, fn)
         except Exception as e:             # the generator failed: written cases still count
             if not cases:
-                return name, 0, 1, ["FAIL %s [case generation]" % name, "     %s" % e], False
+                return name, 0, 1, ["FAIL %s [case generation]" % name, "     %s" % e], []
             lines.append("FAIL %s [case generation]: %s" % (name, e))
     image = RUN["image"]
     kept, why, argued = kept_for(name)

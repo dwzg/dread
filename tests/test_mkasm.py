@@ -58,3 +58,21 @@ def test_labels_only_within_one_copy(target, tmp_path):
     assert stored in listing.funcs and listing.funcs[stored][0] == "ram_crc"
     inner = [st for st in listing.ins if stored <= st < stored + 0x100 and isinstance(listing.ins[st][1], tuple)]
     assert inner, "the RAM function's own branches should use labels"
+
+
+def test_an_instruction_across_a_file_boundary(target, variant, tmp_path):
+    """Files of 64 bytes: four-byte instructions run past the end of many. The next file began at
+    its own start once, with the tail of that instruction again (FreeRTOS's clang build had one at
+    the 64 KiB boundary: two bytes twice, every label behind them off by two, and 40 passes of raw
+    words that never caught up)."""
+    tools = ("clang", "ld.lld", "llvm-objcopy") if variant == "rv32" else ("arm-none-eabi-as",)
+    if not all(have(t) for t in tools):
+        pytest.skip("needs " + ", ".join(tools))
+    raw_table = tmp_path / "asm_raw_words.txt"
+    rc = mkasm.main(["--target", target.root, "--verify", "--out", str(tmp_path / "asm"), "--build",
+                     str(tmp_path / "b"), "--raw", str(raw_table), "--region", "0x40"])
+    assert rc == 0
+    full = tmp_path / "full.txt"
+    assert mkasm.main(["--target", target.root, "--verify", "--out", str(tmp_path / "asm2"), "--build",
+                       str(tmp_path / "b2"), "--raw", str(full)]) == 0
+    assert mkasm.load_raw_words(str(raw_table)) == mkasm.load_raw_words(str(full))     # no more raw words
