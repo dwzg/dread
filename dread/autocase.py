@@ -73,7 +73,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 18       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 19       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -89,9 +89,12 @@ VERSION = 18       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 15: a callee a run hung in also ends inputs at its call ("stops");
                   # 16: so in the boundary sweep, for a run that hung in one;
                   # 17: a run's limit is a byte budget (dread.emu.Machine.call), STUB_CALLS 256;
-                  # 18: STUB_CALLS 2,000 again (at 256 FreeRTOS's -O0 build lost coverage)
+                  # 18: STUB_CALLS 2,000 again (at 256 FreeRTOS's -O0 build lost coverage);
+                  # 19: an emulator a CPU exception may have broken is replaced (dread.emu.Core.retire:
+                  # cases made in a broken worker were cached), a quick failure is not cached
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
+FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
 STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped and counts as not returning
                             # (256 sped one function's generation up ten times, runs a generated loop
                             # count kept going; but a -O0 build's functions lost coverage: a loop that
@@ -1435,9 +1438,13 @@ def cases_for(run, name, fn):
                   "seconds": round(time.time() - started, 2)}      # for reading only; not in the key
         if failed is not None:
             # the search is deterministic: under the same key it fails again (it took the eight
-            # slowest functions of a FreeRTOS build's first round, main's loop 80 s, every time)
+            # slowest functions of a FreeRTOS build's first round, main's loop 80 s, every time).
+            # Only a slow failure is kept: a quick one costs little to repeat, and a failure that
+            # was not the function's own (an emulator a CPU exception had broken failed every run
+            # at once, Core.retire) must not stay for good.
             cached["failed"] = failed
-        cache_store(path, cached)
+        if failed is None or cached["seconds"] >= FAILURE_SECONDS:
+            cache_store(path, cached)
     if cached.get("failed") and not extra_load(image, name):
         raise GenerationError(cached["failed"])
     out = []

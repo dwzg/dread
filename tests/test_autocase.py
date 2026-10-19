@@ -304,10 +304,12 @@ def test_loads_inside_instructions_and_stores_behind_the_image():
         assert g.touches_image(m), what
 
 
-def test_a_failed_generation_is_cached(target, tmp_path, monkeypatch):
+def test_a_slow_failed_generation_is_cached(target, tmp_path, monkeypatch):
     """The search is deterministic, so a function whose generation failed fails again under the same
-    key: the failure is cached like cases are, and the next run raises at once (a FreeRTOS build's
-    first lift round spent most of its minute generating the eight functions that always fail)."""
+    key: a slow failure is cached like cases are, and the next run raises at once (a FreeRTOS build's
+    first lift round spent most of its minute generating the eight functions that always fail). A
+    quick one is not: it costs little to repeat, and one that was not the function's own (an emulator
+    left broken, dread.emu.Core.retire) must not stay."""
     from dread import autocase
     from dread.cases import Suite
     from dread.emu import Layout
@@ -320,15 +322,23 @@ def test_a_failed_generation_is_cached(target, tmp_path, monkeypatch):
     suite.auto["clamp"] = {}
     run = {"target": target, "image": image, "program": program, "layout": layout, "original": image.payload(),
            "suite": suite}
-    calls = []
+    calls, clock = [], [1000.0]
 
     def failing(self, name, *args, **kwargs):
         calls.append(name)
+        clock[0] += took
         raise autocase.GenerationError("%s: only 0 of 400 generated inputs ran to the end" % name)
     monkeypatch.setattr(autocase.Generator, "generate", failing)
     monkeypatch.setattr(autocase, "_GENERATORS", {})
+    monkeypatch.setattr(autocase.time, "time", lambda: clock[0])
     fn = program.by_name["clamp"]
+    took = 1.0                                      # quick: generated again every time
     for _ in range(2):
         with pytest.raises(autocase.GenerationError, match="only 0 of 400"):
             autocase.cases_for(run, "clamp", fn)
-    assert calls == ["clamp"]
+    assert calls == ["clamp", "clamp"]
+    took = autocase.FAILURE_SECONDS + 1             # slow: cached
+    for _ in range(2):
+        with pytest.raises(autocase.GenerationError, match="only 0 of 400"):
+            autocase.cases_for(run, "clamp", fn)
+    assert calls == ["clamp", "clamp", "clamp"]

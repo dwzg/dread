@@ -56,6 +56,33 @@ def test_reset_restores_what_stores_changed(target):
     assert again.core is m.core and again.read(ram, 64) == before
 
 
+UNDEFINED = {"a32": b"\xf0\x00\xf0\xe7", "m3": b"\x00\xde", "rv32": b"\x00\x00\x00\x00"}     # udf, udf, unimp
+LOAD = {"a32": b"\x00\x00\x90\xe5\x1e\xff\x2f\xe1", "m3": b"\x00\x68\x70\x47",          # a load through r0/a0
+        "rv32": b"\x03\x25\x05\x00\x67\x80\x00\x00"}        # and a return (the block stays short)
+
+
+def test_a_run_ending_in_a_cpu_exception_gets_a_new_core(target, variant):
+    """After a run that ends in a CPU exception or an invalid instruction the next Machine gets a
+    new core: Unicorn kept such an exception for every later call on one core of a FreeRTOS build
+    (dread.emu.Core.retire). After an unmapped access the core is reset and used again."""
+    from dread.emu import EmuError
+    image = target.image()
+    layout, program = Layout(target, image), Program(target, image)
+    code = target.memory.scratch_base + 0x800
+    m = Machine(layout, image.payload(), isa_of=program.isa_at)
+    m.write(code, UNDEFINED[variant])
+    with pytest.raises(EmuError, match="CPU exception|Invalid instruction"):
+        m.call(code, max_instructions=100)
+    again = Machine(layout, image.payload(), isa_of=program.isa_at)
+    assert again.core is not m.core
+    nowhere = next(a for a in (0x70000000, 0x30000000, 0x0F000000)
+                   if not any(lo <= a < hi for lo, hi in layout.maps))
+    again.write(code, LOAD[variant])
+    with pytest.raises(EmuError, match="READ_UNMAPPED"):
+        again.call(code, nowhere, max_instructions=100)
+    assert Machine(layout, image.payload(), isa_of=program.isa_at).core is again.core
+
+
 def test_the_instruction_limit_is_a_budget_alike_in_c_and_python(target, monkeypatch):
     """A run's limit is a budget of bytes of code entered (the instruction set's shortest
     instructions), kept by a C block hook (Unicorn's own count calls a hook before every

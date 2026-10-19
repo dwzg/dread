@@ -205,6 +205,20 @@ The long runs set the pace of everything after them. Measure first, then cut.
   peripheral values) were not marked for the reset between cases (a later stage's write stayed for
   the next case on the emulator). Lesson: a change to what generation finds is measured on every
   build of the matrix, -O0 included, before it is kept.
+- [x] **Emulators that a CPU exception broke** (VERSION 19). The next measurement (stub limit back,
+  the spin rule in shared code) had every build within two functions of the one before the pass but
+  -O0: 241 against 314 (the nine builds in 50 minutes against 1 h 43 min). The -O0 build's case
+  generation was not deterministic: under the same cache keys a second run made other cases for 157
+  of 428 functions. One input (a run that ended in a prefetch abort with its stack pointer at 0)
+  broke the emulator of its worker process: from then on every call on it raised the same exception
+  at its first instruction, so every later generation in that worker failed at once (149 of the
+  check's 175 failures), and the failure cache kept them. A core is now replaced after a run that ends
+  in a CPU exception or an invalid instruction (a millisecond each; some 6,300 such runs in that
+  build's check), and a failed generation is cached only when it took ten seconds or more. The -O0
+  lift check: 226 -> 312 accepted before recorded inputs (291 before the pass), 21 -> 13 rounds. Not
+  found: what in Unicorn keeps the exception (the reset writes every register; the input replays
+  it on a fresh core). Lesson: a cache of failures assumes they recur; check that the same key gives
+  the same result in a second run before caching what a fault elsewhere could have caused.
 - [x] The test suite in a fresh worktree regenerated gizmo's cases (21 minutes; the MSP430 test 772 s,
   0.4 s with its cache): `bin/dev-worktree` copies the caches into a new worktree.
 - [ ] The generation of functions that never return is the slowest left (one task's loop: 49,000 runs
@@ -410,6 +424,11 @@ repository holds the recipe only (CLAUDE.md, rule 1); builds and results live in
   and the MSP430F449 demo built by TI's msp430-elf-gcc -Os with TI's support files (installed in
   ~/.local/opt): 250 functions, the listing rebuilds byte for byte, Ghidra finds 43 without symbols;
   no lifter for MSP430 yet, and no system-run models of its board.
+- [ ] **Stores through small pointers into an image at address 0** (the MPS2 builds have their flash
+  at 0): a store through a null or small pointer lands in the image without a fault, the run is
+  rejected as touching the image, and the generator learns nothing from it (pointer learning looks
+  at faults); every input of one -O0 list function failed so, in a fresh process too. Learn from such
+  stores (and loads of code as data) as from faults; measure on every build.
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger). --task input now also asks for the functions the lift
   check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed

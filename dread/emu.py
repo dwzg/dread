@@ -20,8 +20,10 @@ Architecture: ARM (A and M profile, ARM state and Thumb) through dread.arch.
 """
 import struct
 
-from unicorn import (UC_HOOK_BLOCK, UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ,
-                     UC_HOOK_MEM_WRITE, UC_MEM_WRITE, Uc, UcError)
+from unicorn import (UC_ERR_FETCH_UNMAPPED, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_HOOK_BLOCK,
+                     UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
+                     UC_MEM_WRITE, Uc, UcError)
+UNMAPPED = (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_FETCH_UNMAPPED)
 
 PAGE = 0x1000
 POLL_LOGGED = 2     # reads after a Machine.poll_read stage's start that are still logged one by one
@@ -188,6 +190,7 @@ class Core:
 
     cores = {}          # (id(layout), id(payload)) -> Core, least recently used first
     KEEP = 4            # emulators kept (the tests use two); more grow memory without bound
+    retired = 0         # cores taken out of use (retire), for reading
 
     def __init__(self, layout, payload):
         self.layout, self.payload = layout, payload
@@ -258,6 +261,19 @@ class Core:
         self.uc.ctl_flush_tb()
         for reg in self.layout.all_regs:
             self.uc.reg_write(reg, 0)
+
+    def retire(self):
+        """Take this core out of use: the next Machine for its image gets a new one (about a
+        millisecond to build). After a run that ends in a CPU exception or an invalid instruction,
+        Unicorn's own state can be what the reset does not reach: on a FreeRTOS build one run ended
+        in a prefetch abort with its stack pointer at 0, and from then on every call on that core
+        raised the same abort at its first instruction, for every function; the worker process's
+        generations all failed, 149 of a lift check's 175 failures. The Machine that made the run
+        keeps the core it ran on."""
+        key = (id(self.layout), id(self.payload))
+        if Core.cores.get(key) is self:
+            del Core.cores[key]
+            Core.retired += 1
 
     @classmethod
     def get(cls, layout, payload):
@@ -724,12 +740,15 @@ class Machine:
         try:
             uc.emu_start(self.arch.start_address(addr, isa), lay.sentinel, count=count)
         except UcError as e:
+            if getattr(e, "errno", None) not in UNMAPPED:   # an invalid instruction (Core.retire)
+                self.core.retire()
             raise EmuError("emulation fault at pc=0x%x: %s" % (uc.reg_read(lay.pc), e))
         except Exception as e:              # an exception in a stub or a hook of the case
             raise EmuError("%s in a stub or hook at pc=0x%x: %s" % (type(e).__name__, uc.reg_read(lay.pc), e))
         finally:
             self._collect()
         if self.exception is not None:
+            self.core.retire()
             raise EmuError("CPU exception %d at pc=0x%x" % (self.exception, uc.reg_read(lay.pc)))
         writes = self._read_written()
         for register, poll in sorted(self.polls.items()):
