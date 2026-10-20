@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 12                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 13                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -72,6 +72,8 @@ VERSION = 12                # 3: entry spills (variadic functions) are no use; 4
                             # a bl to a helper that calls another is a call, not a switch's dispatch
                             # 12: the MSP430's flags one by one (the layer's flag_effects): clrc writes C
                             # and passes Z, N and V through instead of reading the flags as one
+                            # 13: a register such a save and restore enclose a call with is not read
+                            # behind that call (the restore replaces the callee's value unread)
 
 
 class RegFlow:
@@ -288,6 +290,7 @@ class Analysis:
         self.graphs = {fn.name: self._graph(fn, self.rows[fn.name], entry_name,
                                             following.get(fn.entry, program.end(fn)))
                        for fn in program.functions}
+        self.shadowed = {}                  # name -> {call index: registers not read behind it} (_neutral_saves)
         for fn in program.functions:
             self._neutral_saves(fn)
         self.may = self._may_write()
@@ -562,6 +565,19 @@ class Analysis:
                 continue
             code[i] = code[i]._replace(uses=code[i].uses & ~bit)
             code[j] = code[j]._replace(kills=code[j].kills & ~bit, writes=code[j].writes & ~bit)
+            # The restore passes the entry's value on, so the register looked live behind the calls
+            # the pair encloses, as if their callers read what the callee left there (FreeRTOS on
+            # RISC-V saves a2 around its assertion call: 23 functions refused for reading a2 behind
+            # vAssertCalled). Behind such a call the restore replaces the callee's value before
+            # anything reads it: not read behind that call.
+            path, k = [i], i
+            while k != j:
+                k = succ[k][0]
+                path.append(k)
+            for n, c in enumerate(path[:-1]):
+                if code[c].kind in ("call", "icall") and not any(code[q].uses & bit for q in path[n + 1:-1]):
+                    shadow = self.shadowed.setdefault(fn.name, {})
+                    shadow[c] = shadow.get(c, 0) | bit
 
     def _may_write(self):
         """Registers each function may write, its callees included (least fixpoint)."""
@@ -622,7 +638,9 @@ class Analysis:
                 v = uses[i] | (o & ~kills[i])
                 if o != live_out[i] or v != live_in[i]:
                     live_out[i], live_in[i], changed = o, v, True
-        return (live_in[0] if n else 0), [(i, c, live_out[i]) for i, c in calls if c is not None], tails
+        shadow = self.shadowed.get(name, {})
+        return (live_in[0] if n else 0), [(i, c, live_out[i] & ~shadow.get(i, 0)) for i, c in calls if c is not None], \
+            tails
 
     def solve(self):
         callers = collections.defaultdict(set)

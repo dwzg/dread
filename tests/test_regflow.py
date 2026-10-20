@@ -324,6 +324,27 @@ k:  addi sp, sp, -16
     assert flow.read_regs("f") == ["a0"], flow.read_regs("f")
     assert "a3" in flow.read_regs("h"), flow.read_regs("h")      # it takes a frame address
     assert flow.read_regs("k") == [], flow.read_regs("k")        # f leaves t1 as it found it
+    assert flow.sites_of("g", "t1") == [], flow.sites_of("g", "t1")     # f puts t1 back itself: not g's
+
+
+@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+def test_a_register_saved_around_a_call_is_not_read_behind_it(tmp_path):
+    """GCC -Os saves an argument it needs after an assertion call around that call (FreeRTOS on
+    RISC-V: a2 around vAssertCalled). The restore puts back the entry's value, so the register is the
+    caller's own behind the call, not what the callee left: no call site reads it, and the caller
+    lifts (23 such functions were refused for reading a2 behind vAssertCalled)."""
+    from dread import lift
+    from dread.program import Program
+    from dread.target import Target
+    flow = _rv_flow(tmp_path, {"t.c": '''
+__attribute__((noinline, noipa)) void fail(const char *file, int line) { while (*file != line) { } }
+unsigned clear(unsigned *p, unsigned i, unsigned bits) { if (i > 2) fail("x", 1); return p[i] & ~bits; }
+'''}, ("-Os",))
+    assert flow.read_regs("clear") == ["a0", "a1", "a2"], flow.read_regs("clear")
+    assert flow.kept_regs("fail") == [], flow.kept_regs("fail")
+    program = Program(Target.load(str(tmp_path)))
+    text = lift.make_lifter(program, flow).lift(program.by_name["clear"]).text
+    assert "fail(" in text
 
 
 def test_arm_frame_slots():

@@ -711,7 +711,10 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   callees included (regflow's preserved), keeps the caller's value in the C since 2026-10-20 (13 of
   the 52 refusals for reading a register behind a call on the ARM and RISC-V builds; on copies of
   GCC -Os, 291 to 295 on the MPS2 build, printf's printi and prints among them, and 214 to 215 on
-  RISC-V, none lost); the other 39 read what the callee left, where regflow takes a variadic
+  RISC-V, none lost); 2026-10-20: 20 more (FreeRTOS's RISC-V builds and GCC -O2: a2 around vAssertCalled)
+  were a scratch register the caller saved and restored around the call itself, which regflow (a
+  save and restore of a register that holds the entry's value is neither a read nor a write) let
+  look live behind the call: not read behind it since (regflow 13); the other 39 read what the callee left, where regflow takes a variadic
   callee's save area as read (sprintf behind memset reads r3 only as far as its format goes) or
   follows libgcc's conditional code without its conditions (__aeabi_f2d). The RISC-V port's untyped handlers (labels in a section with mapping symbols) are missing
   from the ground truth. (Three instructions of each static-creation function cannot run, a volatile
