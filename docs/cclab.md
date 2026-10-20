@@ -136,6 +136,34 @@ differences in the code (TI's tail-calls its helpers at every level but -Ooff, a
 dense switch). Arm GCC's own defaults (arm-none-eabi): short enums (the objects say
 `Tag_ABI_enum_size: small`), unsigned plain char. The bundle carries the comparisons.
 
+## Compiler Explorer's compilers
+
+`--adapter ce:ID` makes an adapter of one of the compilers Compiler Explorer's public instance hosts
+(godbolt.org: on 2026-10-20 52 ARM GCC versions, 21 ARM clang, 48 RISC-V GCC, 42 RISC-V clang, TI's
+Arm clang, 17 MSP430 GCC, SDCC). The probes are compiled there to assembly, assembled and linked
+here, and measured as with a local compiler: a compiler's profile without installing it, and
+compilers compared version against version.
+
+```sh
+bin/dread cclab ce-list arm gcc unknown-eabi                 # ids: carmug1320 is ARM GCC 13.2 bare metal
+bin/dread cclab run --adapter ce:carmug1320 --build cortex-m3-O2 --build cortex-m3-Os
+bin/dread cclab compare gcc-arm ce-carmug1320                # the local GCC against GCC 13.2
+```
+
+The adapter is the built-in one of the compiler's architecture and kind (gcc-arm, clang-arm,
+gcc-riscv, gcc-msp430) with `dread/cclab/ce.py` as its compiler; C++ probes go to the C++ compiler of
+the same id without its `c`, and are skipped where there is none. Answers are cached in
+`~/.cache/dread/compiler-explorer` (by instance, compiler, language, flags and source) and requests
+are half a second apart, as the public instance asks of heavy users. Measured on 2026-10-20: GCC 13.2
+against the local GCC 16 on the Cortex-M3 at -O2 and -Os agree on every probe that matters for
+linking (62); four differences in the code, among them the virtual call GCC 16 turns into a guess of
+W::f and GCC 13 makes through the register (which had made a test of DREAD's fail on CI's GCC 13).
+
+Only DREAD's own probes go to the public instance (rule 1, as for language models): `--probe-dir`
+(one's own probes, which may come from a private project's code) is refused with such an adapter
+unless `DREAD_CE_URL` names an instance of one's own (Compiler Explorer is open source; it runs in
+podman with the toolchains one chooses).
+
 ## A language model at work
 
 `dread pilot` (and so the lab's builds) asks its questions through a provider of

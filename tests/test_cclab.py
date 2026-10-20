@@ -558,3 +558,80 @@ def test_a_target_takes_helper_results_from_a_profile(tmp_path):
     flow = regflow.load(target, image, Program(target, image))
     assert "r1" in flow.kept_regs("checksum")
     assert "the compiler's profile (its result)" in flow.why("checksum", "r1")
+
+
+# ---- Compiler Explorer (dread.cclab.ce): offline, from a fixed list and a filled cache ----
+
+CE_COMPILERS = {"c": [{"id": "carmug1320", "name": "ARM GCC 13.2.0 (unknown-eabi)", "instructionSet": "arm32",
+                       "compilerType": ""},
+                      {"id": "carmug1330", "name": "ARM GCC 13.3.0 (unknown-eabi)", "instructionSet": "arm32",
+                       "compilerType": ""},
+                      {"id": "rv32-cclang1810", "name": "RISC-V rv32gc clang 18.1.0", "instructionSet": "riscv32",
+                       "compilerType": "clang"},
+                      {"id": "cx86g1320", "name": "x86-64 gcc 13.2", "instructionSet": "amd64", "compilerType": ""}],
+                "c++": [{"id": "armug1320", "name": "ARM GCC 13.2.0 (unknown-eabi)", "instructionSet": "arm32",
+                         "compilerType": ""}]}
+
+
+@pytest.fixture
+def ce_offline(monkeypatch, tmp_path):
+    from dread.cclab import ce
+    monkeypatch.setattr(ce, "compilers", lambda lang="c": CE_COMPILERS[lang])
+
+    def no_network(*a, **k):
+        raise AssertionError("the test asked Compiler Explorer")
+    monkeypatch.setattr(ce, "_request", no_network)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.delenv("DREAD_CE_URL", raising=False)
+    return ce
+
+
+def test_a_compiler_explorer_adapter_is_made_from_the_builtin_one(ce_offline):
+    """ce:ID takes the built-in adapter of the compiler's architecture and kind; its compile commands
+    run dread.cclab.ce (by its file) with the base's arguments behind "--", C++ goes to the C++
+    compiler of the same id without the C prefix, and an architecture without a base is refused."""
+    a = ad.load("ce:carmug1320")
+    assert a.name == "ce-carmug1320" and a.ce == "carmug1320" and a.family == "gnu" and a.matrix
+    compile_ = a.commands["compile"]
+    assert compile_[1].endswith(os.path.join("dread", "cclab", "ce.py"))
+    assert compile_[2:7] == ["--compiler", "carmug1320", "--as", "arm-none-eabi-as", "--"]
+    assert compile_[7:] == ["-c", "{src}", "-o", "{obj}", "{flags}"]
+    cxx = a.commands["compile_cxx"]
+    assert cxx[2:5] == ["--compiler", "armug1320", "--lang"] and "-x" not in cxx
+    assert "compile_cxx" not in ad.load("ce:carmug1330").commands       # (no C++ twin in the list)
+    with pytest.raises(ad.AdapterError, match="no adapter"):
+        ad.load("ce:cx86g1320")
+    with pytest.raises(ad.AdapterError, match="no adapter"):             # (no built-in clang-riscv yet)
+        ad.load("ce:rv32-cclang1810")
+    with pytest.raises(ad.AdapterError, match="no compiler"):
+        ad.load("ce:nothing")
+
+
+@pytest.mark.skipif(not have("arm-none-eabi-as"), reason="needs arm-none-eabi-as")
+def test_the_compiler_explorer_driver_assembles_what_it_has(ce_offline, tmp_path):
+    """The driver sends nothing when the cache has the answer: the assembly of that compiler, source
+    and flags, which it assembles here with the flags' machine options."""
+    import hashlib
+    ce = ce_offline
+    src = tmp_path / "p.c"
+    src.write_text("int five(void) { return 5; }\n")
+    flags = ["-mcpu=cortex-m3", "-mthumb", "-O2"]
+    key = hashlib.sha1(json.dumps([ce.url(), "carmug1320", "c", flags, src.read_text()]).encode()).hexdigest()
+    cached = os.path.join(ce.cache_dir(), "asm", key[:2], key + ".s")
+    os.makedirs(os.path.dirname(cached))
+    with open(cached, "w") as f:
+        f.write("\t.syntax unified\n\t.cpu cortex-m3\n\t.thumb\n\t.text\n\t.global five\n\t.thumb_func\n"
+                "five:\n\tmovs r0, #5\n\tbx lr\n")
+    obj = tmp_path / "p.o"
+    assert ce.main(["--compiler", "carmug1320", "--as", "arm-none-eabi-as", "--", "-c", str(src), "-o", str(obj)]
+                   + flags) == 0
+    assert obj.exists() and (tmp_path / "p.o.s").read_text().startswith("\t.syntax unified")
+
+
+def test_own_probes_do_not_go_to_the_public_compiler_explorer(ce_offline, tmp_path, capsys):
+    """--probe-dir adds one's own probes, which may come from a private project's code: refused with a
+    Compiler Explorer adapter unless DREAD_CE_URL names an instance of one's own."""
+    from dread.cclab import main
+    (tmp_path / "mine").mkdir()
+    rc = main(["run", "--adapter", "ce:carmug1320", "--work", str(tmp_path / "w"), "--probe-dir", str(tmp_path / "mine")])
+    assert rc == 1 and "instance of one's own" in capsys.readouterr().err

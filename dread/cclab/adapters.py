@@ -77,9 +77,65 @@ def builtin():
     return out
 
 
-def load(spec):
-    """The adapter named spec (a built-in one) or in the file spec."""
+# Compiler Explorer's compilers by architecture and kind: the built-in adapter each is made from, and
+# the local assembler of what it writes (dread.cclab.ce)
+CE_BASES = {("arm", "gcc"): ("gcc-arm", "arm-none-eabi-as"),
+            ("arm", "clang"): ("clang-arm", "clang -c -x assembler"),
+            ("riscv", "gcc"): ("gcc-riscv", "riscv64-elf-as"),
+            ("msp430", "gcc"): ("gcc-msp430", "msp430-elf-as")}
+
+
+def ce_adapter(ident):
+    """The adapter of Compiler Explorer's compiler ident (dread.cclab.ce): the built-in one of its
+    architecture and kind, compiling there and assembling here; its C++ probes go to the C++
+    compiler of the same id without the C prefix, and are skipped when there is none."""
+    import copy
+    import sys
     import tomllib
+    from dread.cclab import ce
+    try:
+        c = ce.compiler(ident, "c")
+    except ce.CompilerExplorerError as e:
+        raise AdapterError(str(e))
+    iset = (c.get("instructionSet") or "").lower()
+    kind = "clang" if "clang" in ((c.get("compilerType") or "") + c["name"]).lower() else "gcc"
+    arch = ("arm" if iset == "arm32" or (iset.startswith("arm") and "64" not in iset) else
+            "riscv" if iset.startswith("riscv") else "msp430" if "msp430" in iset else iset)
+    if (arch, kind) not in CE_BASES:
+        raise AdapterError("no adapter for Compiler Explorer's %s (%s: %s, %s)" % (ident, c["name"], iset, kind))
+    base, assembler = CE_BASES[(arch, kind)]
+    with open(builtin()[base], "rb") as f:
+        data = copy.deepcopy(tomllib.load(f))
+    data["name"] = "ce-" + ident
+    data["ce"] = ident
+    data["guard"] = False
+    script = os.path.abspath(ce.__file__)       # (by its file: it needs nothing of DREAD, whichever is installed)
+    driver = [sys.executable, script, "--compiler", ident, "--as", assembler]
+    commands = data["commands"]
+    commands["version"] = driver + ["--version"]
+    commands["compile"] = driver + ["--"] + [w for w in commands["compile"][1:]]
+    cxx = ident[1:] if ident.startswith("c") else None
+    try:
+        known = cxx is not None and any(x["id"] == cxx for x in ce.compilers("c++"))
+    except ce.CompilerExplorerError:
+        known = False
+    if known and "compile_cxx" in commands:
+        rest = [w for w in commands["compile_cxx"][1:]]
+        if rest[:2] == ["-x", "c++"]:
+            rest = rest[2:]
+        commands["compile_cxx"] = [sys.executable, script, "--compiler", cxx, "--lang", "c++",
+                                   "--as", assembler, "--"] + rest
+    else:
+        commands.pop("compile_cxx", None)
+    return Adapter(data, "ce:" + ident)       # (the spec load() makes it from again: the lab's workers do)
+
+
+def load(spec):
+    """The adapter named spec (a built-in one), in the file spec, or ce:ID for Compiler Explorer's
+    compiler ID (ce_adapter)."""
+    import tomllib
+    if spec.startswith("ce:"):
+        return ce_adapter(spec[3:])
     path = builtin().get(spec, spec)
     if not os.path.exists(path):
         raise AdapterError("no adapter %s (built-in: %s; or a file)" % (spec, ", ".join(builtin())))
@@ -125,6 +181,7 @@ class Adapter:
         self.ldflags = list(data.get("ldflags", []))
         self.support_flags = list(data.get("support_flags", []))
         self.script = data.get("script") or None
+        self.ce = data.get("ce")                # Compiler Explorer's compiler id (ce_adapter)
         self._resolved = {}
 
     # ---- the builds ----

@@ -30,11 +30,15 @@ across compilers and replacing shape catalogues with analyses, not a profile per
 - [ ] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
   clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
   2026-10-20, here 6).
-- [ ] **A cclab adapter for Compiler Explorer** (its public API: 52 ARM GCC versions, 21 ARM clang,
+- [x] **A cclab adapter for Compiler Explorer** (its public API: 52 ARM GCC versions, 21 ARM clang,
   48 RISC-V GCC, 42 RISC-V clang, TI Arm clang, 17 MSP430 GCC, SDCC on 2026-10-20): the probes
   compiled there to assembly, assembled and linked here, measured in the emulator as now; answers
   cached by compiler, options and probe; at most a few requests a second. Only DREAD's own probes
   go there (rule 1; as for language models).
+  Done 2026-10-20 (docs/cclab.md, "Compiler Explorer's compilers"): `--adapter ce:ID`, `dread cclab
+  ce-list`; GCC 13.2 against the local GCC 16: the same on all 62 probes that matter for linking,
+  four differences in the code. Not yet: RISC-V clang (no built-in clang-riscv adapter to start
+  from), SDCC and TI's Arm clang (their own adapters first).
 - [ ] **One analysis of base registers instead of shapes**: what each register holds as sp plus a
   constant, an argument plus a constant, or a constant, through every move and add, for regflow's
   save areas and frame stores, the lifter's frames and the generator's frames (regflow 15 followed

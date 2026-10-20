@@ -166,6 +166,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread cclab", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("adapters", help="the built-in adapters")
+    p = sub.add_parser("ce-list", help="Compiler Explorer's compilers (an adapter: --adapter ce:ID)")
+    p.add_argument("words", nargs="*", help="only those whose name or id has every word")
+    p.add_argument("--lang", default="c", choices=("c", "c++"))
     p = sub.add_parser("doctor", help="check an adapter: tools, version, one probe built and run")
     p.add_argument("--adapter", required=True)
     p.add_argument("--work", default="cclab-work")
@@ -199,6 +202,17 @@ def main(argv=None):
                 print("%-12s %-4s %3d builds  %s" % (name, a.family, len(a.builds()),
                                                      ", ".join("%s: %s" % (d, " ".join(c)) for d, c in a.matrix.items())))
             return 0
+        if args.action == "ce-list":
+            from dread.cclab import ce
+            try:
+                found = ce.compilers(args.lang)
+            except ce.CompilerExplorerError as e:
+                raise ad.AdapterError(str(e))
+            for c in found:
+                text = (c["id"] + " " + c["name"]).lower()
+                if all(w.lower() in text for w in args.words):
+                    print("%-22s %-10s %s" % (c["id"], c.get("instructionSet") or "-", c["name"]))
+            return 0
         if args.action == "report":
             return make_report(args.work, args.adapter)
         if args.action == "compare":
@@ -212,6 +226,10 @@ def main(argv=None):
         adapter = ad.load(args.adapter)
         if args.action == "doctor":
             return doctor(adapter, args.work, guard=args.guard)
+        if adapter.ce and args.probe_dir and not os.environ.get("DREAD_CE_URL"):
+            # (one's own probes may come from a private project's code: rule 1)
+            raise ad.AdapterError("a Compiler Explorer adapter compiles DREAD's own probes only on the public "
+                                  "instance; --probe-dir needs an instance of one's own (DREAD_CE_URL)")
         results = run(adapter, args.work, args.build, args.probes, args.jobs, guard=args.guard,
                       probe_dirs=args.probe_dir)
         failed = [k for k, r in results.items() if "error" in r]
