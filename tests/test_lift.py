@@ -663,21 +663,19 @@ SHARED_CODE_S = """
     .global f, g, use
     .type f, %%function
     .thumb_func
-f:      push    {r1, r2, r3}    @ falls into the shared loop with its frame open
-        mov     r2, sp
-        movs    r1, #3
+f:      push    {r4, r5, lr}    @ falls into the shared tail with its frame open
+        movs    r4, #3
+        adds    r5, r0, r1
     .size f, . - f
 %s
-shared: ldr.w   r0, [r2], #4    @ the tail f and g share: it ends their frame
-        subs    r1, r1, #1
-        bne     shared
-        add     sp, #12
-        bx      lr
+shared: adds    r0, r4, r5      @ the tail f and g share: it ends their frame
+        lsls    r0, r0, #1
+        pop     {r4, r5, pc}
     .type g, %%function
     .thumb_func
-g:      push    {r1, r2, r3}    @ branches into it with its frame open
-        mov     r2, sp
-        movs    r1, #2
+g:      push    {r4, r5, lr}    @ branches into it with its frame open
+        movs    r4, #2
+        subs    r5, r0, r1
         b       shared
     .size g, . - g
     .type use, %%function
@@ -965,3 +963,78 @@ def test_registers_the_caller_left_are_handed_in(tmp_path):
         "\n".join(lines)
     with open(tmp_path / "build" / "lift-check" / "main" / "lifted" / "pad.c") as f:
         assert f.readline().startswith("/* dread: fixed r7")
+
+
+VA_LIST_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global vsum, walk, local, use
+    .type vsum, %function
+    .thumb_func
+vsum:   push    {r1, r2, r3}    @ a variadic function: its save area next to the stack arguments
+        push    {lr}
+        add     r1, sp, #4      @ va_start: the address of the saved r1
+        bl      walk            @ walk reads r0 words through it, on into the stack arguments
+        pop     {r3}
+        add     sp, #12
+        bx      r3
+    .size vsum, . - vsum
+    .type walk, %function
+    .thumb_func
+walk:   movs    r2, #0
+1:      cbz     r0, 2f
+        ldr     r3, [r1], #4
+        add     r2, r3
+        subs    r0, #1
+        b       1b
+2:      mov     r0, r2
+        bx      lr
+    .size walk, . - walk
+    .type local, %function
+    .thumb_func
+local:  push    {r4, lr}        @ an address of its own local, no save area: lifts as before
+        sub     sp, #8
+        str     r0, [sp]
+        mov     r1, sp
+        movs    r0, #1
+        bl      walk
+        add     sp, #8
+        pop     {r4, pc}
+    .size local, . - local
+    .type use, %function
+    .thumb_func
+use:    push    {r4, lr}
+        bl      vsum
+        bl      local
+        pop     {r4, pc}
+    .size use, . - use
+"""
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-as"), reason="needs arm-none-eabi-as")
+def test_a_va_list_into_the_save_area_is_refused(tmp_path):
+    """A variadic function saves its argument registers next to its stack arguments, and a va_list
+    walks from the one into the other; the C's frame (a local array) does not hold them next to each
+    other, so a lifted copy read words of its own past the saved registers. FreeRTOS's sprintf
+    (GCC, clang, ARM and RISC-V) was accepted so and printed a stack word of its own for its third
+    argument: no generated case passed one. Taking an address in the save area is refused; an
+    address of a local is not."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport, regflow
+    (tmp_path / "t.s").write_text(VA_LIST_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    with pytest.raises(lift.Refused, match="takes the address of the argument registers it saved"):
+        lifter.lift(p.by_name["vsum"])
+    assert "walk(r0, r1, r2, r3)" in lifter.lift(p.by_name["local"]).text

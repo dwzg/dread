@@ -959,7 +959,7 @@ class Lifter:
             if kind == "jump" and target is not None and (target & ~1) in depth:
                 targets.add(target & ~1)
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
-                    "bound": set(), "handed": handed,
+                    "bound": set(), "handed": handed, "save_area": self.save_area(fn, insns),
                     "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns),
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
@@ -1896,12 +1896,43 @@ class Lifter:
     def op_orn(self, insn, ops):
         return self._logic(insn, ops, lambda a, b: "%s | ~%s" % (a, b))
 
+    def save_area(self, fn, insns):
+        """Bytes at the top of the frame that hold argument registers saved at the entry, next to the
+        stack arguments: a variadic function's save area (GCC and the other compiler push r0-r3 or
+        r1-r3 first; clang reserves the room with sub sp and stores into it, as
+        dread.regflow.variadic_save_area finds; RISC-V's sw of a1-a7 so too). 0 when there is none."""
+        if not insns or self.arch.name not in ("arm", "riscv"):
+            return 0
+        args = list(self.ARGS)
+        if self.arch.name == "arm" and self.arch.stack_kind(insns[0]) == "push":
+            regs = [r for r, _ in self.stack_words(insns[0]) if r is not None]
+            if regs and set(regs) <= set(args) and args[-1] in regs:
+                return 4 * len(regs)
+        from dread.regflow import variadic_save_area
+        joins = {t & ~1 for i in insns for k, t, _ in [self.arch.flow(i)] if k == "jump" and isinstance(t, int)}
+        try:
+            return 4 * len(variadic_save_area(self.prog, fn, insns, joins))
+        except Exception:
+            return 0
+
+    def _check_save_area(self, insn, below):
+        """Refuse an address `below` bytes under the entry's stack pointer that lies in the save area of
+        the argument registers (save_area): a va_list, and what reads through it walks on into the
+        stack arguments above, which the C's frame (a local array) does not hold next to them. GCC's
+        sprintf of FreeRTOS's demo was accepted so, and printed a stack word of its own for the third
+        argument: the generated cases never passed one."""
+        if 0 < below <= self.ctx.get("save_area", 0):
+            raise Refused("0x%x takes the address of the argument registers it saved next to its stack "
+                          "arguments (a va_list walks on into them; the C's frame does not hold them next "
+                          "to each other)" % insn.address)
+
     def op_mov(self, insn, ops):
         d = self.dest(ops[0])
         if len(ops) != 2:
             raise Refused("0x%x: %s %s" % (insn.address, insn.mnemonic, insn.op_str))
         src = ops[1]
         if src.type == A.ARM_OP_REG and src.reg == A.ARM_REG_SP and not self.s:
+            self._check_save_area(insn, self.ctx["depth"][insn.address])
             return "%s = %s;" % (d, self.reg(src.reg, sp=True))
         b, carry = self.operand2(src)
         return self.logical(d, b, carry)
@@ -1927,6 +1958,8 @@ class Lifter:
                     insn.address, insn.mnemonic, insn.op_str))
             if second.type == A.ARM_OP_IMM and second.imm >= self.ctx["depth"][insn.address]:
                 raise Refused("0x%x takes the address of a stack argument" % insn.address)
+            if second.type == A.ARM_OP_IMM:
+                self._check_save_area(insn, self.ctx["depth"][insn.address] - second.imm)
             a = self.reg(first.reg, sp=True)
         else:
             a = self.reg(first.reg) if len(srcs) > 1 else d
@@ -1934,6 +1967,7 @@ class Lifter:
             if v is not None and v[0] == "sp" and second.type == A.ARM_OP_IMM and kind in ("add", "sub"):
                 if (v[1] - second.imm if kind == "add" else v[1] + second.imm) <= 0:
                     raise Refused("0x%x takes the address of a stack argument" % insn.address)
+                self._check_save_area(insn, v[1] - second.imm if kind == "add" else v[1] + second.imm)
         b, _ = self.operand2(second)
         if kind in ("rsb", "rsc"):
             a, b = b, a

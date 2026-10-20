@@ -112,14 +112,20 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     fixes, before shared code): the FreeRTOS builds unchanged but the hard-float ones, +6 each
     (mps2f-gcc-Os 322 to 328, mps2f-clang-Os 310 to 316: libgcc's __aeabi_dcmpeq/ge/le/lt, which read
     the flags of __aeabi_cdcmple, and vCompetingMathTask1/2 that call them); no build lost one.
-  - [ ] **A va_list that walks from the saved argument registers into the stack arguments**: the
-    other compiler's -On pick_va_5 pushes r1-r3 next to its caller's stack arguments, takes the
-    address of the saved r1 and loads on upwards in a loop; the lifted C's frame is a local array,
-    not next to its own incoming arguments, so the walk reads other words (the comparison refutes
-    it). Refusing an address in the save area would also refuse GCC's variadic functions, which
-    store such an address they never use and lift today; better a frame that mirrors the caller's
-    stack arguments above sp0 (copies of the incoming stack words) for a function that takes an
-    address in its save area. Until then a walk the generated inputs do not reach would pass.
+  - [ ] **A va_list that walks from the saved argument registers into the stack arguments**: a
+    variadic function saves its argument registers next to its stack arguments, and a va_list walks
+    from the one into the other; the lifted C's frame is a local array, not next to its incoming
+    arguments. Found 2026-10-21 to be a false acceptance on the benchmark: FreeRTOS's sprintf and
+    printf (GCC and clang, ARM and RISC-V) were accepted, and the rebuilt sprintf printed a stack word
+    of its own for its third argument (sprintf(buf, "%d %d %d", 11, 22, 33): "11 22 -1513889519"):
+    no generated case passed an argument on the stack. Now refused: an address taken in the save
+    area (the first push of argument registers ending with r3, or dread.regflow's
+    variadic_save_area; RISC-V too, where addi also learnt the refusal of a stack argument's
+    address). That also refuses functions that only store such an address and never use it (GCC's
+    pick_va_5 of the compiler lab: sound before, a loss now). Open: lift them properly, with a C
+    signature that lets GCC lay out the same save area next to the stack arguments (a variadic C
+    function: `u32 f(u32 a0, ...)`, or C23's `f(...)` where all four are saved), or allow an address
+    that never escapes (decisions.md, 2026-10-21).
   - [x] **The caller's r4-r11 at the entry, for the C**: the other compiler keeps the stack aligned
     with `push {r7, lr}` and drops the pad on the way out into a scratch register, `pop {r0, pc}` in
     a function without a result (its -On make_nt): r0 then holds the caller's r7. The lifter does not

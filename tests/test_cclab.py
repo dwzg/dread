@@ -670,7 +670,11 @@ def test_run_lift_checks_each_build_with_dread(tmp_path):
         hard = key.startswith("cortex-m4f")
         assert ("-mfloat-abi=hard" in got["compiler"]["cflags"]) == hard, got["compiler"]
         accepted = [fn for fn, v in got["verdicts"].items() if v[0] == "accepted"]
-        assert "pick_i5_5" in accepted and "ret_s8" in accepted and len(accepted) >= len(got["verdicts"]) - 6, got
+        # the variadic probes take an address in their save area (va_start): refused (dread.lift)
+        variadic = [fn for fn, v in got["verdicts"].items() if fn.startswith("pick_va") and v[0] != "accepted"]
+        assert all("argument registers it saved" in got["verdicts"][fn][1] for fn in variadic), got
+        assert "pick_i5_5" in accepted and "ret_s8" in accepted and \
+            len(accepted) >= len(got["verdicts"]) - 4 - len(variadic), got
         saved = json.loads((tmp_path / "gcc-arm" / key / "results.json").read_text())
         assert saved["lift"]["verdicts"] == got["verdicts"]
     assert report.write(str(tmp_path), "gcc-arm", out=lambda *x: None) == 0

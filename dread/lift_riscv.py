@@ -355,6 +355,12 @@ class RiscVLifter(lift.Lifter):
         if op == "addi":
             if f.rd == 2:
                 return None                 # a frame adjustment (states follows it)
+            base = self.frame_value(f.rs1, *self.ctx["states"][a])
+            if base is not None:            # an address in the frame, or above it
+                below = base[1] - f.imm
+                if below <= 0:
+                    raise Refused("0x%x takes the address of a stack argument" % a)
+                self._check_save_area(insn, below)
             src = self.reg(f.rs1, sp=True)
             return self.assign(f, src if not f.imm else ALU_IMM["addi"] % (src, f.imm & 0xFFFFFFFF))
         if op in ALU_IMM:

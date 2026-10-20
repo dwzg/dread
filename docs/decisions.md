@@ -164,3 +164,26 @@ recommendations here."), on a recommendation.
   data is compared except those outputs" (such cases are refused again).
 - **Status.** Done (runner, 2026-10-20): the report line reads "compared except what the original's
   stale stack data (an uninitialised local) decides: ...".
+
+## Refusing a va_list into the saved argument registers (2026-10-21)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** A variadic function saves its argument registers next to its stack arguments, and a
+  va_list walks from the one into the other. The lifted C keeps its frame in a local array, not next
+  to its incoming arguments, so a lifted copy reads words of its own past the saved registers. The
+  benchmark accepted FreeRTOS's sprintf and printf so (GCC and clang, ARM and RISC-V): the rebuilt
+  sprintf printed a stack word of its own for its third argument, because no generated case passed
+  an argument on the stack. A false acceptance: what to do until such functions can be lifted
+  properly?
+- **Options.** (a) Leave it (the comparison decides; it did not). (b) Refuse a function that takes
+  an address in its save area: sound, but it also refuses functions that store such an address
+  and never use it (GCC's pick_va_5 of the compiler lab, sound before). (c) Refuse only where the
+  address escapes (into a call, a walk): precise, a dataflow of addresses through registers and
+  frame slots that the lifter does not have yet. (d) Lift them properly: a C signature with which
+  GCC lays out the same save area next to the stack arguments.
+- **Choice: (b) now, (d) or (c) as the next steps.** An accepted function must be right for every
+  input its callers can give; a refusal only costs a function that stays original. The losses:
+  printf and sprintf on every FreeRTOS build (they were wrong), GCC's variadic probes of the lab.
+- **Undo.** Revert the lifter commit "a va_list into the saved argument registers is refused".
+- **Status.** Done (lift.py, lift_riscv.py, 2026-10-21); (c) and (d) are in docs/todo.md.
