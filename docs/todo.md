@@ -670,6 +670,11 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   -O2 168, clang -Os 215), the M4F builds 309 and 290 (+10 each), MSP430 150 (+7); every build gained,
   each lost two to seven (the search's path, regenerated). 63 minutes. Merged after it, measured
   next: regflow 13 and 14 (38 refusals fewer), generator 26 (the chase), stale-data cases compared.
+  Measure-26 (regflow 13 and 14, generator 26, stale-data cases compared): the eight builds 2,065
+  (+49: GCC -Os 307, -O0 332, -O2 250, clang -Os 289, -O2 264, RISC-V GCC -Os 234, -O2 174, clang -Os
+  215), the M4F builds 314 and 305 (+5, +15), MSP430 150; one lost (clang -O2). 2,834 of 3,791 on the
+  eleven builds against 2,679 at measure-24. Merged after it, measured next: generator 27 (loop
+  frames, flag setters behind other instructions) and saved registers touched refused.
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with
