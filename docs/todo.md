@@ -716,8 +716,17 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 - [x] **Integration on gizmo-msp430**: every rewritten function runs with its real callees and agrees
   (a call that pushes its return address leaves a stack slot the run did not see written: Machine
   keeps it in stack_preset; the engine's memory hooks see the registers of the instruction's start).
-- [ ] **The other tools on gizmo-msp430**: regflow, recorded cases, switches,
-  callsites, Ghidra, the GUI, the system run with its models (16-bit registers), CI (TI's GCC from
+- [x] **The system run on gizmo-msp430** (2026-10-20): the layer's reset (sr clear, pc from the
+  reset vector), interrupts (GIE; pc and then sr pushed, sr cleared, so a low-power mode ends, on
+  through the vector of the controller's line: gizmo's one line is vector 0) and returns (reti runs
+  in the engine, a low-power mode again unless the handler cleared CPUOFF in the stacked sr); the
+  run already took an interrupt for a core asleep (no block runs: the clock goes on to the next
+  event and the interrupt comes at the loop). gizmo's models with their 16-bit registers needed
+  nothing. Every scenario agrees, original against rebuilt; the keys scenario takes the timer's
+  interrupt twice. The lift check's system check runs on the MSP430 too and accepts irq_entry and
+  main (gizmo-msp430: 36 accepted); the recorder takes a call's return address from the stack
+  where there is no link register. A test wakes the core from LPM0 on the bare engine.
+- [ ] **The other tools on gizmo-msp430**: switches, callsites, Ghidra, the GUI, CI (TI's GCC from
   its download with a checksum, or the MSP430 tests skip), the test suite's variants.
 - [x] **The pilot's prototypes on MSP430 and RISC-V** (found 2026-10-19 while checking how the
   compiler lab feeds the pilot): the declarations the model is told to use had ARM's types for
@@ -738,8 +747,8 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   same value to the same address as a move to itself (an empty asm before every store now). Nine
   seeds of 16 functions of 60 instructions with 16 inputs each: no difference, nothing refused.
   gizmo-msp430: 48 of 130 entries lift (62 of the refused are libgcc's shift routines, labels that
-  fall into one another); the lift check accepts 26, 13 more are written by hand; irq_entry lifts but
-  waits for an MSP430 system run.
+  fall into one another); the lift check accepts 26, 13 more are written by hand; irq_entry lifts and
+  is accepted by the system run since (with main).
 - [x] **Stack arguments on MSP430**: the lifter refused functions with arguments beyond r12-r15
   (gizmo's parse_kv and sum6, libgcc's udivmodsi4) and their callers (apply_config); FreeRTOS's task
   creation takes two on the stack. Now they are parameters sa0, sa1, ... of the lifted C behind

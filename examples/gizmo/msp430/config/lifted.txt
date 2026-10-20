@@ -17,9 +17,11 @@ delay
 fmt_dec
 irq_dispatch
 irq_enable_timer
+irq_entry  # accepted by the system run
 keys_read
 led_off
 led_on
+main  # accepted by the system run
 memcmp
 memcpy
 memset

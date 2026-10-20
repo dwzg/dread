@@ -660,6 +660,48 @@ class Msp430:
         engine.reg_write(0, int.from_bytes(read(sp, 2), "little"))
         engine.reg_write(1, sp + 2)
 
+    # ---- the system run (dread.sysrun) ----
+    # Words are read and written through the engine here: the system run's read_word and write_word
+    # move four bytes, which at the reset vector (0xfffe) would run past the 64 KiB.
+
+    GIE = 8                                 # sr bit 3: interrupts enabled
+
+    def reset(self, engine, read_word, entry, vectors):
+        """As the core comes out of reset: sr clear (interrupts off, the CPU on), pc from the reset
+        vector, the table's last word (vectors + 0x1e)."""
+        engine.reg_write(2, 0)
+        return int.from_bytes(engine.mem_read(vectors + 0x1E, 2), "little") & 0xFFFE
+
+    def interrupts_enabled(self, engine):
+        """GIE: an interrupt may be taken. The handler runs with sr cleared, so it nests only where
+        it sets GIE itself."""
+        return bool(engine.reg_read(2) & self.GIE)
+
+    def system_exception(self, intno):
+        """The MSP430 has no system call, and the engine raises no exception of its own."""
+        return None
+
+    def enter_interrupt(self, engine, number, resume, vectors, read_word, write_word, cause=None):
+        """Take interrupt `number` as the core does (TI's MSP430x2xx guide, 2.2.3): pc pushed, then
+        sr, sr cleared (a low-power mode ends, GIE off), on at the word of vector `number` (its
+        index from vectors: a controller's line N is vector N; gizmo's one line, 0, is the table's
+        first). reti, at the handler's end, runs in the engine and restores sr, a low-power mode
+        too unless the handler cleared CPUOFF in the stacked sr."""
+        sp = (engine.reg_read(1) - 2) & 0xFFFE
+        engine.mem_write(sp, struct.pack("<H", resume & 0xFFFF))
+        sp = (sp - 2) & 0xFFFE
+        engine.mem_write(sp, struct.pack("<H", engine.reg_read(2)))
+        engine.reg_write(1, sp)
+        engine.reg_write(2, 0)
+        return int.from_bytes(engine.mem_read(vectors + 2 * number, 2), "little") & 0xFFFE
+
+    def exception_return(self, engine, read_word):
+        """Nothing to finish: reti runs in the engine."""
+        return None
+
+    def resume_address(self, engine):
+        return engine.reg_read(0)
+
 
 class Msp430Asm:
     """How dread asm writes MSP430 code: llvm-objdump's text, which llvm-mc reads back as the same

@@ -453,3 +453,47 @@ def test_a_stack_argument_read_from_the_wrong_place_shows(tmp_path, monkeypatch)
     accepted = lift.check(target, image, ["udivmodsi4", "__mspabi_remul"], out=lines.append, jobs=4)
     assert "udivmodsi4" not in accepted, lines
     assert any(line.startswith("dropped  FAIL __mspabi_remul") for line in lines), lines
+
+
+def test_an_msp430_interrupt_wakes_the_core_from_a_low_power_mode():
+    """The system run's interrupt on the MSP430 (dread.arch.msp430.enter_interrupt), as TI's guide has
+    it: main sets GIE and CPUOFF (LPM0) and the engine stops behind that instruction, asleep; the
+    interrupt pushes pc and then sr, clears sr (awake, GIE off) and goes to vector 0; the handler
+    clears CPUOFF in the stacked sr and returns with reti (in the engine), so main goes on awake."""
+    import unicorn.unicorn_const as C
+    arch = Msp430()
+    e = arch.new_uc()
+    e.mem_map(0x0000, 0x10000)
+    e.mem_write(0x8000, bytes.fromhex("32d01800" "1c43" "ff3f"))           # bis #0x18, sr; mov #1, r12; jmp $
+    e.mem_write(0x8100, bytes.fromhex("b1c010000000" "3d400700" "0013"))   # bic #0x10, 0(sp); mov #7, r13; reti
+    e.mem_write(0xFFE0, struct.pack("<H", 0x8100))                         # vector 0
+    e.mem_write(0xFFFE, struct.pack("<H", 0x8000))                         # reset
+    pc = arch.reset(e, None, 0x8000, 0xFFE0)
+    assert pc == 0x8000 and e.reg_read(2) == 0 and not arch.interrupts_enabled(e)
+    e.reg_write(1, 0x0A00)
+    e.emu_start(pc, 0x8006)
+    resume = arch.resume_address(e)
+    assert e.sleeping and resume == 0x8004 and arch.interrupts_enabled(e)
+    pc = arch.enter_interrupt(e, 0, resume, 0xFFE0, None, None)
+    assert pc == 0x8100 and e.reg_read(2) == 0 and e.reg_read(1) == 0x09FC
+    assert struct.unpack("<HH", bytes(e.mem_read(0x09FC, 4))) == (0x18, 0x8004)    # sr below pc
+    e.emu_start(pc, 0x8006)
+    assert e.reg_read(0) == 0x8006 and not e.sleeping
+    assert (e.reg_read(12), e.reg_read(13), e.reg_read(1), e.reg_read(2) & 0x18) == (1, 7, 0x0A00, 0x08)
+
+
+@needs_ti_gcc
+def test_gizmo_msp430_system_run(tmp_path):
+    """gizmo-msp430 from reset with its models, original against the image with the rewritten C:
+    every scenario agrees; in the keys scenario the timer's interrupt (vector 0, through the
+    interrupt controller) moves the key into the ring buffer and the status line follows."""
+    from dread import build, sysrun
+    from dread.target import Target
+    from test_runner import src_copy
+    target = Target.load(gizmo_dir("msp430"))
+    payload = build.build(target, target.image(), src=str(src_copy(tmp_path, "msp430")), out=str(tmp_path / "recon"),
+                          quiet=True)
+    for name in sorted(target.scenarios):
+        assert sysrun.main(["--target", target.root, "--scenario", name, "--recon", payload]) == 0, name
+    outcome = sysrun.run_image(target, target.image(), target.image().payload(), target.scenarios["keys"])
+    assert outcome.reports["interrupts"].get(0) and "mode run volume 7" in outcome.reports["uart"]["sent"], outcome

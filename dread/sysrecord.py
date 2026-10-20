@@ -141,11 +141,18 @@ class Recorder:
         lo, hi = self.extents.get(addr, (addr, addr + 1))
         call = {"name": name, "entry": addr, "sp": sp, "low": sp, "steps": 0, "context": self.context,
                 "lo": lo, "hi": hi, "blocks": {addr},
-                "handler": handler, "ret": None if handler else uc.reg_read(self.layout.lr) & ~1,
+                "handler": handler, "ret": None if handler else self._return_address(uc, sp),
                 "args": [uc.reg_read(r) for r in self.layout.arg_regs],
                 "mem": {}, "frame": {}, "io": {}, "seen": {}, "reads": {}, "later": []}
         self.active.append(call)
         running.append(call)
+
+    def _return_address(self, uc, sp):
+        """Where a function just entered returns to: its link register, or the word at sp where the
+        architecture has none and the call pushed it (MSP430)."""
+        if self.layout.lr is not None:
+            return uc.reg_read(self.layout.lr) & ~1
+        return int.from_bytes(uc.mem_read(sp, self.layout.word), "little")
 
     def _where(self, call, addr):
         """"frame" (its callers' frames), "mem", or None for the call's own frames."""

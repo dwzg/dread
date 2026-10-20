@@ -2190,7 +2190,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                 continue
             break
     endless = endless + sorted(n for n in loops if n not in accepted)     # what loop cases did not accept
-    runs = system and target.scenarios and hasattr(program.arch, "reset")   # (no system run for MSP430 yet)
+    runs = system and target.scenarios and hasattr(program.arch, "reset")   # (an architecture without one: no system run)
     by_system = system_check(target, image, program, lifter, endless, out, verdicts, loop_missed, jobs) \
         if runs else {}
     for name in endless:
