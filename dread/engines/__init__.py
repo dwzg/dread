@@ -185,18 +185,29 @@ class Engine:
         handle = self.next_handle
         self.next_handle += 1
         self.hooks[handle] = (tuple(kinds), callback, user_data, begin, end)
-        self.rebuild_hooks()
+        self.hooks_changed()
         return handle
 
     def hook_del(self, handle):
         if self.hooks.pop(handle, None) is not None:
+            self.hooks_changed()
+
+    def hooks_changed(self):
+        """Hooks were added or taken away: during a run the tables are rebuilt at once (a hook may
+        add a hook, which counts from the next instruction), else when the next run starts. A
+        Machine adds and removes several hooks between two runs, and rebuilding the tables (two
+        flag arrays the size of memory) at each took a tenth of a generation on MSP430."""
+        if self.until is not None:
             self.rebuild_hooks()
+        else:
+            self.hooks_stale = True
 
     def rebuild_hooks(self):
         """Per kind, the hooks in the order they were added, and for code and memory hooks a
         filter by address: a set of addresses (narrow hooks) and a flag for hooks that cover
         everything or a wide range (checked at every event)."""
         size = len(self.mem)
+        self.hooks_stale = False
         self.by_kind = {}
         for kinds, callback, user, begin, end in self.hooks.values():
             for kind in kinds:
@@ -314,6 +325,8 @@ class Engine:
     def emu_start(self, begin, until, timeout=0, count=0):
         """Run from begin (see the contract above). timeout is not supported (DREAD bounds runs
         by count)."""
+        if self.hooks_stale:
+            self.rebuild_hooks()
         self.pc = begin
         self.stop_request = False
         self.until = until

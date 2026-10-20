@@ -1554,9 +1554,30 @@ def cases_for(run, name, fn):
     gen = generator_for(run)
     image = run["image"]
     options = dict(run["suite"].auto[name])
-    calls = resolve_calls(gen, options.pop("calls", ()))
+    generate = options.pop("generate", True)    # False: kept and written cases only (dread.liftfuzz's
+    calls = resolve_calls(gen, options.pop("calls", ()))        # reduction tries those first)
     frame = options.pop("frame", 0)
     prog = gen.program
+    if generate is False:
+        cached = {"cases": []}
+    else:
+        cached = _generated(run, name, fn, gen, image, prog, options, calls, frame)
+    out = []
+
+    def setup(case):
+        return lambda m: gen.apply(m, case)
+
+    for i, c in enumerate(cached["cases"]):
+        out.append(("generated %d" % i, fn.entry, setup(c), c["args"], c.get("limit", 200_000), c))
+    for i, c in enumerate(kept_load(image, name, gen.real)):
+        out.append(("kept %d" % i, fn.entry, setup(c), c["args"], c.get("limit", 200_000), None))
+    for i, c in enumerate(extra_load(image, name, calls, frame)):
+        out.append(("written %d" % i, fn.entry, setup(c), c["args"], c.get("limit", 200_000), None))
+    return out
+
+
+def _generated(run, name, fn, gen, image, prog, options, calls, frame):
+    """The generated cases of cases_for, from the cache or made and cached."""
     sizes = {a: prog.insn_size(a) for a in fn.insns}
     key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, dict(options, calls=calls, frame=frame),
                     prog.arch, gen.environment())
@@ -1582,15 +1603,4 @@ def cases_for(run, name, fn):
             cache_store(path, cached)
     if cached.get("failed") and not extra_load(image, name):
         raise GenerationError(cached["failed"])
-    out = []
-
-    def setup(case):
-        return lambda m: gen.apply(m, case)
-
-    for i, c in enumerate(cached["cases"]):
-        out.append(("generated %d" % i, fn.entry, setup(c), c["args"], c.get("limit", 200_000), c))
-    for i, c in enumerate(kept_load(image, name, gen.real)):
-        out.append(("kept %d" % i, fn.entry, setup(c), c["args"], c.get("limit", 200_000), None))
-    for i, c in enumerate(extra_load(image, name, calls, frame)):
-        out.append(("written %d" % i, fn.entry, setup(c), c["args"], c.get("limit", 200_000), None))
-    return out
+    return cached

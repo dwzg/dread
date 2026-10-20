@@ -256,6 +256,8 @@ class Msp430Engine(Engine):
     def emu_start(self, begin, until, timeout=0, count=0):
         """The base class's run loop (dread.engines.Engine.emu_start: keep the two alike) with step()
         inlined and pc as the register itself: a third less time an instruction."""
+        if self.hooks_stale:
+            self.rebuild_hooks()
         self.sleeping = False
         r, cache = self.r, self.cache
         r[0] = begin & 0xFFFE

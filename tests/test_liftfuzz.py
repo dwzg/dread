@@ -14,7 +14,7 @@ needs_gcc = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-
 def test_random_functions_agree(isa, tmp_path):
     lines = []
     failures, refused, _ = liftfuzz.run(isa, functions=40, length=30, inputs=12, seed=7, keep=str(tmp_path / isa),
-                                        out=lines.append, jobs=4, reduce=0)
+                                        out=lines.append, reduce=0)
     assert not failures and not refused, "\n".join(lines)
 
 
@@ -29,7 +29,7 @@ def test_a_planted_mistake_shows_and_is_reduced(tmp_path, monkeypatch):
     monkeypatch.setattr(lift.Lifter, "_compare", wrong_overflow)
     lines = []
     failures, refused, _ = liftfuzz.run("a32", functions=40, length=30, inputs=12, seed=7, keep=str(tmp_path / "a32"),
-                                        out=lines.append, jobs=4, reduce=1)
+                                        out=lines.append, reduce=1)
     assert failures and not refused
     reduced = [line for line in lines if line.startswith("reduced")]
     assert len(reduced) == 1 and len(reduced[0].split(" to: ")[1].split(" | ")) <= 3, reduced
@@ -44,7 +44,7 @@ def test_random_rv32_functions_agree(tmp_path):
     """dread.lift_riscv on random RV32IMC code (the assembler compresses what it can)."""
     lines = []
     failures, refused, _ = liftfuzz.run("rv32", functions=40, length=30, inputs=12, seed=7,
-                                        keep=str(tmp_path / "rv32"), out=lines.append, jobs=4, reduce=0)
+                                        keep=str(tmp_path / "rv32"), out=lines.append, reduce=0)
     assert not failures and not refused, "\n".join(lines)
 
 
@@ -56,7 +56,7 @@ def test_a_planted_rv32_mistake_shows_and_is_reduced(tmp_path, monkeypatch):
     monkeypatch.setitem(lift_riscv.DIVS, "divu", "({b} == 0 ? 0u : {a} / {b})")
     lines = []
     failures, refused, _ = liftfuzz.run("rv32", functions=60, length=30, inputs=12, seed=7,
-                                        keep=str(tmp_path / "rv32"), out=lines.append, jobs=4, reduce=1)
+                                        keep=str(tmp_path / "rv32"), out=lines.append, reduce=1)
     assert failures and not refused, "\n".join(lines)
     reduced = [line for line in lines if line.startswith("reduced")]       # (a zero divisor needs the units
     assert len(reduced) == 1 and "divu" in reduced[0] and len(reduced[0].split(" to: ")[1].split(" | ")) <= 12, reduced

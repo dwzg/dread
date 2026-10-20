@@ -59,6 +59,7 @@ import argparse
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -1289,9 +1290,10 @@ def make(isa, out, bodies, cases):
     return target, image
 
 
-def check(isa, work, bodies, cases, jobs=None):
+def check(isa, work, bodies, cases, jobs=None, generate=True):
     """Make the image in `work`, lift every function, build and compare: ({name: the runner's
-    FAIL block}, {name: refusal}, [names with an instruction no input ran])."""
+    FAIL block}, {name: refusal}, [names with an instruction no input ran]). generate=False: the
+    written cases alone, nothing generated (the reduction's first try)."""
     from dread import build, lift, regflow, runner
     from dread.program import Program
     target, image = make(isa, work, bodies, cases)
@@ -1319,6 +1321,9 @@ def check(isa, work, bodies, cases, jobs=None):
                     failures[name] = "FAIL %s  the build failed:\n%s" % (name, "\n".join(own))
             return failures or {n: "FAIL %s  the build failed: %s" % (n, str(e)) for n in names}, refused, []
         runner.prepare(target, image, payload)
+        if not generate:
+            for name in names:
+                runner.RUN["suite"].auto.setdefault(name, {})["generate"] = False
         blocks = []
         _, uncovered, results = runner.run(names, only=True, out=blocks.append, jobs=jobs)
         bad = {name for name, count, fails in results if fails}
@@ -1330,15 +1335,27 @@ def check(isa, work, bodies, cases, jobs=None):
     return failures, refused, uncovered
 
 
-def minimize(isa, body, cases, work, jobs=None):
+def minimize(isa, body, cases, work, jobs=None, hints=()):
     """The shortest run of units that still differs or is refused: the shortest failing prefix,
-    then every unit left out whose absence keeps it failing. Returns (style, units, builds)."""
+    then every unit left out whose absence keeps it failing. Returns (style, units, builds).
+
+    hints: generated inputs that showed the failure. Each try runs them with the written inputs
+    first, generating nothing; only a try they do not fail is checked with generated cases as
+    well. Most tries end at the first step: generating cases for every try took 40 of a reduction's
+    50 seconds. A try counts as failing when either step fails, so the result is never longer than
+    with generated cases alone."""
     style, units = body
     trials = [0]
 
     def fails(us):
         trials[0] += 1
         here = os.path.join(work, "trial")
+        if hints:
+            shutil.rmtree(here, ignore_errors=True)
+            failures, refused, _ = check(isa, here, {"f0": (style, us)}, {"f0": list(cases) + list(hints)}, jobs,
+                                         generate=False)
+            if failures or refused:
+                return True
         shutil.rmtree(here, ignore_errors=True)
         failures, refused, _ = check(isa, here, {"f0": (style, us)}, {"f0": cases}, jobs)
         return bool(failures or refused)
@@ -1361,6 +1378,24 @@ def minimize(isa, body, cases, work, jobs=None):
     return style, us, trials[0]
 
 
+def failing_inputs(work, name, block):
+    """The generated cases a FAIL block names ([generated N]), from the cache of the check in `work`:
+    inputs for the reduction's first try. Cases with stubs are left out (a stub's address is a
+    callee's, which a shorter body moves)."""
+    import glob
+    import json
+    numbers = [int(n) for n in re.findall(r"\[generated (\d+)\]", block)]
+    found = []
+    for path in glob.glob(os.path.join(work, "build", "autocases", "*", name + ".json")):
+        try:
+            with open(path) as f:
+                made = json.load(f).get("cases", [])
+        except (OSError, ValueError):
+            continue
+        found += [made[n] for n in numbers if n < len(made) and not made[n].get("calls")]
+    return found
+
+
 def run(isa, functions=100, length=40, inputs=16, seed=1, keep=None, out=print, jobs=None, reduce=2):
     """Generate, lift, build and compare; reduce the first `reduce` failures. Returns (failures,
     refusals, workdir or None when removed)."""
@@ -1375,7 +1410,9 @@ def run(isa, functions=100, length=40, inputs=16, seed=1, keep=None, out=print, 
         isa, functions, length, inputs, len(failures), len(refused),
         " (%d with an instruction no input ran)" % len(uncovered) if uncovered else ""))
     for name in (sorted(refused) + sorted(failures))[:reduce]:
-        style, units, trials = minimize(isa, bodies[name], cases[name], os.path.join(work, "reduce-" + name), jobs)
+        hints = failing_inputs(work, name, failures.get(name, ""))
+        style, units, trials = minimize(isa, bodies[name], cases[name], os.path.join(work, "reduce-" + name), jobs,
+                                        hints)
         out("reduced  %-6s in %d builds to: %s%s" % (name, trials, "[%s] " % style if style else "",
                                                      " | ".join("; ".join(u) for u in units)))
     if failures or refused or keep:

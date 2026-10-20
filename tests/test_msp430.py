@@ -370,7 +370,7 @@ def test_random_msp430_functions_agree(tmp_path):
     from dread import liftfuzz
     lines = []
     failures, refused, _ = liftfuzz.run("msp430", functions=16, length=60, inputs=16, seed=7,
-                                        keep=str(tmp_path / "msp430"), out=lines.append, jobs=4, reduce=0)
+                                        keep=str(tmp_path / "msp430"), out=lines.append, reduce=0)
     assert not failures and not refused, "\n".join(lines)
 
 
@@ -382,7 +382,7 @@ def test_a_planted_msp430_mistake_shows_and_is_reduced(tmp_path, monkeypatch):
     monkeypatch.setitem(lift_msp430.JUMPS, "jlo", "c")
     lines = []
     failures, refused, _ = liftfuzz.run("msp430", functions=16, length=60, inputs=16, seed=7,
-                                        keep=str(tmp_path / "msp430"), out=lines.append, jobs=4, reduce=1)
+                                        keep=str(tmp_path / "msp430"), out=lines.append, reduce=1)
     assert failures and not refused, "\n".join(lines)
     reduced = [line for line in lines if line.startswith("reduced")]
     assert len(reduced) == 1 and "jlo" in reduced[0] and len(reduced[0].split(" to: ")[1].split(" | ")) <= 6, reduced
@@ -398,7 +398,7 @@ def test_lifted_c_that_calls_libgcc_fails_the_fuzzers_build(tmp_path, monkeypatc
         '__asm__ ("swpb %0" : "+r"(x));\n    return x;', "return __builtin_bswap16(x);"))
     lines = []
     failures, refused, _ = liftfuzz.run("msp430", functions=8, length=60, inputs=8, seed=1,
-                                        keep=str(tmp_path / "msp430"), out=lines.append, jobs=4, reduce=1)
+                                        keep=str(tmp_path / "msp430"), out=lines.append, reduce=1)
     assert failures and not refused, "\n".join(lines)
     assert any("undefined reference to `__mspabi_s" in block for block in failures.values())
     reduced = [line for line in lines if line.startswith("reduced")]

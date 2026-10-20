@@ -354,6 +354,15 @@ The long runs set the pace of everything after them. Measure first, then cut.
   too: the same cases again (bin/ab-cases, three functions), loop cases another 17 to 23 % faster
   (that task 86 s to 71 s, 104 s in the morning; prvQueueOverwriteTask 10.2 s to 7.9 s), a plain
   function 12 %. Fewer search runs for loop cases change the cases: the item below.
+- [x] The suite's slowest tests (pytest --durations, 2026-10-20) were the lifter fuzzer's: a planted
+  mistake found and reduced (MSP430 31 s, RV32 30 s, ARM 15 s) and the random functions (46 s for
+  six), about 120 of the suite's 269 s. The reduction generated cases anew for each of its 40 tries
+  (40 of 50 s): a try now runs the generated input that showed the failure, with the written ones,
+  first and without generating; only a try that does not fail so is checked with generated cases
+  too (MSP430: 37 of 40 tries end at once, the same reduction as before). DREAD's own engines rebuilt
+  their hook tables (two flag arrays the size of memory) at every hook added or taken away, four
+  times a run: now once when a run starts (the same cases: bin/ab-cases on five MSP430 functions).
+  The fuzzer's tests take the polite worker count instead of four. Those nine tests: 121 s to 75 s.
 - [ ] The system check (about a minute of a lift check on that build): one wave of two runs of the
   scenario per function; all candidates rebuilt together would be two runs, but brings back some of
   the clock's distortion (their own blocks take no time): try it with a fallback to one at a time.
@@ -425,7 +434,8 @@ The long runs set the pace of everything after them. Measure first, then cut.
   less), the providers report the finish reason, the tokens and the reasoning's length and the log
   keeps them; the survivors question gets an answer of its own when it comes with the last try (it
   only asks for arguments). The pilot computes the never-returning functions once for its lifters.
-- [ ] A measured run with a cloud model (waits for "Questions for the user").
+- [x] A measured run with a cloud model (waits for "Questions for the user"): the keys came on
+  2026-10-19; the measurements are in "The pilot on what the lifter leaves".
 - [x] RISC-V (RV32IMC), in the porting guide's order (docs/porting.md); clang 23 and ld.lld are
   installed, Unicorn runs RV32 with the machine-mode registers, capstone 5 gives the text but not the
   registers an instruction uses (`regs_access` is unsupported for RISC-V, system registers are no
@@ -614,6 +624,22 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   instructions run, 74,000 tokens in and 352,000 out, 28 minutes. Most misses were failed
   assertions, which the generator covers itself since (stops): the next runs, with Sonnet and the
   local model too, go on what the measurement after that leaves.
+  2026-10-20, --task input on the same 20 functions of GCC -Os (fewest missed first, 74 missed
+  instructions), each on a fresh copy of the build, then dread lift --check on it (296 before):
+  - Sonnet 5.5 declined all 20 (stop reason "refusal", no text), also with the purpose stated in
+    the question; Opus 5.5 too; Haiku 5.5 answers the same question. What is declined: a listing
+    together with the instructions an input should reach. $0.17. A run stops asking a provider after
+    three declined in a row since.
+  - Haiku 5.5: 5 functions covered whole, 17 of 74 instructions; 53 answers, 181,000 tokens in,
+    114,000 out, $0.75 at assumed prices, 9.5 minutes. The lift check accepts all five (301).
+  - deepseek-flash, answers up to 32,000 tokens (at 8,000, 37 of 56 had been cut off reasoning): 7
+    whole, 22 of 74; 43 answers, 122,000 in, 818,000 out, at most $1.49 (the balance went from 11.87
+    to 10.38), 60 minutes. The lift check accepts six (302). The seventh, _fwalk_sglue, fails on its
+    input: r1 = 0xe815, the callback, points into _fwalk_sglue's own body; the original runs its own
+    instructions there, the rebuilt image has other bytes (an unfair input, not a lifter fault).
+  - The local model: running (about eleven minutes a function).
+  Open: refuse an input whose run calls through a value it gave into the middle of a function (the
+  generator pins such inputs to its pointer stub; the pilot's inputs do not pass through that).
 - [ ] **New architectures through it**: Cortex-M4F first (FreeRTOS's ARM_CM4F port, below), then MSP430X
   with TI's cl430 (FreeRTOS's MSP430X port), AVR (its ATmega ports), each as its own item below.
 - [ ] (Later) a compute-heavy library (littlefs) for the case generator on parsers and data structures.
