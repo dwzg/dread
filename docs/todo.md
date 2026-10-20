@@ -681,7 +681,13 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
     to 10.38), 60 minutes. The lift check accepts six (302). The seventh, _fwalk_sglue, fails on its
     input: r1 = 0xe815, the callback, points into _fwalk_sglue's own body; the original runs its own
     instructions there, the rebuilt image has other bytes (an unfair input, not a lifter fault).
-  - The local model: running (about eleven minutes a function).
+  - The local model (qwen3.8-27b, answers up to 32,000 tokens): cut off by the run's timeout after 3 h
+    53 min with 18 of the 20 asked (about 13 minutes a function); 6 covered whole, 19 of their 59
+    missed instructions; 43 answers, 150,000 tokens in, 1,018,000 out; the lift check accepts five
+    more (301). Its summary line was lost with the cut (stdout buffered): the counts come from its
+    conversations.
+  So far: deepseek-flash finds the most (six accepted), Haiku nearly as much at a sixth of the time,
+  the local model as much as Haiku at no cost but twenty-five times the time; Sonnet and Opus decline.
   Refused since: an input whose run makes the function call through a register to an address that
   is no function's entry (pilot.wild_call: the first block behind each of its indirect calls; a
   call through a veneer is not followed), with the tools' words back to the model; the question
