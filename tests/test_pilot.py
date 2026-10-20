@@ -347,3 +347,13 @@ cross = "arm-none-eabi-"
     cases = json.load(open(os.path.join(image.extra_cases, "apply.json")))["cases"]
     assert len(cases) == 1 and int(str(cases[0]["args"][0]), 0) == twice.entry | 1, cases
     assert len(still) < len(apply.insns)
+
+
+def test_a_dry_run_of_the_input_task_asks_nothing(gizmo, tmp_path, monkeypatch, capsys):
+    """--dry-run asks no provider (none is needed) for --task input: it lists the functions with
+    instructions no input ran (once it asked the default provider about each one)."""
+    target, image, program, flow = gizmo
+    monkeypatch.setenv("DREAD_LLM", str(tmp_path / "no-such-llm.toml"))
+    assert pilot.main(["--target", target.root, "--task", "input", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "nothing asked" in out and "missed instructions" in out

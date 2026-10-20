@@ -732,7 +732,9 @@ def main(argv=None):
     parser.add_argument("--no-lifted", action="store_true", help="do not show the model the lifted C")
     parser.add_argument("--no-mutate", action="store_true", help="skip the mutation check")
     parser.add_argument("--no-integration", action="store_true", help="skip the integration run")
-    parser.add_argument("--dry-run", action="store_true", help="print the question for each function, ask nothing")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="ask nothing: print each question (write), or the functions and what would be asked "
+                             "about them (input, name)")
     parser.add_argument("--usage", nargs="?", const="", metavar="YYYY-MM",
                         help="print the tokens (and costs, where llm.toml gives prices) of a month's answers; ask nothing")
     parser.add_argument("--task", choices=("write", "input", "name"), default="write",
@@ -753,16 +755,22 @@ def main(argv=None):
     program = Program(target, image)
     flow = regflow.load(target, image, program)
     if args.task != "write":
-        try:
-            provider = llm.load(args.provider)
-        except llm.ProviderError as e:
-            print("dread pilot: %s" % e, file=sys.stderr)
-            return 1
+        provider = None
+        if not args.dry_run:                # (a dry run asks nothing, so it needs no provider)
+            try:
+                provider = llm.load(args.provider)
+            except llm.ProviderError as e:
+                print("dread pilot: %s" % e, file=sys.stderr)
+                return 1
         if args.task == "name":
             from dread.samecode import UNNAMED
             names = shown(target, args.names) if args.names else sorted(
                 (fn.name for fn in program.functions if UNNAMED.match(fn.name) and may_show(target, fn.name)),
                 key=lambda n: len(program.by_name[n].insns))[:args.limit]
+            if args.dry_run:
+                print("\n".join(names))
+                print("dread pilot --task name --dry-run: %d functions would be asked about; nothing asked" % len(names))
+                return 0
             asking = Asking(provider)
             for name in names:
                 if not asking.go_on():
@@ -775,8 +783,14 @@ def main(argv=None):
             if not args.names or name in args.names:
                 missed.setdefault(name, addresses)
         missed = {n: missed[n] for n in shown(target, sorted(missed))}
-        started, before = time.time(), llm.usage_summary().get(provider.name, {})
         asked = sorted(missed.items(), key=lambda kv: (len(kv[1]), kv[0]))[:args.limit]     # fewest first
+        if args.dry_run:
+            for name, addresses in asked:
+                print("%-34s %d missed instructions" % (name, len(addresses)))
+            print("dread pilot --task input --dry-run: %d functions, %d missed instructions would be asked "
+                  "about; nothing asked" % (len(asked), sum(len(a) for _, a in asked)))
+            return 0
+        started, before = time.time(), llm.usage_summary().get(provider.name, {})
         line = input_task(target, image, program, provider, asked, args.tries, flow)
         after = llm.usage_summary().get(provider.name, {})
         spent = {k: (after.get(k) or 0) - (before.get(k) or 0) for k in ("answers", "input", "output", "cost")}
