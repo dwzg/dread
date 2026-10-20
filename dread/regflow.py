@@ -935,6 +935,9 @@ def main(argv=None):
                 continue
             print("    %s:" % reg)
             for caller, address in sites:
+                if caller not in analysis.rows:     # "the ABI" or "the compiler's profile" (abi_label)
+                    print("        by %s: read after every call" % caller)
+                    continue
                 for what in analysis.readers(caller, address, reg):
                     if what[0] == "read":
                         text = "read at 0x%x" % what[1]

@@ -549,3 +549,25 @@ def test_a_flag_write_under_a_condition_keeps_its_writes(tmp_path):
     flow = regflow.analyse(Program(Target.load(str(tmp_path))))
     assert flow.read_regs("k") == ["r0", "r1"], flow.read_regs("k")
     assert flow.read_regs("m") == ["r0", "r1", "r3"], flow.read_regs("m")
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-gcc")), reason="needs arm-none-eabi-gcc")
+def test_why_names_the_abi_as_a_reader(tmp_path, capsys):
+    """A helper's result by the ABI is read after every call (abi_results): regflow lists the ABI as
+    a caller of its own ("the ABI", address 0), and --why looked that name up as a function."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text("unsigned long long q(unsigned long long a, unsigned long long b) { return a / b; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-T", str(tmp_path / "t.ld"),
+                    "-e", "q", "-o", elf, str(tmp_path / "t.c"), "-lgcc"], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    assert regflow.main(["--target", str(tmp_path), "--why", "__aeabi_uldivmod"]) in (0, None)
+    out = capsys.readouterr().out
+    assert "by the ABI: read after every call" in out, out
