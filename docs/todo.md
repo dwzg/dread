@@ -811,11 +811,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   the compiled engine (the lift took 627 s in measure-21). Left of those chains: the logical right
   shifts (next item), the epilogues (they pop their caller's registers), and system-run models of
   the MSP430F449 board for the tasks.
-- [ ] **The MSP430's flags bit by bit in regflow**: clrc (bic #1, sr) writes C and passes Z, N and V
-  through, so with the flags as one unit it reads them; the logical right shifts (__mspabi_srli_N,
-  __mspabi_srll_N) begin with it, and their callers are refused for leaving the flags (28 functions
-  on gizmo-msp430, as many on FreeRTOS's build), although the rrc behind it writes all four. The
-  lifter keeps the flags apart already; regflow and the layer's effects would need c, z, n and v.
+- [x] **The MSP430's flags bit by bit in regflow** (2026-10-20): clrc (bic #1, sr) writes C and passes
+  Z, N and V through, so with the flags as one unit it read them; the logical right shifts
+  (__mspabi_srli_N, __mspabi_srll_N) begin with it, and their callers were refused for leaving the
+  flags, although the rrc behind it writes all four. The layer has flag_effects (each flag read,
+  written, or passed through), and regflow (version 12) and the lifter's entry analysis follow the
+  flags so where it is there, folding them into "flags" in what they report. gizmo-msp430: 112 of
+  130 lift (84), the lift check accepts 78 (50); the MSP430 fuzzer agrees on three seeds.
 - [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the
   5-million-instruction limit (about 5 s per case on the MSP430 engine; two of gizmo's took over 300
   s). Bound a mutant's case by a multiple of what the original took on it.

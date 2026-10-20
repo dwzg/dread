@@ -486,6 +486,41 @@ class Msp430:
     def sets_flags(self, insn):
         return "flags" in self.reg_effects(insn)[1]
 
+    FLAG_NAMES = ("c", "z", "n", "v")       # sr's flags one by one, for dread.regflow (flag_effects)
+    FLAG_BITS = {"c": 1, "z": 2, "n": 4, "v": 0x100}
+    FLAGS_ALL = frozenset(FLAG_NAMES)
+    FLAGS_READ = {"addc": {"c"}, "subc": {"c"}, "dadd": {"c"}, "rrc": {"c"}}
+    FLAGS_WRITTEN = {"add": FLAGS_ALL, "addc": FLAGS_ALL, "sub": FLAGS_ALL, "subc": FLAGS_ALL, "cmp": FLAGS_ALL,
+                     "and": FLAGS_ALL, "xor": FLAGS_ALL, "bit": FLAGS_ALL, "rrc": FLAGS_ALL, "rra": FLAGS_ALL,
+                     "sxt": FLAGS_ALL, "dadd": frozenset("czn")}
+    JUMP_FLAGS = {"jmp": (), "jne": "z", "jeq": "z", "jlo": "c", "jhs": "c", "jn": "n", "jge": "nv", "jl": "nv"}
+
+    def flag_effects(self, insn):
+        """(read, written): sr's flags one by one (C, Z, N, V as "c", "z", "n", "v"), for dread.regflow;
+        a flag neither read nor written passes through. reg_effects has them as one unit "flags",
+        so clrc (bic #1, sr), which writes C and passes Z, N and V through, read them all there: the
+        logical right shifts of libgcc begin with it, and their callers looked as if they had to
+        leave the flags for them, although the rrc behind clrc writes all four."""
+        f = insn.fields
+        op = f.op
+        if f.target is not None:
+            return set(self.JUMP_FLAGS[op]), set()
+        if op in ("reti", "call"):
+            return set(), set(self.FLAGS_ALL)       # sr restored; a callee may change them
+        read = set(self.FLAGS_ALL) if f.src is not None and f.src.mode == "reg" and f.src.reg == 2 else set()
+        d = f.dst
+        if d is None:                       # one operand: rrc, rra, swpb, sxt, push, call
+            if f.src is not None and f.src.mode == "reg" and f.src.reg == 2 and op in ("rrc", "rra", "swpb", "sxt"):
+                return set(self.FLAGS_ALL), set(self.FLAGS_ALL)
+            return read | self.FLAGS_READ.get(op, set()), set(self.FLAGS_WRITTEN.get(op, ()))
+        if d.mode == "reg" and d.reg == 2:  # an instruction on sr itself
+            if op in ("bic", "bis") and f.src.mode == "imm":
+                return read, {n for n, bit in self.FLAG_BITS.items() if f.src.value & bit}
+            if op == "mov":
+                return read, set(self.FLAGS_ALL)
+            return set(self.FLAGS_ALL), set(self.FLAGS_ALL)
+        return read | self.FLAGS_READ.get(op, set()), set(self.FLAGS_WRITTEN.get(op, ()))
+
     def stack_kind(self, insn):
         """"push" for push, "pop" for pop (mov @sp+, rN), else None."""
         f = insn.fields

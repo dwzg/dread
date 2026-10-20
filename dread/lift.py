@@ -572,7 +572,9 @@ class Lifter:
         nothing; a call leaves the scratch registers, lr and the flags written. A conditional write
         counts once the register is written under the opposite condition too (addeq r7, ...;
         addne r7, ...), or on the edge of a conditional branch whose condition it was written
-        under, as long as the flags do not change in between."""
+        under, as long as the flags do not change in between. Where the layer has the flags one
+        by one (flag_effects: the MSP430's clrc writes C and passes the others through) they are
+        followed so, and the result has them as "flags" again (undefined, or read, if one is)."""
         if fn.name in self._entry:
             return self._entry[fn.name]
         prog, arch = self.prog, self.arch
@@ -589,7 +591,9 @@ class Lifter:
         fixed = tuple(self.prog.image.fixed)                    # one value everywhere ([image] fixed)
         # (ARM) s0-s15 are the lifted C's at the entry (FPU_MIRROR); s16-s31 hold the caller's
         fpu = ["s%d" % k for k in range(16, 32)] if getattr(self.arch, "fp_arg_regs", None) else []
-        start = frozenset(r for r in self.REGS + ["flags"] + fpu if r not in tuple(args) + ("sp", "pc", link) + fixed)
+        bits = ["flags:" + n for n in arch.FLAG_NAMES] if hasattr(arch, "flag_effects") else None
+        start = frozenset(r for r in self.REGS + (bits or ["flags"]) + fpu
+                          if r not in tuple(args) + ("sp", "pc", link) + fixed)
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
         work = [fn.insns[0]]
         while work:
@@ -600,6 +604,10 @@ class Lifter:
             undef, partial = undef_at[a], partial_at[a]
             kind, target, _ = arch.flow(insn)
             reads, writes = arch.reg_effects(insn)
+            if bits:
+                fr, fw = arch.flag_effects(insn)
+                reads = (set(reads) - {"flags"}) | {"flags:" + n for n in fr}
+                writes = (set(writes) - {"flags"}) | {"flags:" + n for n in fw}
             if arch.stack_kind(insn) == "push" or kind == "return":
                 reads = set()
             saved = self.saving_store(insn, known.get(a, (0, {}))[1])
@@ -607,6 +615,8 @@ class Lifter:
                 reads = set(reads) - {saved}    # stored into the frame to be restored: a save, no use
             if kind in ("call", "icall"):
                 writes = set(writes) | self.after_call(insn)
+                if bits and "flags" in writes:
+                    writes = (writes - {"flags"}) | set(bits)
             copy = self.plain_move(insn)
             if copy is not None and copy[1] in undef:
                 reads = set(reads) - {copy[1]}   # a copy of what the caller left (mov r8, r8 is a nop;
@@ -628,7 +638,7 @@ class Lifter:
                     else:
                         part.add((r, pred))
                 after_u, after_p = frozenset(u), frozenset(part)
-            if "flags" in writes:
+            if "flags" in writes or (bits and writes & set(bits)):
                 after_p = frozenset()       # the conditions written under no longer hold
             if copy is not None and copy[1] in undef:
                 after_u = after_u | {copy[0]}
@@ -646,6 +656,11 @@ class Lifter:
                     if nu != undef_at[b] or np != partial_at[b]:
                         undef_at[b], partial_at[b] = nu, np
                         work.append(b)
+        if bits:
+            def fold(regs):
+                return frozenset("flags" if r.startswith("flags:") else r for r in regs)
+            undef_at = {a: fold(u) for a, u in undef_at.items()}
+            found = {a: set(fold(r)) for a, r in found.items()}
         self._entry[fn.name] = (undef_at, found)
         return undef_at, found
 

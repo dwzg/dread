@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 11                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 12                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -70,6 +70,8 @@ VERSION = 11                # 3: entry spills (variadic functions) are no use; 4
                             # 11: vpush and vpop, and libgcc's eight-byte push and pop of one register
                             # (str lr, [sp, #-8]!; ldr pc, [sp], #8: a return), are pushes and pops;
                             # a bl to a helper that calls another is a call, not a switch's dispatch
+                            # 12: the MSP430's flags one by one (the layer's flag_effects): clrc writes C
+                            # and passes Z, N and V through instead of reading the flags as one
 
 
 class RegFlow:
@@ -186,6 +188,10 @@ def _rows(program, fn, mask, entry_name):
             continue
         kind, target, falls = arch.flow(insn)
         reads, writes = arch.reg_effects(insn)
+        if hasattr(arch, "flag_effects"):      # the flags one by one (scratch_names)
+            fr, fw = arch.flag_effects(insn)
+            reads = (set(reads) - {"flags"}) | {"flags:" + n for n in fr}
+            writes = (set(writes) - {"flags"}) | {"flags:" + n for n in fw}
         stack = arch.stack_kind(insn)
         if entry and spills:
             spilled = {r for r in arch.frame_stores(insn, sp_based) if r not in written} & save_area
@@ -247,9 +253,12 @@ def variadic_save_area(program, fn, insns, joins):
 
 def scratch_names(target, arch):
     """The registers a call may leave changed, which the analysis follows: the scratch registers,
-    the flags, and where floats travel in the FPU (hard float) its argument registers (s0-s15)."""
+    the flags (one by one, "flags:c" and so on, where the layer has flag_effects: Analysis folds them
+    into "flags" in its result), and where floats travel in the FPU (hard float) its argument
+    registers (s0-s15)."""
     callee_saved = set(target.abi.callee_saved)
-    return [r for r in arch.general_regs() if r not in callee_saved] + ["flags"] + list(target.abi.fp_arg_regs)
+    flags = ["flags:" + n for n in arch.FLAG_NAMES] if hasattr(arch, "flag_effects") else ["flags"]
+    return [r for r in arch.general_regs() if r not in callee_saved] + flags + list(target.abi.fp_arg_regs)
 
 
 POOL_REACH = 0x1000         # how far behind a function's last instruction its pool may lie
@@ -264,6 +273,9 @@ class Analysis:
         arch = program.arch
         self.names = scratch_names(program.target, arch)
         self.bit = {n: 1 << i for i, n in enumerate(self.names)}
+        flag_bits = [b for n, b in self.bit.items() if n.startswith("flags:")]
+        if flag_bits:                       # "flags" stands for them all (the layer's and callers' name)
+            self.bit["flags"] = sum(flag_bits)
         self.everything = (1 << len(self.names)) - 1
         entries = {fn.entry: fn.name for fn in program.functions}
 
@@ -659,8 +671,40 @@ class Analysis:
             for reg, label in labels.items():
                 sites[name][reg].append([label, 0, True])
         preserved = {name: self.kept[name] & ~self.may[name] for name in self.rows if self.kept[name] & ~self.may[name]}
-        return RegFlow(self.names, dict(self.kept), dict(self.reads), {k: dict(v) for k, v in sites.items()},
-                       preserved)
+        return self._folded(self.names, dict(self.kept), dict(self.reads), {k: dict(v) for k, v in sites.items()},
+                            preserved)
+
+    def _folded(self, names, kept, reads, sites, preserved):
+        """The RegFlow, with flags followed one by one folded into "flags" (a flag read is the flags
+        read: what the layers and the tools name)."""
+        if not any(n.startswith("flags:") for n in names):
+            return RegFlow(names, kept, reads, sites, preserved)
+        public = []
+        for n in names:
+            n = "flags" if n.startswith("flags:") else n
+            if n not in public:
+                public.append(n)
+        moved = {1 << i: 1 << public.index("flags" if n.startswith("flags:") else n) for i, n in enumerate(names)}
+
+        def fold(m):
+            out = 0
+            for bit, to in moved.items():
+                if m & bit:
+                    out |= to
+            return out
+        folded_sites = {}
+        for callee, by_reg in sites.items():
+            regs = {}
+            for reg, entries in by_reg.items():
+                key = "flags" if reg.startswith("flags:") else reg
+                merged = {(e[0], e[1]): e for e in regs.get(key, [])}
+                for e in entries:
+                    k = (e[0], e[1])
+                    merged[k] = [e[0], e[1], bool(merged[k][2] or e[2])] if k in merged else list(e)
+                regs[key] = list(merged.values())
+            folded_sites[callee] = regs
+        return RegFlow(public, {k: fold(v) for k, v in kept.items()}, {k: fold(v) for k, v in reads.items()},
+                       folded_sites, {k: fold(v) for k, v in preserved.items() if fold(v)})
 
     def read_always(self, name, start, reg):
         """Whether every path from the instruction behind index `start` reads `reg` before
