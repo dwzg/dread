@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Generated cases of the same functions from two DREAD checkouts, timed and compared byte for
+byte: the check for a change meant to make the generator or the emulator faster without changing
+what they find. Each checkout generates in a process of its own with its own code (and the
+.venv it links), one function after the other, A before B, so that both see the same machine.
+
+    bin/ab-cases [--target DIR] [--image NAME] [--payload FILE] [--loop] A B NAME...
+
+A and B are checkouts (the main one and a worktree, say). The options of each function are the
+target's (its suite's auto() settings and the last lift check's: a loop function gets loop
+cases); --loop asks for loop cases where neither says anything (a task the lift check dropped).
+--payload is the rebuilt image the runner is prepared with (default: the last lift check's).
+Exits 1 when a function's cases differ or a side fails.
+
+Written after two comparisons on 2026-10-20 had compared nothing: a shell loop handed the loop
+option where the tag belonged, both sides wrote one file, and the timing compared plain runs.
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+WORKER = r'''
+import json, sys, time
+from dread import autocase, runner
+from dread.target import Target
+target_dir, image_name, payload, name, loop, out = sys.argv[1:7]
+t = Target.load(target_dir)
+image = t.image(image_name or None)
+runner.prepare(t, image, payload)
+gen = autocase.generator_for(runner.RUN)
+fn = gen.program.by_name[name]
+options = dict(runner.RUN["suite"].auto.get(name, {"loop": True} if loop == "1" else {}))
+calls = autocase.resolve_calls(gen, options.pop("calls", ()))
+frame = options.pop("frame", 0)
+started = time.perf_counter()
+made = gen.generate(name, fn.entry, fn.insns, calls=calls, frame=frame, **options)
+seconds = time.perf_counter() - started
+with open(out, "w") as f:
+    json.dump({"seconds": seconds, "loop": bool(options.get("loop")), "cases": made}, f, sort_keys=True)
+'''
+
+
+def python_of(checkout):
+    own = os.path.join(checkout, ".venv", "bin", "python")
+    return own if os.path.exists(own) else sys.executable
+
+
+def generate(checkout, target, image, payload, name, loop, out):
+    env = dict(os.environ, PYTHONPATH=checkout)
+    run = subprocess.run([python_of(checkout), "-c", WORKER, target, image or "", payload, name, "1" if loop else "0",
+                          out], env=env, cwd=checkout, capture_output=True, text=True)
+    if run.returncode or not os.path.exists(out):
+        tail = (run.stderr or run.stdout).strip().splitlines()[-1:] or ["no output"]
+        return None, "exit %d: %s" % (run.returncode, tail[0][:160])
+    with open(out) as f:
+        return json.load(f), None
+
+
+def first_difference(a, b):
+    if len(a) != len(b):
+        return "%d cases against %d" % (len(a), len(b))
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            keys = sorted(k for k in set(x) | set(y) if x.get(k) != y.get(k))
+            return "case %d differs in %s" % (i, ", ".join(keys))
+    return None
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="bin/ab-cases", description=__doc__.split("\n\n")[0])
+    parser.add_argument("--target", default=os.environ.get("DREAD_TARGET", "."))
+    parser.add_argument("--image")
+    parser.add_argument("--payload")
+    parser.add_argument("--loop", action="store_true")
+    parser.add_argument("a")
+    parser.add_argument("b")
+    parser.add_argument("names", nargs="+")
+    args = parser.parse_args(argv)
+    a, b = os.path.abspath(args.a), os.path.abspath(args.b)
+    target = os.path.abspath(args.target)
+    for side in (a, b):
+        if not os.path.isdir(os.path.join(side, "dread")):
+            parser.error("%s is no DREAD checkout" % side)
+    payload = args.payload
+    if payload is None:
+        sys.path.insert(0, a)
+        from dread.target import Target
+        t = Target.load(target)
+        payload = os.path.join(t.build, "lift-check", t.image(args.image).name, "payload.bin")
+    if not os.path.exists(payload):
+        parser.error("no rebuilt image at %s (run dread lift --check, or give --payload)" % payload)
+    bad = 0
+    with tempfile.TemporaryDirectory(prefix="ab-cases-") as work:
+        for name in args.names:
+            got = {}
+            for label, side in (("A", a), ("B", b)):
+                got[label] = generate(side, target, args.image, payload, name, args.loop,
+                                      os.path.join(work, "%s-%s.json" % (label, name)))
+            (ra, ea), (rb, eb) = got["A"], got["B"]
+            if ea or eb:
+                bad += 1
+                print("%-34s FAILED  A: %s  B: %s" % (name, ea or "ok", eb or "ok"))
+                continue
+            diff = first_difference(ra["cases"], rb["cases"])
+            bad += diff is not None
+            print("%-34s A %7.1f s  B %7.1f s  (%+.0f %%)  %d cases%s  %s" % (
+                name, ra["seconds"], rb["seconds"], 100 * (rb["seconds"] / ra["seconds"] - 1) if ra["seconds"] else 0,
+                len(ra["cases"]), ", loop" if ra["loop"] else "", "DIFFER: " + diff if diff else "identical"),
+                flush=True)
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

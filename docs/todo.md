@@ -334,7 +334,7 @@ The long runs set the pace of everything after them. Measure first, then cut.
   build of the FreeRTOS matrix, in the same time (57 min beside other work).
 - [x] The test suite in a fresh worktree regenerated gizmo's cases (21 minutes; the MSP430 test 772 s,
   0.4 s with its cache): `bin/dev-worktree` copies the caches into a new worktree.
-- [ ] The generation of functions that never return is the slowest left (one task's loop: 49,000 runs
+- [x] The generation of functions that never return is the slowest left (one task's loop: 49,000 runs
   of 48 stub calls, 331 s under cProfile). About half is Python per stub call (ten register reads
   through Unicorn's binding, the IT repair), the rest the solver's and the sweep's runs (24,000 and
   23,000: the sweep steps every stub answer of a loop case). A stub's register reads and IT repair in
@@ -348,7 +348,12 @@ The long runs set the pace of everything after them. Measure first, then cut.
   than single reads), and the IT repair wraps memory hooks only (Unicorn restores an instruction's
   starting state for those alone): the same cases (three functions compared byte for byte), loop
   cases 18 to 21 % faster (that task 104 s to 86 s, prvQueueOverwriteTask 12.1 s to 9.5 s), a plain
-  function 3 %. Left: the hooks added per run; fewer search runs (it changes the cases).
+  function 3 %. Then the stub hooks stay on the emulator across Machines (pruned to the Machine's
+  stubs before each run; adding one took about 20 us in the binding, twelve a run), the fault and
+  interrupt hooks are added once per emulator, and core registers are written through the C function
+  too: the same cases again (bin/ab-cases, three functions), loop cases another 17 to 23 % faster
+  (that task 86 s to 71 s, 104 s in the morning; prvQueueOverwriteTask 10.2 s to 7.9 s), a plain
+  function 12 %. Fewer search runs for loop cases change the cases: the item below.
 - [ ] The system check (about a minute of a lift check on that build): one wave of two runs of the
   scenario per function; all candidates rebuilt together would be two runs, but brings back some of
   the clock's distortion (their own blocks take no time): try it with a fallback to one at a time.
@@ -374,6 +379,8 @@ The long runs set the pace of everything after them. Measure first, then cut.
   the MSP430: nearly every run): ending a run after a stretch without a new block would save most of
   their time on every architecture, but it changes the cases (a VERSION change) and wants its own
   measurement of coverage.
+  With it, fewer search runs for loop cases (the sweep steps every stub answer of a loop case: 23,000
+  of a task's 49,000 runs), measured the same way.
 
 ## Phase 7: reading aids, plugin, documentation
 

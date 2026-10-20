@@ -225,6 +225,26 @@ def core_reader(uc):
     return read
 
 
+def core_writer(uc):
+    """The writing half of core_reader: write(reg, value) of a 32-bit core register through Unicorn's
+    C function (a buffer made once), or the engine's own reg_write."""
+    try:
+        import ctypes
+        import unicorn.unicorn_py3.unicorn as binding
+        library = getattr(binding, "uclib", None) or getattr(binding, "_uc")
+        function, handle = library.uc_reg_write, uc._uch
+    except (ImportError, AttributeError):
+        return uc.reg_write
+    buffer = ctypes.c_uint64(0)
+    ref = ctypes.byref(buffer)
+
+    def write(reg, value):
+        buffer.value = value & 0xFFFFFFFF
+        if function(handle, reg, ref):
+            uc.reg_write(reg, value & 0xFFFFFFFF)   # an error: the binding raises it as it would
+    return write
+
+
 class Core:
     """One emulator per image, reused for every call. A Machine borrows the Core of its image; the
     Core undoes what the previous Machine left (written pages, hooks, registers)."""
@@ -237,6 +257,8 @@ class Core:
         self.layout, self.payload = layout, payload
         self.uc = uc = layout.arch.new_uc()
         self.read32 = core_reader(uc)       # the core registers, fast (Machine.reg, the stubs)
+        self.write32 = core_writer(uc)
+        self.stub_hooks = {}                # address -> hook, kept across Machines (stub_hook)
         for lo, hi in layout.maps:
             uc.mem_map(lo, hi - lo)
         self.initial = layout.initial(payload)
@@ -255,6 +277,19 @@ class Core:
             uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
         for lo, hi in layout.io:
             uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._on_io, begin=lo, end=hi - 1)
+        # Every Machine's own two hooks, added once (Unicorn's binding takes about 20 us to add a
+        # hook): they hand over to the Machine that runs. The fault hook is a memory hook and clears
+        # a stale IT state behind it, as Machine.hook_add does.
+        on_unmapped = self._on_unmapped
+        if layout.settle_it:
+            settle = layout.arch.settle_it
+
+            def on_unmapped(uc, *args, inner=on_unmapped, settle=settle):
+                result = inner(uc, *args)
+                settle(uc)
+                return result
+        uc.hook_add(UC_HOOK_MEM_INVALID, on_unmapped)
+        uc.hook_add(UC_HOOK_INTR, self._on_intr)
         # The CPU as built, put back by every reset: a run can change CPU state that no register
         # write reaches. A FreeRTOS run on Unicorn's Cortex-M33 executed a bxns (code it had
         # overwritten) and left the core in Non-secure state; from then on every fetch raised a
@@ -286,6 +321,29 @@ class Core:
                     data[lo - start:hi - start] = content[lo - base:hi - base]
             self.pages[number] = bytes(data)
         return self.pages[number]
+
+    def _on_unmapped(self, uc, access, addr, size, value, user):
+        return self.machine._on_unmapped(uc, access, addr, size, value, user)
+
+    def _on_intr(self, uc, intno, user):
+        return self.machine._on_intr(uc, intno, user)
+
+    def stub_hook(self, addr):
+        """The code hook of a stub at addr (Machine.stub). It stays across Machines: a loop case's
+        search stubs the same callees in tens of thousands of runs, and adding a hook takes about 20 us
+        in Unicorn's binding. prune_stub_hooks takes away the hooks of addresses the Machine about to
+        run does not stub, so that a callee runs as it did without them."""
+        if addr not in self.stub_hooks:
+            self.stub_hooks[addr] = self.uc.hook_add(UC_HOOK_CODE, self._on_stub, begin=addr, end=addr)
+
+    def prune_stub_hooks(self, stubs):
+        for addr in [a for a in self.stub_hooks if a not in stubs]:
+            self.uc.hook_del(self.stub_hooks.pop(addr))
+
+    def _on_stub(self, uc, addr, size, user):
+        m = self.machine
+        if addr in m.stubs:
+            m._on_stub(uc, addr, size, user)
 
     def reset(self):
         if self.fast is not None:
@@ -385,12 +443,11 @@ class Machine:
         self.stale_fill = None      # (byte, span, entries): at every block that starts at one of the
                                     # entries, span bytes below sp (down to the stack's bottom) become
                                     # byte: what earlier frames left there is gone (dread.runner)
-        self.hook_add(UC_HOOK_MEM_INVALID, self._on_unmapped)
+        # (the hooks of _on_unmapped and _on_intr are the Core's, added once)
         # A system call (svc, ecall) runs as a no-op, logged in order: its handler is the firmware's and
         # not modelled (FreeRTOS's RISC-V port yields with ecall). Any other CPU exception stops the run
         # as a fault (with a hook in place, Unicorn would take an undefined instruction as handled).
         self.svc_regs, self.exception = False, None
-        self.hook_add(UC_HOOK_INTR, self._on_intr)
 
     # ---- hooks ----
 
@@ -512,13 +569,14 @@ class Machine:
             # from it, so the run ends at the callee's entry however the caller got there (behind a
             # tail jump in the original, lr is the harness's own return and a return went there)
             return
+        write = self.core.write32
         if isinstance(ret, tuple):          # (r0, r1): a stub of a function with a wide result
             for reg, v in zip(self.layout.result_regs, ret):
-                uc.reg_write(reg, (v or 0) & 0xFFFFFFFF)
+                write(reg, v or 0)
         else:
-            uc.reg_write(self.layout.result_regs[0], (ret or 0) & 0xFFFFFFFF)
+            write(self.layout.result_regs[0], ret or 0)
         if self.layout.lr is not None:
-            uc.reg_write(self.layout.pc, read(self.layout.lr))  # bit 0 of lr keeps Thumb state
+            write(self.layout.pc, read(self.layout.lr))     # bit 0 of lr keeps Thumb state
         else:
             self.arch.pop_return(uc, self.read)
 
@@ -531,17 +589,13 @@ class Machine:
         known = Machine.entries.get((self.layout.target.file, self.layout.image.name))
         if known is not None and self.layout.base <= addr < self.layout.image.end and addr not in known:
             raise EmuError("stub at 0x%x, which is not the entry of a function" % addr)
-        again = addr in self.stubs
         self.stubs[addr] = fn
-        if not again:
-            self.hook_add(UC_HOOK_CODE, self._on_stub, begin=addr, end=addr)
+        self.core.stub_hook(addr)
         moved = self.aliases.get(addr)
         if moved:       # C code calls the moved function directly, not through its old entry
             self.unalias[moved] = addr
-            again = moved in self.stubs
             self.stubs[moved] = fn
-            if not again:
-                self.hook_add(UC_HOOK_CODE, self._on_stub, begin=moved, end=moved)
+            self.core.stub_hook(moved)
 
     def cover(self, begin, end, tree=False):
         """Record the blocks executed in [begin, end): covered_insns() turns them into
@@ -717,7 +771,10 @@ class Machine:
             if name in self.core_names:     # a core register: the fast reader (Core.read32)
                 return self.core.read32(rid)
             return self.uc.reg_read(rid)
-        self.uc.reg_write(rid, value & 0xFFFFFFFF)
+        if name in self.core_names:
+            self.core.write32(rid, value)
+        else:
+            self.uc.reg_write(rid, value & 0xFFFFFFFF)
 
     # ---- the call ----
 
@@ -812,6 +869,7 @@ class Machine:
                 self._budget_hooked = True
                 self.hook_add(UC_HOOK_BLOCK, self._on_budget)
             count = 0
+        self.core.prune_stub_hooks(self.stubs)
         try:
             uc.emu_start(self.arch.start_address(addr, isa), lay.sentinel, count=count)
         except UcError as e:

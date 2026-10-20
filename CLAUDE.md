@@ -78,7 +78,10 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   now (`pytest --durations=15`, `BUILD/times/`, the `seconds` of `BUILD/autocases/*.json`), profile
   the top item (cProfile) and fix what dominates. Prefer the algorithmic fix (work per byte or per
   run that need not be done); move a hot path into C (`dread.fasthooks`) when a Python callback per
-  instruction or memory access dominates. Record before and after in the commit message.
+  instruction or memory access dominates. Record before and after in the commit message. A change
+  meant to be faster without changing results is checked with `bin/ab-cases [--target DIR] [--loop]
+  MAIN WORKTREE NAME...`: both checkouts generate the named functions' cases, timed, compared byte
+  for byte (a shell loop by hand twice compared nothing).
 - **A lifter change** (what it lifts, refuses or keeps across calls): run `dread lift --check` on
   every gizmo build before the suite and commit the regenerated `config/lifted.txt` with the change.
   A test that plants a fault and shows it through a caller assumes the caller is the original's
