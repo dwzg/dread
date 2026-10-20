@@ -312,7 +312,9 @@ class Program:
         ranges, and behind the image up to its limit) is ROOM, nobody's. With it a load of code as
         data is told from a load of a function's own constants (dread.emu.Machine.trace_reads): cases
         of FreeRTOS that pointed into another function's pool, or behind the image, read other bytes
-        in the rebuilt image."""
+        in the rebuilt image. A pool another function loads from with a pc-relative load or adr (a
+        compiler's constant tables shared by several functions) ends the extent in front of it: the
+        overlay keeps such a pool while a reader is original, and its loads are constants, not code."""
         if getattr(self, "_owners", None) is None:
             import array
             from dread.overlay import EXTENT_TAIL
@@ -325,6 +327,19 @@ class Program:
             for lo, hi in list(self.image.free) + [(end, limit)]:
                 for a in range(max(lo, self.base) & ~1, min(hi, limit), 2):
                     owners[(a - self.base) >> 1] = ROOM
+            readers = {}                # word address -> the functions that load it pc-relatively
+            literal, pc_address = getattr(self.arch, "literal", None), getattr(self.arch, "pc_address", None)
+            if literal is not None:
+                for k, f in enumerate(self.functions):
+                    for a in f.insns:
+                        insn = self.insn(a)
+                        if insn is None:
+                            continue
+                        ref = literal(insn, f.isa)
+                        ref = ref[0] if ref else (pc_address(insn, f.isa) if pc_address is not None else None)
+                        if ref is not None:
+                            readers.setdefault(ref & ~3, set()).add(k)
+            shared = sorted(readers)
             for k, f in enumerate(self.functions):
                 if not f.insns:
                     continue
@@ -336,6 +351,12 @@ class Program:
                 j = bisect.bisect_left(words, last)
                 if j < len(words) and words[j] < stop:
                     stop = last
+                j = bisect.bisect_left(shared, last)
+                while j < len(shared) and shared[j] < stop:
+                    if readers[shared[j]] - {k}:        # (a pool of another function's too)
+                        stop = shared[j]
+                        break
+                    j += 1
                 for a in range(max(f.insns[0] & ~1, self.base), min(stop, end), 2):
                     if owners[(a - self.base) >> 1] != ROOM:
                         owners[(a - self.base) >> 1] = min(k + 1, ROOM - 1)

@@ -97,3 +97,56 @@ def test_names_and_annotations(program):
     assert program.name_at(main.entry) == "main"
     assert program.name_at(0xDEAD0000) is None
     assert any(name == "g_config" for kind, a, name in program.symbols() if kind == "d")
+
+
+SHARED_POOL_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global f, g, h
+    .type f, %function
+    .thumb_func
+f:  ldr     r0, shared      @ a constant behind g: a compiler's table that several functions load from
+    bx      lr
+    .type g, %function
+    .thumb_func
+g:  ldr     r0, own
+    bx      lr
+    .align 2
+own:    .word 0x55667788    @ g's own pool
+shared: .word 0x11223344
+    .type h, %function
+    .thumb_func
+h:  bx      lr
+"""
+
+
+@pytest.mark.skipif(not (have("arm-none-eabi-as") and have("arm-none-eabi-ld")), reason="needs arm-none-eabi binutils")
+def test_a_pool_another_function_loads_is_no_part_of_an_extent(tmp_path):
+    """A function's extent runs to the next function, its pools included, but not into a pool
+    another function loads from with a pc-relative load: a compiler that shares its constant tables
+    between functions made such a load count as a load of code (another function's extent), and
+    every generated input of a function that only loads a constant was thrown away."""
+    from test_bench import TARGET
+    from dread import autocase, elfimport
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(SHARED_POOL_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "f", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    symbols = {s.name: s.value for s in Elf(elf).symbols if s.name in ("own", "shared")}
+    owners = p.extent_owners()
+    g = [f.name for f in p.functions].index("g") + 1
+    assert owners[(symbols["own"] - p.base) >> 1] == g                 # its own pool: its extent
+    assert owners[(symbols["shared"] - p.base) >> 1] == 0              # another's constants: nobody's
+    gen = autocase.Generator(t, t.image(), program=p)
+    m = gen.machine()
+    m.trace_reads(t.image().base, t.image().end, gen.code, gen.owners)
+    assert m.call(p.by_name["f"].entry, max_instructions=100).ret == 0x11223344 and not m.code_reads
