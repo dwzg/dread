@@ -481,3 +481,69 @@ def test_float_arguments_and_results_with_hard_float():
     flow = regflow.load(target, target.image(), Program(target, target.image()))
     assert {"s0", "s1", "s2"} <= set(flow.read_regs("lp_filter"))
     assert "s0" in flow.read_regs("to_millivolts") and "s1" not in flow.read_regs("to_millivolts")
+
+
+IT_FLAGS_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global k, m, caller
+    .type k, %function
+    .thumb_func
+k:                          @ libgcc's __aeabi_fmul: r3 set by a flag-setting instruction under ne,
+    mov.w   ip, #255        @ read under ne after more new flags (and on the branch's ne edge)
+    ands.w  r2, ip, r0, lsr #23
+    ittt    ne
+    andsne.w r3, ip, r1, lsr #23
+    teqne   r2, ip
+    teqne   r3, ip
+    beq     1f
+    adds    r0, r2, r3
+    bx      lr
+1:  movs    r0, #0
+    bx      lr
+    .type m, %function
+    .thumb_func
+m:                          @ against: new flags under ne, then a read under eq of the caller's r3
+    cmp     r0, #0
+    itt     ne
+    movne   r3, #1
+    cmpne   r1, #0
+    it      eq
+    addeq   r0, r3, #1
+    bx      lr
+    .type caller, %function
+    .thumb_func
+caller:
+    push    {r4, lr}
+    bl      k
+    bl      m
+    pop     {r4, pc}
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),
+                    reason="needs arm-none-eabi binutils")
+def test_a_flag_write_under_a_condition_keeps_its_writes(tmp_path):
+    """regflow 17: an instruction under a condition that sets the flags ran when the condition holds
+    afterwards (skipped, it would have left the flags and the condition false), so what was written
+    under that condition stays written for later reads under it. Without it libgcc's __aeabi_fmul
+    seemed to read r3, and soft-float code that keeps a value in r3 across it was refused (keeps_fp
+    of the compiler lab, built by GCC and by a second compiler)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(IT_FLAGS_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "caller", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    flow = regflow.analyse(Program(Target.load(str(tmp_path))))
+    assert flow.read_regs("k") == ["r0", "r1"], flow.read_regs("k")
+    assert flow.read_regs("m") == ["r0", "r1", "r3"], flow.read_regs("m")

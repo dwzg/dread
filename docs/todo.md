@@ -50,6 +50,37 @@ across compilers and replacing shape catalogues with analyses, not a profile per
 - [ ] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
   clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
   2026-10-20, here 6).
+- [ ] **What a second compiler's code needs** (found 2026-10-20 on a commercial compiler's lab
+  builds: the probes' objects from a bundle, linked here with GNU ld, newlib and libgcc, so none of
+  its library is involved; what the lab learned about that compiler stays in `~/dread-private/`,
+  not here; below only what DREAD lacks, in general terms). `dread lift --check`
+  on each build, and on GCC's lab build of the same probes for comparison; what stops functions,
+  generic first:
+  - [x] **regflow 17**: an instruction under a condition that sets the flags ran when the condition
+    holds afterwards, so what was written under that condition stays written for later reads under
+    it. Before, libgcc's `__aeabi_fmul` (`ittt ne; andsne r3, ...; teqne r2, ip; teqne r3, ip`)
+    seemed to read r3, and soft-float code that keeps a value in r3 across it was refused
+    (keeps_fp and op_fmul on GCC's build and the other compiler's). No gizmo table changed.
+  - [ ] **The run-time ABI's helpers by the standard**: `__aeabi_uldivmod` and the other helpers of
+    Arm's RTABI take their arguments in r0-r3, none on the stack (except the C++ array helper
+    `__aeabi_vec_cctor_nocookie_nodtor`), and return in r0, r0:r1 or r0-r3; libgcc's moves sp, so
+    its stack arguments were "not known" and every caller was refused (four of the lab's probes on
+    every build, GCC's too). A table in the ARM layer (stack arguments, `abi_results` as MSP430 has).
+  - [ ] **Calls whose results C cannot return**: the remainder of `__aeabi_uldivmod` in r2:r3, the
+    flags of `__aeabi_cfcmple` and its kin (the RTABI's compares that answer in the flags; libgcc's
+    own `__aeabi_fcmplt` calls them), a register the callee leaves that the caller reads: an inline-asm call that
+    binds r0-r3 and reads the flags after the `bl`, for callees without stack arguments.
+  - [ ] **Code shared between functions** (a compiler's cross call or outliner, at high
+    optimisation for size): functions that branch or fall into common code with their frame still
+    open, and common code called by `bl` whose callers read what it leaves; with a symbol of its own
+    or only a local label, so to DREAD it may belong to no function. Lift it as part of each function
+    that enters it (as IDA's tail chunks); a two-byte function (one `b.n` into it) stays original
+    until functions can move.
+  - [ ] **A lift step in the lab**: `dread cclab run --lift` gives each build a `[compiler]` (the
+    rebuilding GCC with the build's cpu) and runs `dread lift --check`; the probes' verdicts go into
+    results.json, `report` and `compare` ("lifted N of M"). Then a run at work checks the real images
+    with the compiler's own library, and the bundle's objects can be relinked at home by an option,
+    not by hand (2026-10-20: a hand-made adapter in `~/dread-private/`).
 - [x] **A cclab adapter for Compiler Explorer** (its public API: 52 ARM GCC versions, 21 ARM clang,
   48 RISC-V GCC, 42 RISC-V clang, TI Arm clang, 17 MSP430 GCC, SDCC on 2026-10-20): the probes
   compiled there to assembly, assembled and linked here, measured in the emulator as now; answers

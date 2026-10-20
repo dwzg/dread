@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 16                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 17                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -84,6 +84,9 @@ VERSION = 16                # 3: entry spills (variadic functions) are no use; 4
                             # r3, [r1]; beq L; ... L: cmp r2, r3 reads no r3 of the caller: Ubuntu's and
                             # Debian's newlib strcmp, which made its callers' callers look as if they read
                             # r3 on every older-toolchain build of the benchmark)
+                            # 17: a flag write under a condition keeps what was written under that condition
+                            # (it ran when the condition holds afterwards: libgcc's __aeabi_fmul seemed to
+                            # read r3, and every soft-float caller that kept a value in r3 was refused)
 
 
 class RegFlow:
@@ -231,8 +234,14 @@ def _rows(program, fn, mask, entry_name):
             state[pred] = covered | wm
         out.append(Row(a, insn.size, kind, target, falls, uses, kills, wm, pred is not None, stack, writes, covered,
                        fall_covered))
-        if wm & flags or kind in ("call", "icall"):
+        if kind in ("call", "icall"):
             state = {}
+        elif wm & flags:
+            # New flags end what was known under every condition but the instruction's own: one
+            # under a condition that holds now ran (skipped, it would have left the flags, and the
+            # condition false), and so did everything before it under that condition (libgcc's
+            # __aeabi_fmul: ittt ne; andsne r3, ...; teqne r2, ip; teqne r3, ip reads its own r3).
+            state = {pred: state[pred]} if pred is not None else {}
     return out
 
 
