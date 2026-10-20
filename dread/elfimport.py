@@ -386,6 +386,38 @@ def write_startup(toml_path, image_name, copies, key="startup", block=None):
     return True
 
 
+def called_without_function(target, image):
+    """[(entry, name, size)] for the targets of direct calls that lie in code no function holds: a
+    compiler's shared code with a local label only, called with bl from several functions (a reader
+    of the stripped image, Ghidra, makes such a target a function too). The size runs to the next
+    function or the end of the code run. [] when the image's bytes are not there."""
+    from dread.program import Program
+    try:
+        program = Program(target, image)
+    except Exception:
+        return []
+    entries = sorted(f.entry for f in program.functions)
+    out = {}
+    for fn in program.functions:
+        for a in fn.insns:
+            insn = program.insn(a)
+            if insn is None:
+                continue
+            kind, dest, _ = program.arch.flow(insn)
+            if kind != "call" or not isinstance(dest, int):
+                continue
+            t = dest & ~1
+            if t in out or program.function_at(t) is not None or program.insn(t) is None:
+                continue
+            end = next((e for e in entries if e > t), None)
+            for lo, hi, _ in program.ranges:
+                if lo <= t < hi:
+                    end = hi if end is None else min(end, hi)
+            if end:
+                out[t] = ("FUN_%08x" % t, end - t)
+    return [(t, name, size) for t, (name, size) in sorted(out.items())]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread import-elf", description=__doc__.split("\n\n")[0])
     parser.add_argument("elf")
@@ -458,6 +490,11 @@ def main(argv=None):
                                                         os.path.relpath(target.file)))
     elif free:
         print("free ranges for [image.%s] in dread.toml:\n%s" % (image.name, free_toml(free)))
+    called = called_without_function(target, image)
+    if called:
+        write_tables(image, sorted(functions + called), code, symbols)
+        print("%d calls into code no function held: %s, functions of their own"
+              % (len(called), ", ".join(name for _, name, _ in called)))
     return 0
 
 

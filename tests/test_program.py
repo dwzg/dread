@@ -150,3 +150,49 @@ def test_a_pool_another_function_loads_is_no_part_of_an_extent(tmp_path):
     m = gen.machine()
     m.trace_reads(t.image().base, t.image().end, gen.code, gen.owners)
     assert m.call(p.by_name["f"].entry, max_instructions=100).ret == 0x11223344 and not m.code_reads
+
+
+CALLED_LABEL_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global f, add2
+    .type f, %function
+    .thumb_func
+f:      push    {r6, lr}
+        movs    r6, #5
+        bl      tail            @ a call into code with a local label only (a compiler's shared code)
+        pop     {r6, pc}
+    .size f, . - f
+tail:   mov     r1, r6
+        b.w     add2
+    .type add2, %function
+    .thumb_func
+add2:   adds    r0, r0, r1
+        bx      lr
+    .size add2, . - add2
+"""
+
+
+@pytest.mark.skipif(not (have("arm-none-eabi-as") and have("arm-none-eabi-ld")), reason="needs arm-none-eabi binutils")
+def test_import_makes_a_called_label_a_function(tmp_path):
+    """A call's target in code no function holds (a second compiler's older version calls its shared
+    code by a local label: the lifter refused the caller, "calls into the middle of something")
+    becomes a function of its own, FUN_address, up to the next function."""
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(CALLED_LABEL_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "f", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    tail = [s.value for s in Elf(elf).symbols if s.name == "tail"][0]
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    fn = p.by_entry[tail]
+    assert fn.name == "FUN_%08x" % tail and fn.insns == [tail, tail + 2]

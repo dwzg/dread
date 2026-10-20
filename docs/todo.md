@@ -156,9 +156,12 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     (regflow's, r0-r3 without it) as read at a call, a tail call and a fall into another function,
     and names the caller's register a copy came from; a bound call binds such registers (r4-r11) from
     the C's variables. The other compiler's -Ohz build: every probe function (95 of 95).
-  - [ ] **A call into code no function owns** (`bl` into the other compiler's unnamed shared code, its
+  - [x] **A call into code no function owns** (`bl` into the other compiler's unnamed shared code, its
     older version: keeps_fp): the callee needs a name (a function of its own at the target, as
-    import does for calls it finds), then bound calls take what it leaves.
+    import does for calls it finds), then bound calls take what it leaves. Done 2026-10-21:
+    import-elf makes the target of a direct call into code no function holds a function, FUN_address,
+    up to the next function (as Ghidra would in a stripped image). Its older version's -Ohz build:
+    every probe function too (95 of 95).
   - [x] **A lift step in the lab**: `dread cclab run --lift` gives each build a `[compiler]` (the
     rebuilding GCC with the build's cpu) and runs `dread lift --check`; the probes' verdicts go into
     results.json, `report` and `compare` ("lifted N of M"). Then a run at work checks the real images
