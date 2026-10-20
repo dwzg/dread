@@ -108,6 +108,10 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     lifter makes them constants). GCC's -Os build 91 of 94 probe functions, the other compiler's
     -Ohz 79 to 83 of 95. Folding the loads instead (the pool then free for other C) is left for
     when the room matters.
+  - Measured 2026-10-21 (measure-31: regflow 17, the RTABI table, bound calls, the extent and pool
+    fixes, before shared code): the FreeRTOS builds unchanged but the hard-float ones, +6 each
+    (mps2f-gcc-Os 322 to 328, mps2f-clang-Os 310 to 316: libgcc's __aeabi_dcmpeq/ge/le/lt, which read
+    the flags of __aeabi_cdcmple, and vCompetingMathTask1/2 that call them); no build lost one.
   - [ ] **A va_list that walks from the saved argument registers into the stack arguments**: the
     other compiler's -On pick_va_5 pushes r1-r3 next to its caller's stack arguments, takes the
     address of the saved r1 and loads on upwards in a loop; the lifted C's frame is a local array,
