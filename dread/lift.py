@@ -108,6 +108,9 @@ FP_SCRATCH = ("s15", "s14", "s13", "s12")    # the inline assembly's own registe
 # none of them in s0-s15 itself (its own asm uses the scratch registers above), and s16-s31, which
 # a call keeps, it never touches.
 FPU_MIRRORED = frozenset("s%d" % k for k in range(16))
+# What a call can hand over behind it beyond a C result (_bound_call): the scratch registers and the
+# flags, in an asm statement around the bl
+BOUND = frozenset(("r1", "r2", "r3", "r12", "flags"))
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
@@ -791,6 +794,7 @@ class Lifter:
             if kind == "jump" and target is not None and (target & ~1) in depth:
                 targets.add(target & ~1)
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
+                    "bound": set(),
                     "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns),
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
@@ -810,7 +814,8 @@ class Lifter:
             if into is not None:
                 body.append("    " + self._tail_into(into, insn))
         stubs = {self.arch.target(i) & ~1 for i in insns if getattr(i, "call_via", None)}   # bl into a bx rN
-        return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]), frame, stack_params,
+        return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]) + sorted(self.ctx["bound"]),
+                      frame, stack_params,
                       [a for a in fn.insns if a not in depth and a not in stubs])
 
     def uses_fpu(self, insns):
@@ -1146,7 +1151,7 @@ class Lifter:
             callee = prog.by_entry.get(target & ~1)
             if callee is None:
                 raise Refused("0x%x calls into the middle of something (0x%x)" % (insn.address, target))
-            text = self._fp_call(self._call(callee, insn))
+            text = self._fp_call(self._call(callee, insn, bind=True))
             return text + " for (;;) { }" if self.never_returns(callee.name) else text
         if kind == "icall":
             if i == A.ARM_INS_BLX:
@@ -1514,7 +1519,7 @@ class Lifter:
             return ""
         return "((u64)r1 << 32 | r0)" if self._wide(self.ctx["fn"].name) else "r0"
 
-    def _call(self, callee, insn):
+    def _call(self, callee, insn, bind=False):
         if not IDENT.match(callee.name):
             raise Refused("0x%x calls %s, whose name is not a C identifier" % (insn.address, callee.name))
         nstack = self.stack_args(callee)
@@ -1525,7 +1530,9 @@ class Lifter:
         if leaves:
             raise Refused("0x%x calls %s, which reads %s its caller leaves" % (
                 insn.address, callee.name, ", ".join(leaves)))
-        self._check_after_call(callee, insn)
+        behind = self._check_after_call(callee, insn, bind=bind and nstack == 0)
+        if behind:
+            return self._bound_call(callee, behind)
         wide = self._wide(callee.name)
         self.ctx["callees"].add((callee.name, nstack, wide))
         d = self.ctx["depth"][insn.address]
@@ -1553,26 +1560,61 @@ class Lifter:
         args = list(ARGS) + ["*(volatile u32 *)(sp0 - %d)" % (d - 4 * k) for k in range(words)]
         return "r0 = ((u32 (*)(%s))%s)(%s); r1 = r2 = r3 = r12 = 0;" % (types, fp, ", ".join(args))
 
-    def _check_after_call(self, callee, insn):
-        """Refuse when the caller reads a scratch register or the flags behind the call that the
-        callee leaves (the C cannot know them). One the callee never writes, its callees included
-        (regflow's preserved: GCC's -fipa-ra keeps a value in it across such a call), still holds
-        the caller's own value, which the C keeps in its variable (_call does not clear it), unless
-        it held what the function's own caller left at the call (undefined there: refused)."""
+    def _check_after_call(self, callee, insn, bind=False):
+        """What the caller reads behind the call that the callee leaves and a C call cannot return:
+        a scratch register beyond the result, or the flags. One the callee never writes, its callees
+        included (regflow's preserved: GCC's -fipa-ra keeps a value in it across such a call), still
+        holds the caller's own value, which the C keeps in its variable (_call does not clear it),
+        unless it held what the function's own caller left at the call (undefined there: refused).
+        With bind (a callee without stack arguments), the others are returned for _bound_call (an
+        asm call that hands them over: the remainder of __aeabi_uldivmod in r2:r3, the flags of
+        __aeabi_cfcmple); without it, or for one it cannot hand over, the call is refused."""
         flow = self.flow
         if flow is None:
-            return
+            return set()
         result = {"r0", "r1"} if self._wide(callee.name) else {"r0"}
         preserved = set(flow.preserved_regs(callee.name))
         undef = self.ctx["undef"].get(insn.address, frozenset())
+        behind = set()
         for reg in flow.kept_regs(callee.name):
             if reg in FPU_MIRRORED:
                 continue                    # read back after the call (FPU_MIRROR)
             if reg in preserved and reg not in undef:
                 continue
             if reg not in result and (self.ctx["fn"].name, insn.address) in flow.sites_of(callee.name, reg):
+                if bind and reg in BOUND and reg not in preserved:
+                    behind.add(reg)
+                    continue
                 raise Refused("0x%x reads %s behind the call of %s (what the callee leaves)" % (
                     insn.address, reg, callee.name))
+        return behind
+
+    def _bound_call(self, callee, behind):
+        """A call whose caller reads behind it what the callee leaves beyond a C result (_check_after_call):
+        the bl in an asm statement with r0-r3 bound in and out (r12 too when it is read) and, when the
+        flags are read, an mrs right behind the bl, so that the C goes on with what the original's
+        caller finds. The callee takes no stack arguments; the r4-r11 it keeps by the convention."""
+        self.ctx["bound"].add(callee.name)      # no prototype (the asm names it); a callee all the same
+        regs = ["r0", "r1", "r2", "r3"] + (["r12"] if "r12" in behind else [])
+        binds = ", ".join('x%s __asm__("%s") = %s' % (r[1:], r, r) for r in regs)
+        outs = ['"+r"(x%s)' % r[1:] for r in regs]
+        text = "bl %s" % callee.name
+        if "flags" in behind:
+            outs.append('"=r"(t)')
+            text += "\\n\\tmrs %%%d, apsr" % (len(outs) - 1)
+        clobbers = ['"lr"', '"cc"', '"memory"'] + ([] if "r12" in behind else ['"r12"'])
+        if self.ctx.get("fp"):              # a hard-float callee may change s0-s15 (FPU_MIRROR reads them back)
+            clobbers += ['"s%d"' % k for k in range(16)]
+        lines = ["{ register u32 %s;" % binds]
+        if "flags" in behind:
+            lines.append("u32 t;")
+        lines.append('__asm__ volatile ("%s" : %s :: %s);' % (text, ", ".join(outs), ", ".join(clobbers)))
+        lines.append(" ".join("%s = x%s;" % (r, r[1:]) for r in regs))
+        if "flags" in behind:
+            lines.append("n = t >> 31; z = t >> 30 & 1; c = t >> 29 & 1; v = t >> 28 & 1;")
+        if "r12" not in behind and "r12" not in set(self.flow.preserved_regs(callee.name)):
+            lines.append("r12 = 0;")
+        return " ".join(lines) + " }"
 
     def stack_words(self, insn):
         """A push's or pop's words from the lowest address up: (register, C variable) each, an FPU

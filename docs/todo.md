@@ -70,10 +70,15 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     `[abi] stack_args`, regflow 18 takes the results as read. With regflow 17, probes accepted on
     the lab's GCC -Os build 85 to 89 of 94; on the other compiler's builds three or four more each.
     Gizmo's tables unchanged; on a32 `__aeabi_ldiv0` now returns r0:r1 (the standard's).
-  - [ ] **Calls whose results C cannot return**: the remainder of `__aeabi_uldivmod` in r2:r3, the
+  - [x] **Calls whose results C cannot return**: the remainder of `__aeabi_uldivmod` in r2:r3, the
     flags of `__aeabi_cfcmple` and its kin (the RTABI's compares that answer in the flags; libgcc's
     own `__aeabi_fcmplt` calls them), a register the callee leaves that the caller reads: an inline-asm call that
     binds r0-r3 and reads the flags after the `bl`, for callees without stack arguments.
+    Done 2026-10-20 (`_bound_call`; not for tail calls, whose callers C cannot hand r2:r3 either):
+    probes accepted on the lab's GCC -Os build 89 to 91 of 94 (libgcc's float compares 37 to 42 of
+    the library's), on the other compiler's -On build every probe; what stays there is the shared
+    code below. Broken on purpose (r2 cleared behind the bl), the 64-bit remainder failed 41 of 46
+    cases.
   - [ ] **Code shared between functions** (a compiler's cross call or outliner, at high
     optimisation for size): functions that branch or fall into common code with their frame still
     open, and common code called by `bl` whose callers read what it leaves; with a symbol of its own

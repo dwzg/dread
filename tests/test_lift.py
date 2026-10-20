@@ -557,3 +557,46 @@ def test_the_run_time_abi_helpers_take_no_stack_arguments(tmp_path):
     assert "__aeabi_uldivmod(r0, r1, r2, r3)" in lifter.lift(p.by_name["q"]).text
     flow = regflow.analyse(p)
     assert {"r0", "r1", "r2", "r3"} <= set(flow.kept_regs("__aeabi_uldivmod")), flow.kept_regs("__aeabi_uldivmod")
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_call_whose_caller_reads_what_c_cannot_return(tmp_path):
+    """The remainder of a 64-bit division comes back in r2:r3 of __aeabi_uldivmod, and libgcc's
+    __aeabi_fcmplt reads the flags __aeabi_cfcmple leaves: a C call returns neither, so both callers
+    were refused. The lifter puts such a call into an asm statement that binds r0-r3 and reads the
+    flags right behind the bl (_bound_call), and the lifted C agrees with the original."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(          # use reads both results, as callers of the originals do
+        "__attribute__((noinline)) unsigned long long r(unsigned long long a, unsigned long long b)"
+        " { return a % b; }\n"
+        "__attribute__((noinline)) int lt(float a, float b) { return a < b; }\n"
+        "__attribute__((noinline)) unsigned long long two(unsigned long long a, unsigned long long b,"
+        " unsigned long long c, unsigned long long d) { return a / b + c % d; }\n"
+        "volatile unsigned long long A, B, R, T; volatile float X, Y; volatile int L;\n"
+        "void use(void) { R = r(A, B); L = lt(X, Y); T = two(A, B, B, A); }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "use", "-o", elf, str(tmp_path / "t.c"), "-lgcc"], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    from dread import regflow
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    assert '"bl __aeabi_uldivmod"' in lifter.lift(p.by_name["r"]).text
+    assert 'bl __aeabi_cfcmple\\n\\tmrs' in lifter.lift(p.by_name["__aeabi_fcmplt"]).text
+    text = lifter.lift(p.by_name["two"]).text           # one call bound, one a C call: one prototype
+    assert text.count("extern u64 __aeabi_uldivmod") == 1 and '"bl __aeabi_uldivmod"' in text, text
+    lines = []
+    accepted = lift.check(t, t.image(), ["r", "__aeabi_fcmplt", "two"], out=lines.append, jobs=2)
+    assert set(accepted) == {"r", "__aeabi_fcmplt", "two"}, "\n".join(lines)
