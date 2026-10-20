@@ -182,6 +182,8 @@ class Generator:
         self.layout = layout or Layout(target, image)
         self._flow = None                   # dread.regflow, when a stub's mask needs it
         self._endless = None                # dread.noreturn, when a run hangs in a callee
+        self._switches = None               # {name: entry} of the functions that switch stacks
+        self._reaching = None               # {name: the stack switches its calls reach}
         self._environment = None            # see environment()
         self._stall_part = None             # see stall_part
         self.wild_pins = None               # see drop_wild
@@ -582,6 +584,62 @@ class Generator:
             return []
         reads = set(self._flow.read_regs(name))
         return [r for r in regs if r in reads]
+
+    def stack_switches(self):
+        """{name: entry} of the functions that load their stack pointer from memory not on the stack
+        (dread.lift.Lifter.switches_stacks): context switches. Only functions with an instruction that
+        writes the stack pointer without reading it are looked at."""
+        if self._switches is None:
+            from dread import lift
+            arch, lifter, found = self.program.arch, None, {}
+            for fn in self.program.functions:
+                for a in fn.insns:
+                    insn = self.program.insn(a)
+                    if insn is None:
+                        continue
+                    reads, writes = arch.reg_effects(insn)
+                    if "sp" in writes and "sp" not in reads:
+                        break
+                else:
+                    continue
+                if lifter is None:
+                    try:
+                        lifter = lift.make_lifter(self.program, self.flow() or None)
+                    except lift.NoLifter:
+                        break
+                if lifter.switches_stacks(fn):
+                    found[fn.name] = fn.entry
+            self._switches = found
+        return self._switches
+
+    def switch_stubs(self, name):
+        """[[entry, mask, 0]]: stubs for the stack switches that name's calls reach, however deep. A
+        context switch run for real in a function's case loads the next task's stack pointer from
+        a generated TCB and the run goes nowhere (FreeRTOS on the MSP430: every input of a function
+        that yields died so); stubbed, it returns, as a yield does in the cases on the ARM (a store
+        into the interrupt controller) and on RISC-V (ecall, a logged no-op)."""
+        switches = self.stack_switches()
+        if not switches:
+            return []
+        if self._reaching is None:
+            from dread import lift
+            callers = {}
+            for fn in self.program.functions:       # calls, tail calls, and calls through a register
+                direct = lift.direct_callees(self.program, fn) | {c.name for c in self.callees(fn.insns, depth=1)}
+                for c in direct:                    # that holds an entry (GCC's -Os on the MSP430: call r8)
+                    callers.setdefault(c, set()).add(fn.name)
+            reaching = {}
+            for s in switches:
+                seen, work = set(), [s]
+                while work:
+                    for c in callers.get(work.pop(), ()):
+                        if c not in seen:
+                            seen.add(c)
+                            work.append(c)
+                for c in seen:
+                    reaching.setdefault(c, set()).add(s)
+            self._reaching = reaching
+        return [[switches[s], self.reads_mask(s), 0] for s in sorted(self._reaching.get(name, ())) if s != name]
 
     def reads_mask(self, name):
         """The argument registers a function reads at its entry (dread.regflow), as a stub's logging
@@ -1713,7 +1771,9 @@ def cases_for(run, name, fn):
 def _generated(run, name, fn, gen, image, prog, options, calls, frame):
     """The generated cases of cases_for, from the cache or made and cached."""
     sizes = {a: prog.insn_size(a) for a in fn.insns}
-    keyed = dict(options, calls=calls, frame=frame)
+    have = {c[0] for c in calls}
+    calls = calls + [c for c in gen.switch_stubs(name) if c[0] not in have]   # (in the key: the cases of a
+    keyed = dict(options, calls=calls, frame=frame)                         # function that reaches none stay)
     if len(gen.ladder(fn.insns)) > SWEEP_STEPS:     # (only those: the other functions keep their cases)
         keyed["sweep_steps"] = SWEEP_STEPS
     key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, keyed, prog.arch, gen.environment())

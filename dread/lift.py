@@ -118,6 +118,13 @@ class Refused(Exception):
     """The function uses something the translation does not model exactly."""
 
 
+class StackSwitch(Refused):
+    """An instruction loads the stack pointer from memory that is not on the stack: from there on the
+    code runs on another stack. A context switch does so (FreeRTOS's vPortYield on the MSP430 saves
+    the registers on the task's stack, stores the stack pointer into the task's TCB and loads the
+    next task's from its TCB). Lifter.states(switch=True) ends the path there."""
+
+
 class Lifted:
     """The result for one function; unreached: its instructions no path from the entry reaches
     (padding behind an ARMv4T veneer's bx pc, say), which no case can run."""
@@ -204,6 +211,7 @@ class Lifter:
         return, when the caller has them already (dread.noreturn.find, which otherwise runs here)."""
         self.prog, self.arch, self.flow = program, program.arch, flow
         self._stack_args, self._entry, self._resolved, self._states, self._handlers = {}, {}, {}, {}, {}
+        self._switching = set()             # functions whose states(switch=True) met a StackSwitch
         self._noreturn = set(endless) if endless is not None else None
         path = program.image.table("asm_only")
         self.asm_only = read_ranges(path) if path and os.path.exists(path) else []
@@ -280,7 +288,7 @@ class Lifter:
         call = self._fp_call(self._call(callee, insn))
         return "%s %sreturn %s;" % (call, self._fp_sync("out"), self._ret())
 
-    def states(self, fn, strict=True):
+    def states(self, fn, strict=True, switch=False):
         """{address: (depth, values)} before every instruction a path from the entry reaches.
         depth: how many bytes the stack pointer is below its value at the entry. values: what is
         known of registers (by name) and frame slots (by their depth, an int): ("sp", k) for the
@@ -288,8 +296,10 @@ class Lifter:
         RET for the return address (lr at the entry, saved by a push, popped into another register:
         Thumb-1's pop {r3}; bx r3 is a return). Where paths meet, the values they agree on are kept.
         Raises Refused when the depth is not the same on every path or changes in a way not modelled
-        (and, when strict, when the code falls through out of the function)."""
-        key = (fn.name, strict)
+        (and, when strict, when the code falls through out of the function). switch: a load of the
+        stack pointer from memory not on the stack (StackSwitch) ends its path instead of refusing:
+        nothing behind it runs on this function's stack (stack_args, switches_stacks)."""
+        key = (fn.name, strict, switch)
         if key in self._states:
             return self._states[key]
         prog, arch = self.prog, self.arch
@@ -303,7 +313,13 @@ class Lifter:
                 raise Refused("0x%x does not decode" % a)
             depth, values = states[a]
             returning = arch.flow(insn)[0] == "return" or self.ret_jump(insn, values)
-            new, after = self.step(insn, depth, values)
+            try:
+                new, after = self.step(insn, depth, values)
+            except StackSwitch:
+                if not switch:
+                    raise
+                self._switching.add(fn.name)
+                continue
             if arch.predicate(insn) is not None:
                 if new != depth and not returning:
                     raise Refused("0x%x moves the stack pointer under a condition" % a)
@@ -330,9 +346,18 @@ class Lifter:
         MSP430 in the stack slot the call pushed, depth 0)."""
         return {self.arch.link_reg: self.RET}
 
-    def depths(self, fn, strict=True):
+    def depths(self, fn, strict=True, switch=False):
         """{address: depth} of states()."""
-        return {a: st[0] for a, st in self.states(fn, strict).items()}
+        return {a: st[0] for a, st in self.states(fn, strict, switch).items()}
+
+    def switches_stacks(self, fn):
+        """Whether a path of fn loads its stack pointer from memory not on the stack (StackSwitch):
+        a context switch, which generated cases of its callers stub (dread.autocase)."""
+        try:
+            self.states(fn, strict=False, switch=True)
+        except Refused:
+            pass
+        return fn.name in self._switching
 
     def ret_jump(self, insn, values):
         """bx rN or mov pc, rN with the return address in rN."""
@@ -527,6 +552,12 @@ class Lifter:
             v = values.get(dict(slots).get("sp"))
             if v is not None and v[0] == "sp":
                 return v[1]
+        # a literal is a constant (a reset handler's initial stack), not another task's stack
+        mem = next((o.mem for o in ops if o.type == A.ARM_OP_MEM), None)
+        if i == A.ARM_INS_LDR and mem is not None and mem.base not in (A.ARM_REG_SP, A.ARM_REG_PC) or \
+                i in self.LDMS and ops and ops[0].type == A.ARM_OP_REG and ops[0].reg != A.ARM_REG_SP:
+            raise StackSwitch("0x%x loads the stack pointer from memory not on the stack (a context switch?): "
+                              "%s %s" % (insn.address, insn.mnemonic, insn.op_str))
         raise Refused("0x%x changes the stack pointer in a way not modelled: %s %s" % (
             insn.address, insn.mnemonic, insn.op_str))
 
@@ -541,11 +572,11 @@ class Lifter:
             return declared
         self._stack_args[fn.name] = 0           # a recursive call counts nothing while this is worked out
         try:
-            depth = self.depths(fn, strict=False)
+            depth = self.depths(fn, strict=False, switch=True)
         except Refused:
             self._stack_args[fn.name] = None
             return None
-        states = self.states(fn, strict=False)
+        states = self.states(fn, strict=False, switch=True)
         top = 0
         for a in fn.insns:
             if a not in depth:

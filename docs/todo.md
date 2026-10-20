@@ -1019,6 +1019,20 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   on), and their callers' cases run the real context switch, which goes nowhere in a function's
   case (xTaskCreate's callers failed). Left out of the recipe until a context switch can be stubbed
   in cases.
+  Done generically (2026-10-20): a load of the stack pointer from memory not on the stack (mov
+  @r12, sp; ldr sp, [rN]; lw sp, k(rN); not a literal, not the frame) is a stack switch
+  (lift.StackSwitch): the function is refused itself, takes as stack arguments the words it reads
+  before the switch (vPortYield, xPortStartScheduler and the tick handler: none), so its callers lift
+  without [abi] stack_args; and the generated cases of every function whose calls reach one (calls
+  through a register too: GCC's -Os keeps vPortYield in r8 in prvIdleTask) stub it, the stub in their
+  cache key (38 functions of that build). The build: 143 as before, ulTaskGenericNotifyTake and
+  xTaskDelayUntil gained (no instruction covered before), vStartLEDFlashTasks and
+  vStartPolledQueueTasks lost to room; xQueueSemaphoreTake misses 21 instructions (72), and
+  xQueueGenericSend, xQueuePeek and xQueueReceive have no room (2,094 bytes short). Room is the limit
+  now: behind the image up to 0x8000, then the generated inputs' 16 KiB scratch, then 16 KiB of
+  erased flash up to the vectors. Next: the generator's pointer buffers (scratch + 4 KiB, sixteen of
+  1 KiB) bounded by the scratch's size (on this target they run past it and over the pointer stub in
+  its middle), then the scratch to the top of the flash and the room up to it (30 KiB).
 - [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the
   5-million-instruction limit (about 5 s per case on the MSP430 engine; two of gizmo's took over 300
   s). Bound a mutant's case by a multiple of what the original took on it.

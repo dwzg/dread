@@ -414,9 +414,11 @@ def test_a_full_room_drops_the_largest_and_the_check_goes_on(tmp_path):
 
 @pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_declared_stack_arguments_of_a_context_switch(tmp_path):
-    """A function that loads its stack pointer from memory (a context switch) has stack arguments the
-    lifter cannot count, so its callers are refused; [abi] stack_args says how many (FreeRTOS's MSP430
-    port's vPortYield: none), and they lift."""
+    """A function that loads its stack pointer from memory not on the stack (a context switch) takes
+    the stack words it reads before the switch: none here, so its callers lift as they are. One whose
+    stack pointer is not static otherwise (taken from a register the analysis does not know: here an
+    argument) has stack arguments the lifter cannot count, so its callers are refused; [abi]
+    stack_args says how many, and they lift."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
@@ -424,7 +426,10 @@ def test_declared_stack_arguments_of_a_context_switch(tmp_path):
         "unsigned saved;\n"
         "__attribute__((naked, noinline)) void switcher(void)\n"
         "{ __asm__ volatile (\"ldr r3, =saved\\n str sp, [r3]\\n ldr sp, [r3]\\n bx lr\\n .ltorg\"); }\n"
-        "unsigned caller(unsigned x) { switcher(); return x + 1; }\n")
+        "__attribute__((naked, noinline)) void adjuster(unsigned to)\n"
+        "{ __asm__ volatile (\"mov sp, r0\\n bx lr\"); }\n"
+        "unsigned caller(unsigned x) { switcher(); return x + 1; }\n"
+        "unsigned other(unsigned x) { adjuster(x); return x + 2; }\n")
     (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
                                    " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
                                    "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
@@ -440,15 +445,18 @@ def test_declared_stack_arguments_of_a_context_switch(tmp_path):
     for declared in (False, True):
         if declared:
             with open(tmp_path / "dread.toml", "a") as f:
-                f.write("\n[abi]\nstack_args = {switcher = 0}\n")
+                f.write("\n[abi]\nstack_args = {adjuster = 0}\n")
         t = Target.load(str(tmp_path))
         p = Program(t, t.image())
         lifter = lift.make_lifter(p)
+        assert lifter.switches_stacks(p.by_name["switcher"]) and lifter.stack_args(p.by_name["switcher"]) == 0
+        assert not lifter.switches_stacks(p.by_name["adjuster"])
+        assert "switcher(r0, r1, r2, r3)" in lifter.lift(p.by_name["caller"]).text
         if declared:
-            assert "switcher(r0, r1, r2, r3)" in lifter.lift(p.by_name["caller"]).text
+            assert "adjuster(r0, r1, r2, r3)" in lifter.lift(p.by_name["other"]).text
         else:
-            with pytest.raises(lift.Refused, match="calls switcher, whose stack arguments are not known"):
-                lifter.lift(p.by_name["caller"])
+            with pytest.raises(lift.Refused, match="calls adjuster, whose stack arguments are not known"):
+                lifter.lift(p.by_name["other"])
 
 
 def test_registers_the_callers_keep_are_compiled_call_saved(tmp_path):

@@ -526,3 +526,76 @@ def test_the_engine_stops_a_run_that_circles_in_known_code():
     assert run(16, 20_000) == ("returned", False)
     assert run(1024, 20_000) == ("stopped", True, True)
     assert gen.stall_part == autocase.STALL
+
+
+CONTEXT_SWITCH_CODE = """
+    .text
+    .global yields
+yields:                     ; keeps its argument across a context switch
+    push r10
+    mov r12, r10
+    call #switch_to
+    mov r10, r12
+    add #1, r12
+    pop r10
+    ret
+    .global switch_to
+switch_to:                  ; saves r4 on this task's stack, takes the next task's stack pointer from cur
+    push r4
+    mov &0x0400, r12
+    mov r1, 0(r12)
+    call #pick
+    mov &0x0400, r12
+    mov @r12, r1
+    pop r4
+    ret
+    .global pick
+pick:                       ; the next task: its TCB pointer is in next
+    mov &0x0402, &0x0400
+    ret
+"""
+
+
+@needs_ti_gcc
+def test_a_context_switch_takes_no_stack_arguments_and_is_stubbed_in_cases(tmp_path):
+    """A function that loads its stack pointer from memory not on the stack (a context switch:
+    FreeRTOS's vPortYield on the MSP430) is refused itself, takes the stack words it reads before
+    the switch as its stack arguments (none here: its callers lift without [abi] stack_args), and
+    the generated cases of a function that calls it stub it (run for real on FreeRTOS's MSP430
+    build, it loaded the next task's stack pointer from a generated TCB and the inputs died; this
+    small one survives on zeroed memory, so only the stub is checked here)."""
+    from dread import autocase, elfimport, liftfuzz, lift
+    from dread.elf import Elf
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.S").write_text(CONTEXT_SWITCH_CODE)
+    (tmp_path / "t.ld").write_text("MEMORY { text (rx) : ORIGIN = 0x4000, LENGTH = 0xbf00 }\n"
+                                   "SECTIONS { .text : { *(.text .text.*) } > text }\n")
+    elf_path = str(tmp_path / "t.elf")
+    subprocess.run(["msp430-elf-gcc", "-mcpu=msp430", "-nostdlib", "-T", str(tmp_path / "t.ld"), "-Wl,-e,yields",
+                    "-o", elf_path, str(tmp_path / "t.S")], check=True)
+    (tmp_path / "dread.toml").write_text(liftfuzz.ISAS["msp430"]["toml"].replace(
+        'original = "fuzz.bin"', 'original = "t.bin"').replace('entry = "f0"', 'entry = "yields"'))
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    elf = Elf(elf_path)
+    elfimport.write_tables(image, *elfimport.tables(elf, isa="msp430"))
+    (tmp_path / "t.bin").write_bytes(elf.payload(image.base, image.erased)[0])
+    program = Program(target, image)
+    lifter = lift.make_lifter(program)
+    switch_to = program.by_name["switch_to"]
+    assert lifter.switches_stacks(switch_to) and not lifter.switches_stacks(program.by_name["yields"])
+    assert lifter.stack_args(switch_to) == 0
+    with pytest.raises(lift.StackSwitch, match="loads the stack pointer from memory not on the stack"):
+        lifter.lift(switch_to)
+    assert "switch_to(" in lifter.lift(program.by_name["yields"]).text
+    gen = autocase.Generator(target, image)
+    stubs = gen.switch_stubs("yields")
+    assert [s[0] for s in stubs] == [switch_to.entry]
+    fn = program.by_name["yields"]
+    cases = gen.generate("yields", fn.entry, fn.insns, calls=stubs)
+    got = set()
+    for c in cases:
+        got |= gen.coverage(fn.entry, fn.insns, c, c.get("limit", 200_000))
+    assert got == set(fn.insns)
+    assert cases and all(switch_to.entry in [c[0] for c in case["calls"]] for case in cases)

@@ -275,6 +275,10 @@ class Msp430Lifter(lift.Lifter):
             return depth - 2
         d = f.dst
         if d is not None and d.mode == "reg" and d.reg == 1 and not f.byte:
+            if f.op == "mov" and (f.src.mode in ("abs", "sym") or f.src.mode in ("idx", "ind", "inc")
+                                  and f.src.reg not in (0, 1)):
+                raise lift.StackSwitch("0x%x loads the stack pointer from memory not on the stack (a context "
+                                       "switch?): %s %s" % (insn.address, insn.mnemonic, insn.op_str))
             if f.op in ("add", "sub") and f.src.mode == "imm":
                 k = f.src.value if f.src.value < 0x8000 else f.src.value - 0x10000
                 return depth - k if f.op == "add" else depth + k
@@ -312,7 +316,7 @@ class Msp430Lifter(lift.Lifter):
             return declared
         self._stack_args[fn.name] = 0           # a recursive call counts nothing while this is worked out
         try:
-            states = self.states(fn, strict=False)
+            states = self.states(fn, strict=False, switch=True)    # (a context switch: until it switches)
         except Refused:
             self._stack_args[fn.name] = None
             return None

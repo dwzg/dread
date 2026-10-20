@@ -139,7 +139,7 @@ address faults before the run can stop.
 | `args` | how many argument registers (default ARM 4: r0-r3; RISC-V 8: a0-a7) |
 | `callee_saved` | the registers a function preserves (default ARM r4-r11; RISC-V s0-s11) |
 | `result` | the registers a result comes back in (default ARM r0, r1; RISC-V a0, a1) |
-| `stack_args` | `{name = words}`: the stack words a function takes where the lifter cannot count them, its stack pointer not being static (a context switch: FreeRTOS's MSP430 port's `vPortYield` takes none); its callers are refused without it |
+| `stack_args` | `{name = words}`: the stack words a function takes where the lifter cannot count them, its stack pointer not being static; its callers are refused without it. A context switch needs none: the words it reads above its return address before it loads its stack pointer from memory not on the stack are counted (FreeRTOS's MSP430 port's `vPortYield`: none), and generated cases of the functions whose calls reach it stub it |
 | `float` | `"hard"`: floats travel in the FPU's argument registers (ARM: s0-s15, as the procedure call standard's VFP variant says), which the register flow, the generated cases and the lifted C then follow; `"soft"`: in the core registers. Default: hard where `[compiler] cflags` has `-mfloat-abi=hard` |
 
 ### `[compiler]`

@@ -144,6 +144,9 @@ class RiscVLifter(lift.Lifter):
             v = self.frame_value(src, depth, values)
             if v is not None:
                 return v[1]
+        if f.op == "lw" and f.rd == 2 and f.rs1 != 2:
+            raise lift.StackSwitch("0x%x loads the stack pointer from memory not on the stack (a context switch?): "
+                                   "%s %s" % (insn.address, insn.mnemonic, insn.op_str))
         raise Refused("0x%x changes the stack pointer in a way not modelled: %s %s" % (
             insn.address, insn.mnemonic, insn.op_str))
 
@@ -176,7 +179,7 @@ class RiscVLifter(lift.Lifter):
             return declared
         self._stack_args[fn.name] = 0
         try:
-            states = self.states(fn, strict=False)
+            states = self.states(fn, strict=False, switch=True)    # (a context switch: until it switches)
         except Refused:
             self._stack_args[fn.name] = None
             return None
