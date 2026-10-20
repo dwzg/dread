@@ -645,8 +645,19 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   -O2 and RISC-V GCC -O2 unchanged, none lost; the -Os builds compiled it at -Os already. Of the 17
   task loops of GCC -O0 whose system runs differed (their -O0 frames overflowed the task stacks:
   FreeRTOS's own check called vApplicationStackOverflowHook in prvBlockingTask's run), 2 are
-  accepted, 11 agree and miss 2 to 121 instructions, 4 still differ (main_full: the system run's
-  instruction-count chunks, below).
+  accepted, 11 agree and miss 2 to 121 instructions, 4 still differed. One of them, main_full, was
+  the system run's own doing: its chunks ended by the engine's count of instructions, inside blocks,
+  whose rest the next chunk counted again, at points the two images do not share (the rebuilt
+  main_full ran 106 clock units behind at the limit: two device accesses more). Chunks end where a
+  block starts since, before the block counts; main_full agrees and misses one instruction (the loop
+  behind vTaskStartScheduler, which runs only if the scheduler cannot start). With both changes on
+  fresh copies of all eleven builds: GCC -O0 322, -O2 237, RISC-V GCC -Os 218, -O2 168 and clang -Os
+  210 (main on each RISC-V build, by the chunk fix), the rest as at measure-24, none lost: 1,970 of
+  2,763 on the eight builds (+13). Still differing on GCC -O0: prvQueueSetSendingTask (also on GCC
+  -Os), prvSemaphoreTest, vRegTest2Implementation. Clang -Os's xTaskGenericNotify and
+  xTaskGenericNotifyFromISR are lifted since the switch resolver's filled registers (refused
+  before) and UNCOVERED: the generator never set the switch index to 3 or 4 (tbb behind cmp #4), nor
+  the task's notify state to "waiting".
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with
