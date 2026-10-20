@@ -569,3 +569,56 @@ def test_a_run_that_ends_on_a_branch_to_itself_is_a_case(tmp_path):
             got |= gen.coverage(fn.entry, fn.insns, c, c.get("limit", 200_000))
         assert got == set(fn.insns), fn.name
         assert loop or any(c.get("hang") for c in cases)
+
+
+CHAIN_C = """
+struct node { unsigned pad[2]; struct node *next; unsigned value; };
+struct list { unsigned count; unsigned pad; struct node *end; };
+__attribute__((noinline)) unsigned put_last(struct list *l, unsigned *key)
+{
+    if (*key == 0xFFFFFFFFu) {          /* behind a compare: the end's next node gets the key */
+        l->end->next->next->value = *key;
+        return 1;
+    }
+    l->count++;
+    return 0;
+}
+"""
+
+
+def test_a_near_miss_is_chased_through_pointers_no_input_set(tmp_path, monkeypatch):
+    """The compare-guided stage solves *key == -1, and the run then follows l->end->next->next, words no
+    input set (0: the image lies at 0, as on FreeRTOS's MPS2 builds, so the run reads and writes the
+    image instead of faulting, and the main stage learns no pointer from it): a near miss. Chased, those words point to
+    buffers of their own, one pointer deeper a step, and the path is covered; without the chase it is
+    not (FreeRTOS's vListInsert, whose path behind its item's value 0xFFFFFFFF reaches a list
+    pointer nobody had set)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import autocase, elfimport
+    (tmp_path / "t.c").write_text(CHAIN_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0, LENGTH = 64K\n"     # (flash at 0, as on
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"    # the MPS2 boards)
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "put_last", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET.replace("base = 0x08000000, size = 0x100000", "base = 0, size = 0x100000")
+                                         + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+
+    def missed(chase):
+        gen = Generator(target, target.image())
+        if not chase:
+            gen.chase_buffers = []
+        fn = gen.program.by_name["put_last"]
+        got = set()
+        for c in gen.generate("put_last", fn.entry, fn.insns):
+            got |= gen.coverage(fn.entry, fn.insns, c, c.get("limit", 200_000))
+        return set(fn.insns) - got
+    assert missed(True) == set()
+    assert missed(False)

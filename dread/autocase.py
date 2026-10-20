@@ -79,7 +79,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 25       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 26       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -112,6 +112,8 @@ VERSION = 25       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 25: memory cells do not overlap (Cells.add): a pointer one byte off read the same
                   # buffer as new cells, written over most of the first one's bytes in every input;
                   # a run that ends on a branch to itself (for (;;);) is a case (Machine.self_loop_at)
+                  # 26: the compare-guided stage chases a near miss: a run that reached new code and
+                  # then failed is tried again with the words no input set as pointers (Generator.chase)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -144,6 +146,10 @@ FLOATS = (0x00000000, 0x80000000, 0x3F800000, 0xBF800000, 0x3F000000, 0xBF000000
           0x00000001, 0x007FFFFF, 0x7F800000, 0xFF800000, 0x7FC00000, 0x7F800001)
 HUNG_STOP = 0.5             # share of fresh inputs in which such a callee ends the run instead ("stops")
 POINTER_REACH = 0x1000      # a fault this far behind an input's value makes the input a learned pointer
+CHASE_STEPS = 4             # a near miss of the compare-guided stage is tried again so often, one pointer deeper each
+CHASE_RUNS = 64             # near misses chased per function at most
+CHASE_WORDS = 32            # words one step sets at most
+CHASE_BUFFER = 0x100        # bytes a chased word's buffer has
 POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTER_BASE ...
 POINTER_STEP = 0x400        # ... this far apart ...
 POINTER_SLOTS = 16          # ... at most this many different ones (then they are reused)
@@ -199,6 +205,10 @@ class Generator:
         self.scratch = mem.scratch_base
         self.fake_pointer = mem.scratch_base + mem.scratch_size // 2 & ~0xFFF      # stub for calls through pointers
         self.pointer_slots = self._pointer_slots(mem.scratch_size)
+        # buffers of chased words (chase): the scratch above the pointer stub's page and the learned
+        # pointers' buffers, where there is room (none on a 16 KiB scratch)
+        low = max(self.fake_pointer + 0x1000, max(self.pointer_slots) + POINTER_STEP)
+        self.chase_buffers = list(range(low, mem.scratch_base + mem.scratch_size - CHASE_BUFFER + 1, CHASE_BUFFER))
         self.boundary = tuple(range(17)) + (0x7F, 0x80, 0xFF, 0x100, 0x7FFF, 0x8000, 0xFFFF, 0x10000, 0x7FFFFFFF,
                                             0x80000000, 0xFFFFFFFE, 0xFFFFFFFF, self.scratch, self.scratch + 0x40,
                                             self.scratch + 0x104)
@@ -1424,6 +1434,8 @@ class Generator:
         image, lay = self.image, self.layout
         words_set = set(words)
         solver = random.Random("%s/%d/solve" % (seed_name(entry), SEED))
+        width_bytes = self.arch.reg_bits // 8          # a pointer's bytes
+        chase_set = set(self.chase_buffers)
         setters = self.flag_setters(words)
         readers = {at: read for at, read in setters.values()}
         runs, cost, total = [0], [0], [0, 0]
@@ -1433,7 +1445,9 @@ class Generator:
             return runs[0] >= SOLVE_RUNS or cost[0] >= SOLVE_COST or \
                 total[0] >= 4 * SOLVE_RUNS or total[1] >= 4 * SOLVE_COST or self.late()
 
-        def attempt(case, watch=(), record=False):
+        chases = [CHASE_RUNS]
+
+        def attempt(case, watch=(), record=False, steps=CHASE_STEPS):
             runs[0] += 1
             cost[0] += len(case["mem"]) + 50
             total[0] += 1
@@ -1465,12 +1479,33 @@ class Generator:
                 m.call(entry, *case["args"], max_instructions=min(limit, SOLVE_LIMIT),
                        stall=self.stall_for(min(limit, SOLVE_LIMIT)))
             except EmuError:
-                return None, None
+                return chase(case, m, watch, record, steps)
             if self.touches_image(m):
-                return None, None
+                return chase(case, m, watch, record, steps)
             known.learn(m.reads)
             m.covered = m.covered_insns(words)
             return m, seen
+
+        def chase(case, m, watch, record, steps):
+            """A near miss: a run that reached code no input had reached and then failed, at a fault or
+            at a load from or a store into the image, mostly through a pointer no input set (read as 0:
+            vListInsert, its item's value solved, came to a list pointer nobody had set). Every word it
+            read that no input gave (in neither the image, the stack nor a peripheral) points to a
+            zeroed buffer of its own (Generator.chase_buffers), and the run is tried again: one pointer
+            of a chain deeper each step. The words join the case, so that a run that ends is a case
+            like any other (the original decides what it does with them)."""
+            if steps <= 0 or chases[0] <= 0 or not self.chase_buffers or not m.covered_insns(words) - covered:
+                return None, None
+            given = {a for a, _, _ in case["mem"]}
+            fresh = [a for a, n in sorted(m.reads.items()) if n == width_bytes and a not in given
+                     and not image.base <= a < image.end and not self.target.memory.is_io(a)][:CHASE_WORDS]
+            used = sum(1 for a, n, v in case["mem"] if v in chase_set)
+            if not fresh or used + len(fresh) > len(self.chase_buffers):
+                return None, None
+            chases[0] -= 1
+            for k, a in enumerate(fresh):
+                case["mem"].append([a, width_bytes, self.chase_buffers[used + k]])
+            return attempt(case, watch, record, steps - 1)
 
         effects, fillable = [], []
 
