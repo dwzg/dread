@@ -583,11 +583,17 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   and the MSP430F449 demo built by TI's msp430-elf-gcc -Os with TI's support files (installed in
   ~/.local/opt): 250 functions, the listing rebuilds byte for byte, Ghidra finds 43 without symbols;
   no lifter for MSP430 yet, and no system-run models of its board.
-- [ ] **Stores through small pointers into an image at address 0** (the MPS2 builds have their flash
+- [x] **Stores through small pointers into an image at address 0** (the MPS2 builds have their flash
   at 0): a store through a null or small pointer lands in the image without a fault, the run is
   rejected as touching the image, and the generator learns nothing from it (pointer learning looks
   at faults); every input of one -O0 list function failed so, in a fresh process too. Learn from such
   stores (and loads of code as data) as from faults; measure on every build.
+  Tried (2026-10-20): stores into the image learned from as faults, at the lowest address written.
+  No -O0 list function fails generation any more (only vAssertCalled, which waits for a debugger, and
+  cleanup_stdio), and on six uncovered functions of GCC -Os the cases covered as much or less
+  (xQueuePeek 84 instructions against 89, vTaskGenericNotifyGiveFromISR 31 against 36): the learned
+  pointers mostly moved the random search. Not kept; loads of code as data give no address (the C
+  hooks keep a flag).
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger). --task input now also asks for the functions the lift
   check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed
