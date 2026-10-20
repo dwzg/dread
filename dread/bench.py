@@ -50,12 +50,22 @@ Recipe format:
     [[builds]]
     name = "B"
     project = "P"
+    toolchain = "ubuntu-22.04"  # optional: compile and link in that toolchain's container (below)
     cc = "arm-none-eabi-gcc"  # the compiler; ld: the link driver (default cc)
     cflags = [...]            # for compiling (and linking, unless lflags gives the link driver's own)
     dread_cflags = [...]      # optional: the flags rewritten C is compiled with (default: cflags
                               # without -g, -W, -M, -I and -D options)
     [[builds.patches]]        # optional: substitutions of this build only, after the project's
 
+Toolchains: a build that names `toolchain = NAME` is compiled and linked in a podman container of the
+image localhost/dread-tc-NAME, made from bench/toolchains/NAME.containerfile (a distribution's
+packaged cross compilers; `dread bench toolchain NAME...` builds images, which a build also does when
+its image is missing or older than its file). The source is mounted read-only and the build's
+directory read-write, both at their own paths, without network; DREAD itself runs on the host and
+compiles rewritten and lifted C with the host's compiler. Every build records the version its
+compiler gives (cc --version), which the report shows: a compiler's version decides code shapes.
+
+    dread bench toolchain NAME... [--rebuild]
     dread bench fetch RECIPE
     dread bench build RECIPE [BUILD...]
     dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,noreturn]
@@ -113,6 +123,50 @@ def run(cmd, cwd=None, quiet=True, timeout=None):
     if r.returncode:
         raise BenchError("%s failed (%d):\n%s" % (" ".join(cmd[:3]), r.returncode, (r.stderr or r.stdout)[-3000:]))
     return r.stdout
+
+
+# ---- toolchains in containers ----
+
+IMAGE_PREFIX = "localhost/dread-tc-"
+
+
+def toolchain_file(name):
+    return os.path.join(ROOT, "bench", "toolchains", name + ".containerfile")
+
+
+def toolchain_digest(name):
+    """What a toolchain's image is made from (its Containerfile), for build.json and the image's label."""
+    path = toolchain_file(name)
+    if not os.path.exists(path):
+        raise BenchError("no toolchain %s (%s)" % (name, path))
+    with open(path, "rb") as f:
+        return hashlib.sha1(f.read()).hexdigest()
+
+
+def ensure_toolchain(name, rebuild=False, out=print):
+    """The image of a toolchain, built with podman when it is missing, older than its file, or
+    rebuild is set; returns the image's name."""
+    if shutil.which("podman") is None:
+        raise BenchError("toolchain %s needs podman" % name)
+    digest, image = toolchain_digest(name), IMAGE_PREFIX + name
+    r = subprocess.run(["podman", "image", "inspect", "--format", "{{index .Labels \"dread.digest\"}}", image],
+                       capture_output=True, text=True)
+    if rebuild or r.returncode or r.stdout.strip() != digest:
+        out("toolchain %s: building %s" % (name, image))
+        import tempfile
+        with tempfile.TemporaryDirectory() as context:
+            run(["podman", "build", "-q", "--label", "dread.digest=" + digest, "-t", image, "-f",
+                 toolchain_file(name), context], timeout=3600)
+    return image
+
+
+def in_container(cmd, image, mounts, cwd):
+    """cmd as podman runs it in image: each (directory, read_only) of mounts at its own path, the
+    working directory cwd, no network (rootless podman leaves what it writes the user's)."""
+    argv = ["podman", "run", "--rm", "--network=none"]
+    for path, read_only in mounts:
+        argv += ["-v", "%s:%s%s" % (path, path, ":ro" if read_only else "")]
+    return argv + ["-w", cwd, image] + list(cmd)
 
 
 # ---- the source ----
@@ -242,8 +296,10 @@ def made_from(recipe, name):
     target's models and scenarios, the build's own entry): build.json keeps it, and measure() builds
     again when it changed since."""
     b = the_build(recipe, name)
-    blob = json.dumps({"source": recipe.get("source"), "project": recipe["projects"][b["project"]], "build": b},
-                      sort_keys=True, default=str)
+    made = {"source": recipe.get("source"), "project": recipe["projects"][b["project"]], "build": b}
+    if b.get("toolchain"):
+        made["toolchain"] = toolchain_digest(b["toolchain"])
+    blob = json.dumps(made, sort_keys=True, default=str)
     return hashlib.sha1(blob.encode()).hexdigest()
 
 
@@ -261,20 +317,25 @@ def build(recipe, name, bench=None, jobs=None, out=print):
     flags = home(b["cflags"]) + ["-D" + d for d in project.get("defines", ())] + ["-I" + d for d in first] + \
         ["-I" + os.path.join(src, i) for i in project.get("includes", ())]
     cc, ld = b["cc"], b.get("ld", b["cc"])
+    image = ensure_toolchain(b["toolchain"], out=out) if b.get("toolchain") else None
+
+    def tool(cmd):                      # (on the host, or in the toolchain's container)
+        return in_container(cmd, image, [(src, True), (where, False)], src) if image else cmd
+    version = run(tool([cc, "--version"]), cwd=src).strip().splitlines()[0]
     started = time.time()
     objects = []
 
     def compile_one(item):
         source, path = item
         obj = os.path.join(objdir, source.replace("/", "__") + ".o")
-        run([cc] + flags + ["-c", path, "-o", obj], cwd=src)
+        run(tool([cc] + flags + ["-c", path, "-o", obj]), cwd=src)
         return obj
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs or os.cpu_count() or 4) as pool:
         objects = list(pool.map(compile_one, sorted(files.items())))
     elf = os.path.join(where, "firmware.elf")
     script = ["-T", os.path.join(src, project["ldscript"])] if project.get("ldscript") else []
-    run([ld] + home(b.get("lflags", b["cflags"])) + script + ["-Wl,-Map=" + os.path.join(work, "firmware.map"),
-                                                              "-o", elf] + objects + home(project.get("link", ())),
+    run(tool([ld] + home(b.get("lflags", b["cflags"])) + script + ["-Wl,-Map=" + os.path.join(work, "firmware.map"),
+                                                                   "-o", elf] + objects + home(project.get("link", ()))),
         cwd=src)
     seconds = time.time() - started
     os.makedirs(os.path.join(where, "original"), exist_ok=True)
@@ -301,6 +362,7 @@ def build(recipe, name, bench=None, jobs=None, out=print):
             shutil.rmtree(stale, ignore_errors=True)
     with open(os.path.join(where, "build.json"), "w") as f:
         json.dump({"recipe": recipe["name"], "build": name, "project": b["project"], "cc": cc,
+                   "toolchain": b.get("toolchain"), "version": version,
                    "cflags": b["cflags"], "sources": len(files), "seconds": round(seconds, 1),
                    "made_from": made_from(recipe, name)}, f, indent=1)
     out("%s: built %d sources in %.0f s" % (name, len(files), seconds))
@@ -356,7 +418,8 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
                     "image_bytes": len(image.payload())})
     with open(os.path.join(where, "build.json")) as f:
         info = json.load(f)
-    metrics.update(cc=info["cc"], cflags=" ".join(info["cflags"]))
+    metrics.update(cc=info["cc"], cflags=" ".join(info["cflags"]), toolchain=info.get("toolchain"),
+                   version=info.get("version"))
     truth = {fn.entry for fn in program.functions}
     if "asm" in steps:
         raw_file = os.path.join(where, "work", "raw.txt")
@@ -477,6 +540,12 @@ def summary_line(m):
     return ", ".join(parts)
 
 
+def compiler_cell(m):
+    """The report's compiler column: the version the compiler gave, and the toolchain's image."""
+    text = m.get("version") or os.path.basename(m.get("cc", ""))
+    return text + (" (%s)" % m["toolchain"] if m.get("toolchain") else "")
+
+
 def report(recipe, bench=None, out=print):
     """BENCH/NAME/report.md from every build's metrics.json."""
     rows = []
@@ -495,7 +564,7 @@ def report(recipe, bench=None, out=print):
         v = lf.get("verdicts", {})
         r = m.get("record", {})
         lines.append("| %s | %s | %d | %d | %s | %s | %s | %s | %s | %s |" % (
-            m["build"], os.path.basename(m.get("cc", "")), m["functions"], m["instruction_bytes"],
+            m["build"], compiler_cell(m), m["functions"], m["instruction_bytes"],
             ("identical" if m["asm"]["identical"] else "differs") + (" (%d raw)" % m["asm"]["raw_words"]
                                                                      if m["asm"]["raw_words"] else "")
             if "asm" in m else "-",
@@ -520,13 +589,18 @@ def report(recipe, bench=None, out=print):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread bench", description=__doc__.split("\n\n")[0])
-    parser.add_argument("action", choices=("fetch", "build", "measure", "report", "all"))
-    parser.add_argument("recipe", help="a recipe file, or the name of one in DREAD's bench/")
-    parser.add_argument("builds", nargs="*", help="builds of the recipe (default: all)")
+    parser.add_argument("action", choices=("fetch", "build", "measure", "report", "all", "toolchain"))
+    parser.add_argument("recipe", help="a recipe file, or the name of one in DREAD's bench/ (toolchain: a toolchain)")
+    parser.add_argument("builds", nargs="*", help="builds of the recipe (default: all; toolchain: more toolchains)")
+    parser.add_argument("--rebuild", action="store_true", help="toolchain: build the image again")
     parser.add_argument("--steps", default=",".join(STEPS), help="measuring steps (default: %s)" % ",".join(STEPS))
     parser.add_argument("--jobs", type=int, help="compilers at once")
     args = parser.parse_args(argv)
     try:
+        if args.action == "toolchain":
+            for name in [args.recipe] + args.builds:
+                print("%s: %s" % (name, ensure_toolchain(name, rebuild=args.rebuild)))
+            return 0
         recipe = load(args.recipe)
         names = args.builds or [b["name"] for b in recipe["builds"]]
         steps = [s for s in args.steps.split(",") if s]

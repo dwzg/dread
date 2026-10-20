@@ -74,7 +74,9 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   check refused went on to remove its worktree and branch). CI runs every test on Ubuntu's older
   compilers: look at its run after a push (`gh run list --repo dwzg/dread`); the push script refuses
   to push while the last finished run on main is red, except the push that fixes it (`--ci-red-ok`).
-  On 2026-10-20 CI had been red for 74 pushes nobody looked at.
+  On 2026-10-20 CI had been red for 74 pushes nobody looked at. `bin/with-toolchain NAME COMMAND...`
+  runs a command (the tests) with the compilers of a toolchain image (bench/toolchains/, podman) in
+  front of the host's: a change that depends on compiler versions is tried on CI's older ones first.
 - **Stay polite on the machine**: long runs go to the background (polite, as the tools are);
   nothing that fills memory or runs without a bound.
 - **Beside a long run**: a bench measurement runs from the checkout and starts every step anew, so

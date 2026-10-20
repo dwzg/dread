@@ -17,16 +17,36 @@ comparison with the original keeps the results right whatever the compiler; what
 cost is coverage and acceptance, where the tools recognise code shapes. The way out is measuring
 across compilers and replacing shape catalogues with analyses, not a profile per compiler.
 
-- [ ] **Toolchains in containers** (podman, rootless, installed by the user 2026-10-20): an image per
+- [x] **Toolchains in containers** (podman, rootless, installed by the user 2026-10-20): an image per
   toolchain, built from a distribution's packages (Ubuntu 20.04: arm-none-eabi-gcc 9.2; 22.04: 10.3;
   24.04: 13.2; Debian 12: 12.2; Debian 13: 14) and LLVM's apt repository (clang 14 to 21), with the
   RISC-V GCC of the same distributions; `dread bench` builds a recipe with `toolchain = IMAGE`
   inside the container (the compile and link steps only; DREAD's analysis runs here), the image's
   compiler versions in the report. Done when a FreeRTOS build of each image goes through the bench.
-- [ ] **The benchmark across compiler versions**: the M3 GCC -Os and -O2 and clang -Os builds and
+  Done 2026-10-20: five images (bench/toolchains/: Ubuntu 20.04, 22.04, 24.04, Debian 12, 13: GCC 9.2,
+  10.3, 13.2, 12.2, 14.2, binutils 2.34 to 2.44, clang 12, 14, 18, 16, 19), a build's `toolchain =
+  NAME`, the version each compiler gives in build.json and the report; a FreeRTOS build in an image
+  takes 6 to 10 s. `bin/with-toolchain NAME COMMAND...` runs the tests with an image's compilers.
+- [ ] **The benchmark across compiler versions** (first round done, 2026-10-20, below): the M3 GCC -Os and -O2 and clang -Os builds and
   the RISC-V GCC -Os build for every image; accepted per version, and the refusals and drops by
   category across versions. Each category that only some versions show is a work item (an analysis
   that does not know a shape). Done when the table is in the report and the categories are items.
+  First round, -Os on the M3 (bench/freertos.toml's mps2-gccN-Os and mps2-clangN-Os), accepted:
+  GCC 9 293/373, 10 299/374, 12 296/374, 13 298/371, 14 293/371, the host's 16 311/366; clang 12
+  289/366, 14 285/365, 16 285/365, 18 277/362, 19 280/362, the host's 23 296/356; every listing
+  rebuilt byte for byte. By origin (the link map): FreeRTOS's own functions (about 300, the same
+  source) GCC 80.4 to 83.1 % against 84.7 % on GCC 16, clang 80.7 to 81.4 % against 82.3 %; newlib's
+  65 to 72.5 % against 97 to 100 %: the host's newlib (Arch's) is built for size and the
+  distributions' is not. Categories:
+  - [ ] Distribution newlib's strcmp (and kin) loads r3 under a condition and branches on the same
+    condition: regflow took r3 for read, so about seven FreeRTOS functions a build were refused for
+    a register nothing reads ("its callers read r3, which it sets"). regflow 16 carries the writes
+    made under a branch's condition along its edges (in progress).
+  - [ ] newlib's reentrant wrappers (_read_r, _write_r, _close_r, _lseek_r, _sbrk_r, also _free_r,
+    _malloc_r): UNCOVERED by one to a few instructions: the store of errno into the reent behind a
+    callee that returned -1 and set errno (a stub effect the generator does not find).
+  - [ ] The -O2 builds and the RISC-V GCC builds (RISC-V newlib-nano is not packaged by the
+    distributions: xPack's riscv-none-elf-gcc in an image, or picolibc).
 - [ ] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
   clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
   2026-10-20, here 6).

@@ -422,6 +422,134 @@ cc = "arm-none-eabi-gcc"
 cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
           "-fdata-sections", "-g"]
 
+# The compiler-version axis (docs/todo.md, "Compiler diversity"): the GCC -Os and clang -Os builds
+# compiled and linked with distributions' packaged toolchains (bench/toolchains/), the flags as above
+
+[[builds]]
+name = "mps2-gcc9-Os"
+project = "mps2"
+toolchain = "ubuntu-20.04"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc10-Os"
+project = "mps2"
+toolchain = "ubuntu-22.04"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc12-Os"
+project = "mps2"
+toolchain = "debian-12"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc13-Os"
+project = "mps2"
+toolchain = "ubuntu-24.04"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc14-Os"
+project = "mps2"
+toolchain = "debian-13"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-clang12-Os"
+project = "mps2"
+toolchain = "ubuntu-20.04"
+cc = "clang"
+cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "--sysroot=/usr/arm-none-eabi",
+          "-ffreestanding", "-Os", "-ffunction-sections", "-fdata-sections", "-g"]
+ld = "arm-none-eabi-gcc"
+lflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft"]
+dread_cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os",
+                "-ffunction-sections"]
+
+[[builds.patches]]                      # clang allows no C statement in a naked function
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c"
+old = "void Reset_Handler( void ) __attribute__( ( naked ) );"
+new = "void Reset_Handler( void );"
+
+[[builds]]
+name = "mps2-clang14-Os"
+project = "mps2"
+toolchain = "ubuntu-22.04"
+cc = "clang"
+cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "--sysroot=/usr/arm-none-eabi",
+          "-ffreestanding", "-Os", "-ffunction-sections", "-fdata-sections", "-g"]
+ld = "arm-none-eabi-gcc"
+lflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft"]
+dread_cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os",
+                "-ffunction-sections"]
+
+[[builds.patches]]                      # clang allows no C statement in a naked function
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c"
+old = "void Reset_Handler( void ) __attribute__( ( naked ) );"
+new = "void Reset_Handler( void );"
+
+[[builds]]
+name = "mps2-clang16-Os"
+project = "mps2"
+toolchain = "debian-12"
+cc = "clang"
+cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "--sysroot=/usr/arm-none-eabi",
+          "-ffreestanding", "-Os", "-ffunction-sections", "-fdata-sections", "-g"]
+ld = "arm-none-eabi-gcc"
+lflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft"]
+dread_cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os",
+                "-ffunction-sections"]
+
+[[builds.patches]]                      # clang allows no C statement in a naked function
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c"
+old = "void Reset_Handler( void ) __attribute__( ( naked ) );"
+new = "void Reset_Handler( void );"
+
+[[builds]]
+name = "mps2-clang18-Os"
+project = "mps2"
+toolchain = "ubuntu-24.04"
+cc = "clang"
+cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "--sysroot=/usr/arm-none-eabi",
+          "-ffreestanding", "-Os", "-ffunction-sections", "-fdata-sections", "-g"]
+ld = "arm-none-eabi-gcc"
+lflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft"]
+dread_cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os",
+                "-ffunction-sections"]
+
+[[builds.patches]]                      # clang allows no C statement in a naked function
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c"
+old = "void Reset_Handler( void ) __attribute__( ( naked ) );"
+new = "void Reset_Handler( void );"
+
+[[builds]]
+name = "mps2-clang19-Os"
+project = "mps2"
+toolchain = "debian-13"
+cc = "clang"
+cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "--sysroot=/usr/arm-none-eabi",
+          "-ffreestanding", "-Os", "-ffunction-sections", "-fdata-sections", "-g"]
+ld = "arm-none-eabi-gcc"
+lflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft"]
+dread_cflags = ["--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os",
+                "-ffunction-sections"]
+
+[[builds.patches]]                      # clang allows no C statement in a naked function
+file = "FreeRTOS/Demo/CORTEX_MPS2_QEMU_IAR_GCC/build/gcc/startup_gcc.c"
+old = "void Reset_Handler( void ) __attribute__( ( naked ) );"
+new = "void Reset_Handler( void );"
+
 [[builds]]
 name = "mps2-gcc-O0"
 project = "mps2"

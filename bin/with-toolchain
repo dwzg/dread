@@ -1,0 +1,40 @@
+#!/bin/sh
+# Run a command with a toolchain image's compilers in front of the host's (bench/toolchains/): every
+# cross tool the image has (arm-none-eabi-*, clang, ld.lld, the llvm-* tools of its LLVM) becomes a
+# script on PATH that runs that tool in a podman container of the image, with /tmp, this checkout,
+# the bench directory and the working directory mounted at their own paths, without network. For
+# running DREAD's tests against the compilers of another distribution before CI does:
+#
+#   bin/with-toolchain ubuntu-22.04 .venv/bin/python -m pytest -q tests/test_lift.py
+#
+# Each call starts a container (a tenth of a second or so); the host's other tools stay as they are.
+set -eu
+[ $# -ge 2 ] || { echo "usage: bin/with-toolchain NAME COMMAND..." >&2; exit 2; }
+name=$1
+shift
+root=$(cd "$(dirname "$0")/.." && pwd)
+image=localhost/dread-tc-$name
+"$root/.venv/bin/python" -m dread.cli bench toolchain "$name" > /dev/null    # (built when missing or old)
+bench=${DREAD_BENCH:-$HOME/dread-bench}
+mkdir -p "$bench"
+shims=$(mktemp -d "${TMPDIR:-/tmp}/dread-with-$name.XXXXXX")
+trap 'rm -rf "$shims"' EXIT INT TERM
+# the image's tools: GNU's cross tools by name, LLVM's from its versioned directory
+tools=$(podman run --rm --network=none "$image" sh -c \
+    'ls /usr/bin/arm-none-eabi-* /usr/bin/riscv64-*-elf-* 2>/dev/null; ls -d /usr/lib/llvm-*/bin 2>/dev/null | tail -1')
+llvm=$(printf '%s\n' "$tools" | grep '^/usr/lib/llvm-' || true)
+for tool in $(printf '%s\n' "$tools" | grep -v '^/usr/lib/llvm-'); do
+    base=$(basename "$tool")
+    printf '#!/bin/sh\nexec podman run --rm -i --network=none -v /tmp:/tmp -v "%s:%s" -v "%s:%s" -v "$PWD:$PWD" -w "$PWD" %s %s "$@"\n' \
+        "$root" "$root" "$bench" "$bench" "$image" "$tool" > "$shims/$base"
+    chmod +x "$shims/$base"
+done
+if [ -n "$llvm" ]; then
+    for base in clang clang++ ld.lld llvm-mc llvm-objcopy llvm-objdump llvm-nm llvm-readelf llvm-cxxfilt llvm-ar; do
+        printf '#!/bin/sh\nexec podman run --rm -i --network=none -v /tmp:/tmp -v "%s:%s" -v "%s:%s" -v "$PWD:$PWD" -w "$PWD" %s %s/%s "$@"\n' \
+            "$root" "$root" "$bench" "$bench" "$image" "$llvm" "$base" > "$shims/$base"
+        chmod +x "$shims/$base"
+    done
+fi
+echo "with-toolchain $name: $(ls "$shims" | wc -l) tools from $image" >&2
+PATH="$shims:$PATH" "$@"

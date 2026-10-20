@@ -78,7 +78,34 @@ def test_a_local_recipe_builds_and_measures(tmp_path, monkeypatch):
     assert metrics["noreturn"]["functions"] >= 2          # main's loop, and the reset handler that calls it
     assert json.load(open(os.path.join(where, "metrics.json")))["functions"] == metrics["functions"]
     report = open(bench.report(r, out=lambda *a: None)).read()
-    assert "| m3-Os | arm-none-eabi-gcc |" in report and "identical" in report
+    assert "| m3-Os | arm-none-eabi-gcc " in report and "identical" in report     # (its --version line)
+
+
+def test_a_toolchain_runs_the_compiler_in_its_container(tmp_path, monkeypatch):
+    """A build that names a toolchain compiles and links in that image's container, the source
+    read-only and the build's directory writable at their own paths, without network; its image is
+    built (with its Containerfile's digest as a label) when missing or older than the file."""
+    argv = bench.in_container(["arm-none-eabi-gcc", "-c", "a.c"], "localhost/dread-tc-x", [("/src", True),
+                              ("/out", False)], "/src")
+    assert argv[:4] == ["podman", "run", "--rm", "--network=none"]
+    assert argv[4:8] == ["-v", "/src:/src:ro", "-v", "/out:/out"] and argv[8:11] == ["-w", "/src", "localhost/dread-tc-x"]
+    assert argv[11:] == ["arm-none-eabi-gcc", "-c", "a.c"]
+    with pytest.raises(bench.BenchError, match="no toolchain"):
+        bench.toolchain_digest("no-such-toolchain")
+    assert os.path.exists(bench.toolchain_file("ubuntu-22.04"))
+    import shutil as sh
+    import subprocess
+    if not sh.which("podman") or subprocess.run(["podman", "image", "exists", "localhost/dread-tc-ubuntu-22.04"]).returncode:
+        pytest.skip("needs podman and the image of the toolchain ubuntu-22.04 (dread bench toolchain ubuntu-22.04)")
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    path = tmp_path / "gizmo.toml"
+    text = open(recipe(tmp_path)["_file"]).read().replace('project = "m3"\n', 'project = "m3"\ntoolchain = "ubuntu-22.04"\n', 1)
+    path.write_text(text)
+    r = bench.load(str(path))
+    where = bench.build(r, "m3-Os", out=lambda *a: None)
+    info = json.load(open(os.path.join(where, "build.json")))
+    assert info["toolchain"] == "ubuntu-22.04" and " 10.3." in info["version"], info
+    assert os.path.exists(os.path.join(where, "firmware.elf"))
 
 
 @needs_gcc
