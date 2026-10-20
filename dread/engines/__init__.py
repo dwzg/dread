@@ -92,6 +92,7 @@ class Engine:
         self.next_handle = 1
         self.stop_request = False
         self.until = None
+        self.stall, self.stalled = 0, False         # see emu_start and dread.emu.Machine.call
         self.rebuild_hooks()
 
     def flush(self):
@@ -331,11 +332,16 @@ class Engine:
         self.stop_request = False
         self.until = until
         n, block_start = 0, True
+        stall, seen, left = self.stall, set(), self.stall      # (stall: see dread.emu.Machine.call)
+        self.stalled = False
         try:
             while True:
                 pc = self.pc
                 if pc == until or (count and n >= count):
                     break
+                if block_start and stall and pc not in seen:
+                    seen.add(pc)
+                    left = stall
                 if block_start and self.block_hooks:
                     self.run_block_hooks(pc, self.block_size(pc, until))
                     if self.stop_request:
@@ -352,6 +358,11 @@ class Engine:
                         continue
                 block_start = self.step(pc)
                 n += 1
+                if stall:
+                    left -= 1
+                    if left <= 0:
+                        self.stalled = True
+                        break
                 if self.stop_request:
                     break
         except Fault as e:

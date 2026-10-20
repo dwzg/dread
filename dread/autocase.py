@@ -121,6 +121,8 @@ SOLVE_CLIMB = 10            # steps towards a comparison that no single change s
 SOLVE_RETURNS = 64          # results of stub calls that are inputs there (a case is generated with 8)
 SOLVE_SLOTS = 400           # input values examined per starting input
 SOLVE_LIMIT = 20_000        # instructions per run there
+STALL = 4                   # on DREAD's own engines a search run stops after limit // STALL instructions that
+                            # enter no block it had not entered (Generator.stall_part)
 SWEEP_RUNS = 600            # emulator runs per base input in the boundary sweep
 LONG_SECONDS = 120          # the last-resort search gives up after this long without one input that finished
 KEPT_MAX = 6
@@ -176,6 +178,7 @@ class Generator:
         self._flow = None                   # dread.regflow, when a stub's mask needs it
         self._endless = None                # dread.noreturn, when a run hangs in a callee
         self._environment = None            # see environment()
+        self._stall_part = None             # see stall_part
         self.loop = False                   # generating loop cases (generate(loop=True))
         self.payload = payload if payload is not None else image.payload()
         self.arch = image.arch
@@ -512,8 +515,32 @@ class Generator:
             flow = self.flow()
             found = json.dumps(flow.to_json(), sort_keys=True).encode() if flow else b"none"
             h.update(b"regflow " + hashlib.sha1(found).digest())
+            if self.stall_part:             # (only where it applies: the other images keep their cases)
+                h.update(b"stall %d" % self.stall_part)
             self._environment = h.hexdigest()
         return self._environment
+
+    @property
+    def stall_part(self):
+        """STALL on DREAD's own engines, which interpret every instruction in Python (about 25 times
+        Unicorn's cost an instruction), else 0. A search run there stops after limit // STALL
+        instructions that enter no block it had not entered (dread.emu.Machine.call stall), as at the
+        limit: circling in code it knows (a count of billions, a list that points at itself), it would
+        mostly run into it. Measured from scratch on 2026-10-20: FreeRTOS's MSP430 build generated in
+        509 s of CPU instead of 1,000 (the lift check 128 s instead of 370), the same 143 functions
+        accepted, two closer (vTaskSwitchContext's generation no longer fails). Not on Unicorn: GCC
+        -Os saved a fifth of its generation but lost two functions, one of them whole: FreeRTOS's
+        blocking calls time out only after many rounds of a loop that enters no new code (the pended
+        ticks the kernel counts in memory), and such runs end within the limit."""
+        if self._stall_part is None:
+            # (a new engine of its own: a Machine would reset the shared core, and the first answer
+            # came while a run was being set up, which made the first generation differ)
+            from unicorn import Uc
+            self._stall_part = 0 if isinstance(self.layout.arch.new_uc(), Uc) else STALL
+        return self._stall_part
+
+    def stall_for(self, max_instructions):
+        return max_instructions // self.stall_part if self.stall_part else 0
 
     def flow(self):
         """dread.regflow for the image, loaded once; False when it cannot be made."""
@@ -841,7 +868,7 @@ class Generator:
             self.apply(m, case)
             m.cover(words[0], end)
             m.trace_reads(image.base, image.end, self.code, self.owners)
-            m.call(entry, *case["args"], max_instructions=max_instructions)
+            m.call(entry, *case["args"], max_instructions=max_instructions, stall=self.stall_for(max_instructions))
             if self.loop and self.ends_badly(m):
                 raise EmuError("a loop case ended neither at a stub call nor by a return")
             return m
@@ -935,7 +962,7 @@ class Generator:
             m.cover(words[0], end, tree=True)
             m.trace_reads(image.base, image.end, self.code, self.owners)
             try:
-                m.call(entry, *case["args"], max_instructions=limit)
+                m.call(entry, *case["args"], max_instructions=limit, stall=self.stall_for(limit))
             except EmuError:
                 faults += 1
                 if m.spinning:
@@ -1083,7 +1110,7 @@ class Generator:
                 self.apply(m, case)
                 m.cover(words[0], end)
                 m.trace_reads(image.base, image.end, self.code, self.owners)
-                return m, m.call(entry, *case["args"], max_instructions=limit)
+                return m, m.call(entry, *case["args"], max_instructions=limit, stall=self.stall_for(limit))
             except EmuError:
                 return (m, None) if m.timed_out else (None, None)
         for base in (corpus[:first_stages][-sweep:] + corpus[first_stages:][-sweep:] if corpus else extras[:1]):
@@ -1238,7 +1265,8 @@ class Generator:
                 m.hook_add(UC_HOOK_CODE, lambda uc, addr, size, user, read=readers[at]:
                            len(seen.setdefault(addr, [])) < 32 and seen[addr].append(read(uc)), begin=at, end=at)
             try:
-                m.call(entry, *case["args"], max_instructions=min(limit, SOLVE_LIMIT))
+                m.call(entry, *case["args"], max_instructions=min(limit, SOLVE_LIMIT),
+                       stall=self.stall_for(min(limit, SOLVE_LIMIT)))
             except EmuError:
                 return None, None
             if self.touches_image(m):

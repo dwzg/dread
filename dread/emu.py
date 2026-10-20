@@ -556,7 +556,18 @@ class Machine:
             self._poke(uc, addr, (v & ((1 << 8 * s) - 1)).to_bytes(s, "little"))
 
     def _on_budget(self, uc, addr, size, user):
+        """The run's limit and its stall rule without the C helper (fasthooks.dread_budget, alike)."""
         self._budget -= size
+        if self._stall and not self._stalled:
+            if addr not in self._seen:
+                self._seen.add(addr)
+                self._stall_left = self._stall
+            else:
+                self._stall_left -= size
+                if self._stall_left <= 0:
+                    self._stalled = True
+                    uc.emu_stop()
+                    return
         if self._budget <= 0 < self._budget + size:
             uc.emu_stop()
 
@@ -778,11 +789,13 @@ class Machine:
 
     # ---- the call ----
 
-    def call(self, addr, *args, max_instructions=5_000_000):
+    def call(self, addr, *args, max_instructions=5_000_000, stall=0):
         """Call the function at addr (its original entry) with args in the argument registers;
         further arguments go into the stack words at the stack top, as the calling convention
         passes them. Returns a Result; raises EmuError on a fault or when the function does not
-        return within max_instructions (unless may_hang)."""
+        return within max_instructions (unless may_hang). stall: a run that enters no block it had
+        not entered for that many instructions stops as at the limit (self.stalled; the case
+        generator's searches: a run circling in code it knows mostly runs into the limit)."""
         uc, lay = self.uc, self.layout
         isa = self.isa_of(addr)
         # A moved function that left a branch at its old entry is entered through it, so that the
@@ -858,17 +871,26 @@ class Machine:
         # count instructions themselves.
         count, fast = max_instructions, self.core.fast
         budget = max_instructions * self.arch.min_insn(isa) if max_instructions else 1 << 62
+        stall_bytes = stall * self.arch.min_insn(isa) if stall else 0
+        self.stalled = False
         if fast is not None:
             if self.core.budget_hook is None:
                 self.core.budget_hook = fast.add(UC_HOOK_BLOCK, "dread_budget")
             fast.state.budget, fast.state.budget_hit = budget, 0
+            fast.state.stall, fast.state.stall_left, fast.state.stalled = stall_bytes, stall_bytes, 0
+            if stall_bytes:
+                from dread import fasthooks
+                fast.clear(fasthooks.SEEN)
             count = 0
         elif max_instructions and isinstance(uc, Uc):
             self._budget = budget
+            self._stall, self._stall_left, self._stalled, self._seen = stall_bytes, stall_bytes, False, set()
             if not getattr(self, "_budget_hooked", False):
                 self._budget_hooked = True
                 self.hook_add(UC_HOOK_BLOCK, self._on_budget)
             count = 0
+        elif hasattr(uc, "stall"):          # DREAD's own engines count instructions themselves
+            uc.stall = stall
         self.core.prune_stub_hooks(self.stubs)
         try:
             uc.emu_start(self.arch.start_address(addr, isa), lay.sentinel, count=count)
@@ -880,6 +902,12 @@ class Machine:
             raise EmuError("%s in a stub or hook at pc=0x%x: %s" % (type(e).__name__, uc.reg_read(lay.pc), e))
         finally:
             self._collect()
+            if fast is not None:
+                self.stalled = bool(fast.state.stalled)
+            elif isinstance(uc, Uc):
+                self.stalled = getattr(self, "_stalled", False)
+            else:
+                self.stalled = bool(getattr(uc, "stalled", False))
         if self.exception is not None:
             self.core.retire()
             raise EmuError("CPU exception %d at pc=0x%x" % (self.exception, uc.reg_read(lay.pc)))

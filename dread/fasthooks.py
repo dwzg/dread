@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fasthooks.c")
-BLOCKS, TREE, READS, WRITES, PAGES = range(5)
+BLOCKS, TREE, READS, WRITES, PAGES, SEEN = range(6)
 
 _LIB = []
 
@@ -35,7 +35,9 @@ class State(ctypes.Structure):
                 ("blocks", Set), ("tree_set", Set), ("reads", Set), ("writes", Set), ("pages", Set),
                 ("code_reads", ctypes.c_int32), ("last_block", ctypes.c_uint64),
                 ("owners", ctypes.c_void_p), ("owners_n", ctypes.c_uint64), ("pc_reg", ctypes.c_int32),
-                ("budget", ctypes.c_int64), ("budget_hit", ctypes.c_int32), ("emu_stop", ctypes.c_void_p)]
+                ("budget", ctypes.c_int64), ("budget_hit", ctypes.c_int32), ("emu_stop", ctypes.c_void_p),
+                ("stall", ctypes.c_int64), ("stall_left", ctypes.c_int64), ("stalled", ctypes.c_int32),
+                ("seen", Set)]
 
 
 def library():

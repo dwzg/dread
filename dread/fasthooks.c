@@ -40,6 +40,10 @@ typedef struct {
     int64_t budget;                 /* bytes of code a run may still enter (dread_budget) */
     int32_t budget_hit;             /* the budget ran out and the run was stopped */
     emu_stop_fn emu_stop;
+    int64_t stall;                  /* bytes a run may enter without a block it had not entered; 0: no limit */
+    int64_t stall_left;
+    int32_t stalled;                /* the run was stopped for that (budget_hit is set too) */
+    set_t seen;                     /* the blocks this run entered (with stall) */
 } state_t;
 
 static uint64_t mix(uint64_t x)
@@ -123,11 +127,16 @@ static void set_clear(set_t *s)
     s->used = 0;
 }
 
+static set_t *pick(state_t *st, int which)
+{
+    return which == 0 ? &st->blocks : which == 1 ? &st->tree_set : which == 2 ? &st->reads
+         : which == 3 ? &st->writes : which == 5 ? &st->seen : &st->pages;
+}
+
 /* Copy the keys (and values) of a set into out arrays of at least s->used entries. */
 size_t dread_copy(state_t *st, int which, uint64_t *keys, uint32_t *vals)
 {
-    set_t *s = which == 0 ? &st->blocks : which == 1 ? &st->tree_set : which == 2 ? &st->reads
-             : which == 3 ? &st->writes : &st->pages;
+    set_t *s = pick(st, which);
     size_t n = 0;
     if (s->ordered && s->order) {
         for (; n < s->used; n++) {
@@ -149,15 +158,13 @@ size_t dread_copy(state_t *st, int which, uint64_t *keys, uint32_t *vals)
 
 size_t dread_count(state_t *st, int which)
 {
-    set_t *s = which == 0 ? &st->blocks : which == 1 ? &st->tree_set : which == 2 ? &st->reads
-             : which == 3 ? &st->writes : &st->pages;
+    set_t *s = pick(st, which);
     return s->used;
 }
 
 void dread_clear(state_t *st, int which)
 {
-    set_t *s = which == 0 ? &st->blocks : which == 1 ? &st->tree_set : which == 2 ? &st->reads
-             : which == 3 ? &st->writes : &st->pages;
+    set_t *s = pick(st, which);
     set_clear(s);
     if (which == 2)
         st->code_reads = 0;
@@ -192,6 +199,20 @@ void dread_block(void *uc, uint64_t address, uint32_t size, state_t *st)
 void dread_budget(void *uc, uint64_t address, uint32_t size, state_t *st)
 {
     st->budget -= size;
+    /* With stall: a run that enters no block it had not entered for that many bytes circles in code
+     * it knows (a loop over a list that points at itself, a count of billions) and stops as at the
+     * limit, which it would mostly run into. */
+    if (st->stall > 0 && !st->budget_hit) {
+        if (set_put(&st->seen, address, 0, 1))
+            st->stall_left = st->stall;
+        else if ((st->stall_left -= size) <= 0) {
+            st->stalled = 1;
+            st->budget_hit = 1;
+            st->emu_stop(uc);
+            settle(uc, st);
+            return;
+        }
+    }
     if (st->budget <= 0 && !st->budget_hit) {
         st->budget_hit = 1;
         st->emu_stop(uc);

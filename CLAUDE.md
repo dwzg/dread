@@ -81,7 +81,9 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   instruction or memory access dominates. Record before and after in the commit message. A change
   meant to be faster without changing results is checked with `bin/ab-cases [--target DIR] [--loop]
   MAIN WORKTREE NAME...`: both checkouts generate the named functions' cases, timed, compared byte
-  for byte (a shell loop by hand twice compared nothing).
+  for byte (a shell loop by hand twice compared nothing); `--cover` compares the instructions the
+  cases cover instead, for a change meant to change them (then measure whole builds from scratch:
+  a handful of functions moves with the search's path, 2026-10-20).
 - **A lifter change** (what it lifts, refuses or keeps across calls): run `dread lift --check` on
   every gizmo build before the suite and commit the regenerated `config/lifted.txt` with the change.
   A test that plants a fault and shows it through a caller assumes the caller is the original's

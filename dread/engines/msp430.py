@@ -264,11 +264,16 @@ class Msp430Engine(Engine):
         self.stop_request = False
         self.until = until
         n, block_start = 0, True
+        stall, seen, left = self.stall, set(), self.stall      # (stall: see dread.emu.Machine.call)
+        self.stalled = False
         try:
             while True:
                 pc = r[0]
                 if pc == until or (count and n >= count):
                     break
+                if block_start and stall and pc not in seen:
+                    seen.add(pc)
+                    left = stall
                 if block_start and self.block_hooks:
                     self.run_block_hooks(pc, self.block_size(pc, until))
                     if self.stop_request:
@@ -289,6 +294,11 @@ class Msp430Engine(Engine):
                 r[0] = entry[3]()
                 block_start = entry[2]
                 n += 1
+                if stall:
+                    left -= 1
+                    if left <= 0:
+                        self.stalled = True
+                        break
                 if self.stop_request:
                     break
         except Fault as e:

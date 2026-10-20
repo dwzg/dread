@@ -380,12 +380,22 @@ The long runs set the pace of everything after them. Measure first, then cut.
   brings back the clock's distortion, and only 4 candidates never run at all (fault handlers and
   hooks). What a realistic run spends now: 3.4 million blocks through the Python block hook, about
   40 % of it: the item below.
-- [ ] The generator's runs that only circle in known code until the instruction limit (checksum on
+- [x] The generator's runs that only circle in known code until the instruction limit (checksum on
   the MSP430: nearly every run): ending a run after a stretch without a new block would save most of
   their time on every architecture, but it changes the cases (a VERSION change) and wants its own
   measurement of coverage.
-  With it, fewer search runs for loop cases (the sweep steps every stub answer of a loop case: 23,000
-  of a task's 49,000 runs), measured the same way.
+  Done (2026-10-20) for DREAD's own engines: a search run stops after limit // 4 instructions that
+  enter no block it had not entered (dread.emu.Machine.call stall: the C budget hook, its Python
+  twin and the engines' run loops; Generator.stall_part; in the cache key only where it applies, so
+  the other images keep their cases). Measured from scratch on two FreeRTOS builds: MSP430
+  generation 1,000 s of CPU to 509 (the lift check 370 s to 128), the same 143 accepted, two
+  functions closer; GCC -Os (Unicorn) saved a fifth but lost two functions, one whole
+  (prvSanityCheckCreatedSemaphore: FreeRTOS's blocking calls time out only after many rounds of a
+  loop that enters no new code, the pended ticks counted in memory, and such runs end within the
+  limit). So not on Unicorn, where an instruction costs a twenty-fifth. bin/ab-cases --cover
+  compares what such a change's cases cover.
+- [ ] Fewer search runs for loop cases (the sweep steps every stub answer of a loop case: 23,000 of a
+  task's 49,000 runs): changes the cases; measure with bin/ab-cases --cover and from scratch.
 
 - [ ] A C fast path for the system run's block hook (dread.fasthooks): nearly every block is a known
   block of shared code with nothing due (clock += size and three comparisons); C could do those and

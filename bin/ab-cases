@@ -4,13 +4,15 @@ byte: the check for a change meant to make the generator or the emulator faster 
 what they find. Each checkout generates in a process of its own with its own code (and the
 .venv it links), one function after the other, A before B, so that both see the same machine.
 
-    bin/ab-cases [--target DIR] [--image NAME] [--payload FILE] [--loop] A B NAME...
+    bin/ab-cases [--target DIR] [--image NAME] [--payload FILE] [--loop] [--cover] A B NAME...
 
 A and B are checkouts (the main one and a worktree, say). The options of each function are the
 target's (its suite's auto() settings and the last lift check's: a loop function gets loop
 cases); --loop asks for loop cases where neither says anything (a task the lift check dropped).
 --payload is the rebuilt image the runner is prepared with (default: the last lift check's).
-Exits 1 when a function's cases differ or a side fails.
+Exits 1 when a function's cases differ or a side fails. --cover is for a change meant to change
+the cases (a generator change): each side also runs its own cases again and counts the instructions
+of the function they ran; then it exits 1 when B covers fewer than A, or a side fails.
 
 Written after two comparisons on 2026-10-20 had compared nothing: a shell loop handed the loop
 option where the tag belonged, both sides wrote one file, and the timing compared plain runs.
@@ -26,7 +28,7 @@ WORKER = r'''
 import json, sys, time
 from dread import autocase, runner
 from dread.target import Target
-target_dir, image_name, payload, name, loop, out = sys.argv[1:7]
+target_dir, image_name, payload, name, loop, out, cover = sys.argv[1:8]
 t = Target.load(target_dir)
 image = t.image(image_name or None)
 runner.prepare(t, image, payload)
@@ -38,8 +40,24 @@ frame = options.pop("frame", 0)
 started = time.perf_counter()
 made = gen.generate(name, fn.entry, fn.insns, calls=calls, frame=frame, **options)
 seconds = time.perf_counter() - started
+covered = None
+if cover == "1":                    # each case run again on the original, as the runner runs it
+    covered = set()
+    for c in made:
+        m = gen.machine()
+        m.plan = []
+        gen.apply(m, c)
+        m.cover(fn.insns[0], gen.program.end(fn))
+        m.may_hang = bool(c.get("hang"))
+        try:
+            m.call(fn.entry, *c["args"], max_instructions=c.get("limit", 200_000))
+        except Exception:
+            continue
+        covered |= m.covered_insns(fn.insns)
+    covered = len(covered)
 with open(out, "w") as f:
-    json.dump({"seconds": seconds, "loop": bool(options.get("loop")), "cases": made}, f, sort_keys=True)
+    json.dump({"seconds": seconds, "loop": bool(options.get("loop")), "cases": made, "covered": covered,
+               "insns": len(fn.insns)}, f, sort_keys=True)
 '''
 
 
@@ -48,10 +66,10 @@ def python_of(checkout):
     return own if os.path.exists(own) else sys.executable
 
 
-def generate(checkout, target, image, payload, name, loop, out):
+def generate(checkout, target, image, payload, name, loop, out, cover=False):
     env = dict(os.environ, PYTHONPATH=checkout)
     run = subprocess.run([python_of(checkout), "-c", WORKER, target, image or "", payload, name, "1" if loop else "0",
-                          out], env=env, cwd=checkout, capture_output=True, text=True)
+                          out, "1" if cover else "0"], env=env, cwd=checkout, capture_output=True, text=True)
     if run.returncode or not os.path.exists(out):
         tail = (run.stderr or run.stdout).strip().splitlines()[-1:] or ["no output"]
         return None, "exit %d: %s" % (run.returncode, tail[0][:160])
@@ -75,6 +93,7 @@ def main(argv=None):
     parser.add_argument("--image")
     parser.add_argument("--payload")
     parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--cover", action="store_true")
     parser.add_argument("a")
     parser.add_argument("b")
     parser.add_argument("names", nargs="+")
@@ -98,18 +117,25 @@ def main(argv=None):
             got = {}
             for label, side in (("A", a), ("B", b)):
                 got[label] = generate(side, target, args.image, payload, name, args.loop,
-                                      os.path.join(work, "%s-%s.json" % (label, name)))
+                                      os.path.join(work, "%s-%s.json" % (label, name)), args.cover)
             (ra, ea), (rb, eb) = got["A"], got["B"]
             if ea or eb:
                 bad += 1
                 print("%-34s FAILED  A: %s  B: %s" % (name, ea or "ok", eb or "ok"))
                 continue
             diff = first_difference(ra["cases"], rb["cases"])
+            change = "%+.0f %%" % (100 * (rb["seconds"] / ra["seconds"] - 1)) if ra["seconds"] else "-"
+            if args.cover:
+                bad += rb["covered"] < ra["covered"]
+                print("%-34s A %7.1f s  B %7.1f s  (%s)  covered A %d, B %d of %d; cases A %d, B %d%s%s" % (
+                    name, ra["seconds"], rb["seconds"], change, ra["covered"], rb["covered"], ra["insns"],
+                    len(ra["cases"]), len(rb["cases"]), ", loop" if ra["loop"] else "",
+                    "" if diff else ", identical"), flush=True)
+                continue
             bad += diff is not None
-            print("%-34s A %7.1f s  B %7.1f s  (%+.0f %%)  %d cases%s  %s" % (
-                name, ra["seconds"], rb["seconds"], 100 * (rb["seconds"] / ra["seconds"] - 1) if ra["seconds"] else 0,
-                len(ra["cases"]), ", loop" if ra["loop"] else "", "DIFFER: " + diff if diff else "identical"),
-                flush=True)
+            print("%-34s A %7.1f s  B %7.1f s  (%s)  %d cases%s  %s" % (
+                name, ra["seconds"], rb["seconds"], change, len(ra["cases"]), ", loop" if ra["loop"] else "",
+                "DIFFER: " + diff if diff else "identical"), flush=True)
     return 1 if bad else 0
 
 

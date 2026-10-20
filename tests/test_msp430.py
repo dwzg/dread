@@ -500,3 +500,29 @@ def test_gizmo_msp430_system_run(tmp_path):
         assert sysrun.main(["--target", target.root, "--scenario", name, "--recon", payload]) == 0, name
     outcome = sysrun.run_image(target, target.image(), target.image().payload(), target.scenarios["keys"])
     assert outcome.reports["interrupts"].get(0) and "mode run volume 7" in outcome.reports["uart"]["sent"], outcome
+
+
+def test_the_engine_stops_a_run_that_circles_in_known_code():
+    """DREAD's own engine keeps the stall rule itself (it counts instructions): checksum over 1024
+    bytes (its 32-bit steps loop in helpers on the 16-bit core: about 150 instructions a byte) stops
+    with stall, returns without; the generator uses the rule on this engine."""
+    from dread import autocase, emu
+    from dread.target import Target
+    target = Target.load(gizmo_dir("msp430"))
+    gen = autocase.Generator(target, target.image())
+    fn = gen.program.by_name["checksum"]
+    scratch = target.memory.scratch_base
+
+    def run(n, stall):
+        m = gen.machine()
+        m.plan = []
+        m.write(scratch, bytes(range(256)) * 16)
+        try:
+            m.call(fn.entry, scratch, n & 0xFFFF, n >> 16, max_instructions=200_000, stall=stall)
+            return "returned", m.stalled
+        except emu.EmuError:
+            return "stopped", m.stalled, m.timed_out
+    assert run(1024, 0) == ("returned", False)
+    assert run(16, 20_000) == ("returned", False)
+    assert run(1024, 20_000) == ("stopped", True, True)
+    assert gen.stall_part == autocase.STALL

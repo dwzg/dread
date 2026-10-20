@@ -130,3 +130,32 @@ def test_the_instruction_limit_is_a_budget_alike_in_c_and_python(target, monkeyp
     monkeypatch.setattr(emu.Core, "cores", {})
     assert run(200_000)[0] == "returned"
     assert run(50) == short
+
+
+def test_a_run_that_circles_in_known_code_stops_alike_in_c_and_python(target, monkeypatch):
+    """With stall, a run that enters no block it had not entered for that many instructions stops
+    as at the limit (checksum over 4096 bytes: one loop), in the C block hook and in the Python one
+    at the same block; a short run returns; without stall the long one returns too."""
+    from dread import autocase, emu, fasthooks
+    gen = autocase.Generator(target, target.image())
+    fn = gen.program.by_name["checksum"]
+    scratch = target.memory.scratch_base
+
+    def run(n, stall):
+        m = gen.machine()
+        m.plan = []
+        m.write(scratch, bytes(range(256)) * 16)
+        try:
+            m.call(fn.entry, scratch, n, max_instructions=200_000, stall=stall)
+            return "returned", m.stalled
+        except emu.EmuError:
+            return "stopped", m.stalled, m.timed_out, m.uc.reg_read(m.layout.pc)
+    assert run(4096, 0) == ("returned", False)
+    assert run(16, 1000) == ("returned", False)
+    long = run(4096, 1000)
+    assert long[:3] == ("stopped", True, True), long
+    monkeypatch.setattr(fasthooks, "_LIB", [None])          # as without a C compiler
+    monkeypatch.setattr(emu.Core, "cores", {})
+    assert run(16, 1000) == ("returned", False)
+    assert run(4096, 1000) == long
+    assert gen.stall_part == 0                              # Unicorn: the generator does not use it
