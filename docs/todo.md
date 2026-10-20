@@ -273,9 +273,12 @@ The long runs set the pace of everything after them. Measure first, then cut.
   deliver the line feed). read_line: 51 s -> 1.8 s, and its generated cases now cover all of it
   (m3: 17 -> 25 of 25 instructions). dread integration now applies a case's poll stages and fixed
   peripheral values (it applied only memory: inputs that waited on the UART never returned there).
-- [ ] C for the peripheral hook: after the cuts, Python peripheral callbacks no longer dominate on
+- [x] C for the peripheral hook: after the cuts, Python peripheral callbacks no longer dominate on
   gizmo; measure again on a target with more device traffic before porting `Machine._on_io` (poll
-  stages, the replay plan, spin detection, the log) to dread.fasthooks.
+  stages, the replay plan, spin detection, the log) to dread.fasthooks. Measured (2026-10-20) on
+  FreeRTOS GCC -Os's slowest generation (a task's loop cases, its UART and timers): the two
+  peripheral hooks take 10 % of it, the stub calls 40 % (after the faster register reads): not
+  ported; the stub path would come first.
 
 ## Performance, third pass (2026-10-19, asked for by the user)
 
