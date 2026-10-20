@@ -98,12 +98,16 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     compiler's -On build 86 to 92 of 95. Elsewhere: gizmo a32's `reset` gets cases (its constants lie
     behind `irq_entry`), and the RISC-V benchmark builds' trap vector table is nobody's (cases of
     main and vOutNS16550 byte for byte the same, bin/ab-cases); no other build's extents changed.
-  - [ ] **Pools a rebuilt function still reads**: a function that takes its pool's address with
+  - [x] **Pools a rebuilt function still reads**: a function that takes its pool's address with
     `adr` (or `add rX, pc`) and loads through it reads the pool at run time, but the overlay counts
     only original functions' loads, so it builds the C over that pool: GCC's ret_ll (`adr r1, pool;
     ldrd r0, r1, [r1]`) and, at -Ohz, the other compiler's ret_s1, ret_s4, ret_s8, ret_s12 fail.
     The lifter could fold such loads into constants as it does `ldr rX, [pc, #d]`, or the overlay
-    keep pools a replaced function's adr points into.
+    keep pools a replaced function's adr points into. Done 2026-10-20, the second: the overlay
+    counts a replaced function's adr targets as loaded (its pc-relative loads stay excluded: the
+    lifter makes them constants). GCC's -Os build 91 of 94 probe functions, the other compiler's
+    -Ohz 79 to 83 of 95. Folding the loads instead (the pool then free for other C) is left for
+    when the room matters.
   - [ ] **A va_list that walks from the saved argument registers into the stack arguments**: the
     other compiler's -On pick_va_5 pushes r1-r3 next to its caller's stack arguments, takes the
     address of the saved r1 and loads on upwards in a loop; the lifted C's frame is a local array,

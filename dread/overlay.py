@@ -162,11 +162,15 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                 if to is not None and to != fn.name and t != funcs[to].entry and fn.name not in sizes:
                     entered.setdefault(to, (fn.name, a, t))
             ref = arch.literal(insn, fn.isa)
+            folded = ref is not None            # a pc-relative load: the lifter makes it a constant
             ref = ref[0] if ref else arch.pc_address(insn, fn.isa)
             if ref is not None:
                 ref &= ~3
                 all_loaders.setdefault(ref, set()).add(fn.name)
-                if fn.name not in sizes:
+                # an adr's address stays an address in the C, which reads through it at run time (GCC's
+                # adr r1, pool; ldrd r0, r1, [r1], compiled as mov.w r3, #0x8000000 and offsets: no
+                # word of the C's points at the pool, and the C was built over it)
+                if fn.name not in sizes or not folded:
                     loaded.add(ref)
                     loaders.setdefault(ref, set()).add(fn.name)
     for fn in replaced:

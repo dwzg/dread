@@ -600,3 +600,54 @@ def test_a_call_whose_caller_reads_what_c_cannot_return(tmp_path):
     lines = []
     accepted = lift.check(t, t.image(), ["r", "__aeabi_fcmplt", "two"], out=lines.append, jobs=2)
     assert set(accepted) == {"r", "__aeabi_fcmplt", "two"}, "\n".join(lines)
+
+
+ADR_POOL_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global ll, use
+    .type ll, %function
+    .thumb_func
+ll:     adr     r1, 1f          @ GCC's 64-bit constant: the pool's address, then ldrd through it
+        ldrd    r0, r1, [r1]
+        bx      lr
+        .align 2
+1:      .word   0x55667788
+        .word   0x11223344
+    .type use, %function
+    .thumb_func
+use:    push    {r4, lr}        @ reads both words of the result
+        bl      ll
+        ldr     r4, =0x20000000
+        strd    r0, r1, [r4]
+        pop     {r4, pc}
+        .ltorg
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_a_pool_the_c_reads_through_adr_is_kept(tmp_path):
+    """The lifter makes a pc-relative load a constant, but an adr's address stays an address in
+    the C, which loads through it at run time. GCC compiled it as mov.w r3, #0x8000000 and offsets,
+    so no word of the C pointed at the pool, and the overlay built the C over it: GCC's ret_ll of the
+    compiler lab read its own instructions (return value 0x55667788 vs 0x31c4f8d3)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.s").write_text(ADR_POOL_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    lines = []
+    assert lift.check(t, t.image(), ["ll"], out=lines.append, jobs=1) == ["ll"], "\n".join(lines)
