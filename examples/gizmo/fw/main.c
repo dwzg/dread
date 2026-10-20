@@ -114,6 +114,12 @@ int main(void)
     uart_puts("GIZMO 1000\r\n");
     apply_config(default_config);
     print_status();
+#ifdef GIZMO_CPP
+    fmt_dec(buf, shapes_demo(sizeof g_config + 9));
+    uart_puts("shapes ");
+    uart_puts(buf);
+    uart_puts("\r\n");
+#endif
     fmt_hex(buf, ram_crc((const u8 *)&g_config, sizeof g_config), 8);
     uart_puts("crc ");
     uart_puts(buf);

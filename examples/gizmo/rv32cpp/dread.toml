@@ -1,0 +1,77 @@
+# Gizmo 1000, RV32 build with its C++ part (examples/gizmo/fw/shapes.cpp: virtual methods, a template
+# used twice, a static object with a constructor), clang++ with -fno-exceptions -fno-rtti, for an
+# RV32IMC core in machine mode. Not a real device. The tables in config/ come from the ELF
+# (`make -C ../fw targets`).
+
+[target]
+name = "gizmo-rv32cpp"
+title = "Gizmo 1000 (RV32IMC, C++)"
+
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imc"
+
+[image.main]
+original = "original/gizmo.bin"
+base = 0x20000000
+limit = 0x20020000              # 128 KiB of flash from the base
+entry = "_start"
+startup = [
+    {kind = "code", run = 0x80000000, size = 0x34, stored = 0x20000c34},
+    {kind = "data", run = 0x80000034, size = 0x1c, stored = 0x20000c68},
+    {kind = "zero", run = 0x80000050, size = 0x30},
+]
+
+[memory]
+regions = [
+    {name = "flash", base = 0x20000000, size = 0x100000, kind = "rom"},
+    {name = "ram", base = 0x80000000, size = 0x10000},
+    {name = "scratch", base = 0x80100000, size = 0x20000},
+]
+io = [[0x10000000, 0x10010000]]
+stack = {top = 0x80010000, size = 0x2000}
+sentinel = 0x1fff0000
+scratch = {base = 0x80100000, size = 0x20000}
+
+[compiler]
+kind = "clang"
+triple = "riscv32-unknown-elf"
+cflags = ["-march=rv32imc", "-mabi=ilp32", "-Os", "-ffreestanding", "-fno-builtin", "-ffunction-sections",
+          "-fno-common", "-mno-relax"]
+
+# Devices for the system run (dread sysrun): gizmo's serial port (examples/gizmo/fw/gizmo.h).
+[models.uart]
+kind = "uart"
+base = 0x10000000
+data = 0x0
+status = 0x4
+tx_ready = 0x1
+rx_ready = 0x2
+
+[models.timer]
+kind = "timer"
+base = 0x10001000
+irq = 0
+
+[models.intc]
+kind = "intc"
+base = 0x10002000
+
+[models.gpio]
+kind = "gpio"
+base = 0x10003000
+
+[scenarios.boot]
+until = {uart = "READY"}
+limit = 5_000_000
+
+[scenarios.keys]
+input = [[40_000, "uart", "s"]]
+until = {uart = "READY\r\nmode run volume 7"}
+limit = 5_000_000
+
+[scenarios.config]
+input = [[40_000, "uart", "cvolume=3\r\n"], [200_000, "uart", "s"]]
+until = {uart = "mode run volume 3"}
+limit = 5_000_000

@@ -27,7 +27,18 @@ _start:
     addi    a2, a2, -4
     bgtz    a2, 3b
     j       1b
-4:  li      t0, 0x800               # mie.MEIE: the interrupt controller's line
+4:
+#ifdef GIZMO_CPP
+    la      s0, __init_array_start  # the C++ part's static constructors (rv32cpp.ld keeps .init_array)
+    la      s1, __init_array_end
+6:  bgeu    s0, s1, 7f
+    lw      t0, 0(s0)
+    jalr    t0
+    addi    s0, s0, 4
+    j       6b
+7:
+#endif
+    li      t0, 0x800               # mie.MEIE: the interrupt controller's line
     csrs    mie, t0
     csrsi   mstatus, 8              # mstatus.MIE
     call    main

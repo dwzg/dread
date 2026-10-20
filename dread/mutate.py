@@ -99,10 +99,26 @@ def strip_code(text):
 
 def find_function(paths, name):
     """(path, lines, first body line, closing line, static) of the definition of `name` in the
-    given C files: the line after its opening brace up to the line of its closing brace (0-based).
-    Raises KeyError when none of the files defines it."""
+    given C and C++ files: the line after its opening brace up to the line of its closing brace
+    (0-based). A mangled C++ name is looked for as written, then by its name in the source
+    (dread.cxx.source_patterns: Tri::area for _ZNK3Tri4areaEv; bound for an instance of the
+    template bound, whose definition every instance shares): a method defined outside its class,
+    starting in the first column. Raises KeyError when none of the files defines it."""
+    from dread import cxx
+    for fragment in [re.escape(name)] + cxx.source_patterns(name):
+        try:
+            return _find_definition(paths, fragment)
+        except KeyError:
+            pass
+    raise KeyError(name)
+
+
+CXX_QUALIFIERS = re.compile(r"(?:(?:(?:const|volatile|override|final|noexcept)\b|&&|&)\s*)+")
+
+
+def _find_definition(paths, fragment):
     # a definition starts in the first column; the prefix may hold __attribute__((...))
-    pattern = re.compile(r"(?m)^(?:[A-Za-z_][^;{}\n]*?\b)?%s\s*\(" % re.escape(name))
+    pattern = re.compile(r"(?m)^(?:[A-Za-z_][^;{}\n]*?\b)?%s\s*\(" % fragment)
     for path in paths:
         with open(path) as f:
             text = f.read()
@@ -120,6 +136,9 @@ def find_function(paths, name):
             j = i + 1
             while j < len(code) and code[j] in " \t\n":
                 j += 1
+            q = CXX_QUALIFIERS.match(code, j)       # a C++ method's qualifiers (const, override)
+            if q:
+                j = q.end()
             rest = code[j:j + 64]
             if rest.startswith("__asm__") or rest.startswith("__attribute__"):
                 k = code.find("{", j)
@@ -143,7 +162,7 @@ def find_function(paths, name):
             close_line = code.count("\n", 0, k)
             head = code[code.rfind("\n", 0, m.start()) + 1:m.end()]
             return path, lines, open_line + 1, close_line, "static" in head.split()
-    raise KeyError(name)
+    raise KeyError(fragment)
 
 
 def mutants(lines, start, end):
@@ -199,7 +218,7 @@ def sources(src):
 
     for d, _, files in sorted(os.walk(src)):
         for f in sorted(files):
-            if f.endswith((".c", ".h")):
+            if f.endswith(build.SOURCES + build.HEADERS):
                 visit(os.path.join(d, f), None, None)
     return out
 

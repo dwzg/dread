@@ -1,0 +1,19 @@
+{
+ "cases": [
+  {
+   "args": [
+    2,
+    2,
+    2148532224,
+    1,
+    2148532224,
+    2148532224,
+    3,
+    256
+   ],
+   "by": "dread mutate --kill",
+   "mem": [],
+   "why": "tells the original from the change: src/shapes.cpp:26  return v < lo ? lo : v > hi ? hi : v;   [< -> <=]"
+  }
+ ]
+}

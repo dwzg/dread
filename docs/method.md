@@ -24,6 +24,19 @@ Functions not rewritten stay where they are and become symbols that carry their 
 C calls them by name and the original keeps calling the same addresses. After linking, every byte
 that differs from the original must lie in a slot that was handed out; anything else aborts.
 
+C++ works the same way (gizmo-m3cpp with g++, gizmo-rv32cpp with clang++; `docs/target.md`
+`cxxflags`). The tables keep the mangled
+names, because the linker matches them; `dread functions` and the listing show them demangled
+(`dread.cxx`), and `dread functions --families` lists the instances of each template. A method is
+rewritten in C++ outside its class, the class described by its layout (the vtable pointer first)
+without virtual methods: a virtual method defined in the file would make the compiler emit the
+class's vtable there, and the image keeps its own. A function template is rewritten once, with an
+explicit instantiation for each instance the image has (weak symbols, taken as defined like any
+other). In C, a method is a function named by its mangled name with the object as its first
+argument. The vtables stay in the image's data: a method that moves keeps a branch at its entry,
+where they point. Static constructors are the startup's business (`.init_array`), which the system
+run executes like the rest of the startup.
+
 ## 3. The comparison: `dread test`
 
 Each case calls one function in both images with the same registers and memory. They must agree on

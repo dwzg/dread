@@ -62,7 +62,7 @@ import os
 import sys
 
 from dread import target as tgt
-from dread.build import recon_dir
+from dread.build import HEADERS, SOURCES, recon_dir
 from dread.cases import Suite
 from dread.emu import EmuError, Layout, Machine
 from dread.overlay import load_placement
@@ -494,7 +494,7 @@ def main(argv=None):
         if not args.recon and os.path.isdir(image.src):
             built = os.path.getmtime(recon_path)
             newer = [os.path.join(d, f) for d, _, fs in os.walk(image.src) for f in fs
-                     if f.endswith((".c", ".h")) and os.path.getmtime(os.path.join(d, f)) > built]
+                     if f.endswith(SOURCES + HEADERS) and os.path.getmtime(os.path.join(d, f)) > built]
             if newer:
                 raise tgt.TargetError("%s is older than %s: run `dread recon`" % (recon_path, ", ".join(sorted(newer))))
         suite = prepare(target, image, recon_path, args.keep_failing)

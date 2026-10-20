@@ -51,7 +51,8 @@ SCHEMA = {
              "extensions": str},
     "memory": {"regions": list, "io": list, "stack": dict, "sentinel": int, "scratch": dict},
     "abi": {"args": int, "callee_saved": list, "result": list, "float": str, "stack_args": dict},
-    "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "lifted_cflags": list, "ldflags": list,
+    "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "lifted_cflags": list, "cxxflags": list,
+                 "ldflags": list,
                  "include": list, "idioms": str, "tools": dict, "profile": str},
     "paths": {"build": str, "src": str},
     "host": {"jobs": int, "free_cores": int, "nice": int},
@@ -207,15 +208,20 @@ class Compiler:
              is DREAD's translation, not the original's code; at -O0 every register of the original
              lives in the frame, slow, large and deep (FreeRTOS's GCC -O0 build: six functions more at
              -Os, -O2: four; none lost on four builds). [] compiles it with cflags alone
+    cxxflags the flags for C++ sources in src (.cpp, .cc, .cxx): default cflags and CXX_FLAGS (no
+             exceptions, no RTTI, no guards around local statics, no atexit registration: what the
+             overlay can place is code and read-only data, not unwind tables, typeinfo objects or
+             runtime calls of the C++ library)
     ldflags  flags for the linker (default: --no-warn-rwx-segments for GNU ld, none for lld)
     include  further include directories
     idioms   the lifter's compiler profile
     profile  a dread cclab profile of the original's compiler (relative to the target's directory):
              dread.regflow takes its runtime helpers' results as read after every call
-    tools    {"cc"|"as"|"ld"|"objcopy"|"nm": a command or a list} overriding the defaults
+    tools    {"cc"|"cxx"|"as"|"ld"|"objcopy"|"nm": a command or a list} overriding the defaults
     """
 
     KINDS = ("gcc", "clang")
+    CXX_FLAGS = ["-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics", "-fno-use-cxa-atexit"]
 
     def __init__(self, data, target):
         self.kind = data.get("kind", "gcc")
@@ -229,6 +235,7 @@ class Compiler:
         self.cflags = list(data.get("cflags", []))
         layer = list(getattr(getattr(target, "arch", None), "lifted_cflags", {}).get(self.kind, ()))
         self.lifted_cflags = list(data.get("lifted_cflags", ["-Os"] + layer))
+        self.cxxflags = list(data.get("cxxflags", self.cflags + self.CXX_FLAGS))
         self.ldflags = list(data.get("ldflags", ["--no-warn-rwx-segments"] if self.kind == "gcc" else []))
         self.include = [target.path(p) for p in data.get("include", [])]
         self.idioms = data.get("idioms")
@@ -247,15 +254,15 @@ class Compiler:
 
     def command(self, name):
         """The command line (a list) that starts one tool: cc (compiles C, and assembly with
-        -x assembler), as, ld, objcopy, nm."""
+        -x assembler), cxx (compiles C++), as, ld, objcopy, nm."""
         if name in self.tools:
             value = self.tools[name]
             return list(value) if isinstance(value, list) else [value]
         if self.kind == "clang":
             clang = ["clang", "--target=" + self.triple]
-            return {"cc": clang, "as": clang + ["-c", "-x", "assembler"], "ld": ["ld.lld"],
+            return {"cc": clang, "cxx": ["clang++"] + clang[1:], "as": clang + ["-c", "-x", "assembler"], "ld": ["ld.lld"],
                     "objcopy": ["llvm-objcopy"], "nm": ["llvm-nm"]}[name]
-        return [self.cross + ("gcc" if name == "cc" else name)]
+        return [self.cross + {"cc": "gcc", "cxx": "g++"}.get(name, name)]
 
     def assembler(self):
         """The command that assembles a .s file into an object (add -o OBJ FILE): GNU as takes the

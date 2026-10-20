@@ -9,6 +9,32 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## How C++ rewrites describe their classes, and where the C++ builds are tested (2026-10-20)
+
+**Decided by recommendation** (the todo item "C++ originals and rewrites").
+
+- **Question.** A method rewritten in C++ needs its class. Declared as in the original (virtual
+  methods, the hierarchy), a virtual method defined outside its class becomes the class's key
+  function, and the compiler emits the class's vtable (and with RTTI its typeinfo) in the rewrite's
+  file: data the overlay would place beside the image's own vtable, under the same symbol. And the
+  two C++ builds of gizmo could join every per-build test (conftest's VARIANTS) or have their own.
+- **Options.** (a) The class described by its layout: the vtable pointer as a first member, the
+  methods without `virtual`; the mangled name does not encode virtual, so the definition links
+  against the original's entry. (b) The real hierarchy with every virtual method inline in the
+  class and the rewritten one forced out (`__attribute__((used))` on an inline method): it emits a
+  weak copy whose section name depends on the compiler, and nothing guards against the vtable
+  coming back. (c) The real hierarchy and a linker script that drops the rewrite's vtables. For the
+  tests: (1) tests/test_cxx.py with what C++ adds; (2) m3cpp and rv32cpp in VARIANTS.
+- **Choice.** (a), with a test that the rewrite's object defines no vtable, typeinfo or guard
+  symbol; a function template is rewritten once with an explicit instantiation per instance (weak
+  symbols, which the build now takes as defined). (1): the per-build tests carry build-specific
+  expectations (refusals, counts) and would run on six builds instead of four, two of which differ
+  from m3 and rv32 only in shapes.cpp; test_cxx.py runs the listing, the build, the cases,
+  the system run and the generator on both.
+- **Undo.** (b) or (c) need only the rewrite's source to change; for (2), add the two names to
+  VARIANTS in tests/conftest.py and give the per-build tests their expectations.
+- **Status.** Done (2026-10-20): gizmo-m3cpp (g++) and gizmo-rv32cpp (clang++).
+
 ## Calls into the scratch count as wild calls (2026-10-20)
 
 **Decided by recommendation** (an extension of an existing refusal).

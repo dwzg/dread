@@ -149,5 +149,8 @@ int main(void);
 void apply_config(const char *text);
 void print_status(void);
 void handle_key(int c);
+#ifdef GIZMO_CPP
+u32 shapes_demo(u32 x);                 /* shapes.cpp, the m3cpp build only */
+#endif
 
 #endif

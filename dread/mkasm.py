@@ -175,8 +175,13 @@ class Listing:
         if st in self.funcs:
             label, fn = self.funcs[st]
             where = "0x%x" % st if fn.entry == st else "stored at 0x%x, runs at 0x%x" % (st, fn.entry)
+            if getattr(self, "_shown", None) is None:       # C++ names demangled, all in one go
+                from dread import cxx
+                self._shown = cxx.demangle(f.name for _, f in self.funcs.values())
+            shown = self._shown.get(fn.name, fn.name)
             out.append("")
-            out.append("%s ---- %s (%s, %d instruction bytes) ----" % (c, fn.name, where, fn.size))
+            out.append("%s ---- %s (%s%s, %d instruction bytes) ----" % (
+                c, fn.name, "" if shown == fn.name else shown + ", ", where, fn.size))
         for text in self.notes.get(st, ()):
             out.append("%s %s" % (c, text))
         if st in self.funcs:

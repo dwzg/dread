@@ -32,6 +32,13 @@ void Reset_Handler(void)
     copy_words(__data_start, __data_load, __data_end);
     copy_words(__ramfunc_start, __ramfunc_load, __ramfunc_end);
     zero_words(__bss_start, __bss_end);
+#ifdef GIZMO_CPP
+    {   /* the C++ part's static constructors (m3cpp.ld keeps .init_array) */
+        extern void (*__init_array_start[])(void), (*__init_array_end[])(void);
+        for (void (**f)(void) = __init_array_start; f < __init_array_end; f++)
+            (*f)();
+    }
+#endif
     main();
     for (;;)
         ;

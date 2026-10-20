@@ -39,8 +39,8 @@ def mode_strings():
 
 
 names = mode_strings()
-bases = {"a32": (0x80000000, 0x80003000), "m3": (0x40011000, 0x40010800), "m4": (0x40011000, 0x40010800),
-         "rv32": (0x10000000, 0x10003000), "msp430": (0x0100, 0x0130)}
+bases = {"a32": (0x80000000, 0x80003000), "m3": (0x40011000, 0x40010800), "m4": (0x40011000, 0x40010800), "m3cpp": (0x40011000, 0x40010800),
+         "rv32": (0x10000000, 0x10003000), "rv32cpp": (0x10000000, 0x10003000), "msp430": (0x0100, 0x0130)}
 lines = ["/* written by examples/gizmo/fw/addresses.py from %s; do not edit */" % elf_path.split("/")[-1],
          "#define UART_BASE 0x%08xu" % bases[variant][0],
          "#define GPIO_BASE 0x%08xu" % bases[variant][1],
@@ -53,7 +53,7 @@ lines = ["/* written by examples/gizmo/fw/addresses.py from %s; do not edit */" 
          "#define STR_TEST ((const char *)0x%08x)" % names[3],
          "#define STR_UNKNOWN ((const char *)0x%08x)" % names[4],
          "#define STR_SERVICE ((const char *)0x%08x)" % names[7]]
-if variant in ("m3", "m4", "rv32", "msp430"):     # (msp430: C division calls the image's own __mspabi_divul)
+if variant in ("m3", "m4", "m3cpp", "rv32", "rv32cpp", "msp430"):     # (msp430: C division calls the image's own __mspabi_divul)
     lines.append("#define HAVE_UDIV 1")
 if variant == "msp430":
     lines.append("#define HWREG(a) (*(volatile u16 *)(a))")

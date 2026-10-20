@@ -52,6 +52,14 @@ def file_flags(target, path):
 
 _COMPILERS = {}
 
+SOURCES = (".c", ".cpp", ".cc", ".cxx")             # in src: C, and C++ (dread.cxx)
+HEADERS = (".h", ".hpp", ".hh")
+
+
+def is_cxx(path):
+    """Whether a source is C++ (compiled with [compiler]'s cxx and cxxflags)."""
+    return path.endswith(SOURCES[1:])
+
 
 def compile_stamp(command, flags):
     """What a directory's objects are compiled with: the compiler (its path, size and time, so that
@@ -73,12 +81,17 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
     further include directories (dread mutate compiles a copy elsewhere and still needs the
     headers beside the original); quiet: no compiler messages (variants that do not compile);
     flags: further flags after the target's (the lifted C's [compiler] lifted_cflags)."""
-    sources = sorted(glob.glob(os.path.join(src, "**", "*.c"), recursive=True))
+    sources = sorted(f for suffix in SOURCES for f in glob.glob(os.path.join(src, "**", "*" + suffix), recursive=True))
     include = [INCLUDE, src] + list(extra_include) + target.compiler.include
-    headers = [h for d in include for h in glob.glob(os.path.join(d, "**", "*.h"), recursive=True)]
+    headers = [h for d in include for suffix in HEADERS
+               for h in glob.glob(os.path.join(d, "**", "*" + suffix), recursive=True)]
     newest_header = max((os.path.getmtime(h) for h in headers), default=0)
-    flags = target.compiler.cflags + target.compiler.required() + list(flags) + ["-I" + d for d in include]
+    extra = target.compiler.required() + list(flags) + ["-I" + d for d in include]
+    flags = target.compiler.cflags + extra
+    cxx = [target.compiler.command("cxx"), target.compiler.cxxflags + extra]
     stamp_path, stamp = os.path.join(objdir, ".flags"), compile_stamp(target.compiler.command("cc"), flags)
+    if any(is_cxx(c) for c in sources):     # (a C-only build keeps the stamp it had)
+        stamp += compile_stamp(*cxx)
     try:
         with open(stamp_path) as f:
             same = f.read() == stamp
@@ -87,7 +100,7 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
     objects, todo = [], []
     for c in sources:
         rel = os.path.relpath(c, src)
-        obj = os.path.join(objdir, rel[:-2] + ".o")
+        obj = os.path.join(objdir, rel + ".o" if is_cxx(c) else rel[:-2] + ".o")
         objects.append(obj)
         if not same or not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(c), newest_header):
             todo.append((c, obj))
@@ -96,9 +109,9 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
         os.makedirs(os.path.dirname(obj), exist_ok=True)
         if os.path.exists(obj):         # a failed compile must not leave the old object behind
             os.remove(obj)
-        procs.append((c, subprocess.Popen(target.compiler.command("cc") + flags + file_flags(target, c) +
-                                          ["-c", "-o", obj, c], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                          text=True)))
+        command = cxx[0] + cxx[1] if is_cxx(c) else target.compiler.command("cc") + flags
+        procs.append((c, subprocess.Popen(command + file_flags(target, c) + ["-c", "-o", obj, c],
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)))
     failed = []
     for c, p in procs:
         out = p.communicate()[0]
@@ -127,12 +140,14 @@ def read_names(path):
 
 
 def defined_functions(objects):
-    """The global functions the objects define."""
+    """The global functions the objects define, weak ones too: C++ emits template instances and
+    inline functions weak (in COMDAT groups), and the original's symbol of the same name would win
+    the link over them."""
     from dread.elf import STT_FUNC, Elf
     names = set()
     for obj in objects:
         for sym in Elf(obj).symbols:
-            if sym.kind == STT_FUNC and sym.shndx and sym.bind == 1:
+            if sym.kind == STT_FUNC and sym.shndx and sym.bind in (1, 2):     # (STB_GLOBAL, STB_WEAK)
                 names.add(sym.name)
     return names
 

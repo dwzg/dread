@@ -1152,11 +1152,40 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## C++
 
-- [ ] **C++ originals and rewrites**: a C++ part in gizmo (a class with virtual methods, a template
+- [x] **C++ originals and rewrites**: a C++ part in gizmo (a class with virtual methods, a template
   used twice, a static object with a constructor), built with g++ and clang++ (-fno-exceptions
   -fno-rtti). The tools on it: mangled names kept for linking and shown demangled, vtables in data
   that stay valid when a method moves, static constructors in the startup (system run), template
   instances as families; `.cpp` sources in the build, a method rewritten in C++ and one in C.
+  Done 2026-10-20: gizmo-m3cpp (g++) and gizmo-rv32cpp (clang++), both with fw/shapes.cpp; their
+  linker scripts keep .init_array, the startups run it (tests/test_cxx.py; docs/decisions.md):
+  - The listing rebuilds byte for byte; the mangled names stay in the tables (the linker matches
+    them), `dread functions` and the listing's headers show them demangled (dread.cxx, c++filt or
+    llvm-cxxfilt), `dread functions --families` lists the instances of each template (bound<...>:
+    bound<int>, bound<unsigned int>; methods of a class template too).
+  - The lift check takes every function the plain builds take: m3cpp 43 lifted and 17 by hand of
+    61 (ram_crc refused, as in m3), rv32cpp 39 and 17 of 58 (_start and ram_crc refused, as in
+    rv32). Three gaps showed: storing sp itself (str sp, [sp, #k]: &local_object kept for a call
+    through the vtable; now the frame's address, as mov rX, sp gives it); calls through a vtable,
+    where every generated input faulted (object, table, code: the generator learned code pointers
+    only in a pass that cases which ended seeded; generator 29 learns them in the first pass of
+    every function that reaches a call through a register); and on RISC-V the object's word, which
+    the first run read through a pointer put two bytes off, so that the aligned runs never read it
+    whole (generator 30: an aligned cell takes the place of misaligned ones it overlaps). Neither
+    generator changed a plain gizmo build's list.
+  - clang folds a constructor that only stores constants into .data (no .init_array entry): the
+    Counter reads the volatile g_ticks, which is 0 when the constructors run after .bss is cleared.
+  - `.cpp` sources in src (build.SOURCES; [compiler] cxx and cxxflags: no exceptions, no RTTI, no
+    guards, no atexit); weak symbols count as defined (template instances are weak: the original's
+    symbol would win the link). Tri::area rewritten in C++ (the class by its layout, without virtual
+    methods, so that no vtable is emitted), the template bound once for both instances (explicit
+    instantiations), Rect::area in C under its mangled name: all in place at the original's sizes,
+    their generated cases agree, planted bugs fail; dread mutate finds C++ definitions by their
+    source names (Tri::area, bound, Box<T>::get) and caught all (bound<int>'s < to <= by --kill:
+    v == lo > hi).
+  - Square::sides (lifted, larger) moves with a branch at its entry, which Square's vtable in the
+    image's data still points at: the system run agrees ("shapes 158": the constructor ran; 116
+    without it); on rv32cpp the three scenarios agree too.
 
 ## Scale and robustness
 

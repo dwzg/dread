@@ -1,0 +1,42 @@
+# Functions built from lifted C: their cases (for one that never returns: its loop cases,
+# or every scenario of the system run) agree with the original and run every instruction it
+# can reach. Written by dread lift --check; not edited by hand.
+_GLOBAL__sub_I_shapes_cpp
+_ZL7measurePK5Shape
+_ZNK3Tri5sidesEv
+_ZNK4Rect5sidesEv
+_ZNK6Square5sidesEv
+__cxa_pure_virtual
+apply_config
+beep_off
+beep_on
+cmd_beep
+cmd_led
+cmd_mode
+cmd_volume
+delay
+fmt_dec
+gpio_set
+handle_key
+irq_dispatch
+irq_enable_timer
+keys_read
+led_off
+led_on
+main
+memcmp
+memcpy
+memset
+parse_kv
+print_status
+read_line
+script_run
+shapes_demo
+strlen
+strncpy
+timer_irq
+timer_start
+trap_entry  # accepted by the system run
+uart_getc
+uart_init
+uart_puts

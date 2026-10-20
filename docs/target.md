@@ -152,8 +152,9 @@ address faults before the run can stop.
 | `profile` | a `dread cclab` profile of the original's compiler (`docs/cclab.md`), relative to the target's directory: the register flow takes its runtime helpers' results as read after every call |
 | `cflags` | the flags C for this target is compiled with (for clang, also given to the assembler: `-march`) |
 | `lifted_cflags` | added after `cflags` for the lifted C (default `["-Os"]`, and what the architecture layer names for the compiler: the MSP430 with GCC adds `-fno-ssa-phiopt`, without which GCC turns a flag's `z ? 1 : 0` into a shift by 15, a libgcc call the original does not make): it is DREAD's translation, not the original's code, so the original's optimisation level does not bind it; at `-O0` every register of the original is kept in the frame (slow, large, deep enough to overflow a small task stack). `[]` compiles it with `cflags` alone |
+| `cxxflags` | the flags C++ sources in `src` (`.cpp`, `.cc`, `.cxx`) are compiled with: default `cflags` and `-fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-use-cxa-atexit` (the overlay places code and read-only data, not unwind tables, typeinfo objects or calls into the C++ runtime). C++ is compiled with `cross` + `g++`, or `clang++` for `kind = "clang"` |
 | `ldflags` | flags for the linker (default `--no-warn-rwx-segments` for GNU ld, none for lld) |
-| `tools` | `{cc, as, ld, objcopy, nm}`: a command or a list for a tool, overriding the defaults |
+| `tools` | `{cc, cxx, as, ld, objcopy, nm}`: a command or a list for a tool, overriding the defaults |
 | `include` | include directories |
 | `idioms` | the family of compiler idioms the lifter recognises |
 

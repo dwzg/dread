@@ -62,6 +62,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | RISC-V (RV32IMC): gizmo-rv32 built with clang; every tool runs on it: listing with byte-identical rebuild, reading aids, the overlay, differential tests, integration, recorded cases, regflow, switches, Ghidra, the system run with interrupts, the lifter and its fuzzer | done |
 | Cortex-M4 (FPv4-SP, DSP extension): gizmo-m4 built with GCC with hard float, run on Unicorn's own Cortex-M4 (the core a target names: an M3 has no FPU); every test runs on it; the lifter, the harness and the system run do not model the FPU and the DSP instructions yet (its float and DSP functions are refused) | under way |
 | MSP430: gizmo-msp430 built with TI's MSP430 GCC; a decoder of its own (no capstone), an engine of its own (no Unicorn: a Python interpreter behind Unicorn's interface, checked against GDB's simulator), the listing with byte-identical rebuild, the reading aids, the overlay (into the image's free flash), differential tests with generated cases, the mutation check, integration, regflow, the lifter (stack arguments included) and its fuzzer, the system run (interrupts through the vector table, low-power modes) with recorded cases and the lift check's system check | under way |
+| C++: gizmo-m3cpp and gizmo-rv32cpp, gizmo's Cortex-M3 and RV32 builds with a C++ part (virtual methods, a template used twice, a static constructor), g++ and clang++ with -fno-exceptions -fno-rtti; names shown demangled, template families, `.cpp` sources in the build, a method rewritten in C++ and one in C, vtables valid across a moved method, the constructor in the system run | done |
 | Compiler lab (`dread cclab`): probe programs compiled across a compiler's option matrix and run in the emulator: where arguments and results go, the types, which runtime helper each operation calls and what it changes, the shape of the code, what a call keeps; on ARM, RISC-V and MSP430; adapters for GCC (ARM, RISC-V, MSP430), clang, Arm's LLVM toolchain, TI's armcl and IAR EWARM (from WSL), with a guard that keeps a proprietary toolchain's code from a language model; `docs/cclab.md` | first version |
 
 ## Layout
@@ -70,7 +71,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 |---|---|
 | `dread/` | the Python package; `bin/dread` runs it from a checkout |
 | `docs/` | the method (`method.md`), porting to another architecture (`porting.md`), the target description, the file formats |
-| `examples/gizmo/` | the test firmware: sources, builds and five target directories (a32, m3, m4, rv32, msp430) |
+| `examples/gizmo/` | the test firmware: sources, builds and seven target directories (a32, m3, m4, m3cpp, rv32, rv32cpp, msp430) |
 | `tests/` | DREAD's own tests (`.venv/bin/pytest`) |
 
 ## Using it
