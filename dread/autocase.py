@@ -121,7 +121,7 @@ SOLVE_CLIMB = 10            # steps towards a comparison that no single change s
 SOLVE_RETURNS = 64          # results of stub calls that are inputs there (a case is generated with 8)
 SOLVE_SLOTS = 400           # input values examined per starting input
 SOLVE_LIMIT = 20_000        # instructions per run there
-STALL = 4                   # on DREAD's own engines a search run stops after limit // STALL instructions that
+STALL = 2                   # on DREAD's own engines a search run stops after limit // STALL instructions that
                             # enter no block it had not entered (Generator.stall_part)
 SWEEP_RUNS = 600            # emulator runs per base input in the boundary sweep
 SWEEP_STEPS = SWEEP_RUNS // 4   # values a slot steps through at most (Generator.ladder)
@@ -542,12 +542,14 @@ class Generator:
         Unicorn's cost an instruction), else 0. A search run there stops after limit // STALL
         instructions that enter no block it had not entered (dread.emu.Machine.call stall), as at the
         limit: circling in code it knows (a count of billions, a list that points at itself), it would
-        mostly run into it. Measured from scratch on 2026-10-20: FreeRTOS's MSP430 build generated in
-        509 s of CPU instead of 1,000 (the lift check 128 s instead of 370), the same 143 functions
-        accepted, two closer (vTaskSwitchContext's generation no longer fails). Not on Unicorn: GCC
-        -Os saved a fifth of its generation but lost two functions, one of them whole: FreeRTOS's
-        blocking calls time out only after many rounds of a loop that enters no new code (the pended
-        ticks the kernel counts in memory), and such runs end within the limit."""
+        mostly run into it. Measured from scratch on 2026-10-20 at half the limit: FreeRTOS's MSP430
+        build generated in 760 s of CPU instead of 1,000 (the lift check 242 s instead of 370), the
+        same 143 functions accepted; gizmo-msp430's checksum 244 s to 3 s, its lifted table as before.
+        At a quarter (509 s) gizmo's script_run lost a summing loop's body (its cases ran 149 of 158
+        instructions): a loop over a length entered no new code for longer than that and ended within
+        the limit. Not on Unicorn: GCC -Os saved a fifth of its generation but lost two functions, one
+        of them whole: FreeRTOS's blocking calls time out only after many rounds of a loop that enters
+        no new code (the pended ticks the kernel counts in memory), and such runs end within it."""
         if self._stall_part is None:
             # (a new engine of its own: a Machine would reset the shared core, and the first answer
             # came while a run was being set up, which made the first generation differ)

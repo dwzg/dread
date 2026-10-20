@@ -394,6 +394,12 @@ The long runs set the pace of everything after them. Measure first, then cut.
   loop that enters no new code, the pended ticks counted in memory, and such runs end within the
   limit). So not on Unicorn, where an instruction costs a twenty-fifth. bin/ab-cases --cover
   compares what such a change's cases cover.
+  Corrected the same day to half the limit: at a quarter gizmo-msp430's script_run lost a summing
+  loop's body (149 of 158 instructions covered, the function dropped), which neither the FreeRTOS
+  measurement nor the four gizmo functions compared had shown. At half: script_run whole again
+  (gizmo-msp430's table as before), FreeRTOS MSP430 from scratch 760 s of generation instead of
+  1,000 (lift check 242 s instead of 370), the same 143 accepted, checksum 244 s to 3 s. A
+  generator change that changes cases now gets the lift check on every gizmo build too (CLAUDE.md).
 - [x] Fewer search runs for loop cases (the sweep steps every stub answer of a loop case: 23,000 of a
   task's 49,000 runs): changes the cases; measure with bin/ab-cases --cover and from scratch.
   Measured (2026-10-20): of the busiest task's 72 s, the compare-guided stage made 24,000 runs (31 s),

@@ -84,8 +84,11 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   for byte (a shell loop by hand twice compared nothing); `--cover` compares the instructions the
   cases cover instead, for a change meant to change them (then measure whole builds from scratch:
   a handful of functions moves with the search's path, 2026-10-20).
-- **A lifter change** (what it lifts, refuses or keeps across calls): run `dread lift --check` on
-  every gizmo build before the suite and commit the regenerated `config/lifted.txt` with the change.
+- **A lifter change** (what it lifts, refuses or keeps across calls), **or a generator change that
+  changes cases**: run `dread lift --check` on every gizmo build before the suite and commit the
+  regenerated `config/lifted.txt` with the change; a table that loses a function is a regression to
+  trace before the change goes in (2026-10-20: a generator change measured on a FreeRTOS build and
+  four gizmo functions cost gizmo-msp430's script_run, which only the gizmo lift check showed).
   A test that plants a fault and shows it through a caller assumes the caller is the original's
   code; a caller that starts to lift can take the fault out of its reach (2026-10-20: uart_puts,
   lifted once it kept r1 across uart_putc, made two tests fail).
