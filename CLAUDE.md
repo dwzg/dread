@@ -56,10 +56,13 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   item is bigger than thought, a bug comes first, an approach turns out wrong): split, add, reorder or
   drop items, and say why in the commit message. Every few items, check with numbers (test times,
   coverage, what an item gained) whether the order still makes sense.
-- **Never block.** A decision that is the user's (a matter of taste, anything public or
-  irreversible beyond the agreed pushes, credentials, buying or installing system software) goes
-  into "Questions for the user" in `docs/todo.md` with the options and a recommendation; then go on
-  with what does not depend on it.
+- **Never block.** The user leaves decisions to the recommendation (2026-10-20: "Just note it down
+  so I can review your decisions later"): take the recommended option and write it into
+  `docs/decisions.md` (question, options, choice, why, how to undo, status), also where it takes
+  from a comparison (rule 6 then holds through that record). Only what the user alone can do or
+  undo goes into "Questions for the user" in `docs/todo.md`: files or credentials only they have,
+  buying or installing system software, anything public or irreversible beyond the agreed pushes
+  (a force-push); then go on with what does not depend on it.
 - **When stuck**, after two serious attempts or a few hours on one item: write down what was tried
   and why it failed in the item, put the tree back to the last commit, and take the next item.
 - **Commit only green**: `.venv/bin/pytest` passes, every gizmo build. Push only through the leak

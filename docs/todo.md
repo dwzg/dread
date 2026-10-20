@@ -98,33 +98,14 @@ IAR's runtime code marked and left out.
 
 ## Questions for the user
 
-Decisions that are the user's, with options and a recommendation. Work goes on around them.
+What only the user can do (provide files, credentials, system software) or decide (what cannot be
+undone). Other decisions are taken by the recommended option and written down in
+`docs/decisions.md` for the user to review (the user, 2026-10-20). Work goes on around them.
 
 - **IAR-built gizmo?** For the IAR profile: gizmo built with IAR EWARM (Cortex-M3) and, for MSP430,
   EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
   `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
   and optimisation levels matter to you?
-- **Compare a stale-data case except its stale bytes?** (2026-10-20) A case whose every difference
-  is bytes the original wrote from stale stack data (an uninitialised local; FreeRTOS's timer
-  commands carry a union member nobody set into the timer queue) is refused now, as a case whose
-  original took a stack address for a value is: rule 6, nothing compared is taken away. Where every
-  case carries such bytes, the function is left uncovered (vStartTimerDemoTask, and
-  xTaskIncrementTick by its recorded case: FAIL became UNCOVERED, about two functions on each MPS2
-  build). Options: (a) keep refusing; (b) compare such a case except the bytes the fills moved in
-  the original (the bytes whose value the original itself does not define), every other output as
-  before, the bytes left out named in the report. Recommended: (b); it takes from a comparison,
-  so it is yours to decide.
-- **A variadic callee's argument registers the caller did not set?** (2026-10-20) A variadic
-  function stores every argument register from its first unnamed one on into its save area (the
-  demo's sprintf: r2 and r3, the area's address handed to tiny_print), so regflow counts them read.
-  A caller that passes fewer (sprintf(buf, "%d", n) sets r0 to r2) then seems to read what the
-  previous callee left in r3: 12 functions of the clang builds are refused for reading r3 behind
-  memset. Options: (a) keep refusing; (b) at a call site, a register the variadic callee only stores
-  into its save area counts as read only if the caller set it before the call: those callers lift,
-  and a loop case's stub of the variadic callee logs the registers the caller set, not one it left
-  (where the original passes a leftover the C does not reproduce; the format reads it only if the
-  original reads an argument it did not pass, undefined in C). Recommended: (b); it takes from what
-  a stub logs at such sites, so it is yours to decide.
 
 ## Phase 4: cases, mutation, coverage (rest)
 
@@ -764,6 +745,10 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   Lift checks with every case generated anew, main against this: GCC -Os 297 to 298, clang -Os 269
   to 270 (__sflush_r both), the M4F clang build and RISC-V GCC -Os as before (280, 217), none lost;
   the gizmo builds' tables as before.
+- [ ] **Two decisions to implement** (`docs/decisions.md`, 2026-10-20): (1) a variadic callee's save-area
+  stores count as reads only of registers the caller set before the call (regflow; the 12 clang
+  callers of memset and sprintf); (2) a case whose differences are all stale bytes of the original is
+  compared except those bytes, which the report names (vStartTimerDemoTask, xTaskIncrementTick).
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger). --task input now also asks for the functions the lift
   check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed
