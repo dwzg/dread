@@ -79,7 +79,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 27       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 28       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -116,6 +116,8 @@ VERSION = 27       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # then failed is tried again with the words no input set as pointers (Generator.chase)
                   # 27: a branch's flag setter is found behind instructions that do not touch the flags
                   # (Arm.branch_deciders); a loop case's frame is the task's (Generator.loop_frame)
+                  # 28: a call into the scratch (a callback the chase set to a buffer) is wild too:
+                  # drop_wild repairs it with the pointer stub (dread.emu.Machine.watch_calls)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -1457,6 +1459,9 @@ class Generator:
         solver = random.Random("%s/%d/solve" % (seed_name(entry), SEED))
         width_bytes = self.arch.reg_bits // 8          # a pointer's bytes
         chase_set = set(self.chase_buffers)
+        from dread.emu import ARGS_ROOM                 # the room above the stack top where a call's stack
+        args_room = (lay.stack_top, lay.stack_top + ARGS_ROOM)  # arguments lie (the case's own words, not chased:
+        # clang's __sflush_r popped r8-r11 from words there the chase had set, which its C reads otherwise)
         setters = self.flag_setters(words)
         readers = {at: read for at, read in setters.values()}
         runs, cost, total = [0], [0], [0, 0]
@@ -1511,7 +1516,8 @@ class Generator:
             """A near miss: a run that reached code no input had reached and then failed, at a fault or
             at a load from or a store into the image, mostly through a pointer no input set (read as 0:
             vListInsert, its item's value solved, came to a list pointer nobody had set). Every word it
-            read that no input gave (in neither the image, the stack nor a peripheral) points to a
+            read that no input gave (in neither the image, the stack, the room above it for stack
+            arguments nor a peripheral) points to a
             zeroed buffer of its own (Generator.chase_buffers), and the run is tried again: one pointer
             of a chain deeper each step. The words join the case, so that a run that ends is a case
             like any other (the original decides what it does with them)."""
@@ -1519,7 +1525,8 @@ class Generator:
                 return None, None
             given = {a for a, _, _ in case["mem"]}
             fresh = [a for a, n in sorted(m.reads.items()) if n == width_bytes and a not in given
-                     and not image.base <= a < image.end and not self.target.memory.is_io(a)][:CHASE_WORDS]
+                     and not image.base <= a < image.end and not self.target.memory.is_io(a)
+                     and not args_room[0] <= a < args_room[1]][:CHASE_WORDS]
             used = sum(1 for a, n, v in case["mem"] if v in chase_set)
             if not fresh or used + len(fresh) > len(self.chase_buffers):
                 return None, None

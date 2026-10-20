@@ -229,7 +229,9 @@ def test_a_case_whose_differences_are_stale_stack_data_is_compared_except_those(
 def test_a_call_into_the_middle_of_a_function_is_seen(tmp_path):
     """Machine.watch_calls: a call through a register that lands inside a function but not at its
     entry is recorded with its site (the runner refuses such a case, the pilot such an input); the
-    entry is not, and an address outside every function only where anywhere is asked for."""
+    entry is not; the scratch area, where generated inputs' buffers lie, is unless a stub is there
+    (the harness's pointer stub); another address outside every function only where anywhere is
+    asked for."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
@@ -266,8 +268,10 @@ cross = "arm-none-eabi-"
     sites = program.icall_sites()
     assert sites and all(apply.entry <= a < program.end(apply) for a in sites)
 
-    def watch(pointer, anywhere=False):
+    def watch(pointer, anywhere=False, stubbed=False):
         m = Machine(Layout(t, image), image.payload())
+        if stubbed:
+            m.stub(pointer & ~1, lambda m, *a: 0)
         m.watch_calls(program, sites, anywhere)
         try:
             m.call(apply.entry, pointer, 4, max_instructions=10_000)
@@ -276,8 +280,10 @@ cross = "arm-none-eabi-"
         return [target for _, target in m.wild_calls]
     assert watch(twice.insns[1] | 1) == [twice.insns[1]]
     assert watch(twice.entry | 1) == []
-    stub = 0x20100001                       # (outside every function: the scratch area)
-    assert watch(stub) == [] and watch(stub, anywhere=True) == [stub & ~1]
+    stub = 0x20100001                       # (the scratch area, where a generated input's buffers lie)
+    assert watch(stub) == [stub & ~1]       # a callback an input aimed at a buffer (generator 28)
+    assert watch(stub, stubbed=True) == []  # a stub there (the harness's pointer stub) is fine
+    assert watch(0x20000001) == [] and watch(0x20000001, anywhere=True) == [0x20000000]   # RAM: only anywhere
 
 
 SMASH_C = """

@@ -470,8 +470,11 @@ class Machine:
     def watch_calls(self, program, sites, anywhere=False):
         """Record in self.wild_calls [(site, target)] the calls through a register at `sites`
         ({address: size}) whose target lies in the image but is no function's entry: the middle of a
-        function, or data such as the vector table (anywhere: any address that is no function's entry;
-        else stubs and the harness's pointer stub, outside the image, are fine). The target is the first block behind the call; a call to the
+        function, or data such as the vector table; or in the scratch, where the generated inputs'
+        buffers lie (a callback the input pointed at a buffer: the compare-guided stage's chase set
+        FreeRTOS's _write to one, and __sflush_r's run went on through data; anywhere: any address
+        that is no function's entry). A stub's address is fine (the harness's pointer stub lies in
+        the scratch). The target is the first block behind the call; a call to the
         next instruction (an svc that runs on) is none. Not followed: a call through a veneer (bl to a
         bx rN stub) reaches its target a block later. An input that points a callback into the
         middle of a function runs code the rebuilt image has otherwise, or calls it with other values
@@ -482,11 +485,14 @@ class Machine:
         def at_site(uc, address, size, user):
             state["site"] = address
 
+        mem = self.layout.target.memory
+        scratch = (mem.scratch_base, mem.scratch_base + mem.scratch_size) if mem.scratch_base is not None else (0, 0)
+
         def on_block(uc, address, size, user):
             site, state["site"] = state["site"], None
-            if site is None or address == site + sites[site] or address in program.by_entry:
+            if site is None or address == site + sites[site] or address in program.by_entry or address in self.stubs:
                 return
-            if anywhere or program.in_image(address):
+            if anywhere or program.in_image(address) or scratch[0] <= address < scratch[1]:
                 self.wild_calls.append((site, address))
 
         for address in sites:

@@ -675,6 +675,9 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   215), the M4F builds 314 and 305 (+5, +15), MSP430 150; one lost (clang -O2). 2,834 of 3,791 on the
   eleven builds against 2,679 at measure-24. Merged after it, measured next: generator 27 (loop
   frames, flag setters behind other instructions) and saved registers touched refused.
+  Left there, traced: clang -O2's __sflush_r, whose FILE callback a generated input points at a real
+  function's entry that loads r8-r11 from generated memory (a longjmp-like target; no wild call,
+  since it is an entry); clang -Os's prvSampleTimeNow, whose rebuilt run ends at 0x3c (not traced).
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with

@@ -9,6 +9,21 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Calls into the scratch count as wild calls (2026-10-20)
+
+**Decided by recommendation** (an extension of an existing refusal).
+
+- **Question.** A case whose original calls through a register into the middle of a function or
+  into the image's data is refused (the rebuilt image has other code there); the generator repairs
+  such a callback with its pointer stub. A callback a generated input aimed at a buffer in the
+  scratch (the compare-guided stage's chase set FreeRTOS's FILE callbacks to buffers) ran zeros and
+  data as code and went unseen.
+- **Choice.** A call into the scratch is wild too, unless a stub is there (the harness's pointer stub
+  lies in the scratch): the generator repairs it, the runner refuses a case that still makes one.
+  The scratch holds nothing but generated inputs' buffers, so no real code is called there.
+- **Undo.** Revert generator 28's change to dread.emu.Machine.watch_calls.
+- **Status.** Done (generator 28, 2026-10-20).
+
 ## Refusing a case whose input makes code touch saved registers (2026-10-20)
 
 **Decided by recommendation.**
