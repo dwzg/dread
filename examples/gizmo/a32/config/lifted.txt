@@ -14,6 +14,7 @@ delay
 fmt_dec
 gpio_set
 handle_key
+hang
 irq_dispatch
 irq_enable_timer
 irq_entry  # accepted by the system run

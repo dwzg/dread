@@ -658,6 +658,20 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   xTaskGenericNotifyFromISR are lifted since the switch resolver's filled registers (refused
   before) and UNCOVERED: the generator never set the switch index to 3 or 4 (tbb behind cmp #4), nor
   the task's notify state to "waiting".
+  Generator 25 (2026-10-20): (a) memory cells do not overlap. A learned pointer is put one to three
+  bytes off now and then, a run then read the same buffer at new addresses, and every input wrote
+  those overlapping cells one after the other, over most of each other's bytes: half of a build's
+  functions had such inputs, and vListInsert's item value read 0x08000000 whatever the compare-
+  guided stage set. Measured from scratch on three builds: GCC -Os 298 to 297, clang -Os 270 to 274,
+  RISC-V GCC -Os 218 to 220, the instructions the uncovered functions miss 447 to 313, 1,204 to
+  1,180 and 557 to 551 (a few functions each way, the search's path). vListInsert still misses its
+  one: behind the compare it loads a list pointer from a word no input sets, and the solver drops an
+  attempt that reached new code and then touched the image (a pointer chain, which the pilot's Haiku
+  wrote). (b) A run that runs into its limit on a branch to itself (for (;;);) has done all it does
+  in both images: a case (emu.Machine.self_loop_at; a loop case, or a "hang" case of a function's own
+  error path). GCC -Os 298 to 303 with the cases of the five affected functions made anew: FreeRTOS's
+  malloc-failed and stack-overflow hooks, prvGetRegistersFromStack, Default_Handler and main_full
+  (whose last instruction is the loop behind vTaskStartScheduler); gizmo's hang and Default_Handler.
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with

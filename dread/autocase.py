@@ -79,7 +79,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 24       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 25       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -109,6 +109,9 @@ VERSION = 24       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 24: a case whose run calls through a register into the image at no function's
                   # entry is dropped and its pointer inputs get the pointer stub in the second pass
                   # (drop_wild); the stub's place compared without the Thumb bit where a run died
+                  # 25: memory cells do not overlap (Cells.add): a pointer one byte off read the same
+                  # buffer as new cells, written over most of the first one's bytes in every input;
+                  # a run that ends on a branch to itself (for (;;);) is a case (Machine.self_loop_at)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -682,8 +685,11 @@ class Generator:
     def ends_badly(m):
         """Whether a run of a case that ends at a call (stops, a loop case) ended neither by a return
         nor at that call (at the instruction limit, or spinning on a register): no common place to
-        compare it, so it is no case; it may still teach the compare-guided stage."""
-        return getattr(m, "ends_at_call", False) and not m.stopped_at and bool(m.timed_out or m.spinning)
+        compare it, so it is no case; it may still teach the compare-guided stage. A run that came to a
+        branch to itself (dread.emu.Machine.self_loop_at: for (;;);) ended there in both images alike:
+        FreeRTOS's malloc and stack-overflow hooks got no loop case before."""
+        return getattr(m, "ends_at_call", False) and not m.stopped_at and bool(m.timed_out or m.spinning) \
+            and m.self_loop is None
 
     def coverage(self, entry, words, case, limit=200_000, check_image=False):
         """The function's instructions this input executes; empty if it does not finish (or, with
@@ -1081,6 +1087,18 @@ class Generator:
             try:
                 m.call(entry, *case["args"], max_instructions=limit, stall=self.stall_for(limit))
             except EmuError:
+                if m.self_loop is not None and self.program.function_at(m.self_loop) is self.program.by_entry.get(entry):
+                    # It came to a loop of its own that nothing leaves (for (;;); behind an error): there
+                    # it has done all it does, in both images alike, so the run is a "hang" case,
+                    # compared up to the limit (the runner gives both images the same budget)
+                    got = m.covered_insns(words)
+                    if got - covered and not self.touches_image(m):
+                        case["hang"], case["limit"] = True, limit
+                        covered |= got
+                        corpus.append(case)
+                        last_gain = attempt
+                    known.learn(m.reads)
+                    continue
                 faults += 1
                 if m.spinning:
                     spins.setdefault(m.spinning[0], m.spinning[1:])
@@ -1135,7 +1153,7 @@ class Generator:
                             m.read(a, n)
                         except Exception:
                             continue
-                        known.setdefault(a, n)
+                        known.add(a, n)
                 continue
             if m.spinning:                      # (a case that ends at a call came back spinning: the
                 spins.setdefault(m.spinning[0], m.spinning[1:])     # next inputs get a poll stage)
@@ -1628,16 +1646,42 @@ class Generator:
 
 
 class Cells(dict):
-    """The memory locations the generator gives values to: {address: size}, at most MAX_CELLS."""
+    """The memory locations the generator gives values to: {address: size}, at most MAX_CELLS, none
+    overlapping another. Every input writes its cells one after the other, so overlapping ones wrote
+    over most of each other's bytes, and a value the search gave the first did not survive: learned
+    pointers are put one to three bytes off now and then, a run then read the same buffer at new
+    addresses, and FreeRTOS's vListInsert had cells at r1, r1+1, r1+2 and r1+3, the item's value
+    reading 0x08000000 whatever the compare-guided stage set (its portMAX_DELAY path stayed unrun;
+    half of a build's functions had such inputs)."""
+
+    def __init__(self):
+        super().__init__()
+        self._owner = {}                    # byte address -> the address of the cell holding it
 
     def full(self):
         return len(self) >= MAX_CELLS
+
+    def add(self, a, n):
+        """Know the n bytes at a as a cell: left out where it overlaps a known cell it does not hold
+        whole (a word one byte off: its bytes are that cell's), in place of the known cells it holds
+        whole (a byte read first, then the word around it)."""
+        if self.get(a, 0) >= n:
+            return
+        over = {self._owner[b] for b in range(a, a + n) if b in self._owner}
+        if any(o < a or o + self[o] > a + n for o in over) or len(self) - len(over) >= MAX_CELLS:
+            return
+        for o in over:
+            for b in range(o, o + self.pop(o)):
+                del self._owner[b]
+        self[a] = n
+        for b in range(a, a + n):
+            self._owner[b] = a
 
     def learn(self, reads):
         for a, n in reads.items():
             if len(self) >= MAX_CELLS:
                 return
-            self.setdefault(a, n)
+            self.add(a, n)
 
 
 def coalesce(stores):

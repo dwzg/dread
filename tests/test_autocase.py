@@ -502,3 +502,70 @@ def test_pointer_buffers_stay_in_the_scratch():
         for a in g.pointer_slots:
             assert lo <= a and a + autocase.POINTER_STEP <= hi
             assert not a <= g.fake_pointer < a + autocase.POINTER_STEP
+
+
+def test_memory_cells_do_not_overlap():
+    """A memory cell that overlaps a known one is left out, unless it holds the known ones whole, which
+    it then replaces: every input writes its cells one after the other, and overlapping cells (a
+    learned pointer one byte off read the same buffer) wrote over each other's bytes, so that the
+    value the search gave the first never reached the function (FreeRTOS's vListInsert)."""
+    from dread.autocase import Cells
+    cells = Cells()
+    cells.learn({0x1000: 4, 0x1001: 4, 0x1002: 4, 0x1003: 4})      # a pointer one, two, three bytes off
+    assert dict(cells) == {0x1000: 4}
+    cells.learn({0x2001: 1, 0x2000: 4, 0x2006: 2})                  # a byte first, then its word
+    assert dict(cells) == {0x1000: 4, 0x2000: 4, 0x2006: 2}
+    cells.add(0x2004, 4)                                            # holds 0x2006 whole, not 0x2000
+    assert dict(cells) == {0x1000: 4, 0x2000: 4, 0x2004: 4}
+    cells.add(0x1000, 2)                                            # known larger: as it was
+    assert dict(cells) == {0x1000: 4, 0x2000: 4, 0x2004: 4}
+    spans = sorted((a, a + n) for a, n in cells.items())
+    assert all(e <= s for (_, e), (s, _) in zip(spans, spans[1:]))
+
+
+SELF_LOOP_C = """
+volatile unsigned flag;
+__attribute__((noinline, noreturn)) void halt(unsigned code) { flag = code; for (;;) { } }
+__attribute__((noinline)) unsigned check(unsigned x) { if (x > 100u) { flag = x; for (;;) { } } return x + 1; }
+"""
+
+
+def test_a_run_that_ends_on_a_branch_to_itself_is_a_case(tmp_path):
+    """A run that runs into its limit on an unconditional branch to itself (for (;;);) has done all it
+    does, in the original and in the C alike: it is a "hang" case. A function that ends so (FreeRTOS's
+    malloc-failed hook) got no loop case before, nor did the error path of one that returns otherwise."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(SELF_LOOP_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "check", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    gen = Generator(target, target.image())
+    halt, check = gen.program.by_name["halt"], gen.program.by_name["check"]
+    m = gen.machine()
+    m.plan = []
+    m.may_hang = True
+    m.call(check.entry, 200, max_instructions=1000)
+    spin = [a for a in check.insns if gen.program.arch.flow(gen.program.insn(a))[1] == a]
+    assert m.timed_out and [m.self_loop] == spin
+    m = gen.machine()
+    m.plan = []
+    m.call(check.entry, 2, max_instructions=1000)
+    assert m.self_loop is None
+    for fn, loop in ((halt, True), (check, False)):
+        cases = gen.generate(fn.name, fn.entry, fn.insns, loop=loop)
+        got = set()
+        for c in cases:
+            got |= gen.coverage(fn.entry, fn.insns, c, c.get("limit", 200_000))
+        assert got == set(fn.insns), fn.name
+        assert loop or any(c.get("hang") for c in cases)

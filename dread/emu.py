@@ -438,6 +438,7 @@ class Machine:
         self.core_names = frozenset(self.arch.general_regs()) | {"sp", "pc", "lr"}     # 32 bits (reg)
         self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
         self.timed_out = False      # the last call ran into its instruction limit
+        self.self_loop = None       # where it did so on a branch to itself (self_loop_at)
         self.stack_preset = set()   # stack bytes call() wrote for the call itself (a pushed return address)
         self.stack_shift = 0        # bytes below the stack top where call() starts the stack (dread.runner)
         self.stale_fill = None      # (byte, span, entries): at every block that starts at one of the
@@ -815,6 +816,24 @@ class Machine:
 
     # ---- the call ----
 
+    def self_loop_at(self, uc):
+        """The address of the instruction a stopped run stands on when it is an unconditional branch
+        to itself (for (;;); at the end of a hook or a fault handler), else None. A run that ran into
+        its limit there had done all it would ever do, without interrupts, in the original and in the
+        C alike: a defined end, though not a return (dread.autocase makes it a "hang" case)."""
+        resume = self.arch.resume_address(uc)       # (bit 0: Thumb, on the ARM)
+        address = resume & ~1
+        try:
+            insn = self.arch.decode(bytes(uc.mem_read(address, 4)), address, "t32" if resume & 1 else None)
+        except Exception:
+            return None
+        if insn is None:
+            return None
+        kind, target, _ = self.arch.flow(insn)
+        if kind == "jump" and target is not None and target & ~1 == address and self.arch.predicate(insn) is None:
+            return address
+        return None
+
     def call(self, addr, *args, max_instructions=5_000_000, stall=0):
         """Call the function at addr (its original entry) with args in the argument registers;
         further arguments go into the stack words at the stack top, as the calling convention
@@ -868,7 +887,7 @@ class Machine:
             if reg is not None and reg not in lay.arg_regs[:len(regs)]:
                 uc.reg_write(reg, KEPT_POISON + 0x11 * (i + 1))
         self.calls, self.written, self.written_ranges = [], set(), None
-        self.timed_out, self.exception = False, None
+        self.timed_out, self.exception, self.self_loop = False, None, None
         if self.core.fast is not None:
             from dread import fasthooks
             self.core.fast.clear(fasthooks.WRITES)
@@ -943,6 +962,7 @@ class Machine:
                 self.calls.append(("io poll reads", register, poll["count"]))
         if uc.reg_read(lay.pc) != lay.sentinel:
             self.timed_out = self.spinning is None and not getattr(self, "stopped_at", None)
+            self.self_loop = self.self_loop_at(uc) if self.timed_out else None
             if self.may_hang:
                 return Result(0, writes, list(self.calls) + [("did not return",)], layout=lay)
             raise EmuError("function at 0x%x did not return within %d instructions" % (addr, max_instructions))
