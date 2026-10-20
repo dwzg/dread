@@ -406,12 +406,24 @@ The long runs set the pace of everything after them. Measure first, then cut.
   SOLVE_RUNS in each of the two passes a function not covered whole gets, with and without learning
   from loads: _generate_all).
 
-- [ ] A C fast path for the system run's block hook (dread.fasthooks): nearly every block is a known
+- [x] A C fast path for the system run's block hook (dread.fasthooks): nearly every block is a known
   block of shared code with nothing due (clock += size and three comparisons); C could do those and
   call Python only for a new block, a function's entry, code built from C, an event or the limit due,
   a spin check or an interrupt question (the masked answer's registers compared in C). The same
   outcomes as the Python hook, compared on every scenario (sysdump of 2026-10-20); estimated a third
   off a realistic run, the system check and dread sysrecord with it.
+  Done (2026-10-20): dread_sysblock does a known block of shared code with nothing due, a function
+  entered again (counted in C, added to System.entered at the end) and a block behind which the
+  masked answer still holds (the registers and bits the layer's mask_registers names, compared in
+  C); the rest goes to System._on_block, which keeps the rules; the state is System.st (SysState in
+  C, a plain object on DREAD's own engines). A realistic FreeRTOS run: 97.4 % of its 3.4 million
+  blocks in C. Old against new: all 53 runs alike (37 scenario runs of 15 targets on both images, 16
+  system-check runs of GCC -Os and RISC-V GCC -Os on both images); the system-check runs 8.1 s to
+  4.8 s on ARM, 7.2 times faster on RISC-V, the scenario runs 93 s to 61 s. Found on the way: a timer
+  model may schedule beyond 2**63 (the CLINT with its compare register all ones), which C's 64-bit
+  fields wrapped (test_riscv_traps_from_reset ran to its limit); the true times stay in Python, C
+  gets them clamped. Left in a realistic run: the peripheral hook (126,000 calls through the
+  binding) and the register reads at every chunk's end.
 - [x] gizmo's MSP430 cases take ten minutes to generate (the suite's first run after a generator
   VERSION change: 603 s of its 936), on DREAD's own engine, which the byte budget does not reach;
   profile that engine's runs. Profiled (2026-10-20): checksum's search runs nearly all end at the

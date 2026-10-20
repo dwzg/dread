@@ -439,3 +439,29 @@ limit = 50_000_000
     assert run.reports["uart"]["sent"] == "x", run.reports
     assert run.how.startswith("spins"), run.how
     assert run.clock < 3_000_000, run.clock
+
+
+def test_the_c_block_hook_gives_the_python_hooks_outcome(monkeypatch):
+    """On Unicorn the blocks that only move the clock are done in C (dread.fasthooks, dread_sysblock):
+    every outcome is the Python hook's (how, clock, device log, reports, functions entered and their
+    order), and the C hook did most of the blocks."""
+    from conftest import gizmo_dir
+    from dread import fasthooks
+    from dread.target import Target
+    t = Target.load(gizmo_dir("m4"))
+    image = t.image()
+
+    def outcomes():
+        out, fast = {}, 0
+        for name, scenario in sorted(t.scenarios.items()):
+            scenario = dict(scenario, _name=name)
+            system = sysrun.System(t, image, image.payload(), scenario=scenario)
+            o = system.run(int(scenario.get("limit", sysrun.LIMIT)))
+            out[name] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+            fast += system.st.fast if system.fast is not None else 0
+        return out, fast
+    with_c, done_in_c = outcomes()
+    monkeypatch.setattr(fasthooks, "_LIB", [None])          # as without a C compiler
+    without, none = outcomes()
+    assert with_c == without
+    assert none == 0 and done_in_c > 1000, done_in_c

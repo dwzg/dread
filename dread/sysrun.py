@@ -32,6 +32,14 @@ without any clock: "polls" when it keeps reading one register, "waits" when it a
 all), or at a fault. A read repeated without
 anything between is one log entry with its count.
 
+The block hook is the run's hot path (a FreeRTOS run of 30 million clock units enters 3.4 million
+blocks). On Unicorn a hook in C (dread.fasthooks, dread_sysblock) does the blocks that only move the
+clock: a known block of shared code with nothing due, a function entered again (counted there),
+and one behind which the masked interrupt's answer still holds (the registers it depends on read as
+when it was given: the layer's mask_registers). Every other block goes to System._on_block, which
+keeps the rules; both read and write one state (System.st). Elsewhere (DREAD's own engines)
+_on_block does every block.
+
 Scenarios are tables of the target's [scenarios] section:
 
     [scenarios.boot]
@@ -77,6 +85,27 @@ class Outcome:
         self.how, self.clock, self.log, self.reports, self.entered, self.order = how, clock, log, reports, entered, order
 
 
+NO_EVENT = (1 << 63) - 1    # _State.next_event when nothing is scheduled (as in dread.fasthooks)
+CLOCK_MAX = NO_EVENT - 1    # the state's clock and times stop here (64 bits in C); see System.clock
+
+
+class _State:
+    """The run's clock and what the block hook decides with, as plain attributes: on Unicorn the same
+    fields are dread.fasthooks.SysState, which the C block hook reads and writes."""
+
+    def __init__(self):
+        self.clock = self.progress = self.spin_check = 0
+        self.next_event, self.limit, self.spin = NO_EVENT, LIMIT, SPIN
+        self.frozen = self.due = self.irq_check = self.observers = self.memo = 0
+
+
+def _field(name, kind=int):
+    """A System attribute kept in its state (System.st)."""
+    if kind is bool:
+        return property(lambda s: bool(getattr(s.st, name)), lambda s, v: setattr(s.st, name, 1 if v else 0))
+    return property(lambda s: getattr(s.st, name), lambda s, v: setattr(s.st, name, v))
+
+
 class _Registers:
     """The engine's reg_read for the layer's interrupt questions (cpu_masks, interrupts_enabled),
     through Unicorn's C function where the engine is Unicorn (dread.emu.core_reader)."""
@@ -90,11 +119,52 @@ class System:
     ({name: {...}}) to tell shared code from C; built: the names of the functions built from C (for
     the original, whose code of them does not count)."""
 
+    spin_check, limit, frozen = (_field(n) for n in ("spin_check", "limit", "frozen"))
+    due, irq_check = _field("due", bool), _field("irq_check", bool)
+
+    # The state holds 64-bit times (C's), Python any: a timer model may schedule beyond 2**63 (the CLINT
+    # once its compare register is all ones), and the run may move the clock on to such an event when
+    # it waits (run()), just before it ends at the limit. The true values stay here; the state gets
+    # them clamped below NO_EVENT, which every comparison during a run takes alike.
+    @property
+    def clock(self):
+        return self._big_clock if self._big_clock is not None else self.st.clock
+
+    @clock.setter
+    def clock(self, value):
+        self._big_clock = value if value > CLOCK_MAX else None
+        self.st.clock = min(value, CLOCK_MAX)
+
+    @property
+    def progress(self):
+        return self.st.progress
+
+    @progress.setter
+    def progress(self, value):
+        self.st.progress = min(value, CLOCK_MAX)
+
+    @property
+    def next_event(self):
+        return self._next_event
+
+    @next_event.setter
+    def next_event(self, value):
+        self._next_event = value
+        self.st.next_event = NO_EVENT if value is None else min(value, CLOCK_MAX)
+
     def __init__(self, target, image, payload, program=None, placement=None, built=(), scenario=None):
         self.target, self.image, self.arch = target, image, image.arch
         self.program = program or Program(target, image)
         self.layout = Layout(target, image)
         self.uc = uc = self.arch.new_uc()
+        # On Unicorn a block hook in C does the blocks that only move the clock (dread.fasthooks:
+        # nearly all) and hands the others to _on_block; elsewhere _on_block does every block.
+        from dread import fasthooks
+        self.fast, self.callback_error = None, None
+        if fasthooks.usable(uc):
+            self.fast = fasthooks.SysHooks(uc, self._from_c)
+        self.st = self.fast.state if self.fast is not None else _State()
+        self._big_clock, self._next_event = None, None
         for lo, hi in self.layout.maps:
             uc.mem_map(lo, hi - lo)
         uc.mem_write(image.base, bytes(payload))
@@ -141,7 +211,8 @@ class System:
         # block boundary splits (QEMU's 1 KiB pages do: FreeRTOS's strcmp, `it cs` at 0x7fe), and an
         # interrupt taken there stacked it cleared (a repair at every block took 40 % of a run anyway)
         self._shared(placement, built)
-        uc.hook_add(UC_HOOK_BLOCK, self._on_block)
+        if self.fast is None:
+            uc.hook_add(UC_HOOK_BLOCK, self._on_block)
         for lo, hi in self.layout.io:
             uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._on_io, begin=lo, end=hi - 1)
         self.fault = None
@@ -173,6 +244,10 @@ class System:
                 excluded.append((fn.insns[0], prog.end(fn)))
         self.excluded = sorted(excluded)
         self.excluded_lo = [lo for lo, _ in self.excluded]
+        if self.fast is not None:
+            self.fast.set_excluded(self.excluded)
+            for address in self.entries:
+                self.fast.add_entry(address)
 
     def is_shared(self, address):
         i = bisect.bisect_right(self.excluded_lo, address) - 1
@@ -205,7 +280,8 @@ class System:
 
     def interrupts_changed(self):
         """Something may now ask for an interrupt: checked behind the next block of shared code."""
-        self.irq_check = True
+        st = self.st
+        st.irq_check, st.memo = 1, 0
         self.irq_epoch += 1
 
     def _wanted(self):
@@ -241,9 +317,20 @@ class System:
 
     # ---- hooks ----
 
+    def _from_c(self, addr, size):
+        """A block the C hook hands over (dread.fasthooks.SysHooks): an exception cannot pass through
+        the C between, so it stops the run and run() raises it."""
+        try:
+            self._on_block(self.uc, addr, size, None)
+        except BaseException as e:          # noqa: B036 (raised again by run())
+            if self.callback_error is None:
+                self.callback_error = e
+            self.uc.emu_stop()
+
     def _on_block(self, uc, addr, size, user):
-        if self.due:
-            self.due = False
+        st = self.st
+        if st.due:
+            st.due = 0
             uc.emu_stop()                   # this block runs (and counts) when the run goes on
             return
         for o in self.observers:
@@ -261,33 +348,34 @@ class System:
                 self.order.append(entry)
             self.entered[entry] += 1
         if not self.is_shared(addr):
-            self.frozen += 1                # a wait in code built from C (a rebuilt idle loop): stop the
-            if self.frozen >= FROZEN and self.next_event is not None:      # chunk, the run moves the
+            st.frozen += 1                  # a wait in code built from C (a rebuilt idle loop): stop the
+            if st.frozen >= FROZEN and st.next_event != NO_EVENT:          # chunk, the run moves the
                 uc.emu_stop()                                               # clock on to the event
         else:
-            self.frozen = 0
+            st.frozen = 0
             if fresh:
-                self.progress = self.clock
-            self.clock += size
-            if self.clock - self.progress >= SPIN and self.clock >= self.spin_check:
+                st.progress = st.clock
+            st.clock += size
+            if st.clock - st.progress >= SPIN and st.clock >= st.spin_check:
                 # Here, in a block of code both images share, at a clock both have: a check between
                 # the emulator's chunks came at other points in the two images, which then ended with
                 # logs of different lengths. Every SPIN // 16 units while the rule holds.
-                self.spin_check = self.clock + SPIN // 16
+                st.spin_check = st.clock + SPIN // 16
                 wanted = self._wanted()
                 if wanted is not None and not self._may_take(*wanted):
                     # it waits for an interrupt it keeps masked (an assertion's loop with interrupts
                     # off): nothing can change any more
                     self.request_stop("spins: interrupt %d waits, masked, and nothing new for %d units of shared "
-                                      "clock, at 0x%x" % (wanted[1], self.clock - self.progress, addr))
-            if (self.next_event is not None and self.clock >= self.next_event) or self.clock >= self.limit:
+                                      "clock, at 0x%x" % (wanted[1], st.clock - st.progress, addr))
+            if st.clock >= st.next_event or st.clock >= st.limit:
                 uc.emu_stop()
-            if self.irq_check:
+            if st.irq_check:
                 waiting = self.irq_waiting
                 if waiting is None or waiting[0] != self.irq_epoch or waiting[2] != self._masks(waiting[1]):
                     wanted = self._wanted()
+                    st.memo = 0
                     if wanted is None:
-                        self.irq_check, self.irq_waiting = False, None
+                        st.irq_check, self.irq_waiting = 0, None
                     else:
                         masks = self._masks(wanted[0])
                         if self._may_take(*wanted, masks=masks):
@@ -295,6 +383,10 @@ class System:
                             uc.emu_stop()
                         else:
                             self.irq_waiting = (self.irq_epoch, wanted[0], masks)
+                            registers = getattr(self.arch, "mask_registers", None)
+                            if self.fast is not None and registers is not None:     # (the C hook's copy)
+                                self.fast.set_memo(registers(getattr(wanted[0], "may_take", None) is not None),
+                                                   self.regs.reg_read)
 
     def _owner(self, address):
         i = bisect.bisect_right(self.owned_lo, address) - 1
@@ -305,8 +397,9 @@ class System:
     def _on_io(self, uc, access, addr, size, value, user):
         model, mask = self._owner(addr), (1 << 8 * size) - 1
         who = model.name if model else "-"
-        self.clock += ACCESS
-        self.last_access = self.progress = self.clock
+        st = self.st
+        st.clock += ACCESS
+        self.last_access = st.progress = st.clock
         if access == UC_MEM_WRITE:
             self.log.append(("write", who, addr, size, value & mask))
             self.new += 1
@@ -329,8 +422,8 @@ class System:
                 self.log.append(("read", who, addr, size, got, 1))
                 self.new += 1
                 self.last_new = self.clock
-        if (self.next_event is not None and self.clock >= self.next_event) or self.clock >= self.limit:
-            self.due = True                 # (not emu_stop here: see self.due)
+        if st.clock >= st.next_event or st.clock >= st.limit:
+            st.due = 1                      # (not emu_stop here: see self.due)
         if self.layout.settle_it:
             self.arch.settle_it(uc)
 
@@ -353,6 +446,7 @@ class System:
     def run(self, limit=LIMIT):
         uc, arch = self.uc, self.arch
         self.limit = limit
+        self.st.observers, self.st.spin = 1 if self.observers else 0, SPIN
         self.pending_input = sorted((int(t), str(m), d) for t, m, d in self.scenario.get("input", ()))
 
         def word(address):
@@ -386,6 +480,8 @@ class System:
                 uc.emu_start(pc, self.layout.sentinel, count=CHUNK)
             except UcError as e:
                 error = e
+            if self.callback_error is not None:
+                raise self.callback_error
             back = arch.exception_return(uc, word)
             if back is not None:                # the M profile's return from an exception, finished here
                 self.fault, pc = None, back
@@ -442,6 +538,9 @@ class System:
                     how = "waits: no device access for %d units of shared clock and nothing scheduled, pc 0x%x" % (
                         self.clock - self.last_access, pc & ~1)
                 break
+        if self.fast is not None:           # the entries the C hook counted
+            for address, n in self.fast.take_entered():
+                self.entered[self.entries[address]] += n
         reports = {m.name: m.report() for m in self.models}
         if self.interrupts:
             reports["interrupts"] = dict(sorted(self.interrupts.items()))

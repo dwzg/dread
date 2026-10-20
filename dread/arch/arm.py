@@ -657,6 +657,15 @@ class Arm:
             return not engine.reg_read(ua.UC_ARM_REG_PRIMASK) & 1 and not engine.reg_read(ua.UC_ARM_REG_XPSR) & 0x1FF
         return not engine.reg_read(ua.UC_ARM_REG_CPSR) & 0x80
 
+    def mask_registers(self, priorities):
+        """[(register, bits)]: what cpu_masks (priorities) or interrupts_enabled reads, for the system
+        run's C hook to tell that an answer still holds (dread.sysrun). Keep the three alike."""
+        if self.profile == "m":
+            if priorities:
+                return [(ua.UC_ARM_REG_PRIMASK, 1), (ua.UC_ARM_REG_FAULTMASK, 1), (ua.UC_ARM_REG_BASEPRI, 0xFF)]
+            return [(ua.UC_ARM_REG_PRIMASK, 1), (ua.UC_ARM_REG_XPSR, 0x1FF)]
+        return [] if priorities else [(ua.UC_ARM_REG_CPSR, 0x80)]
+
     def cpu_masks(self, engine):
         """M profile: the core's PRIMASK, FAULTMASK and BASEPRI, for a controller with priorities."""
         if self.profile != "m":

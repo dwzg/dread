@@ -88,6 +88,8 @@ static int set_put(set_t *s, uint64_t key, uint32_t val, int keep_first)
 
 static uint32_t set_get(set_t *s, uint64_t key)
 {
+    if (!s->cap)                    /* nothing put yet: no table */
+        return 0;
     uint64_t k = key + 1;
     size_t mask = s->cap - 1, i = mix(k) & mask;
     while (s->keys[i]) {
@@ -305,4 +307,110 @@ size_t dread_state_size(void)
 void dread_init(state_t *st)
 {
     st->reads.ordered = 1;
+}
+
+/* ---- the system run's block hook (dread.sysrun) ----
+ *
+ * Nearly every block of a system run is a known block of shared code with nothing due: the clock
+ * moves on by its size, and that is all (79 % of a FreeRTOS run's 3.4 million blocks; with the
+ * entries of functions counted here and the masked interrupt's answer compared here, 99 %). This
+ * hook does those and calls the Python hook (System._on_block) for every other block, which keeps
+ * the rules in one place; the state both read and write is sys_t. */
+
+typedef void (*block_fn)(void *uc, uint64_t address, uint32_t size, void *user);
+
+typedef struct {
+    int64_t clock, progress, spin_check, next_event, limit, spin;  /* next_event INT64_MAX: none */
+    int32_t frozen, due, irq_check, observers;
+    int32_t memo;                   /* the last interrupt answer was "masked" and nothing changed since */
+    int32_t memo_n;                 /* registers its answer depends on */
+    int32_t memo_regs[4];
+    uint32_t memo_bits[4];
+    uint32_t memo_vals[4];          /* their bits then */
+    set_t known;                    /* block address -> its largest size + 1 */
+    set_t entry_set;                /* addresses where functions are entered */
+    set_t entered;                  /* entry address -> the entries counted here */
+    const uint64_t *excl_lo, *excl_hi;  /* code that is not shared, sorted */
+    uint64_t excl_n;
+    reg_rw_fn reg_read;
+    block_fn python;
+    int64_t fast;                   /* blocks this hook did alone */
+} sys_t;
+
+static int sys_shared(const sys_t *st, uint64_t address)
+{
+    uint64_t lo = 0, hi = st->excl_n;
+    while (lo < hi) {               /* the last range starting at or below address */
+        uint64_t mid = (lo + hi) / 2;
+        if (st->excl_lo[mid] <= address)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo == 0 || address >= st->excl_hi[lo - 1];
+}
+
+static int sys_masks_hold(void *uc, sys_t *st)
+{
+    if (!st->memo)
+        return 0;
+    for (int i = 0; i < st->memo_n; i++) {
+        uint64_t v = 0;
+        st->reg_read(uc, st->memo_regs[i], &v);
+        if (((uint32_t)v & st->memo_bits[i]) != st->memo_vals[i])
+            return 0;
+    }
+    return 1;
+}
+
+/* UC_HOOK_BLOCK */
+void dread_sysblock(void *uc, uint64_t address, uint32_t size, sys_t *st)
+{
+    if (!st->observers && !st->due) {
+        uint32_t known = set_get(&st->known, address);
+        if (known && size < known && sys_shared(st, address)) {
+            int64_t clock = st->clock + size;
+            if ((clock - st->progress < st->spin || clock < st->spin_check)
+                    && clock < st->next_event && clock < st->limit
+                    && (!st->irq_check || sys_masks_hold(uc, st))) {
+                if (set_get(&st->entry_set, address))
+                    set_put(&st->entered, address, set_get(&st->entered, address) + 1, 0);
+                st->clock = clock;
+                st->frozen = 0;
+                st->fast++;
+                return;
+            }
+        }
+    }
+    int due = st->due;
+    st->python(uc, address, size, NULL);
+    if (!due && !st->observers) {   /* the Python hook recorded the block (it returns first only when due) */
+        uint32_t known = set_get(&st->known, address);
+        if (size + 1 > known)
+            set_put(&st->known, address, size + 1, 0);
+    }
+}
+
+size_t dread_sys_size(void)
+{
+    return sizeof(sys_t);
+}
+
+/* The entries counted here, as (address, count) pairs, and the counts set back to none. */
+size_t dread_sys_entered(sys_t *st, uint64_t *keys, uint32_t *vals)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < st->entered.cap; i++)
+        if (st->entered.keys[i]) {
+            keys[n] = st->entered.keys[i] - 1;
+            vals[n] = st->entered.vals[i];
+            n++;
+        }
+    set_clear(&st->entered);
+    return n;
+}
+
+void dread_sys_entry(sys_t *st, uint64_t address)
+{
+    set_put(&st->entry_set, address, 1, 1);
 }

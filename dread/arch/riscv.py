@@ -657,6 +657,13 @@ class RiscV:
         return bool(engine.reg_read(ur.UC_RISCV_REG_MSTATUS) & self.MSTATUS_MIE) and \
             bool(engine.reg_read(ur.UC_RISCV_REG_MIE) & self.MIE_MEIE)
 
+    def mask_registers(self, priorities):
+        """[(register, bits)]: what cpu_masks (priorities) or interrupts_enabled reads (dread.sysrun's
+        C hook). Keep the three alike."""
+        if priorities:
+            return [(ur.UC_RISCV_REG_MSTATUS, 0xFFFFFFFF), (ur.UC_RISCV_REG_MIE, 0xFFFFFFFF)]
+        return [(ur.UC_RISCV_REG_MSTATUS, self.MSTATUS_MIE), (ur.UC_RISCV_REG_MIE, self.MIE_MEIE)]
+
     def cpu_masks(self, engine):
         """mstatus and mie, for a controller that decides itself (dread.models.clint)."""
         return {"mstatus": engine.reg_read(ur.UC_RISCV_REG_MSTATUS), "mie": engine.reg_read(ur.UC_RISCV_REG_MIE)}

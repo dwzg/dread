@@ -170,3 +170,77 @@ class Hooks:
 
     def clear(self, which):
         self.lib.dread_clear(ctypes.byref(self.state), which)
+
+
+NO_EVENT = (1 << 63) - 1            # SysState.next_event when nothing is scheduled
+
+BLOCK_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_void_p)
+
+
+class SysState(ctypes.Structure):
+    """The system run's clock and what its block hook decides with (sys_t in fasthooks.c)."""
+    _fields_ = [("clock", ctypes.c_int64), ("progress", ctypes.c_int64), ("spin_check", ctypes.c_int64),
+                ("next_event", ctypes.c_int64), ("limit", ctypes.c_int64), ("spin", ctypes.c_int64),
+                ("frozen", ctypes.c_int32), ("due", ctypes.c_int32), ("irq_check", ctypes.c_int32),
+                ("observers", ctypes.c_int32), ("memo", ctypes.c_int32), ("memo_n", ctypes.c_int32),
+                ("memo_regs", ctypes.c_int32 * 4), ("memo_bits", ctypes.c_uint32 * 4),
+                ("memo_vals", ctypes.c_uint32 * 4),
+                ("known", Set), ("entry_set", Set), ("entered", Set),
+                ("excl_lo", ctypes.c_void_p), ("excl_hi", ctypes.c_void_p), ("excl_n", ctypes.c_uint64),
+                ("reg_read", ctypes.c_void_p), ("python", ctypes.c_void_p), ("fast", ctypes.c_int64)]
+
+
+class SysHooks:
+    """The C block hook of one system run (dread.sysrun.System): blocks it cannot do alone go to
+    `python`, a callable(address, size), which System._on_block serves."""
+
+    def __init__(self, engine, python):
+        import unicorn.unicorn_py3.unicorn as U
+        from unicorn import UC_HOOK_BLOCK
+        self.lib, self.uclib, self.engine = library(), U.uclib, engine
+        lib = self.lib
+        lib.dread_sys_size.restype = ctypes.c_size_t
+        if lib.dread_sys_size() != ctypes.sizeof(SysState):
+            raise OSError("system state layout differs (%d against %d bytes)" % (
+                lib.dread_sys_size(), ctypes.sizeof(SysState)))
+        lib.dread_sys_entered.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        lib.dread_sys_entered.restype = ctypes.c_size_t
+        lib.dread_sys_entry.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        self.state = s = SysState()
+        s.next_event = NO_EVENT
+        s.reg_read = ctypes.cast(self.uclib.uc_reg_read, ctypes.c_void_p)
+        self.callback = BLOCK_CB(lambda uc, address, size, user: python(address, size))     # (kept alive here)
+        s.python = ctypes.cast(self.callback, ctypes.c_void_p)
+        self.ranges = None
+        handle = ctypes.c_ulong()
+        status = self.uclib.uc_hook_add(engine._uch, ctypes.byref(handle), UC_HOOK_BLOCK,
+                                        ctypes.cast(lib.dread_sysblock, ctypes.c_void_p),
+                                        ctypes.cast(ctypes.byref(s), ctypes.c_void_p), 1, 0)
+        if status:
+            raise OSError("uc_hook_add failed (%d)" % status)
+
+    def set_excluded(self, ranges):
+        """The code that is not shared, as sorted [(lo, hi), ...]."""
+        n = len(ranges)
+        lo, hi = (ctypes.c_uint64 * max(n, 1))(*[a for a, _ in ranges]), (ctypes.c_uint64 * max(n, 1))(*[b for _, b in ranges])
+        self.ranges = (lo, hi)
+        s = self.state
+        s.excl_lo, s.excl_hi, s.excl_n = ctypes.cast(lo, ctypes.c_void_p), ctypes.cast(hi, ctypes.c_void_p), n
+
+    def add_entry(self, address):
+        self.lib.dread_sys_entry(ctypes.byref(self.state), address)
+
+    def take_entered(self):
+        """[(entry address, entries)] the hook counted since the last call."""
+        n = self.state.entered.used
+        keys, vals = (ctypes.c_uint64 * max(n, 1))(), (ctypes.c_uint32 * max(n, 1))()
+        n = self.lib.dread_sys_entered(ctypes.byref(self.state), keys, vals)
+        return [(keys[i], vals[i]) for i in range(n)]
+
+    def set_memo(self, registers, read):
+        """The masked answer holds while these (register, bits) read as now."""
+        s = self.state
+        for i, (reg, bits) in enumerate(registers[:4]):
+            s.memo_regs[i], s.memo_bits[i], s.memo_vals[i] = reg, bits, read(reg) & bits
+        s.memo_n = min(len(registers), 4)
+        s.memo = 1 if len(registers) <= 4 else 0
