@@ -352,6 +352,13 @@ The long runs set the pace of everything after them. Measure first, then cut.
 - [ ] The system check (about a minute of a lift check on that build): one wave of two runs of the
   scenario per function; all candidates rebuilt together would be two runs, but brings back some of
   the clock's distortion (their own blocks take no time): try it with a fallback to one at a time.
+  Measured (2026-10-20, GCC -Os, cases cached): the system check is two thirds of the lift check
+  (124 of 170 s under cProfile). Half of a FreeRTOS run's blocks asked again whether an interrupt
+  that waits masked (a lower priority's while a handler runs, one behind BASEPRI) may be taken: the
+  answer is kept now until interrupts_changed counts a change or the masks differ, and the masks are
+  read through Unicorn's C function. All 37 scenario runs of 15 targets (original and whole-image
+  build) give the same outcomes; 108 s against 92 s, the MPS2 runs that end waiting on a masked
+  interrupt twice as fast. Grouping the candidates is still open.
 - [x] gizmo's MSP430 cases take ten minutes to generate (the suite's first run after a generator
   VERSION change: 603 s of its 936), on DREAD's own engine, which the byte budget does not reach;
   profile that engine's runs. Profiled (2026-10-20): checksum's search runs nearly all end at the

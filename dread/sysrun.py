@@ -59,7 +59,7 @@ from unicorn import (UC_HOOK_BLOCK, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_
 from dread import models as dmodels
 from dread import target as tgt
 from dread.build import recon_dir
-from dread.emu import Layout
+from dread.emu import Layout, core_reader
 from dread.program import Program
 
 CHUNK = 200_000          # instructions per emu_start (stop rules are checked between chunks)
@@ -75,6 +75,14 @@ class Outcome:
 
     def __init__(self, how, clock, log, reports, entered, order):
         self.how, self.clock, self.log, self.reports, self.entered, self.order = how, clock, log, reports, entered, order
+
+
+class _Registers:
+    """The engine's reg_read for the layer's interrupt questions (cpu_masks, interrupts_enabled),
+    through Unicorn's C function where the engine is Unicorn (dread.emu.core_reader)."""
+
+    def __init__(self, engine):
+        self.reg_read = core_reader(engine)
 
 
 class System:
@@ -99,6 +107,15 @@ class System:
         self.by_name = {m.name: m for m in self.models}
         self.controllers = [m for m in self.models if hasattr(m, "pending_interrupt")]
         self.irq_check, self.deliver, self.interrupts = False, False, collections.Counter()
+        # An interrupt that is wanted but masked (a lower priority's while a handler runs, one behind
+        # BASEPRI) is asked about behind every block of shared code until it is taken: half the
+        # blocks of a FreeRTOS run. What the controllers answer changes only with what reaches
+        # interrupts_changed (their registers, lines, timer events, exception entry and return), so
+        # irq_waiting keeps (irq_epoch, controller, masks) of the last answer "masked", and a block
+        # with the same epoch and the same masks reads only the masks again (the same decisions,
+        # a quarter of the time). The masks are read through Unicorn's C function where it is one.
+        self.irq_epoch, self.irq_waiting = 0, None
+        self.regs = _Registers(uc)
         owned = sorted((lo, hi, m) for m in self.models for lo, hi in m.ranges)
         self.owned_lo, self.owned = [lo for lo, _, _ in owned], owned
         self.log, self.clock, self.new, self.stop = [], 0, 0, None
@@ -189,6 +206,7 @@ class System:
     def interrupts_changed(self):
         """Something may now ask for an interrupt: checked behind the next block of shared code."""
         self.irq_check = True
+        self.irq_epoch += 1
 
     def _wanted(self):
         """The interrupt a controller asks for, or None."""
@@ -198,13 +216,23 @@ class System:
                 return c, number
         return None
 
-    def _may_take(self, controller, number):
+    def _masks(self, controller):
+        """What _may_take reads of the core for `controller`: its masks (the layer's cpu_masks) when
+        it has priorities, else whether the core takes interrupts at all (interrupts_enabled)."""
+        if getattr(controller, "may_take", None) is not None:
+            return self.arch.cpu_masks(self.regs)
+        return self.arch.interrupts_enabled(self.regs)
+
+    def _may_take(self, controller, number, masks=None):
         """Whether the core takes that interrupt now: the controller decides with the core's masks
-        when it has priorities (may_take), else the layer (interrupts_enabled)."""
+        when it has priorities (may_take), else the layer (interrupts_enabled). masks: _masks(),
+        when read already."""
+        if masks is None:
+            masks = self._masks(controller)
         may = getattr(controller, "may_take", None)
         if may is not None:
-            return may(number, self.arch.cpu_masks(self.uc))
-        return self.arch.interrupts_enabled(self.uc)
+            return may(number, masks)
+        return masks
 
     def schedule(self):
         times = [t for t in (m.next_event() for m in self.models) if t is not None]
@@ -255,12 +283,18 @@ class System:
             if (self.next_event is not None and self.clock >= self.next_event) or self.clock >= self.limit:
                 uc.emu_stop()
             if self.irq_check:
-                wanted = self._wanted()
-                if wanted is None:
-                    self.irq_check = False
-                elif self._may_take(*wanted):
-                    self.deliver = True
-                    uc.emu_stop()
+                waiting = self.irq_waiting
+                if waiting is None or waiting[0] != self.irq_epoch or waiting[2] != self._masks(waiting[1]):
+                    wanted = self._wanted()
+                    if wanted is None:
+                        self.irq_check, self.irq_waiting = False, None
+                    else:
+                        masks = self._masks(wanted[0])
+                        if self._may_take(*wanted, masks=masks):
+                            self.deliver, self.irq_waiting = True, None
+                            uc.emu_stop()
+                        else:
+                            self.irq_waiting = (self.irq_epoch, wanted[0], masks)
 
     def _owner(self, address):
         i = bisect.bisect_right(self.owned_lo, address) - 1
