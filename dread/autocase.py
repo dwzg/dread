@@ -79,7 +79,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 23       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 24       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -106,6 +106,9 @@ VERSION = 23       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # limit in the function itself: each argument in turn set small);
                   # 23: float arguments (hard float): the FPU registers a function reads at its entry
                   # (dread.regflow) get values of their own (FLOATS, its float constants, any bits)
+                  # 24: a case whose run calls through a register into the image at no function's
+                  # entry is dropped and its pointer inputs get the pointer stub in the second pass
+                  # (drop_wild); the stub's place compared without the Thumb bit where a run died
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -181,6 +184,7 @@ class Generator:
         self._endless = None                # dread.noreturn, when a run hangs in a callee
         self._environment = None            # see environment()
         self._stall_part = None             # see stall_part
+        self.wild_pins = None               # see drop_wild
         self.loop = False                   # generating loop cases (generate(loop=True))
         self.payload = payload if payload is not None else image.payload()
         self.arch = image.arch
@@ -680,13 +684,26 @@ class Generator:
                         self.long = 0
                 finally:
                     self.io_fixed = False
+        pins = self.wild_pins               # inputs a dropped case pointed a call into the image with
         covered = set()
         for c in cases:
             covered |= self.coverage(entry, words, c, c.get("limit", limit))
+        if pins and not set(words) <= covered:
+            # the same pass again with those inputs the pointer stub (the search is seeded: it learns
+            # the same data pointers, so that a callback cell behind one is the same address)
+            try:
+                again = self._generate_once(*args, learn=True, pins=pins)
+            except GenerationError:
+                again = []
+            for c in again:
+                got = self.coverage(entry, words, c, c.get("limit", limit))
+                if got - covered:
+                    covered |= got
+                    cases.append(c)
         if set(words) <= covered:
             return cases
         try:
-            other = self._generate_once(*args, learn=False)
+            other = self._generate_once(*args, learn=False, pins=pins)
         except GenerationError:
             return cases
         for c in other:
@@ -696,7 +713,11 @@ class Generator:
                 cases.append(c)
         return cases
 
-    def _generate_once(self, name, entry, words, calls, frame, count, budget, limit, sweep, learn):
+    def _generate_once(self, name, entry, words, calls, frame, count, budget, limit, sweep, learn, pins=None):
+        """One search pass (see generate). pins: (argument indices, memory addresses) whose inputs are
+        the pointer stub from the start (drop_wild found code pointers there in an earlier pass)."""
+        if pins and all(c[0] != self.fake_pointer for c in calls):
+            calls = list(calls) + [[self.fake_pointer, 0, 0]]
         rng = random.Random("%s/%d" % (seed_name(entry), SEED))
         exact, near = self.constants(words)
         deeper = set()
@@ -723,7 +744,7 @@ class Generator:
                 else:
                     calls.append([fn.entry, self.reads_mask(fn.name), 0])
         pointers = any(c[0] == self.fake_pointer for c in calls)
-        pin_args, pin_mem = set(), set()
+        pin_args, pin_mem = set(pins[0]) if pins else set(), set(pins[1]) if pins else set()
         data_args, data_mem = {}, {}        # inputs learned to be data pointers -> their buffer
         words_set = set(words)
         nregs = len(self.layout.arg_regs)
@@ -734,12 +755,17 @@ class Generator:
             used = len(data_args) + len(data_mem)
             return self.scratch + POINTER_BASE + POINTER_STEP * (used % POINTER_SLOTS)
 
+        fake_code = self.fake_code(entry)
+
         def pinned(case):
             for i in pin_args:
-                case["args"][i] = self.fake_pointer
+                case["args"][i] = fake_code
             for m_ in case["mem"]:
                 if m_[0] in pin_mem:
-                    m_[2] = self.fake_pointer
+                    m_[2] = fake_code
+            if pins:                        # a callback cell an earlier pass found: there even where
+                given = {m_[0] for m_ in case["mem"]}       # this input sets nothing (it reads 0)
+                case["mem"] += [[a, 4, fake_code] for a in sorted(pins[1]) if a not in given]
             for i, address in data_args.items():
                 if i < len(case["args"]) and rng.random() < POINTER_KEEP:
                     case["args"][i] = address + misalign()
@@ -1023,8 +1049,8 @@ class Generator:
                 learn_pointers(m, case)
                 if pointers:
                     went = {m.reg("pc") & ~1, m.reg(self.program.arch.veneer_reg)} - {self.fake_pointer, 0}
-                    pin_args.update(i for i, v in enumerate(case["args"][:nregs]) if v in went)
-                    pin_mem.update(a for a, n, v in case["mem"] if n == 4 and v in went)
+                    pin_args.update(i for i, v in enumerate(case["args"][:nregs]) if v & ~1 in went)
+                    pin_mem.update(a for a, n, v in case["mem"] if n == 4 and v & ~1 in went)
                 # What the run loaded before it failed is an input all the same: a function whose
                 # first inputs all fail (a division by a value from memory, a wait for a flag)
                 # never gets any otherwise.
@@ -1177,7 +1203,9 @@ class Generator:
         if len(corpus) + len(extras) < 4:
             raise GenerationError("%s: only %d of %d generated inputs ran to the end (%d faulted); write cases"
                                   % (name, len(corpus) + len(extras), budget, faults))
-        return self.settle_hangs(entry, self.drop_bad_ends(entry, corpus + extras))
+        cases = self.settle_hangs(entry, self.drop_bad_ends(entry, corpus + extras))
+        cases, self.wild_pins = self.drop_wild(entry, words, cases, limit)
+        return cases
 
     def left_through(self, m, words):
         """The function a run that ended elsewhere left the tested one for: the destination of the
@@ -1197,6 +1225,66 @@ class Generator:
         if kind not in ("call", "jump") or target is None:
             return None
         return self.program.function_at(target)
+
+    def drop_wild(self, entry, words, cases, limit):
+        """(the cases, each whose run calls through a register into the image at no function's entry
+        repaired or dropped, (argument indices, memory addresses) of the inputs that gave such an
+        address): a generated callback (127, a Thumb pointer into __aeabi_dmul) ran code there that
+        the lifted C calls with other values in the other registers (dread.runner refuses such a
+        case; dread.emu.Machine.watch_calls). Repaired: those inputs become the pointer stub (a stub
+        that logs the call, not arguments it cannot know), kept when the run then calls nothing so
+        and ends; the path it reached stays covered. The pins go to the next pass (_generate_all).
+        Only where the function or a callee (CALLEE_DEPTH) calls through a register."""
+        sites = self.program.icall_sites()
+        reach = set(words).union(*(f.insns for f in self.callees(words))) if sites else set()
+        if not cases or not reach & set(sites):
+            return cases, None
+        kept, pin_args, pin_mem = [], set(), set()
+        nregs, fake, code = len(self.layout.arg_regs), self.fake_pointer, self.fake_code(entry)
+        for case in cases:
+            ended, targets = self._wild_run(entry, case, limit, sites)
+            if not targets:
+                kept.append(case)
+                continue
+            slots_args = {i for i, v in enumerate(case["args"][:nregs]) if v & ~1 in targets}
+            slots_mem = {a for a, n, v in case["mem"] if n == 4 and v & ~1 in targets}
+            pin_args |= slots_args
+            pin_mem |= slots_mem
+            if not slots_args and not slots_mem:
+                continue                    # (an address the run computed: dropped)
+            repaired = json.loads(json.dumps(case))
+            for i in slots_args:
+                repaired["args"][i] = code
+            for m_ in repaired["mem"]:
+                if m_[0] in slots_mem:
+                    m_[2] = code
+            if all(c[0] != fake for c in repaired.get("calls", ())):
+                repaired["calls"] = list(repaired.get("calls", ())) + [[fake, 0, 0]]
+            ended, targets = self._wild_run(entry, repaired, limit, sites)
+            if ended and not targets:
+                kept.append(repaired)
+        return kept, ((pin_args, pin_mem) if pin_args or pin_mem else None)
+
+    def fake_code(self, entry):
+        """The pointer stub as a value a call through a register goes to: with the instruction set's
+        mode bit (Thumb's bit 0: a Cortex-M faults at an even target before a stub runs)."""
+        return self.program.arch.start_address(self.fake_pointer, self.program.isa_at(entry))
+
+    def _wild_run(self, entry, case, limit, sites):
+        """(whether the case's run ended as a case's must, {targets of its calls into the image at no
+        entry}) (drop_wild)."""
+        m = self.machine()
+        m.plan = []
+        m.may_hang = bool(case.get("hang"))
+        try:
+            self.apply(m, case)
+            m.trace_reads(self.image.base, self.image.end, self.code, self.owners)
+            m.watch_calls(self.program, sites)
+            m.call(entry, *case["args"], max_instructions=case.get("limit", limit))
+            ended = not self.touches_image(m) and not self.ends_badly(m)
+        except EmuError:
+            ended = False
+        return ended, {t & ~1 for _, t in getattr(m, "wild_calls", ())}
 
     def drop_bad_ends(self, entry, cases):
         """The cases without those that should end at a call (stops, loop cases) and end otherwise

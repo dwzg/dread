@@ -682,11 +682,24 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   (xQueuePeek 84 instructions against 89, vTaskGenericNotifyGiveFromISR 31 against 36): the learned
   pointers mostly moved the random search. Not kept; loads of code as data give no address (the C
   hooks keep a flag).
-- [ ] **Generated code pointers to the pointer stub**: an input whose run calls through a register
+- [x] **Generated code pointers to the pointer stub**: an input whose run calls through a register
   into the image at no function's entry (Machine.watch_calls) gets that value pinned to the
   generator's pointer stub, as where a run dies at the jump, so that a callback path is covered by
   a fair case (prvReloadTimer on the M4F builds, clang's __sflush_r: UNCOVERED now that such cases
   are refused). Changes cases (VERSION); measure from scratch and on every gizmo build.
+  Done (generator 24): a pass ends with drop_wild, which runs each case watching its calls; a case
+  that calls into the image at no entry is repaired (the inputs that gave the address become the
+  pointer stub, with its stub added and the instruction set's mode bit: a Cortex-M faults at an even
+  target before a stub runs) and kept when it then ends fairly, else dropped; the inputs are pinned
+  in a second pass with the first pass's settings (pinned memory cells set even where an input left
+  them out). Found on the way: the generator's pointer stub was never in DREAD's stub lists (only case
+  files that named it put it there), so nothing pinned before; and the old pin on a run that died at the
+  jump compared values with their Thumb bit. Clang's __sflush_r: 49 of 119 instructions covered by
+  fair cases to 119. prvReloadTimer stays UNCOVERED: with the stub as its callback the reload loop
+  does not end (the wild call had broken it), and the search finds no period that ends it.
+  Lift checks with every case generated anew, main against this: GCC -Os 297 to 298, clang -Os 269
+  to 270 (__sflush_r both), the M4F clang build and RISC-V GCC -Os as before (280, 217), none lost;
+  the gizmo builds' tables as before.
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger). --task input now also asks for the functions the lift
   check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed

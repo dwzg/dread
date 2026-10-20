@@ -440,3 +440,46 @@ def test_float_arguments_get_values_of_their_own():
     assert all(c.get("fregs") == ["s0"] for c in cases)
     signs = {c["fargs"][0] >> 31 for c in cases if c["fargs"][0] & 0x7FFFFFFF}
     assert signs == {0, 1}
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_case_with_a_callback_into_a_function_is_repaired(tmp_path):
+    """drop_wild: a case whose callback points into the middle of a function (the original runs
+    that code with its registers, the lifted C with others) comes back with the pointer stub there
+    (Thumb's bit kept, the stub added), and the input is pinned for the next pass; a fair case stays."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(r'''
+__attribute__((noinline)) int twice(int x) { return x + x + 3; }
+__attribute__((noinline)) int apply(int (*f)(int), int x) { if (!f) return -1; return f(x) * 5; }
+__attribute__((naked, noreturn)) void reset(void) { for (;;) ; }
+__attribute__((section(".vectors"), used)) void (*const vectors[2])(void) = {(void (*)(void))0x20005000, reset};
+''')
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) } > FLASH }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "reset", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '''
+[image.main]
+original = "original/t.bin"
+base = 0x08000000
+entry = "reset"
+
+[compiler]
+cross = "arm-none-eabi-"
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    gen = Generator(t, t.image())
+    twice, apply = gen.program.by_name["twice"], gen.program.by_name["apply"]
+    wild = {"args": [twice.insns[1] | 1, 4, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0}
+    fair = {"args": [twice.entry | 1, 4, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0}
+    kept, pins = gen.drop_wild(apply.entry, apply.insns, [wild, fair], 10_000)
+    assert pins == ({0}, set())
+    assert kept[1] == fair and len(kept) == 2
+    assert kept[0]["args"][0] == gen.fake_pointer | 1 == gen.fake_code(apply.entry)
+    assert [gen.fake_pointer, 0, 0] in kept[0]["calls"]
