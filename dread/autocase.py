@@ -39,7 +39,10 @@ Callees run for real unless auto() names stubs: calls=((callee, register mask[, 
 callee a name or an address. A callee a run hangs in until the instruction limit (an assertion that
 waits for a debugger, a wait for a flag nothing sets) is stubbed in later inputs: each case lists
 its stubs, so both images get the same (FreeRTOS's demo: configASSERT's handler spins, and every
-null-pointer check stayed uncovered). A generic stub returns a generated value (the first eight calls of a
+null-pointer check stayed uncovered). A real callee answers one way (newlib's _read stub always
+fails): when code is still left after every other stage, the callee whose call stands nearest in
+front of it is stubbed in a last stage of inputs, its result an input (decider; only inputs that run
+new code are kept, so the earlier stages are as they were). A generic stub returns a generated value (the first eight calls of a
 run, later ones 0) and logs the argument registers in the mask and the stack words, with addresses
 inside the stack replaced by the word "stack". Peripheral registers are inputs like memory; with
 "io": "fixed" they read what the case says whatever was written.
@@ -79,7 +82,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 30       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 31       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -124,7 +127,9 @@ VERSION = 30       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # never ended before, so nothing seeded it; 30: an aligned memory cell takes the place
                   # of misaligned ones it overlaps (Cells.add: the first run to reach an object read it
                   # through a pointer put two bytes off, and the aligned runs never got its vtable
-                  # pointer as a whole word; C++ on RISC-V)
+                  # pointer as a whole word; C++ on RISC-V); 31: a last stage stubs the callee whose call
+                  # stands in front of the code still left, its result an input (decider: newlib's _read
+                  # stub always fails, and _read_r's code for a read that succeeded went uncovered)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -148,6 +153,8 @@ BOUNDS = frozenset(range(17)) | {0xFF, 0x100, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF
 LONG_SECONDS = 120          # the last-resort search gives up after this long without one input that finished
 KEPT_MAX = 6
 HUNG_STUBS = 4              # callees at most that get stubbed because runs hung in them
+DECIDER_STUBS = 2           # callees at most that get stubbed because a stalled search left code behind their call
+DECIDER_RUNS = 200          # inputs per such callee (the last stage)
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
 # Float arguments (hard float), as bits: zeros, ones, halves, decimal steps, the integer conversions'
 # bounds, the smallest and largest normal numbers, denormals, infinities, quiet and signalling NaNs
@@ -858,6 +865,7 @@ class Generator:
         known, covered, corpus, extras, faults, last_gain = Cells(), set(), [], [], 0, 0
         calls = [list(c) for c in calls]    # grows by the callees runs hang in (hung, below)
         hung = set()
+        deciders = set()                    # callees stubbed because the search stalled behind their call
         stops = []                          # loop cases: callees that never return end the run
         if self.loop:
             have = {c[0] for c in calls}
@@ -1345,12 +1353,66 @@ class Generator:
                 seen.add(key)
                 unique.append(case)
         extras = extras[:count // 2] + unique
+        # Last: a real callee answers one way (newlib's _read stub always fails, and _read_r's code for
+        # a read that succeeded went uncovered). Where code is still left, the callee whose call stands
+        # nearest in front of it is stubbed in some more inputs, its result an input; an input is kept
+        # only when it runs new code. After every other stage, so that it only adds (in the first stage
+        # it took gizmo-msp430's script_run 14 instructions: the later stages mutated stubbed inputs).
+        for _ in range(DECIDER_STUBS):
+            if words_set <= covered or self.loop or self.late():
+                break
+            stub = self.decider(words, covered, calls, deciders)
+            if stub is None:
+                break
+            deciders.add(stub.entry)
+            extra = [stub.entry, self.reads_mask(stub.name), 0]
+            for _ in range(DECIDER_RUNS):
+                if words_set <= covered or self.late():
+                    break
+                case = json.loads(json.dumps(rng.choice(corpus))) if corpus and rng.random() < 0.8 else fresh()
+                case["calls"] = [list(c) for c in case.get("calls", ()) if c[0] != stub.entry] + [list(extra)]
+                case["returns"] = [value() for _ in range(8)]
+                if rng.random() < 0.5:
+                    case["args"] = [value() if rng.random() < 0.3 else a for a in case["args"]]
+                try:
+                    m = run(case)
+                except EmuError:
+                    continue
+                if m.timed_out or self.touches_image(m) or self.ends_badly(m):
+                    continue
+                got = m.covered_insns(words)
+                if got - covered:
+                    covered |= got
+                    corpus.append(case)
         if len(corpus) + len(extras) < 4:
             raise GenerationError("%s: only %d of %d generated inputs ran to the end (%d faulted); write cases"
                                   % (name, len(corpus) + len(extras), budget, faults))
         cases = self.settle_hangs(entry, self.drop_bad_ends(entry, corpus + extras))
         cases, self.wild_pins = self.drop_wild(entry, words, cases, limit)
         return cases
+
+    def decider(self, words, covered, calls, taken):
+        """The callee called directly from words whose call stands nearest in front of an instruction no
+        input ran, and that no input stubs yet: stubbed in later inputs, its result becomes an input.
+        A real callee answers one way: newlib's _read stub always fails, so _read_r's code for a read
+        that succeeded stayed uncovered. Not a function that never returns. None when there is none."""
+        missed = sorted(set(words) - covered)
+        stubbed = {c[0] for c in calls} | set(taken)
+        best = None
+        for a in words:
+            insn = self.program.insn(a)
+            if insn is None:
+                continue
+            kind, target, _ = self.program.arch.flow(insn)
+            if kind != "call" or not isinstance(target, int):
+                continue
+            callee = self.program.by_entry.get(target & ~1)
+            if callee is None or callee.entry in stubbed or callee.name in self.endless():
+                continue
+            later = [x for x in missed if x > a]
+            if later and (best is None or later[0] - a < best[0]):
+                best = (later[0] - a, callee)
+        return best[1] if best else None
 
     def left_through(self, m, words):
         """The function a run that ended elsewhere left the tested one for: the destination of the

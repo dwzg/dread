@@ -57,6 +57,7 @@ cmd_mode
 cmd_volume
 delay
 fmt_dec
+handle_key
 irq_dispatch
 irq_enable_timer
 irq_entry  # accepted by the system run

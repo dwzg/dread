@@ -1055,3 +1055,61 @@ def test_a_va_list_walks_on_into_the_stack_arguments(tmp_path):
         m = Machine(Layout(t, t.image()), payload, al)
         got.append(m.call(entry, 5, 1, 2, 3, 4, 5, max_instructions=10_000).ret)    # 4 and 5 on the stack
     assert got == [15, 15], got
+
+
+DECIDER_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global fails, f, use
+    .type fails, %function
+    .thumb_func
+fails:  movs    r0, #0          @ a callee that always fails (newlib's _read stub)
+        subs    r0, #1
+        bx      lr
+    .size fails, . - fails
+    .type f, %function
+    .thumb_func
+f:      push    {r4, lr}
+        bl      fails
+        adds    r3, r0, #1
+        beq     1f
+        movs    r0, #7          @ the path for a callee that succeeds
+        pop     {r4, pc}
+1:      movs    r0, #9
+        pop     {r4, pc}
+    .size f, . - f
+    .type use, %function
+    .thumb_func
+use:    push    {r4, lr}
+        bl      f
+        pop     {r4, pc}
+    .size use, . - use
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_a_callee_that_answers_one_way_is_stubbed_when_the_search_stalls(tmp_path):
+    """A real callee answers one way: newlib's _read stub always fails, so _read_r's code for a read
+    that succeeded went uncovered on the benchmark's distribution builds (and _write_r, _close_r,
+    _lseek_r, __sread). When the search stalls short of every instruction, the callee whose call
+    stands in front of what is left is stubbed in later inputs (generator 31), its result an input."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.s").write_text(DECIDER_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    lines = []
+    assert lift.check(t, t.image(), ["f"], out=lines.append, jobs=1) == ["f"], "\n".join(lines)

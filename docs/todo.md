@@ -48,8 +48,12 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     the recorded cases, 301 against 293), the rest a second round of recorded cases. The host's
     builds unchanged (GCC 16 -Os 311/366).
   - [ ] newlib's reentrant wrappers (_read_r, _write_r, _close_r, _lseek_r, _sbrk_r, also _free_r,
-    _malloc_r): UNCOVERED by one to a few instructions: the store of errno into the reent behind a
-    callee that returned -1 and set errno (a stub effect the generator does not find).
+    _malloc_r): UNCOVERED by one to a few instructions. Not the errno store, as it seemed: newlib's
+    _read stub always fails, so the code for a read that succeeded never ran. Generator 31
+    (2026-10-21): a last stage stubs the callee whose call stands in front of the code still left
+    (decider): the GCC 9 build's _read_r, _write_r, _close_r, _lseek_r and __sread lift; gizmo's rv32
+    and msp430 gain handle_key. Left: _sbrk_r (its errno store needs a stub that writes errno: stub
+    effects), _free_r, _fflush_r, __sfp, strcmp (other causes, not traced).
   - [ ] The -O2 builds and the RISC-V GCC builds (RISC-V newlib-nano is not packaged by the
     distributions: xPack's riscv-none-elf-gcc in an image, or picolibc).
 - [x] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,

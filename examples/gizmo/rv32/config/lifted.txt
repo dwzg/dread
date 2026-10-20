@@ -11,6 +11,7 @@ cmd_volume
 delay
 fmt_dec
 gpio_set
+handle_key
 irq_dispatch
 irq_enable_timer
 keys_read
