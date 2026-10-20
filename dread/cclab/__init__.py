@@ -70,10 +70,12 @@ def _one(job):
     return key, out
 
 
-def run(adapter, work, only=None, names=None, jobs=None, out=print, guard=None, probe_dirs=()):
+def run(adapter, work, only=None, names=None, jobs=None, out=print, guard=None, probe_dirs=(), lift=False):
     """Build and measure every build of the adapter's matrix (or those in only); returns
     {key: results or {"error", "log"}}. guard: as the adapter says unless given; probe_dirs:
-    directories of one's own probes besides DREAD's."""
+    directories of one's own probes besides DREAD's. lift: then dread lift --check on each measured
+    build's probe functions, one build after the other (lab.lift_build), the verdicts into its
+    results.json ("lift"): whether DREAD handles this compiler's code, not only how it calls."""
     guard = adapter.guard if guard is None else guard
     probe_dirs = [os.path.abspath(d) for d in probe_dirs]
     try:
@@ -107,6 +109,28 @@ def run(adapter, work, only=None, names=None, jobs=None, out=print, guard=None, 
             key, result = _one(job)
             results[key] = result
             out("%-28s %s" % (key, "error: " + result["error"] if "error" in result else "measured"))
+    if lift:
+        picks = {key: picked for key, picked, _ in builds}
+        for key in sorted(results):
+            result = results[key]
+            if "error" in result:
+                continue
+            d = os.path.join(work, adapter.name, key)
+            compiler = lab.rebuild_compiler(adapter, picks[key], result["results"])
+            if compiler is None:
+                result["lift"] = {"error": "no rebuilding compiler for %s: give the adapter a [rebuild] table"
+                                           % adapter.arch}
+            else:
+                probes = [fn for fn, e in result["results"].items() if e.get("error") != "not in the linked image"]
+                result["lift"] = lab.lift_build(d, compiler, probes)
+            with open(os.path.join(d, "results.json"), "w") as f:
+                json.dump(result, f, indent=1)
+            got = result["lift"]
+            if "error" in got:
+                out("%-28s lift: %s" % (key, got["error"]))
+            else:
+                n = sum(1 for v in got["verdicts"].values() if v[0] == "accepted")
+                out("%-28s lifted %d of %d probe functions (%.0f s)" % (key, n, len(got["verdicts"]), got["seconds"]))
     failed = sorted(k for k, r in results.items() if "error" in r)
     if failed:
         out("the failed builds' commands and output: %s" % os.path.join(work, adapter.name, failed[0], "failed.json")
@@ -194,6 +218,9 @@ def main(argv=None):
     p.add_argument("--jobs", type=int)
     p.add_argument("--guard", action="store_true", default=None,
                    help="guard the work directory and the builds as for a proprietary toolchain")
+    p.add_argument("--lift", action="store_true",
+                   help="then dread lift --check on each build's probe functions (GCC or clang rebuilds them; "
+                        "the adapter's [rebuild] says otherwise): what DREAD makes of this compiler's code")
     p = sub.add_parser("report", help="compare the builds measured in the work directory")
     p.add_argument("--work", default="cclab-work")
     p.add_argument("--adapter")
@@ -241,7 +268,7 @@ def main(argv=None):
             raise ad.AdapterError("a Compiler Explorer adapter compiles DREAD's own probes only on the public "
                                   "instance; --probe-dir needs an instance of one's own (DREAD_CE_URL)")
         results = run(adapter, args.work, args.build, args.probes, args.jobs, guard=args.guard,
-                      probe_dirs=args.probe_dir)
+                      probe_dirs=args.probe_dir, lift=args.lift)
         failed = [k for k, r in results.items() if "error" in r]
         print("dread cclab: %d builds measured, %d failed, in %s" % (len(results) - len(failed), len(failed),
                                                                    os.path.join(args.work, adapter.name)))

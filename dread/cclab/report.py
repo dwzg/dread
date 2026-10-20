@@ -97,6 +97,39 @@ def builds_text(keys, every):
     return "all %d" % len(every) if len(keys) == len(every) else ", ".join(keys)
 
 
+def lift_verdicts(result):
+    """{function: text} of a build's lift check (run --lift): "accepted", or the verdict with the kind
+    of its reason (addresses and registers taken out, so that builds compare). {} without one."""
+    from dread.bench import reason_kind
+    got = (result.get("lift") or {}).get("verdicts") or {}
+    return {fn: v[0] if v[0] == "accepted" else "%s: %s" % (v[0], reason_kind(v[1])) for fn, v in got.items()}
+
+
+def lift_lines(good):
+    """The report's section on run --lift: how many probe functions each build's lift check accepted,
+    and the others with their verdicts. [] when no build was lifted."""
+    lifted = {k: lift_verdicts(v) for k, v in good.items() if lift_verdicts(v)}
+    errors = {k: v["lift"]["error"] for k, v in good.items() if "error" in (v.get("lift") or {})}
+    if not lifted and not errors:
+        return []
+    lines = ["", "## What DREAD lifts", "",
+             "dread lift --check on each build's probe functions (run --lift): the compiler's code translated "
+             "instruction by instruction, rebuilt and compared with the original in the emulator.", ""]
+    lines += ["- %s: %d of %d" % (k, sum(1 for t in v.values() if t == "accepted"), len(v)) for k, v in lifted.items()]
+    lines += ["- %s: %s" % (k, e) for k, e in errors.items()]
+    rows = collections.OrderedDict()
+    for key, verdicts in lifted.items():
+        for fn, text in verdicts.items():
+            if text != "accepted":
+                rows.setdefault(fn, collections.OrderedDict()).setdefault(text, []).append(key)
+    if rows:
+        lines += ["", "| probe | not lifted (builds) |", "|---|---|"]
+        for fn, seen in rows.items():
+            lines.append("| `%s` | %s |" % (fn, "; ".join("%s (%s)" % (text, builds_text(keys, lifted))
+                                                           for text, keys in seen.items())))
+    return lines
+
+
 def write(work, adapter_name=None, out=print):
     adapters = [adapter_name] if adapter_name else sorted(
         d for d in os.listdir(work) if os.path.isdir(os.path.join(work, d)))
@@ -177,6 +210,7 @@ def write(work, adapter_name=None, out=print):
                 changed = [r for r in ORDER if r in info["changed"]] + sorted(info["changed"] - set(ORDER))
                 lines.append("| `%s` | %s | %s | %s |" % (h, ", ".join(sorted(info["ops"])), " ".join(changed) or "-",
                                                          builds_text(sorted(info["builds"]), good)))
+        lines += lift_lines(good)
         path = os.path.join(work, name, "report.md")
         with open(path, "w") as f:
             f.write("\n".join(lines) + "\n")

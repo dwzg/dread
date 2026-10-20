@@ -62,6 +62,39 @@ def results(work, adapter):
     return builds, arch, rows, min(aligned) if aligned else None
 
 
+def lift_section(builds_a, builds_b, original, rebuild):
+    """Lines on run --lift's verdicts: each compiler's count, and the probes one compiler's code lifts
+    in every build and the other's not in some (DREAD's tools on the two compilers' code). [] unless
+    both were lifted."""
+    a = {k: report.lift_verdicts(v) for k, v in builds_a.items() if report.lift_verdicts(v)}
+    b = {k: report.lift_verdicts(v) for k, v in builds_b.items() if report.lift_verdicts(v)}
+    if not a or not b:
+        return []
+
+    def count(side):
+        return sum(1 for v in side.values() for t in v.values() if t == "accepted"), sum(len(v) for v in side.values())
+    lines = ["", "## What DREAD lifts (run --lift)", "",
+             "%s: %d of %d probe functions over %d builds; %s: %d of %d over %d." % (
+                 original, *count(a), len(a), rebuild, *count(b), len(b))]
+    rows = []
+    for fn in sorted({fn for v in list(a.values()) + list(b.values()) for fn in v}):
+        texts = []
+        for side in (a, b):
+            seen = collections.OrderedDict()
+            for key, verdicts in side.items():
+                if fn in verdicts:
+                    seen.setdefault(verdicts[fn], []).append(key)
+            texts.append(seen)
+        if all(set(t) <= {"accepted"} for t in texts):
+            continue
+        rows.append("| `%s` | %s | %s |" % (fn, *("; ".join("%s (%s)" % (t, report.builds_text(k, side))
+                                                            for t, k in seen.items()) or "-"
+                                                  for seen, side in zip(texts, (a, b)))))
+    if rows:
+        lines += ["", "| probe | %s | %s |" % (original, rebuild), "|---|---|---|"] + rows
+    return lines
+
+
 def hint(fn, original, rebuild):
     """The option of the rebuilding compiler that gives the original's result for this probe, a
     sentence where it has none, or None where nothing is known."""
@@ -128,6 +161,7 @@ def write(work, original, rebuild, out=print):
         found["abi"].append("| stack alignment at calls | the largest power of two dividing every frame at a "
                             "call | %s | %s |" % (a_align, b_align))
     head = ["| probe | what | %s | %s |" % (original, rebuild), "|---|---|---|---|"]
+    lines += lift_section(a_builds, b_builds, original, rebuild)
     lines += ["", "## Calling convention, types, what a call keeps", ""]
     lines += head + found["abi"] if found["abi"] else ["They agree on every probe."]
     if hints:

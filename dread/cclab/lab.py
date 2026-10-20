@@ -805,6 +805,54 @@ MEASURES = {"arg": measure_arg, "result": measure_result, "value": measure_value
             "keeps": measure_keeps}
 
 
+# ---- lifting (run --lift) ----
+
+def rebuild_compiler(adapter, picked, results):
+    """The [compiler] of a build's dread.toml for `run --lift`: the compiler DREAD rebuilds the
+    build's functions with. The adapter's [rebuild] table when it has one; else, by architecture,
+    GCC for an ARM build's core (-mcpu from its cpu, through [cpus]; the float ABI as measured: a
+    float argument in s0 is hard float) or clang for a RISC-V build's -march. None where the lab
+    knows no rebuilding compiler (give the adapter a [rebuild] table)."""
+    own = adapter.data.get("rebuild")
+    if own:
+        return dict(own)
+    if adapter.arch == "arm":
+        hard = str((results.get("pick_f_1") or {}).get("where", "")).startswith("s")
+        flags = ["-mthumb", "-mcpu=%s" % (adapter.cpu_model(picked) or "cortex-m3")]
+        flags += ["-mfloat-abi=hard", "-mfpu=auto"] if hard else ["-mfloat-abi=soft"]
+        return {"cross": "arm-none-eabi-", "cflags": flags + ["-ffreestanding", "-Os", "-ffunction-sections"]}
+    if adapter.arch == "riscv":
+        march = next((v for v in picked.values() if str(v).startswith("rv32")), "rv32imc")
+        return {"kind": "clang", "triple": "riscv32-unknown-elf",
+                "cflags": ["-march=%s" % march, "-mabi=ilp32", "-Os", "-ffreestanding", "-fno-builtin",
+                           "-ffunction-sections", "-fno-common", "-mno-relax"]}
+    return None
+
+
+def lift_build(directory, compiler, names):
+    """dread lift --check on a measured build's probe functions, with `compiler` as the build's
+    [compiler] (written into its dread.toml once): {"compiler", "verdicts": {function: [verdict,
+    reason]}, "seconds"}, or {"error"} when the check did not run. A separate process, so that the
+    check has a worker pool of its own; its output in the build's lift.log."""
+    from dread.bench import dread as run, verdicts_of
+    from dread.target import Target
+    toml = os.path.join(directory, "dread.toml")
+    with open(toml) as f:
+        text = f.read()
+    if "\n[compiler]" not in text:
+        with open(toml, "a") as f:
+            f.write("\n# dread cclab run --lift: the compiler DREAD rebuilds this build's functions with\n"
+                    "[compiler]\n" + "".join("%s = %s\n" % (k, json.dumps(v)) for k, v in compiler.items()))
+    seconds, code, out = run("lift", "--target", directory, "--check", *names,
+                             log=os.path.join(directory, "lift.log"))
+    target = Target.load(directory)
+    verdicts = {fn: [verdict, reason] for fn, verdict, reason in verdicts_of(target, target.image())
+                if fn in names}
+    if not verdicts:
+        return {"compiler": compiler, "error": "the lift check gave no verdicts (exit %d; lift.log)" % code}
+    return {"compiler": compiler, "verdicts": verdicts, "seconds": round(seconds, 1)}
+
+
 def measure(directory, probe_files):
     """{function: {measure, note, shape, and what the measure found}} of one build."""
     bench = Bench(directory)

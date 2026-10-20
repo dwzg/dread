@@ -652,3 +652,26 @@ def test_a_failed_build_leaves_its_log(tmp_path, capsys):
     failed = json.loads((tmp_path / "w" / "broken" / "O0" / "failed.json").read_text())
     assert failed["error"].startswith("compiling") and failed["log"][0]["code"] == 1
     assert "failed.json" in capsys.readouterr().out
+
+
+@needs_gcc
+def test_run_lift_checks_each_build_with_dread(tmp_path):
+    """run --lift: after the measurements, dread lift --check on each build's probe functions with the
+    rebuilding compiler (GCC for the build's core, the float ABI as measured); the verdicts go into
+    results.json, and the report and the comparison show them. What DREAD makes of a compiler's code,
+    besides how the compiler calls."""
+    from dread.cclab import run, compare, report
+    a = ad.load("gcc-arm")
+    results = run(a, str(tmp_path), only=["cortex-m3-Os", "cortex-m4f-Os"], names=["abi", "float"], jobs=2,
+                  out=lambda *x: None, lift=True)
+    for key in ("cortex-m3-Os", "cortex-m4f-Os"):
+        got = results[key]["lift"]
+        assert "error" not in got, got
+        hard = key.startswith("cortex-m4f")
+        assert ("-mfloat-abi=hard" in got["compiler"]["cflags"]) == hard, got["compiler"]
+        accepted = [fn for fn, v in got["verdicts"].items() if v[0] == "accepted"]
+        assert "pick_i5_5" in accepted and "ret_s8" in accepted and len(accepted) >= len(got["verdicts"]) - 6, got
+        saved = json.loads((tmp_path / "gcc-arm" / key / "results.json").read_text())
+        assert saved["lift"]["verdicts"] == got["verdicts"]
+    assert report.write(str(tmp_path), "gcc-arm", out=lambda *x: None) == 0
+    assert "## What DREAD lifts" in (tmp_path / "gcc-arm" / "report.md").read_text()

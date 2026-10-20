@@ -72,29 +72,67 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     its stack arguments were "not known" and every caller was refused (four of the lab's probes on
     every build, GCC's too). A table in the ARM layer (stack arguments, `abi_results` as MSP430 has).
     Done 2026-10-20: `RTABI_RESULTS` (83 helpers), the lifter asks the layer after the target's
-    `[abi] stack_args`, regflow 18 takes the results as read. With regflow 17, probes accepted on
-    the lab's GCC -Os build 85 to 89 of 94; on the other compiler's builds three or four more each.
-    Gizmo's tables unchanged; on a32 `__aeabi_ldiv0` now returns r0:r1 (the standard's).
+    `[abi] stack_args`, regflow 18 takes the results as read. Measured together with the next item
+    (below). Gizmo's tables unchanged; on a32 `__aeabi_ldiv0` now returns r0:r1 (the standard's).
   - [x] **Calls whose results C cannot return**: the remainder of `__aeabi_uldivmod` in r2:r3, the
     flags of `__aeabi_cfcmple` and its kin (the RTABI's compares that answer in the flags; libgcc's
     own `__aeabi_fcmplt` calls them), a register the callee leaves that the caller reads: an inline-asm call that
     binds r0-r3 and reads the flags after the `bl`, for callees without stack arguments.
-    Done 2026-10-20 (`_bound_call`; not for tail calls, whose callers C cannot hand r2:r3 either):
-    probes accepted on the lab's GCC -Os build 89 to 91 of 94 (libgcc's float compares 37 to 42 of
-    the library's), on the other compiler's -On build every probe; what stays there is the shared
-    code below. Broken on purpose (r2 cleared behind the bl), the 64-bit remainder failed 41 of 46
-    cases.
+    Done 2026-10-20 (`_bound_call`; not for tail calls, whose callers C cannot hand r2:r3 either).
+    With regflow 17 and the RTABI table, probes accepted: the lab's GCC -Os build 84 to 90 of 94
+    (libgcc's float compares lifted too), the other compiler's -On 79 to 86 of 95, -Ohz 72 to 78,
+    its older version's -Ohz 66 to 71. (Corrected the same evening: a script of mine had read
+    "dropped  FAIL fn" as a function named FAIL, dropping failed functions from count and total; it
+    had reported 85 to 91 and "every probe" at -On.) Broken on purpose (r2 cleared behind the bl),
+    the 64-bit remainder failed 41 of 46 cases.
+  - [x] **A pool another function loads is no part of an extent**: a function's extent ran to the
+    next function, pools included, and a load from another function's extent counted as a load of
+    code, so every generated input was thrown away when a function loaded a constant from a table
+    behind another (the other compiler shares its constant tables between functions: a probe that
+    only loads a constant got no case). `Program.extent_owners` ends an extent in front of a
+    pool another function loads pc-relatively (the overlay already kept such pools). The other
+    compiler's -On build 86 to 92 of 95. Elsewhere: gizmo a32's `reset` gets cases (its constants lie
+    behind `irq_entry`), and the RISC-V benchmark builds' trap vector table is nobody's (cases of
+    main and vOutNS16550 byte for byte the same, bin/ab-cases); no other build's extents changed.
+  - [ ] **Pools a rebuilt function still reads**: a function that takes its pool's address with
+    `adr` (or `add rX, pc`) and loads through it reads the pool at run time, but the overlay counts
+    only original functions' loads, so it builds the C over that pool: GCC's ret_ll (`adr r1, pool;
+    ldrd r0, r1, [r1]`) and, at -Ohz, the other compiler's ret_s1, ret_s4, ret_s8, ret_s12 fail.
+    The lifter could fold such loads into constants as it does `ldr rX, [pc, #d]`, or the overlay
+    keep pools a replaced function's adr points into.
+  - [ ] **A va_list that walks from the saved argument registers into the stack arguments**: the
+    other compiler's -On pick_va_5 pushes r1-r3 next to its caller's stack arguments, takes the
+    address of the saved r1 and loads on upwards in a loop; the lifted C's frame is a local array,
+    not next to its own incoming arguments, so the walk reads other words (the comparison refutes
+    it). Refusing an address in the save area would also refuse GCC's variadic functions, which
+    store such an address they never use and lift today; better a frame that mirrors the caller's
+    stack arguments above sp0 (copies of the incoming stack words) for a function that takes an
+    address in its save area. Until then a walk the generated inputs do not reach would pass.
+  - [ ] **The caller's r4-r11 at the entry, for the C**: the other compiler keeps the stack aligned
+    with `push {r7, lr}` and drops the pad on the way out into a scratch register, `pop {r0, pc}` in
+    a function without a result (its -On make_nt): r0 then holds the caller's r7. The lifter does not
+    store a saved callee-saved register (only the matching pop reads it back, it assumed), so the
+    lifted r0 is an unwritten frame word, and the comparison, which always compares r0, refutes it.
+    Not comparing r0 where no caller reads it would weaken the comparison (rule 6). Better: an entry
+    stub in assembly that hands the C the caller's r4-r11 (and lr), so the C reproduces what the
+    original leaves; the same would lift functions refused today for reading what their caller left
+    in r4-r11. Likely common in that compiler's lower optimisation levels.
   - [ ] **Code shared between functions** (a compiler's cross call or outliner, at high
     optimisation for size): functions that branch or fall into common code with their frame still
     open, and common code called by `bl` whose callers read what it leaves; with a symbol of its own
     or only a local label, so to DREAD it may belong to no function. Lift it as part of each function
     that enters it (as IDA's tail chunks); a two-byte function (one `b.n` into it) stays original
     until functions can move.
-  - [ ] **A lift step in the lab**: `dread cclab run --lift` gives each build a `[compiler]` (the
+  - [x] **A lift step in the lab**: `dread cclab run --lift` gives each build a `[compiler]` (the
     rebuilding GCC with the build's cpu) and runs `dread lift --check`; the probes' verdicts go into
     results.json, `report` and `compare` ("lifted N of M"). Then a run at work checks the real images
-    with the compiler's own library, and the bundle's objects can be relinked at home by an option,
-    not by hand (2026-10-20: a hand-made adapter in `~/dread-private/`).
+    with the compiler's own library. Done 2026-10-20 (docs/cclab.md, "What DREAD makes of a
+    compiler's code"): the float ABI as measured (a float argument in s0), an adapter's `[rebuild]`
+    for others; the probe functions only, one build after the other.
+  - [ ] **A bundle's objects relinked at home by an option**: the probes' objects a compiler made
+    elsewhere, linked here with the GNU toolchain (newlib, libgcc, the two C++ type_info vtables), so
+    that its code is measured and lifted without its library (2026-10-20: a hand-made adapter in
+    `~/dread-private/`, whose compile step copies the bundle's object).
 - [x] **A cclab adapter for Compiler Explorer** (its public API: 52 ARM GCC versions, 21 ARM clang,
   48 RISC-V GCC, 42 RISC-V clang, TI Arm clang, 17 MSP430 GCC, SDCC on 2026-10-20): the probes
   compiled there to assembly, assembled and linked here, measured in the emulator as now; answers

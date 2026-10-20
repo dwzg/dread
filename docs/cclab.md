@@ -147,6 +147,27 @@ differences in the code (TI's tail-calls its helpers at every level but -Ooff, a
 dense switch). Arm GCC's own defaults (arm-none-eabi): short enums (the objects say
 `Tag_ABI_enum_size: small`), unsigned plain char. The bundle carries the comparisons.
 
+## What DREAD makes of a compiler's code (`--lift`)
+
+The probes say how a compiler calls; `run --lift` also says whether DREAD's tools handle the code it
+makes. After the measurements, each build gets a `[compiler]` in its `dread.toml` (the compiler DREAD
+rebuilds functions with: GCC for an ARM build's core, -mcpu from its cpu through `[cpus]`, hard
+float where a float argument was measured in s0; clang for a RISC-V build's -march; an adapter's
+`[rebuild]` table says otherwise), and `dread lift --check` runs on the build's probe functions,
+one build after the other. The verdicts go into the build's `results.json` (`lift`), the report
+lists each build's count and the probes not lifted, and `compare` shows where two compilers' code
+fares differently:
+
+```sh
+bin/dread cclab run --adapter gcc-arm --work cclab-work --lift
+bin/dread cclab report --work cclab-work
+```
+
+Only the probe functions are checked, not the toolchain's library; the check needs the rebuilding
+compiler (arm-none-eabi-gcc) on the machine. On 2026-10-20 it found, on GCC 16's -Os build, four
+of 94 probe functions not lifted: three that take the address of a stack argument, and ret_ll, whose
+64-bit constant GCC loads with `adr` and `ldrd` from its pool, which the rebuilt function covers.
+
 ## Compiler Explorer's compilers
 
 `--adapter ce:ID` makes an adapter of one of the compilers Compiler Explorer's public instance hosts
