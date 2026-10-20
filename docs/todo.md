@@ -38,10 +38,15 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   source) GCC 80.4 to 83.1 % against 84.7 % on GCC 16, clang 80.7 to 81.4 % against 82.3 %; newlib's
   65 to 72.5 % against 97 to 100 %: the host's newlib (Arch's) is built for size and the
   distributions' is not. Categories:
-  - [ ] Distribution newlib's strcmp (and kin) loads r3 under a condition and branches on the same
+  - [x] Distribution newlib's strcmp (and kin) loads r3 under a condition and branches on the same
     condition: regflow took r3 for read, so about seven FreeRTOS functions a build were refused for
     a register nothing reads ("its callers read r3, which it sets"). regflow 16 carries the writes
-    made under a branch's condition along its edges (in progress).
+    made under a branch's condition along its edges. Measured 2026-10-20 (measure-30, all 21
+    builds): every version build gained 10 to 13 and lost none (GCC 9 303/373, 10 310/374, 12
+    308/374, 13 310/371, 14 303/371; clang 12 302/366, 14 298/365, 16 298/365, 18 290/362, 19
+    293/362), the r3 refusals are gone; most of it is regflow 16 (GCC 9's first lift check, before
+    the recorded cases, 301 against 293), the rest a second round of recorded cases. The host's
+    builds unchanged (GCC 16 -Os 311/366).
   - [ ] newlib's reentrant wrappers (_read_r, _write_r, _close_r, _lseek_r, _sbrk_r, also _free_r,
     _malloc_r): UNCOVERED by one to a few instructions: the store of errno into the reent behind a
     callee that returned -1 and set errno (a stub effect the generator does not find).
