@@ -220,6 +220,26 @@ def test_a_refusal_ends_the_function_at_once(gizmo):
     assert "led_on\trefused\t1\tprovider refusal" in results
 
 
+def test_a_run_stops_asking_a_provider_that_keeps_declining(gizmo):
+    """Three questions declined in a row end the run (a provider's classifiers decline the same kind of
+    question again); an answer in between starts the count anew; the summary says what was declined."""
+    target, image, program, flow = gizmo
+    refused = {"text": "", "finish": "refusal", "tokens": 0}
+    provider = llm.Scripted([refused, "no idea", refused, refused, refused, "never asked"])
+    names = [fn.name for fn in program.functions if len(fn.insns) > 4][:6]
+    asked = [(name, [program.by_name[name].insns[2]]) for name in names]
+    lines = []
+    line = pilot.input_task(target, image, program, provider, asked, tries=1, flow=flow, out=lines.append)
+    assert len(provider.asked) == 5 and provider.answers == ["never asked"]
+    assert line == "5 functions of 6, 0 with every missed instruction run, 0 of 5 missed instructions run, " \
+                   "4 declined by the provider", line
+    assert sum("declined 3 questions in a row" in x for x in lines) == 1, lines
+    asking = pilot.Asking(llm.Scripted([]), out=lines.append)
+    assert asking.go_on() and asking.provider.last == {}    # a provider error leaves no finish: no refusal
+    asking.asked()
+    assert (asking.row, asking.declined, asking.done) == (0, 0, 1)
+
+
 def test_the_providers_say_how_an_answer_ended():
     scripted = llm.Scripted([{"text": "x", "finish": "length", "tokens": 7}, "y"])
     assert scripted.ask("s", []) == "x" and scripted.last == {"finish": "length", "tokens": 7, "reasoning": 0}

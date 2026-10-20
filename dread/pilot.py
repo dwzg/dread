@@ -33,6 +33,12 @@ and what it cost. --task name asks for a name and a
 sentence for FUN_ functions and collects the proposals in BUILD/pilot/IMAGE/names.tsv: no tool can
 check a name, so none is applied.
 
+A provider that declines DECLINED_IN_A_ROW questions in a row (stop reason "refusal" or
+"content_filter") is asked no more in that run: its classifiers decline the same kind of question
+again, and another provider may answer it. On 2026-10-20 Anthropic's Sonnet 5.5 and Opus 5.5 declined
+every --task input question on FreeRTOS (a listing with instructions to reach), also with the purpose
+stated, while Haiku 5.5 answered the same question.
+
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
                 [--no-mutate] [--no-integration] [--dry-run] [--task write|input|name] [NAME...]
 """
@@ -518,6 +524,58 @@ def lift_missed(target, image, program):
     return out
 
 
+DECLINED_IN_A_ROW = 3       # questions a provider declined one after another before a run stops asking it
+
+
+class Asking:
+    """Counts what a provider declines over a run: go_on() before each function's questions says
+    whether to ask them, asked() after them notes how the last answer ended; after DECLINED_IN_A_ROW
+    declined in a row nothing more is asked (see the module's docstring)."""
+
+    def __init__(self, provider, out=print):
+        self.provider, self.out = provider, out
+        self.row = self.declined = self.done = 0
+
+    @property
+    def stopped(self):
+        return self.row >= DECLINED_IN_A_ROW
+
+    def go_on(self):
+        if self.stopped:
+            return False
+        self.provider.last = {}             # (a provider error leaves no finish: not a refusal)
+        return True
+
+    def asked(self):
+        self.done += 1
+        if (getattr(self.provider, "last", {}) or {}).get("finish") not in llm.Provider.REFUSED:
+            self.row = 0
+            return
+        self.row += 1
+        self.declined += 1
+        if self.stopped:
+            self.out("dread pilot: %s declined %d questions in a row; the rest are not asked of it (its "
+                     "classifiers decline the same kind of question again; another provider may answer: "
+                     "--provider)" % (self.provider.label(), self.row))
+
+
+def input_task(target, image, program, provider, asked, tries=3, flow=None, out=print):
+    """--task input over [(name, missed addresses)]; returns the summary line (without the cost)."""
+    asking = Asking(provider, out)
+    whole = ran = total = 0
+    for name, addresses in asked:
+        if not asking.go_on():
+            break
+        still = find_inputs(target, image, program, provider, name, addresses, tries, flow, out)
+        asking.asked()
+        whole += not still
+        ran += len(addresses) - len(still)
+        total += len(addresses)
+    return "%d functions%s, %d with every missed instruction run, %d of %d missed instructions run%s" % (
+        asking.done, " of %d" % len(asked) if asking.done < len(asked) else "", whole, ran, total,
+        ", %d declined by the provider" % asking.declined if asking.declined else "")
+
+
 def find_inputs(target, image, program, provider, name, missed, tries=3, flow=None, out=print):
     """Ask for inputs that run the missed instructions; each one that runs some becomes a written
     case of the function (extra_cases, "by" the pilot). Returns the addresses still unrun."""
@@ -672,8 +730,12 @@ def main(argv=None):
             names = shown(target, args.names) if args.names else sorted(
                 (fn.name for fn in program.functions if UNNAMED.match(fn.name) and may_show(target, fn.name)),
                 key=lambda n: len(program.by_name[n].insns))[:args.limit]
+            asking = Asking(provider)
             for name in names:
+                if not asking.go_on():
+                    break
                 propose_name(target, image, program, provider, name, flow)
+                asking.asked()
             return 0
         missed = missed_instructions(target, image, args.names or [fn.name for fn in program.functions])
         for name, addresses in lift_missed(target, image, program).items():      # what the lifter left
@@ -682,18 +744,12 @@ def main(argv=None):
         missed = {n: missed[n] for n in shown(target, sorted(missed))}
         started, before = time.time(), llm.usage_summary().get(provider.name, {})
         asked = sorted(missed.items(), key=lambda kv: (len(kv[1]), kv[0]))[:args.limit]     # fewest first
-        whole, ran, total = 0, 0, 0
-        for name, addresses in asked:
-            still = find_inputs(target, image, program, provider, name, addresses, args.tries, flow)
-            whole += not still
-            ran += len(addresses) - len(still)
-            total += len(addresses)
+        line = input_task(target, image, program, provider, asked, args.tries, flow)
         after = llm.usage_summary().get(provider.name, {})
         spent = {k: (after.get(k) or 0) - (before.get(k) or 0) for k in ("answers", "input", "output", "cost")}
-        print("dread pilot --task input: %d functions, %d with every missed instruction run, %d of %d missed "
-              "instructions run; %d answers, %d tokens in, %d out%s, %.0f s" % (
-                  len(asked), whole, ran, total, spent["answers"], spent["input"], spent["output"],
-                  ", $%.2f" % spent["cost"] if after.get("cost") is not None else "", time.time() - started))
+        print("dread pilot --task input: %s; %d answers, %d tokens in, %d out%s, %.0f s" % (
+            line, spent["answers"], spent["input"], spent["output"],
+            ", $%.2f" % spent["cost"] if after.get("cost") is not None else "", time.time() - started))
         return 0
     names = shown(target, args.names) if args.names else candidates(target, image, program, args.limit)
     if not names:
@@ -721,13 +777,17 @@ def main(argv=None):
         return 1
     from dread.util.polite import polite
     polite()
-    accepted = 0
+    accepted, asking = 0, Asking(provider)
     for name in names:
+        if not asking.go_on():
+            break
         outcome, _, _ = pilot_one(target, image, program, provider, name, args.tries, flow, not args.no_lifted,
                                   not args.no_mutate, not args.no_integration, endless=endless)
+        asking.asked()
         accepted += outcome == "accepted"
-    print("dread pilot: %d of %d accepted; conversations in %s" % (
-        accepted, len(names), os.path.relpath(os.path.join(target.build, "pilot", image.name))))
+    print("dread pilot: %d of %d accepted%s; conversations in %s" % (
+        accepted, asking.done, ", %d declined by the provider" % asking.declined if asking.declined else "",
+        os.path.relpath(os.path.join(target.build, "pilot", image.name))))
     return 0
 
 
