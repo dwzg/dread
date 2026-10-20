@@ -19,10 +19,13 @@ bench=${DREAD_BENCH:-$HOME/dread-bench}
 mkdir -p "$bench"
 shims=$(mktemp -d "${TMPDIR:-/tmp}/dread-with-$name.XXXXXX")
 trap 'rm -rf "$shims"' EXIT INT TERM
-# the image's tools: GNU's cross tools by name, LLVM's from its versioned directory
+# the image's tools: GNU's cross tools by name, LLVM's from its versioned directory (only those the
+# image has: a script for a tool it lacks would hide the host's)
 tools=$(podman run --rm --network=none "$image" sh -c \
     'ls /usr/bin/arm-none-eabi-* /usr/bin/riscv64-*-elf-* 2>/dev/null; ls -d /usr/lib/llvm-*/bin 2>/dev/null | tail -1')
 llvm=$(printf '%s\n' "$tools" | grep '^/usr/lib/llvm-' || true)
+have=""
+[ -n "$llvm" ] && have=$(podman run --rm --network=none "$image" ls "$llvm")
 for tool in $(printf '%s\n' "$tools" | grep -v '^/usr/lib/llvm-'); do
     base=$(basename "$tool")
     printf '#!/bin/sh\nexec podman run --rm -i --network=none -v /tmp:/tmp -v "%s:%s" -v "%s:%s" -v "$PWD:$PWD" -w "$PWD" %s %s "$@"\n' \
@@ -31,6 +34,7 @@ for tool in $(printf '%s\n' "$tools" | grep -v '^/usr/lib/llvm-'); do
 done
 if [ -n "$llvm" ]; then
     for base in clang clang++ ld.lld llvm-mc llvm-objcopy llvm-objdump llvm-nm llvm-readelf llvm-cxxfilt llvm-ar; do
+        printf '%s\n' "$have" | grep -qx "$base" || continue
         printf '#!/bin/sh\nexec podman run --rm -i --network=none -v /tmp:/tmp -v "%s:%s" -v "%s:%s" -v "$PWD:$PWD" -w "$PWD" %s %s/%s "$@"\n' \
             "$root" "$root" "$bench" "$bench" "$image" "$llvm" "$base" > "$shims/$base"
         chmod +x "$shims/$base"

@@ -1261,9 +1261,10 @@ def make(isa, out, bodies, cases):
         cmd = ["msp430-elf-gcc"] + conf["flags"] + ["-nostdlib", "-T", script, "-Wl,-e," + first, "-o", elf_path,
                                                     source] + ["-Wl,-u," + h for h in MSP_LIBGCC] + ["-lgcc"]
     else:
+        from dread.target import linker_knows
+        quiet = ["-Wl,--no-warn-rwx-segments"] if linker_knows(["arm-none-eabi-ld"], "--no-warn-rwx-segments") else []
         cmd = ["arm-none-eabi-gcc"] + conf["flags"] + ["-nostdlib", "-Wl,-Ttext=0x%x" % conf["base"],
-                                                       "-Wl,-e," + first, "-Wl,--no-warn-rwx-segments", "-o", elf_path,
-                                                       source]
+                                                       "-Wl,-e," + first] + quiet + ["-o", elf_path, source]
     got = subprocess.run(cmd, capture_output=True, text=True)
     if got.returncode:
         raise RuntimeError("the assembler refused the generated code:\n" + got.stderr)

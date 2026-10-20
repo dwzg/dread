@@ -134,7 +134,9 @@ def test_compiler_kinds(tmp_path):
         (tmp_path / name).mkdir()
     gnu = Target.load(write(tmp_path / "gnu", MINIMAL)).compiler
     assert gnu.command("cc") == ["arm-none-eabi-gcc"] and gnu.command("ld") == ["arm-none-eabi-ld"]
-    assert gnu.ldflags == ["--no-warn-rwx-segments"] and "-fno-reorder-functions" in gnu.required()
+    from dread.target import linker_knows
+    quiet = linker_knows(gnu.command("ld"), "--no-warn-rwx-segments")     # (binutils 2.39 and later)
+    assert gnu.ldflags == (["--no-warn-rwx-segments"] if quiet else []) and "-fno-reorder-functions" in gnu.required()
     text = MINIMAL + '\n[compiler]\nkind = "clang"\ntriple = "riscv32-unknown-elf"\ncflags = ["-march=rv32imc"]\n'
     clang = Target.load(write(tmp_path / "clang", text)).compiler
     assert clang.command("cc") == ["clang", "--target=riscv32-unknown-elf"]

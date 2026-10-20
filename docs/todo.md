@@ -52,9 +52,13 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     callee that returned -1 and set errno (a stub effect the generator does not find).
   - [ ] The -O2 builds and the RISC-V GCC builds (RISC-V newlib-nano is not packaged by the
     distributions: xPack's riscv-none-elf-gcc in an image, or picolibc).
-- [ ] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
+- [x] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
   clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
-  2026-10-20, here 6).
+  2026-10-20, here 6). Done 2026-10-20: the suite under `bin/with-toolchain ubuntu-22.04` first found
+  96 failures and 2 errors, all from the default `--no-warn-rwx-segments` that binutils 2.38's ld
+  does not know (now given only where the linker's --help lists it), then 10 from LLVM tools the
+  images lacked (llvm-N added); then 570 passed, 6 skipped (each for a build's own reason). The CI
+  matrix: Ubuntu 24.04 with Python 3.11 and 3.13, Ubuntu 22.04 with 3.11.
 - [ ] **What a second compiler's code needs** (found 2026-10-20 on a commercial compiler's lab
   builds: the probes' objects from a bundle, linked here with GNU ld, newlib and libgcc, so none of
   its library is involved; what the lab learned about that compiler stays in `~/dread-private/`,

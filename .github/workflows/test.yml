@@ -1,6 +1,8 @@
 # The test suite on every push and pull request: the gizmo builds (ARM state, Cortex-M3, RV32IMC),
-# with the cross compiler and LLVM from the distribution. Ghidra tests are skipped (no Ghidra on the
-# runner).
+# with the cross compiler and LLVM from the distribution, on Ubuntu 24.04 (GCC 13, binutils 2.42,
+# clang 18) and 22.04 (GCC 10, binutils 2.38, clang 14): DREAD meets older compilers than the host's
+# (2026-10-20: two gaps only GCC 13 showed, a default only binutils 2.39 knows). Ghidra tests are
+# skipped (no Ghidra on the runner); -rs lists every skip with its reason.
 name: tests
 on:
   push:
@@ -10,11 +12,14 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.13"]
+        include:
+          - {os: ubuntu-24.04, python: "3.11"}
+          - {os: ubuntu-24.04, python: "3.13"}
+          - {os: ubuntu-22.04, python: "3.11"}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -31,4 +36,4 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --quiet -e ".[test]"
       - name: Tests
-        run: .venv/bin/python -m pytest -q --durations=10
+        run: .venv/bin/python -m pytest -q -rs --durations=10

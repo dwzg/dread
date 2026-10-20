@@ -195,6 +195,23 @@ class Abi:
         self.fp_arg_regs = list(getattr(arch, "fp_arg_regs", lambda: [])()) if self.float == "hard" else []
 
 
+_LINKER_HELP = {}
+
+
+def linker_knows(command, option):
+    """Whether a linker lists option in its --help (asked once per command and process; a linker
+    that cannot be run knows nothing)."""
+    import subprocess
+    key = tuple(command)
+    if key not in _LINKER_HELP:
+        try:
+            got = subprocess.run(list(command) + ["--help"], capture_output=True, text=True, timeout=60)
+            _LINKER_HELP[key] = got.stdout + got.stderr
+        except (OSError, subprocess.SubprocessError):
+            _LINKER_HELP[key] = ""
+    return option in _LINKER_HELP[key]
+
+
 class Compiler:
     """[compiler]: how C for this target is compiled.
 
@@ -212,7 +229,9 @@ class Compiler:
              exceptions, no RTTI, no guards around local statics, no atexit registration: what the
              overlay can place is code and read-only data, not unwind tables, typeinfo objects or
              runtime calls of the C++ library)
-    ldflags  flags for the linker (default: --no-warn-rwx-segments for GNU ld, none for lld)
+    ldflags  flags for the linker (default: --no-warn-rwx-segments for a GNU ld that knows it, from
+             binutils 2.39 on, none for lld or an older ld: Ubuntu 22.04's 2.38 refused it, and every
+             link of a test failed so)
     include  further include directories
     idioms   the lifter's compiler profile
     profile  a dread cclab profile of the original's compiler (relative to the target's directory):
@@ -236,12 +255,16 @@ class Compiler:
         layer = list(getattr(getattr(target, "arch", None), "lifted_cflags", {}).get(self.kind, ()))
         self.lifted_cflags = list(data.get("lifted_cflags", ["-Os"] + layer))
         self.cxxflags = list(data.get("cxxflags", self.cflags + self.CXX_FLAGS))
-        self.ldflags = list(data.get("ldflags", ["--no-warn-rwx-segments"] if self.kind == "gcc" else []))
         self.include = [target.path(p) for p in data.get("include", [])]
         self.idioms = data.get("idioms")
         self.tools = dict(data.get("tools", {}))
         self.profile = os.path.join(os.path.dirname(target.file), data["profile"]) if data.get("profile") else None
         self._profile_results = None
+        if "ldflags" in data:
+            self.ldflags = list(data["ldflags"])
+        else:
+            quiet = self.kind == "gcc" and linker_knows(self.command("ld"), "--no-warn-rwx-segments")
+            self.ldflags = ["--no-warn-rwx-segments"] if quiet else []
 
     def profile_results(self):
         """{helper name: [result registers]} of the compiler profile ({} without one)."""
