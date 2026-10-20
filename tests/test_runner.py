@@ -324,8 +324,9 @@ def test_a_case_whose_original_touches_its_saved_registers_is_refused(tmp_path):
     target = Target.load(str(tmp_path))
     image = target.image()
     program = Program(target, image)
-    first = program.insn(program.by_name["user"].entry)
-    assert first.mnemonic == "push" and "r4" in first.op_str, (first.mnemonic, first.op_str)   # (the layout tested)
+    # (the layout tested: user pushes r4 in its prologue; GCC 13 moves the arguments first)
+    head = program.instructions(program.by_name["user"])[:4]
+    assert any(i.mnemonic == "push" and "r4" in i.op_str for i in head), [(i.mnemonic, i.op_str) for i in head]
     data = {name: address for kind, address, name in program.symbols() if kind == "d"}
     src = tmp_path / "src"
     src.mkdir()

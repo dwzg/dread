@@ -124,6 +124,24 @@ undone). Other decisions are taken by the recommended option and written down in
 - [x] **GitHub Actions** (the user agreed, 2026-10-18): the suite on every push, Python 3.11 and 3.13,
   the distribution's arm-none-eabi-gcc. A failure there that does not happen locally is looked at
   first (another compiler version decides placements and identical-code mutants).
+  Red from 2026-10-19 02:22 to 2026-10-20, 74 pushes, and nobody looked (the user asked): the push
+  script ran the fast tests here, on GCC 16, binutils 2.47 and clang 23; CI runs everything on
+  Ubuntu 24.04's GCC 13, binutils 2.42 and clang 18. Five tests, three of them faults of DREAD's:
+  - regflow followed a variadic save area through a copy of sp, not through a copy of that copy:
+    clang 18 keeps a frame pointer (add r7, sp, #8; add.w r12, r7, #8; stm.w r12, {r1-r3}), and r1-r3
+    counted as read (regflow 15: the layers' base_copy; the test runs with a frame pointer too);
+  - the ARM listing stated the core but not the FPU: binutils before 2.47 take none from
+    `.cpu cortex-m4` and rejected gizmo-m4's 30 float instructions (written as words; the rebuild
+    stayed byte for byte). `.fpu` from [compiler] cflags' -mfpu now; checked with GCC 13.2's
+    assembler on Compiler Explorer: none rejected;
+  - the fake wslpath of a cclab test used echo, which dash (Ubuntu's /bin/sh) stops at the \c of
+    \mnt\c\w (printf now);
+  - two tests asked for one compiler's code: the C++ probe's devirtualising guess (GCC 16 guesses,
+    GCC 13 calls through the register; the test now ties the count of taken indirect calls to
+    whether W::f ran) and a prologue's first instruction (GCC 13 moves the arguments before the
+    push; the test looks at the first four).
+  Since: ~/.config/dread/checked-push.sh refuses to push while CI's last finished run on main is red
+  (`--ci-red-ok` for the push that fixes it).
 
 ## Performance, first pass
 

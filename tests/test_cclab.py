@@ -57,7 +57,8 @@ def test_windows_tools_get_windows_file_names(tmp_path, monkeypatch):
     itself does not (WSL runs /mnt/c/... executables directly)."""
     fake = tmp_path / "bin"
     fake.mkdir()
-    (fake / "wslpath").write_text('#!/bin/sh\n[ "$1" = "-w" ] && echo "C:\\\\work$(echo "$2" | tr / \\\\\\\\)"\n')
+    # printf, not echo: dash (the CI's /bin/sh) takes the \c of \mnt\c\w in echo's text for "stop here"
+    (fake / "wslpath").write_text('#!/bin/sh\n[ "$1" = "-w" ] && printf "%s\\n" "C:\\\\work$(printf "%s" "$2" | tr / \\\\\\\\)"\n')
     (fake / "wslpath").chmod(0o755)
     monkeypatch.setenv("PATH", str(fake) + os.pathsep + os.environ["PATH"])
     a = ad.Adapter({"name": "t", "windows": True, "tools": {"cc": "/bin/true"},
@@ -420,8 +421,10 @@ def test_cxx_on_the_arm_cxx_abi(tmp_path):
     function's arguments behind it; a constructor that calls a function first has 'this' back in r0
     afterwards (the ARM C++ ABI: constructors return this); a class with a destructor comes back
     through memory although it holds one int; new and delete call operator new and the sized
-    delete at -O0; at -O2 GCC devirtualises the virtual call on a guess, leaving an indirect call
-    that the run does not take."""
+    delete at -O0; the virtual call is an indirect call in the code at both levels, taken by the run
+    at -O0 (W::f is called); at -O2 GCC 16 devirtualises it on a guess (W::f inlined, the indirect
+    call left for other classes, not taken), GCC 13 (the CI's) calls through the register: icalls
+    counts what the run takes, whichever the compiler chose."""
     got = measured(tmp_path, "gcc-arm", ["cortex-m3-O0", "cortex-m3-O2"])
     for r in got.values():
         assert r["_ZNK1S4selfEv"]["where"] == "r0" and r["_ZNK1S5thirdEii"]["where"] == "r2"
@@ -430,7 +433,11 @@ def test_cxx_on_the_arm_cxx_abi(tmp_path):
     o0, o2 = got["cortex-m3-O0"], got["cortex-m3-O2"]
     called = [h["function"] for h in o0["_Z14cxx_new_deletei"]["helpers"] if h["depth"] == 1]
     assert called[0] == "_Znwj" and called[-1] == "_ZdlPvj"
-    assert "(through a register)" in o2["_Z11cxx_virtuali"]["shape"]["calls"] and o2["_Z11cxx_virtuali"]["icalls"] == 0
+    for r in (o0, o2):
+        v = r["_Z11cxx_virtuali"]
+        taken = "_ZNK1W1fEi" in [h["function"] for h in v["helpers"] if h["depth"] == 1]
+        assert "(through a register)" in v["shape"]["calls"] and v["icalls"] == (1 if taken else 0), v
+    assert o0["_Z11cxx_virtuali"]["icalls"] == 1
 
 
 @needs_gcc

@@ -417,6 +417,13 @@ class RiscV:
             return NAMES[f.rd]
         return None
 
+    def base_copy(self, insn):
+        """(rd, rs1) of addi rd, rs1, imm (and mv), else None (dread.regflow: copies of sp's copies)."""
+        f = fields(insn)
+        if f.op == "addi" and f.rd and f.rs1:
+            return NAMES[f.rd], NAMES[f.rs1]
+        return None
+
     def frame_stores(self, insn, sp_based):
         """The register sw, sh or sb puts where a register of sp_based points (an entry spill)."""
         f = fields(insn)

@@ -71,7 +71,10 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   tree: once a push went out because the command that ran the tests went on after they failed.
   The same holds for the push script itself: its exit status decides what comes after it, so it is
   not piped into `tail` before an `&&` (the pipe's status is tail's: on 2026-10-20 a push the leak
-  check refused went on to remove its worktree and branch).
+  check refused went on to remove its worktree and branch). CI runs every test on Ubuntu's older
+  compilers: look at its run after a push (`gh run list --repo dwzg/dread`); the push script refuses
+  to push while the last finished run on main is red, except the push that fixes it (`--ci-red-ok`).
+  On 2026-10-20 CI had been red for 74 pushes nobody looked at.
 - **Stay polite on the machine**: long runs go to the background (polite, as the tools are);
   nothing that fills memory or runs without a bound.
 - **Beside a long run**: a bench measurement runs from the checkout and starts every step anew, so

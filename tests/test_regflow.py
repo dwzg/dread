@@ -143,12 +143,15 @@ def test_switch_fallback_without_resolution(target, monkeypatch):
 
 
 @pytest.mark.skipif(not (have("clang") and have("ld.lld")), reason="needs clang and ld.lld")
-def test_a_variadic_spill_is_no_use(tmp_path):
+@pytest.mark.parametrize("fp", ["", "-fno-omit-frame-pointer"])
+def test_a_variadic_spill_is_no_use(tmp_path, fp):
     """clang's variadic functions keep r1-r3 next to their stack arguments with stores (add r0, sp,
     #12; stm r0!, {r1, r2, r3}) where GCC pushes them; counted as uses, they made every caller of an
     assertion handler that calls printf look as if it read r3 (FreeRTOS's clang builds: most of the
     lifter's refusals). A store of a register nothing has written yet where sp points, in the entry's
-    straight run, is a spill like a push."""
+    straight run, is a spill like a push. With a frame pointer the store goes through a copy of a
+    copy of sp (mov r7, sp; add.w r12, r7, #8; stm.w r12, {r1, r2, r3}): clang 18, the CI's, keeps one
+    at -O2 for this target, and the test failed there until regflow 15 followed such copies."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
@@ -163,7 +166,7 @@ def test_a_variadic_spill_is_no_use(tmp_path):
         "int caller(int a) { return sum(1, a); }\n")
     obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
     subprocess.run(["clang", "--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-O2", "-ffreestanding", "-c",
-                    "-ffunction-sections", "-o", obj, str(tmp_path / "t.c")], check=True)
+                    "-ffunction-sections", "-o", obj, str(tmp_path / "t.c")] + ([fp] if fp else []), check=True)
     (tmp_path / "t.ld").write_text("SECTIONS { . = 0x08000000; .text : { *(.text*) } }\n")
     subprocess.run(["ld.lld", "-T", str(tmp_path / "t.ld"), "-e", "caller", "-o", elf, obj], check=True)
     (tmp_path / "original").mkdir()

@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 14                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 15                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -76,6 +76,9 @@ VERSION = 14                # 3: entry spills (variadic functions) are no use; 4
                             # behind that call (the restore replaces the callee's value unread)
                             # 14: sp stays a base of frame stores when an instruction moves it (sub sp):
                             # clang's variadic save areas (sub sp, #8; strd r2, r3, [sp, #16]) went unseen
+                            # 15: a copy of a base plus a constant is a base too (the layer's base_copy):
+                            # clang 18 keeps a frame pointer and reaches the save area through it (add r7,
+                            # sp, #8; add.w r12, r7, #8; stm.w r12, {r1, r2, r3}), unseen until then
 
 
 class RegFlow:
@@ -201,7 +204,7 @@ def _rows(program, fn, mask, entry_name):
             spilled = {r for r in arch.frame_stores(insn, sp_based) if r not in written} & save_area
             if spilled:
                 reads = set(reads) - spilled
-            copy = arch.sp_copy(insn)
+            copy = based_copy(arch, insn, sp_based)
             sp_based -= set(writes) - {"sp"}    # (sub sp, #8 moves it: sp stays a base)
             if copy is not None:
                 sp_based.add(copy)
@@ -224,6 +227,19 @@ def _rows(program, fn, mask, entry_name):
     return out
 
 
+def based_copy(arch, insn, bases):
+    """The register an instruction sets to a base (sp, or a register already set to sp plus a
+    constant) plus a constant, else None: the layer's sp_copy, and its base_copy for copies of copies
+    (clang 18's frame pointer: add r7, sp, #8; add.w r12, r7, #8)."""
+    copy = arch.sp_copy(insn)
+    if copy is not None:
+        return copy
+    pair = arch.base_copy(insn) if hasattr(arch, "base_copy") else None
+    if pair is not None and pair[1] in bases:
+        return pair[0]
+    return None
+
+
 def variadic_save_area(program, fn, insns, joins):
     """The argument registers a variadic function stores in its frame on the entry's straight run
     before anything writes them: the run of stored ones that ends with the last argument register and
@@ -239,7 +255,7 @@ def variadic_save_area(program, fn, insns, joins):
         kind, _, _ = arch.flow(insn)
         _, writes = arch.reg_effects(insn)
         stored |= {r for r in arch.frame_stores(insn, sp_based) if r not in written}
-        copy = arch.sp_copy(insn)
+        copy = based_copy(arch, insn, sp_based)
         sp_based -= set(writes) - {"sp"}        # (clang's variadic functions begin with sub sp)
         if copy is not None:
             sp_based.add(copy)

@@ -474,6 +474,16 @@ class Arm:
             return self._name(insn.reg_name(ops[0].reg))
         return None
 
+    def base_copy(self, insn):
+        """(rd, rn) of an instruction that sets rd to the register rn plus a constant (add rd, rn,
+        #imm; mov rd, rn), else None (dread.regflow follows copies of sp's copies: a frame pointer)."""
+        ops = insn.operands
+        if insn.id in (csarm.ARM_INS_ADD, csarm.ARM_INS_MOV) and self.predicate(insn) is None and len(ops) >= 2 \
+                and ops[0].type == csarm.ARM_OP_REG and ops[1].type == csarm.ARM_OP_REG \
+                and (len(ops) == 2 or ops[2].type == csarm.ARM_OP_IMM) and not ops[1].shift.type:
+            return self._name(insn.reg_name(ops[0].reg)), self._name(insn.reg_name(ops[1].reg))
+        return None
+
     def frame_stores(self, insn, sp_based):
         """The registers a store puts where a register of sp_based (sp, or a copy of it plus a
         constant) points: str, strd, strh, strb, stm and stmdb. An entry spill (a variadic function
@@ -1035,6 +1045,14 @@ class ArmAsm:
 
     def __init__(self, arch):
         self.arch = arch
+        self.fpu = None
+
+    def configure(self, compiler):
+        """The FPU the compiler flags name (-mfpu=): the listing states it, since GNU as before 2.47
+        does not take one from `.cpu cortex-m4` and rejected every float instruction of gizmo-m4
+        (binutils 2.42, the CI's: 30 instructions written as words)."""
+        fpus = [f.split("=", 1)[1] for f in compiler.cflags if f.startswith("-mfpu=")]
+        self.fpu = fpus[-1] if fpus and fpus[-1] != "auto" else None
 
     def prelude(self, isa):
         """The directives that put GNU as into the right instruction set."""
@@ -1050,6 +1068,8 @@ class ArmAsm:
             lines.append("\t.arch armv6k")
         else:
             lines.append("\t.arch armv5te")
+        if self.fpu:
+            lines.append("\t.fpu %s" % self.fpu)
         return lines + self.switch(isa)
 
     def switch(self, isa):
