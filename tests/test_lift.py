@@ -2,6 +2,7 @@
 and that the acceptance keeps what agrees with the original and drops a planted mistake. On gizmo-rv32
 the translator is dread.lift_riscv (dread.lift.make_lifter)."""
 import os
+import re
 import shutil
 
 import pytest
@@ -353,6 +354,45 @@ def test_a_branch_on_a_constant_the_function_stored_is_decided(tmp_path, opt):
     result = lift.make_lifter(p).lift(fn)
     assert set(calls) <= set(result.unreached), [hex(a) for a in result.unreached]
     assert "fail" not in result.text
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+@pytest.mark.parametrize("opt", ["-Os", "-O2"])
+def test_the_stack_pointer_stored_as_a_value(tmp_path, opt):
+    """GCC keeps the address of a local at the bottom of the frame with str sp, [sp, #k] (C++ keeps
+    the object a call through its vtable gets as `this` so): the lifter stores the frame's address
+    there, as it gives it for mov rX, sp, instead of refusing; the lift check accepts the function."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(
+        "struct obj { unsigned a, b; };\n"
+        "__attribute__((noipa)) unsigned use(struct obj **all, int n)\n"
+        "{ unsigned t = 0; for (int i = 0; i < n; i++) t += all[i]->a * all[i]->b; return t; }\n"
+        "unsigned f(unsigned x) { struct obj p = {x, 1}, q = {x + 1, 2}; struct obj *all[] = {&p, &q};"
+        " return use(all, 2); }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH }\n")
+    elf = str(tmp_path / "t.elf")
+    flags = ["-mcpu=cortex-m3", "-mthumb", opt, "-nostdlib", "-ffunction-sections"]
+    subprocess.run(["arm-none-eabi-gcc"] + flags + ["-T", str(tmp_path / "t.ld"), "-e", "f", "-o", elf,
+                    str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "%s"]\n' % opt)
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    fn = p.by_name["f"]
+    stores = [a for a in fn.insns if p.insn(a).mnemonic.startswith("str") and p.insn(a).op_str.startswith("sp,")]
+    assert stores, "GCC stores sp itself"
+    result = lift.make_lifter(p).lift(fn)
+    assert re.search(r"= \(u32\)\(sp0 - \d+\);", result.text), result.text
+    lines = []
+    accepted = lift.check(t, t.image(), ["f", "use"], out=lines.append, jobs=2)
+    assert "f" in accepted, "\n".join(lines)
 
 
 @pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")

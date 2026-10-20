@@ -2011,7 +2011,9 @@ class Lifter:
         return "{ u32 a = %s, w = %s; %s = (u32)*(volatile %s *)a; %s = w; }" % (addr, newbase, d, ctype, base)
 
     def _store(self, insn, ops, ctype):
-        s = self.reg(ops[0].reg)
+        # the stack pointer as the value: the address of the frame's bottom, as mov rX, sp gives it
+        # (C++ keeps &local_object for a call through a vtable that way: str sp, [sp, #k])
+        s = self.reg(ops[0].reg, sp=True)
         addr, newbase, base = self._mem(insn)
         if newbase is None:
             return "*(volatile %s *)(%s) = (%s)%s;" % (ctype, addr, ctype, s)
