@@ -207,18 +207,22 @@ def stale_target(tmp_path, cases):
     return target, image, payload
 
 
-def test_a_case_whose_differences_are_stale_stack_data_is_refused(tmp_path):
+def test_a_case_whose_differences_are_stale_stack_data_is_compared_except_those(tmp_path):
     """start's C leaves other data where send's unset members lie, so the queue's last two words
     differ; with the stack below the stack pointer filled at every function entry they change in
-    the original too: stale data, the case is refused, not failed (it runs nothing for coverage).
-    start2's C sends a 3 for a 2 besides: a difference the fills do not move, so it fails."""
+    the original too: outputs the original itself does not define. The case is compared except those
+    (named in the report) and counts for coverage (decided 2026-10-20, docs/decisions.md; it was
+    refused before). start2's C sends a 3 for a 2 besides: a difference the fills do not move, so it
+    fails, the stale words named beside it."""
     target, image, payload = stale_target(tmp_path, 'case("start", "x = 5", lambda m: None, 5)\n'
                                                     'case("start2", "x = 5", lambda m: None, 5)\n'
                                                     'case("plain", "x = 1", lambda m: None, 1)\n')
     failed, uncovered, text = run_all(target, payload)
-    assert "REFUSED start [x = 5]: the original read stale stack data" in text, text
-    assert "FAIL start " not in text and "start" in uncovered, text
-    assert "FAIL start2 [x = 5]" in text and "ok   plain" in text, text
+    assert "start [x = 5]: compared except what the original's stale stack data" in text, text
+    assert "FAIL start " not in text and "REFUSED start " not in text and "start" not in uncovered, text
+    assert "ok   start " in text, text
+    assert "FAIL start2 [x = 5]" in text and "the original's stale stack data decides" in text, text
+    assert "ok   plain" in text, text
 
 
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")

@@ -25,18 +25,21 @@ mutation check is what shows whether its cases tell both outcomes apart.
 Output, one block per function, in this form (other tools read it):
 
     ok   NAME                       n/m cases agree
+         NAME [label]: compared except ...   a case whose every difference changes in the original
+                                    too when what lies below the stack pointer at its function
+                                    entries changes (it read stale stack data, an uninitialised
+                                    local: what earlier frames left there, which C, laying out its
+                                    frames and saving other values in them, leaves otherwise;
+                                    stale_outputs): compared except those outputs, which the line
+                                    names, and counted for coverage (decided 2026-10-20 by
+                                    recommendation, docs/decisions.md; refused before)
     FAIL NAME [label]               followed by the differences, indented by five spaces
     UNCOVERED NAME: a of b instructions of the original never ran: ADDRESS ...
     REFUSED NAME [label]: ...       a written case that reads code as data or writes into the image,
                                     or a case whose two images differ where the original's own
                                     outcome changes when its stack starts STACK_SHIFT bytes lower
                                     (it took a stack address for a value: C's frames lie otherwise),
-                                    or where every difference changes in the original too when what
-                                    lies below the stack pointer at its function entries changes
-                                    (it read stale stack data, an uninitialised local: what earlier
-                                    frames left there, which C, laying out its frames and saving
-                                    other values in them, leaves otherwise; stale_explains), or
-                                    where the original calls through a register into the middle of a
+                                    or where the original calls through a register into the middle of a
                                     function (a code pointer the input gave that is no entry: the
                                     rebuilt image has other code there, or calls it with other
                                     values in the other registers; wild_call); such a case is not
@@ -137,18 +140,18 @@ def wild_call(name, addr, args, limit, setup, kept, why):
     return (getattr(m, "wild_calls", None) or [None])[0]
 
 
-def stale_explains(name, addr, args, limit, setup, kept, why, first, rebuilt):
-    """Whether stale stack data the original read explains every difference between the images: the
+def stale_outputs(name, addr, args, limit, setup, kept, why, first, rebuilt):
+    """The outputs in which the images differ that stale stack data the original read decides: the
     original runs again with STALE_SPAN bytes below the stack pointer filled at every function entry
     (once with each of STALE_FILLS), so that an uninitialised local, of the function or of a callee,
-    reads the fill instead of what earlier frames left; when every output in which the images differ
-    changes there too, C cannot be held to it (it lays out its frames otherwise and saves other
-    values in them; FreeRTOS's timer commands carry a union member nobody set into the timer queue).
-    Returns a short text of those outputs, or None. A difference the fills do not move, or an
-    original that fails with a fill, keeps the case compared."""
+    reads the fill instead of what earlier frames left; an output that changes there too is one the
+    original itself does not define, and C cannot be held to it (it lays out its frames otherwise
+    and saves other values in them; FreeRTOS's timer commands carry a union member nobody set into
+    the timer queue). Returns those outputs (dread.emu's difference keys), empty when the fills move
+    none or the original fails with a fill."""
     images = first.differences(rebuilt)
     if not images:
-        return None
+        return set()
     lay = RUN["layout"]
     entries = frozenset(e & ~1 for e in Machine.entries.get((lay.target.file, lay.image.name), ()))
     moved = set()
@@ -161,11 +164,14 @@ def stale_explains(name, addr, args, limit, setup, kept, why, first, rebuilt):
             setup(m)
             again = m.call(addr, *args, max_instructions=limit)
         except Exception:
-            return None
+            return set()
         moved |= first.differences(again)
-    if not images <= moved:
-        return None
-    memory = sorted(k[1] for k in images if isinstance(k, tuple) and k[0] == "memory")
+    return images & moved
+
+
+def outputs_text(keys):
+    """A short text of difference keys: memory as address runs, the rest by name."""
+    memory = sorted(k[1] for k in keys if isinstance(k, tuple) and k[0] == "memory")
     runs = []
     for a in memory:
         if runs and a == runs[-1][1] + 1:
@@ -174,8 +180,8 @@ def stale_explains(name, addr, args, limit, setup, kept, why, first, rebuilt):
             runs.append([a, a])
     shown = ["memory " + ", ".join("0x%x" % lo if lo == hi else "0x%x-0x%x" % (lo, hi) for lo, hi in runs[:4])
              + (", ..." if len(runs) > 4 else "")] if runs else []
-    shown += sorted(k if isinstance(k, str) else "%s %s" % k for k in images if not (isinstance(k, tuple)
-                                                                                    and k[0] == "memory"))
+    shown += sorted(k if isinstance(k, str) else "%s %s" % k for k in keys if not (isinstance(k, tuple)
+                                                                                  and k[0] == "memory"))
     return "; ".join(shown)
 
 
@@ -277,15 +283,18 @@ def run_function(name):
                          "with the stack %d bytes lower): a stack address taken for a value; not compared"
                          % (name, label, STACK_SHIFT))
             continue
-        stale = stale_explains(name, addr, args, limit, setup, kept, why, out[0], out[1]) \
+        stale = stale_outputs(name, addr, args, limit, setup, kept, why, out[0], out[1]) \
             if diff and not depends and not isinstance(out[0], Exception) and not isinstance(out[1], Exception) \
-            else None
-        if stale:
-            refused += 1
-            lines.append("REFUSED %s [%s]: the original read stale stack data (an uninitialised local): every "
-                         "difference between the images (%s) changes in the original too when what lies below "
-                         "the stack pointer at its function entries changes; not compared" % (name, label, stale))
+            else set()
+        if stale and not out[0].differences(out[1]) - stale:
+            # Every difference is an output the original's stale stack data decides: compared except
+            # those (decided 2026-10-20, docs/decisions.md; such a case was refused before)
+            lines.append("     %s [%s]: compared except what the original's stale stack data (an uninitialised "
+                         "local) decides: %s" % (name, label, outputs_text(stale)))
+            covered |= case_covered
             continue
+        if stale:
+            diff = list(diff) + ["(of these, the original's stale stack data decides %s)" % outputs_text(stale)]
         covered |= case_covered
         if diff:
             bad += 1
