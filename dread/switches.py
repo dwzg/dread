@@ -72,19 +72,14 @@ def _engine(program, isa):
 
 def _on_unmapped(uc, access, address, size, value, state):
     """A zero page where the dispatch reads or writes outside the image (RAM, peripherals); at most
-    MAX_PAGES new ones per run."""
+    MAX_PAGES new ones per run. Recorded here, and the run faults: _run maps them between runs and
+    runs again from the start, which comes to the same (the runs are short and start alike). Mapped
+    here, inside the access, Unicorn's memory map changed under a store that it then finished: the
+    suite crashed once in that store's lookup (2026-10-20)."""
     if state["new"] >= MAX_PAGES:
         return False
-    for page in {address & ~(PAGE - 1), (address + size - 1) & ~(PAGE - 1)}:
-        if page in state["mapped"]:
-            continue
-        try:
-            uc.mem_map(page, PAGE)
-        except UcError:
-            return False
-        state["mapped"].add(page)
-        state["new"] += 1
-    return True
+    state["want"] |= {address & ~(PAGE - 1), (address + size - 1) & ~(PAGE - 1)} - state["mapped"]
+    return False
 
 
 def _on_write(uc, access, address, size, value, state):
@@ -133,19 +128,32 @@ def _run(program, uc, state, isa, runs, first, address):
     landings = []
     try:
         for fill, set_at, reg, value in runs:
-            for r in arch.general_regs():
-                uc.reg_write(arch.reg_id(r), fill)
-            arch.initial_status(uc)
-            state.update(set_at=set_at, reg=reg, value=value, lo=first, jump=address, landed=None, last=None, new=0,
-                         called=False, through=_helper(program, address))
-            try:
-                uc.emu_start(arch.start_address(first, isa), 0xFFFFFFFF, count=STEPS)
-                landings.append(state["landed"] if state["last"] == address else None)
-            except UcError:
-                landings.append(None)
-            for page in state["dirty"]:     # zero again what the run wrote, for the next one
-                uc.mem_write(page, bytes(PAGE))
-            state["dirty"] = set()
+            state["new"] = 0
+            while True:
+                for r in arch.general_regs():
+                    uc.reg_write(arch.reg_id(r), fill)
+                arch.initial_status(uc)
+                state.update(set_at=set_at, reg=reg, value=value, lo=first, jump=address, landed=None, last=None,
+                             called=False, through=_helper(program, address), want=set())
+                try:
+                    uc.emu_start(arch.start_address(first, isa), 0xFFFFFFFF, count=STEPS)
+                    landing = state["landed"] if state["last"] == address else None
+                except UcError:
+                    landing = None
+                for page in state["dirty"]:     # zero again what the run wrote, for the next one
+                    uc.mem_write(page, bytes(PAGE))
+                state["dirty"] = set()
+                want = sorted(state["want"]) if landing is None else []
+                try:
+                    for page in want:           # it ran into memory it wants: mapped, and run again
+                        uc.mem_map(page, PAGE)
+                        state["mapped"].add(page)
+                        state["new"] += 1
+                except UcError:
+                    want = []
+                if not want:
+                    landings.append(landing)
+                    break
     finally:
         for page in state["dirty"]:
             uc.mem_write(page, bytes(PAGE))

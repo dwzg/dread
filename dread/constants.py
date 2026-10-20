@@ -48,22 +48,16 @@ def _engine(program, isa):
         uc.mem_write(c.run, bytes(program.data[lo:lo + c.size]))
     for lo, hi in merged:
         uc.mem_protect(lo, hi - lo, UC_PROT_READ | UC_PROT_EXEC)
-    state = {"mapped": set(), "new": 0, "fill": 0}
+    state = {"mapped": set(), "new": 0, "fill": 0, "want": set()}
 
     def on_unmapped(uc, access, address, size, value, st):
+        """Pages of the fill byte where a run reads or writes outside the image, at most MAX_PAGES
+        a run: recorded, and the run faults; _run maps them and runs again from the start (mapped
+        inside the access, Unicorn's memory map changed under it: see dread.switches._on_unmapped)."""
         if st["new"] >= MAX_PAGES:
             return False
-        for page in {address & ~(PAGE - 1), (address + size - 1) & ~(PAGE - 1)}:
-            if page in st["mapped"]:
-                continue
-            try:
-                uc.mem_map(page, PAGE)
-                uc.mem_write(page, bytes([st["fill"]]) * PAGE)
-            except UcError:
-                return False
-            st["mapped"].add(page)
-            st["new"] += 1
-        return True
+        st["want"] |= {address & ~(PAGE - 1), (address + size - 1) & ~(PAGE - 1)} - st["mapped"]
+        return False
 
     uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED, on_unmapped, user_data=state)
     uc.hook_add(UC_HOOK_MEM_FETCH_UNMAPPED, lambda *a: False)
@@ -146,21 +140,33 @@ def _run(program, first, address, names):
     results = []
     for fill in FILLS:
         state["fill"], state["new"] = fill, 0
-        for page in state["mapped"]:
-            uc.mem_write(page, bytes([fill]) * PAGE)
-        word = int.from_bytes(bytes([fill]) * 4, "little")
-        for r in arch.general_regs():
-            uc.reg_write(arch.reg_id(r), word)
-        arch.initial_status(uc)             # (before sp: the A profile banks sp per mode)
-        for r, value in program.image.fixed.items():    # gp and kin keep their one value
-            uc.reg_write(arch.reg_id(r), value)
-        uc.reg_write(arch.reg_id("sp"), word & ~0xFFF)     # a stack address that differs between the runs
-        if arch.link_reg:
-            uc.reg_write(arch.reg_id(arch.link_reg), arch.start_address(word & ~3, isa))
-        try:
-            uc.emu_start(arch.start_address(first, isa), address, count=RUN_BACK * 2)
-        except UcError:
-            return None
+        while True:
+            for page in state["mapped"]:
+                uc.mem_write(page, bytes([fill]) * PAGE)
+            word = int.from_bytes(bytes([fill]) * 4, "little")
+            for r in arch.general_regs():
+                uc.reg_write(arch.reg_id(r), word)
+            arch.initial_status(uc)             # (before sp: the A profile banks sp per mode)
+            for r, value in program.image.fixed.items():    # gp and kin keep their one value
+                uc.reg_write(arch.reg_id(r), value)
+            uc.reg_write(arch.reg_id("sp"), word & ~0xFFF)     # a stack address that differs between the runs
+            if arch.link_reg:
+                uc.reg_write(arch.reg_id(arch.link_reg), arch.start_address(word & ~3, isa))
+            state["want"] = set()
+            try:
+                uc.emu_start(arch.start_address(first, isa), address, count=RUN_BACK * 2)
+                break
+            except UcError:
+                want = sorted(state["want"])
+            try:
+                for page in want:               # memory it wants: mapped (filled above), and run again
+                    uc.mem_map(page, PAGE)
+                    state["mapped"].add(page)
+                    state["new"] += 1
+            except UcError:
+                want = []
+            if not want:
+                return None
         if uc.reg_read(arch.pc_reg()) & ~1 != address:
             return None
         results.append({r: uc.reg_read(arch.reg_id(r)) for r in names})
