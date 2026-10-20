@@ -741,6 +741,13 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
     conversations.
   So far: deepseek-flash finds the most (six accepted), Haiku nearly as much at a sixth of the time,
   the local model as much as Haiku at no cost but twenty-five times the time; Sonnet and Opus decline.
+  Haiku 5.5 over every function with missed instructions of GCC -Os after measure-24 (34 functions,
+  447 instructions): 8 covered whole, 154 instructions run; 91 answers, 370,000 tokens in, 223,000
+  out, $1.48 at the assumed prices, 19 minutes; the lift check accepts all eight more and loses none
+  (298 to 306 of 366, 81 to 84 %): about $0.19 a function accepted. Open: where such inputs should
+  live. They are a build's written cases (tests/extra_cases), which the benchmark's next build keeps
+  or not; the measurement counts DREAD's own tools, so a second figure "with the pilot's inputs",
+  their files kept beside the recipe (FreeRTOS is open source), would show both.
   Refused since: an input whose run makes the function call through a register to an address that
   is no function's entry (pilot.wild_call: the first block behind each of its indirect calls; a
   call through a veneer is not followed), with the tools' words back to the model; the question
