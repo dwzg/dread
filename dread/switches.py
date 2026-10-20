@@ -201,6 +201,19 @@ def resolve(program, fn, address):
         landings = _run(program, uc, state, isa, runs, fn.insns[first], address)
         if any(a is not None for a in landings):
             break
+    if check is not None and not any(a is not None for a in landings):
+        # With every register 0 a store through one went into the image where it starts at 0 (FreeRTOS's
+        # MPS2 builds: xTaskGenericNotify's strb r1, [r0, #0x54] in front of its tbb), which the
+        # run may not write: again with the registers filled, so that such an access lands in a
+        # page mapped for it.
+        runs = [(FILLS[-1], set_at, reg_id, value) for _, set_at, reg_id, value in runs]
+        here = set(fn.insns)
+        for first in starts:
+            landings = _run(program, uc, state, isa, runs, fn.insns[first], address)
+            # (where the fill itself is the target, the jump went nowhere: only code counts)
+            landings = [a if a is not None and (a in here or a in program.by_entry) else None for a in landings]
+            if any(a is not None for a in landings):
+                break
     if check is None:
         if None in landings or len(set(landings)) != 1:
             return None
@@ -247,9 +260,13 @@ def mapping(program, fn, address):
     uc, state = _engine(program, isa)
     runs = [(0, set_at, arch.reg_id(reg), value) for value in range(0, min(limit, MAX_CASES) + 2)]
     inside, values = set(fn.insns), {}
-    for first in [fn.insns[start]] + ([fn.insns[k]] if k != start else []):
-        landings = _run(program, uc, state, isa, runs, first, address)
-        values = {run[3]: at for run, at in zip(runs, landings) if at is not None and at in inside}
+    for fill in FILLS[:1] + FILLS[-1:]:     # (registers filled when zero ones store into the image: resolve)
+        runs = [(fill, set_at, reg_id, value) for _, set_at, reg_id, value in runs]
+        for first in [fn.insns[start]] + ([fn.insns[k]] if k != start else []):
+            landings = _run(program, uc, state, isa, runs, first, address)
+            values = {run[3]: at for run, at in zip(runs, landings) if at is not None and at in inside}
+            if values:
+                break
         if values:
             break
     return (set_at, reg, values, limit) if values else None
