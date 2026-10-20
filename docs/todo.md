@@ -698,6 +698,13 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   builds 318 and 309 (+4 each), MSP430 151; two lost (GCC -O0). 2,864 of 3,791 on the eleven builds.
   Merged after it: generator 28 (calls into the scratch wild, the chase off the stack-argument room).
   Measure-28 (generator 28): every build as in measure-27 (+0 -0 on all eleven), 54.5 minutes.
+  Measure-29 (generators 29 and 30: code pointers learned in the first pass, aligned cells over
+  misaligned ones): the eight builds 2,105 (+19: GCC -Os 311, -O0 339, -O2 256, clang -Os 296, -O2
+  271, RISC-V GCC -Os 238, -O2 177, clang -Os 217), the M4F builds 322 and 310 (+5), MSP430 151:
+  2,888 of 3,791 (+24), 56 minutes. 44 gained, most behind calls through pointers (_fwalk_sglue on
+  every build, __sflush_r on five, timer callbacks); 20 lost, every one UNCOVERED by one to eleven
+  instructions (the search's path moved: prvSanityCheckCreatedSemaphore on four builds misses the
+  store behind a take that fails at one iteration), none FAIL.
   Left there, traced: clang -O2's __sflush_r, whose FILE callback a generated input points at a real
   function's entry that loads r8-r11 from generated memory (a longjmp-like target; no wild call,
   since it is an entry); clang -Os's prvSampleTimeNow, whose rebuilt run ends at 0x3c (not traced).
