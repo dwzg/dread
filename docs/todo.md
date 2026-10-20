@@ -675,6 +675,10 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   215), the M4F builds 314 and 305 (+5, +15), MSP430 150; one lost (clang -O2). 2,834 of 3,791 on the
   eleven builds against 2,679 at measure-24. Merged after it, measured next: generator 27 (loop
   frames, flag setters behind other instructions) and saved registers touched refused.
+  Measure-27 (generator 27, saved registers touched refused): the eight builds 2,086 (+21: GCC -Os
+  310, -O0 337, -O2 252, clang -Os 294, -O2 266, RISC-V GCC -Os 235, -O2 175, clang -Os 217), the M4F
+  builds 318 and 309 (+4 each), MSP430 151; two lost (GCC -O0). 2,864 of 3,791 on the eleven builds.
+  Merged after it: generator 28 (calls into the scratch wild, the chase off the stack-argument room).
   Left there, traced: clang -O2's __sflush_r, whose FILE callback a generated input points at a real
   function's entry that loads r8-r11 from generated memory (a longjmp-like target; no wild call,
   since it is an entry); clang -Os's prvSampleTimeNow, whose rebuilt run ends at 0x3c (not traced).
