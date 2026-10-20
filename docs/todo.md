@@ -112,7 +112,7 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     fixes, before shared code): the FreeRTOS builds unchanged but the hard-float ones, +6 each
     (mps2f-gcc-Os 322 to 328, mps2f-clang-Os 310 to 316: libgcc's __aeabi_dcmpeq/ge/le/lt, which read
     the flags of __aeabi_cdcmple, and vCompetingMathTask1/2 that call them); no build lost one.
-  - [ ] **A va_list that walks from the saved argument registers into the stack arguments**: a
+  - [x] **A va_list that walks from the saved argument registers into the stack arguments**: a
     variadic function saves its argument registers next to its stack arguments, and a va_list walks
     from the one into the other; the lifted C's frame is a local array, not next to its incoming
     arguments. Found 2026-10-21 to be a false acceptance on the benchmark: FreeRTOS's sprintf and
@@ -122,16 +122,16 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     area (the first push of argument registers ending with r3, or dread.regflow's
     variadic_save_area; RISC-V too, where addi also learnt the refusal of a stack argument's
     address). That also refuses functions that only store such an address and never use it (GCC's
-    pick_va_5 of the compiler lab: sound before, a loss now). Open: lift them properly. The way
-    that looks best: for a function whose frame must be the real one (an address in its save area or
-    of a stack argument), an assembly wrapper at its entry reserves the original's frame below the
-    entry's stack pointer (mov r12, sp; sub sp, #F; push {r12, lr}; bl the C body; pop; add sp; bx
-    lr) and hands the body that stack pointer as sp0 (its fifth argument, the pushed r12): the C then
-    reads and writes the original's frame where the original does, and its stack arguments above it,
-    so a va_list walks on as it should (also lifting functions refused for a stack argument's
-    address). A C signature that lets GCC lay out the save area itself does not cover all four
-    registers saved (GCC's printf) before C23. Or allow an address that never escapes
-    (decisions.md, 2026-10-21).
+    pick_va_5 of the compiler lab: sound before, a loss now).
+    Done 2026-10-21, the wrapper: where the translation is refused only for an address in the save
+    area or of a stack argument, the function is lifted again wrapped (Lifter.WRAP, can_wrap): a
+    naked entry (mov r12, sp; sub sp, #frame; push {r12, lr}; bl NAME_dread_body; pop; add sp; bx
+    lr) reserves the original's frame on the real stack and hands the body that stack pointer as
+    sp0, its fifth argument; frame and stack arguments are real memory, as in the original. The
+    rebuilt sprintf of the benchmark prints what the original prints with 2, 3, 5 and 8 arguments.
+    The lab's probes: GCC -Os every one (94; the three that take a stack argument's address too),
+    the other compiler's -On 94 of 95, -Ohz 95 of 95 in both versions. ARM state and Thumb-2 only:
+    RISC-V and Thumb-1 (which cannot push r12) keep the refusal.
   - [x] **The caller's r4-r11 at the entry, for the C**: the other compiler keeps the stack aligned
     with `push {r7, lr}` and drops the pad on the way out into a scratch register, `pop {r0, pc}` in
     a function without a result (its -On make_nt): r0 then holds the caller's r7. The lifter does not

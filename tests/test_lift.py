@@ -1013,28 +1013,45 @@ use:    push    {r4, lr}
 """
 
 
-@pytest.mark.skipif(not shutil.which("arm-none-eabi-as"), reason="needs arm-none-eabi-as")
-def test_a_va_list_into_the_save_area_is_refused(tmp_path):
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_a_va_list_walks_on_into_the_stack_arguments(tmp_path):
     """A variadic function saves its argument registers next to its stack arguments, and a va_list
-    walks from the one into the other; the C's frame (a local array) does not hold them next to each
-    other, so a lifted copy read words of its own past the saved registers. FreeRTOS's sprintf
-    (GCC, clang, ARM and RISC-V) was accepted so and printed a stack word of its own for its third
-    argument: no generated case passed one. Taking an address in the save area is refused; an
-    address of a local is not."""
+    walks from the one into the other; the C's frame (a local array) did not hold them next to each
+    other, so a lifted copy read words of its own past the saved registers. FreeRTOS's sprintf (GCC,
+    clang, ARM and RISC-V) was accepted so and printed a stack word of its own for its third
+    argument: no generated case passed one. Such a function is now wrapped: an assembly entry reserves
+    the original's frame on the real stack and hands the C body its stack pointer (sp0), so the walk
+    goes on as in the original. An address of a local alone needs no wrapper."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport, regflow
+    from dread.emu import Layout, Machine
+    from dread.overlay import load_placement
     (tmp_path / "t.s").write_text(VA_LIST_S)
     obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
     subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
     subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "use", "-o", elf, obj], check=True)
     (tmp_path / "original").mkdir()
     (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
-                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
     t = Target.load(str(tmp_path))
     p = Program(t, t.image())
     lifter = lift.make_lifter(p, regflow.analyse(p))
-    with pytest.raises(lift.Refused, match="takes the address of the argument registers it saved"):
-        lifter.lift(p.by_name["vsum"])
-    assert "walk(r0, r1, r2, r3)" in lifter.lift(p.by_name["local"]).text
+    text = lifter.lift(p.by_name["vsum"]).text
+    assert "__attribute__((naked)) void vsum(void)" in text and "u32 vsum_dread_body(" in text
+    assert "naked" not in lifter.lift(p.by_name["local"]).text
+    lines = []
+    assert lift.check(t, t.image(), ["vsum"], out=lines.append, jobs=1) == ["vsum"], "\n".join(lines)
+    work = tmp_path / "build" / "lift-check" / "main"
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    entry = p.by_name["vsum"].entry
+    got = []
+    for payload, al in ((t.image().payload(), None), (rebuilt, aliases)):
+        m = Machine(Layout(t, t.image()), payload, al)
+        got.append(m.call(entry, 5, 1, 2, 3, 4, 5, max_instructions=10_000).ret)    # 4 and 5 on the stack
+    assert got == [15, 15], got

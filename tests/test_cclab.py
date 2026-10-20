@@ -670,7 +670,7 @@ def test_run_lift_checks_each_build_with_dread(tmp_path):
         hard = key.startswith("cortex-m4f")
         assert ("-mfloat-abi=hard" in got["compiler"]["cflags"]) == hard, got["compiler"]
         accepted = [fn for fn, v in got["verdicts"].items() if v[0] == "accepted"]
-        # the variadic probes take an address in their save area (va_start): refused (dread.lift)
+        # a variadic probe that takes an address in its save area is refused only where no wrapper is built
         variadic = [fn for fn, v in got["verdicts"].items() if fn.startswith("pick_va") and v[0] != "accepted"]
         assert all("argument registers it saved" in got["verdicts"][fn][1] for fn in variadic), got
         assert "pick_i5_5" in accepted and "ret_s8" in accepted and \

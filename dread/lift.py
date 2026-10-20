@@ -909,7 +909,41 @@ class Lifter:
             return "t32"
         return "a32" if "-marm" in flags or self.arch.name == "arm" else None
 
+    # Refusals a function's own frame on the real stack takes away (can_wrap, render): an address in
+    # the save area of its argument registers (a va_list walks on into the stack arguments), or of a
+    # stack argument itself
+    WRAP = ("takes the address of a stack argument", "takes the address of the argument registers it saved")
+
     def lift(self, fn):
+        """The C of fn (Lifted). Where it is refused only for an address that needs the original's
+        frame next to the stack arguments (WRAP), it is lifted again wrapped: an assembly entry
+        reserves the original's frame on the real stack and hands the C body its stack pointer."""
+        self._wrapping = False
+        try:
+            return self._lift(fn)
+        except Refused as e:
+            if not any(w in str(e) for w in self.WRAP) or not self.can_wrap(fn):
+                raise
+        self._wrapping = True
+        try:
+            return self._lift(fn)
+        finally:
+            self._wrapping = False
+
+    def can_wrap(self, fn):
+        """Whether fn's C can get the original's frame on the real stack (render's wrapper): ARM state
+        or Thumb-2 (Thumb-1 cannot push r12), not an exception handler, GCC or clang (naked
+        functions)."""
+        if self.arch.name != "arm" or self.prog.target.compiler.kind not in ("gcc", "clang"):
+            return False
+        if self.prog.isa_at(fn.entry) == "t32" and getattr(self.arch, "thumb2", None) is False:
+            return False
+        try:
+            return not self.handler_kind(fn)
+        except Refused:
+            return False
+
+    def _lift(self, fn):
         prog, arch = self.prog, self.arch
         isa = prog.isa_at(fn.entry)
         if isa != self.compiled_isa():
@@ -949,7 +983,7 @@ class Lifter:
         self._check_fpu(fn, insns)
         handler = self.handler_kind(fn)
         self._check_returns(fn, states, handler)
-        stack_params = self.stack_args(fn)
+        stack_params = self.stack_args(fn) if not getattr(self, "_wrapping", False) else 0
         if stack_params > MAX_STACK_ARGS:
             raise Refused("it takes %d stack words" % stack_params)
         frame = (max(depth.values()) + 7) & ~7
@@ -960,6 +994,7 @@ class Lifter:
                 targets.add(target & ~1)
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
                     "bound": set(), "handed": handed, "save_area": self.save_area(fn, insns),
+                    "wrapped": getattr(self, "_wrapping", False),
                     "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns),
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
@@ -1079,6 +1114,24 @@ class Lifter:
             lines.append("{")
             lines.append("    u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
                          " r10 = 0, r11 = 0, r12 = 0, lr = 0;")
+        elif ctx.get("wrapped"):
+            # the original's frame on the real stack, below its stack pointer at the entry (sp0), the
+            # stack arguments above it as they lie: the entry reserves the frame and calls the body
+            # with sp0 as its fifth argument (the pushed r12)
+            body_name = fn.name + "_dread_body"
+            lines.append("%s %s(u32 a0, u32 a1, u32 a2, u32 a3, u32 sp0);" % (
+                "u64" if self._wide(fn.name) else "u32", body_name))
+            lines.append("__attribute__((naked)) void %s(void)" % fn.name)
+            lines.append("{")
+            lines.append('    __asm__ volatile ("mov r12, sp\\n\\tsub sp, sp, #%d\\n\\tpush {r12, lr}\\n\\t'
+                         'bl %s\\n\\tpop {r12, lr}\\n\\tadd sp, sp, #%d\\n\\tbx lr");'
+                         % (ctx["frame"], body_name, ctx["frame"]))
+            lines.append("}")
+            lines.append("__attribute__((noinline, used)) %s %s(u32 a0, u32 a1, u32 a2, u32 a3, u32 sp0)" % (
+                "u64" if self._wide(fn.name) else "u32", body_name))
+            lines.append("{")
+            lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
+                         " r10 = 0, r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
         else:
             lines.append("%s %s(%s)" % ("u64" if self._wide(fn.name) else "u32", fn.name, ", ".join(params)))
             lines.append("{")
@@ -1095,8 +1148,9 @@ class Lifter:
         if ctx.get("flags_in"):             # read before written (mrs r0, cpsr first): the caller's flags
             lines.append('    { u32 t; __asm__ volatile ("mrs %0, apsr" : "=r"(t)); n = t >> 31; z = t >> 30 & 1; '
                          'c = t >> 29 & 1; v = t >> 28 & 1; }')
-        lines.append("    u32 frame[%d] __attribute__((aligned(8)));" % max(2, ctx["frame"] // 4))
-        lines.append("    u32 sp0 = (u32)&frame[%d];" % (ctx["frame"] // 4))
+        if not ctx.get("wrapped"):
+            lines.append("    u32 frame[%d] __attribute__((aligned(8)));" % max(2, ctx["frame"] // 4))
+            lines.append("    u32 sp0 = (u32)&frame[%d];" % (ctx["frame"] // 4))
         if ctx["switch"]:
             lines.append("    u32 index = 0;")
         lines.append("    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)lr; (void)sp0;")
@@ -1715,6 +1769,8 @@ class Lifter:
             off = 4 * k - d
             if off < 0:
                 args.append("*(volatile u32 *)(sp0 - %d)" % -off)
+            elif self.ctx.get("wrapped"):
+                args.append("*(volatile u32 *)(sp0 + %d)" % off)
             elif off // 4 < self.ctx["stack_params"]:
                 args.append("s%d" % (off // 4))
             else:
@@ -1921,7 +1977,7 @@ class Lifter:
         stack arguments above, which the C's frame (a local array) does not hold next to them. GCC's
         sprintf of FreeRTOS's demo was accepted so, and printed a stack word of its own for the third
         argument: the generated cases never passed one."""
-        if 0 < below <= self.ctx.get("save_area", 0):
+        if 0 < below <= self.ctx.get("save_area", 0) and not self.ctx.get("wrapped"):
             raise Refused("0x%x takes the address of the argument registers it saved next to its stack "
                           "arguments (a va_list walks on into them; the C's frame does not hold them next "
                           "to each other)" % insn.address)
@@ -1956,7 +2012,8 @@ class Lifter:
                                                        second.shift.type not in (0, A.ARM_SFT_INVALID)):
                 raise Refused("0x%x computes with the stack pointer: %s %s" % (
                     insn.address, insn.mnemonic, insn.op_str))
-            if second.type == A.ARM_OP_IMM and second.imm >= self.ctx["depth"][insn.address]:
+            if second.type == A.ARM_OP_IMM and second.imm >= self.ctx["depth"][insn.address] \
+                    and not self.ctx.get("wrapped"):
                 raise Refused("0x%x takes the address of a stack argument" % insn.address)
             if second.type == A.ARM_OP_IMM:
                 self._check_save_area(insn, self.ctx["depth"][insn.address] - second.imm)
@@ -1965,7 +2022,7 @@ class Lifter:
             a = self.reg(first.reg) if len(srcs) > 1 else d
             v = self.values().get(self.name(first.reg)) if first.type == A.ARM_OP_REG else None
             if v is not None and v[0] == "sp" and second.type == A.ARM_OP_IMM and kind in ("add", "sub"):
-                if (v[1] - second.imm if kind == "add" else v[1] + second.imm) <= 0:
+                if (v[1] - second.imm if kind == "add" else v[1] + second.imm) <= 0 and not self.ctx.get("wrapped"):
                     raise Refused("0x%x takes the address of a stack argument" % insn.address)
                 self._check_save_area(insn, v[1] - second.imm if kind == "add" else v[1] + second.imm)
         b, _ = self.operand2(second)
@@ -2215,6 +2272,8 @@ class Lifter:
             d = self.ctx["depth"][insn.address]
             if not m.index:
                 off = m.disp - d
+                if off >= 0 and self.ctx.get("wrapped"):
+                    return "(sp0 + %d)" % off, None, base    # the real stack argument
                 if off >= 0:
                     if off % 4:
                         raise Refused("0x%x: a stack argument access not on a word" % insn.address)
@@ -2225,6 +2284,8 @@ class Lifter:
         v = self.values().get(base)
         if v is not None and v[0] == "sp" and not m.index and post is None and not insn.writeback:
             off = m.disp - v[1]             # through a frame pointer: a stack argument or a frame word
+            if off >= 0 and self.ctx.get("wrapped"):
+                return "(sp0 + %d)" % off, None, base
             if off >= 0:
                 if off % 4 or off // 4 >= self.ctx["stack_params"]:
                     raise Refused("0x%x: a stack argument access not on a word" % insn.address)

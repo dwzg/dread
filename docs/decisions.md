@@ -186,4 +186,7 @@ recommendations here."), on a recommendation.
   input its callers can give; a refusal only costs a function that stays original. The losses:
   printf and sprintf on every FreeRTOS build (they were wrong), GCC's variadic probes of the lab.
 - **Undo.** Revert the lifter commit "a va_list into the saved argument registers is refused".
-- **Status.** Done (lift.py, lift_riscv.py, 2026-10-21); (c) and (d) are in docs/todo.md.
+- **Status.** Done (lift.py, lift_riscv.py, 2026-10-21). Then (d) the same night, another way than
+  a C signature: a wrapped function's C gets the original's frame on the real stack (an assembly
+  entry reserves it and hands the body its stack pointer), so ARM state and Thumb-2 lift such
+  functions again, rightly; RISC-V and Thumb-1 keep the refusal.
