@@ -122,10 +122,16 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     area (the first push of argument registers ending with r3, or dread.regflow's
     variadic_save_area; RISC-V too, where addi also learnt the refusal of a stack argument's
     address). That also refuses functions that only store such an address and never use it (GCC's
-    pick_va_5 of the compiler lab: sound before, a loss now). Open: lift them properly, with a C
-    signature that lets GCC lay out the same save area next to the stack arguments (a variadic C
-    function: `u32 f(u32 a0, ...)`, or C23's `f(...)` where all four are saved), or allow an address
-    that never escapes (decisions.md, 2026-10-21).
+    pick_va_5 of the compiler lab: sound before, a loss now). Open: lift them properly. The way
+    that looks best: for a function whose frame must be the real one (an address in its save area or
+    of a stack argument), an assembly wrapper at its entry reserves the original's frame below the
+    entry's stack pointer (mov r12, sp; sub sp, #F; push {r12, lr}; bl the C body; pop; add sp; bx
+    lr) and hands the body that stack pointer as sp0 (its fifth argument, the pushed r12): the C then
+    reads and writes the original's frame where the original does, and its stack arguments above it,
+    so a va_list walks on as it should (also lifting functions refused for a stack argument's
+    address). A C signature that lets GCC lay out the save area itself does not cover all four
+    registers saved (GCC's printf) before C23. Or allow an address that never escapes
+    (decisions.md, 2026-10-21).
   - [x] **The caller's r4-r11 at the entry, for the C**: the other compiler keeps the stack aligned
     with `push {r7, lr}` and drops the pad on the way out into a scratch register, `pop {r0, pc}` in
     a function without a result (its -On make_nt): r0 then holds the caller's r7. The lifter does not
@@ -182,10 +188,11 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     with the compiler's own library. Done 2026-10-20 (docs/cclab.md, "What DREAD makes of a
     compiler's code"): the float ABI as measured (a float argument in s0), an adapter's `[rebuild]`
     for others; the probe functions only, one build after the other.
-  - [ ] **A bundle's objects relinked at home by an option**: the probes' objects a compiler made
+  - [x] **A bundle's objects relinked at home by an option**: the probes' objects a compiler made
     elsewhere, linked here with the GNU toolchain (newlib, libgcc, the two C++ type_info vtables), so
     that its code is measured and lifted without its library (2026-10-20: a hand-made adapter in
-    `~/dread-private/`, whose compile step copies the bundle's object).
+    `~/dread-private/`, whose compile step copies the bundle's object). Done 2026-10-21:
+    `--adapter relink:DIR` (docs/cclab.md, "A compiler that runs elsewhere").
 - [x] **A cclab adapter for Compiler Explorer** (its public API: 52 ARM GCC versions, 21 ARM clang,
   48 RISC-V GCC, 42 RISC-V clang, TI Arm clang, 17 MSP430 GCC, SDCC on 2026-10-20): the probes
   compiled there to assembly, assembled and linked here, measured in the emulator as now; answers

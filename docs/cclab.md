@@ -168,6 +168,27 @@ compiler (arm-none-eabi-gcc) on the machine. On 2026-10-20 it found, on GCC 16's
 of 94 probe functions not lifted: three that take the address of a stack argument, and ret_ll, whose
 64-bit constant GCC loads with `adr` and `ldrd` from its pool, which the rebuilt function covers.
 
+## A compiler that runs elsewhere (`relink:`)
+
+A bundle (`bundle`) carries the probes' objects of every build: the compiler's code, none of its
+library. `--adapter relink:DIR`, DIR a bundle's adapter directory (the bundle unpacked: WORK/ADAPTER),
+makes an adapter whose compile step copies the bundle's object of each build and file, and whose
+link is GNU's (the built-in adapter of the bundle's architecture) with newlib, libgcc and the lab's
+`relink_support.c` (the C++ type_info tables a compiler names even with RTTI off). Its builds are
+the bundle's, a cpu and an optimisation each; its version text is the bundle's. So a compiler that
+runs only at work is measured and lifted at home:
+
+```sh
+bin/dread cclab run --adapter relink:bundle/iar-arm --work cclab-home --lift
+bin/dread cclab compare --work cclab-home iar-arm-relinked gcc-arm
+```
+
+What differs from the builds at work: the runtime helpers are libgcc's and newlib's under the same
+standard names, not the compiler's own (a helper with another contract, one the compiler's code
+relies on beyond the calling convention, behaves as GNU's does here). On 2026-10-20 the relinked
+builds of a second compiler agreed with the ones made at work on every probe that matters for
+linking.
+
 ## Compiler Explorer's compilers
 
 `--adapter ce:ID` makes an adapter of one of the compilers Compiler Explorer's public instance hosts

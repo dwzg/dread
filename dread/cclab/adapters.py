@@ -130,12 +130,74 @@ def ce_adapter(ident):
     return Adapter(data, "ce:" + ident)       # (the spec load() makes it from again: the lab's workers do)
 
 
+RELINK_BASES = {"arm": "gcc-arm", "riscv": "gcc-riscv"}
+
+
+def relink_adapter(directory):
+    """An adapter of the objects a compiler made elsewhere, measured here: a bundle's adapter
+    directory (WORK/ADAPTER as `bundle` packs it: each build's obj/ and version.txt). The compile
+    step copies the bundle's object of each build and file (dread/cclab/relink.py); the link is the
+    GNU one of the built-in adapter of the bundle's architecture, with the C library and libgcc for
+    the runtime helpers by their standard names and the lab's relink_support.c for the C++ type_info
+    tables, so that nothing of the other compiler's library takes part (a compiler that runs at work
+    only: its code is measured and lifted at home). Its builds are the bundle's: a cpu and an
+    optimisation each (cortex-m3-Ohz), the cpu's link flags the base adapter's."""
+    import copy
+    import json
+    import sys
+    import tomllib
+    directory = os.path.abspath(os.path.expanduser(directory)).rstrip("/")
+    if not os.path.isdir(directory):
+        raise AdapterError("relink: no directory %s" % directory)
+    builds = sorted(d for d in os.listdir(directory)
+                    if os.path.isdir(os.path.join(directory, d, "obj")) and not d.startswith("doctor-"))
+    if not builds:
+        raise AdapterError("relink: %s holds no builds with objects (a bundle's WORK/ADAPTER)" % directory)
+    arch = "arm"
+    for b in builds:
+        path = os.path.join(directory, b, "results.json")
+        if os.path.exists(path):
+            with open(path) as f:
+                arch = json.load(f).get("arch", arch)
+            break
+    if arch not in RELINK_BASES:
+        raise AdapterError("relink: no GNU adapter to link %s objects with" % arch)
+    with open(builtin()[RELINK_BASES[arch]], "rb") as f:
+        base = tomllib.load(f)
+    data = copy.deepcopy(base)
+    data["name"] = os.path.basename(directory) + "-relinked"
+    data["guard"] = False
+    objs = os.listdir(os.path.join(directory, builds[0], "obj"))
+    data["support"] = "support.o" in objs           # the bundle's builds bring the lab's own files
+    data["cxx_support"] = "cxx_support.o" in objs
+    here = os.path.dirname(os.path.abspath(__file__))
+    driver = [sys.executable, os.path.join(here, "relink.py"), directory]
+    commands = data["commands"]
+    commands["version"] = driver + ["--version"]
+    commands["compile"] = driver + ["{obj}"]
+    commands["compile_cxx"] = driver + ["{obj}"]
+    link = list(commands["link"])
+    at = link.index("{objs}") + 1
+    link[at:at] = [os.path.join(here, "relink_support.c")]
+    link[len(link) - 1:len(link) - 1] = ["-lc"]      # (before libgcc, the last)
+    commands["link"] = link
+    cpus = base["matrix"].get("cpu", {})
+    data["matrix"] = {"cpu": {c: cpus.get(c, ["-mcpu=%s" % c, "-mthumb"]) for c in
+                              sorted({b.rsplit("-", 1)[0] for b in builds})},
+                      "opt": {o: [] for o in sorted({b.rsplit("-", 1)[1] for b in builds})}}
+    data.pop("cflags", None)
+    data["relink"] = directory
+    return Adapter(data, "relink:" + directory)
+
+
 def load(spec):
-    """The adapter named spec (a built-in one), in the file spec, or ce:ID for Compiler Explorer's
-    compiler ID (ce_adapter)."""
+    """The adapter named spec (a built-in one), in the file spec, ce:ID for Compiler Explorer's
+    compiler ID (ce_adapter), or relink:DIR for a bundle's objects linked here (relink_adapter)."""
     import tomllib
     if spec.startswith("ce:"):
         return ce_adapter(spec[3:])
+    if spec.startswith("relink:"):
+        return relink_adapter(spec[len("relink:"):])
     path = builtin().get(spec, spec)
     if not os.path.exists(path):
         raise AdapterError("no adapter %s (built-in: %s; or a file)" % (spec, ", ".join(builtin())))

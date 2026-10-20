@@ -679,3 +679,27 @@ def test_run_lift_checks_each_build_with_dread(tmp_path):
         assert saved["lift"]["verdicts"] == got["verdicts"]
     assert report.write(str(tmp_path), "gcc-arm", out=lambda *x: None) == 0
     assert "## What DREAD lifts" in (tmp_path / "gcc-arm" / "report.md").read_text()
+
+
+@needs_gcc
+def test_a_bundles_objects_relinked_here_measure_the_same(tmp_path):
+    """relink:DIR: the objects of a bundle's builds (a compiler that runs elsewhere: at work), copied
+    instead of compiled and linked here with GNU's linker, newlib and libgcc, nothing of the other
+    compiler's library. GCC's own objects relinked so measure as GCC's builds did, and the version
+    text is the bundle's."""
+    from dread.cclab import run
+    a = ad.load("gcc-arm")
+    first = run(a, str(tmp_path / "work"), only=["cortex-m3-Os"], names=["abi", "float"], jobs=1,
+                out=lambda *x: None)
+    relinked = ad.load("relink:" + str(tmp_path / "work" / "gcc-arm"))
+    assert relinked.name == "gcc-arm-relinked" and [k for k, _, _ in relinked.builds()] == ["cortex-m3-Os"]
+    again = run(relinked, str(tmp_path / "home"), names=["abi", "float"], jobs=1, out=lambda *x: None)
+    assert "error" not in again["cortex-m3-Os"], again["cortex-m3-Os"]
+    a_res, b_res = first["cortex-m3-Os"]["results"], again["cortex-m3-Os"]["results"]
+    for fn, entry in a_res.items():
+        if entry.get("measure") != "op":            # (helpers: the same libgcc, under the same names)
+            assert b_res[fn].get("where") == entry.get("where") and b_res[fn].get("value") == entry.get("value"), fn
+    assert (tmp_path / "home" / "gcc-arm-relinked" / "version.txt").read_text() == \
+        (tmp_path / "work" / "gcc-arm" / "version.txt").read_text()
+    with pytest.raises(ad.AdapterError, match="no builds with objects"):
+        ad.load("relink:" + str(tmp_path))
