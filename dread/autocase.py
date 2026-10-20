@@ -79,7 +79,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 28       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 30       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -117,7 +117,14 @@ VERSION = 28       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 27: a branch's flag setter is found behind instructions that do not touch the flags
                   # (Arm.branch_deciders); a loop case's frame is the task's (Generator.loop_frame)
                   # 28: a call into the scratch (a callback the chase set to a buffer) is wild too:
-                  # drop_wild repairs it with the pointer stub (dread.emu.Machine.watch_calls)
+                  # drop_wild repairs it with the pointer stub (dread.emu.Machine.watch_calls);
+                  # 29: code pointers are learned in the first pass of every function that reaches a
+                  # call through a register (the input a run jumped to becomes the pointer stub), not
+                  # only in the pass drop_wild seeds: C++'s virtual calls (object, vtable, method)
+                  # never ended before, so nothing seeded it; 30: an aligned memory cell takes the place
+                  # of misaligned ones it overlaps (Cells.add: the first run to reach an object read it
+                  # through a pointer put two bytes off, and the aligned runs never got its vtable
+                  # pointer as a whole word; C++ on RISC-V)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -855,7 +862,13 @@ class Generator:
                     stops.append(fn.entry)
                 else:
                     calls.append([fn.entry, self.reads_mask(fn.name), 0])
-        pointers = any(c[0] == self.fake_pointer for c in calls)
+        # Inputs a run jumped to are learned as code pointers (the pointer stub in later inputs) in
+        # every function that reaches a call through a register: a pointer two loads deep (C++'s
+        # object, its vtable, the method) faults in every input until it is the stub, so no input
+        # ends and drop_wild never seeds the pass that would learn it
+        sites = self.program.icall_sites()
+        pointers = any(c[0] == self.fake_pointer for c in calls) or bool(sites and set(sites) & set(words).union(
+            *(f.insns for f in self.callees(words))))
         pin_args, pin_mem = set(pins[0]) if pins else set(), set(pins[1]) if pins else set()
         data_args, data_mem = {}, {}        # inputs learned to be data pointers -> their buffer
         words_set = set(words)
@@ -1175,6 +1188,8 @@ class Generator:
                     went = {m.reg("pc") & ~1, m.reg(self.program.arch.veneer_reg)} - {self.fake_pointer, 0}
                     pin_args.update(i for i, v in enumerate(case["args"][:nregs]) if v & ~1 in went)
                     pin_mem.update(a for a, n, v in case["mem"] if n == 4 and v & ~1 in went)
+                    if (pin_args or pin_mem) and all(c[0] != self.fake_pointer for c in calls):
+                        calls.append([self.fake_pointer, 0, 0])     # (the stub those inputs go to)
                 # What the run loaded before it failed is an input all the same: a function whose
                 # first inputs all fail (a division by a value from memory, a wait for a flag)
                 # never gets any otherwise.
@@ -1726,12 +1741,19 @@ class Cells(dict):
 
     def add(self, a, n):
         """Know the n bytes at a as a cell: left out where it overlaps a known cell it does not hold
-        whole (a word one byte off: its bytes are that cell's), in place of the known cells it holds
-        whole (a byte read first, then the word around it)."""
+        whole (a word one byte off: its bytes are that cell's), unless it is aligned (its address a
+        multiple of its size) and those cells are not: then, and for the known cells it holds whole
+        (a byte read first, then the word around it), in their place. A learned pointer is put one
+        to three bytes off now and then; when the first run to reach a buffer read it so, its cells
+        were misaligned for good, and the aligned runs read half a cell and half nothing (an
+        object's vtable pointer never became a whole input word: C++ on RISC-V)."""
         if self.get(a, 0) >= n:
             return
         over = {self._owner[b] for b in range(a, a + n) if b in self._owner}
-        if any(o < a or o + self[o] > a + n for o in over) or len(self) - len(over) >= MAX_CELLS:
+        partial = [o for o in over if o < a or o + self[o] > a + n]
+        if partial and (a % n or any(o % self[o] == 0 for o in partial)):
+            return
+        if len(self) - len(over) >= MAX_CELLS:
             return
         for o in over:
             for b in range(o, o + self.pop(o)):

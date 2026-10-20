@@ -505,10 +505,11 @@ def test_pointer_buffers_stay_in_the_scratch():
 
 
 def test_memory_cells_do_not_overlap():
-    """A memory cell that overlaps a known one is left out, unless it holds the known ones whole, which
-    it then replaces: every input writes its cells one after the other, and overlapping cells (a
-    learned pointer one byte off read the same buffer) wrote over each other's bytes, so that the
-    value the search gave the first never reached the function (FreeRTOS's vListInsert)."""
+    """A memory cell that overlaps a known one is left out, unless it holds the known ones whole, or
+    is aligned where they are not, and then replaces them: every input writes its cells one after the
+    other, and overlapping cells (a learned pointer one byte off read the same buffer) wrote over each
+    other's bytes, so that the value the search gave the first never reached the function (FreeRTOS's
+    vListInsert); a misaligned cell learned first kept the aligned word out (C++ on RISC-V)."""
     from dread.autocase import Cells
     cells = Cells()
     cells.learn({0x1000: 4, 0x1001: 4, 0x1002: 4, 0x1003: 4})      # a pointer one, two, three bytes off
@@ -519,6 +520,11 @@ def test_memory_cells_do_not_overlap():
     assert dict(cells) == {0x1000: 4, 0x2000: 4, 0x2004: 4}
     cells.add(0x1000, 2)                                            # known larger: as it was
     assert dict(cells) == {0x1000: 4, 0x2000: 4, 0x2004: 4}
+    cells.learn({0x3002: 4, 0x3000: 4, 0x3004: 4})                  # a pointer two bytes off read first:
+    assert dict(cells) == {0x1000: 4, 0x2000: 4, 0x2004: 4, 0x3000: 4, 0x3004: 4}     # the aligned words win
+    cells.add(0x2002, 4)                                            # misaligned over aligned: left out
+    cells.add(0x2000, 2)                                            # aligned, but inside an aligned cell
+    assert dict(cells) == {0x1000: 4, 0x2000: 4, 0x2004: 4, 0x3000: 4, 0x3004: 4}
     spans = sorted((a, a + n) for a, n in cells.items())
     assert all(e <= s for (_, e), (s, _) in zip(spans, spans[1:]))
 
