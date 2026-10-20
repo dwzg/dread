@@ -148,6 +148,14 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     (`placement.json`'s `via`); the entry gets a narrow b (only its two bytes may change), and the
     emulator enters through it so that the cases test it. Both of the other compiler's -Ohz builds
     94 of 95 probe functions (85 before); what stays is keeps_fp.
+  - [x] **A callee that reads a register its caller keeps**: the other compiler's shared code called
+    with `bl` may start `mov r1, r6; b.w __addsf3`, so it reads its caller's r6. A copy counts as no
+    use, and a call or tail call counted no use of its arguments either, so the callee seemed to read
+    nothing its caller leaves, and the lifted caller called it with whatever the C held in r6 (its
+    keeps_fp failed its comparison). Done 2026-10-21: entry_states takes the arguments a callee reads
+    (regflow's, r0-r3 without it) as read at a call, a tail call and a fall into another function,
+    and names the caller's register a copy came from; a bound call binds such registers (r4-r11) from
+    the C's variables. The other compiler's -Ohz build: every probe function (95 of 95).
   - [ ] **A call into code no function owns** (`bl` into the other compiler's unnamed shared code, its
     older version: keeps_fp): the callee needs a name (a function of its own at the target, as
     import does for calls it finds), then bound calls take what it leaves.

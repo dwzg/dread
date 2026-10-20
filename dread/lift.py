@@ -111,6 +111,9 @@ FPU_MIRRORED = frozenset("s%d" % k for k in range(16))
 # What a call can hand over behind it beyond a C result (_bound_call): the scratch registers and the
 # flags, in an asm statement around the bl
 BOUND = frozenset(("r1", "r2", "r3", "r12", "flags"))
+# What a bound call can hand a callee besides r0-r3: the registers the convention has the callee keep,
+# which a compiler's shared code reads from its caller (mov r1, r6; b.w __addsf3)
+BOUND_IN = frozenset(("r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11"))
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
@@ -737,6 +740,9 @@ class Lifter:
         start = frozenset(r for r in self.REGS + (bits or ["flags"]) + fpu
                           if r not in tuple(args) + ("sp", "pc", link) + fixed)
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
+        # (register, the caller's register its value is a copy of): mov r1, r6 hands what the caller
+        # left in r6 on; a call that takes r1 then reads the caller's r6 (a compiler's shared code)
+        origin_at = {fn.insns[0]: frozenset()}
         work = [fn.insns[0]]
         while work:
             a = work.pop()
@@ -744,8 +750,21 @@ class Lifter:
             if insn is None:
                 continue
             undef, partial = undef_at[a], partial_at[a]
+            origin = {}
+            for r, o in origin_at[a]:
+                origin.setdefault(r, set()).add(o)
             kind, target, _ = arch.flow(insn)
             reads, writes = arch.reg_effects(insn)
+            # a call or a tail call (a jump to another function's entry, a fall into one) reads the
+            # arguments its callee takes (dread.regflow; r0-r3 without it)
+            to = None
+            if isinstance(target, int) and (kind in ("call",) or (kind == "jump" and (target & ~1) not in index)):
+                to = prog.by_entry.get(target & ~1)
+            into = self.falls_into(fn, insn) if a + insn.size not in index else None
+            for callee in (to, into):
+                if callee is not None:
+                    takes = set(self.flow.read_regs(callee.name)) if self.flow is not None else set(self.ARGS)
+                    reads = set(reads) | (takes & set(self.ARGS))
             if bits:
                 fr, fw = arch.flag_effects(insn)
                 reads = (set(reads) - {"flags"}) | {"flags:" + n for n in fr}
@@ -767,7 +786,7 @@ class Lifter:
             # the flags have not changed since, or the pair would be gone from partial
             bad = {r for r in reads & undef if pred is None or (r, pred) not in partial} - {"sp", "pc"}
             if bad:
-                found[a] = bad
+                found[a] = {o for r in bad for o in origin.get(r, {r})}
             if pred is None:
                 after_u = undef - writes
                 after_p = frozenset(x for x in partial if x[0] not in writes)
@@ -784,6 +803,9 @@ class Lifter:
                 after_p = frozenset()       # the conditions written under no longer hold
             if copy is not None and copy[1] in undef:
                 after_u = after_u | {copy[0]}
+            after_o = frozenset((r, o) for r, os in origin.items() for o in os if r not in writes)
+            if copy is not None and copy[1] in undef:
+                after_o = after_o | {(copy[0], o) for o in origin.get(copy[1], {copy[1]})}
             for b in self.successors(fn, index, a, insn, strict=False, values=known.get(a, (0, None))[1]):
                 bu, bp = after_u, after_p
                 if kind == "jump" and pred is not None and bp:
@@ -791,12 +813,12 @@ class Lifter:
                     done = {r for r, c in bp if c == cond}
                     bu, bp = bu - done, frozenset(x for x in bp if x[0] not in done)
                 if b not in undef_at:
-                    undef_at[b], partial_at[b] = bu, bp
+                    undef_at[b], partial_at[b], origin_at[b] = bu, bp, after_o
                     work.append(b)
                 else:
-                    nu, np = undef_at[b] | bu, partial_at[b] & bp
-                    if nu != undef_at[b] or np != partial_at[b]:
-                        undef_at[b], partial_at[b] = nu, np
+                    nu, np, no = undef_at[b] | bu, partial_at[b] & bp, origin_at[b] | after_o
+                    if nu != undef_at[b] or np != partial_at[b] or no != origin_at[b]:
+                        undef_at[b], partial_at[b], origin_at[b] = nu, np, no
                         work.append(b)
         if bits:
             def fold(regs):
@@ -1625,12 +1647,12 @@ class Lifter:
             raise Refused("0x%x calls %s, whose stack arguments are not known (its stack pointer is not static)"
                           % (insn.address, callee.name))
         leaves = self.leaves(callee)
-        if leaves:
+        if leaves and not (bind and nstack == 0 and set(leaves) <= BOUND_IN):
             raise Refused("0x%x calls %s, which reads %s its caller leaves" % (
                 insn.address, callee.name, ", ".join(leaves)))
         behind = self._check_after_call(callee, insn, bind=bind and nstack == 0)
-        if behind:
-            return self._bound_call(callee, behind)
+        if behind or leaves:
+            return self._bound_call(callee, behind, leaves)
         wide = self._wide(callee.name)
         self.ctx["callees"].add((callee.name, nstack, wide))
         d = self.ctx["depth"][insn.address]
@@ -1687,13 +1709,16 @@ class Lifter:
                     insn.address, reg, callee.name))
         return behind
 
-    def _bound_call(self, callee, behind):
+    def _bound_call(self, callee, behind, inputs=()):
         """A call whose caller reads behind it what the callee leaves beyond a C result (_check_after_call):
         the bl in an asm statement with r0-r3 bound in and out (r12 too when it is read) and, when the
         flags are read, an mrs right behind the bl, so that the C goes on with what the original's
-        caller finds. The callee takes no stack arguments; the r4-r11 it keeps by the convention."""
+        caller finds. The callee takes no stack arguments; the r4-r11 it keeps by the convention, and
+        those it reads from its caller (inputs: a compiler's shared code) are bound as well, from the
+        C's variables (and back: whatever it leaves there)."""
         self.ctx["bound"].add(callee.name)      # no prototype (the asm names it); a callee all the same
-        regs = ["r0", "r1", "r2", "r3"] + (["r12"] if "r12" in behind else [])
+        regs = ["r0", "r1", "r2", "r3"] + (["r12"] if "r12" in behind else []) + sorted(
+            inputs, key=lambda r: int(r[1:]))
         binds = ", ".join('x%s __asm__("%s") = %s' % (r[1:], r, r) for r in regs)
         outs = ['"+r"(x%s)' % r[1:] for r in regs]
         text = "bl %s" % callee.name

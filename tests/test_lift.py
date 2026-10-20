@@ -832,3 +832,68 @@ def test_a_two_byte_function_gets_a_narrow_branch(tmp_path, gap):
     else:
         assert to == placed["via"] and at["gap"] <= to < at["gap"] + gap
         assert rebuilt[to - 0x08000000:to - 0x08000000 + 4] == arch.entry_branch(to, placed["address"], "t32")
+
+
+CALLER_LEFT_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global frag, add2, caller, use
+    .type frag, %function
+    .thumb_func
+frag:   mov     r1, r6          @ shared code that reads its caller's r6 (a compiler's cross call)
+        b.w     add2
+    .size frag, . - frag
+    .type add2, %function
+    .thumb_func
+add2:   adds    r0, r0, r1
+        bx      lr
+    .size add2, . - add2
+    .type caller, %function
+    .thumb_func
+caller: push    {r6, lr}
+        mov     r6, r1
+        bl      frag            @ r0 + r6
+        pop     {r6, pc}
+    .size caller, . - caller
+    .type use, %function
+    .thumb_func
+use:    push    {r4, lr}
+        bl      caller
+        pop     {r4, pc}
+    .size use, . - use
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_a_callee_that_reads_a_register_its_caller_keeps(tmp_path):
+    """A compiler's shared code called with bl may read a register the convention has its caller
+    keep: mov r1, r6; b.w add2 passes the caller's r6 on. A copy is no use, but the tail call takes
+    r1, so frag reads r6 its caller leaves (the analysis missed it: the C called frag with whatever
+    its own r6 held, and the other compiler's keeps_fp failed its comparison). Now frag is refused
+    for it, and its caller's call binds r6 from the C's variable, and lifts."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport, regflow
+    (tmp_path / "t.s").write_text(CALLER_LEFT_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    assert lifter.leaves(p.by_name["frag"]) == ["r6"]
+    with pytest.raises(lift.Refused, match="reads r6 before anything writes it"):
+        lifter.lift(p.by_name["frag"])
+    assert 'x6 __asm__("r6") = r6' in lifter.lift(p.by_name["caller"]).text
+    lines = []
+    assert lift.check(t, t.image(), ["caller"], out=lines.append, jobs=1) == ["caller"], "\n".join(lines)
