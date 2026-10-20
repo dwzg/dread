@@ -585,32 +585,19 @@ def wild_call(gen, program, fn, case):
     first block behind one of fn's calls through a register (a call to the next instruction, as an
     svc that runs on, is none). Not seen: a call through a veneer (bl to a bx rN stub) reaches its
     target a block later."""
-    from unicorn import UC_HOOK_BLOCK, UC_HOOK_CODE
     sites = {a: program.insn_size(a) for a in fn.insns if program.arch.flow(program.insn(a))[0] == "icall"}
     if not sites:
         return None
     m = gen.machine()
     m.plan = []
     gen.apply(m, case)
-    state = {"after": None, "wild": None}
-
-    def at_site(uc, address, size, user):
-        state["after"] = address + sites[address]
-
-    def on_block(uc, address, size, user):
-        after, state["after"] = state["after"], None
-        if after is not None and address != after and address not in program.by_entry and state["wild"] is None:
-            state["wild"] = address
-
-    for address in sites:
-        m.hook_add(UC_HOOK_CODE, at_site, begin=address, end=address)
-    m.hook_add(UC_HOOK_BLOCK, on_block)
+    m.watch_calls(program, sites, anywhere=True)        # (dread.emu: any address that is no entry)
     m.may_hang = bool(case.get("hang"))
     try:
         m.call(fn.entry, *case["args"], max_instructions=case.get("limit", 200_000))
     except Exception:
         pass
-    return state["wild"]
+    return m.wild_calls[0][1] if m.wild_calls else None
 
 
 def find_inputs(target, image, program, provider, name, missed, tries=3, flow=None, out=print):

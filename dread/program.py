@@ -284,6 +284,19 @@ class Program:
             self._halves = frozenset(a + k for a, (size, _) in self.code.items() for k in range(0, max(size, 2), 2))
         return self._halves
 
+    def icall_sites(self):
+        """{address: size} of every call through a register in the image's functions (the layer's
+        flow kind "icall"), for dread.emu.Machine.watch_calls."""
+        if getattr(self, "_icall_sites", None) is None:
+            sites = {}
+            for fn in self.functions:
+                for a in fn.insns:
+                    insn = self.insn(a)
+                    if insn is not None and self.arch.flow(insn)[0] == "icall":
+                        sites[a] = self.insn_size(a)
+            self._icall_sites = sites
+        return self._icall_sites
+
     def writable_end(self):
         """The end of what a case may not store into: the image, and behind it the room the overlay
         fills up to the image's limit."""

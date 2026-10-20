@@ -35,8 +35,12 @@ Output, one block per function, in this form (other tools read it):
                                     lies below the stack pointer at its function entries changes
                                     (it read stale stack data, an uninitialised local: what earlier
                                     frames left there, which C, laying out its frames and saving
-                                    other values in them, leaves otherwise; stale_explains); such a
-                                    case is not compared and runs nothing for coverage
+                                    other values in them, leaves otherwise; stale_explains), or
+                                    where the original calls through a register into the middle of a
+                                    function (a code pointer the input gave that is no entry: the
+                                    rebuilt image has other code there, or calls it with other
+                                    values in the other registers; wild_call); such a case is not
+                                    compared and runs nothing for coverage
     UNTESTED NAME
 
 Exit status 1 when anything failed, is uncovered or untested. Functions run in parallel worker
@@ -112,6 +116,25 @@ def stack_moves_it(name, addr, args, limit, setup, kept, why, first):
         return Result(r.ret, {a: v for a, v in r.writes.items() if not lo <= a < hi}, r.calls, r.saved,
                       r.layout, r.kept, r.why)
     return bool(outside(first).diff(outside(again)))
+
+
+def wild_call(name, addr, args, limit, setup, kept, why):
+    """(site, target) of the first call through a register, anywhere in the original's run, that
+    lands in the image but at no function's entry, or None (dread.emu.Machine.watch_calls). A generated
+    input set a timer's callback to 127, a Thumb pointer into the middle of __aeabi_dmul at 0x7e
+    (FreeRTOS's Cortex-M4F builds): the original ran that code with its registers and came back, the
+    lifted prvReloadTimer called it with others and came to address 0."""
+    lay, program = RUN["layout"], RUN["program"]
+    m = Machine(lay, RUN["original"], isa_of=RUN["isa_of"])
+    m.plan, m.replay, m.function = [], False, name
+    m.kept, m.kept_why = kept, why
+    try:
+        setup(m)
+        m.watch_calls(program, program.icall_sites())
+        m.call(addr, *args, max_instructions=limit)
+    except Exception:
+        pass
+    return (getattr(m, "wild_calls", None) or [None])[0]
 
 
 def stale_explains(name, addr, args, limit, setup, kept, why, first, rebuilt):
@@ -237,6 +260,16 @@ def run_function(name):
             diff = out[0].diff(out[1])
         if depends:
             diff = list(diff) + [depends]
+        wild = wild_call(name, addr, args, limit, setup, kept, why) \
+            if diff and not depends and not isinstance(out[0], Exception) else None
+        if wild:
+            refused += 1
+            owner = RUN["program"].function_at(wild[1])
+            lines.append("REFUSED %s [%s]: the original calls 0x%x from 0x%x, %s (a code pointer the input "
+                         "gave): the rebuilt image has other code there, or calls it with other values in the "
+                         "other registers; not compared" % (name, label, wild[1], wild[0], "inside %s but not its "
+                                                             "entry" % owner.name if owner else "into the image's data"))
+            continue
         if diff and not depends and not isinstance(out[0], Exception) and not isinstance(out[1], Exception) \
                 and stack_moves_it(name, addr, args, limit, setup, kept, why, out[0]):
             refused += 1

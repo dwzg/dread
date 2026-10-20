@@ -645,7 +645,15 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   compiled the callers knowing: prints keeps a value in r2 across printchar), which the C used;
   such a register is now compiled call-saved in the function's file (Lifter.call_saved, GCC's
   -fcall-saved-REG; not for clang): +1 on each of the three builds, none lost (printchar on ARM is
-  UNCOVERED behind it: its store path needs a pointer to a writable pointer); another kind is an inconsistent input that makes a real
+  UNCOVERED behind it: its store path needs a pointer to a writable pointer);
+  also 2026-10-20: a generated code pointer that lands in the image but at no function's entry
+  (a timer's callback 127, a Thumb pointer into __aeabi_dmul; a FILE's _write into prvCheckTask;
+  0x20a, between two functions): the original ran that code with its registers and came back, the
+  C called it with other values in the others (prvReloadTimer came to address 0 on both M4F builds,
+  clang's __sflush_r and cleanup_stdio to an even address); such a case is refused now
+  (runner.wild_call, Machine.watch_calls, which the pilot uses for its inputs too): cleanup_stdio
+  accepted on the M4F clang build, none lost on three builds; prvReloadTimer and clang's __sflush_r
+  are UNCOVERED behind it (every case of their callback paths had such a pointer: the item below); another kind is an inconsistent input that makes a real
   callee read beyond a local of the caller (a queue's item size of 24 for a 4-byte item: memcpy copies the frame behind
   it, laid out otherwise in the C), which the harness cannot tell yet (it would need to know which
   stack bytes the call wrote); (4) scratch
@@ -674,6 +682,11 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   (xQueuePeek 84 instructions against 89, vTaskGenericNotifyGiveFromISR 31 against 36): the learned
   pointers mostly moved the random search. Not kept; loads of code as data give no address (the C
   hooks keep a flag).
+- [ ] **Generated code pointers to the pointer stub**: an input whose run calls through a register
+  into the image at no function's entry (Machine.watch_calls) gets that value pinned to the
+  generator's pointer stub, as where a run dies at the jump, so that a callback path is covered by
+  a fair case (prvReloadTimer on the M4F builds, clang's __sflush_r: UNCOVERED now that such cases
+  are refused). Changes cases (VERSION); measure from scratch and on every gizmo build.
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger). --task input now also asks for the functions the lift
   check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed

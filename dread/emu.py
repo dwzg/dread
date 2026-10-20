@@ -466,6 +466,32 @@ class Machine:
                 return result
         self.core.hooks.append(self.uc.hook_add(kind, callback, **where))
 
+    def watch_calls(self, program, sites, anywhere=False):
+        """Record in self.wild_calls [(site, target)] the calls through a register at `sites`
+        ({address: size}) whose target lies in the image but is no function's entry: the middle of a
+        function, or data such as the vector table (anywhere: any address that is no function's entry;
+        else stubs and the harness's pointer stub, outside the image, are fine). The target is the first block behind the call; a call to the
+        next instruction (an svc that runs on) is none. Not followed: a call through a veneer (bl to a
+        bx rN stub) reaches its target a block later. An input that points a callback into the
+        middle of a function runs code the rebuilt image has otherwise, or calls it with other values
+        in the other registers (dread.runner refuses such a case; dread.pilot such an input)."""
+        state = {"site": None}
+        self.wild_calls = []
+
+        def at_site(uc, address, size, user):
+            state["site"] = address
+
+        def on_block(uc, address, size, user):
+            site, state["site"] = state["site"], None
+            if site is None or address == site + sites[site] or address in program.by_entry:
+                return
+            if anywhere or program.in_image(address):
+                self.wild_calls.append((site, address))
+
+        for address in sites:
+            self.hook_add(UC_HOOK_CODE, at_site, begin=address, end=address)
+        self.hook_add(UC_HOOK_BLOCK, on_block)
+
     def _on_write(self, uc, access, addr, size, value, user):
         if not self.layout.in_stack(addr):
             self.written.update(range(addr, addr + size))

@@ -219,3 +219,58 @@ def test_a_case_whose_differences_are_stale_stack_data_is_refused(tmp_path):
     assert "REFUSED start [x = 5]: the original read stale stack data" in text, text
     assert "FAIL start " not in text and "start" in uncovered, text
     assert "FAIL start2 [x = 5]" in text and "ok   plain" in text, text
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_call_into_the_middle_of_a_function_is_seen(tmp_path):
+    """Machine.watch_calls: a call through a register that lands inside a function but not at its
+    entry is recorded with its site (the runner refuses such a case, the pilot such an input); the
+    entry is not, and an address outside every function only where anywhere is asked for."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.emu import Machine, Layout
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(r'''
+__attribute__((noinline)) int twice(int x) { return x + x + 3; }
+__attribute__((noinline)) int apply(int (*f)(int), int x) { if (!f) return -1; return f(x) * 5; }
+__attribute__((naked, noreturn)) void reset(void) { for (;;) ; }
+__attribute__((section(".vectors"), used)) void (*const vectors[2])(void) = {(void (*)(void))0x20005000, reset};
+''')
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) } > FLASH }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "reset", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '''
+[image.main]
+original = "original/t.bin"
+base = 0x08000000
+entry = "reset"
+
+[compiler]
+cross = "arm-none-eabi-"
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    image = t.image()
+    program = Program(t, image)
+    twice, apply = program.by_name["twice"], program.by_name["apply"]
+    sites = program.icall_sites()
+    assert sites and all(apply.entry <= a < program.end(apply) for a in sites)
+
+    def watch(pointer, anywhere=False):
+        m = Machine(Layout(t, image), image.payload())
+        m.watch_calls(program, sites, anywhere)
+        try:
+            m.call(apply.entry, pointer, 4, max_instructions=10_000)
+        except Exception:
+            pass
+        return [target for _, target in m.wild_calls]
+    assert watch(twice.insns[1] | 1) == [twice.insns[1]]
+    assert watch(twice.entry | 1) == []
+    stub = 0x20100001                       # (outside every function: the scratch area)
+    assert watch(stub) == [] and watch(stub, anywhere=True) == [stub & ~1]
