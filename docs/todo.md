@@ -622,6 +622,21 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   +3 against their first measurement that day, by name: printi, prints, vRegTest1Implementation,
   xStreamBufferReceiveFromISR; TIMER0_Handler, vRegTest1Implementation, xSecondTimerHandler; none
   lost); MSP430 74. 73 min for eleven builds, every case generated anew (the cache's key changed).
+  Measure-24 (2026-10-20: generator 24 with the pointer stub for wild callbacks, the register a
+  caller keeps compiled call-saved, wild calls refused, the MSP430 stall rule, the system run's C
+  hook, the sweep cap): 1,957 of 2,763 on the eight builds, +5 against measure-23 and none lower
+  (GCC -Os 298, -O0 316, -O2 233, clang -Os 270, -O2 247, RISC-V GCC -Os 217, -O2 167, clang -Os 209);
+  the Cortex-M4F builds 299 of 394 and 280 of 384 (+2 each); MSP430 143 of 250 (74 at measure-23).
+  Gained by name: __sflush_r (GCC -Os, -O0, clang -Os), prvBytesInBuffer (GCC -Os, M4F GCC),
+  __aeabi_dsub (both M4F), cleanup_stdio (M4F clang), printchar (RISC-V GCC -Os). 62 min for the
+  eleven builds with every case generated anew (73 for measure-23).
+  Disagreements traced that day and left: a queue whose generated item size is larger than the
+  item makes a real callee copy the frame behind a local, laid out otherwise in the C
+  (xFirstTimerHandler's saved r4 on GCC -Os, TIMER1_Handler on the M4F clang build, most likely
+  xEventGroupClearBitsFromISR on RISC-V GCC -Os); telling them needs where a passed object ends.
+  memset on GCC -O0 runs more than ten times the original's instructions in its C (compiled at -O0
+  like the build). MSP430's three indirect jumps are libgcc's __muldisi2, __umuldisi2 and __muldi3:
+  br X(pc) through words that hold 0x120a, no function (never called): rightly refused.
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with
