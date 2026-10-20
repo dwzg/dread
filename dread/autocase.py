@@ -124,6 +124,8 @@ SOLVE_LIMIT = 20_000        # instructions per run there
 STALL = 4                   # on DREAD's own engines a search run stops after limit // STALL instructions that
                             # enter no block it had not entered (Generator.stall_part)
 SWEEP_RUNS = 600            # emulator runs per base input in the boundary sweep
+SWEEP_STEPS = SWEEP_RUNS // 4   # values a slot steps through at most (Generator.ladder)
+BOUNDS = frozenset(range(17)) | {0xFF, 0x100, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF}  # always in the ladder
 LONG_SECONDS = 120          # the last-resort search gives up after this long without one input that finished
 KEPT_MAX = 6
 HUNG_STUBS = 4              # callees at most that get stubbed because runs hung in them
@@ -266,6 +268,20 @@ class Generator:
 
     def insns(self, words):
         return [i for i in (self.program.insn(a) for a in words) if i is not None]
+
+    def ladder(self, words, rng=None):
+        """The values the boundary sweep steps a slot through: the function's constants and their
+        neighbours, 0 to 16 and the word's edges (BOUNDS). Longer than SWEEP_STEPS, it keeps BOUNDS
+        and a sample of the rest (with rng; without one, the full ladder): the sweep keeps at least
+        four slots, so a long ladder broke its SWEEP_RUNS a base input (FreeRTOS's busiest test task
+        has 579 values: 23,000 sweep runs, a third of its generation; twelve functions a build have
+        more than 150). The cache key names the cap for those alone (cases_for)."""
+        exact, near = self.constants(words)
+        ladder = sorted(exact | near | BOUNDS)
+        if rng is not None and len(ladder) > SWEEP_STEPS:
+            rest = [v for v in ladder if v not in BOUNDS]
+            ladder = sorted(set(rng.sample(rest, SWEEP_STEPS - len(BOUNDS))) | BOUNDS)
+        return ladder
 
     def constants(self, words):
         """(exact, near): immediates and literal values of the instructions, and their neighbours.
@@ -1098,7 +1114,7 @@ class Generator:
         # Boundary sweep: step each value of a few inputs through the constants and their
         # neighbours; where the observable result changes from one value to the next, both sides
         # are kept. A value whose every step changes the result is data and gets a sample only.
-        ladder = sorted(exact | near | set(range(17)) | {0xFF, 0x100, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF})
+        ladder = self.ladder(words, rng)
         swept = []
 
         def sweep_run(case):
@@ -1607,8 +1623,10 @@ def cases_for(run, name, fn):
 def _generated(run, name, fn, gen, image, prog, options, calls, frame):
     """The generated cases of cases_for, from the cache or made and cached."""
     sizes = {a: prog.insn_size(a) for a in fn.insns}
-    key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, dict(options, calls=calls, frame=frame),
-                    prog.arch, gen.environment())
+    keyed = dict(options, calls=calls, frame=frame)
+    if len(gen.ladder(fn.insns)) > SWEEP_STEPS:     # (only those: the other functions keep their cases)
+        keyed["sweep_steps"] = SWEEP_STEPS
+    key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, keyed, prog.arch, gen.environment())
     path = os.path.join(run["target"].build, "autocases", image.name, name + ".json")
     cached = cache_load(path)
     if not cached or cached.get("key") != key:

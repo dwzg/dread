@@ -394,8 +394,17 @@ The long runs set the pace of everything after them. Measure first, then cut.
   loop that enters no new code, the pended ticks counted in memory, and such runs end within the
   limit). So not on Unicorn, where an instruction costs a twenty-fifth. bin/ab-cases --cover
   compares what such a change's cases cover.
-- [ ] Fewer search runs for loop cases (the sweep steps every stub answer of a loop case: 23,000 of a
+- [x] Fewer search runs for loop cases (the sweep steps every stub answer of a loop case: 23,000 of a
   task's 49,000 runs): changes the cases; measure with bin/ab-cases --cover and from scratch.
+  Measured (2026-10-20): of the busiest task's 72 s, the compare-guided stage made 24,000 runs (31 s),
+  the boundary sweep 23,160 (24 s), the random search 850. The sweep's cap of SWEEP_RUNS a base input
+  keeps at least four slots and stepped each through the whole ladder: 579 values there, more than
+  150 for twelve functions a build (all tasks). A ladder longer than SWEEP_STEPS (150) keeps BOUNDS
+  and a sample of the function's constants; the cache key names the cap for those functions alone.
+  bin/ab-cases --cover on the eight longest of GCC -Os: the same instructions covered, 10 to 32 %
+  faster (that task 73 s to 49 s). Left: the compare-guided stage's 24,000 runs (four times
+  SOLVE_RUNS in each of the two passes a function not covered whole gets, with and without learning
+  from loads: _generate_all).
 
 - [ ] A C fast path for the system run's block hook (dread.fasthooks): nearly every block is a known
   block of shared code with nothing due (clock += size and three comparisons); C could do those and
