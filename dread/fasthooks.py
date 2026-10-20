@@ -181,7 +181,7 @@ class SysState(ctypes.Structure):
     """The system run's clock and what its block hook decides with (sys_t in fasthooks.c)."""
     _fields_ = [("clock", ctypes.c_int64), ("progress", ctypes.c_int64), ("spin_check", ctypes.c_int64),
                 ("next_event", ctypes.c_int64), ("limit", ctypes.c_int64), ("spin", ctypes.c_int64),
-                ("frozen", ctypes.c_int32), ("due", ctypes.c_int32), ("irq_check", ctypes.c_int32),
+                ("chunk", ctypes.c_int64), ("frozen", ctypes.c_int32), ("due", ctypes.c_int32), ("irq_check", ctypes.c_int32),
                 ("observers", ctypes.c_int32), ("memo", ctypes.c_int32), ("memo_n", ctypes.c_int32),
                 ("memo_regs", ctypes.c_int32 * 4), ("memo_bits", ctypes.c_uint32 * 4),
                 ("memo_vals", ctypes.c_uint32 * 4),

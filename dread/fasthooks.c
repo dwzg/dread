@@ -321,6 +321,7 @@ typedef void (*block_fn)(void *uc, uint64_t address, uint32_t size, void *user);
 
 typedef struct {
     int64_t clock, progress, spin_check, next_event, limit, spin;  /* next_event INT64_MAX: none */
+    int64_t chunk;                  /* blocks the run's current chunk may still enter */
     int32_t frozen, due, irq_check, observers;
     int32_t memo;                   /* the last interrupt answer was "masked" and nothing changed since */
     int32_t memo_n;                 /* registers its answer depends on */
@@ -366,7 +367,7 @@ static int sys_masks_hold(void *uc, sys_t *st)
 /* UC_HOOK_BLOCK */
 void dread_sysblock(void *uc, uint64_t address, uint32_t size, sys_t *st)
 {
-    if (!st->observers && !st->due) {
+    if (!st->observers && !st->due && st->chunk > 0) {
         uint32_t known = set_get(&st->known, address);
         if (known && size < known && sys_shared(st, address)) {
             int64_t clock = st->clock + size;
@@ -377,14 +378,16 @@ void dread_sysblock(void *uc, uint64_t address, uint32_t size, sys_t *st)
                     set_put(&st->entered, address, set_get(&st->entered, address) + 1, 0);
                 st->clock = clock;
                 st->frozen = 0;
+                st->chunk--;
                 st->fast++;
                 return;
             }
         }
     }
-    int due = st->due;
+    int stops = st->due || st->chunk <= 0;
     st->python(uc, address, size, NULL);
-    if (!due && !st->observers) {   /* the Python hook recorded the block (it returns first only when due) */
+    if (!stops && !st->observers) { /* the Python hook recorded the block (it stops first, recording
+                                       nothing, when a stop is due or the chunk is used up) */
         uint32_t known = set_get(&st->known, address);
         if (size + 1 > known)
             set_put(&st->known, address, size + 1, 0);

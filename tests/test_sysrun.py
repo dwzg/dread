@@ -465,3 +465,26 @@ def test_the_c_block_hook_gives_the_python_hooks_outcome(monkeypatch):
     without, none = outcomes()
     assert with_c == without
     assert none == 0 and done_in_c > 1000, done_in_c
+
+
+def test_the_chunk_size_changes_nothing(monkeypatch):
+    """A chunk ends where a block starts, before the block counts: every outcome with chunks of a
+    few blocks is that with one chunk. (Chunks ended by the engine's count of instructions once,
+    inside blocks, whose rest the next chunk counted again, at points the two images do not share:
+    FreeRTOS's main_full rebuilt ran 106 clock units behind the original at the limit.)"""
+    from conftest import gizmo_dir
+    from dread.target import Target
+    t = Target.load(gizmo_dir("m4"))
+    image = t.image()
+
+    def outcomes():
+        out = {}
+        for name, scenario in sorted(t.scenarios.items()):
+            scenario = dict(scenario, _name=name)
+            o = sysrun.System(t, image, image.payload(), scenario=scenario).run(int(scenario.get("limit", sysrun.LIMIT)))
+            out[name] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+        return out
+    monkeypatch.setattr(sysrun, "CHUNK", 13)
+    small = outcomes()
+    monkeypatch.setattr(sysrun, "CHUNK", 10 ** 9)
+    assert small == outcomes()

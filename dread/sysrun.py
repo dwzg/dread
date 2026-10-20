@@ -30,7 +30,9 @@ sent; checked at the store that completes it, so both runs stop at the same plac
 firmware waits with nothing scheduled (QUIET units without a new block or log entry, or a chunk
 without any clock: "polls" when it keeps reading one register, "waits" when it accesses no device at
 all), or at a fault. A read repeated without
-anything between is one log entry with its count.
+anything between is one log entry with its count. A chunk (the emulator's run between such checks)
+is CHUNK blocks and ends where a block starts, before the block counts, so that its size changes
+nothing the clock counts.
 
 The block hook is the run's hot path (a FreeRTOS run of 30 million clock units enters 3.4 million
 blocks). On Unicorn a hook in C (dread.fasthooks, dread_sysblock) does the blocks that only move the
@@ -70,7 +72,11 @@ from dread.build import recon_dir
 from dread.emu import Layout, core_reader
 from dread.program import Program
 
-CHUNK = 200_000          # instructions per emu_start (stop rules are checked between chunks)
+CHUNK = 50_000           # blocks per emu_start (stop rules are checked between chunks); a chunk ends
+# where a block starts, before the block counts. It ended by the engine's count of instructions once:
+# inside a block, whose rest the next chunk entered as a block of its own and counted again, at points
+# the two images do not share (their C runs other instructions), so that their clocks drifted apart
+# (FreeRTOS's main_full rebuilt: 106 units behind at the limit, two device accesses more in its log)
 ACCESS = 8               # shared-clock units a device access takes
 QUIET = 200_000          # shared-clock units without a new block or a device access: the firmware waits
 FROZEN = 2_000           # blocks in a row outside shared code with an event due: a wait the clock cannot see
@@ -97,6 +103,7 @@ class _State:
         self.clock = self.progress = self.spin_check = 0
         self.next_event, self.limit, self.spin = NO_EVENT, LIMIT, SPIN
         self.frozen = self.due = self.irq_check = self.observers = self.memo = 0
+        self.chunk = CHUNK                  # blocks the current chunk may still enter
 
 
 def _field(name, kind=int):
@@ -329,10 +336,11 @@ class System:
 
     def _on_block(self, uc, addr, size, user):
         st = self.st
-        if st.due:
+        if st.due or st.chunk <= 0:         # a stop asked for, or the chunk's end
             st.due = 0
             uc.emu_stop()                   # this block runs (and counts) when the run goes on
             return
+        st.chunk -= 1
         for o in self.observers:
             o.block(addr, size)
         known = self.blocks.get(addr)
@@ -477,7 +485,8 @@ class System:
             self.new, clock_before = 0, self.clock
             error = None
             try:
-                uc.emu_start(pc, self.layout.sentinel, count=CHUNK)
+                self.st.chunk = CHUNK
+                uc.emu_start(pc, self.layout.sentinel)
             except UcError as e:
                 error = e
             if self.callback_error is not None:
