@@ -752,6 +752,8 @@ def main(argv=None):
                         help="write C (default), find inputs for unrun instructions, or propose names")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
+    if hasattr(sys.stdout, "reconfigure"):  # a line a function as it ends, also into a file (a run its
+        sys.stdout.reconfigure(line_buffering=True)     # timeout ended had kept none of them)
     if args.usage is not None:
         return print_usage(args.usage or None)
     try:
