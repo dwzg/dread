@@ -483,3 +483,20 @@ cross = "arm-none-eabi-"
     assert kept[1] == fair and len(kept) == 2
     assert kept[0]["args"][0] == gen.fake_pointer | 1 == gen.fake_code(apply.entry)
     assert [gen.fake_pointer, 0, 0] in kept[0]["calls"]
+
+
+def test_pointer_buffers_stay_in_the_scratch():
+    """Learned data pointers' buffers lie inside the scratch and off the pointer stub: sixteen below
+    the stub where the scratch is large (as always, so those images keep their cases), fewer where it
+    is small (gizmo-msp430's 16 KiB, where the sixteen ran over the stub and past the scratch's end)."""
+    from conftest import gizmo_dir
+    from dread import autocase
+    from dread.target import Target
+    for variant, count in (("m3", 16), ("msp430", 11)):
+        t = Target.load(gizmo_dir(variant))
+        g = autocase.Generator(t, t.image())
+        lo, hi = t.memory.scratch_base, t.memory.scratch_base + t.memory.scratch_size
+        assert len(g.pointer_slots) == count
+        for a in g.pointer_slots:
+            assert lo <= a and a + autocase.POINTER_STEP <= hi
+            assert not a <= g.fake_pointer < a + autocase.POINTER_STEP

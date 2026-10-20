@@ -195,6 +195,7 @@ class Generator:
             raise EmuError("[memory] scratch is not set: generated inputs need scratch memory for their buffers")
         self.scratch = mem.scratch_base
         self.fake_pointer = mem.scratch_base + mem.scratch_size // 2 & ~0xFFF      # stub for calls through pointers
+        self.pointer_slots = self._pointer_slots(mem.scratch_size)
         self.boundary = tuple(range(17)) + (0x7F, 0x80, 0xFF, 0x100, 0x7FFF, 0x8000, 0xFFFF, 0x10000, 0x7FFFFFFF,
                                             0x80000000, 0xFFFFFFFE, 0xFFFFFFFF, self.scratch, self.scratch + 0x40,
                                             self.scratch + 0x104)
@@ -521,6 +522,19 @@ class Generator:
             self._endless = set(noreturn.find(self.program))
         return self._endless
 
+    def _pointer_slots(self, size):
+        """Where learned data pointers get their buffers: POINTER_STEP apart from scratch +
+        POINTER_BASE, POINTER_SLOTS of them, each inside the scratch and none on the pointer stub's
+        address. A scratch of 64 KiB or more holds them all below the stub, as they always were; a
+        small one fewer (16 KiB on the MSP430: ten), where the sixteen ran over the stub and past
+        the scratch's end."""
+        out, a, end = [], self.scratch + POINTER_BASE, self.scratch + size
+        while len(out) < POINTER_SLOTS and a + POINTER_STEP <= end:
+            if not a <= self.fake_pointer < a + POINTER_STEP:
+                out.append(a)
+            a += POINTER_STEP
+        return out or [self.scratch]
+
     def environment(self):
         """A digest of what a function's cases depend on besides its own instructions: the whole
         image (a literal pool holds the addresses of globals and callees: a rebuild that moved the
@@ -539,6 +553,8 @@ class Generator:
             h.update(b"regflow " + hashlib.sha1(found).digest())
             if self.stall_part:             # (only where it applies: the other images keep their cases)
                 h.update(b"stall %d" % self.stall_part)
+            if self.pointer_slots != [self.scratch + POINTER_BASE + POINTER_STEP * k for k in range(POINTER_SLOTS)]:
+                h.update(b"pointer slots " + repr(self.pointer_slots).encode())     # (a small scratch only)
             self._environment = h.hexdigest()
         return self._environment
 
@@ -809,9 +825,9 @@ class Generator:
         fregs = self.fp_inputs(name)        # float arguments in the FPU's registers (hard float)
 
         def buffer_for(slot):
-            """A scratch buffer of its own for each learned data pointer, below the stub address."""
+            """A scratch buffer of its own for each learned data pointer (pointer_slots)."""
             used = len(data_args) + len(data_mem)
-            return self.scratch + POINTER_BASE + POINTER_STEP * (used % POINTER_SLOTS)
+            return self.pointer_slots[used % len(self.pointer_slots)]
 
         fake_code = self.fake_code(entry)
 
