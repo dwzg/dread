@@ -339,3 +339,67 @@ def test_a_register_the_callee_never_writes_keeps_its_value_across_the_call(tmp_
     lines = []
     accepted = lift.check(t, image, ["use"], out=lines.append, jobs=2)
     assert accepted == ["use"], "\n".join(lines)
+
+
+@pytest.mark.compiles
+def test_a_full_room_drops_the_largest_and_the_check_goes_on(tmp_path):
+    """When the C does not fit into its room behind the image (an MSP430's 64 KiB: FreeRTOS's build
+    filled it), the overlay says by how much and which functions it could not place; the check drops
+    the largest of them until that is covered and builds again, instead of failing whole."""
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    for cache in ("autocases", "regflow"):
+        here = os.path.join(gizmo_dir("m3"), "build", cache)
+        if os.path.isdir(here):
+            shutil.copytree(here, copy / "m3" / "build" / cache)
+    image = Target.load(str(copy / "m3")).image()
+    end = image.base + len(image.payload())
+    toml = copy / "m3" / "dread.toml"
+    text = toml.read_text()
+    assert text.count("limit = 0x08010000") == 1
+    toml.write_text(text.replace("limit = 0x08010000", "limit = 0x%x" % (end + 0x100)))
+    target = Target.load(str(copy / "m3"))
+    lines = []
+    accepted = lift.check(target, target.image(), NAMES, out=lines.append, jobs=4)
+    assert any("no room left for its C" in line for line in lines), "\n".join(lines)
+    assert not any(line.startswith("dread lift: the build failed") for line in lines), "\n".join(lines)
+    assert accepted and set(accepted) < set(NAMES), "\n".join(lines)
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_declared_stack_arguments_of_a_context_switch(tmp_path):
+    """A function that loads its stack pointer from memory (a context switch) has stack arguments the
+    lifter cannot count, so its callers are refused; [abi] stack_args says how many (FreeRTOS's MSP430
+    port's vPortYield: none), and they lift."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(
+        "unsigned saved;\n"
+        "__attribute__((naked, noinline)) void switcher(void)\n"
+        "{ __asm__ volatile (\"ldr r3, =saved\\n str sp, [r3]\\n ldr sp, [r3]\\n bx lr\\n .ltorg\"); }\n"
+        "unsigned caller(unsigned x) { switcher(); return x + 1; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "caller", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    toml = TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n' \
+        '\n[compiler]\ncross = "arm-none-eabi-"\n'
+    (tmp_path / "dread.toml").write_text(toml)
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    for declared in (False, True):
+        if declared:
+            with open(tmp_path / "dread.toml", "a") as f:
+                f.write("\n[abi]\nstack_args = {switcher = 0}\n")
+        t = Target.load(str(tmp_path))
+        p = Program(t, t.image())
+        lifter = lift.make_lifter(p)
+        if declared:
+            assert "switcher(r0, r1, r2, r3)" in lifter.lift(p.by_name["caller"]).text
+        else:
+            with pytest.raises(lift.Refused, match="calls switcher, whose stack arguments are not known"):
+                lifter.lift(p.by_name["caller"])

@@ -50,7 +50,7 @@ SCHEMA = {
     "arch": {"name": str, "isa": str, "profile": str, "cpu": str, "endian": str, "ghidra": str, "thumb2": bool,
              "extensions": str},
     "memory": {"regions": list, "io": list, "stack": dict, "sentinel": int, "scratch": dict},
-    "abi": {"args": int, "callee_saved": list, "result": list, "float": str},
+    "abi": {"args": int, "callee_saved": list, "result": list, "float": str, "stack_args": dict},
     "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "ldflags": list, "include": list,
                  "idioms": str, "tools": dict, "profile": str},
     "paths": {"build": str, "src": str},
@@ -176,6 +176,12 @@ class Abi:
             arch.reg_id(reg)                    # raises on an unknown register name
         self.arg_regs = arch.arg_regs(self.args)
         self.float = data.get("float")
+        # stack words named functions take where the lifter cannot count them (their stack pointer
+        # is not static: a context switch)
+        self.stack_args = dict(data.get("stack_args", {}))
+        for name, words in self.stack_args.items():
+            if not isinstance(words, int) or words < 0:
+                raise ValueError("[abi] stack_args: %s takes a number of words, not %r" % (name, words))
         self.fp_arg_regs = []
 
     def set_float(self, cflags, arch):

@@ -535,6 +535,10 @@ class Lifter:
         call: its stack arguments. None when that is not known (its stack pointer is not static)."""
         if fn.name in self._stack_args:
             return self._stack_args[fn.name]
+        declared = self.prog.target.abi.stack_args.get(fn.name)
+        if declared is not None:                # [abi] stack_args: the target says so (a context switch)
+            self._stack_args[fn.name] = declared
+            return declared
         self._stack_args[fn.name] = 0           # a recursive call counts nothing while this is worked out
         try:
             depth = self.depths(fn, strict=False)
@@ -2183,6 +2187,20 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                 verdicts[e.function] = ("dropped", "the overlay: %s" % e, "")
                 accepted = [n for n in accepted if n != e.function]
                 continue
+            if e.room:                      # the room for the C is full: the largest without room go
+                over, unplaced, sizes = e.room
+                drop, freed = [], 0
+                for name in unplaced:
+                    if name in accepted and freed < over:
+                        drop.append(name)
+                        freed += sizes[name]
+                if drop:
+                    why = "the overlay: no room left for its C (the room was %d bytes short)" % over
+                    for name in drop:
+                        out("dropped  %-24s %s" % (name, why))
+                        verdicts[name] = ("dropped", why, "")
+                    accepted = [n for n in accepted if n not in drop]
+                    continue
             out("dread lift: the build failed: %s" % e)
             return []
         foreign = foreign_calls(program, work, accepted, lifter)

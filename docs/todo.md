@@ -821,6 +821,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   build: 143 of 250 (102), none lost: the two chains and 13 more that read flags a callee seemed to
   leave or need (pvPortMalloc, xQueueGenericCreate, vTaskSuspendAll, prvUnlockQueue, the LED and
   serial tasks, __mspabi_divul); 74 that morning.
+  Next on that build: 14 callers of vPortYield (the port's context switch, its stack pointer loaded
+  from the TCB) are refused for its stack arguments. `[abi] stack_args = {vPortYield = 0}` (since
+  2026-10-20) lets them lift, but nothing more is accepted: their C needs room the image does not
+  have (the lift check failed whole on a full room; it drops the largest without room now and goes
+  on), and their callers' cases run the real context switch, which goes nowhere in a function's
+  case (xTaskCreate's callers failed). Left out of the recipe until a context switch can be stubbed
+  in cases.
 - [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the
   5-million-instruction limit (about 5 s per case on the MSP430 engine; two of gizmo's took over 300
   s). Bound a mutant's case by a multiple of what the original took on it.

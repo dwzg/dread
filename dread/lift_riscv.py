@@ -166,9 +166,14 @@ class RiscVLifter(lift.Lifter):
 
     def stack_args(self, fn):
         """Words above the entry's stack pointer the function reads (its stack arguments): RISC-V
-        passes eight arguments in registers, and the translation refuses the rest (0 or None)."""
+        passes eight arguments in registers, and the translation refuses the rest (0 or None). [abi]
+        stack_args overrides it for a function whose stack pointer is not static."""
         if fn.name in self._stack_args:
             return self._stack_args[fn.name]
+        declared = self.prog.target.abi.stack_args.get(fn.name)
+        if declared is not None:
+            self._stack_args[fn.name] = declared
+            return declared
         self._stack_args[fn.name] = 0
         try:
             states = self.states(fn, strict=False)

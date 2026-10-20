@@ -302,9 +302,14 @@ class Msp430Lifter(lift.Lifter):
         """How many words above its return address a function reads or writes, or passes on to a
         tail call: its stack arguments (0, the count, or None when its stack pointer is not static).
         Counted from what _accesses knows, by the highest byte: a byte at 3(sp) at the entry is
-        the second half of the first word (TI's GCC packs char arguments two to a word)."""
+        the second half of the first word (TI's GCC packs char arguments two to a word). [abi]
+        stack_args overrides it for a function whose stack pointer is not static."""
         if fn.name in self._stack_args:
             return self._stack_args[fn.name]
+        declared = self.prog.target.abi.stack_args.get(fn.name)
+        if declared is not None:
+            self._stack_args[fn.name] = declared
+            return declared
         self._stack_args[fn.name] = 0           # a recursive call counts nothing while this is worked out
         try:
             states = self.states(fn, strict=False)

@@ -52,11 +52,34 @@ EXTENT_TAIL = 1024      # bytes behind a function's last instruction that may st
 
 
 class OverlayError(Exception):
-    """The link cannot be made; `function` names the one function at fault when there is one."""
+    """The link cannot be made; `function` names the one function at fault when there is one, and
+    `room`, when the room for the C is full, says (bytes over, the functions without room largest
+    first, {function: size})."""
 
-    def __init__(self, message, function=None):
+    def __init__(self, message, function=None, room=None):
         super().__init__(message)
         self.function = function
+        self.room = room
+
+
+TAIL_SECTIONS = (".text", ".rodata", ".srodata", ".glue_7", ".v4_bx", ".vfp11_veneer", ".iplt")
+
+
+def tail_bytes(objects, placed):
+    """The bytes the C puts into its room (.recon.tail, see link): every section the script sends
+    there, less the functions placed elsewhere, each aligned as its section asks."""
+    total = 0
+    for obj in objects:
+        for sec in Elf(obj).sections:
+            if not (sec.alloc and sec.kind == SHT_PROGBITS and sec.size):
+                continue
+            name = sec.name
+            if not any(name == p or name.startswith(p + ".") for p in TAIL_SECTIONS):
+                continue
+            if name.startswith(".text.") and name[len(".text."):] in placed:
+                continue
+            total = align_up(total, max(sec.align, 1)) + sec.size
+    return total
 
 
 def align_up(value, alignment):
@@ -304,9 +327,12 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                        + list(objects) + extra, capture_output=True, text=True)
     if r.returncode:
         message = r.stderr
+        room = None
         if "the room for the C is full" in r.stderr:
             message += "no space for: %s\n" % " ".join(sorted(in_tail))
-        raise OverlayError("the link failed:\n" + message)
+            over = tail_bytes(objects, set(in_slot + in_body + in_hole)) - (tail_end - tail)
+            room = (max(over, 1), sorted(in_tail, key=lambda n: (-sizes[n], n)), {n: sizes[n] for n in in_tail})
+        raise OverlayError("the link failed:\n" + message, room=room)
     linked = Elf(elf_path)
     for sec in linked.sections:
         if sec.kind == SHT_PROGBITS and sec.alloc and sec.size:
