@@ -114,6 +114,17 @@ Decisions that are the user's, with options and a recommendation. Work goes on a
   the original (the bytes whose value the original itself does not define), every other output as
   before, the bytes left out named in the report. Recommended: (b); it takes from a comparison,
   so it is yours to decide.
+- **A variadic callee's argument registers the caller did not set?** (2026-10-20) A variadic
+  function stores every argument register from its first unnamed one on into its save area (the
+  demo's sprintf: r2 and r3, the area's address handed to tiny_print), so regflow counts them read.
+  A caller that passes fewer (sprintf(buf, "%d", n) sets r0 to r2) then seems to read what the
+  previous callee left in r3: 12 functions of the clang builds are refused for reading r3 behind
+  memset. Options: (a) keep refusing; (b) at a call site, a register the variadic callee only stores
+  into its save area counts as read only if the caller set it before the call: those callers lift,
+  and a loop case's stub of the variadic callee logs the registers the caller set, not one it left
+  (where the original passes a leftover the C does not reproduce; the format reads it only if the
+  original reads an argument it did not pass, undefined in C). Recommended: (b); it takes from what
+  a stub logs at such sites, so it is yours to decide.
 
 ## Phase 4: cases, mutation, coverage (rest)
 
