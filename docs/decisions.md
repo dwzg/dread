@@ -52,5 +52,7 @@ Newest first. "Status" says whether the choice is in the code yet.
 - **Choice: (b).** The bytes left out are exactly those the original does not define (they change
   with what the stack held before the call); every byte the original defines is still compared, and
   the report names what was left out, so a reader sees it.
-- **Undo.** Revert the commit that implements it.
-- **Status.** To be implemented (`docs/todo.md`, "What the lifter leaves").
+- **Undo.** Revert the runner commit "a case whose every difference is the original's stale stack
+  data is compared except those outputs" (such cases are refused again).
+- **Status.** Done (runner, 2026-10-20): the report line reads "compared except what the original's
+  stale stack data (an uninitialised local) decides: ...".

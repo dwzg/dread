@@ -664,6 +664,12 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   error path). GCC -Os 298 to 303 with the cases of the five affected functions made anew: FreeRTOS's
   malloc-failed and stack-overflow hooks, prvGetRegistersFromStack, Default_Handler and main_full
   (whose last instruction is the loop behind vTaskStartScheduler); gizmo's hang and Default_Handler.
+  Measure-25 (2026-10-20: lifted C at -Os, chunks that end at block starts, generator 25, register
+  calls in the call trees, stack switches stubbed, -fno-ssa-phiopt on the MSP430): the eight builds
+  2,016 of 2,763 (+59: GCC -Os 303, -O0 328, -O2 243, clang -Os 279, -O2 253, RISC-V GCC -Os 227,
+  -O2 168, clang -Os 215), the M4F builds 309 and 290 (+10 each), MSP430 150 (+7); every build gained,
+  each lost two to seven (the search's path, regenerated). 63 minutes. Merged after it, measured
+  next: regflow 13 and 14 (38 refusals fewer), generator 26 (the chase), stale-data cases compared.
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with
@@ -745,10 +751,10 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   Lift checks with every case generated anew, main against this: GCC -Os 297 to 298, clang -Os 269
   to 270 (__sflush_r both), the M4F clang build and RISC-V GCC -Os as before (280, 217), none lost;
   the gizmo builds' tables as before.
-- [ ] **A decision to implement** (`docs/decisions.md`, 2026-10-20): a case whose differences are all
-  stale bytes of the original is compared except those bytes, which the report names
-  (vStartTimerDemoTask, xTaskIncrementTick). (The other one, a variadic callee's registers, turned
-  out to be a regflow bug: clang's save areas behind sub sp went unseen; regflow 14, 18 refusals gone.)
+- [x] **A decision to implement** (`docs/decisions.md`, 2026-10-20): a case whose differences are all
+  stale bytes of the original is compared except those bytes, which the report names. Done (the
+  runner). The other one, a variadic callee's registers, was a regflow bug: clang's save areas behind
+  sub sp went unseen; regflow 14, 18 refusals gone.
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger). --task input now also asks for the functions the lift
   check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed
