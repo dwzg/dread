@@ -622,3 +622,60 @@ def test_a_near_miss_is_chased_through_pointers_no_input_set(tmp_path, monkeypat
         return set(fn.insns) - got
     assert missed(True) == set()
     assert missed(False)
+
+
+READER_C = """
+volatile int status;
+__attribute__((noinline, noipa)) int receive(char *buf, int n) { buf[0] = 0; return n; }  /* (fills it) */
+__attribute__((noreturn)) void reader(void)
+{
+    char buf[8];
+    for (;;) {
+        __builtin_memset(buf, 0, sizeof buf);   /* (not what lay on the stack: the stub's bytes) */
+        receive(buf, 8);
+        if (buf[0] == 'H' && buf[1] == 'i')     /* what the stub wrote into the local buffer */
+            status = 1;
+        else
+            status = 2;
+    }
+}
+"""
+
+
+def test_a_loop_case_stub_fills_the_buffer_it_is_handed(tmp_path):
+    """A task's loop cases stub its callees; with the task's frame (Generator.loop_frame: its deepest
+    stack, dread.lift's analysis) a stub writes into a local the task hands it, and the compare-guided
+    stage sets those bytes: the path behind 'H' and 'i' is covered. With no frame the stub writes
+    nothing there and it is not (FreeRTOS's prvReceivingTask: 31 of its 64 instructions)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(READER_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "reader", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    gen = Generator(target, target.image())
+    fn = gen.program.by_name["reader"]
+    assert gen.loop_frame("reader") >= 8
+    insns = [gen.program.insn(a) for a in fn.insns]
+    branches = [i.address for i in insns if gen.arch.flow(i)[0] == "jump" and gen.arch.predicate(i) is not None]
+    deciders = gen.arch.branch_deciders(insns)
+    assert branches and all(b in deciders for b in branches), (branches, deciders)  # (GCC loads a literal
+    # between the cmp and its bne here: the setter is found behind it)
+
+    def missed(frame):
+        got = set()
+        for c in gen.generate("reader", fn.entry, fn.insns, loop=True, frame=frame):
+            got |= gen.coverage(fn.entry, fn.insns, c, c.get("limit", 200_000))
+        return set(fn.insns) - got
+    assert missed(gen.loop_frame("reader")) == set()
+    assert missed(0)

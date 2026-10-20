@@ -885,8 +885,12 @@ class Arm:
         and second are Unicorn register ids (second None: the constant imm), kind "test" or "compare",
         sign -1 when the decider compares with the negation (adds rN, rN, #4; beq asks whether rN was
         -4; cmn). Plain forms only: a register against a register or a constant, no shifted operand,
-        the setter at most four instructions before the branch with nothing but other conditional
-        branches between; cbz and cbnz decide themselves (register against 0)."""
+        the setter at most 16 bytes before the branch with nothing between that sets the flags or
+        leaves the straight run (other conditional branches, an IT, and instructions that do not
+        touch the flags are passed: GCC puts a literal's load between cmp and bne, and an eighth of
+        the branches of FreeRTOS's builds had their setter so; the values are read at the setter,
+        so a register the load writes afterwards does not matter); cbz and cbnz decide themselves
+        (register against 0)."""
         index = {ins.address: k for k, ins in enumerate(insns)}
         out = {}
 
@@ -911,6 +915,9 @@ class Arm:
                     k -= 1
                     continue
                 sets = s.id in self.SETTERS or self.sets_flags(s)
+                if not sets and self.flow(s)[0] == "next":
+                    k -= 1                  # (it does not touch the flags: look further back)
+                    continue
                 ops = s.operands[-2:]
                 if sets and len(s.operands) >= 2 and ops[0].type == csarm.ARM_OP_REG \
                         and ops[1].type in (csarm.ARM_OP_REG, csarm.ARM_OP_IMM) and not any(o.shift.type for o in ops):

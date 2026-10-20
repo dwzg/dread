@@ -79,7 +79,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 26       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 27       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -114,6 +114,8 @@ VERSION = 26       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # a run that ends on a branch to itself (for (;;);) is a case (Machine.self_loop_at)
                   # 26: the compare-guided stage chases a near miss: a run that reached new code and
                   # then failed is tried again with the words no input set as pointers (Generator.chase)
+                  # 27: a branch's flag setter is found behind instructions that do not touch the flags
+                  # (Arm.branch_deciders); a loop case's frame is the task's (Generator.loop_frame)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -668,6 +670,25 @@ class Generator:
                     reaching.setdefault(c, set()).add(s)
             self._reaching = reaching
         return [[switches[s], self.reads_mask(s), 0] for s in sorted(self._reaching.get(name, ())) if s != name]
+
+    def loop_frame(self, name):
+        """A loop case's frame: the bytes the function's stack holds at its deepest (dread.lift's
+        stack analysis), so that its stubbed callees write into the locals it hands them (a receive
+        buffer) and the compare-guided stage gets those bytes as inputs (fills). With none, a task
+        that checks what it received could not get past its first check: FreeRTOS's
+        prvReceivingTask, whose stream buffer delivers a string byte by byte, had 31 of its 64
+        instructions unrun by its loop cases, none with its frame. 0 where the analysis fails."""
+        cache = self.__dict__.setdefault("_loop_frames", {})
+        if name not in cache:
+            from dread import lift
+            try:
+                lifter = self.__dict__.get("_frame_lifter") or lift.make_lifter(self.program, self.flow() or None)
+                self.__dict__["_frame_lifter"] = lifter
+                depths = lifter.depths(self.program.by_name[name], strict=False)
+                cache[name] = (max(depths.values()) + 7) & ~7 if depths else 0
+            except Exception:
+                cache[name] = 0
+        return cache[name]
 
     def reads_mask(self, name):
         """The argument registers a function reads at its entry (dread.regflow), as a stub's logging
@@ -1843,6 +1864,8 @@ def cases_for(run, name, fn):
     generate = options.pop("generate", True)    # False: kept and written cases only (dread.liftfuzz's
     calls = resolve_calls(gen, options.pop("calls", ()))        # reduction tries those first)
     frame = options.pop("frame", 0)
+    if options.get("loop") and not frame:
+        frame = gen.loop_frame(name)        # (in the cache key: only loop functions get new cases)
     prog = gen.program
     if generate is False:
         cached = {"cases": []}
