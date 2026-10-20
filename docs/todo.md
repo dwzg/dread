@@ -528,6 +528,14 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   and RISC-V builds, +4 against measure-21 (GCC -Os +1, -O2 +2, clang -O2 +3, RISC-V GCC -O2 and clang
   -Os +1 each; clang -Os -3, RISC-V GCC -Os -1: which ones, no measurement kept; they name them since),
   MSP430 74 as before; 63 min beside the full suite and the MSP430 tests.
+  Measure-23 (2026-10-20: the DSP and FPU instructions, vpush and libgcc's eight-byte push, a
+  register a callee never writes kept across calls, branches decided never taken, stale-data cases
+  refused, the IT state kept at interrupts; generator 23, regflow 11): 1,952 of 2,763 on the eight
+  builds, +22 against measure-22 and none lower (GCC -Os +5, -O0 +3, -O2 +5, clang -Os +3, -O2 +3,
+  RISC-V GCC -Os +2, -O2 +1, clang -Os 0); the Cortex-M4F builds 297 of 394 and 278 of 384 (+4 and
+  +3 against their first measurement that day, by name: printi, prints, vRegTest1Implementation,
+  xStreamBufferReceiveFromISR; TIMER0_Handler, vRegTest1Implementation, xSecondTimerHandler; none
+  lost); MSP430 74. 73 min for eleven builds, every case generated anew (the cache's key changed).
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with
