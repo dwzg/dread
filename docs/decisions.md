@@ -9,6 +9,32 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Compiler diversity before more architectures; MIPS paused after step 1 (2026-10-20)
+
+**Decided by the user** ("we need to focus on the most important architectures which are already
+implemented (ARM/Cortex-M and RISC-V) and focus on compiler diversity. I follow all your
+recommendations here."), on a recommendation.
+
+- **Question.** CI's older compilers (GCC 13, binutils 2.42, clang 18) showed two gaps of DREAD's
+  own that the newer ones here never did. Real firmware comes from many compilers, versions and
+  options: does DREAD need a profile per compiler?
+- **Recommendation taken.** No catalogue per compiler. The comparison with the original keeps
+  results right whatever the compiler; what a compiler can cost is coverage and acceptance where the
+  tools recognise code shapes. So: (1) measure across compilers (toolchains in podman containers as
+  an axis of the benchmark, an older distribution in CI, Compiler Explorer's compilers for the
+  lab's probes); (2) replace shape catalogues by analyses (one analysis of what registers hold as
+  sp, argument or constant plus an offset); (3) the emulator as oracle where it can answer
+  (calling conventions measured with poisoned registers); (4) language models as writers of rules
+  for what is left, judged by the comparison; (5) compilers identified by matching their output.
+  docs/todo.md, "Compiler diversity", holds the items.
+- **MIPS.** Paused after step 1 of docs/porting.md (decoding, flow, the listing: on main); step 2
+  (the emulator and what hangs on it) on the branch `mips`, with its open Unicorn segfault.
+- **Compiler Explorer and private code.** Its public instance gets DREAD's own probes and test code
+  only. Matching a private image's functions would send C written from the image: that needs an
+  instance of our own (open source, in podman), as language models need DREAD's guard.
+- **Undo.** Reorder docs/todo.md; the branch `mips` resumes MIPS where it stopped.
+- **Status.** Plan in docs/todo.md; MIPS step 1 on main (2026-10-20).
+
 ## atexit counts as a generic name in the leak check (2026-10-20)
 
 **Decided by recommendation** (it narrows a safety check, so it is written down).

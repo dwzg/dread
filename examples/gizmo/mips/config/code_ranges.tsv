@@ -1,0 +1,6 @@
+# instruction runs: start, end (exclusive), isa; written by dread import-elf
+0x80000000	0x80000058	mips32
+0xbfc00000	0xbfc00098	mips32
+0xbfc00380	0xbfc0058c	mips32
+0xbfc00590	0xbfc00cdc	mips32
+0xbfc00ce0	0xbfc013cc	mips32

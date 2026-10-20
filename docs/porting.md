@@ -6,7 +6,9 @@ every method in its docstrings, `dread.arch.riscv.RiscV` is the second layer (RV
 on it, and its port is the worked example of the order below), `dread.arch.msp430.Msp430` the third
 (under way: neither capstone nor Unicorn knows the MSP430, so its layer decodes the instructions
 itself, into objects with capstone's attributes, and runs them on an engine of DREAD's own,
-`dread.engines.msp430`).
+`dread.engines.msp430`), `dread.arch.mips.Mips` the fourth (paused after step 1: MIPS32r2 little
+endian, the first with delay slots; it decodes the bits itself too; the branch `mips` goes on with
+Unicorn's virtual TLB, so that kseg0 and kseg1 addresses are themselves).
 This page lists what a new layer has to provide, what is still ARM-specific outside the layer, and
 the order of the work.
 
@@ -47,6 +49,8 @@ generator, the lifter, the reading aids)
 | `bound_check(insn)`, `switch_targets(insn, program, inside)` | switch shapes (dread.switches runs them) |
 | `mark_call(program, insn)`, `link_pair(prev, insn, isa)` | optional: calls that are not plain calls (stubs, switch helpers, two-instruction calls: RISC-V's auipc + jalr, and its auipc/lui + addi addresses) |
 | `link_reg`, `veneer_reg` | the register a call leaves the return address in (None where the call pushes it: MSP430), and the one veneers go through |
+| `delay_slot(insn)`, `likely(insn)` | optional: whether the instruction behind a branch runs before it goes (MIPS), and whether only when it is taken (a branch-likely) |
+| `discard_sections` | optional: allocated sections the toolchain adds to every object that no image wants (MIPS: .MIPS.abiflags, .reginfo, a .got); dread asm and dread overlay discard them |
 | `word`, `reg_bits` | the size of a stack argument (bytes) and of a register (bits) |
 | `frame_stores(insn, sp_based)`, `sp_copy(insn)`, `frame_slot(insn)` | optional, for dread.regflow: the registers a store puts where sp (or a copy of it) points, the register an instruction sets to sp plus a constant, and ("store" or "load", register, offset) of a single-register access at sp plus a constant (a variadic save area at the entry, and saves around a call, are no reads) |
 

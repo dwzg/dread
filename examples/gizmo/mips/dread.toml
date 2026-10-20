@@ -1,0 +1,77 @@
+# Gizmo 1000, MIPS32 build: DREAD's test firmware (examples/gizmo/fw), built with clang for a
+# little-endian MIPS32 release 2 core in kernel mode: the boot flash in kseg1, RAM in kseg0. Not a
+# real device. The tables in config/ come from the ELF (`make -C ../fw targets`).
+
+[target]
+name = "gizmo-mips"
+title = "Gizmo 1000 (MIPS32, little endian)"
+
+[arch]
+name = "mips"
+isa = "mips32"
+
+[image.main]
+original = "original/gizmo.bin"
+base = 0xbfc00000
+limit = 0xbfc20000              # 128 KiB of boot flash from the base
+entry = "_start"
+startup = [
+    {kind = "code", run = 0x80000000, size = 0x58, stored = 0xbfc014a0},
+    {kind = "data", run = 0x80000060, size = 0x64, stored = 0xbfc01500},
+    {kind = "zero", run = 0x800000d0, size = 0x38},
+]
+fixed = {gp = 0x80008070}
+free = [[0xbfc014f0, 0xbfc01500]]
+
+[memory]
+regions = [
+    {name = "flash", base = 0xbfc00000, size = 0x100000, kind = "rom"},
+    {name = "ram", base = 0x80000000, size = 0x10000},
+    {name = "scratch", base = 0x80100000, size = 0x20000},
+]
+io = [[0xbf800000, 0xbf810000]]
+stack = {top = 0x80010000, size = 0x2000}
+sentinel = 0x1fff0000
+scratch = {base = 0x80100000, size = 0x20000}
+
+[compiler]
+kind = "clang"
+triple = "mipsel-unknown-elf"
+cflags = ["-march=mips32r2", "-mno-abicalls", "-fno-pic", "-Os", "-ffreestanding", "-fno-builtin",
+          "-ffunction-sections", "-fno-common"]
+
+# Devices for the system run (dread sysrun): gizmo's serial port (examples/gizmo/fw/gizmo.h).
+[models.uart]
+kind = "uart"
+base = 0xbf800000
+data = 0x0
+status = 0x4
+tx_ready = 0x1
+rx_ready = 0x2
+
+[models.timer]
+kind = "timer"
+base = 0xbf801000
+irq = 0
+
+[models.intc]
+kind = "intc"
+base = 0xbf802000
+
+[models.gpio]
+kind = "gpio"
+base = 0xbf803000
+
+[scenarios.boot]
+until = {uart = "READY"}
+limit = 5_000_000
+
+[scenarios.keys]
+input = [[40_000, "uart", "s"]]
+until = {uart = "READY\r\nmode run volume 7"}
+limit = 5_000_000
+
+[scenarios.config]
+input = [[40_000, "uart", "cvolume=3\r\n"], [200_000, "uart", "s"]]
+until = {uart = "mode run volume 3"}
+limit = 5_000_000

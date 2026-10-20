@@ -16,6 +16,8 @@ A32 := -march=armv4t -marm -mabi=aapcs -mfloat-abi=soft
 M3 := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -DGIZMO_M3
 M4 := -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 -DGIZMO_M3 -DGIZMO_M4
 RV32 := --target=riscv32-unknown-elf -march=rv32imc -mabi=ilp32 -fuse-ld=lld -DGIZMO_RV32
+MIPS := --target=mipsel-unknown-elf -march=mips32r2 -mno-abicalls -fno-pic -DGIZMO_MIPS
+MIPS_OBJ := $(patsubst %,build/mips/%.o,start_mips lib util hw main)
 MSP430_CROSS ?= msp430-elf-
 MSP430 := -mcpu=msp430 -mhwmult=none -DGIZMO_MSP430
 MSP430CLANG := --target=msp430 -DGIZMO_MSP430
@@ -24,7 +26,7 @@ SRC := lib.c util.c hw.c main.c
 
 .PHONY: all targets clean
 all: build/a32/gizmo.elf build/m3/gizmo.elf build/m4/gizmo.elf build/m3cpp/gizmo.elf build/rv32/gizmo.elf \
-     build/rv32cpp/gizmo.elf build/msp430/gizmo.elf
+     build/rv32cpp/gizmo.elf build/mips/gizmo.elf build/msp430/gizmo.elf
 
 build/a32/gizmo.elf: start_a32.S $(SRC) a32.ld gizmo.h Makefile
 	mkdir -p $(dir $@)
@@ -66,6 +68,19 @@ build/rv32/gizmo.elf: start_rv32.S $(SRC) rv32.ld gizmo.h Makefile
 	mkdir -p $(dir $@)
 	$(CLANG) $(RV32) $(COMMON) -T rv32.ld -Wl,-Map=$(@:.elf=.map) -o $@ start_rv32.S $(SRC)
 
+# The MIPS build (clang has no bare-metal driver for MIPS and would link with the host's gcc: compile
+# with clang, link with ld.lld)
+build/mips/%.o: %.c gizmo.h Makefile
+	mkdir -p $(dir $@)
+	$(CLANG) $(MIPS) $(filter-out -nostdlib,$(COMMON)) -c -o $@ $<
+
+build/mips/start_mips.o: start_mips.S Makefile
+	mkdir -p $(dir $@)
+	$(CLANG) $(MIPS) $(filter-out -nostdlib,$(COMMON)) -c -o $@ $<
+
+build/mips/gizmo.elf: $(MIPS_OBJ) mips.ld
+	ld.lld -T mips.ld -Map=$(@:.elf=.map) -o $@ $(MIPS_OBJ)
+
 build/msp430/gizmo.elf: start_msp430.S $(SRC) msp430.ld gizmo.h Makefile
 	mkdir -p $(dir $@)
 	$(MSP430_CROSS)gcc $(MSP430) $(COMMON) -T msp430.ld -Wl,-Map=$(@:.elf=.map) -o $@ start_msp430.S $(SRC) \
@@ -85,7 +100,7 @@ build/msp430clang/gizmo.elf: $(MSP430CLANG_OBJ) msp430.ld
 	ld.lld -m msp430elf -T msp430.ld -Map=$(@:.elf=.map) -o $@ $(MSP430CLANG_OBJ)
 
 targets: all
-	for v in a32 m3 m4 m3cpp rv32 rv32cpp msp430; do \
+	for v in a32 m3 m4 m3cpp rv32 rv32cpp mips msp430; do \
 	    mkdir -p ../$$v/original && cp build/$$v/gizmo.elf ../$$v/original/gizmo.elf && \
 	    $(DREAD) import-elf build/$$v/gizmo.elf --target ../$$v --payload ../$$v/original/gizmo.bin --write-startup && \
 	    mkdir -p ../$$v/src && python3 addresses.py build/$$v/gizmo.elf ../$$v/src/addresses.h $$v || exit 1; \

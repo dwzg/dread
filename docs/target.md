@@ -64,13 +64,13 @@ cflags = ["-mcpu=cortex-m3", "-mthumb", "-Os", "-ffreestanding", "-fno-builtin",
 
 | Key | Meaning |
 |---|---|
-| `name` | `"arm"`, `"riscv"` or `"msp430"` (the 16-bit MSP430, on DREAD's own engine; under way), required |
-| `isa` | the instruction set of code the code ranges do not mark. ARM: `"a32"` (ARM state, default) or `"t32"` (Thumb, 16- and 32-bit); RISC-V: `"rv32"`; MSP430: `"msp430"` |
+| `name` | `"arm"`, `"riscv"`, `"msp430"` (the 16-bit MSP430, on DREAD's own engine; under way) or `"mips"` (MIPS32 release 2, little endian; under way), required |
+| `isa` | the instruction set of code the code ranges do not mark. ARM: `"a32"` (ARM state, default) or `"t32"` (Thumb, 16- and 32-bit); RISC-V: `"rv32"`; MSP430: `"msp430"`; MIPS: `"mips32"` |
 | `profile` | ARM: `"a"` (classic cores with CPSR: ARM7, ARM9, ARM11; default) or `"m"` (Cortex-M, Thumb only) |
 | `extensions` | RISC-V: the standard extensions, default `"imc"` (the C extension decides whether instructions may be 2 bytes long; `-march` in `[compiler] cflags` overrides it) |
 | `cpu` | Unicorn's CPU model (`cortex-m3`, `cortex-m4`, `arm926`, `arm1176`, ...), with its own features (an M3 has no DSP extension or FPU; an M0 is ARMv6-M); default: Unicorn's choice for the mode (on the M profile a Cortex-M33) |
 | `endian` | `"little"` (the only one supported) |
-| `ghidra` | Ghidra's language id (default `ARM:LE:32:Cortex` for M profile, `ARM:LE:32:v4t` otherwise, `RISCV:LE:32:default` for RISC-V, analysed with Ghidra's `gcc` compiler spec) |
+| `ghidra` | Ghidra's language id (default `ARM:LE:32:Cortex` for M profile, `ARM:LE:32:v4t` otherwise, `RISCV:LE:32:default` for RISC-V, analysed with Ghidra's `gcc` compiler spec; `MIPS:LE:32:default` for MIPS) |
 
 Unicorn has no ARM7TDMI model. An ARM7 target runs on the default model or on `arm926`. The
 differences that can matter, such as unaligned loads, are not modelled.

@@ -65,7 +65,7 @@ def test_minimal_defaults(tmp_path):
     (MINIMAL + "[memory]\nregions = [{base = 0, size = 0x100}, {base = 0x80, size = 0x100}]\n", "overlap"),
     (MINIMAL + "[image.main.tables]\nfunktions = 'f.tsv'\n", "unknown tables"),
     (MINIMAL.replace("base = 0x1000", "base = '0x1000'"), "should be int"),
-    (MINIMAL.replace('[arch]\nname = "arm"', '[arch]\nname = "mips"'), "unknown architecture"),
+    (MINIMAL.replace('[arch]\nname = "arm"', '[arch]\nname = "vax"'), "unknown architecture"),
 ])
 def test_mistakes_are_refused(tmp_path, text, message):
     with pytest.raises(TargetError, match=message):

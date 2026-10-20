@@ -307,7 +307,9 @@ def build(target, base, outdir, builddir, arch=None):
     # below the vectors that the image holds at its top).
     script = os.path.join(builddir, "listing.ld")
     with open(script, "w") as f:
-        f.write("SECTIONS\n{\n    . = 0x%x;\n    .text : { *(.text) }\n}\n" % base)
+        discard = " ".join("*(%s)" % s for s in getattr(arch, "discard_sections", ()))
+        f.write("SECTIONS\n{\n    . = 0x%x;\n    .text : { *(.text) }\n%s}\n"
+                % (base, "    /DISCARD/ : { %s }\n" % discard if discard else ""))
     for cmd in (compiler.command("ld") + compiler.ldflags + extra_ld + ["-T", script, "-e", "0x%x" % base, "-o", elf, obj],
                 compiler.command("objcopy") + ["-O", "binary", "-j", ".text", elf, binf]):
         r2 = subprocess.run(cmd, capture_output=True, text=True)

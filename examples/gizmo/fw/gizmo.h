@@ -5,9 +5,13 @@
  * for a Cortex-M3 in Thumb-2 (GIZMO_M3, flash at 0x08000000, RAM at 0x20000000, peripherals at
  * 0x40000000, the NVIC), for an RV32IMC core in machine mode (GIZMO_RV32, flash at 0x20000000,
  * RAM at 0x80000000, peripherals at 0x10000000, the A32 build's interrupt controller at the machine
- * external interrupt), and for an MSP430 (GIZMO_MSP430, 16-bit int: flash at 0x8000, the vectors at
+ * external interrupt), for an MSP430 (GIZMO_MSP430, 16-bit int: flash at 0x8000, the vectors at
  * 0xffe0, RAM at 0x0200, peripherals at 0x0100 with 16-bit registers, the A32 build's interrupt
- * controller on every vector but reset). The peripherals have the same registers on all of them.
+ * controller on every vector but reset), and for a little-endian MIPS32 core in kernel mode
+ * (GIZMO_MIPS: the boot flash at 0xbfc00000 in kseg1, RAM at 0x80000000 in kseg0, peripherals at
+ * 0xbf800000, the A32 build's interrupt controller at hardware interrupt 0). The peripherals have
+ * the same registers on all of them. (The M4 and the C++ builds are the M3's and the RV32's with
+ * more.)
  */
 #ifndef GIZMO_H
 #define GIZMO_H
@@ -39,6 +43,11 @@ typedef u32 hwreg;
 #define TIMER_BASE 0x10001000u
 #define INTC_BASE  0x10002000u
 #define GPIO_BASE  0x10003000u
+#elif defined(GIZMO_MIPS)
+#define UART_BASE  0xbf800000u
+#define TIMER_BASE 0xbf801000u
+#define INTC_BASE  0xbf802000u
+#define GPIO_BASE  0xbf803000u
 #elif defined(GIZMO_MSP430)
 #define UART_BASE  0x0100u
 #define TIMER_BASE 0x0110u
@@ -129,6 +138,11 @@ void timer_start(u32 ticks);
 void delay(u32 ticks);
 void timer_irq(void);
 void irq_enable_timer(void);
+#ifdef GIZMO_MIPS
+/* ram_crc runs in RAM (kseg0): jal reaches only the 256 MiB region of the flash (kseg1), and ld.lld
+   writes the call into the wrong region without a word; a long call loads the address */
+__attribute__((long_call))
+#endif
 u32 ram_crc(const u8 *p, u32 n);
 
 #ifdef GIZMO_M4

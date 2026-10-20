@@ -3,8 +3,60 @@
 The queue of work, top first. Each item says how to tell it is done. Take the first open item,
 finish it with tests on both gizmo builds, commit, run the leak check, push, and tick it off here in
 the same commit. What was done and learned goes into the commit message; this file only keeps the
-queue. The order was agreed with the user: the ARM phases, then `dread pilot`, then RISC-V. How the
-queue may change while the user is away: CLAUDE.md, "Working unattended".
+queue. The order was agreed with the user: the ARM phases, then `dread pilot`, then RISC-V; since
+2026-10-20 compiler diversity on the architectures DREAD has, ARM/Cortex-M and RISC-V, before more
+architectures (docs/decisions.md). How the queue may change while the user is away: CLAUDE.md,
+"Working unattended".
+
+## Compiler diversity (the user, 2026-10-20: first, on ARM/Cortex-M and RISC-V)
+
+Real firmware comes from many compilers, versions and options; DREAD was tested on one version of
+each. CI on Ubuntu 24.04's GCC 13, binutils 2.42 and clang 18 found two gaps of DREAD's own that
+GCC 16, binutils 2.47 and clang 23 never showed (a frame pointer's copies, the listing's FPU). The
+comparison with the original keeps the results right whatever the compiler; what a compiler can
+cost is coverage and acceptance, where the tools recognise code shapes. The way out is measuring
+across compilers and replacing shape catalogues with analyses, not a profile per compiler.
+
+- [ ] **Toolchains in containers** (podman, rootless, installed by the user 2026-10-20): an image per
+  toolchain, built from a distribution's packages (Ubuntu 20.04: arm-none-eabi-gcc 9.2; 22.04: 10.3;
+  24.04: 13.2; Debian 12: 12.2; Debian 13: 14) and LLVM's apt repository (clang 14 to 21), with the
+  RISC-V GCC of the same distributions; `dread bench` builds a recipe with `toolchain = IMAGE`
+  inside the container (the compile and link steps only; DREAD's analysis runs here), the image's
+  compiler versions in the report. Done when a FreeRTOS build of each image goes through the bench.
+- [ ] **The benchmark across compiler versions**: the M3 GCC -Os and -O2 and clang -Os builds and
+  the RISC-V GCC -Os build for every image; accepted per version, and the refusals and drops by
+  category across versions. Each category that only some versions show is a work item (an analysis
+  that does not know a shape). Done when the table is in the report and the categories are items.
+- [ ] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
+  clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
+  2026-10-20, here 6).
+- [ ] **A cclab adapter for Compiler Explorer** (its public API: 52 ARM GCC versions, 21 ARM clang,
+  48 RISC-V GCC, 42 RISC-V clang, TI Arm clang, 17 MSP430 GCC, SDCC on 2026-10-20): the probes
+  compiled there to assembly, assembled and linked here, measured in the emulator as now; answers
+  cached by compiler, options and probe; at most a few requests a second. Only DREAD's own probes
+  go there (rule 1; as for language models).
+- [ ] **One analysis of base registers instead of shapes**: what each register holds as sp plus a
+  constant, an argument plus a constant, or a constant, through every move and add, for regflow's
+  save areas and frame stores, the lifter's frames and the generator's frames (regflow 15 followed
+  one more shape; the next compiler brings another).
+- [ ] **Calling conventions measured, not only read**: a function run with poisoned registers says
+  which it reads before it writes them and which it changes; regflow's answer is checked against
+  that on every build of the benchmark, disagreements listed.
+- [ ] **Refusals to a language model as rule writer**: the categories the benchmark leaves (a code
+  shape the tools do not know) go with their listings to a model that proposes the rule (a
+  recognizer, an input, the C); nothing is taken that the comparison does not accept.
+- [ ] **`dread whatcc` by matching**: a function's C compiled with many compilers and options until
+  the bytes match the original's, as matching decompilation does (decomp.me); on Compiler Explorer
+  for open targets only, with a Compiler Explorer of our own in podman for private ones (C written
+  from a private image must not leave the machine).
+- [ ] **Tests that state properties, not one compiler's output**: the tests that compile snippets
+  checked for what they assume of the code (three CI failures on 2026-10-20 were such assumptions);
+  the snippet tests run in the CI job of the older distribution too.
+- [ ] **The pilot without names**: Haiku's inputs on a copy of the GCC -Os build with every name made
+  FUN_address and the calls' names gone too: how much of what it finds comes from knowing FreeRTOS
+  (open source, its names in the listing) and how much from reading the code. Private firmware has
+  no names.
+
 
 ## Compiler lab (`dread cclab`; the user, 2026-10-19: before anything else)
 
@@ -793,7 +845,9 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   stale bytes of the original is compared except those bytes, which the report names. Done (the
   runner). The other one, a variadic callee's registers, was a regflow bug: clang's save areas behind
   sub sp went unseen; regflow 14, 18 refusals gone.
-- [x] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
+- [x] **The pilot on what the lifter leaves** (costs at Anthropic's list prices the user gave on 2026-10-20:
+  Haiku 5.5 $0.10/$0.50, Sonnet 5.5 $2/$10, Opus 5.5 $4/$20, Fable 5.1 $10/$50 per million tokens in/out;
+  the figures recorded before were at older prices assumed, ten times Haiku's): local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger). --task input now also asks for the functions the lift
   check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed
   instructions run, 74,000 tokens in and 352,000 out, 28 minutes. Most misses were failed
@@ -803,10 +857,11 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   instructions), each on a fresh copy of the build, then dread lift --check on it (296 before):
   - Sonnet 5.5 declined all 20 (stop reason "refusal", no text), also with the purpose stated in
     the question; Opus 5.5 too; Haiku 5.5 answers the same question. What is declined: a listing
-    together with the instructions an input should reach. $0.17. A run stops asking a provider after
+    together with the instructions an input should reach. $0.11 (at the list prices of 2026-10-20). A run stops asking a provider after
     three declined in a row since.
   - Haiku 5.5: 5 functions covered whole, 17 of 74 instructions; 53 answers, 181,000 tokens in,
-    114,000 out, $0.75 at assumed prices, 9.5 minutes. The lift check accepts all five (301).
+    114,000 out, $0.08 at the list prices ($0.75 at the older ones assumed then), 9.5 minutes. The lift check
+    accepts all five (301).
   - deepseek-flash, answers up to 32,000 tokens (at 8,000, 37 of 56 had been cut off reasoning): 7
     whole, 22 of 74; 43 answers, 122,000 in, 818,000 out, at most $1.49 (the balance went from 11.87
     to 10.38), 60 minutes. The lift check accepts six (302). The seventh, _fwalk_sglue, fails on its
@@ -821,8 +876,8 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   the local model as much as Haiku at no cost but twenty-five times the time; Sonnet and Opus decline.
   Haiku 5.5 over every function with missed instructions of GCC -Os after measure-24 (34 functions,
   447 instructions): 8 covered whole, 154 instructions run; 91 answers, 370,000 tokens in, 223,000
-  out, $1.48 at the assumed prices, 19 minutes; the lift check accepts all eight more and loses none
-  (298 to 306 of 366, 81 to 84 %): about $0.19 a function accepted. Open: where such inputs should
+  out, $0.15 at the list prices ($1.48 at the older ones assumed then), 19 minutes; the lift check accepts
+  all eight more and loses none (298 to 306 of 366, 81 to 84 %): about $0.02 a function accepted. Open: where such inputs should
   live. They are a build's written cases (tests/extra_cases), which the benchmark's next build keeps
   or not; the measurement counts DREAD's own tools, so a second figure "with the pilot's inputs",
   their files kept beside the recipe (FreeRTOS is open source), would show both.
@@ -832,14 +887,14 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   says that a pointer to code must be a function's entry.
   Haiku 5.5 again after the day's generator work (measure-28's GCC -Os, 310 accepted): 33 functions
   with 230 missed instructions left (447 that morning), 10 covered whole, 77 instructions run; 87
-  answers, 327,000 tokens in, 188,000 out, $1.26, 17 minutes; the lift check accepts all ten and loses
-  none (310 to 320): $0.13 a function. Six of the ten Haiku found that morning too; two of that
+  answers, 327,000 tokens in, 188,000 out, $0.13 at the list prices, 17 minutes; the lift check accepts
+  all ten and loses none (310 to 320): about $0.013 a function. Six of the ten Haiku found that morning too; two of that
   morning's eight the generator covers itself now (vListInsert, prvInsertTimerInActiveList). Done:
   measured with every provider; what the benchmark does with such inputs is a later item (below).
 - [ ] (Later) **The pilot's inputs in the benchmark**: a `dread bench pilot` step that keeps the input
   pilot's written cases of a build beside the recipe (FreeRTOS is open source), keyed by the image's
   hash, and a second figure per build, "with the pilot's inputs", from a lift check on a copy, so that
-  the measurement still counts DREAD's own tools first. About $1.30 a build with Haiku 5.5.
+  the measurement still counts DREAD's own tools first. About $0.13 a build with Haiku 5.5.
 - [ ] (Later) **What the lifter leaves, round two**: (1) loop cases seeded with what the system run
   saw each callee of a task return and write (dread.sysrecord for loop functions: their stub answers
   as returns, fills and effects; about twenty task loops a build miss instructions behind checks in a
@@ -1131,8 +1186,26 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## More architectures (each: a gizmo build with clang, the arch layer, every tool on it)
 
-- [ ] AArch64 (A64): literal loads, adrp pairs, the AAPCS64 registers.
 - [ ] MIPS32, little endian: delay slots (branch encoding in the overlay, the lifter, regflow), gp.
+  Paused after step 1 (the user, 2026-10-20: compiler diversity first). Step 1 done: dread.arch.mips
+  decodes the bits itself (capstone has no register access for MIPS and names coprocessor 0's
+  registers as general ones), checked against llvm-mc on random operands of every integer form;
+  gizmo-mips (clang, the image in kseg1 at 0xbfc00000, RAM in kseg0; clang has no bare-metal
+  driver for MIPS: compiled with clang, linked with ld.lld); the listing rebuilds byte for byte
+  with every instruction as text. Found: ld.lld puts .MIPS.abiflags and .reginfo in front of .text
+  (every j and jal of the listing 0x30 off; the layer's discard_sections), and gizmo's own call of
+  ram_crc (RAM, kseg0) by jal from the flash (kseg1) went to 0xb0000000: jal reaches only its own
+  256 MiB region and ld.lld said nothing (a long call now; a test checks that every jump lands on
+  code). Step 2 in progress on the branch `mips`: Unicorn's virtual TLB (kseg0 and kseg1 addresses
+  as themselves, else nothing there fetches), o32's 16-byte argument home in front of the stack
+  arguments, the generator's hooks, the entry branch, _gp for the overlay, regflow's delay slots
+  (the branch's row takes its reads and the slot's effects, the slot's row the transfer: arguments
+  set in a jal's slot). Open there: Unicorn segfaults translating a block during fmt_hex's case
+  generation (tcg_const in tb_gen_code), which also hangs a pool whose worker dies so.
+- [ ] AArch64 (A64): literal loads, adrp pairs, the AAPCS64 registers. Bigger than it looks: the first
+  64-bit architecture, and the tools are 32-bit throughout (the emulator's arguments and results,
+  the comparisons, the generator's values and pointer cells, regflow's masks, the lifter's u32
+  registers): 64-bit registers and pointers through every tool first, from the layer's reg_bits.
 - [ ] PowerPC 32, big endian: brings big-endian support to the emulator, the program database and
   the listing generator; lr/ctr calls.
 - [ ] Big-endian ARM (BE-8) on the existing ARM layer.

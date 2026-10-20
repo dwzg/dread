@@ -13,8 +13,31 @@ syms = {s.name: s.value for s in elf.symbols if s.name and not s.name.startswith
 data, base = elf.payload()
 
 
+PT_LOAD = 1
+# (run address, stored address, length) of what the startup copies from the image (.data, .ramfunc)
+copies = [(vaddr, paddr, filesz) for kind, _, vaddr, paddr, filesz, _, _ in elf.segments
+          if kind == PT_LOAD and vaddr != paddr and filesz]
+
+
+def stored(address):
+    """Where the image holds the bytes that run at `address` (itself outside the copies)."""
+    for run, at, size in copies:
+        if run <= address < run + size:
+            return at + address - run
+    return address
+
+
+def running(address):
+    """Where the bytes the image holds at `address` run (itself outside the copies): clang's MIPS
+    build keeps short constant strings in small data (.sdata), which runs from RAM."""
+    for run, at, size in copies:
+        if at <= address < at + size:
+            return run + address - at
+    return address
+
+
 def string_at(address):
-    o = address - base
+    o = stored(address) - base
     if not 0 <= o < len(data):
         return None
     end = data.find(b"\0", o)
@@ -34,13 +57,14 @@ def mode_strings():
     found = {}
     for text in set(want):
         o = data.find(b"\0" + text + b"\0")
-        found[text] = base + o + 1
+        found[text] = running(base + o + 1)
     return [found[t] for t in want]
 
 
 names = mode_strings()
 bases = {"a32": (0x80000000, 0x80003000), "m3": (0x40011000, 0x40010800), "m4": (0x40011000, 0x40010800), "m3cpp": (0x40011000, 0x40010800),
-         "rv32": (0x10000000, 0x10003000), "rv32cpp": (0x10000000, 0x10003000), "msp430": (0x0100, 0x0130)}
+         "rv32": (0x10000000, 0x10003000), "rv32cpp": (0x10000000, 0x10003000), "msp430": (0x0100, 0x0130),
+         "mips": (0xbf800000, 0xbf803000)}
 lines = ["/* written by examples/gizmo/fw/addresses.py from %s; do not edit */" % elf_path.split("/")[-1],
          "#define UART_BASE 0x%08xu" % bases[variant][0],
          "#define GPIO_BASE 0x%08xu" % bases[variant][1],
@@ -53,7 +77,7 @@ lines = ["/* written by examples/gizmo/fw/addresses.py from %s; do not edit */" 
          "#define STR_TEST ((const char *)0x%08x)" % names[3],
          "#define STR_UNKNOWN ((const char *)0x%08x)" % names[4],
          "#define STR_SERVICE ((const char *)0x%08x)" % names[7]]
-if variant in ("m3", "m4", "m3cpp", "rv32", "rv32cpp", "msp430"):     # (msp430: C division calls the image's own __mspabi_divul)
+if variant in ("m3", "m4", "m3cpp", "rv32", "rv32cpp", "msp430", "mips"):     # (msp430: C division calls the image's own __mspabi_divul)
     lines.append("#define HAVE_UDIV 1")
 if variant == "msp430":
     lines.append("#define HWREG(a) (*(volatile u16 *)(a))")
