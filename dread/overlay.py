@@ -235,7 +235,8 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
 
     branch_len = {fn: arch.branch_length(funcs[fn].isa, funcs[fn].entry, (base, limit)) for fn in replaced}
     in_slot, in_body, relocated, helpers = [], [], [], [fn for fn in sizes if fn not in funcs]
-    place = {}
+    place, short, tramps = {}, set(), {}
+    narrow = getattr(arch, "short_branch", None)
     for fn in sorted(replaced):
         runs = slots[fn]
         here = fit(runs[0][0], runs[0][1], fn) if runs[0][0] % aligns[fn] == 0 else None
@@ -244,7 +245,11 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             place[fn] = here
             continue
         if runs[0][1] < branch_len[fn]:
-            raise OverlayError("%s does not fit at its entry and leaves no room for a branch there" % fn, fn)
+            if narrow is None or funcs[fn].isa != "t32" or runs[0][1] < 2:
+                raise OverlayError("%s does not fit at its entry and leaves no room for a branch there" % fn, fn)
+            short.add(fn)                   # a narrow b to its C or to a trampoline within reach (below)
+            relocated.append(fn)
+            continue
         later = [fit(s, n, fn) for s, n in runs[1:]]
         later = [x for x in later if x]
         if later:
@@ -270,7 +275,38 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
     free_holes = [[lo, hi] for lo, hi in free]
     holes += free_holes                 # after the freed holes: best fit takes those first
     in_hole = []
+
+    def reach(fn, at):
+        """Whether the narrow b at fn's entry reaches at."""
+        try:
+            narrow(funcs[fn].entry, at, funcs[fn].isa)
+            return True
+        except ValueError:
+            return False
+
+    # A function too small for a branch (a compiler's b.n into shared code, two bytes) gets a narrow
+    # one: its C goes into room within 2 KiB if it fits there, else a branch to it does (a trampoline).
+    for fn in sorted(short, key=lambda n: (funcs[n].entry, n)):
+        fits = [(h, fit(h[0], h[1] - h[0], fn)) for h in holes]
+        fits = [(h, x) for h, x in fits if x and reach(fn, x[0])]
+        if fits:
+            h, (at, _) = min(fits, key=lambda hx: (hx[0][1] - hx[0][0], hx[0][0]))
+            place[fn] = (at, sizes[fn])
+            h[0] = align_up(at + sizes[fn], 2)
+            in_hole.append(fn)
+            continue
+        for h in sorted(holes, key=lambda h: (h[1] - h[0], h[0])):
+            at = align_up(h[0], 4)
+            if at + branch_len[fn] <= h[1] and reach(fn, at):
+                tramps[fn] = at
+                h[0] = at + branch_len[fn]
+                break
+        else:
+            raise OverlayError("%s does not fit at its entry, and no room within reach of a narrow branch there"
+                               % fn, fn)
     for fn in sorted(relocated, key=lambda n: (-sizes[n], n)):
+        if fn in in_hole:
+            continue
         fits = [(h, fit(h[0], h[1] - h[0], fn)) for h in holes]
         fits = [(h, x) for h, x in fits if x]
         if fits:
@@ -360,7 +396,13 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                                % (fn, syms.get(fn, 0), place[fn][0]), fn)
     for fn in in_body + relocated:
         f = funcs[fn]
-        code = arch.entry_branch(f.entry, syms[fn], f.isa, branch_len[fn])
+        if fn in short:                     # a narrow b, to the C or to its trampoline
+            code = narrow(f.entry, tramps.get(fn, syms[fn]), f.isa)
+            if fn in tramps:
+                hop = arch.entry_branch(tramps[fn], syms[fn], f.isa, branch_len[fn])
+                picture[tramps[fn] - base:tramps[fn] - base + len(hop)] = hop
+        else:
+            code = arch.entry_branch(f.entry, syms[fn], f.isa, branch_len[fn])
         picture[f.entry - base:f.entry - base + len(code)] = code
     picture.extend(bytes([erased]) * (-len(picture) % 4))
 
@@ -371,7 +413,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
     for start, stop in hole_space + free:
         allowed.update(range(start, stop))
     for fn in in_body + relocated:
-        allowed.update(range(funcs[fn].entry, funcs[fn].entry + branch_len[fn]))
+        allowed.update(range(funcs[fn].entry, funcs[fn].entry + (2 if fn in short else branch_len[fn])))
     stray = [base + i for i in range(len(original)) if picture[i] != original[i] and base + i not in allowed]
     if stray:
         raise OverlayError("the overlay changed %d bytes outside the rewritten functions, first at 0x%x"
@@ -404,8 +446,14 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
         else:
             how, text = "behind the image", "moved to 0x%x behind the image, branch at original entry" % syms[fn]
         lines.append("%s\t0x%x\t%d\t%d\t%s" % (fn, f.entry, f.size, sizes[fn], text))
+        if fn in short:
+            text = text.replace("branch at original entry", "a narrow branch at original entry" +
+                                (" through 0x%x" % tramps[fn] if fn in tramps else ""))
+            lines[-1] = "%s\t0x%x\t%d\t%d\t%s" % (fn, f.entry, f.size, sizes[fn], text)
         placement[fn] = {"entry": f.entry, "address": syms[fn], "original_bytes": f.size, "c_bytes": sizes[fn],
                          "placement": how, "branch": fn in in_body + relocated, "isa": f.isa}
+        if fn in tramps:
+            placement[fn]["via"] = tramps[fn]
     done = len(replaced)
     tail_size = next((s.size for s in linked.sections if s.name == ".recon.tail"), 0)
     free_left = sum(h[1] - h[0] for h in free_holes) - (tail_size if tail_inside else 0)

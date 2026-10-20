@@ -756,3 +756,79 @@ def test_shared_code_others_branch_into_stays(tmp_path):
     rebuilt = (tmp_path / "build" / "lift-check" / "main" / "payload.bin").read_bytes()
     lo, hi = shared - 0x08000000, shared - 0x08000000 + 12
     assert rebuilt[lo:hi] == original[lo:hi]
+
+
+TWO_BYTES_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global h, k, use
+    .type h, %%function
+    .thumb_func
+h:      b.n     common          @ a two-byte function: one narrow branch into shared code
+    .size h, . - h
+    .type k, %%function
+    .thumb_func
+k:      movs    r1, #1          @ another function that enters it (it stays original)
+        b.n     common
+    .size k, . - k
+common: adds    r0, r2, r3      @ code no function owns
+        eors    r0, r0, r1
+        lsls    r0, r0, #3
+        adds    r0, r0, #7
+        bx      lr
+        .align  2
+gap:    .space  %d, 0xff        @ declared free: room within reach of h's narrow branch
+    .type use, %%function
+    .thumb_func
+use:    push    {r4, lr}
+        movs    r1, #3
+        movs    r2, #5
+        movs    r3, #9
+        bl      h
+        mov     r4, r0
+        bl      k
+        add     r0, r4
+        pop     {r4, pc}
+"""
+
+
+@pytest.mark.parametrize("gap", [32, 4], ids=["the C within reach", "a trampoline within reach"])
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_a_two_byte_function_gets_a_narrow_branch(tmp_path, gap):
+    """A function that is one b.n into shared code (a compiler's cross call: eight such probe
+    functions of the other compiler at -Ohz) has no room for the four-byte branch to its C. A narrow
+    b reaches 2 KiB: the C goes into room within reach, or a trampoline that branches to it does,
+    and the cases enter through the narrow branch."""
+    import json
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.elf import Elf
+    (tmp_path / "t.s").write_text(TWO_BYTES_S % gap)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "use", "-o", elf, obj], check=True)
+    at = {s.name: s.value & ~1 for s in Elf(elf).symbols if s.name in ("h", "gap")}
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\nfree = [[0x%x, 0x%x]]\n' % (at["gap"], at["gap"] + gap) +
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    lines = []
+    assert lift.check(t, t.image(), ["h"], out=lines.append, jobs=1) == ["h"], "\n".join(lines)
+    work = tmp_path / "build" / "lift-check" / "main"
+    placed = json.loads((work / "placement.json").read_text())["functions"]["h"]
+    rebuilt = (work / "payload.bin").read_bytes()
+    arch = t.image().arch
+    to = arch.short_branch_target(rebuilt[at["h"] - 0x08000000:], at["h"], "t32")
+    if gap == 32:
+        assert to == placed["address"] and "via" not in placed
+    else:
+        assert to == placed["via"] and at["gap"] <= to < at["gap"] + gap
+        assert rebuilt[to - 0x08000000:to - 0x08000000 + 4] == arch.entry_branch(to, placed["address"], "t32")

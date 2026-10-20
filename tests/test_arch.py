@@ -332,3 +332,18 @@ case_uqi:
     assert shapes == {0x10: ("push", 8), 0x14: ("push", 16), 0x18: ("pop", 16), 0x1C: ("push", 8),
                       0x100: ("push", 8), 0x10E: ("pop", 8)}, shapes
     assert arm.flow(program.insn(0x10E))[0] == "return"
+
+
+def test_a_narrow_thumb_branch_reaches_2_kib():
+    """dread.overlay's entry branch for a two-byte function: b.n, 2 KiB either way from pc + 4."""
+    from dread.arch.arm import Arm
+    arch = Arm(isa="t32", profile="m")
+    for dst in (0x1004 + 2046, 0x1004 - 2048, 0x1006, 0x1000):
+        code = arch.short_branch(0x1000, dst, "t32")
+        assert len(code) == 2 and arch.short_branch_target(code, 0x1000, "t32") == dst
+    for dst in (0x1004 + 2048, 0x1004 - 2050, 0x1001):
+        with pytest.raises(ValueError):
+            arch.short_branch(0x1000, dst, "t32")
+    with pytest.raises(ValueError):
+        arch.short_branch(0x1000, 0x1008, "a32")
+    assert arch.short_branch_target(b"\x00\xbf", 0x1000, "t32") is None        # a nop, no branch

@@ -863,6 +863,25 @@ class Arm:
         second = (0xD000 if link else 0x9000) | (j1 << 13) | (j2 << 11) | ((off >> 1) & 0x7FF)
         return struct.pack("<HH", first, second)
 
+    def short_branch(self, src, dst, isa):
+        """The bytes of Thumb's narrow unconditional b (two bytes, 2 KiB either way) at `src` to
+        `dst`: the entry of a function too small for a branch to its C (dread.overlay). Raises
+        ValueError out of reach and in ARM state."""
+        off = dst - (src + 4)
+        if isa != "t32" or off % 2 or not -2048 <= off <= 2046:
+            raise ValueError("no narrow branch from 0x%x to 0x%x" % (src, dst))
+        return struct.pack("<H", 0xE000 | ((off >> 1) & 0x7FF))
+
+    def short_branch_target(self, code, src, isa):
+        """Where the narrow b in the first two bytes of `code` at `src` goes, or None."""
+        if isa != "t32" or len(code) < 2:
+            return None
+        h = struct.unpack_from("<H", code)[0]
+        if h & 0xF800 != 0xE000:
+            return None
+        off = (h & 0x7FF) << 1
+        return src + 4 + (off - 0x1000 if off & 0x800 else off)
+
     def branch_length(self, isa, src=None, span=None):
         """The room the branch at a moved function's entry needs (src, span: where it is and the
         range its destination lies in; ARM's branches reach the whole image)."""

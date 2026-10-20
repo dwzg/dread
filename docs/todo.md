@@ -140,10 +140,14 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     of a two-byte `b.n` into it failed before). The other compiler's -Ohz builds: 83 to 85 of 95
     probe functions, its older version's 77 to 85 (its shared code has no symbol); -On and GCC's
     unchanged. What stays at -Ohz is mostly two-byte functions (below).
-  - [ ] **Two-byte functions**: a function that is one `b.n` into shared code (or a `nop` that falls
+  - [x] **Two-byte functions**: a function that is one `b.n` into shared code (or a `nop` that falls
     into it) leaves no room for the four-byte branch to its C. A `b.n` reaches 2 KB: a four-byte
     trampoline (or the C itself) in freed room within reach would do (eight of the other compiler's
-    -Ohz probe functions, its older version's too).
+    -Ohz probe functions, its older version's too). Done 2026-10-20, the second: the overlay places
+    such a function first, its C into room within reach if it fits there, else a trampoline
+    (`placement.json`'s `via`); the entry gets a narrow b (only its two bytes may change), and the
+    emulator enters through it so that the cases test it. Both of the other compiler's -Ohz builds
+    94 of 95 probe functions (85 before); what stays is keeps_fp.
   - [ ] **A call into code no function owns** (`bl` into the other compiler's unnamed shared code, its
     older version: keeps_fp): the callee needs a name (a function of its own at the target, as
     import does for calls it finds), then bound calls take what it leaves.

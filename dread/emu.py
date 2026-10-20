@@ -641,6 +641,23 @@ class Machine:
             self.stubs[moved] = fn
             self.core.stub_hook(moved)
 
+    def _narrow_to(self, addr, moved, isa):
+        """Whether the narrow b at addr (a function too small for the branch to its C, dread.overlay)
+        leads to moved, directly or through a trampoline that branches there."""
+        target_of = getattr(self.arch, "short_branch_target", None)
+        if target_of is None:
+            return False
+        via = target_of(self.read(addr, 2), addr, isa)
+        if via is None:
+            return False
+        if via == moved:
+            return True
+        try:
+            hop = self.arch.entry_branch(via, moved, isa)
+        except ValueError:
+            return False
+        return self.read(via, len(hop)) == hop
+
     def cover(self, begin, end, tree=False):
         """Record the blocks executed in [begin, end): covered_insns() turns them into
         instruction addresses (block granularity: a conditional instruction that does not
@@ -859,7 +876,7 @@ class Machine:
                 expected = self.arch.entry_branch(addr, moved, isa)
             except ValueError:
                 expected = None
-            if self.read(addr, len(expected or b"\0" * 4)) != expected:
+            if self.read(addr, len(expected or b"\0" * 4)) != expected and not self._narrow_to(addr, moved, isa):
                 addr = moved
         if self.arg_domains:
             from dread.cases import confine_args
