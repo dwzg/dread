@@ -2,6 +2,7 @@
 # or every scenario of the system run) agree with the original and run every instruction it
 # can reach. Written by dread lift --check; not edited by hand.
 __aeabi_ldiv0
+__aeabi_uidivmod
 __ram_crc_veneer
 apply_config
 beep_off

@@ -125,12 +125,28 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     stub in assembly that hands the C the caller's r4-r11 (and lr), so the C reproduces what the
     original leaves; the same would lift functions refused today for reading what their caller left
     in r4-r11. Likely common in that compiler's lower optimisation levels.
-  - [ ] **Code shared between functions** (a compiler's cross call or outliner, at high
+  - [x] **Code shared between functions** (a compiler's cross call or outliner, at high
     optimisation for size): functions that branch or fall into common code with their frame still
     open, and common code called by `bl` whose callers read what it leaves; with a symbol of its own
     or only a local label, so to DREAD it may belong to no function. Lift it as part of each function
     that enters it (as IDA's tail chunks); a two-byte function (one `b.n` into it) stays original
-    until functions can move.
+    until functions can move. Done 2026-10-20, the second: `Lifter.shared_code` makes a function a
+    `Body` (its own instructions, then the pieces of shared code it falls or branches into with its
+    frame open, or that belong to no function), the build records the bodies in lifted.json, and the
+    runner and the generator cover them (coverage spans the whole body). A branch into another
+    function with the frame open is refused instead of being taken for a tail call (the C's frame
+    would be popped by the original's tail), and the overlay keeps an extent closed where original
+    code branches into it (code no function owns behind a function that took it in: three callers
+    of a two-byte `b.n` into it failed before). The other compiler's -Ohz builds: 83 to 85 of 95
+    probe functions, its older version's 77 to 85 (its shared code has no symbol); -On and GCC's
+    unchanged. What stays at -Ohz is mostly two-byte functions (below).
+  - [ ] **Two-byte functions**: a function that is one `b.n` into shared code (or a `nop` that falls
+    into it) leaves no room for the four-byte branch to its C. A `b.n` reaches 2 KB: a four-byte
+    trampoline (or the C itself) in freed room within reach would do (eight of the other compiler's
+    -Ohz probe functions, its older version's too).
+  - [ ] **A call into code no function owns** (`bl` into the other compiler's unnamed shared code, its
+    older version: keeps_fp): the callee needs a name (a function of its own at the target, as
+    import does for calls it finds), then bound calls take what it leaves.
   - [x] **A lift step in the lab**: `dread cclab run --lift` gives each build a `[compiler]` (the
     rebuilding GCC with the build's cpu) and runs `dread lift --check`; the probes' verdicts go into
     results.json, `report` and `compare` ("lifted N of M"). Then a run at work checks the real images

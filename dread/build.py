@@ -176,7 +176,7 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
         lifter.src_calls = frozenset(src_calls)
         kept.clear()                        # what was lifted for other callers
     os.makedirs(outdir, exist_ok=True)
-    made, endless, loops = {}, [], []
+    made, endless, loops, bodies = {}, [], [], {}
     for name in names:
         fn = program.by_name.get(name)
         if fn is None:
@@ -203,6 +203,8 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
             with open(path, "w") as f:
                 f.write(text)
         made[name] = result.unreached
+        if getattr(result, "body", None):
+            bodies[name] = result.body      # its C holds shared code too (lift.Lifter.shared_code)
         if lifter.system_only(fn):         # never returns, or an exception handler
             endless.append(name)
             if lifter.handler_kind(fn) is None:
@@ -210,7 +212,7 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
     for old in glob.glob(os.path.join(outdir, "*.c")):
         if os.path.basename(old)[:-2] not in made:
             os.remove(old)
-    return made, endless, loops
+    return made, endless, loops, bodies
 
 
 def system_names(path):
@@ -232,7 +234,7 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
     record = os.path.join(workdir, "lifted.txt")
     if names:
         defined = defined_functions(objects)
-        made, endless, loops = lift_sources(target, image, [n for n in names if n not in defined],
+        made, endless, loops, bodies = lift_sources(target, image, [n for n in names if n not in defined],
                                             os.path.join(workdir, "lifted"), quiet=quiet, lifter=lifter,
                                             src_calls=called_functions(objects))
         if lifted is None:                  # the image's table: the system run's acceptances stay its own
@@ -244,7 +246,7 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
             f.write("".join(n + "\n" for n in made))
         with open(os.path.join(workdir, "lifted.json"), "w") as f:
             json.dump({"unreached": {n: a for n, a in sorted(made.items()) if a}, "system": sorted(endless),
-                       "loop": sorted(loops)}, f, indent=1)
+                       "loop": sorted(loops), "bodies": {n: bodies[n] for n in sorted(bodies)}}, f, indent=1)
     elif os.path.exists(record):
         os.remove(record)
     payload = os.path.join(workdir, "payload.bin")

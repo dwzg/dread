@@ -132,9 +132,23 @@ class Lifted:
     """The result for one function; unreached: its instructions no path from the entry reaches
     (padding behind an ARMv4T veneer's bx pc, say), which no case can run."""
 
-    def __init__(self, name, text, callees, frame, stack_params, unreached=()):
+    def __init__(self, name, text, callees, frame, stack_params, unreached=(), body=None):
         self.name, self.text, self.callees, self.frame, self.stack_params = name, text, callees, frame, stack_params
         self.unreached = list(unreached)
+        self.body = body            # with shared code (Lifter.shared_code): every instruction the C holds
+
+
+class Body:
+    """A function with the shared code it enters (Lifter.shared_code): its own instructions first,
+    then the pieces of shared code, each in address order. key keeps the lifter's caches apart from
+    those of the function alone."""
+
+    def __init__(self, fn, insns):
+        self.name, self.entry, self.size, self.isa, self.insns = fn.name, fn.entry, fn.size, fn.isa, list(insns)
+        self.own, self.key = list(fn.insns), fn.name + "+shared"
+
+    def __repr__(self):
+        return "Body(%s, %d own, %d shared)" % (self.name, len(self.own), len(self.insns) - len(self.own))
 
 
 RETRY_PASSES = 8            # times the lift check tries again what failed through a failing callee
@@ -292,6 +306,83 @@ class Lifter:
         callee = self.prog.by_entry.get(insn.address + insn.size)
         return callee if callee is not None and callee is not fn else None
 
+    def shared_code(self, fn, rounds=4, limit=512):
+        """fn as a Body with the shared code it enters, or None: code outside fn that it falls or
+        branches into with its frame still open, or that belongs to no function. A compiler's cross
+        call or outliner keeps the tail several functions share once (IAR's ?SubroutineN at -Oh and
+        -Ohz, a local label only in its version 8), and the tail ends the frame its callers opened;
+        GCC's .cold parts are entered the same way. Each piece is followed from its entry up to
+        returns, tail calls (another function's entry) and indirect jumps; a piece that leads into
+        more shared code is followed in the next round. Entering a function with the frame closed
+        stays a tail call."""
+        prog, arch = self.prog, self.arch
+        body = list(fn.insns)
+        for _ in range(rounds):
+            current = fn if len(body) == len(fn.insns) else Body(fn, body)
+            try:
+                states = self.states(current, strict=False)
+            except Refused:
+                return None
+            have, entries = set(body), []
+            for a in body:
+                if a not in states:
+                    continue
+                insn = prog.insn(a)
+                depth, values = states[a]
+                kind, target, falls = arch.flow(insn)
+                if kind == "return" or self.ret_jump(insn, values):
+                    continue
+                try:
+                    after = self.step(insn, depth, values)[0]
+                except (Refused, StackSwitch):
+                    continue
+                exits = []
+                if (kind in ("next", "call", "icall") or falls) and not self.dead_end(insn) \
+                        and a + insn.size not in have:
+                    exits.append(a + insn.size)
+                if kind == "jump" and isinstance(target, int) and (target & ~1) not in have:
+                    exits.append(target & ~1)
+                for t in exits:
+                    if t in prog.by_entry and not after:
+                        continue            # a tail call
+                    if prog.insn(t) is not None and prog.isa_at(t) == fn.isa:
+                        entries.append(t)
+            if not entries:
+                break
+            piece = self._piece(entries, have, fn.isa, limit - len(body))
+            if not piece:
+                break
+            body += sorted(piece)
+        return None if len(body) == len(fn.insns) else Body(fn, body)
+
+    def _piece(self, entries, have, isa, room):
+        """The instructions reachable from entries without leaving the shared code: the next one and
+        branch targets (not those of calls), up to returns, indirect jumps and the entries of other
+        functions (tail calls, or more shared code for the next round); None when it grows past room
+        or meets what does not decode."""
+        prog, arch = self.prog, self.arch
+        out, work, starts = set(), list(entries), set(entries)
+        while work:
+            a = work.pop()
+            if a in have or a in out:
+                continue
+            insn = prog.insn(a)
+            if insn is None or prog.isa_at(a) != isa:
+                return None
+            out.add(a)
+            if len(out) > room:
+                return None
+            kind, target, falls = arch.flow(insn)
+            if kind in ("return", "ijump"):
+                continue
+            nexts = []
+            if (kind in ("next", "call", "icall") or falls) and not self.dead_end(insn):
+                nexts.append(a + insn.size)
+            if kind == "jump" and isinstance(target, int):
+                nexts.append(target & ~1)
+            work += [t for t in nexts if t not in prog.by_entry or t in starts]
+        return out
+
     def _tail_into(self, callee, insn):
         """The C of falling into `callee`: its tail call (the frame must be gone by then)."""
         depth, values = self.ctx["states"][insn.address]
@@ -312,7 +403,7 @@ class Lifter:
         (and, when strict, when the code falls through out of the function). switch: a load of the
         stack pointer from memory not on the stack (StackSwitch) ends its path instead of refusing:
         nothing behind it runs on this function's stack (stack_args, switches_stacks)."""
-        key = (fn.name, strict, switch)
+        key = (getattr(fn, "key", fn.name), strict, switch)
         if key in self._states:
             return self._states[key]
         prog, arch = self.prog, self.arch
@@ -577,19 +668,20 @@ class Lifter:
     def stack_args(self, fn):
         """How many words above its entry's stack pointer a function reads or passes on to a tail
         call: its stack arguments. None when that is not known (its stack pointer is not static)."""
-        if fn.name in self._stack_args:
-            return self._stack_args[fn.name]
+        key = getattr(fn, "key", fn.name)
+        if key in self._stack_args:
+            return self._stack_args[key]
         declared = self.prog.target.abi.stack_args.get(fn.name)
         if declared is None and hasattr(self.arch, "abi_stack_args"):
             declared = self.arch.abi_stack_args(fn.name)        # the run-time ABI's helpers: none
         if declared is not None:                # [abi] stack_args: the target says so (a context switch)
-            self._stack_args[fn.name] = declared
+            self._stack_args[key] = declared
             return declared
-        self._stack_args[fn.name] = 0           # a recursive call counts nothing while this is worked out
+        self._stack_args[key] = 0               # a recursive call counts nothing while this is worked out
         try:
             depth = self.depths(fn, strict=False, switch=True)
         except Refused:
-            self._stack_args[fn.name] = None
+            self._stack_args[key] = None
             return None
         states = self.states(fn, strict=False, switch=True)
         top = 0
@@ -612,7 +704,7 @@ class Lifter:
                 n = self.stack_args(callee) or 0
                 if 4 * n > d:
                     top = max(top, (4 * n - d + 3) // 4)
-        self._stack_args[fn.name] = top
+        self._stack_args[key] = top
         return top
 
     def entry_states(self, fn):
@@ -625,8 +717,8 @@ class Lifter:
         under, as long as the flags do not change in between. Where the layer has the flags one
         by one (flag_effects: the MSP430's clrc writes C and passes the others through) they are
         followed so, and the result has them as "flags" again (undefined, or read, if one is)."""
-        if fn.name in self._entry:
-            return self._entry[fn.name]
+        if getattr(fn, "key", fn.name) in self._entry:
+            return self._entry[getattr(fn, "key", fn.name)]
         prog, arch = self.prog, self.arch
         index = {a: i for i, a in enumerate(fn.insns)}
         try:
@@ -711,7 +803,7 @@ class Lifter:
                 return frozenset("flags" if r.startswith("flags:") else r for r in regs)
             undef_at = {a: fold(u) for a, u in undef_at.items()}
             found = {a: set(fold(r)) for a, r in found.items()}
-        self._entry[fn.name] = (undef_at, found)
+        self._entry[getattr(fn, "key", fn.name)] = (undef_at, found)
         return undef_at, found
 
     def saving_store(self, insn, values):
@@ -762,6 +854,8 @@ class Lifter:
                 raise Refused("listed in asm_only: %s" % reason)
         if not IDENT.match(fn.name):
             raise Refused("its name is not a C identifier")
+        if arch.name == "arm" and not isinstance(fn, Body):
+            fn = self.shared_code(fn) or fn     # the shared code it enters becomes its own (Body)
         insns = prog.instructions(fn)
         if not insns or any(i is None for i in insns):
             raise Refused("an instruction does not decode")
@@ -816,7 +910,8 @@ class Lifter:
         stubs = {self.arch.target(i) & ~1 for i in insns if getattr(i, "call_via", None)}   # bl into a bx rN
         return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]) + sorted(self.ctx["bound"]),
                       frame, stack_params,
-                      [a for a in fn.insns if a not in depth and a not in stubs])
+                      [a for a in fn.insns if a not in depth and a not in stubs],
+                      list(fn.insns) if isinstance(fn, Body) else None)
 
     def uses_fpu(self, insns):
         """Whether the instructions use ARM's FPU. VFP holds capstone's ARM ids: on another
@@ -839,8 +934,8 @@ class Lifter:
         abort's return (subs pc, lr, #8), mixed forms."""
         if getattr(self.arch, "profile", None) != "a" or not fn.insns:
             return None
-        if fn.name in self._handlers:
-            return self._handlers[fn.name]
+        if getattr(fn, "key", fn.name) in self._handlers:
+            return self._handlers[getattr(fn, "key", fn.name)]
         returns = [i for i in self.prog.instructions(fn)
                    if i is not None and self.arch.flow(i)[0] == "return" and self.exception_return(i)]
         kind = None
@@ -862,7 +957,7 @@ class Lifter:
             if len(kinds) != 1:
                 raise Refused("its exception returns differ in kind")
             kind = kinds.pop()
-        self._handlers[fn.name] = kind
+        self._handlers[getattr(fn, "key", fn.name)] = kind
         return kind
 
     def system_only(self, fn):
@@ -1143,6 +1238,9 @@ class Lifter:
             callee = prog.by_entry.get(t)
             if callee is None:
                 raise Refused("0x%x branches into other code (0x%x)" % (insn.address, t))
+            after = self.step(insn, *self.ctx["states"][insn.address])[0]
+            if after:                           # its frame open: code that ends it (shared_code), not a call
+                raise Refused("0x%x branches into %s with %d bytes of frame" % (insn.address, callee.name, after))
             call = self._fp_call(self._call(callee, insn))
             if arch.predicate(insn) is not None:
                 return "if (%s) { %s %sreturn %s; }" % (COND[insn.cc], call, self._fp_sync("out"), self._ret())

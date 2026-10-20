@@ -189,6 +189,13 @@ REAL_LIBRARY = ("memcpy", "memmove", "memset", "memcmp", "strcat", "strcmp", "st
 
 
 
+def cover_span(program, words):
+    """[lo, hi) to record a function's coverage over: from its lowest instruction to behind its
+    highest (a lifted Body's shared code may lie in front of the entry or behind the function)."""
+    last = max(words)
+    return min(words), last + program.insn_size(last)
+
+
 class GenerationError(Exception):
     """No input of the search ran to the end: the function needs written cases."""
 
@@ -738,8 +745,7 @@ class Generator:
         m.plan = []
         try:
             self.apply(m, case)
-            m.cover(words[0], self.program.end(self.program.by_entry[entry]) if entry in self.program.by_entry
-                    else words[-1] + 4)
+            m.cover(*cover_span(self.program, words))
             if check_image:
                 m.trace_reads(self.image.base, self.image.end, self.code, self.owners)
             m.call(entry, *case["args"], max_instructions=limit)
@@ -848,7 +854,7 @@ class Generator:
                      | {c[0] for c in calls if c[0] == self.fake_pointer})
         pool = sorted(set(self.boundary) | exact | near | deeper | set(chars) | set(noise))
         image = self.image
-        end = self.program.end(self.program.by_entry[entry]) if entry in self.program.by_entry else words[-1] + 4
+        start, end = cover_span(self.program, words)
         known, covered, corpus, extras, faults, last_gain = Cells(), set(), [], [], 0, 0
         calls = [list(c) for c in calls]    # grows by the callees runs hang in (hung, below)
         hung = set()
@@ -1035,7 +1041,7 @@ class Generator:
             m.plan = []
             m.spin_limit = SPIN_READS
             self.apply(m, case)
-            m.cover(words[0], end)
+            m.cover(start, end)
             m.trace_reads(image.base, image.end, self.code, self.owners)
             m.call(entry, *case["args"], max_instructions=max_instructions, stall=self.stall_for(max_instructions))
             if self.loop and self.ends_badly(m):
@@ -1128,7 +1134,7 @@ class Generator:
             m.plan = []
             m.spin_limit = SPIN_READS
             self.apply(m, case)
-            m.cover(words[0], end, tree=True)
+            m.cover(start, end, tree=True)
             m.trace_reads(image.base, image.end, self.code, self.owners)
             try:
                 m.call(entry, *case["args"], max_instructions=limit, stall=self.stall_for(limit))
@@ -1291,7 +1297,7 @@ class Generator:
             m.plan = []
             try:
                 self.apply(m, case)
-                m.cover(words[0], end)
+                m.cover(start, end)
                 m.trace_reads(image.base, image.end, self.code, self.owners)
                 return m, m.call(entry, *case["args"], max_instructions=limit, stall=self.stall_for(limit))
             except EmuError:
@@ -1354,6 +1360,7 @@ class Generator:
         last = getattr(m, "last_block", None)
         if not last:
             return None
+        words = sorted(words)               # (a lifted Body lists its own instructions first)
         i = bisect.bisect_left(words, last[0] + last[1]) - 1
         if i < 0 or words[i] < last[0]:
             return None
@@ -1496,7 +1503,7 @@ class Generator:
             m = self.machine()
             m.plan = []
             self.apply(m, case)
-            m.cover(words[0], end)
+            m.cover(min(words), end)        # (end: cover_span's)
             m.trace_reads(image.base, image.end, self.code, self.owners)
             seen = {}
             m.after, m.filled = {}, {}

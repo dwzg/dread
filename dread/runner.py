@@ -281,6 +281,9 @@ def run_function(name):
     no case ran)."""
     suite, prog, layout = RUN["suite"], RUN["program"], RUN["layout"]
     fn = prog.by_name.get(name)
+    if fn is not None and RUN.get("bodies", {}).get(name):
+        from dread.lift import Body         # its C holds shared code: cases cover that code too
+        fn = Body(fn, RUN["bodies"][name])
     words = fn.insns if fn else []
     cases = [c + (None,) for c in suite.cases.get(name, [])]
     lines = []
@@ -310,7 +313,8 @@ def run_function(name):
                 out = [EmuError("the case stubs the function it is meant to test"), None]
                 break
             if which == "original" and words and addr == fn.entry:
-                m.cover(words[0], prog.end(fn))
+                from dread.autocase import cover_span
+                m.cover(*cover_span(prog, words))
             written = label.startswith("written")
             if which == "original" and written:
                 m.trace_reads(image.base, image.end, RUN["code"], RUN["owners"])
@@ -445,6 +449,7 @@ def prepare(target, image, recon_path, keep_failing=False):
             suite.auto.setdefault(name, {"loop": True})
         elif name not in system:
             suite.auto.setdefault(name, {})     # lifted C is tested with generated cases, callees real
+    bodies = {n: list(a) for n, a in lifted_info.get("bodies", {}).items()}   # shared code in the C
     for name, addrs in lifted_info.get("unreached", {}).items():
         # no path from the entry reaches them (dread lift); one that runs fails the function
         suite.unreachable.setdefault(name, set()).update(addrs)
@@ -453,7 +458,7 @@ def prepare(target, image, recon_path, keep_failing=False):
     flow = regflow.load(target, image, prog)
     kept_argued = regflow.load_argued(image)
     RUN.clear()
-    RUN.update(system=system)
+    RUN.update(system=system, bodies=bodies)
     RUN.update(target=target, image=image, program=prog, layout=layout, suite=suite, original=image.payload(),
                recon=recon, aliases=aliases, built=built, keep_failing=keep_failing,
                isa_of=prog.isa_at, code=prog.instruction_halves(), owners=prog.extent_owners(), regflow=flow,

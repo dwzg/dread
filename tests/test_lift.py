@@ -41,7 +41,9 @@ def test_refusals_name_their_reason(variant):
         lifted["uart_puts"].text
     if variant == "a32":
         assert "changes the stack pointer" in refused.pop("reset")
-        assert "branches into other code" in refused.pop("__aeabi_uidivmod")
+        # libgcc's __aeabi_uidivmod branches into the division by zero of another function's code (it
+        # was refused for it): that code is its own now (shared_code)
+        assert lifted["__aeabi_uidivmod"].body
     assert refused == {}
 
 
@@ -651,3 +653,106 @@ def test_a_pool_the_c_reads_through_adr_is_kept(tmp_path):
     t = Target.load(str(tmp_path))
     lines = []
     assert lift.check(t, t.image(), ["ll"], out=lines.append, jobs=1) == ["ll"], "\n".join(lines)
+
+
+SHARED_CODE_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global f, g, use
+    .type f, %%function
+    .thumb_func
+f:      push    {r1, r2, r3}    @ falls into the shared loop with its frame open
+        mov     r2, sp
+        movs    r1, #3
+    .size f, . - f
+%s
+shared: ldr.w   r0, [r2], #4    @ the tail f and g share: it ends their frame
+        subs    r1, r1, #1
+        bne     shared
+        add     sp, #12
+        bx      lr
+    .type g, %%function
+    .thumb_func
+g:      push    {r1, r2, r3}    @ branches into it with its frame open
+        mov     r2, sp
+        movs    r1, #2
+        b       shared
+    .size g, . - g
+    .type use, %%function
+    .thumb_func
+use:    push    {r4, lr}
+        bl      f
+        mov     r4, r0
+        bl      g
+        add     r0, r0, r4
+        pop     {r4, pc}
+"""
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["a function", "a label"])
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_code_shared_between_functions(tmp_path, named):
+    """A compiler's cross call keeps a tail several functions share once and enters it with their
+    frame still open, by falling into it or by a branch; the tail ends the frame. As a function of its
+    own (IAR's ?SubroutineN) it was refused (falls into it with 12 bytes of frame; it returns through
+    its callers' frame), as a local label only (IAR's version 8) its callers branched into other code
+    or fell into what follows. Each caller is lifted with the shared code as its own (Body), and its
+    cases cover that code too."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport, regflow
+    symbol = "    .type shared, %function\n    .thumb_func" if named else ""
+    (tmp_path / "t.s").write_text(SHARED_CODE_S % symbol)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    assert ("shared" in p.by_name) == named
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    for name in ("f", "g"):
+        got = lifter.lift(p.by_name[name])
+        assert got.body and set(p.by_name[name].insns) < set(got.body), (name, got.body)
+    lines = []
+    assert sorted(lift.check(t, t.image(), ["f", "g"], out=lines.append, jobs=1)) == ["f", "g"], "\n".join(lines)
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_shared_code_others_branch_into_stays(tmp_path):
+    """f takes the shared code behind it in (a local label, no function's), g stays original and
+    branches into it: the overlay must not give f's C the extent behind f, or g lands in f's C (on
+    the other compiler's -Ohz build three callers of a two-byte b.n into such code failed so)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.elf import Elf
+    (tmp_path / "t.s").write_text(SHARED_CODE_S % "")
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    lines = []
+    assert lift.check(t, t.image(), ["f"], out=lines.append, jobs=1) == ["f"], "\n".join(lines)
+    shared = [s.value for s in Elf(elf).symbols if s.name == "shared"][0]
+    original = (tmp_path / "original" / "t.bin").read_bytes()
+    rebuilt = (tmp_path / "build" / "lift-check" / "main" / "payload.bin").read_bytes()
+    lo, hi = shared - 0x08000000, shared - 0x08000000 + 12
+    assert rebuilt[lo:hi] == original[lo:hi]

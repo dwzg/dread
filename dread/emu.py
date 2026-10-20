@@ -674,8 +674,10 @@ class Machine:
         self.hook_add(UC_HOOK_BLOCK, on_block)
 
     def covered_insns(self, insns):
-        """The addresses of `insns` (sorted instruction addresses) that lie in executed blocks."""
+        """The addresses of `insns` (instruction addresses) that lie in executed blocks. (A lifted
+        Body lists its own instructions before the shared code, which may lie in front of them.)"""
         import bisect
+        insns = sorted(insns)
         out = set()
         for addr, size in getattr(self, "blocks", ()):
             i = bisect.bisect_left(insns, addr)

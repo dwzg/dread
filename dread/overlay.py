@@ -149,7 +149,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
         inside = [a for a in owner if lo <= a < hi]
         if inside:
             raise OverlayError("the free range 0x%x-0x%x holds code of %s" % (lo, hi, owner[min(inside)]))
-    entered = {}
+    entered, jumped = {}, {}
     loaded, loaders, all_loaders = set(), {}, {}
     for fn in prog.functions:
         for a in fn.insns:
@@ -161,6 +161,8 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                 to = owner.get(t)
                 if to is not None and to != fn.name and t != funcs[to].entry and fn.name not in sizes:
                     entered.setdefault(to, (fn.name, a, t))
+                if fn.name not in sizes:        # original code goes on branching there (shared code)
+                    jumped.setdefault(t & ~1, set()).add(fn.name)
             ref = arch.literal(insn, fn.isa)
             folded = ref is not None            # a pc-relative load: the lifter makes it a constant
             ref = ref[0] if ref else arch.pc_address(insn, fn.isa)
@@ -213,6 +215,11 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                 reason = "the C of other functions reads inside it"
             elif any(owner.get(a, fn) != fn for a in inside):
                 reason = "instructions of other functions inside"
+            elif any(jumped.get(a, {fn}) - {fn} for a in inside - mine):
+                # code no function owns that original functions branch into (a compiler's shared
+                # code behind this one: the C of a function that took it in must not cover it)
+                reason = "branches into it from %s" % " ".join(sorted(
+                    {g for a in inside - mine for g in jumped.get(a, ()) if g != fn}))
             if reason:
                 if fn in why or "all" in why:
                     sys.stderr.write("extent of %s refused: %s\n" % (fn, reason))
