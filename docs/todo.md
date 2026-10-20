@@ -872,6 +872,20 @@ of the MSP430 section comes after this one.
 
 ## MSP430 (of special interest to the user; right after RISC-V)
 
+**Paused by the user on 2026-10-20** ("Can we pause MSP430 for now and continue with the rest?"):
+no MSP430 item (MSP430X, the other tools, mul64, case generation, the FreeRTOS build, runaway mutants
+on the slow engine) is taken until the user resumes it. Where it stood: FreeRTOS's MSP430 build 148
+of 250 accepted (143 at measure-24) with stack switches stubbed in cases, the generator's pointer
+buffers inside the scratch, -fno-ssa-phiopt for its lifted C, and calls through a register in the
+lift check's call trees (its retry brought vStartLEDFlashTasks back). Next, when resumed: (1) the lift
+check's retry also for a function left UNCOVERED while a callee's C failed (vStartPolledQueueTasks:
+its queue-creating cases were refused while xTaskCreate's C was in; only failing functions are
+retried now); (2) the recipe's scratch at the top of the flash (0xc000 up to the vectors, the room for
+C up to 0xc000; the patch was measured, not committed): +1 (xSerialPutChar), the three queue functions
+get room and are UNCOVERED (xQueueGenericSend 15 instructions missed, xQueuePeek 71, xQueueReceive
+72), two functions' coverage better and two worse (the search's variance); (3) those queue
+functions' and xTaskCreate's coverage; (4) the 28 two-byte libgcc shift entries (relocatable layout).
+
 Unicorn does not run it and capstone does not decode it, so it needs more than a new arch layer.
 
 - [x] **gizmo-msp430**: built with TI's MSP430 GCC (msp430-elf-, release 8.2.0.52, unpacked in
@@ -1027,7 +1041,9 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   through a register too: GCC's -Os keeps vPortYield in r8 in prvIdleTask) stub it, the stub in their
   cache key (38 functions of that build). The build: 143 as before, ulTaskGenericNotifyTake and
   xTaskDelayUntil gained (no instruction covered before), vStartLEDFlashTasks and
-  vStartPolledQueueTasks lost to room; xQueueSemaphoreTake misses 21 instructions (72), and
+  vStartPolledQueueTasks lost (not to room, as that commit said: in the round that judged them the
+  C of xTaskCreate, which they call through a register, broke their cases, and the lift check's retry
+  did not see such calls; see the pause note above); xQueueSemaphoreTake misses 21 instructions (72), and
   xQueueGenericSend, xQueuePeek and xQueueReceive have no room (2,094 bytes short). Room is the limit
   now: behind the image up to 0x8000, then the generated inputs' 16 KiB scratch, then 16 KiB of
   erased flash up to the vectors. Next: the generator's pointer buffers (scratch + 4 KiB, sixteen of

@@ -159,7 +159,10 @@ def call_trees(program, names):
 
 def direct_callees(program, fn):
     """The functions fn calls or tail-calls directly, by name (falling into another one's entry is
-    a tail call of it: Lifter.falls_into)."""
+    a tail call of it: Lifter.falls_into), and those it calls through a register that holds their
+    entry where the layer names them (register_call_targets: GCC's -Os on the MSP430 keeps a callee
+    it calls twice in a register, call r10; without them the lift check did not retry a function
+    whose callee's C, dropped later, had failed it)."""
     out, last = set(), None
     for insn in program.instructions(fn):
         if insn is None:
@@ -174,6 +177,13 @@ def direct_callees(program, fn):
         callee = program.by_entry.get(last.address + last.size)
         if callee is not None and callee is not fn:
             out.add(callee.name)
+    through = getattr(program.arch, "register_call_targets", None)
+    if through is not None:
+        for targets in through(program, fn).values():
+            for t in targets:
+                callee = program.by_entry.get(t)
+                if callee is not None and callee is not fn:
+                    out.add(callee.name)
     return out
 
 

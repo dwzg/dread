@@ -412,9 +412,10 @@ def test_a_near_miss_is_repaired():
 
 def test_msp430_calls_through_a_register_are_callees():
     """GCC for the MSP430 loads a function it calls more than once into a register (mov #uart_puts,
-    r10; call r10): the layer names such callees, and the generator stubs them in loop cases (gizmo's
-    main calls only so in its loop)."""
-    from dread import autocase
+    r10; call r10): the layer names such callees, the generator stubs them in loop cases (gizmo's
+    main calls only so in its loop), and dread.lift's direct callees include them (the lift check's
+    call trees: a function whose callee's C failed it is tried again once that C is dropped)."""
+    from dread import autocase, lift
     from dread.target import Target
     from conftest import gizmo_dir
     target = Target.load(gizmo_dir("msp430"))
@@ -425,6 +426,7 @@ def test_msp430_calls_through_a_register_are_callees():
     names = {program.by_entry[e].name for entries in found.values() for e in entries}
     assert {"uart_puts", "handle_key"} <= names
     assert {"uart_puts", "handle_key"} <= {f.name for f in gen.callees(main.insns, depth=1)}
+    assert {"uart_puts", "handle_key"} <= lift.direct_callees(program, main)
 
 
 def test_float_arguments_get_values_of_their_own():

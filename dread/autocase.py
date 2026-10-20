@@ -641,8 +641,7 @@ class Generator:
             from dread import lift
             callers = {}
             for fn in self.program.functions:       # calls, tail calls, and calls through a register
-                direct = lift.direct_callees(self.program, fn) | {c.name for c in self.callees(fn.insns, depth=1)}
-                for c in direct:                    # that holds an entry (GCC's -Os on the MSP430: call r8)
+                for c in lift.direct_callees(self.program, fn):     # that holds an entry (call r8)
                     callers.setdefault(c, set()).add(fn.name)
             reaching = {}
             for s in switches:
