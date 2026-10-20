@@ -806,8 +806,11 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   took it): gizmo-msp430 lifts 84 of its 130 functions against 56, and its lift check accepts 50
   against 36 (the 32-bit left shifts; the 16-bit routines are an instruction of two bytes each, too
   short for the four-byte branch the overlay leaves at a moved function's entry: roadmap's
-  relocatable layout). Left of those chains: the logical right shifts (next item), the epilogues
-  (they pop their caller's registers), and system-run models of the MSP430F449 board for the tasks.
+  relocatable layout). FreeRTOS's build (measured alone, 2026-10-20): 102 of 250 against 74, the
+  32-bit shift chains (__mspabi_slll_N, __mspabi_sral_N), none lost; 7 s with the cached cases and
+  the compiled engine (the lift took 627 s in measure-21). Left of those chains: the logical right
+  shifts (next item), the epilogues (they pop their caller's registers), and system-run models of
+  the MSP430F449 board for the tasks.
 - [ ] **The MSP430's flags bit by bit in regflow**: clrc (bic #1, sr) writes C and passes Z, N and V
   through, so with the flags as one unit it reads them; the logical right shifts (__mspabi_srli_N,
   __mspabi_srll_N) begin with it, and their callers are refused for leaving the flags (28 functions
