@@ -337,6 +337,15 @@ The long runs set the pace of everything after them. Measure first, then cut.
   23,000: the sweep steps every stub answer of a loop case). A stub's register reads and IT repair in
   one C call (fasthooks) would take about a quarter; fewer search runs for loop cases would change the
   cases and wants its own measurement.
+  Profiled again (2026-10-20) on FreeRTOS GCC -Os's slowest task, prvHigherPriorityNormallyEmptyTask:
+  in two minutes 30,000 runs made 1.48 million stub calls, 45 % of the time; inside them 14.6 million
+  register reads through Unicorn's Python binding (33 %), the IT repair after every hook (13 %),
+  adding hooks per run (6.5 %). Core registers are read through Unicorn's C function directly now
+  (ctypes, a buffer made once: 0.6 us a read against the binding's 1.3; its reg_read_batch is slower
+  than single reads), and the IT repair wraps memory hooks only (Unicorn restores an instruction's
+  starting state for those alone): the same cases (three functions compared byte for byte), loop
+  cases 18 to 21 % faster (that task 104 s to 86 s, prvQueueOverwriteTask 12.1 s to 9.5 s), a plain
+  function 3 %. Left: the hooks added per run; fewer search runs (it changes the cases).
 - [ ] The system check (about a minute of a lift check on that build): one wave of two runs of the
   scenario per function; all candidates rebuilt together would be two runs, but brings back some of
   the clock's distortion (their own blocks take no time): try it with a fallback to one at a time.

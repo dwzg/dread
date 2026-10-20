@@ -203,6 +203,28 @@ class Result:
         return out
 
 
+def core_reader(uc):
+    """A function that reads one 32-bit core register of `uc`: Unicorn's C function called through
+    ctypes with a buffer made once (0.6 us a read against the Python binding's 1.3; a stub call
+    reads several, and a loop case's search makes millions), or the engine's own reg_read where
+    that is not at hand (DREAD's engines, another binding). Unicorn is pinned at 2.1.4."""
+    try:
+        import ctypes
+        import unicorn.unicorn_py3.unicorn as binding
+        library = getattr(binding, "uclib", None) or getattr(binding, "_uc")
+        function, handle = library.uc_reg_read, uc._uch
+    except (ImportError, AttributeError):
+        return uc.reg_read
+    buffer = ctypes.c_uint64(0)
+    ref = ctypes.byref(buffer)
+
+    def read(reg):
+        if function(handle, reg, ref):
+            return uc.reg_read(reg)         # an error: the binding raises it as it would
+        return buffer.value & 0xFFFFFFFF
+    return read
+
+
 class Core:
     """One emulator per image, reused for every call. A Machine borrows the Core of its image; the
     Core undoes what the previous Machine left (written pages, hooks, registers)."""
@@ -214,6 +236,7 @@ class Core:
     def __init__(self, layout, payload):
         self.layout, self.payload = layout, payload
         self.uc = uc = layout.arch.new_uc()
+        self.read32 = core_reader(uc)       # the core registers, fast (Machine.reg, the stubs)
         for lo, hi in layout.maps:
             uc.mem_map(lo, hi - lo)
         self.initial = layout.initial(payload)
@@ -354,6 +377,7 @@ class Machine:
         self.spinning = None        # (address, size, value) of the register a stopped run spun on
         self._reads, self._cycle = [], [0] * (SPIN_PERIOD + 1)
         self.kept_why = {}          # register -> who reads it after the call, for the report
+        self.core_names = frozenset(self.arch.general_regs()) | {"sp", "pc", "lr"}     # 32 bits (reg)
         self.unmapped = None        # (access, address) of the access to unmapped memory a fault came from
         self.timed_out = False      # the last call ran into its instruction limit
         self.stack_preset = set()   # stack bytes call() wrote for the call itself (a pushed return address)
@@ -371,9 +395,12 @@ class Machine:
     # ---- hooks ----
 
     def hook_add(self, kind, callback, **where):
-        """Add an emulator hook that lasts as long as this Machine. On cores with IT blocks the
-        hook ends by clearing a stale IT state (Arm.settle_it)."""
-        if self.layout.settle_it:
+        """Add an emulator hook that lasts as long as this Machine. On cores with IT blocks a
+        memory hook ends by clearing a stale IT state (Arm.settle_it): Unicorn restores the state of
+        an instruction's start for a memory hook only, not for a code, block or interrupt hook (a
+        stub's at a function's entry, where no IT block is open; the repair there took an eighth of
+        a loop case search)."""
+        if self.layout.settle_it and kind & ~(UC_HOOK_INTR | UC_HOOK_CODE | UC_HOOK_BLOCK):
             inner, settle = callback, self.arch.settle_it
 
             def callback(uc, *args, inner=inner, settle=settle):
@@ -477,7 +504,8 @@ class Machine:
             uc.emu_stop()
 
     def _on_stub(self, uc, addr, size, user):
-        args = tuple(uc.reg_read(r) for r in self.layout.arg_regs)
+        read = self.core.read32
+        args = tuple(read(r) for r in self.layout.arg_regs)
         ret = self.stubs[addr](self, *args)
         if getattr(self, "stopped_at", None):
             # The stub ended the run at this call (a stop, a loop case's last stub call): no return
@@ -490,7 +518,7 @@ class Machine:
         else:
             uc.reg_write(self.layout.result_regs[0], (ret or 0) & 0xFFFFFFFF)
         if self.layout.lr is not None:
-            uc.reg_write(self.layout.pc, uc.reg_read(self.layout.lr))  # bit 0 of lr keeps Thumb state
+            uc.reg_write(self.layout.pc, read(self.layout.lr))  # bit 0 of lr keeps Thumb state
         else:
             self.arch.pop_return(uc, self.read)
 
@@ -686,6 +714,8 @@ class Machine:
         """Read a register, or write it when value is given (names as in dread.arch)."""
         rid = self.arch.reg_id(name)
         if value is None:
+            if name in self.core_names:     # a core register: the fast reader (Core.read32)
+                return self.core.read32(rid)
             return self.uc.reg_read(rid)
         self.uc.reg_write(rid, value & 0xFFFFFFFF)
 
