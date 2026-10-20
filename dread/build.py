@@ -6,7 +6,8 @@ the target's [compiler] flags plus what the overlay needs (-ffunction-sections, 
 with DREAD's include directory (dread.h), the src directory and [compiler] include on the include
 path. Objects go to BUILD/recon/IMAGE/obj; a source is compiled again when it, or any header in
 those directories, is newer than its object, and every source when the compiler or the flags are
-not those the objects were made with (.flags in the object directory). Then links them over the image:
+not those the objects were made with (.flags in the object directory). Lifted C is compiled with
+[compiler] lifted_cflags after the flags (default -Os). Then links them over the image:
 BUILD/recon/IMAGE/payload.bin, with report.tsv, placement.json, recon.ld and recon.elf beside it.
 
 Functions in the image's lifted table (config/lifted.txt, written by `dread lift --check`) are
@@ -67,15 +68,16 @@ def compile_stamp(command, flags):
     return "\n".join([_COMPILERS[exe]] + list(command) + list(flags)) + "\n"
 
 
-def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=False):
+def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=False, flags=()):
     """Compile the sources under `src` into `objdir`; returns the object paths. extra_include:
     further include directories (dread mutate compiles a copy elsewhere and still needs the
-    headers beside the original); quiet: no compiler messages (variants that do not compile)."""
+    headers beside the original); quiet: no compiler messages (variants that do not compile);
+    flags: further flags after the target's (the lifted C's [compiler] lifted_cflags)."""
     sources = sorted(glob.glob(os.path.join(src, "**", "*.c"), recursive=True))
     include = [INCLUDE, src] + list(extra_include) + target.compiler.include
     headers = [h for d in include for h in glob.glob(os.path.join(d, "**", "*.h"), recursive=True)]
     newest_header = max((os.path.getmtime(h) for h in headers), default=0)
-    flags = target.compiler.cflags + target.compiler.required() + ["-I" + d for d in include]
+    flags = target.compiler.cflags + target.compiler.required() + list(flags) + ["-I" + d for d in include]
     stamp_path, stamp = os.path.join(objdir, ".flags"), compile_stamp(target.compiler.command("cc"), flags)
     try:
         with open(stamp_path) as f:
@@ -222,7 +224,7 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
             by_system = system_names(image.table("lifted"))
             loops = [n for n in loops if n not in by_system]
         objects += compile_all(target, image, os.path.join(workdir, "lifted"), os.path.join(workdir, "obj-lifted"),
-                               quiet=quiet)
+                               quiet=quiet, flags=target.compiler.lifted_cflags)
         with open(record, "w") as f:
             f.write("".join(n + "\n" for n in made))
         with open(os.path.join(workdir, "lifted.json"), "w") as f:

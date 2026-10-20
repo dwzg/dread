@@ -120,6 +120,30 @@ def test_objects_follow_the_flags(tmp_path):
     assert os.stat(path).st_mtime_ns == made and open(path, "rb").read() == at_os
 
 
+def last_level(stamp_file):
+    with open(stamp_file) as f:
+        return [l for l in f.read().split("\n") if l.startswith("-O")][-1]
+
+
+@pytest.mark.compiles
+def test_lifted_c_is_compiled_for_size(tmp_path):
+    """Lifted C gets [compiler] lifted_cflags after cflags (default -Os), hand-written C cflags alone:
+    at -O0 a lifted function keeps every register of the original in its frame (FreeRTOS's GCC -O0
+    build: six functions more at -Os, none lost); lifted_cflags = [] leaves cflags alone."""
+    shutil.copytree(GIZMO, tmp_path / "gizmo", ignore=shutil.ignore_patterns("build"))
+    copy = tmp_path / "gizmo" / os.path.relpath(gizmo_dir("m3"), GIZMO)
+    target = Target.load(str(copy))
+    assert target.compiler.lifted_cflags == ["-Os"]
+    target.compiler.cflags = [f for f in target.compiler.cflags if not f.startswith("-O")] + ["-O0"]
+    out = tmp_path / "out"
+    build.build(target, target.image(), out=str(out), quiet=True)
+    assert last_level(out / "obj-lifted" / ".flags") == "-Os"
+    assert last_level(out / "obj" / ".flags") == "-O0"
+    toml = copy / "dread.toml"
+    toml.write_text(toml.read_text().replace("[compiler]\n", "[compiler]\nlifted_cflags = []\n", 1))
+    assert Target.load(str(copy)).compiler.lifted_cflags == []
+
+
 NAMES = ["script_run", "read_line", "apply_config", "fmt_dec", "timer_irq", "parse_kv"]
 
 

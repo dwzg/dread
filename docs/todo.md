@@ -637,6 +637,16 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   memset on GCC -O0 runs more than ten times the original's instructions in its C (compiled at -O0
   like the build). MSP430's three indirect jumps are libgcc's __muldisi2, __umuldisi2 and __muldi3:
   br X(pc) through words that hold 0x120a, no function (never called): rightly refused.
+  Lifted C at -Os (2026-10-20; [compiler] lifted_cflags, default -Os, after the target's cflags):
+  on fresh copies with the objects rebuilt (a first try kept most objects at the old level: the
+  build compared only times, fixed), GCC -O0 316 to 322 (the three empty lock functions, memset,
+  which ran more than ten times the original's instructions at -O0, prvQueueOverwriteTask and
+  vRegTest1Implementation), GCC -O2 233 to 237 (the lock functions, prvRegTestTaskEntry2), clang
+  -O2 and RISC-V GCC -O2 unchanged, none lost; the -Os builds compiled it at -Os already. Of the 17
+  task loops of GCC -O0 whose system runs differed (their -O0 frames overflowed the task stacks:
+  FreeRTOS's own check called vApplicationStackOverflowHook in prvBlockingTask's run), 2 are
+  accepted, 11 agree and miss 2 to 121 instructions, 4 still differ (main_full: the system run's
+  instruction-count chunks, below).
   From the measurement after loop cases: (1) coverage
   misses (about 60 per build) and failed generations (about 20): recorded inputs where a scenario
   reaches the code (the recorder follows calls across task switches and into handlers since, with
