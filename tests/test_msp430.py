@@ -297,6 +297,31 @@ fn wakes_up
 """
 
 
+def msp430_asm_target(tmp_path, code, entry):
+    """(target, image, program) of an image made from MSP430 assembly (msp430-elf-gcc, at 0x4000), with
+    the lifter fuzzer's memory map and its compiler settings."""
+    from dread import elfimport, liftfuzz
+    from dread.elf import Elf
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.S").write_text(code)
+    (tmp_path / "t.ld").write_text("MEMORY { text (rx) : ORIGIN = 0x4000, LENGTH = 0xbf00 }\n"
+                                   "SECTIONS { .text : { *(.text .text.*) } > text }\n")
+    elf_path = str(tmp_path / "t.elf")
+    subprocess.run(["msp430-elf-gcc", "-mcpu=msp430", "-nostdlib", "-T", str(tmp_path / "t.ld"), "-Wl,-e," + entry,
+                    "-o", elf_path, str(tmp_path / "t.S")], check=True)
+    (tmp_path / "dread.toml").write_text(liftfuzz.ISAS["msp430"]["toml"].replace(
+        'original = "fuzz.bin"', 'original = "t.bin"').replace('entry = "f0"', 'entry = "%s"' % entry) +
+        '\n[compiler]\ncross = "msp430-elf-"\nldflags = []\ncflags = ["-mcpu=msp430", "-mhwmult=none", "-Os", '
+        '"-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common"]\n')
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    elf = Elf(elf_path)
+    elfimport.write_tables(image, *elfimport.tables(elf, isa="msp430"))
+    (tmp_path / "t.bin").write_bytes(elf.payload(image.base, image.erased)[0])
+    return target, image, Program(target, image)
+
+
 @needs_ti_gcc
 def test_msp430_stack_argument_rules(tmp_path):
     """Hand-written cases of what the lifter does with the stack above a function's return address:
@@ -305,24 +330,8 @@ def test_msp430_stack_argument_rules(tmp_path):
     register, a word read again behind the call it was passed to (the callee may have changed it;
     the C passed a copy), a tail call with a frame, the return address, an interrupt handler's
     saved status register."""
-    from dread import elfimport, liftfuzz, lift
-    from dread.elf import Elf
-    from dread.program import Program
-    from dread.target import Target
-    (tmp_path / "t.S").write_text(STACK_ARGUMENT_CODE)
-    (tmp_path / "t.ld").write_text("MEMORY { text (rx) : ORIGIN = 0x4000, LENGTH = 0xbf00 }\n"
-                                   "SECTIONS { .text : { *(.text .text.*) } > text }\n")
-    elf_path = str(tmp_path / "t.elf")
-    subprocess.run(["msp430-elf-gcc", "-mcpu=msp430", "-nostdlib", "-T", str(tmp_path / "t.ld"), "-Wl,-e,takes_one",
-                    "-o", elf_path, str(tmp_path / "t.S")], check=True)
-    (tmp_path / "dread.toml").write_text(liftfuzz.ISAS["msp430"]["toml"].replace(
-        'original = "fuzz.bin"', 'original = "t.bin"').replace('entry = "f0"', 'entry = "takes_one"'))
-    target = Target.load(str(tmp_path))
-    image = target.image()
-    elf = Elf(elf_path)
-    elfimport.write_tables(image, *elfimport.tables(elf, isa="msp430"))
-    (tmp_path / "t.bin").write_bytes(elf.payload(image.base, image.erased)[0])
-    program = Program(target, image)
+    from dread import lift
+    target, image, program = msp430_asm_target(tmp_path, STACK_ARGUMENT_CODE, "takes_one")
     lifter = lift.make_lifter(program)
     lifted, refused = {}, {}
     for fn in program.functions:
@@ -355,7 +364,8 @@ def test_gizmo_msp430_lifted_c_calls_nothing_of_libgcc(tmp_path):
     src.mkdir()
     for name, result in lifted.items():
         (src / (name + ".c")).write_text(result.text)
-    objects = build.compile_all(target, image, str(src), str(tmp_path / "obj-lifted"))
+    objects = build.compile_all(target, image, str(src), str(tmp_path / "obj-lifted"),
+                                flags=target.compiler.lifted_cflags)
     assert len(objects) == len(lifted)
     lifter.lifted = lifted
     assert lift.foreign_calls(program, str(tmp_path), sorted(lifted), lifter) == {}
@@ -564,24 +574,8 @@ def test_a_context_switch_takes_no_stack_arguments_and_is_stubbed_in_cases(tmp_p
     the generated cases of a function that calls it stub it (run for real on FreeRTOS's MSP430
     build, it loaded the next task's stack pointer from a generated TCB and the inputs died; this
     small one survives on zeroed memory, so only the stub is checked here)."""
-    from dread import autocase, elfimport, liftfuzz, lift
-    from dread.elf import Elf
-    from dread.program import Program
-    from dread.target import Target
-    (tmp_path / "t.S").write_text(CONTEXT_SWITCH_CODE)
-    (tmp_path / "t.ld").write_text("MEMORY { text (rx) : ORIGIN = 0x4000, LENGTH = 0xbf00 }\n"
-                                   "SECTIONS { .text : { *(.text .text.*) } > text }\n")
-    elf_path = str(tmp_path / "t.elf")
-    subprocess.run(["msp430-elf-gcc", "-mcpu=msp430", "-nostdlib", "-T", str(tmp_path / "t.ld"), "-Wl,-e,yields",
-                    "-o", elf_path, str(tmp_path / "t.S")], check=True)
-    (tmp_path / "dread.toml").write_text(liftfuzz.ISAS["msp430"]["toml"].replace(
-        'original = "fuzz.bin"', 'original = "t.bin"').replace('entry = "f0"', 'entry = "yields"'))
-    target = Target.load(str(tmp_path))
-    image = target.image()
-    elf = Elf(elf_path)
-    elfimport.write_tables(image, *elfimport.tables(elf, isa="msp430"))
-    (tmp_path / "t.bin").write_bytes(elf.payload(image.base, image.erased)[0])
-    program = Program(target, image)
+    from dread import autocase, lift
+    target, image, program = msp430_asm_target(tmp_path, CONTEXT_SWITCH_CODE, "yields")
     lifter = lift.make_lifter(program)
     switch_to = program.by_name["switch_to"]
     assert lifter.switches_stacks(switch_to) and not lifter.switches_stacks(program.by_name["yields"])
@@ -599,3 +593,39 @@ def test_a_context_switch_takes_no_stack_arguments_and_is_stubbed_in_cases(tmp_p
         got |= gen.coverage(fn.entry, fn.insns, c, c.get("limit", 200_000))
     assert got == set(fn.insns)
     assert cases and all(switch_to.entry in [c[0] for c in case["calls"]] for case in cases)
+
+
+FLAG_CODE = """
+    .text
+    .global is_zero
+is_zero:                    ; 1 when the word at 28(r12) is zero (FreeRTOS's prvIsQueueEmpty)
+    mov 28(r12), r13
+    mov.b #1, r12
+    tst r13
+    jeq 1f
+    clr.b r12
+1:  ret
+"""
+
+
+@needs_ti_gcc
+def test_a_flag_taken_as_a_value_calls_no_shift_in_libgcc(tmp_path):
+    """GCC's tree phi optimisation turns the lifted `if (z) goto L; r12 = 0; L:` into
+    (-z | z) >> 15, and on the MSP430 a shift by 15 is a call of libgcc's __mspabi_srli, which the
+    original does not make (dread.lift.foreign_calls drops such a function: four of FreeRTOS's
+    build). The MSP430 layer's lifted_cflags turn it off for GCC (-fno-ssa-phiopt)."""
+    from dread import build, lift
+    target, image, program = msp430_asm_target(tmp_path, FLAG_CODE, "is_zero")
+    assert target.compiler.lifted_cflags == ["-Os", "-fno-ssa-phiopt"]
+    lifter = lift.make_lifter(program)
+    lifted = {"is_zero": lifter.lift(program.by_name["is_zero"])}
+    lifter.lifted = lifted
+    src = tmp_path / "lifted"
+    src.mkdir()
+    (src / "is_zero.c").write_text(lifted["is_zero"].text)
+    found = {}
+    for flags in (["-Os"], target.compiler.lifted_cflags):
+        work = tmp_path / ("w%d" % len(found))
+        build.compile_all(target, image, str(src), str(work / "obj-lifted"), flags=flags)
+        found[" ".join(flags)] = lift.foreign_calls(program, str(work), ["is_zero"], lifter)
+    assert found == {"-Os": {"is_zero": {"__mspabi_srli"}}, "-Os -fno-ssa-phiopt": {}}

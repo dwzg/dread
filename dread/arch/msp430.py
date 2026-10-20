@@ -273,6 +273,12 @@ class Msp430:
         return out
     link_reg = None             # a call pushes the return address
     own_epilogues = ("__mspabi_func_epilog_",)  # GCC's shared epilogues, which compiled C jumps to
+    # Flags the lifted C needs from a compiler besides -Os ([compiler] lifted_cflags' default): GCC's
+    # tree phi optimisation turns a flag's `z ? 1 : 0` into (-z | z) >> 15, and a shift by 15 is a
+    # libgcc call (__mspabi_srli) the original does not make, which drops the function (FreeRTOS's
+    # build: prvIsQueueEmpty, vParTestToggleLED, the two queue tests from interrupts); without it the
+    # C is a branch, and shorter
+    lifted_cflags = {"gcc": ["-fno-ssa-phiopt"]}
 
     def abi_results(self, name):
         """The registers of a runtime helper's result by the MSP430 EABI (16 bits in r12, 32 in

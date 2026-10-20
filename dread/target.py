@@ -202,10 +202,11 @@ class Compiler:
     cross    the GNU prefix (default arm-none-eabi-)
     triple   clang's --target (kind = "clang" needs it)
     cflags   the flags of the original's build, as far as known
-    lifted_cflags  added after cflags for the lifted C (default ["-Os"]): it is DREAD's translation,
-             not the original's code; at -O0 every register of the original lives in the frame,
-             slow, large and deep (FreeRTOS's GCC -O0 build: six functions more at -Os, -O2: four;
-             none lost on four builds). [] compiles it with cflags alone
+    lifted_cflags  added after cflags for the lifted C (default ["-Os"], and what the architecture
+             layer's lifted_cflags names for the compiler: the MSP430 with GCC -fno-ssa-phiopt): it
+             is DREAD's translation, not the original's code; at -O0 every register of the original
+             lives in the frame, slow, large and deep (FreeRTOS's GCC -O0 build: six functions more at
+             -Os, -O2: four; none lost on four builds). [] compiles it with cflags alone
     ldflags  flags for the linker (default: --no-warn-rwx-segments for GNU ld, none for lld)
     include  further include directories
     idioms   the lifter's compiler profile
@@ -226,7 +227,8 @@ class Compiler:
         if self.kind == "clang" and not self.triple:
             raise TargetError("%s: [compiler] kind = \"clang\" needs triple (clang's --target)" % target.file)
         self.cflags = list(data.get("cflags", []))
-        self.lifted_cflags = list(data.get("lifted_cflags", ["-Os"]))
+        layer = list(getattr(getattr(target, "arch", None), "lifted_cflags", {}).get(self.kind, ()))
+        self.lifted_cflags = list(data.get("lifted_cflags", ["-Os"] + layer))
         self.ldflags = list(data.get("ldflags", ["--no-warn-rwx-segments"] if self.kind == "gcc" else []))
         self.include = [target.path(p) for p in data.get("include", [])]
         self.idioms = data.get("idioms")
