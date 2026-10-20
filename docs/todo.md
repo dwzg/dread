@@ -817,7 +817,10 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   flags, although the rrc behind it writes all four. The layer has flag_effects (each flag read,
   written, or passed through), and regflow (version 12) and the lifter's entry analysis follow the
   flags so where it is there, folding them into "flags" in what they report. gizmo-msp430: 112 of
-  130 lift (84), the lift check accepts 78 (50); the MSP430 fuzzer agrees on three seeds.
+  130 lift (84), the lift check accepts 78 (50); the MSP430 fuzzer agrees on three seeds. FreeRTOS's
+  build: 143 of 250 (102), none lost: the two chains and 13 more that read flags a callee seemed to
+  leave or need (pvPortMalloc, xQueueGenericCreate, vTaskSuspendAll, prvUnlockQueue, the LED and
+  serial tasks, __mspabi_divul); 74 that morning.
 - [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the
   5-million-instruction limit (about 5 s per case on the MSP430 engine; two of gizmo's took over 300
   s). Bound a mutant's case by a multiple of what the original took on it.
