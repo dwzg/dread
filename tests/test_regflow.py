@@ -4,6 +4,8 @@ that the runner and the integration run compare the registers it finds.
 Both gizmo builds have one register a compiler kept across a call: uart_puts keeps its string
 pointer in r1 across bl uart_putc (GCC -fipa-ra, the two are in one file). On a32 the remainder of
 __aeabi_uidivmod comes back in r1 too. Anything else found would be a false alarm."""
+import shutil
+
 import pytest
 
 from dread import build, integration, regflow, switches
@@ -179,6 +181,82 @@ def test_a_variadic_spill_is_no_use(tmp_path, fp):
     assert stores, "clang spilled with pushes this time: the test shows nothing"
     flow = regflow.analyse(program)
     assert flow.read_regs("sum") == ["r0"], flow.read_regs("sum")
+
+
+PREDICATED_EDGES_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global f, g, h, caller
+    .type f, %function
+    .thumb_func
+f:                          @ newlib's strcmp (Ubuntu's, Debian's): r3 loaded under eq, the branch on eq
+    ands    ip, r0, #3
+    ldr     r2, [r0]
+    it      eq
+    ldreq   r3, [r1]
+    beq     1f
+    movs    r3, #7
+1:  subs    r0, r2, r3
+    bx      lr
+    .type g, %function
+    .thumb_func
+g:                          @ the fall-through edge: r3 set under ne, read where ne held
+    cmp     r0, #0
+    it      ne
+    movne   r3, #5
+    beq     2f
+    adds    r0, r3, #1
+    bx      lr
+2:  movs    r0, #0
+    bx      lr
+    .type h, %function
+    .thumb_func
+h:                          @ against: r3 set under eq, the branch taken on ne reads the caller's r3
+    cmp     r0, #0
+    it      eq
+    moveq   r3, #5
+    bne     3f
+    adds    r0, r3, #1
+    bx      lr
+3:  adds    r0, r3, #2
+    bx      lr
+    .type caller, %function
+    .thumb_func
+caller:
+    push    {r4, lr}
+    bl      f
+    bl      g
+    bl      h
+    pop     {r4, pc}
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),
+                    reason="needs arm-none-eabi binutils")
+def test_a_branch_edge_carries_the_writes_made_under_its_condition(tmp_path):
+    """regflow 16: on the taken edge of a branch on eq, what was written under eq since the flags
+    changed is written (and on its fall-through edge what was written under ne). Without it newlib's
+    strcmp of Ubuntu and Debian seemed to read r3, and every function whose caller's r3 reached it was
+    refused (seven a build on the benchmark's older toolchains)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(PREDICATED_EDGES_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "caller", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    flow = regflow.analyse(Program(Target.load(str(tmp_path))))
+    assert flow.read_regs("f") == ["r0", "r1"], flow.read_regs("f")
+    assert flow.read_regs("g") == ["r0"], flow.read_regs("g")
+    assert "r3" in flow.read_regs("h"), flow.read_regs("h")
 
 
 def test_a_variadic_save_area_behind_sub_sp(tmp_path):

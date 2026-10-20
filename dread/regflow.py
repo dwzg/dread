@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 15                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 16                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -79,6 +79,11 @@ VERSION = 15                # 3: entry spills (variadic functions) are no use; 4
                             # 15: a copy of a base plus a constant is a base too (the layer's base_copy):
                             # clang 18 keeps a frame pointer and reaches the save area through it (add r7,
                             # sp, #8; add.w r12, r7, #8; stm.w r12, {r1, r2, r3}), unseen until then
+                            # 16: a conditional branch's taken edge carries the writes made under its
+                            # condition, its fall-through edge those under the opposite one (it eq; ldreq
+                            # r3, [r1]; beq L; ... L: cmp r2, r3 reads no r3 of the caller: Ubuntu's and
+                            # Debian's newlib strcmp, which made its callers' callers look as if they read
+                            # r3 on every older-toolchain build of the benchmark)
 
 
 class RegFlow:
@@ -154,7 +159,8 @@ def load_argued(image):
     return out
 
 
-Row = collections.namedtuple("Row", "address size kind target falls uses kills writes conditional stack written covered")
+Row = collections.namedtuple("Row", "address size kind target falls uses kills writes conditional stack written covered "
+                                   "fall_covered", defaults=(0,))
 
 
 def _rows(program, fn, mask, entry_name):
@@ -213,15 +219,18 @@ def _rows(program, fn, mask, entry_name):
                 entry = False
         rm, wm = (0 if stack == "push" else mask(reads)), mask(writes)
         pred = arch.predicate(insn)
-        covered = 0
+        covered = fall_covered = 0
         if pred is None:
             uses, kills = rm, wm
         else:
             covered = state.get(pred, 0)        # also what a predicated call's callee reads
             uses = rm & ~covered
             kills = wm & state.get(arch.complement(pred), 0)
+            if kind == "jump":                  # a conditional branch: what its fall-through edge knows written
+                fall_covered = state.get(arch.complement(pred), 0)
             state[pred] = covered | wm
-        out.append(Row(a, insn.size, kind, target, falls, uses, kills, wm, pred is not None, stack, writes, covered))
+        out.append(Row(a, insn.size, kind, target, falls, uses, kills, wm, pred is not None, stack, writes, covered,
+                       fall_covered))
         if wm & flags or kind in ("call", "icall"):
             state = {}
     return out
@@ -308,6 +317,7 @@ class Analysis:
         self.graphs = {fn.name: self._graph(fn, self.rows[fn.name], entry_name,
                                             following.get(fn.entry, program.end(fn)))
                        for fn in program.functions}
+        self.edges = {name: self._edge_masks(self.rows[name], self.graphs[name][0]) for name in self.rows}
         self.shadowed = {}                  # name -> {call index: registers not read behind it} (_neutral_saves)
         for fn in program.functions:
             self._neutral_saves(fn)
@@ -333,6 +343,28 @@ class Analysis:
         for r in regs:
             m |= self.bit.get(r, 0)
         return m
+
+    @staticmethod
+    def _edge_masks(code, succ):
+        """{(branch row, successor row): registers written on that edge}: a conditional branch's taken
+        edge carries what was written under its condition since the flags last changed (it eq; ldreq
+        r3, [r1]; beq L: r3 is written at L by that way), its fall-through edge what was written under
+        the opposite condition. Where both ways lead to the same row, neither (the write is not
+        certain there)."""
+        index = {row.address: i for i, row in enumerate(code)}
+        out = {}
+        for i, row in enumerate(code):
+            if row.kind != "jump" or not row.conditional or not (row.covered or row.fall_covered):
+                continue
+            taken = index.get((row.target or 0) & ~1)
+            fall = i + 1 if i + 1 < len(code) and code[i + 1].address == row.address + row.size else None
+            if taken is None or taken == fall:
+                continue
+            if row.covered and taken in succ[i]:
+                out[(i, taken)] = row.covered
+            if row.fall_covered and fall is not None and fall in succ[i]:
+                out[(i, fall)] = row.fall_covered
+        return out
 
     def _graph(self, fn, code, entry_name, span_end):
         """(successors, returns, calls [(index, callee or None)], tails [(index, callee)], unknown):
@@ -644,6 +676,7 @@ class Analysis:
         """(live at the entry, [(call index, callee, live after it)], tails)"""
         succ, _, calls, tails, _ = self.graphs[name]
         uses, kills, exits = self.effects(name, own)
+        edges = self.edges.get(name, {})
         n = len(uses)
         live_in, live_out = [0] * n, [0] * n
         changed = True
@@ -652,7 +685,7 @@ class Analysis:
             for i in range(n - 1, -1, -1):
                 o = exits[i]
                 for j in succ[i]:
-                    o |= live_in[j]
+                    o |= live_in[j] & ~edges.get((i, j), 0)
                 v = uses[i] | (o & ~kills[i])
                 if o != live_out[i] or v != live_in[i]:
                     live_out[i], live_in[i], changed = o, v, True
