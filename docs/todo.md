@@ -363,7 +363,7 @@ The long runs set the pace of everything after them. Measure first, then cut.
   their hook tables (two flag arrays the size of memory) at every hook added or taken away, four
   times a run: now once when a run starts (the same cases: bin/ab-cases on five MSP430 functions).
   The fuzzer's tests take the polite worker count instead of four. Those nine tests: 121 s to 75 s.
-- [ ] The system check (about a minute of a lift check on that build): one wave of two runs of the
+- [x] The system check (about a minute of a lift check on that build): one wave of two runs of the
   scenario per function; all candidates rebuilt together would be two runs, but brings back some of
   the clock's distortion (their own blocks take no time): try it with a fallback to one at a time.
   Measured (2026-10-20, GCC -Os, cases cached): the system check is two thirds of the lift check
@@ -372,7 +372,20 @@ The long runs set the pace of everything after them. Measure first, then cut.
   answer is kept now until interrupts_changed counts a change or the masks differ, and the masks are
   read through Unicorn's C function. All 37 scenario runs of 15 targets (original and whole-image
   build) give the same outcomes; 108 s against 92 s, the MPS2 runs that end waiting on a masked
-  interrupt twice as fast. Grouping the candidates is still open.
+  interrupt twice as fast. Those were whole-image runs, though (every accepted function rebuilt: the
+  demo asserts early and waits masked). The system check's own runs have one function rebuilt and
+  run to the clock's limit: about 20 s each beside the others, 42 s a function (its build 1.7 s), all
+  24 or more in one wave; the lift check is 80 s now (89 before). Grouping not done: most candidates
+  are dropped (on GCC -Os 11 of 30 or more accepted) and would need their single checks anyway, it
+  brings back the clock's distortion, and only 4 candidates never run at all (fault handlers and
+  hooks). What a realistic run spends now: 3.4 million blocks through the Python block hook, about
+  40 % of it: the item below.
+- [ ] A C fast path for the system run's block hook (dread.fasthooks): nearly every block is a known
+  block of shared code with nothing due (clock += size and three comparisons); C could do those and
+  call Python only for a new block, a function's entry, code built from C, an event or the limit due,
+  a spin check or an interrupt question (the masked answer's registers compared in C). The same
+  outcomes as the Python hook, compared on every scenario (sysdump of 2026-10-20); estimated a third
+  off a realistic run, the system check and dread sysrecord with it.
 - [x] gizmo's MSP430 cases take ten minutes to generate (the suite's first run after a generator
   VERSION change: 603 s of its 936), on DREAD's own engine, which the byte budget does not reach;
   profile that engine's runs. Profiled (2026-10-20): checksum's search runs nearly all end at the
