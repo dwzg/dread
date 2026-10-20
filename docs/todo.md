@@ -593,7 +593,7 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   better: from another function's extent, or from the room the overlay fills (behind the image, its
   free ranges): cases had pointed a queue into a pool and behind the image, where the rebuilt image
   has C (disagreements on that build from about 22 to 8).
-- [ ] **What the lifter leaves**. All builds rebuilt from the recipe and measured on 2026-10-19
+- [x] **What the lifter leaves** (closed 2026-10-20, round two below). All builds rebuilt from the recipe and measured on 2026-10-19
   (afternoon; the scenario 900 ticks): Cortex-M3 GCC -Os 289 of 366, -O0 314 of 437, -O2 227 of 349,
   clang -Os 266 of 356, -O2 240 of 343; RISC-V GCC -Os 214 of 312, -O2 166 of 296, clang -Os 208 of 304:
   1,924 of 2,763 functions (70 %); recorded inputs add 7 to 33 a build; the nine builds took 1 h 43 min.
@@ -767,7 +767,7 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   stale bytes of the original is compared except those bytes, which the report names. Done (the
   runner). The other one, a variadic callee's registers, was a regflow bug: clang's save areas behind
   sub sp went unseen; regflow 14, 18 refusals gone.
-- [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
+- [x] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger). --task input now also asks for the functions the lift
   check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed
   instructions run, 74,000 tokens in and 352,000 out, 28 minutes. Most misses were failed
@@ -804,6 +804,25 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   is no function's entry (pilot.wild_call: the first block behind each of its indirect calls; a
   call through a veneer is not followed), with the tools' words back to the model; the question
   says that a pointer to code must be a function's entry.
+  Haiku 5.5 again after the day's generator work (measure-28's GCC -Os, 310 accepted): 33 functions
+  with 230 missed instructions left (447 that morning), 10 covered whole, 77 instructions run; 87
+  answers, 327,000 tokens in, 188,000 out, $1.26, 17 minutes; the lift check accepts all ten and loses
+  none (310 to 320): $0.13 a function. Six of the ten Haiku found that morning too; two of that
+  morning's eight the generator covers itself now (vListInsert, prvInsertTimerInActiveList). Done:
+  measured with every provider; what the benchmark does with such inputs is a later item (below).
+- [ ] (Later) **The pilot's inputs in the benchmark**: a `dread bench pilot` step that keeps the input
+  pilot's written cases of a build beside the recipe (FreeRTOS is open source), keyed by the image's
+  hash, and a second figure per build, "with the pilot's inputs", from a lift check on a copy, so that
+  the measurement still counts DREAD's own tools first. About $1.30 a build with Haiku 5.5.
+- [ ] (Later) **What the lifter leaves, round two**: (1) loop cases seeded with what the system run
+  saw each callee of a task return and write (dread.sysrecord for loop functions: their stub answers
+  as returns, fills and effects; about twenty task loops a build miss instructions behind checks in a
+  row); (2) a cycle that changes nothing (registers alike at a pc, no store, no peripheral) as a
+  defined end, like a branch to itself (vAssertCalled's wait for a debugger; it stays uncovered for
+  its exit path, so mostly time: the failing generations of vAssertCalled, Reset_Handler, main and
+  vRegTest2Implementation take 400 to 500 s a build); (3) the M4F builds' libgcc compare helpers that
+  return flags (__aeabi_cdcmple and kin: about six refusals a build); (4) the disagreements left
+  (clang's __sflush_r, prvSampleTimeNow).
 - [ ] **New architectures through it**: Cortex-M4F first (FreeRTOS's ARM_CM4F port, below), then MSP430X
   with TI's cl430 (FreeRTOS's MSP430X port), AVR (its ATmega ports), each as its own item below.
 - [ ] (Later) a compute-heavy library (littlefs) for the case generator on parsers and data structures.
