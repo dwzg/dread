@@ -872,8 +872,8 @@ def test_a_callee_that_reads_a_register_its_caller_keeps(tmp_path):
     """A compiler's shared code called with bl may read a register the convention has its caller
     keep: mov r1, r6; b.w add2 passes the caller's r6 on. A copy is no use, but the tail call takes
     r1, so frag reads r6 its caller leaves (the analysis missed it: the C called frag with whatever
-    its own r6 held, and the other compiler's keeps_fp failed its comparison). Now frag is refused
-    for it, and its caller's call binds r6 from the C's variable, and lifts."""
+    its own r6 held, and the other compiler's keeps_fp failed its comparison). Now frag gets r6 as
+    its caller left it (handed in), and its caller's call binds r6 from the C's variable."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport, regflow
@@ -892,8 +892,76 @@ def test_a_callee_that_reads_a_register_its_caller_keeps(tmp_path):
     p = Program(t, t.image())
     lifter = lift.make_lifter(p, regflow.analyse(p))
     assert lifter.leaves(p.by_name["frag"]) == ["r6"]
-    with pytest.raises(lift.Refused, match="reads r6 before anything writes it"):
-        lifter.lift(p.by_name["frag"])
+    assert lifter.lift(p.by_name["frag"]).handed == ["r6"]
     assert 'x6 __asm__("r6") = r6' in lifter.lift(p.by_name["caller"]).text
     lines = []
     assert lift.check(t, t.image(), ["caller"], out=lines.append, jobs=1) == ["caller"], "\n".join(lines)
+
+
+HANDED_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global pad, g, h, use
+    .type pad, %function
+    .thumb_func
+pad:    push    {r7, lr}        @ r7 only keeps the stack aligned; its pad is popped into r0
+        bl      g
+        pop     {r0, pc}        @ r0: the caller's r7 (a second compiler's -On, a function without a result)
+    .size pad, . - pad
+    .type g, %function
+    .thumb_func
+g:      movs    r1, #1
+        bx      lr
+    .size g, . - g
+    .type h, %function
+    .thumb_func
+h:      adds    r0, r0, r4      @ reads what its caller left in r4
+        bx      lr
+    .size h, . - h
+    .type use, %function
+    .thumb_func
+use:    push    {r4, r7, lr}
+        movs    r7, #3
+        bl      pad
+        movs    r4, #9
+        bl      h
+        pop     {r4, r7, pc}
+    .size use, . - use
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_registers_the_caller_left_are_handed_in(tmp_path):
+    """pad hands back its caller's r7 in r0 (the pad of an aligned frame, popped into a scratch
+    register: the analysis took the pop for a write, the C returned an unwritten frame word, and the
+    comparison refuted it); h reads its caller's r4 (it was refused). The C gets such registers as the
+    caller left them: GCC compiles the file with -ffixed-REG, the C reads them at the entry, and a
+    caller's call binds them."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport, regflow
+    (tmp_path / "t.s").write_text(HANDED_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "use", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    assert lifter.leaves(p.by_name["pad"]) == ["r7"] and lifter.leaves(p.by_name["h"]) == ["r4"]
+    assert lifter.lift(p.by_name["pad"]).handed == ["r7"] and lifter.lift(p.by_name["h"]).handed == ["r4"]
+    assert 'x4 __asm__("r4") = r4' in lifter.lift(p.by_name["use"]).text
+    lines = []
+    assert sorted(lift.check(t, t.image(), ["pad", "h", "use"], out=lines.append, jobs=1)) == ["h", "pad", "use"], \
+        "\n".join(lines)
+    with open(tmp_path / "build" / "lift-check" / "main" / "lifted" / "pad.c") as f:
+        assert f.readline().startswith("/* dread: fixed r7")

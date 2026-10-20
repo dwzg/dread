@@ -116,15 +116,19 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     store such an address they never use and lift today; better a frame that mirrors the caller's
     stack arguments above sp0 (copies of the incoming stack words) for a function that takes an
     address in its save area. Until then a walk the generated inputs do not reach would pass.
-  - [ ] **The caller's r4-r11 at the entry, for the C**: the other compiler keeps the stack aligned
+  - [x] **The caller's r4-r11 at the entry, for the C**: the other compiler keeps the stack aligned
     with `push {r7, lr}` and drops the pad on the way out into a scratch register, `pop {r0, pc}` in
     a function without a result (its -On make_nt): r0 then holds the caller's r7. The lifter does not
     store a saved callee-saved register (only the matching pop reads it back, it assumed), so the
     lifted r0 is an unwritten frame word, and the comparison, which always compares r0, refutes it.
-    Not comparing r0 where no caller reads it would weaken the comparison (rule 6). Better: an entry
-    stub in assembly that hands the C the caller's r4-r11 (and lr), so the C reproduces what the
-    original leaves; the same would lift functions refused today for reading what their caller left
-    in r4-r11. Likely common in that compiler's lower optimisation levels.
+    Not comparing r0 where no caller reads it would weaken the comparison (rule 6). Done 2026-10-21,
+    not with an entry stub but with GCC's -ffixed-REG: entry_states follows what the caller left
+    through frame slots too (a pop into another register hands it on) and takes the result registers
+    as read at a return; registers among r4-r11 the function reads so are handed in: the file is
+    compiled with -ffixed-REG (a "/* dread: fixed */" line), so GCC never touches them, the C reads
+    them at the entry, and a caller's call binds them (bound calls). This also lifts functions that
+    were refused for reading what their caller left in r4-r11 (GCC only; clang has no such option
+    for these registers). The other compiler's -On build 92 to 93 of 95.
   - [x] **Code shared between functions** (a compiler's cross call or outliner, at high
     optimisation for size): functions that branch or fall into common code with their frame still
     open, and common code called by `bl` whose callers read what it leaves; with a symbol of its own

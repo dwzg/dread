@@ -38,16 +38,24 @@ def recon_dir(target, image):
 
 
 CALL_SAVED = "/* dread: call-saved "     # a lifted file's first line: registers to keep (Lifter.call_saved)
+FIXED = "/* dread: fixed "               # ... or registers the C gets as the caller left them (handed)
 
 
 def file_flags(target, path):
-    """Compiler flags a source asks for on its first line: GCC's -fcall-saved-REG for the registers
-    of a CALL_SAVED line (other compilers have no such option for these targets: none)."""
+    """Compiler flags a source asks for on its first two lines: GCC's -fcall-saved-REG for the
+    registers of a CALL_SAVED line, -ffixed-REG for those of a FIXED line (the C reads them as the
+    caller left them); other compilers have no such options for these targets: none."""
     with open(path) as f:
-        first = f.readline()
-    if not first.startswith(CALL_SAVED) or target.compiler.kind != "gcc":
+        lines = [f.readline(), f.readline()]
+    if target.compiler.kind != "gcc":
         return []
-    return ["-fcall-saved-" + r for r in first[len(CALL_SAVED):].split("*/")[0].split()]
+    flags = []
+    for line in lines:
+        if line.startswith(CALL_SAVED):
+            flags += ["-fcall-saved-" + r for r in line[len(CALL_SAVED):].split("*/")[0].split()]
+        elif line.startswith(FIXED):
+            flags += ["-ffixed-" + r for r in line[len(FIXED):].split("*/")[0].split()]
+    return flags
 
 
 _COMPILERS = {}
@@ -192,6 +200,9 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
             result = kept[name]
             text = result.text
             saved = lifter.call_saved(fn)
+            handed = getattr(result, "handed", None)
+            if handed:                      # (compile_all reads it: GCC's -ffixed-REG)
+                text = "%s%s */\n%s" % (FIXED, " ".join(handed), text)
             if saved:                       # (compile_all reads it: GCC's -fcall-saved-REG)
                 text = "%s%s */\n%s" % (CALL_SAVED, " ".join(saved), text)
         except lift.Refused as e:

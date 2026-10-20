@@ -114,6 +114,8 @@ BOUND = frozenset(("r1", "r2", "r3", "r12", "flags"))
 # What a bound call can hand a callee besides r0-r3: the registers the convention has the callee keep,
 # which a compiler's shared code reads from its caller (mov r1, r6; b.w __addsf3)
 BOUND_IN = frozenset(("r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11"))
+# What the C of a function can get as its caller left it (Lifter.can_hand): the same registers
+HANDED = BOUND_IN
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
@@ -129,6 +131,12 @@ class StackSwitch(Refused):
     code runs on another stack. A context switch does so (FreeRTOS's vPortYield on the MSP430 saves
     the registers on the task's stack, stores the stack pointer into the task's TCB and loads the
     next task's from its TCB). Lifter.states(switch=True) ends the path there."""
+
+
+def dict_origins(pairs, reg):
+    """The caller's registers a register's value is a copy of, from (register, origin) pairs."""
+    got = {o for r, o in pairs if r == reg}
+    return got or {reg}
 
 
 class Lifted:
@@ -710,7 +718,7 @@ class Lifter:
         self._stack_args[key] = top
         return top
 
-    def entry_states(self, fn):
+    def entry_states(self, fn, given=frozenset()):
         """({address: registers that may still hold what the caller left, before the instruction},
         {address: such registers the instruction reads}). Arguments (r0-r3), sp and pc count as
         written at the entry; pushes (they only save) and returns (lr is only the way back) read
@@ -719,9 +727,15 @@ class Lifter:
         addne r7, ...), or on the edge of a conditional branch whose condition it was written
         under, as long as the flags do not change in between. Where the layer has the flags one
         by one (flag_effects: the MSP430's clrc writes C and passes the others through) they are
-        followed so, and the result has them as "flags" again (undefined, or read, if one is)."""
-        if getattr(fn, "key", fn.name) in self._entry:
-            return self._entry[getattr(fn, "key", fn.name)]
+        followed so, and the result has them as "flags" again (undefined, or read, if one is).
+        What the caller left travels through copies (mov r1, r6), through the frame (push {r7, lr}
+        ... pop {r0, pc} hands back the caller's r7 in r0) and into what a callee reads; a result
+        register at a return is read. given: registers the C gets as the caller left them (lift:
+        handed in), which count as written at the entry."""
+        ekey = (getattr(fn, "key", fn.name), frozenset(given))
+        if ekey in self._entry:
+            return self._entry[ekey]
+        self._entry[ekey] = ({fn.insns[0]: frozenset()}, {})   # what a recursive call sees meanwhile
         prog, arch = self.prog, self.arch
         index = {a: i for i, a in enumerate(fn.insns)}
         try:
@@ -738,11 +752,17 @@ class Lifter:
         fpu = ["s%d" % k for k in range(16, 32)] if getattr(self.arch, "fp_arg_regs", None) else []
         bits = ["flags:" + n for n in arch.FLAG_NAMES] if hasattr(arch, "flag_effects") else None
         start = frozenset(r for r in self.REGS + (bits or ["flags"]) + fpu
-                          if r not in tuple(args) + ("sp", "pc", link) + fixed)
+                          if r not in tuple(args) + ("sp", "pc", link) + fixed + tuple(given))
+        try:
+            results = () if not args else ("r0", "r1") if self._wide(fn.name) else ("r0",)
+        except Exception:
+            results = ("r0",)
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
         # (register, the caller's register its value is a copy of): mov r1, r6 hands what the caller
         # left in r6 on; a call that takes r1 then reads the caller's r6 (a compiler's shared code)
         origin_at = {fn.insns[0]: frozenset()}
+        # frame slots (by depth) holding what the caller left in a register: (slot, its register)
+        slots_at = {fn.insns[0]: frozenset()}
         work = [fn.insns[0]]
         while work:
             a = work.pop()
@@ -764,7 +784,7 @@ class Lifter:
             for callee in (to, into):
                 if callee is not None:
                     takes = set(self.flow.read_regs(callee.name)) if self.flow is not None else set(self.ARGS)
-                    reads = set(reads) | (takes & set(self.ARGS))
+                    reads = set(reads) | (takes & set(self.ARGS)) | set(self.leaves(callee))
             if bits:
                 fr, fw = arch.flag_effects(insn)
                 reads = (set(reads) - {"flags"}) | {"flags:" + n for n in fr}
@@ -806,6 +826,28 @@ class Lifter:
             after_o = frozenset((r, o) for r, os in origin.items() for o in os if r not in writes)
             if copy is not None and copy[1] in undef:
                 after_o = after_o | {(copy[0], o) for o in origin.get(copy[1], {copy[1]})}
+            slots = set(slots_at[a])
+            stack = arch.stack_kind(insn)
+            depth = known[a][0] if a in known else None
+            if depth is not None and stack in ("push", "pop") and pred is None and arch.name == "arm":
+                words = [r for r, _ in self.stack_words(insn)]
+                if stack == "push":         # saved: the slot holds what the caller left
+                    top = depth + arch.stack_bytes(insn)
+                    for k, r in enumerate(words):
+                        at = top - 4 * k
+                        slots = {x for x in slots if x[0] != at}
+                        if r is not None and r in undef:
+                            slots |= {(at, o) for o in origin.get(r, {r})}
+                else:                       # restored, maybe into another register (the pad of an
+                    for k, r in enumerate(words):   # aligned frame popped into r0)
+                        held = {o for s, o in slots if s == depth - 4 * k}
+                        if r is not None and held and r not in ("sp", "pc", link):
+                            after_u = after_u | {r}
+                            after_o = frozenset(x for x in after_o if x[0] != r) | {(r, o) for o in held}
+            if kind == "return" or self.ret_jump(insn, known.get(a, (0, {}))[1] or {}):
+                late = {o for r in results if r in after_u for o in dict_origins(after_o, r)}
+                if late:                    # a result that is what the caller left in another register
+                    found.setdefault(a, set()).update(late)
             for b in self.successors(fn, index, a, insn, strict=False, values=known.get(a, (0, None))[1]):
                 bu, bp = after_u, after_p
                 if kind == "jump" and pred is not None and bp:
@@ -813,19 +855,20 @@ class Lifter:
                     done = {r for r, c in bp if c == cond}
                     bu, bp = bu - done, frozenset(x for x in bp if x[0] not in done)
                 if b not in undef_at:
-                    undef_at[b], partial_at[b], origin_at[b] = bu, bp, after_o
+                    undef_at[b], partial_at[b], origin_at[b], slots_at[b] = bu, bp, after_o, frozenset(slots)
                     work.append(b)
                 else:
                     nu, np, no = undef_at[b] | bu, partial_at[b] & bp, origin_at[b] | after_o
-                    if nu != undef_at[b] or np != partial_at[b] or no != origin_at[b]:
-                        undef_at[b], partial_at[b], origin_at[b] = nu, np, no
+                    ns = slots_at[b] | frozenset(slots)
+                    if nu != undef_at[b] or np != partial_at[b] or no != origin_at[b] or ns != slots_at[b]:
+                        undef_at[b], partial_at[b], origin_at[b], slots_at[b] = nu, np, no, ns
                         work.append(b)
         if bits:
             def fold(regs):
                 return frozenset("flags" if r.startswith("flags:") else r for r in regs)
             undef_at = {a: fold(u) for a, u in undef_at.items()}
             found = {a: set(fold(r)) for a, r in found.items()}
-        self._entry[getattr(fn, "key", fn.name)] = (undef_at, found)
+        self._entry[ekey] = (undef_at, found)
         return undef_at, found
 
     def saving_store(self, insn, values):
@@ -884,6 +927,12 @@ class Lifter:
         states = self.states(fn)
         depth = {a: st[0] for a, st in states.items()}
         undef, found = self.entry_states(fn)
+        handed = frozenset(r for regs in found.values() for r in regs if r != "flags")
+        if handed and handed <= HANDED and self.can_hand(handed):
+            # the C gets them as the caller left them (compiled with GCC's -ffixed-REG: render)
+            undef, found = self.entry_states(fn, given=handed)
+        else:
+            handed = frozenset()
         flags_in = any("flags" in regs for regs in found.values())
         found = {a: regs - {"flags"} for a, regs in found.items() if regs - {"flags"}}
         if found:
@@ -910,7 +959,7 @@ class Lifter:
             if kind == "jump" and target is not None and (target & ~1) in depth:
                 targets.add(target & ~1)
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
-                    "bound": set(),
+                    "bound": set(), "handed": handed,
                     "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns),
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
@@ -930,10 +979,12 @@ class Lifter:
             if into is not None:
                 body.append("    " + self._tail_into(into, insn))
         stubs = {self.arch.target(i) & ~1 for i in insns if getattr(i, "call_via", None)}   # bl into a bx rN
-        return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]) + sorted(self.ctx["bound"]),
-                      frame, stack_params,
-                      [a for a in fn.insns if a not in depth and a not in stubs],
-                      list(fn.insns) if isinstance(fn, Body) else None)
+        got = Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]) + sorted(self.ctx["bound"]),
+                     frame, stack_params,
+                     [a for a in fn.insns if a not in depth and a not in stubs],
+                     list(fn.insns) if isinstance(fn, Body) else None)
+        got.handed = sorted(self.ctx["handed"], key=lambda r: int(r[1:]))
+        return got
 
     def uses_fpu(self, insns):
         """Whether the instructions use ARM's FPU. VFP holds capstone's ARM ids: on another
@@ -1034,6 +1085,9 @@ class Lifter:
             lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
                          " r10 = 0, r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
         lines.append("    u32 n = 0, z = 0, c = 0, v = 0;")
+        for r in sorted(ctx.get("handed", ()), key=lambda r: int(r[1:])):
+            # as the caller left it: GCC never touches the register in this file (-ffixed-REG)
+            lines.append('    __asm__ volatile ("mov %%0, %s" : "=r"(%s));' % (r, r))
         if ctx.get("fp"):                   # the FPU's registers, as bit patterns (see VFP), s0-s15 the caller's
             lines.append("    __attribute__((unused)) u32 %s;" % ", ".join("f%d = 0" % k for k in range(32)))
             lines.append("    " + self._fp_sync("in").strip())
@@ -1708,6 +1762,13 @@ class Lifter:
                 raise Refused("0x%x reads %s behind the call of %s (what the callee leaves)" % (
                     insn.address, reg, callee.name))
         return behind
+
+    def can_hand(self, regs):
+        """Whether the C can get these registers as the caller left them: GCC keeps its hands off a
+        register with -ffixed-REG (dread.build compiles the file so); other compilers have no
+        such option for these targets. ARM only: the C reads them with ARM's mov (the other
+        instruction sets' lifters subclass this one)."""
+        return self.arch.name == "arm" and self.prog.target.compiler.kind == "gcc"
 
     def _bound_call(self, callee, behind, inputs=()):
         """A call whose caller reads behind it what the callee leaves beyond a C result (_check_after_call):
