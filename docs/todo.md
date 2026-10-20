@@ -340,9 +340,21 @@ The long runs set the pace of everything after them. Measure first, then cut.
 - [ ] The system check (about a minute of a lift check on that build): one wave of two runs of the
   scenario per function; all candidates rebuilt together would be two runs, but brings back some of
   the clock's distortion (their own blocks take no time): try it with a fallback to one at a time.
-- [ ] gizmo's MSP430 cases take ten minutes to generate (the suite's first run after a generator
+- [x] gizmo's MSP430 cases take ten minutes to generate (the suite's first run after a generator
   VERSION change: 603 s of its 936), on DREAD's own engine, which the byte budget does not reach;
-  profile that engine's runs.
+  profile that engine's runs. Profiled (2026-10-20): checksum's search runs nearly all end at the
+  instruction limit (its u32 length is two registers on the MSP430: random lengths are billions),
+  so the engine's cost per instruction is the cost: 54 million instructions in two minutes, spread
+  over the interpreter's dispatch on the operation and the operands at every step. The engine
+  compiles each instruction once into a Python function of its own, with its operation, operand
+  modes, registers and constants written in, and runs them from a loop of its own (step inlined):
+  2.8 times faster beside the same load (0.73 us an instruction against 2.0), with the same results
+  (msp430_check: 30,000 random blocks agree with GDB's simulator; three functions' generated cases
+  identical, so cached cases stay valid).
+- [ ] The generator's runs that only circle in known code until the instruction limit (checksum on
+  the MSP430: nearly every run): ending a run after a stretch without a new block would save most of
+  their time on every architecture, but it changes the cases (a VERSION change) and wants its own
+  measurement of coverage.
 
 ## Phase 7: reading aids, plugin, documentation
 

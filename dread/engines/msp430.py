@@ -58,7 +58,7 @@ class Msp430Engine(Engine):
 
     def __init__(self):
         self.r = [0] * 16
-        self.cache = {}         # address -> (Fields, size, ends a block)
+        self.cache = {}         # address -> (Fields, size, ends a block, the compiled instruction)
         self.blocks = {}        # address -> the block's size up to its end
         self.marks = bytearray(1 << self.address_bits)     # bytes of instructions in the cache
         self.sleeping = False
@@ -134,7 +134,7 @@ class Msp430Engine(Engine):
         return d is not None and d.mode == "reg" and d.reg == 0 and f.op in WRITES_DST
 
     def _decoded(self, pc, f):
-        entry = (f, f.size, self._ends_block(f))
+        entry = (f, f.size, self._ends_block(f), self._compile(f, pc, f.size))
         self.cache[pc] = entry
         self.marks[pc:pc + f.size] = b"\x01" * f.size
         return entry
@@ -254,177 +254,234 @@ class Msp430Engine(Engine):
     # ---- execution ----
 
     def emu_start(self, begin, until, timeout=0, count=0):
+        """The base class's run loop (dread.engines.Engine.emu_start: keep the two alike) with step()
+        inlined and pc as the register itself: a third less time an instruction."""
         self.sleeping = False
-        super().emu_start(begin, until, timeout, count)
+        r, cache = self.r, self.cache
+        r[0] = begin & 0xFFFE
+        self.stop_request = False
+        self.until = until
+        n, block_start = 0, True
+        try:
+            while True:
+                pc = r[0]
+                if pc == until or (count and n >= count):
+                    break
+                if block_start and self.block_hooks:
+                    self.run_block_hooks(pc, self.block_size(pc, until))
+                    if self.stop_request:
+                        break
+                    if r[0] != pc:
+                        continue
+                block_start = False
+                if self.code_everywhere or pc in self.code_at:
+                    self.run_code_hooks(pc, self.insn_size(pc))
+                    if self.stop_request:
+                        break
+                    if r[0] != pc:          # redirected: a new block where it goes on
+                        block_start = True
+                        continue
+                entry = cache.get(pc)
+                if entry is None:
+                    entry = self.decode(pc)
+                r[0] = entry[3]()
+                block_start = entry[2]
+                n += 1
+                if self.stop_request:
+                    break
+        except Fault as e:
+            r[0] = pc
+            raise UcError(e.code)
+        finally:
+            self.until = None
 
     def step(self, pc):
         """Run the instruction at pc; True when it ends a block."""
         entry = self.cache.get(pc)
         if entry is None:
             entry = self.decode(pc)
-        f, size, ends = entry
-        r = self.r
-        op = f.op
-        if f.target is not None:            # jumps
-            sr = r[2]
-            if op == "jmp":
-                taken = True
-            elif op == "jne":
-                taken = not sr & ZF
-            elif op == "jeq":
-                taken = sr & ZF
-            elif op == "jlo":
-                taken = not sr & CF
-            elif op == "jhs":
-                taken = sr & CF
-            elif op == "jn":
-                taken = sr & NF
-            elif op == "jge":
-                taken = not (((sr >> 2) ^ (sr >> 8)) & 1)
-            else:                           # jl
-                taken = ((sr >> 2) ^ (sr >> 8)) & 1
-            r[0] = f.target if taken else (pc + 2) & 0xFFFF
-            return True
+        self.r[0] = entry[3]()
+        return entry[2]
+
+    # ---- the instructions compiled ----
+    # Each decoded instruction becomes a Python function of its own (_compile), written out once with
+    # its operation, operand modes, registers and constants filled in, so that a run dispatches on
+    # none of them: about three times faster than interpreting the fields at every step. The
+    # semantics are those the module's docstring states (and the operands' comment above), in the
+    # same order: the source with its @rN+ increment after its load, then the destination's address,
+    # then its load, the store or register write-back, the flags, sr's low-power check. The function
+    # returns where execution goes on; step() puts that into pc, so a hook during the instruction
+    # still sees pc on it.
+
+    def _compile(self, f, pc, size):
+        env = {"r": self.r, "load": self.load, "store": self.store, "sr_written": self._sr_written,
+               "_dadd": _dadd}
+        exec("def run():\n    " + "\n    ".join(self._lines(f, pc, size)), env)
+        return env["run"]
+
+    def _lines(self, f, pc, size):
+        op, nxt = f.op, (pc + size) & 0xFFFF
+        if f.target is not None:            # jumps: the condition on sr's flags
+            cond = {"jmp": None, "jne": "not r[2] & 2", "jeq": "r[2] & 2", "jlo": "not r[2] & 1",
+                    "jhs": "r[2] & 1", "jn": "r[2] & 4", "jge": "not ((r[2] >> 2) ^ (r[2] >> 8)) & 1",
+                    "jl": "((r[2] >> 2) ^ (r[2] >> 8)) & 1"}[op]
+            if cond is None:
+                return ["return %d" % f.target]
+            return ["return %d if %s else %d" % (f.target, cond, (pc + 2) & 0xFFFF)]
         if op == "reti":
-            sp = r[1]
-            sr = self.load(sp, 2)
-            back = self.load((sp + 2) & 0xFFFF, 2)
-            r[2], r[1], r[0] = sr, (sp + 4) & 0xFFFE, back & 0xFFFE
-            self._sr_written()
-            return True
+            return ["sp = r[1]", "sr = load(sp, 2)", "back = load((sp + 2) & 0xFFFF, 2)", "r[2] = sr",
+                    "r[1] = (sp + 4) & 0xFFFE", "sr_written()", "return back & 0xFFFE"]
         if f.dst is None:
-            r[0] = self._single(f, op, f.byte, pc, size)
-        else:
-            r[0] = self._double(f, op, f.byte, pc, size)
-        return ends
+            return self._single_lines(f.src, op, f.byte, pc, nxt)
+        return self._double_lines(f, op, f.byte, pc, size, nxt)
 
-    def _double(self, f, op, byte, pc, size):
-        """A two-operand instruction; returns where execution goes on."""
-        r = self.r
-        s = self._source(f.src, byte, pc)
+    @staticmethod
+    def _source_lines(o, byte, pc):
+        """Lines that leave the source operand's value in s (and do @rN+'s increment, after the
+        load)."""
+        mode, n = o.mode, o.reg
+        if mode == "reg":
+            if n == 0:
+                v = (pc + 2) & 0xFFFF
+                return ["s = %d" % (v & 0xFF if byte else v)]
+            return ["s = r[%d] & 0xFF" % n] if byte else ["s = r[%d]" % n]
+        if mode == "imm":
+            return ["s = %d" % (o.value & 0xFF if byte else o.value)]
+        if mode == "inc":                   # (@pc+ is an immediate)
+            return ["a = r[%d]" % n, "s = load(a, 1)" if byte else "s = load(a & 0xFFFE, 2)",
+                    "r[%d] = (a + %d) & %d" % (n, 1 if byte and n > 1 else 2, 0xFFFF if n > 1 else 0xFFFE)]
+        if mode == "idx":
+            a = "(r[%d] + %d) & 0xFFFF" % (n, o.value)
+        elif mode == "sym":
+            a = "%d" % o.address
+        elif mode == "abs":
+            a = "%d" % o.value
+        else:                               # ind
+            a = "r[%d]" % n if n else "%d" % ((pc + 2) & 0xFFFF)
+        return ["s = load(%s, 1)" % a] if byte else ["s = load((%s) & 0xFFFE, 2)" % a]
+
+    @staticmethod
+    def _write_back(n, byte):
+        """The register write-back of res to register n (r3 takes nothing, sp stays even)."""
+        if n == 3:
+            return []
+        if n == 1:
+            return ["r[1] = res & %d" % (0xFE if byte else 0xFFFE)]
+        return ["r[%d] = res & 0xFF" % n] if byte else ["r[%d] = res" % n]
+
+    def _double_lines(self, f, op, byte, pc, size, nxt):
+        """A two-operand instruction."""
+        mask, msb, width = (0xFF, 0x80, 1) if byte else (0xFFFF, 0x8000, 2)
+        lines = self._source_lines(f.src, byte, pc)
         d = f.dst
-        if byte:
-            mask, msb, width = 0xFF, 0x80, 1
-        else:
-            mask, msb, width = 0xFFFF, 0x8000, 2
-        if d.mode == "reg":
-            n, address = d.reg, None
-            dv = (r[n] if n else pc + size) & mask
-        else:
-            n, address = None, self._destination(d)
-            if not byte:
-                address &= 0xFFFE
-            dv = self.load(address, width) if op != "mov" else 0
-        flags = None
+        n = d.reg if d.mode == "reg" else None
+        if n is None:                       # the destination's address, after the source's increment
+            if d.mode == "idx":
+                a = "(r[%d] + %d) & 0xFFFF" % (d.reg, d.value)
+            elif d.mode == "sym":
+                a = "%d" % d.address
+            else:
+                a = "%d" % d.value
+            lines.append("d = %s" % a if byte else "d = (%s) & 0xFFFE" % a)
+            if op != "mov":
+                lines.append("dv = load(d, %d)" % width)
+        elif op != "mov":
+            lines.append("dv = %d" % ((pc + size) & mask) if n == 0 else "dv = r[%d] & %d" % (n, mask))
+        res, flags = True, False
         if op == "mov":
-            res = s
-        elif op == "add":
-            res, *flags = _add(dv, s, 0, mask, msb)
-        elif op == "addc":
-            res, *flags = _add(dv, s, r[2] & CF, mask, msb)
-        elif op == "sub":
-            res, *flags = _add(dv, ~s & mask, 1, mask, msb)
-        elif op == "subc":
-            res, *flags = _add(dv, ~s & mask, r[2] & CF, mask, msb)
-        elif op == "cmp":
-            _, *flags = _add(dv, ~s & mask, 1, mask, msb)
-            res = None
+            lines.append("res = s")
+        elif op in ("add", "addc", "sub", "subc", "cmp"):
+            carry = {"add": "", "addc": " + (r[2] & 1)", "sub": " + 1", "subc": " + (r[2] & 1)", "cmp": " + 1"}[op]
+            lines += ["b = %s" % ("s" if op in ("add", "addc") else "~s & %d" % mask),
+                      "t = dv + b%s" % carry, "res = t & %d" % mask,
+                      "fl = (1 if t > %d else 0) | (0 if res else 2) | (4 if res & %d else 0)"
+                      " | (256 if ~(dv ^ b) & (dv ^ res) & %d else 0)" % (mask, msb, msb)]
+            res, flags = op != "cmp", True
         elif op == "dadd":
-            res, carry = _dadd(dv, s, r[2] & CF, 2 if byte else 4)
-            flags = (carry, res == 0, res & msb, r[2] & VF)
+            lines += ["res, c = _dadd(dv, s, r[2] & 1, %d)" % (2 if byte else 4),
+                      "fl = c | (0 if res else 2) | (4 if res & %d else 0) | (r[2] & 256)" % msb]
+            flags = True
         elif op == "bit":
-            t = s & dv
-            flags, res = (t != 0, t == 0, t & msb, 0), None
+            lines += ["t = s & dv", "fl = (1 if t else 0) | (0 if t else 2) | (4 if t & %d else 0)" % msb]
+            res, flags = False, True
         elif op == "bic":
-            res = ~s & dv & mask
+            lines.append("res = ~s & dv & %d" % mask)
         elif op == "bis":
-            res = s | dv
+            lines.append("res = s | dv")
         elif op == "xor":
-            res = s ^ dv
-            flags = (res != 0, res == 0, res & msb, s & dv & msb)
+            lines += ["res = s ^ dv", "fl = (1 if res else 0) | (0 if res else 2) | (4 if res & %d else 0)"
+                      " | (256 if s & dv & %d else 0)" % (msb, msb)]
+            flags = True
         else:                               # and
-            res = s & dv
-            flags = (res != 0, res == 0, res & msb, 0)
-        nxt = (pc + size) & 0xFFFF
-        if res is not None:
+            lines += ["res = s & dv", "fl = (1 if res else 0) | (0 if res else 2) | (4 if res & %d else 0)" % msb]
+            flags = True
+        back = "%d" % nxt
+        if res:
             if n is None:
-                self.store(address, width, res)
+                lines.append("store(d, %d, res)" % width)
             elif n == 0:
-                nxt = (res & mask) & 0xFFFE
+                back = "res & %d & 0xFFFE" % mask
             else:
-                self._write_reg(n, res, byte)
-        if flags is not None:
-            self._flags(*flags)
-        if n == 2 and (res is not None or flags is not None):
-            self._sr_written()
-        return nxt
+                lines += self._write_back(n, byte)
+        if flags:
+            lines.append("r[2] = (r[2] & %d) | fl" % ~FLAGS)
+        if n == 2:                          # (every operation writes sr or sets flags there)
+            lines.append("sr_written()")
+        return lines + ["return " + back]
 
-    def _single(self, f, op, byte, pc, size):
-        """A one-operand instruction; returns where execution goes on."""
-        r = self.r
-        o = f.src
-        nxt = (pc + size) & 0xFFFF
-        if op in ("push", "call"):
-            v = self._source(o, byte and op == "push", pc)
-            sp = (r[1] - 2) & 0xFFFE
+    def _single_lines(self, o, op, byte, pc, nxt):
+        """A one-operand instruction."""
+        if op in ("push", "call"):          # the operand first, then the store, then sp
+            lines = self._source_lines(o, byte and op == "push", pc) + ["sp = (r[1] - 2) & 0xFFFE"]
             if op == "push":
-                self.store(sp, 1 if byte else 2, v)
-            else:
-                self.store(sp, 2, nxt)      # the return address: behind the instruction
-                nxt = v & 0xFFFE
-            r[1] = sp
-            return nxt
-        if byte:
-            mask, msb, width = 0xFF, 0x80, 1
-        else:
-            mask, msb, width = 0xFFFF, 0x8000, 2
+                return lines + ["store(sp, %d, s)" % (1 if byte else 2), "r[1] = sp", "return %d" % nxt]
+            return lines + ["store(sp, 2, %d)" % nxt, "r[1] = sp", "return s & 0xFFFE"]
+        mask, msb, width = (0xFF, 0x80, 1) if byte else (0xFFFF, 0x8000, 2)
         # rrc, swpb, rra, sxt: the result goes back where the operand came from
-        mode, n, address = o.mode, None, None
+        mode, n, lines = o.mode, None, []
         if mode == "reg":
             n = o.reg
-            v = (r[n] if n else (pc + 2) & 0xFFFF) & mask
+            lines.append("v = %d" % ((pc + 2) & 0xFFFF & mask) if n == 0 else "v = r[%d] & %d" % (n, mask))
         elif mode == "imm":
             if o.reg == 0:                  # #N: the result overwrites the extension word
-                address = (pc + 2) & 0xFFFF
+                lines.append("d = %d" % ((pc + 2) & 0xFFFF))
             else:
                 n = 3                       # a constant generator: the result goes nowhere
-            v = o.value & mask
+            lines.append("v = %d" % (o.value & mask))
         else:
             if mode == "idx":
-                address = (r[o.reg] + o.value) & 0xFFFF
+                a = "(r[%d] + %d) & 0xFFFF" % (o.reg, o.value)
             elif mode == "sym":
-                address = o.address
+                a = "%d" % o.address
             elif mode == "abs":
-                address = o.value
+                a = "%d" % o.value
             else:                           # ind, inc
-                address = r[o.reg] if o.reg else (pc + 2) & 0xFFFF
-            if not byte:
-                address &= 0xFFFE
-            v = self.load(address, width)
+                a = "r[%d]" % o.reg if o.reg else "%d" % ((pc + 2) & 0xFFFF)
+            lines += ["d = %s" % a if byte else "d = (%s) & 0xFFFE" % a, "v = load(d, %d)" % width]
             if mode == "inc":
-                r[o.reg] = (r[o.reg] + (1 if byte and o.reg > 1 else 2)) & (0xFFFF if o.reg > 1 else 0xFFFE)
-        flags = None
+                lines.append("r[%d] = (r[%d] + %d) & %d" % (o.reg, o.reg, 1 if byte and o.reg > 1 else 2,
+                                                          0xFFFF if o.reg > 1 else 0xFFFE))
+        flags = True
         if op == "rrc":
-            res = (v >> 1) | ((r[2] & CF) * msb)
-            flags = (v & 1, res == 0, res & msb, 0)
+            lines += ["res = (v >> 1) | ((r[2] & 1) * %d)" % msb,
+                      "fl = (v & 1) | (0 if res else 2) | (4 if res & %d else 0)" % msb]
         elif op == "rra":
-            res = (v >> 1) | (v & msb)
-            flags = (v & 1, res == 0, res & msb, 0)
+            lines += ["res = (v >> 1) | (v & %d)" % msb, "fl = (v & 1) | (0 if res else 2) | (4 if res & %d else 0)" % msb]
         elif op == "swpb":
-            res = ((v & 0xFF) << 8) | (v >> 8)
+            lines.append("res = ((v & 0xFF) << 8) | (v >> 8)")
+            flags = False
         else:                               # sxt
-            res = v & 0xFF
-            if res & 0x80:
-                res |= 0xFF00
-            flags = (res != 0, res == 0, res & 0x8000, 0)
+            lines += ["res = v & 0xFF", "if res & 0x80:", "    res |= 0xFF00",
+                      "fl = (1 if res else 0) | (0 if res else 2) | (4 if res & 0x8000 else 0)"]
+        back = "%d" % nxt
         if n == 0:
-            nxt = res & 0xFFFE
+            back = "res & 0xFFFE"
         elif n is not None:
-            self._write_reg(n, res, byte)
+            lines += self._write_back(n, byte)
         else:
-            self.store(address, width, res)
-        if flags is not None:
-            self._flags(*flags)
+            lines.append("store(d, %d, res)" % width)
+        if flags:
+            lines.append("r[2] = (r[2] & %d) | fl" % ~FLAGS)
         if n == 2:
-            self._sr_written()
-        return nxt
+            lines.append("sr_written()")
+        return lines + ["return " + back]
