@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 13                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 14                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -74,6 +74,8 @@ VERSION = 13                # 3: entry spills (variadic functions) are no use; 4
                             # and passes Z, N and V through instead of reading the flags as one
                             # 13: a register such a save and restore enclose a call with is not read
                             # behind that call (the restore replaces the callee's value unread)
+                            # 14: sp stays a base of frame stores when an instruction moves it (sub sp):
+                            # clang's variadic save areas (sub sp, #8; strd r2, r3, [sp, #16]) went unseen
 
 
 class RegFlow:
@@ -200,7 +202,7 @@ def _rows(program, fn, mask, entry_name):
             if spilled:
                 reads = set(reads) - spilled
             copy = arch.sp_copy(insn)
-            sp_based -= set(writes)
+            sp_based -= set(writes) - {"sp"}    # (sub sp, #8 moves it: sp stays a base)
             if copy is not None:
                 sp_based.add(copy)
             written |= set(writes)
@@ -238,7 +240,7 @@ def variadic_save_area(program, fn, insns, joins):
         _, writes = arch.reg_effects(insn)
         stored |= {r for r in arch.frame_stores(insn, sp_based) if r not in written}
         copy = arch.sp_copy(insn)
-        sp_based -= set(writes)
+        sp_based -= set(writes) - {"sp"}        # (clang's variadic functions begin with sub sp)
         if copy is not None:
             sp_based.add(copy)
         written |= set(writes)

@@ -745,10 +745,10 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   Lift checks with every case generated anew, main against this: GCC -Os 297 to 298, clang -Os 269
   to 270 (__sflush_r both), the M4F clang build and RISC-V GCC -Os as before (280, 217), none lost;
   the gizmo builds' tables as before.
-- [ ] **Two decisions to implement** (`docs/decisions.md`, 2026-10-20): (1) a variadic callee's save-area
-  stores count as reads only of registers the caller set before the call (regflow; the 12 clang
-  callers of memset and sprintf); (2) a case whose differences are all stale bytes of the original is
-  compared except those bytes, which the report names (vStartTimerDemoTask, xTaskIncrementTick).
+- [ ] **A decision to implement** (`docs/decisions.md`, 2026-10-20): a case whose differences are all
+  stale bytes of the original is compared except those bytes, which the report names
+  (vStartTimerDemoTask, xTaskIncrementTick). (The other one, a variadic callee's registers, turned
+  out to be a regflow bug: clang's save areas behind sub sp went unseen; regflow 14, 18 refusals gone.)
 - [ ] **The pilot on what the lifter leaves**: local model, deepseek-flash, Sonnet: success rate, time
   and cost per function (the usage ledger). --task input now also asks for the functions the lift
   check left uncovered. First run, deepseek-flash on 20 of GCC -Os: 3 covered whole, 5 of 53 missed

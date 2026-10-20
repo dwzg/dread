@@ -24,8 +24,17 @@ Newest first. "Status" says whether the choice is in the code yet.
 - **Choice: (b).** The registers left out hold a leftover the original passes by accident; the
   format reads it only if the original reads an argument it did not pass, which is undefined in C.
   It takes from what a stub logs at such call sites, nothing else.
-- **Undo.** Revert the commit that implements it (regflow's version goes back with it).
-- **Status.** To be implemented (`docs/todo.md`, "What the lifter leaves").
+- **What came of it.** Tracing it to implement (b) showed the refusals were a regflow bug, not a
+  question: clang's sprintf opens with sub sp, #8 before it stores r2 and r3, and the move took sp
+  out of the bases of the frame stores regflow looks for, so the save area went unseen (GCC's, a
+  push, was seen). Fixed in regflow 14: clang's save areas are no read either, as GCC's have been
+  since regflow 4, at every call site, and the 18 refusals are gone (clang -Os 6, clang -O2 6, the
+  M4F clang build 6 of 13). Nothing more is left out of a comparison than regflow 4 already left out.
+  The per-site part of (b), counting a save-area register where the caller set it and logging it at
+  a stubbed call, is not built: it would compare more than now, and a stub cannot tell a lifted
+  caller's call sites (the C's) from one another.
+- **Undo.** Revert regflow 14 (the refusals come back with it).
+- **Status.** Done as the bug fix (regflow 14, 2026-10-20).
 
 ## Comparing a stale-data case except its stale bytes (2026-10-20)
 

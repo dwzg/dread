@@ -178,6 +178,38 @@ def test_a_variadic_spill_is_no_use(tmp_path):
     assert flow.read_regs("sum") == ["r0"], flow.read_regs("sum")
 
 
+def test_a_variadic_save_area_behind_sub_sp(tmp_path):
+    """clang -Os opens a variadic function with two named arguments by moving sp and storing the rest
+    (sub sp, #8; ...; strd r2, r3, [sp, #16]: FreeRTOS's demo sprintf). The move took sp out of the
+    frame stores' bases, so the save area went unseen, sprintf seemed to read r3, and 18 callers that
+    pass three arguments were refused for reading the r3 a memset before had left."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(
+        "#include <stdarg.h>\n"
+        "__attribute__((noinline)) int sink(char **out, const char *f, va_list ap) { return **out + *f + va_arg(ap, int); }\n"
+        "int fmt(char *out, const char *f, ...) { va_list ap; va_start(ap, f); int r = sink(&out, f, ap);"
+        " va_end(ap); return r; }\n"
+        "int caller(char *b) { return fmt(b, \"%d\", 3); }\n")
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["clang", "--target=thumbv7m-none-eabi", "-mcpu=cortex-m3", "-Os", "-ffreestanding", "-c",
+                    "-ffunction-sections", "-o", obj, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x08000000; .text : { *(.text*) } }\n")
+    subprocess.run(["ld.lld", "-T", str(tmp_path / "t.ld"), "-e", "caller", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\nkind = "clang"\ntriple = "thumbv7m-none-eabi"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    program = Program(Target.load(str(tmp_path)))
+    shape = [(i.mnemonic, i.op_str) for i in program.instructions(program.by_name["fmt"])][:5]
+    assert shape[0][0] == "sub" and any(m.startswith("str") for m, _ in shape), shape   # (else the test shows nothing)
+    flow = regflow.analyse(program)
+    assert flow.read_regs("fmt") == ["r0", "r1"], flow.read_regs("fmt")
+
+
 @pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
 def test_an_ecall_reads_nothing(tmp_path):
     """FreeRTOS's RISC-V port yields with ecall, and its handler saves every register. Counted as a
