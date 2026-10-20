@@ -6,12 +6,25 @@
 # `script`, see dread/cclab/adapters.py), and --keep holds every probe function.
 # Keep the work directory on the Windows side (--work /mnt/c/...), where iccarm.exe sees it.
 # The options as IAR's documentation for EWARM 9.70 spells them (--cpu=, --fpu=none, -O[n|l|m|h|hs|hz];
-# ILINK's --config, --entry, --keep): checked against the documentation, not against the tools.
+# ILINK's --config, --entry, --keep). Tried on EWARM 9.70.2 and 8.42.1 (2026-10-20): the doctor and
+# every probe build through, with what this file now says (9.70.2's installation lacked the library
+# ILINK chooses, so its copy named them: below).
+#
+# An installation without the C library ILINK chooses: ILINK picks the DLib configuration from what
+# the objects declare, and the probes include no library header, so it takes "normal" (dl7M_tln.a
+# for the Cortex-M3 and M4); an installation with only "full" (dl7M_tlf.a) needs a copy with
+#   cflags = ["--dlib_config", "full"]
+#   ldflags = ["--no_library_search", 'C:\...\lib\rt7M_tl.a', 'C:\...\lib\dl7M_tlf.a', 'C:\...\lib\m7M_tl.a']
+# and, as such a list holds for every build, the hard-float build (cortex-m4f) in a copy of its own
+# with the VFP math library (m7M_tlv.a). An installation without IAR's C++ library (no dlpp7M...)
+# takes operator new and delete from the lab's cxx_support.c (cxx_support below; one with the
+# library gets the lab's all the same: an object's definition goes before a library's).
 name = "iar-arm"
 guard = true
 family = "iar"
 windows = true
 support = false
+cxx_support = true        # operator new and delete, __cxa_pure_virtual of the lab's (cxx_support.c)
 arch = "arm"
 isa = "t32"
 profile = "m"

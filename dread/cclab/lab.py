@@ -74,8 +74,7 @@ define region ROM_region = mem:[from 0x{flash:08x} size 0x{flash_size:x}];
 define region RAM_region = mem:[from 0x{ram:08x} size 0x{ram_size:x}];
 define block CSTACK with alignment = 8, size = 0x{stack:x} {{ }};
 define block HEAP with alignment = 8, size = 0 {{ }};
-initialize by copy {{ readwrite }};
-do not initialize {{ section .noinit }};
+do not initialize {{ readwrite }};
 place in ROM_region {{ readonly }};
 place in RAM_region {{ readwrite, block CSTACK, block HEAP }};
 """

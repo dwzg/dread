@@ -218,7 +218,9 @@ What only the user can do (provide files, credentials, system software) or decid
 undone). Other decisions are taken by the recommended option and written down in
 `docs/decisions.md` for the user to review (the user, 2026-10-20). Work goes on around them.
 
-- **IAR-built gizmo?** For the IAR profile: gizmo built with IAR EWARM (Cortex-M3) and, for MSP430,
+- **IAR-built gizmo?** (2026-10-20: the lab ran at work on EWARM 9.70.2 and 8.42.1, every probe
+  through in 24 builds after four changes, now in the adapter and docs/cclab.md; the bundle is in
+  `~/dread-private/iar/`, what DREAD lacks for that code are items under Compiler diversity.) For the IAR profile: gizmo built with IAR EWARM (Cortex-M3) and, for MSP430,
   EW430, with the ELF (debug info on) and the map file, put somewhere outside the repository (say
   `~/dread-private/iar/`). Tests would use them when present and skip otherwise. Which IAR versions
   and optimisation levels matter to you?

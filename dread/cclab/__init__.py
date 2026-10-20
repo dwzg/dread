@@ -49,6 +49,12 @@ def _one(job):
     try:
         d = lab.build(adapter, key, picked, flags, probe_files, work, guard)
     except lab.BuildError as e:
+        # the failed build's log beside its files (a run prints one line per build: what failed,
+        # with which command and output, is only here)
+        where = os.path.join(work, adapter.name, key)
+        if os.path.isdir(where):
+            with open(os.path.join(where, "failed.json"), "w") as f:
+                json.dump({"adapter": adapter.name, "build": key, "error": str(e), "log": e.log}, f, indent=1)
         return key, {"error": str(e), "log": e.log}
     except ad.AdapterError as e:
         return key, {"error": str(e), "log": []}
@@ -101,6 +107,10 @@ def run(adapter, work, only=None, names=None, jobs=None, out=print, guard=None, 
             key, result = _one(job)
             results[key] = result
             out("%-28s %s" % (key, "error: " + result["error"] if "error" in result else "measured"))
+    failed = sorted(k for k, r in results.items() if "error" in r)
+    if failed:
+        out("the failed builds' commands and output: %s" % os.path.join(work, adapter.name, failed[0], "failed.json")
+            + (" (and the same in the other %d)" % (len(failed) - 1) if len(failed) > 1 else ""))
     return results
 
 

@@ -228,15 +228,17 @@ text = open(config).read()
 regions = dict((n, (int(b, 16), int(s, 16))) for n, b, s in
                re.findall(r"define region (\w+) = mem:\[from 0x([0-9a-fA-F]+) size 0x([0-9a-fA-F]+)\];", text))
 assert "ROM_region" in regions and "RAM_region" in regions, regions
-assert "initialize by copy { readwrite };" in text and "place in ROM_region { readonly };" in text
+assert "do not initialize { readwrite };" in text and "place in ROM_region { readonly };" in text
 here = os.path.dirname(out)
 script = os.path.join(here, "standin.ld")
 open(script, "w").write("MEMORY { ROM (rx) : ORIGIN = 0x%x, LENGTH = 0x%x\n RAM (rwx) : ORIGIN = 0x%x, LENGTH = 0x%x }\n"
                         "SECTIONS { .text : { KEEP(*(.text*)) *(.rodata*) } > ROM .data : { *(.data*) } > RAM AT > ROM"
                         " .bss : { *(.bss*) *(COMMON) } > RAM }\n" % (regions["ROM_region"] + regions["RAM_region"]))
 support = os.path.join(here, "obj", "standin_support.c")
-open(support, "w").write(open(os.environ["STANDIN_SUPPORT"]).read()
-                         + open(os.environ["STANDIN_SUPPORT"].replace("support.c", "cxx_support.c")).read())
+library = open(os.environ["STANDIN_SUPPORT"]).read()
+if not any(o.endswith("cxx_support.o") for o in objs):     # (the lab's own when the adapter asks for it)
+    library += open(os.environ["STANDIN_SUPPORT"].replace("support.c", "cxx_support.c")).read()
+open(support, "w").write(library)
 flags = ["-mthumb", "-mcpu=cortex-m3"]
 sys.exit(subprocess.call(["arm-none-eabi-gcc"] + flags + ["-nostdlib", "-T", script, "-e", entry, "-o", out] + objs
                          + [support, "-lgcc"] + ["-Wl,--undefined=" + k for k in keep]))
@@ -635,3 +637,18 @@ def test_own_probes_do_not_go_to_the_public_compiler_explorer(ce_offline, tmp_pa
     (tmp_path / "mine").mkdir()
     rc = main(["run", "--adapter", "ce:carmug1320", "--work", str(tmp_path / "w"), "--probe-dir", str(tmp_path / "mine")])
     assert rc == 1 and "instance of one's own" in capsys.readouterr().err
+
+
+def test_a_failed_build_leaves_its_log(tmp_path, capsys):
+    """A run prints one line per build; what failed, with the command and its output, goes to the
+    build's failed.json, and the run says where (an IAR run at work failed in every build and left
+    nothing to read)."""
+    from dread.cclab import main
+    adapter = tmp_path / "broken.toml"
+    adapter.write_text('name = "broken"\nfamily = "gnu"\n[tools]\ncc = "false"\nld = "false"\n'
+                       '[commands]\ncompile = ["{cc}", "{src}"]\nlink = ["{ld}"]\n'
+                       '[matrix.opt]\nO0 = ["-O0"]\n')
+    assert main(["run", "--adapter", str(adapter), "--work", str(tmp_path / "w"), "--jobs", "1"]) == 1
+    failed = json.loads((tmp_path / "w" / "broken" / "O0" / "failed.json").read_text())
+    assert failed["error"].startswith("compiling") and failed["log"][0]["code"] == 1
+    assert "failed.json" in capsys.readouterr().out

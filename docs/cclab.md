@@ -85,6 +85,17 @@ cp dread/cclab/adapters/iar-arm.toml /mnt/c/cclab-work/iar-arm.toml   # edit [to
 bin/dread cclab doctor --adapter /mnt/c/cclab-work/iar-arm.toml --work /mnt/c/cclab-work
 ```
 
+What a copy for one installation may need: `[tools]` with the compiler's and linker's paths (a
+path, a glob, or a list); a `name` of its own when a second installation (another version) is
+measured into the same work directory, since the results go by the adapter's name; and where the
+installation lacks the C library ILINK chooses (it picks DLib's configuration from what the objects
+declare, and the probes declare none: "normal", `dl7M_tln.a` on the Cortex-M3 and M4),
+`cflags = ["--dlib_config", "full"]` with `ldflags = ["--no_library_search", 'C:\...\lib\rt7M_tl.a',
+'C:\...\lib\dl7M_tlf.a', 'C:\...\lib\m7M_tl.a']`. Such a list holds for every build, so the
+hard-float builds go into a copy of their own with the VFP math library (`m7M_tlv.a`). Keys outside a
+table go above `[tools]`. A failed build's commands and output are in its `failed.json`; `run` says
+where.
+
 Then the whole matrix, and the other compilers on the same machine for comparison:
 
 ```sh
