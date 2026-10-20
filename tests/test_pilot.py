@@ -300,3 +300,50 @@ def test_inputs_for_what_the_lift_check_left_uncovered(tmp_path):
         f.write("main\tdropped\tUNCOVERED main: 1 of 30\t0x%x\n" % main.insns[2])
         f.write("fmt_dec\taccepted\t\t\n")
     assert pilot.lift_missed(t, image, p) == {"parse_kv": [kv.insns[3], kv.insns[4]]}
+
+
+@needs_gcc
+def test_an_input_that_points_a_callback_into_a_function_is_refused(tmp_path):
+    """A callback pointed into the middle of a function runs code the rebuilt image does not have
+    there (deepseek-flash once gave _fwalk_sglue a callback into itself): the tools refuse it and
+    ask again; the function's entry is kept."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(r'''
+__attribute__((noinline)) int twice(int x) { return x + x + 3; }
+__attribute__((noinline)) int apply(int (*f)(int), int x) { if (!f) return -1; return f(x) * 5; }
+__attribute__((naked, noreturn)) void reset(void) { for (;;) ; }
+__attribute__((section(".vectors"), used)) void (*const vectors[2])(void) = {(void (*)(void))0x20005000, reset};
+''')
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) } > FLASH }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "reset", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '''
+[image.main]
+original = "original/t.bin"
+base = 0x08000000
+entry = "reset"
+
+[compiler]
+cross = "arm-none-eabi-"
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    image = t.image()
+    program = Program(t, image)
+    twice, apply = program.by_name["twice"], program.by_name["apply"]
+    inside = twice.insns[1]
+    answer = '```json\n{"args": ["0x%x", 4, 0, 0], "mem": [], "poll": []}\n```'
+    provider = llm.Scripted([answer % (inside | 1), answer % (twice.entry | 1)])
+    still = pilot.find_inputs(t, image, program, provider, "apply", list(apply.insns), tries=2,
+                              flow=regflow.load(t, image, program), out=lambda *a: None)
+    first = provider.asked[1][1][-1]["content"]
+    assert "call 0x%x through a pointer it gave: inside twice, not a function's entry" % inside in first, first
+    cases = json.load(open(os.path.join(image.extra_cases, "apply.json")))["cases"]
+    assert len(cases) == 1 and int(str(cases[0]["args"][0]), 0) == twice.entry | 1, cases
+    assert len(still) < len(apply.insns)

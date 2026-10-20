@@ -651,8 +651,10 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
     input: r1 = 0xe815, the callback, points into _fwalk_sglue's own body; the original runs its own
     instructions there, the rebuilt image has other bytes (an unfair input, not a lifter fault).
   - The local model: running (about eleven minutes a function).
-  Open: refuse an input whose run calls through a value it gave into the middle of a function (the
-  generator pins such inputs to its pointer stub; the pilot's inputs do not pass through that).
+  Refused since: an input whose run makes the function call through a register to an address that
+  is no function's entry (pilot.wild_call: the first block behind each of its indirect calls; a
+  call through a veneer is not followed), with the tools' words back to the model; the question
+  says that a pointer to code must be a function's entry.
 - [ ] **New architectures through it**: Cortex-M4F first (FreeRTOS's ARM_CM4F port, below), then MSP430X
   with TI's cl430 (FreeRTOS's MSP430X port), AVR (its ATmega ports), each as its own item below.
 - [ ] (Later) a compute-heavy library (littlefs) for the case generator on parsers and data structures.

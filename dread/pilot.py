@@ -449,7 +449,8 @@ values peripheral registers answer with:
      "poll": [[register address, from the n-th read on, value], ...]}}
 
 Numbers may be integers or hex strings ("0x20001000"). Memory not given reads as zero; for buffers
-use the scratch area 0x{scratch:x} to 0x{end:x}. Answer with one ```json block holding one input."""
+use the scratch area 0x{scratch:x} to 0x{end:x}. A pointer to code (a callback) must be the entry of a
+function, never an address inside one. Answer with one ```json block holding one input."""
 
 NAME_SYSTEM = """You name functions of a binary image from their code. A name says what the function
 does, in snake_case, with a prefix for its subsystem when one is clear (uart_, gpio_, timer_, cfg_).
@@ -576,6 +577,42 @@ def input_task(target, image, program, provider, asked, tries=3, flow=None, out=
         ", %d declined by the provider" % asking.declined if asking.declined else "")
 
 
+def wild_call(gen, program, fn, case):
+    """The first address `fn` calls through a register that is not a function's entry, or None. An
+    input that points a callback into the middle of a function runs code there that the rebuilt image
+    does not have (it replaces the function): deepseek-flash once passed _fwalk_sglue a callback
+    into _fwalk_sglue itself, which the original ran and the rebuild faulted on. The target is the
+    first block behind one of fn's calls through a register (a call to the next instruction, as an
+    svc that runs on, is none). Not seen: a call through a veneer (bl to a bx rN stub) reaches its
+    target a block later."""
+    from unicorn import UC_HOOK_BLOCK, UC_HOOK_CODE
+    sites = {a: program.insn_size(a) for a in fn.insns if program.arch.flow(program.insn(a))[0] == "icall"}
+    if not sites:
+        return None
+    m = gen.machine()
+    m.plan = []
+    gen.apply(m, case)
+    state = {"after": None, "wild": None}
+
+    def at_site(uc, address, size, user):
+        state["after"] = address + sites[address]
+
+    def on_block(uc, address, size, user):
+        after, state["after"] = state["after"], None
+        if after is not None and address != after and address not in program.by_entry and state["wild"] is None:
+            state["wild"] = address
+
+    for address in sites:
+        m.hook_add(UC_HOOK_CODE, at_site, begin=address, end=address)
+    m.hook_add(UC_HOOK_BLOCK, on_block)
+    m.may_hang = bool(case.get("hang"))
+    try:
+        m.call(fn.entry, *case["args"], max_instructions=case.get("limit", 200_000))
+    except Exception:
+        pass
+    return state["wild"]
+
+
 def find_inputs(target, image, program, provider, name, missed, tries=3, flow=None, out=print):
     """Ask for inputs that run the missed instructions; each one that runs some becomes a written
     case of the function (extra_cases, "by" the pilot). Returns the addresses still unrun."""
@@ -613,11 +650,18 @@ def find_inputs(target, image, program, provider, name, missed, tries=3, flow=No
         else:
             ran = gen.coverage(fn.entry, fn.insns, case, case["limit"], check_image=True)
             new = ran & still
+            wild = wild_call(gen, program, fn, case) if new else None
             if not ran:
                 feedback = ("The input does not finish (it faults, runs on beyond its limit, or loads code as "
                             "data or writes into the image). Give another one.")
             elif not new:
                 feedback = "The input runs, but none of the marked instructions. Give another one."
+            elif wild is not None:
+                owner = program.function_at(wild)
+                feedback = ("The input makes %s call 0x%x through a pointer it gave: %s, not a function's entry. "
+                            "The rebuilt image has other code there. A pointer to code must be a function's "
+                            "entry. Give another one." % (name, wild, "inside %s" % owner.name if owner else
+                                                          "outside every function"))
             else:
                 still -= new
                 case.update({"by": "dread pilot (%s)" % provider.label(),
