@@ -112,6 +112,19 @@ when its cases agree and run all of it (the system run decides for the functions
 and for exception handlers). `dread liftfuzz` checks the translation itself on random instruction
 sequences, because cases that cover a function need not tell a wrong translation apart.
 
+Where the C cannot say what the original's code relies on, the translation says it otherwise:
+
+- a frame that must be the real one (a va_list walks from the saved argument registers into the
+  stack arguments; an address of a stack argument): an assembly entry reserves the original's frame
+  on the real stack and hands the C its stack pointer (ARM state and Thumb-2);
+- code shared between functions (a compiler's cross call or outliner): it becomes part of every
+  function that enters it with its frame open;
+- what a caller reads behind a call that a C call cannot return (a 64-bit remainder in r2:r3, the
+  flags of a compare helper, a register the callee leaves) and what a callee reads of its caller's
+  registers: a call in an asm statement that binds them (bound calls);
+- what the caller left in r4-r11 that the function hands back or reads (a frame's pad popped into
+  r0): the C gets it as the caller left it, the file compiled with GCC's -ffixed-REG.
+
 Lifted C has no names, no structure, and nobody read it: it is a stepping stone (the code is C, so it
 no longer pins the layout, and it comes with cases), never a reconstruction.
 
@@ -144,3 +157,12 @@ Each of these cost time once and is now a check or a rule in a tool:
 - A rebuilt idle loop is not shared code: the system run must still take its interrupts.
 - Most of the generator's time went into Python bookkeeping per byte, not into the emulator: profile
   before moving code into C.
+- Cases that agree on every generated input can still accept a wrong translation when no input
+  reaches the difference: FreeRTOS's sprintf was accepted on every build and printed a stack word of
+  its own for its third argument (no case passed one on the stack; the C's frame was not next to the
+  stack arguments). Frames that must be real are now on the real stack; a check that cannot be
+  exercised by the inputs is a refusal or a construction that makes it hold, not a hope.
+- A real callee answers one way (newlib's _read stub always fails): when code is left behind a
+  call, the generator stubs that callee, its result an input.
+- A script that counts verdicts is code too: one read "dropped  FAIL fn" as a function named FAIL,
+  and the numbers it reported were wrong for an evening.
