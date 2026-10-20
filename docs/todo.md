@@ -61,11 +61,15 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     it. Before, libgcc's `__aeabi_fmul` (`ittt ne; andsne r3, ...; teqne r2, ip; teqne r3, ip`)
     seemed to read r3, and soft-float code that keeps a value in r3 across it was refused
     (keeps_fp and op_fmul on GCC's build and the other compiler's). No gizmo table changed.
-  - [ ] **The run-time ABI's helpers by the standard**: `__aeabi_uldivmod` and the other helpers of
+  - [x] **The run-time ABI's helpers by the standard**: `__aeabi_uldivmod` and the other helpers of
     Arm's RTABI take their arguments in r0-r3, none on the stack (except the C++ array helper
     `__aeabi_vec_cctor_nocookie_nodtor`), and return in r0, r0:r1 or r0-r3; libgcc's moves sp, so
     its stack arguments were "not known" and every caller was refused (four of the lab's probes on
     every build, GCC's too). A table in the ARM layer (stack arguments, `abi_results` as MSP430 has).
+    Done 2026-10-20: `RTABI_RESULTS` (83 helpers), the lifter asks the layer after the target's
+    `[abi] stack_args`, regflow 18 takes the results as read. With regflow 17, probes accepted on
+    the lab's GCC -Os build 85 to 89 of 94; on the other compiler's builds three or four more each.
+    Gizmo's tables unchanged; on a32 `__aeabi_ldiv0` now returns r0:r1 (the standard's).
   - [ ] **Calls whose results C cannot return**: the remainder of `__aeabi_uldivmod` in r2:r3, the
     flags of `__aeabi_cfcmple` and its kin (the RTABI's compares that answer in the flags; libgcc's
     own `__aeabi_fcmplt` calls them), a register the callee leaves that the caller reads: an inline-asm call that

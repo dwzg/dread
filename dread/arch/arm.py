@@ -86,6 +86,25 @@ CONDITION_NAMES = {
     csarm.ARM_CC_GT: "gt", csarm.ARM_CC_LE: "le", csarm.ARM_CC_AL: "",
 }
 
+# The helpers of Arm's run-time ABI (RTABI, IHI 0043: arithmetic, conversions, compares, 64-bit
+# operations, division, unaligned access, memory) by their standard names, with their result
+# registers. Every one takes its arguments in r0-r3 (a 64-bit value in a pair), none on the stack:
+# abi_stack_args. The compares that answer in the flags (__aeabi_cfcmple and kin) and the memory
+# helpers return nothing. Not here: the C++ helpers (__aeabi_vec_cctor_nocookie_nodtor takes five
+# words), those of the C library's ABI, the unwinder's.
+RTABI_RESULTS = {}
+for _regs, _names in (
+        (("r0",), "idiv uidiv idiv0 lcmp ulcmp uread4 uwrite4 read_tp fadd fdiv fmul frsub fsub "
+                  "fcmpeq fcmplt fcmple fcmpge fcmpgt fcmpun dcmpeq dcmplt dcmple dcmpge dcmpgt dcmpun "
+                  "d2iz d2uiz f2iz f2uiz d2f i2f ui2f l2f ul2f f2h f2h_alt d2h d2h_alt h2f h2f_alt"),
+        (("r0", "r1"), "idivmod uidivmod ldiv0 lmul llsl llsr lasr uread8 uwrite8 dadd ddiv dmul drsub "
+                       "dsub d2lz d2ulz f2lz f2ulz f2d i2d ui2d l2d ul2d"),
+        (("r0", "r1", "r2", "r3"), "ldivmod uldivmod"),
+        ((), "cfcmpeq cfcmple cfrcmple cdcmpeq cdcmple cdrcmple memcpy memcpy4 memcpy8 memmove memmove4 "
+             "memmove8 memset memset4 memset8 memclr memclr4 memclr8")):
+    for _n in _names.split():
+        RTABI_RESULTS["__aeabi_" + _n] = _regs
+
 
 class Arm:
     """The ARM layer. Constructed from [arch]: isa, profile, cpu, endian, ghidra."""
@@ -99,6 +118,19 @@ class Arm:
     syscall_numbers = (2,)      # Unicorn's exception number of svc (dread.emu runs it as a logged no-op)
     link_reg = "lr"         # where a call leaves the return address
     veneer_reg = "r12"      # the register a veneer or a call through a register may go through (ip)
+
+    def abi_results(self, name):
+        """The registers of a run-time helper's result by Arm's RTABI (RTABI_RESULTS), whatever the
+        original's own callers read of it: compiled C calls the helper by this contract (the
+        remainder of __aeabi_uidivmod in r1, of __aeabi_uldivmod in r2:r3). dread.regflow takes
+        them as read after every call. () for anything else, and for a helper without one."""
+        return RTABI_RESULTS.get(name, ())
+
+    def abi_stack_args(self, name):
+        """0 for a helper of the RTABI, whatever its code does with sp: none takes an argument on
+        the stack (libgcc's __aeabi_uldivmod moves sp before it calls __udivmoddi4, which left its
+        stack arguments unknown and refused every caller). None for anything else."""
+        return 0 if name in RTABI_RESULTS else None
 
     def __init__(self, isa="a32", profile="a", cpu=None, endian="little", ghidra=None, thumb2=None):
         if isa not in ("a32", "t32"):

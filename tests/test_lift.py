@@ -523,3 +523,37 @@ def test_registers_the_callers_keep_are_compiled_call_saved(tmp_path):
     (tmp_path / "g.c").write_text("int g(void) { return 0; }\n")
     t.compiler.kind = "gcc"
     assert build.file_flags(t, str(tmp_path / "g.c")) == []
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_run_time_abi_helpers_take_no_stack_arguments(tmp_path):
+    """libgcc's __aeabi_uldivmod moves sp before it calls __udivmoddi4, so its stack arguments could
+    not be counted and every caller of a 64-bit division was refused. Arm's run-time ABI says its
+    helpers take every argument in r0-r3 (the ARM layer's RTABI_RESULTS), and that this one returns
+    the quotient in r0:r1 and the remainder in r2:r3: regflow counts those as read after every call."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport, regflow
+    (tmp_path / "t.c").write_text(
+        "unsigned long long q(unsigned long long a, unsigned long long b) { return a / b; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "q", "-o", elf, str(tmp_path / "t.c"), "-lgcc"], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p)
+    helper = p.by_name["__aeabi_uldivmod"]
+    with pytest.raises(lift.Refused, match="changes the stack pointer"):    # (libgcc's: strd ip, lr, [sp, #-16]!)
+        lifter.depths(helper, strict=False, switch=True)
+    assert lifter.stack_args(helper) == 0
+    assert "__aeabi_uldivmod(r0, r1, r2, r3)" in lifter.lift(p.by_name["q"]).text
+    flow = regflow.analyse(p)
+    assert {"r0", "r1", "r2", "r3"} <= set(flow.kept_regs("__aeabi_uldivmod")), flow.kept_regs("__aeabi_uldivmod")

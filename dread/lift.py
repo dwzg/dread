@@ -577,6 +577,8 @@ class Lifter:
         if fn.name in self._stack_args:
             return self._stack_args[fn.name]
         declared = self.prog.target.abi.stack_args.get(fn.name)
+        if declared is None and hasattr(self.arch, "abi_stack_args"):
+            declared = self.arch.abi_stack_args(fn.name)        # the run-time ABI's helpers: none
         if declared is not None:                # [abi] stack_args: the target says so (a context switch)
             self._stack_args[fn.name] = declared
             return declared

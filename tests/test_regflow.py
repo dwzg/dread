@@ -30,7 +30,9 @@ def test_kept_registers(target, variant):
     if variant == "rv32":       # clang inlined uart_putc into uart_puts, the caller that read r1 on ARM
         assert extra == set()
     else:
-        assert extra == ({"uart_putc", "__aeabi_uidivmod"} if variant == "a32" else {"uart_putc"})
+        # (__aeabi_ldiv0, libgcc's bx lr behind the division helpers, returns r0:r1 by the run-time
+        # ABI: regflow 18's abi_results, whatever the image's callers read of it)
+        assert extra == ({"uart_putc", "__aeabi_uidivmod", "__aeabi_ldiv0"} if variant == "a32" else {"uart_putc"})
         assert flow.kept_regs("uart_putc") == ["r1"]
         assert [caller for caller, _ in flow.sites_of("uart_putc", "r1")] == ["uart_puts"]
     assert first in flow.kept_regs("parse_uint") and first not in flow.kept_regs("ring_put")

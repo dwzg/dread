@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 17                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 18                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -87,6 +87,8 @@ VERSION = 17                # 3: entry spills (variadic functions) are no use; 4
                             # 17: a flag write under a condition keeps what was written under that condition
                             # (it ran when the condition holds afterwards: libgcc's __aeabi_fmul seemed to
                             # read r3, and every soft-float caller that kept a value in r3 was refused)
+                            # 18: the ARM layer's abi_results (the RTABI's helpers: __aeabi_uldivmod
+                            # returns r0-r3, __aeabi_uidivmod r0 and r1, ...)
 
 
 class RegFlow:
