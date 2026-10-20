@@ -438,6 +438,10 @@ class RiscV:
         """RISC-V has no push and pop (frames are made with addi sp and single stores)."""
         return None
 
+    def pushed_registers(self, insn):
+        """None pushed (single stores save registers: frame_slot)."""
+        return []
+
     def literal(self, insn, isa):
         """(address, size) of a load whose address an auipc or lui in front of it gives."""
         memory = getattr(insn, "rv_memory", None)

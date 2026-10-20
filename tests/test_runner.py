@@ -278,3 +278,63 @@ cross = "arm-none-eabi-"
     assert watch(twice.entry | 1) == []
     stub = 0x20100001                       # (outside every function: the scratch area)
     assert watch(stub) == [] and watch(stub, anywhere=True) == [stub & ~1]
+
+
+SMASH_C = """
+volatile unsigned sink;
+__attribute__((noinline, noipa)) void copy(char *dst, const char *src, unsigned n) { while (n--) *dst++ = *src++; }
+unsigned user(const char *src, unsigned n, unsigned k) { char buf[4]; copy(buf, src, n); sink = k; return k * 5 + buf[0]; }
+"""
+
+
+def test_a_case_whose_original_touches_its_saved_registers_is_refused(tmp_path):
+    """user keeps k in r4, which its prologue saves below its return address; copy, handed a length
+    past user's 4-byte buffer (an input no caller would make: FreeRTOS's queues with an item size
+    larger than the item), writes over that saved r4, and user's pop hands the smashed value back. The
+    C keeps a 16-byte buffer, so its r4 comes back whole: the images differ, but the difference is
+    the original's frame, which C cannot be held to. Refused, with what touched which register; a
+    length within the buffer is compared and agrees."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    if not shutil.which("arm-none-eabi-gcc"):
+        pytest.skip("needs arm-none-eabi-gcc")
+    (tmp_path / "t.c").write_text(SMASH_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "user", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    program = Program(target, image)
+    first = program.insn(program.by_name["user"].entry)
+    assert first.mnemonic == "push" and "r4" in first.op_str, (first.mnemonic, first.op_str)   # (the layout tested)
+    data = {name: address for kind, address, name in program.symbols() if kind == "d"}
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "rewritten.c").write_text(
+        "#define sink (*(volatile unsigned *)0x%x)\n" % data["sink"] +
+        "void copy(char *dst, const char *src, unsigned n);\n"
+        "unsigned user(const char *src, unsigned n, unsigned k)\n"
+        "{ char buf[16]; copy(buf, src, n); sink = k; return k * 5 + buf[0]; }\n")
+    os.makedirs(image.cases)
+    with open(os.path.join(image.cases, "few.py"), "w") as f:
+        f.write('def text(m):\n    m.write(0x20100000, b"ABCDEFGHIJKLMNOP")\n'
+                'case("user", "n = 2", text, 0x20100000, 2, 9)\n'
+                'case("user", "n = 8", text, 0x20100000, 8, 9)\n')
+    payload = build.build(target, image, src=str(src), out=str(tmp_path / "recon"), quiet=True)
+    failed, uncovered, text = run_all(target, payload)
+    assert "REFUSED user [n = 8]: the input makes the original touch its own saved registers" in text, text
+    assert "write of the saved r4" in text and "by copy" in text, text
+    assert "FAIL user" not in text and "ok   user" in text, text

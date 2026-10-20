@@ -9,6 +9,30 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Refusing a case whose input makes code touch saved registers (2026-10-20)
+
+**Decided by recommendation.**
+
+- **Question.** A generated input can make a callee copy past a local of its caller (a queue whose
+  item size the input made larger than the item, a global pointer aimed into the stack): memcpy
+  then writes over a saved register (xFirstTimerHandler's r4, which its pop restores) or reads saved
+  registers into memory (prvNotifyQueueSetContainer copies its own saved r7 into a queue). C lays
+  out its frames otherwise, so the images differ: most of the disagreements left on the FreeRTOS
+  builds were of this kind (r4 or r7 "after the return", a byte "68 vs 0").
+- **Options.** (a) Keep failing such cases (a function with one is dropped). (b) Refuse a case whose
+  images differ when, run again on the original, anything but a push, a pop, or a save or restore
+  of that register touches a saved register's slot of a frame still on the stack; name what touched
+  which register; check the stale stack data first (a case whose every difference that explains
+  is compared except those outputs and keeps its coverage).
+- **Choice: (b).** The case's outcome is the original's frame layout, which C cannot be held to,
+  as with a stack address taken for a value (refused since before). A case without a difference is
+  never refused, and one whose differences the saved registers do not explain still fails.
+- **Undo.** Revert the runner commit "a case whose input makes code touch saved registers is
+  refused" (such cases fail again).
+- **Status.** Done (runner, saves_touched, 2026-10-20). Against measurement 26 on seven builds: +8
+  (xFirstTimerHandler, TIMER0_Handler, xQueueSelectFromSetFromISR, prvNotifyQueueSetContainer on three
+  builds, prvUnlockQueue, vQueueOverwritePeriodicISRDemo), none lost.
+
 ## A variadic callee's argument registers the caller did not set (2026-10-20)
 
 **Decided by the user**, following the recommendation.

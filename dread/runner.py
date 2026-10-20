@@ -39,6 +39,10 @@ Output, one block per function, in this form (other tools read it):
                                     or a case whose two images differ where the original's own
                                     outcome changes when its stack starts STACK_SHIFT bytes lower
                                     (it took a stack address for a value: C's frames lie otherwise),
+                                    or where the original's input makes code other than a push or
+                                    a pop read or write the function's own saved registers (a length
+                                    past a local: C keeps them elsewhere; saves_touched; decided
+                                    2026-10-20, docs/decisions.md),
                                     or where the original calls through a register into the middle of a
                                     function (a code pointer the input gave that is no entry: the
                                     rebuilt image has other code there, or calls it with other
@@ -119,6 +123,93 @@ def stack_moves_it(name, addr, args, limit, setup, kept, why, first):
         return Result(r.ret, {a: v for a, v in r.writes.items() if not lo <= a < hi}, r.calls, r.saved,
                       r.layout, r.kept, r.why)
     return bool(outside(first).diff(outside(again)))
+
+
+def saves_touched(name, addr, args, limit, setup, kept, why):
+    """Where the original's run touches a saved register's slot (a callee-saved register or the
+    return address that a push or a store through sp put into a frame still on the stack, of the
+    function or of any callee) with anything but a push, a pop, or a save or restore of that register:
+    then the input made code read or write saved registers through a pointer, mostly a length past
+    a local (a queue whose item size the input made larger than the item: memcpy wrote over the saved
+    r4 of FreeRTOS's xFirstTimerHandler, which its pop then restored, and over xSecondTimerHandler's
+    beneath TIMER0_Handler; prvNotifyQueueSetContainer copied its own saved r7 into a queue). C lays
+    out its frames otherwise and cannot be held to it. Returns "write of the saved REG at 0xADDR by
+    FUNCTION" or "read ...", or None. Pops of any function count as pops (an MSP430 epilogue is a
+    function of its own); the scratch registers GCC pushes only to make room (push {r0, r1, r4, lr},
+    push {r3, lr}) are no saves. Run only for a case whose images differ: it watches every
+    instruction."""
+    from unicorn import UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE
+    prog, lay = RUN["program"], RUN["layout"]
+    arch = prog.arch
+    if not hasattr(arch, "pushed_registers"):
+        return None
+    keep = set(lay.target.abi.callee_saved) | ({arch.link_reg} if getattr(arch, "link_reg", None) else set())
+    has_slot = hasattr(arch, "frame_slot")
+    m = Machine(lay, RUN["original"], isa_of=RUN["isa_of"])
+    m.plan, m.replay, m.function = [], False, name
+    m.kept, m.kept_why = kept, why
+    saved, found = {}, []                   # byte address -> the register saved there
+
+    def own(insn, register):
+        if arch.stack_kind(insn) in ("push", "pop"):
+            return True
+        slot = arch.frame_slot(insn) if has_slot else None
+        return slot is not None and slot[1] == register
+
+    def on_insn(uc, address, size, user):
+        insn = prog.insn(address & ~1)
+        if insn is None:
+            return
+        regs = arch.pushed_registers(insn)
+        if regs:
+            sp = uc.reg_read(lay.sp) - arch.stack_bytes(insn)
+            for k, r in enumerate(regs):
+                if r in keep:
+                    for b in range(4):
+                        saved[sp + 4 * k + b] = r
+            return
+        slot = arch.frame_slot(insn) if has_slot else None
+        if slot and slot[0] == "store" and slot[1] in keep:
+            sp = uc.reg_read(lay.sp)
+            for b in range(4):
+                saved[sp + slot[2] + b] = slot[1]
+
+    def touched(uc, access, address, size, value, user):
+        if found or not saved:
+            return
+        regs = {saved[a] for a in range(address, address + size) if a in saved}
+        if not regs:
+            return
+        pc = uc.reg_read(lay.pc) & ~1
+        insn = prog.insn(pc)
+        if insn is not None and all(own(insn, r) for r in regs):
+            return                          # (first: a push stores before it moves sp)
+        sp = uc.reg_read(lay.sp)
+        hit = set()
+        for a in range(address, address + size):
+            r = saved.get(a)
+            if r is None:
+                continue
+            if a < sp:                      # its frame is gone: the stack there is free again
+                del saved[a]
+            else:
+                hit.add(r)
+        if not hit:
+            return
+        owner = prog.function_at(pc)
+        found.append("%s of the saved %s at 0x%x by %s" % ("write" if access == UC_MEM_WRITE else "read",
+                                                         "/".join(sorted(hit)), address,
+                                                         owner.name if owner else "0x%x" % pc))
+    try:
+        setup(m)
+        m.hook_add(UC_HOOK_CODE, on_insn)
+        lo = lay.stack_top - lay.stack_size
+        m.hook_add(UC_HOOK_MEM_READ, touched, begin=lo, end=lay.stack_top - 1)
+        m.hook_add(UC_HOOK_MEM_WRITE, touched, begin=lo, end=lay.stack_top - 1)
+        m.call(addr, *args, max_instructions=limit)
+    except Exception:
+        pass
+    return found[0] if found else None
 
 
 def wild_call(name, addr, args, limit, setup, kept, why):
@@ -283,15 +374,22 @@ def run_function(name):
                          "with the stack %d bytes lower): a stack address taken for a value; not compared"
                          % (name, label, STACK_SHIFT))
             continue
-        stale = stale_outputs(name, addr, args, limit, setup, kept, why, out[0], out[1]) \
-            if diff and not depends and not isinstance(out[0], Exception) and not isinstance(out[1], Exception) \
-            else set()
+        both_ran = diff and not depends and not isinstance(out[0], Exception) and not isinstance(out[1], Exception)
+        stale = stale_outputs(name, addr, args, limit, setup, kept, why, out[0], out[1]) if both_ran else set()
         if stale and not out[0].differences(out[1]) - stale:
             # Every difference is an output the original's stale stack data decides: compared except
             # those (decided 2026-10-20, docs/decisions.md; such a case was refused before)
             lines.append("     %s [%s]: compared except what the original's stale stack data (an uninitialised "
                          "local) decides: %s" % (name, label, outputs_text(stale)))
             covered |= case_covered
+            continue
+        # A difference left that a saved register the input made code touch explains (checked after the
+        # stale data: a case whose every difference that explains keeps its coverage)
+        smash = saves_touched(name, addr, args, limit, setup, kept, why) if both_ran else None
+        if smash:
+            refused += 1
+            lines.append("REFUSED %s [%s]: the input makes the original touch its own saved registers (%s; a "
+                         "length past a local): C keeps them elsewhere; not compared" % (name, label, smash))
             continue
         if stale:
             diff = list(diff) + ["(of these, the original's stale stack data decides %s)" % outputs_text(stale)]

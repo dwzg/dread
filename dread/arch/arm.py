@@ -489,6 +489,16 @@ class Arm:
             return {self._name(insn.reg_name(o.reg)) for o in ops[1:] if o.type == csarm.ARM_OP_REG}
         return set()
 
+    def pushed_registers(self, insn):
+        """The core registers a push stores, from the lowest address up (an FPU register or the
+        unused word of str lr, [sp, #-8]! as None): a function's save area (dread.runner)."""
+        if self.stack_kind(insn) != "push":
+            return []
+        regs = [self._name(insn.reg_name(o.reg)) for o in insn.operands
+                if o.type == csarm.ARM_OP_REG and o.reg != csarm.ARM_REG_SP]
+        regs = [r if r in self.general_regs() or r == "lr" else None for r in regs]
+        return regs + [None] * (self.stack_bytes(insn) // 4 - len(regs))
+
     def frame_slot(self, insn):
         """("store" or "load", register, offset) of str rN, [sp, #imm] and ldr rN, [sp, #imm] without
         writeback, index or condition (not ldr pc), else None (dread.regflow: saves and restores around

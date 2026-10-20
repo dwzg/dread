@@ -35,7 +35,11 @@ once more on the original with the stack starting lower: if the original's own o
 took a stack address for a value (a random generator seeded with the address of a local, a pointer
 an index pushed past a local array), which C, laying out its frames otherwise, cannot reproduce, and
 the case is refused rather than failed; a refused case is not compared and runs nothing for
-coverage. When the original read stale stack data, an uninitialised local whose bytes are what
+coverage. So is a case whose images differ where, run again on the original, anything but a push, a
+pop, or a save or restore of that register touches a saved register's slot of a frame still on the
+stack: the input made code reach the saved registers through a pointer, mostly a length past a local
+(a queue whose item size it made larger than the item), and the outcome is the original's frame
+layout (decided 2026-10-20, `docs/decisions.md`; checked after the stale data below). When the original read stale stack data, an uninitialised local whose bytes are what
 earlier frames left, the original runs again with the stack below the stack pointer filled at every
 function entry (twice, with two bytes): an output that changes there too is one the original itself
 does not define, and C cannot be held to it (it lays out its frames otherwise and saves other values
