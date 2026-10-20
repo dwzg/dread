@@ -791,7 +791,20 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   whose 70 cases pass its text at 0x11, in the I/O region, and none in a buffer of the generator's
   (its pointer argument not learned as one?); why, before the FreeRTOS build goes through. Generation on the MSP430 engine is slow (strncpy 193 s, main 322 s, with a
   benchmark running beside it).
-- [ ] **FreeRTOS's MSP430 build through the lift check** (msp430-gcc-Os: 250 functions).
+- [ ] **FreeRTOS's MSP430 build through the lift check** (msp430-gcc-Os: 250 functions). 93 of its 158
+  refusals were functions that fall into the next one: libgcc's shift routines (each entry shifts
+  once and falls into the next one's), the shared epilogues and the startup. A plain instruction
+  that falls into another function's entry is a tail call of it since 2026-10-20 (as regflow already
+  took it): gizmo-msp430 lifts 84 of its 130 functions against 56, and its lift check accepts 50
+  against 36 (the 32-bit left shifts; the 16-bit routines are an instruction of two bytes each, too
+  short for the four-byte branch the overlay leaves at a moved function's entry: roadmap's
+  relocatable layout). Left of those chains: the logical right shifts (next item), the epilogues
+  (they pop their caller's registers), and system-run models of the MSP430F449 board for the tasks.
+- [ ] **The MSP430's flags bit by bit in regflow**: clrc (bic #1, sr) writes C and passes Z, N and V
+  through, so with the flags as one unit it reads them; the logical right shifts (__mspabi_srli_N,
+  __mspabi_srll_N) begin with it, and their callers are refused for leaving the flags (28 functions
+  on gizmo-msp430, as many on FreeRTOS's build), although the rrc behind it writes all four. The
+  lifter keeps the flags apart already; regflow and the layer's effects would need c, z, n and v.
 - [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the
   5-million-instruction limit (about 5 s per case on the MSP430 engine; two of gizmo's took over 300
   s). Bound a mutant's case by a multiple of what the original took on it.

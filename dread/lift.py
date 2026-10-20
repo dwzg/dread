@@ -151,16 +151,22 @@ def call_trees(program, names):
 
 
 def direct_callees(program, fn):
-    """The functions fn calls or tail-calls directly, by name."""
-    out = set()
+    """The functions fn calls or tail-calls directly, by name (falling into another one's entry is
+    a tail call of it: Lifter.falls_into)."""
+    out, last = set(), None
     for insn in program.instructions(fn):
         if insn is None:
             continue
+        last = insn
         kind, target, _ = program.arch.flow(insn)
         if kind in ("call", "jump") and target is not None:
             callee = program.by_entry.get(target & ~1)
             if callee is not None and callee is not fn:
                 out.add(callee.name)
+    if last is not None and program.arch.flow(last)[0] == "next":
+        callee = program.by_entry.get(last.address + last.size)
+        if callee is not None and callee is not fn:
+            out.add(callee.name)
     return out
 
 
@@ -240,6 +246,8 @@ class Lifter:
             i = index[address]
             if i + 1 < len(fn.insns) and fn.insns[i + 1] == address + insn.size:
                 out.append(fn.insns[i + 1])
+            elif self.falls_into(fn, insn) is not None:
+                pass                        # a tail call of the function it falls into (lift)
             elif strict:
                 raise Refused("0x%x falls through into what follows (data or other code; a call that does not "
                               "return?)" % address)
@@ -252,6 +260,25 @@ class Lifter:
         return out
 
     RET = ("ret",)
+
+    def falls_into(self, fn, insn):
+        """The function whose entry a plain instruction (no jump, call or return) falls through into
+        where fn's own code ends (libgcc's MSP430 shift routines: each entry shifts once and falls
+        into the next one's): a tail call of it with the registers as they are, as dread.regflow
+        takes it; None otherwise (the caller knows the instruction is fn's last)."""
+        if self.arch.flow(insn)[0] != "next":
+            return None
+        callee = self.prog.by_entry.get(insn.address + insn.size)
+        return callee if callee is not None and callee is not fn else None
+
+    def _tail_into(self, callee, insn):
+        """The C of falling into `callee`: its tail call (the frame must be gone by then)."""
+        depth, values = self.ctx["states"][insn.address]
+        after = self.step(insn, depth, values)[0]
+        if after:
+            raise Refused("0x%x falls into %s with %d bytes of frame" % (insn.address, callee.name, after))
+        call = self._fp_call(self._call(callee, insn))
+        return "%s %sreturn %s;" % (call, self._fp_sync("out"), self._ret())
 
     def states(self, fn, strict=True):
         """{address: (depth, values)} before every instruction a path from the entry reaches.
@@ -705,7 +732,7 @@ class Lifter:
                     "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns),
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
-        body = []
+        body, own = [], set(fn.insns)
         for insn in insns:
             if insn.address not in depth:
                 continue                    # never reached (padding, a dead stretch)
@@ -717,6 +744,9 @@ class Lifter:
             text = self.insn(insn)
             note = "/* %x: %s %s */" % (insn.address, insn.mnemonic, insn.op_str)
             body.append("    %s  %s" % (text, note) if text else "    " + note)
+            into = self.falls_into(fn, insn) if insn.address + insn.size not in own else None
+            if into is not None:
+                body.append("    " + self._tail_into(into, insn))
         stubs = {self.arch.target(i) & ~1 for i in insns if getattr(i, "call_via", None)}   # bl into a bx rN
         return Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]), frame, stack_params,
                       [a for a in fn.insns if a not in depth and a not in stubs])

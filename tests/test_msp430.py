@@ -203,16 +203,19 @@ def test_a_runtime_helper_keeps_its_abi_result():
 
 def test_gizmo_msp430_lifts():
     """dread.lift_msp430 on gizmo: of gizmo's own functions it refuses a caller of libgcc's 64-bit
-    multiplication (which takes r8-r11 as its caller leaves them) and the startup; libgcc's shift
-    routines fall into one another."""
+    multiplication (which takes r8-r11 as its caller leaves them) and the startup. libgcc's shift
+    routines fall into one another: each falls into the next one's entry as a tail call of it,
+    except the logical right shifts, which begin with clrc, a write of C that passes the other flags
+    through, so that regflow (the flags as one) takes the next one as reading them."""
     target, image, program, lifter, lifted, refused = lift_gizmo_msp430()
     own = {name: why for name, why in refused.items() if not name.startswith("__")}
     assert own == {
         "_start": "0x8000 changes the stack pointer in a way not modelled: mov #2560, r1",
         "mul64": "0x847c calls __mspabi_mpyll, which reads r10, r11, r8, r9 its caller leaves",
     }
-    assert "falls through into what follows" in refused["__mspabi_srli_4"]
-    assert len(lifted) == 56
+    assert "calls __mspabi_srli_3, which reads flags its caller leaves" in refused["__mspabi_srli_4"]
+    assert "r12 = __mspabi_slli_1(r12, r13, r14, r15);" in lifted["__mspabi_slli_2"].text
+    assert len(lifted) == 84
     # a call through a register that holds a function's entry is a call of that function, and the
     # width of its result is what the code behind it reads (uart_getc's: r12 alone)
     assert "r12 = uart_puts(r12, r13, r14, r15);" in lifted["print_status"].text
