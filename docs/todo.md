@@ -380,6 +380,13 @@ The long runs set the pace of everything after them. Measure first, then cut.
   brings back the clock's distortion, and only 4 candidates never run at all (fault handlers and
   hooks). What a realistic run spends now: 3.4 million blocks through the Python block hook, about
   40 % of it: the item below.
+- [ ] The generator's runs that only circle in known code until the instruction limit (checksum on
+  the MSP430: nearly every run): ending a run after a stretch without a new block would save most of
+  their time on every architecture, but it changes the cases (a VERSION change) and wants its own
+  measurement of coverage.
+  With it, fewer search runs for loop cases (the sweep steps every stub answer of a loop case: 23,000
+  of a task's 49,000 runs), measured the same way.
+
 - [ ] A C fast path for the system run's block hook (dread.fasthooks): nearly every block is a known
   block of shared code with nothing due (clock += size and three comparisons); C could do those and
   call Python only for a new block, a function's entry, code built from C, an event or the limit due,
@@ -397,13 +404,6 @@ The long runs set the pace of everything after them. Measure first, then cut.
   2.8 times faster beside the same load (0.73 us an instruction against 2.0), with the same results
   (msp430_check: 30,000 random blocks agree with GDB's simulator; three functions' generated cases
   identical, so cached cases stay valid).
-- [ ] The generator's runs that only circle in known code until the instruction limit (checksum on
-  the MSP430: nearly every run): ending a run after a stretch without a new block would save most of
-  their time on every architecture, but it changes the cases (a VERSION change) and wants its own
-  measurement of coverage.
-  With it, fewer search runs for loop cases (the sweep steps every stub answer of a loop case: 23,000
-  of a task's 49,000 runs), measured the same way.
-
 ## Phase 7: reading aids, plugin, documentation
 
 - [x] Reading aids: `dread flat` (a function's listing with targets and literals by name, texts,
