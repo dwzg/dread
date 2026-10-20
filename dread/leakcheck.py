@@ -26,7 +26,7 @@ import subprocess
 import sys
 
 GENERIC = set("""main start entry reset hang delay memcpy memset memcmp memmove strlen strcmp strncmp strcpy
-strncpy strcat strchr strstr sprintf printf malloc free calloc realloc abort exit atoi itoa""".split())
+strncpy strcat strchr strstr sprintf printf malloc free calloc realloc abort exit atexit atoi itoa""".split())
 SKIP_DIRS = {".git", ".venv", "build", "__pycache__", ".pytest_cache", "node_modules"}
 HEX = re.compile(r"0x([0-9a-fA-F]{5,8})\b")
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

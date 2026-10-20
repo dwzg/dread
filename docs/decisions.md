@@ -9,6 +9,23 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## atexit counts as a generic name in the leak check (2026-10-20)
+
+**Decided by recommendation** (it narrows a safety check, so it is written down).
+
+- **Question.** The push of gizmo's C++ builds was stopped by the leak check: `atexit`, a name in
+  a private project's tables, appears in DREAD through GCC's option `-fno-use-cxa-atexit` (in the
+  documentation, the compiler defaults, the Makefile, and the flags an ELF's debug information
+  records).
+- **Options.** (a) `atexit` on the generic list of dread.leakcheck, beside `exit`, `abort` and
+  `malloc`; (b) on the allow list in the user's configuration (for coincidences of one private
+  project); (c) avoid the option (it keeps static destructors from registering with a C++ runtime
+  the overlay cannot place: needed).
+- **Choice.** (a): it is a function of the C standard library, as generic as the names already on
+  that list; that a private image has one tells nothing about it, for any user of the check.
+- **Undo.** Take `atexit` off GENERIC in dread/leakcheck.py.
+- **Status.** Done (2026-10-20).
+
 ## How C++ rewrites describe their classes, and where the C++ builds are tested (2026-10-20)
 
 **Decided by recommendation** (the todo item "C++ originals and rewrites").
