@@ -58,6 +58,8 @@ def main(argv=None):
     if entry is None:
         print("dread: unknown command %r\n\n%s" % (argv[0], usage()), file=sys.stderr)
         return 2
+    if hasattr(sys.stdout, "reconfigure"):  # a line as it is printed, also into a file: a long run's log
+        sys.stdout.reconfigure(line_buffering=True)     # (dread bench all) showed nothing for an hour
     module = importlib.import_module(entry[0])
     return module.main(argv[1:]) or 0
 
