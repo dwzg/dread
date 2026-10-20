@@ -889,6 +889,22 @@ class Lifter:
         flow = self.flow
         return bool(flow and "r1" in flow.kept_regs(name) and "r1" not in flow.preserved_regs(name))
 
+    def call_saved(self, fn):
+        """The registers the C must keep for the callers although the ABI lets a function use them:
+        dread.regflow found that the callers read them after the call and that the function, its
+        callees too, leaves them unchanged (GCC compiled the callers knowing, -fipa-ra: FreeRTOS's
+        prints keeps a value in r2 across printchar, and the C, compiled alone, used r2). Not the
+        result, the ABI's callee-saved registers (kept anyway) or the register veneers go through
+        (the overlay's branch to a moved function sets it before the C runs). dread.build compiles
+        the function's file with them call-saved (GCC's -fcall-saved-REG)."""
+        flow = self.flow
+        if flow is None:
+            return []
+        abi, regs = self.prog.target.abi, self.arch.general_regs()
+        keep = set(flow.kept_regs(fn.name)) & set(flow.preserved_regs(fn.name))
+        keep -= set(abi.callee_saved) | set(abi.result[:1]) | {getattr(self.arch, "veneer_reg", None)}
+        return [r for r in regs if r in keep]
+
     def _check_kept(self, fn):
         """Refuse when callers read what C cannot hand back: the flags, or a register other than r0
         and r1 that the function sets."""

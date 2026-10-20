@@ -633,7 +633,13 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   integration does not check that yet), and so is a case whose differences are all stale stack
   data the original read (2026-10-20: FreeRTOS's timer commands copy an unset union member into the
   timer queue, which was most of the disagreements of the MPS2 builds: vStartTimerDemoTask,
-  xTaskIncrementTick, the tick hooks; a question for the user whether to compare the rest); another kind is an inconsistent input that makes a real
+  xTaskIncrementTick, the tick hooks; a question for the user whether to compare the rest);
+  2026-10-20: five of the disagreements (GCC -Os, Cortex-M4F GCC -Os, RISC-V GCC -Os) were a scratch
+  register the callers read after the call because the original never writes it (GCC's -fipa-ra
+  compiled the callers knowing: prints keeps a value in r2 across printchar), which the C used;
+  such a register is now compiled call-saved in the function's file (Lifter.call_saved, GCC's
+  -fcall-saved-REG; not for clang): +1 on each of the three builds, none lost (printchar on ARM is
+  UNCOVERED behind it: its store path needs a pointer to a writable pointer); another kind is an inconsistent input that makes a real
   callee read beyond a local of the caller (a queue's item size of 24 for a 4-byte item: memcpy copies the frame behind
   it, laid out otherwise in the C), which the harness cannot tell yet (it would need to know which
   stack bytes the call wrote); (4) scratch

@@ -34,6 +34,19 @@ def recon_dir(target, image):
     return os.path.join(target.build, "recon", image.name)
 
 
+CALL_SAVED = "/* dread: call-saved "     # a lifted file's first line: registers to keep (Lifter.call_saved)
+
+
+def file_flags(target, path):
+    """Compiler flags a source asks for on its first line: GCC's -fcall-saved-REG for the registers
+    of a CALL_SAVED line (other compilers have no such option for these targets: none)."""
+    with open(path) as f:
+        first = f.readline()
+    if not first.startswith(CALL_SAVED) or target.compiler.kind != "gcc":
+        return []
+    return ["-fcall-saved-" + r for r in first[len(CALL_SAVED):].split("*/")[0].split()]
+
+
 def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=False):
     """Compile the sources under `src` into `objdir`; returns the object paths. extra_include:
     further include directories (dread mutate compiles a copy elsewhere and still needs the
@@ -53,8 +66,9 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
     procs = []
     for c, obj in todo:
         os.makedirs(os.path.dirname(obj), exist_ok=True)
-        procs.append((c, subprocess.Popen(target.compiler.command("cc") + flags + ["-c", "-o", obj, c],
-                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)))
+        procs.append((c, subprocess.Popen(target.compiler.command("cc") + flags + file_flags(target, c) +
+                                          ["-c", "-o", obj, c], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                          text=True)))
     failed = []
     for c, p in procs:
         out = p.communicate()[0]
@@ -128,6 +142,9 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
                 raise kept[name]
             result = kept[name]
             text = result.text
+            saved = lifter.call_saved(fn)
+            if saved:                       # (compile_all reads it: GCC's -fcall-saved-REG)
+                text = "%s%s */\n%s" % (CALL_SAVED, " ".join(saved), text)
         except lift.Refused as e:
             if not quiet:
                 print("dread recon: %s no longer lifts: %s" % (name, e), file=sys.stderr)
