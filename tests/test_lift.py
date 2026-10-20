@@ -98,6 +98,28 @@ def test_lifted_c_compiles(variant, tmp_path):
     assert len(objects) == len(lifted)
 
 
+@pytest.mark.compiles
+def test_objects_follow_the_flags(tmp_path):
+    """An object made with other flags is compiled again though its source is older (once a
+    target's -O0 became -Os and most of its objects stayed at -O0); unchanged, it is left alone."""
+    target = Target.load(gizmo_dir("m3"))
+    image = target.image()
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "f.c").write_text("int f(int a, int b) { int c = a * b; return c + a; }\n")
+    obj = str(tmp_path / "obj")
+    target.compiler.cflags = [f for f in target.compiler.cflags if not f.startswith("-O")] + ["-O0"]
+    path = build.compile_all(target, image, str(src), obj)[0]
+    at_o0 = open(path, "rb").read()
+    target.compiler.cflags[-1] = "-Os"
+    assert build.compile_all(target, image, str(src), obj) == [path]
+    at_os = open(path, "rb").read()
+    assert at_os != at_o0
+    made = os.stat(path).st_mtime_ns
+    build.compile_all(target, image, str(src), obj)
+    assert os.stat(path).st_mtime_ns == made and open(path, "rb").read() == at_os
+
+
 NAMES = ["script_run", "read_line", "apply_config", "fmt_dec", "timer_irq", "parse_kv"]
 
 

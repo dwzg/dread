@@ -5,7 +5,8 @@ the target's [compiler] flags plus what the overlay needs (-ffunction-sections, 
 -fno-reorder-functions),
 with DREAD's include directory (dread.h), the src directory and [compiler] include on the include
 path. Objects go to BUILD/recon/IMAGE/obj; a source is compiled again when it, or any header in
-those directories, is newer than its object. Then links them over the image:
+those directories, is newer than its object, and every source when the compiler or the flags are
+not those the objects were made with (.flags in the object directory). Then links them over the image:
 BUILD/recon/IMAGE/payload.bin, with report.tsv, placement.json, recon.ld and recon.elf beside it.
 
 Functions in the image's lifted table (config/lifted.txt, written by `dread lift --check`) are
@@ -18,6 +19,7 @@ import argparse
 import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -47,6 +49,24 @@ def file_flags(target, path):
     return ["-fcall-saved-" + r for r in first[len(CALL_SAVED):].split("*/")[0].split()]
 
 
+_COMPILERS = {}
+
+
+def compile_stamp(command, flags):
+    """What a directory's objects are compiled with: the compiler (its path, size and time, so that
+    an upgrade counts) and the command line common to every source. Objects made otherwise are
+    stale, however new: once a target's -O0 became -Os and most objects stayed at -O0."""
+    exe = command[0]
+    if exe not in _COMPILERS:
+        path = os.path.realpath(shutil.which(exe) or exe)
+        try:
+            st = os.stat(path)
+            _COMPILERS[exe] = "%s %d %d" % (path, st.st_size, st.st_mtime_ns)
+        except OSError:
+            _COMPILERS[exe] = path
+    return "\n".join([_COMPILERS[exe]] + list(command) + list(flags)) + "\n"
+
+
 def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=False):
     """Compile the sources under `src` into `objdir`; returns the object paths. extra_include:
     further include directories (dread mutate compiles a copy elsewhere and still needs the
@@ -55,17 +75,25 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
     include = [INCLUDE, src] + list(extra_include) + target.compiler.include
     headers = [h for d in include for h in glob.glob(os.path.join(d, "**", "*.h"), recursive=True)]
     newest_header = max((os.path.getmtime(h) for h in headers), default=0)
+    flags = target.compiler.cflags + target.compiler.required() + ["-I" + d for d in include]
+    stamp_path, stamp = os.path.join(objdir, ".flags"), compile_stamp(target.compiler.command("cc"), flags)
+    try:
+        with open(stamp_path) as f:
+            same = f.read() == stamp
+    except OSError:
+        same = False
     objects, todo = [], []
     for c in sources:
         rel = os.path.relpath(c, src)
         obj = os.path.join(objdir, rel[:-2] + ".o")
         objects.append(obj)
-        if not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(c), newest_header):
+        if not same or not os.path.exists(obj) or os.path.getmtime(obj) < max(os.path.getmtime(c), newest_header):
             todo.append((c, obj))
-    flags = target.compiler.cflags + target.compiler.required() + ["-I" + d for d in include]
     procs = []
     for c, obj in todo:
         os.makedirs(os.path.dirname(obj), exist_ok=True)
+        if os.path.exists(obj):         # a failed compile must not leave the old object behind
+            os.remove(obj)
         procs.append((c, subprocess.Popen(target.compiler.command("cc") + flags + file_flags(target, c) +
                                           ["-c", "-o", obj, c], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                           text=True)))
@@ -78,6 +106,10 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
             failed.append(c)
     if failed:
         raise overlay.OverlayError("compiling failed: %s" % ", ".join(os.path.relpath(c) for c in failed))
+    if not same:                        # written last: an interrupted run leaves the old stamp
+        os.makedirs(objdir, exist_ok=True)
+        with open(stamp_path, "w") as f:
+            f.write(stamp)
     stale = set(glob.glob(os.path.join(objdir, "**", "*.o"), recursive=True)) - set(objects)
     for obj in stale:                   # a removed source must not stay linked
         os.remove(obj)
