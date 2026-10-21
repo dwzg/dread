@@ -14,7 +14,7 @@ ODD_S = """
     .cpu cortex-m3
     .thumb
     .text
-    .global use, reads_r4, clobbers_r5, clobbers_r3, plain
+    .global use, reads_r4, clobbers_r5, clobbers_r3, plain, vargs
     .type reads_r4, %function
     .thumb_func
 reads_r4:                       @ reads what its caller left in r4
@@ -40,6 +40,13 @@ clobbers_r3:                    @ writes the scratch register r3
 plain:  adds    r0, r0, #1
         bx      lr
     .size plain, . - plain
+    .type vargs, %function
+    .thumb_func
+vargs:  push    {r1, r2, r3}            @ a variadic function's save area
+        ldr     r0, [sp, #4]
+        add     sp, sp, #12
+        bx      lr
+    .size vargs, . - vargs
     .type use, %function
     .thumb_func
 use:    push    {r4, r5, lr}
@@ -96,6 +103,8 @@ def test_each_kind_of_disagreement_is_found(tmp_path):
     run["preserved"] = dict(run["preserved"], clobbers_r3={"r3"})
     assert callconv.measure("plain")[1]["found"] == {"reads, regflow does not": ["r0"]}
     assert callconv.measure("clobbers_r3")[1]["found"] == {"changes, regflow: leaves it": ["r3"]}
+    assert callconv.variadic_area(prog, prog.by_name["vargs"]) == {"r1", "r2", "r3"}
+    assert callconv.variadic_area(prog, prog.by_name["plain"]) == set()
 
 
 @pytest.mark.compiles

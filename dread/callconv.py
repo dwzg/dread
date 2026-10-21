@@ -20,7 +20,9 @@ Listed per function where the measurement and dread.regflow disagree:
   changes callee-saved X         not restored at the return: not the standard convention
 
 regflow's reads that no case shows are counted, not listed: a path the cases do not take, or the
-analysis' caution. A case whose findings come from code that touches a saved register's slot (a
+analysis' caution. A read of an unnamed argument kept in a variadic save area is listed apart
+("variadic"), not as a disagreement: regflow takes those registers for no use by design (a stub of
+printf would otherwise log what a caller's format does not ask for). A case whose findings come from code that touches a saved register's slot (a
 length past a local: a queue's item size a generated input made larger than the item, so memcpy
 copied the saved r4 to r6 into the queue; dread.runner.saves_touched, where dread test refuses such a
 case) is left out. Not seen: a register read only on paths no case takes, one whose value changes
@@ -91,6 +93,7 @@ def measure(name):
         return name, None
     regs, arg_regs, saved = RUN["regs"], RUN["arg_regs"], set(RUN["saved"])
     said = set(flow.read_regs(name)) if flow else set()
+    area = variadic_area(prog, fn)
     reads, changes, ran, touched = set(), set(), 0, 0
     for case in cases:
         args = list(case[3])
@@ -136,11 +139,13 @@ def measure(name):
         return name, None
     out = {"cases": ran, "touched": touched,
            "reads": sorted(reads, key=regs.index), "changes": sorted(changes, key=regs.index),
-           "regflow_reads": sorted(said & set(regs), key=regs.index), "found": {}}
+           "regflow_reads": sorted(said & set(regs), key=regs.index), "found": {}, "variadic": []}
     found = {k: [] for k in KINDS}
     for r in out["reads"]:
         if r in saved:
             found["reads its caller's"].append(r)
+        elif r not in said and r in area:
+            out["variadic"].append(r)       # (an unnamed argument: no use to regflow by design)
         elif r not in said:
             found["reads, regflow does not"].append(r)
     for r in out["changes"]:
@@ -148,6 +153,27 @@ def measure(name):
     out["found"] = {k: v for k, v in found.items() if v}
     out["unshown"] = sorted(said & set(regs) - reads, key=regs.index)     # regflow's reads no case showed
     return name, out
+
+
+def variadic_area(program, fn):
+    """The argument registers fn keeps in a variadic save area: dread.regflow's rule (stores right
+    below the stack arguments) and an entry push of argument registers that ends with the last one
+    (GCC's push {r1, r2, r3}); the empty set for any other function."""
+    from dread import regflow
+    arch = program.arch
+    insns = [program.insn(a) for a in fn.insns]
+    joins = {fn.entry} | {t & ~1 for i in insns if i is not None
+                          for k, t, _ in [arch.flow(i)] if k == "jump" and isinstance(t, int)}
+    try:
+        area = set(regflow.variadic_save_area(program, fn, insns, joins))
+    except Exception:
+        area = set()
+    args = list(program.target.abi.arg_regs)
+    if insns and insns[0] is not None and hasattr(arch, "pushed_registers"):
+        pushed = [r for r in arch.pushed_registers(insns[0]) if r]
+        if pushed and args[-1] in pushed and set(pushed) <= set(args):
+            area |= set(pushed)
+    return area
 
 
 def prepare(target, image):
