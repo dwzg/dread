@@ -374,7 +374,8 @@ def test_an_adapter_brings_its_own_linker_script(tmp_path):
                                  'support_flags = ["-fno-builtin"]\nscript = "ORIGIN = {nowhere:x}"'))
     results = run(ad.load(str(path)), str(tmp_path / "work"), only=["cortex-m3-O2"], names=["abi"], jobs=1,
                   out=lambda *x: None)
-    assert "placeholders: flash, flash_end, flash_size" in results["cortex-m3-O2"]["error"]
+    error = results["cortex-m3-O2"]["error"]
+    assert "placeholders: " in error and "flash, flash_end, flash_size" in error, error
 
 
 @needs_gcc
