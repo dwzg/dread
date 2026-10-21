@@ -54,6 +54,25 @@ def test_vector_table_behind_a_header():
     assert handlers == [(1, base + 0x20), (2, base + 0x40)]
 
 
+def test_vectors_outside_the_payload_are_read_at_the_base():
+    """image.vectors at an alias of the boot address (0, the image at 0x08000000) lies outside the
+    payload: the table is read at the base, as before image.vectors was read, not from a negative
+    offset (struct reads that from the payload's end)."""
+    import struct
+    base = 0x08000000
+    table = struct.pack("<4I", 0x20001000, (base + 0x20) | 1, (base + 0x40) | 1, 0x12345678)
+    payload = table + b"\x00" * 0x100 + struct.pack("<I", (base + 0x80) | 1)
+
+    class FakeImage:
+        def __init__(self):
+            self.base, self.vectors = base, 0
+
+        def payload(self):
+            return payload
+
+    assert ghidra.vector_handlers(FakeImage()) == [(1, base + 0x20), (2, base + 0x40)]
+
+
 @pytest.mark.slow
 @pytest.mark.ghidra
 @pytest.mark.skipif(ghidra.find_ghidra() is None, reason="needs Ghidra (GHIDRA_INSTALL_DIR)")

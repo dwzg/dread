@@ -76,9 +76,15 @@ def vector_handlers(image):
     The table need not sit at the image's base. A vendor container may store the image behind a
     header (a magic, a CRC); image.vectors then points past that header to the real table, and the
     words are read from that offset into the payload. image.vectors defaults to image.base, so an
-    image whose table is at the base is unaffected."""
+    image whose table is at the base is unaffected.
+
+    Where image.vectors lies outside the payload (an alias of the boot address that the memory map
+    puts on the flash: vectors 0 with the image at 0x08000000, which the system run follows), the
+    table is read at the image's base as before: a negative offset would read the payload's end."""
     data, base = image.payload(), image.base
-    start = image.vectors - base
+    start = image.vectors - base if image.vectors is not None else 0
+    if not 0 <= start < len(data):
+        start = 0
     out = []
     for i in range(1, M_VECTORS):
         off = start + 4 * i
