@@ -126,8 +126,31 @@ its sources.
   stack: the frame stays whole). MSP430 (paused):
   ulTaskGenericNotifyTake's readable C makes every case stack-dependent (refused, so it stays
   lifted), not traced; its critical sections are asm on the real stack beside the lifted frame.
+- [ ] **Types.** The structures behind pointers, as C structures the readable C uses (p->f_58). Done
+  when the gate accepts as many functions as before with them, and their fields against the
+  source's (debug information) are measured on the bench.
+  Analysis done 2026-10-21 (dread/shapes.py, dread readable --shapes [--score ELF]): unification of
+  values and memory objects with offsets over every readable function; functions polymorphic (callees
+  first by strongly connected components, a parameter's memory a template the call copies onto the
+  argument's memory, a recursive link a pointer back up the template); objects that meet at
+  different offsets kept apart; templates copies even of memory reachable from fixed addresses
+  (docs/decisions.md). Fields found that are the source's (offset and size against the members of
+  each pointer parameter's structure): FreeRTOS GCC -Os 618 of 622 (99 %), clang -O2 432 of 474
+  (91 %), RISC-V GCC -Os 439 of 462 (95 %), GCC -O0 634 of 638 (99 %); 25-32 % of the source's
+  members found (what the code reaches through those pointers). Weak: clang's lists (48 found, 20
+  right) and RISC-V's event groups (35, 16), not traced. Next: the rewrite: a structure per type
+  (objects grouped by what their templates came from), its fields at their offsets with padding,
+  a pointer variable declared volatile struct s_N * so that every access stays volatile and reads
+  p->f_58, a cast where it is used as an integer; the gate decides. Then the pilot names the
+  structures and their fields from their uses, as it names globals. The stages over every readable
+  function take 49 s for GCC -Os's 316 (once for the globals' uses, once for the shapes): a pool or a
+  cache of the trees when it is run often.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
+  Thought 2026-10-21: plain accesses let GCC merge and hoist loads, and a loop that waits for a flag
+  an interrupt sets in RAM would no longer see it change; the original's accesses all happen. The
+  types item gets readable accesses without that: volatile in the pointer's declaration, p->f at the
+  use. This item waits until that is done and it is clear what is left.
 - [ ] **The pilot on the draft.** Names for the readable C: the model proposes a map of names and a
   sentence, code applies it (docs/decisions.md). Built 2026-10-21: dread/naming.py (the
   readable_names table, applied by digest, a map kept only when its names are C identifiers nothing

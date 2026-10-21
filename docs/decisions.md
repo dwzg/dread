@@ -9,6 +9,30 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Structures behind pointers: polymorphic unification, measured against debug information (2026-10-21)
+
+**Decided by me**, on the user's standing rule (decisions by recommendation; review here).
+
+- **Question.** How to find the structures readable C should declare: which offsets through which
+  pointers belong together, across functions?
+- **Options, each measured** on FreeRTOS GCC -Os (fields found that are the source's, by offset and
+  size, against the debug information's members of each pointer parameter's structure): (a) plain
+  unification with offsets (Steensgaard's points-to analysis with fields): 43 %, one object of 67
+  fields that 356 parameters pointed to; (b) functions polymorphic, a callee's parameter memory a
+  template the call copies: 77 %; (c) as (b), objects that meet at different offsets kept apart
+  (FreeRTOS walks a list from its end marker as if it were an item, so lists and items had merged):
+  80 %; (d) as (c), templates copies even of memory reachable from fixed addresses (pvPortMalloc
+  returns a pointer into its heap's free list, and sharing that made every allocated structure one):
+  99 %, 32 % of the source's members found.
+- **Choice: (d).** The fields it finds are almost all the source's on GCC -Os and -O0, 91 % on clang
+  -O2 and 95 % on RISC-V; what it misses is what the code never reaches through those pointers. The
+  analysis decides nothing about behaviour: the C written with these structures goes through the
+  gate like any other.
+- **Undo.** dread.shapes is used by nothing else yet; Shapes(share=True) and shifted=True bring back
+  (c) and (b) for a comparison.
+- **Status.** Analysis built and measured (dread readable --shapes --score); the rewrite is the next
+  step (docs/todo.md, Types).
+
 ## Memory at fixed addresses as names: macros that are the access (2026-10-21)
 
 **Decided by me**, on the user's standing rule (decisions by recommendation; review here).

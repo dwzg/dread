@@ -502,21 +502,11 @@ def global_uses(program, context, lifter, names, per=2):
     """What the readable C of the functions names says about its memory at fixed addresses:
     ({key: {"name": its default name, "functions": [names], "uses": [(function, line)]}},
     {function: {keys}}), at most per lines a function."""
-    from dread import cparse, lift, naming, readable
+    from dread import cparse, naming, readable
     uses, by_function = {}, {}
-    for name in names:
-        fn_p = program.by_name.get(name)
-        if fn_p is None:
-            continue
-        try:
-            text = lifter.lift(fn_p).text
-        except lift.Refused:
-            continue
-        made = readable.readable_tree(name, text, context=context)
-        if made is None:
-            continue
-        tree, fn = made
-        chosen = naming.apply_globals(tree, fn, None, context.memory)
+    for tree, fn, macros in readable.readable_trees(program, context, lifter, names):
+        name = fn.name
+        chosen = {naming.global_key(*at): gname for gname, at in macros.items()}
         body = cparse.unparse(fn, notes=False, style="readable").splitlines()
         by_function[name] = set(chosen)
         for key, gname in chosen.items():

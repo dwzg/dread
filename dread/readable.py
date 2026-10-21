@@ -147,6 +147,30 @@ def readable_tree(name, text, stages=None, context=None):
     return tree, fn
 
 
+def readable_trees(program, context, lifter, names, named=None):
+    """[(tree, function, macros)] of the functions' readable C after the stages, their memory at
+    fixed addresses written as names (dread.naming apply_globals: named, the table's globals part, or
+    the default names); macros: {name: (address, type)}. Functions that do not lift or are not the
+    dialect are left out."""
+    from dread import lift
+    out = []
+    for name in names:
+        fn_p = program.by_name.get(name)
+        if fn_p is None:
+            continue
+        try:
+            text = lifter.lift(fn_p).text
+        except lift.Refused:
+            continue
+        made = readable_tree(name, text, context=context)
+        if made is None:
+            continue
+        tree, fn = made
+        chosen = naming.apply_globals(tree, fn, named, context.memory if context is not None else None)
+        out.append((tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}))
+    return out
+
+
 def print_file(tree, fn, stages=None):
     others = [f.name for f in tree.items if isinstance(f, cparse.Function) and f.name != fn.name]
     return cparse.unparse(tree, verbatim=others, style="readable" if (STAGES if stages is None else stages)
@@ -333,7 +357,8 @@ def main(argv=None):
     parser.add_argument("--check", action="store_true", help="test the readable C and write the readable table")
     parser.add_argument("--out", help="write NAME.c files there instead of printing")
     parser.add_argument("--score", metavar="ELF", help="how close the readable_names table's names come to the "
-                        "source's, from ELF's debug information (dread.naming.score)")
+                        "source's, from ELF's debug information (dread.naming.score); with --shapes, the "
+                        "structures' fields too")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     try:
@@ -345,6 +370,26 @@ def main(argv=None):
         from dread.util.polite import polite
         polite()
         check(target, image, args.names or None)
+        return 0
+    if args.shapes:
+        from dread import build, lift, regflow, shapes
+        from dread.program import Program
+        program = Program(target, image)
+        flow = regflow.load(target, image, program)
+        names = args.names or build.read_names(image.table("readable"))
+        trees = readable_trees(program, Context(target, image, program, flow), lift.make_lifter(program, flow), names)
+        s = shapes.analyse(trees)
+        for line in shapes.report(s, trees):
+            print(line)
+        if args.score:
+            per, total = shapes.score(s, program, [(fn.name, len(fn.params)) for _, fn, _ in trees], args.score)
+            for sname, (found, right, src, n) in sorted(per.items(), key=lambda kv: -kv[1][3]):
+                print("%-32s %3d parameters: %4d fields found, %4d the source's, %4d in the source" % (
+                    sname, n, found, right, src))
+            print("dread readable --shapes --score: %d parameters pointing to a structure: %d fields found, %d the "
+                  "source's (%.0f %%); %.0f %% of the source's members found" % (
+                      total[3], total[0], total[1], 100.0 * total[1] / max(total[0], 1),
+                      100.0 * total[1] / max(total[2], 1)))
         return 0
     if args.score:
         from dread.program import Program
