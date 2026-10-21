@@ -177,6 +177,36 @@ def readable_trees(program, context, lifter, names, named=None, digests=None):
     return out
 
 
+def analysis_trees(program, context, lifter, names, named=None, digests=None):
+    """As readable_trees, but before the structure stage, for dread.shapes: every statement a node of
+    the flow graph, so that it follows definitions, not names; digests: of the C after every stage,
+    what the plan is made for (the structure stage moves statements, it renames nothing)."""
+    import copy
+    from dread import lift
+    early = [st for st in STAGES if st[0] != "structure"]
+    out = []
+    for name in names:
+        fn_p = program.by_name.get(name)
+        if fn_p is None:
+            continue
+        try:
+            text = lifter.lift(fn_p).text
+        except lift.Refused:
+            continue
+        made = readable_tree(name, text, stages=early, context=context)
+        if made is None:
+            continue
+        tree, fn = made
+        if digests is not None:
+            full = copy.deepcopy(fn)
+            if not tidy.fixed_registers(tree):
+                structure.structure(full, Run(context))
+            digests[name] = naming.digest(full)
+        chosen = naming.apply_globals(tree, fn, named, context.memory if context is not None else None)
+        out.append((tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}))
+    return out
+
+
 def print_file(tree, fn, stages=None):
     others = [f.name for f in tree.items if isinstance(f, cparse.Function) and f.name != fn.name]
     return cparse.unparse(tree, verbatim=others, style="readable" if (STAGES if stages is None else stages)
@@ -228,7 +258,7 @@ def check(target, image, names=None, out=print, jobs=None):
     # the readable_types table, which the builds read too.
     from dread import shapes
     digests = {}
-    trees = readable_trees(program, context, lifter, lifted, named=context.globals, digests=digests)
+    trees = analysis_trees(program, context, lifter, lifted, named=context.globals, digests=digests)
     context.plan = shapes.plan(shapes.analyse(trees), trees, digests)
     shapes.store_plan(image, context.plan)
     out("dread readable --check: %d structures, pointers to them in %d functions (readable_types)" % (

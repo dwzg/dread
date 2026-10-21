@@ -56,6 +56,7 @@ class Shapes:
         self.embeds = set()             # (kind, offset, kind, offset): one kind's memory inside another's
         self.calls = []                 # (the argument's location, the callee's parameter's): kinds (kinds())
         self.frames = set()             # objects that are a function's stack frame (reached from sp0)
+        self.var_webs = {}              # (function, variable) -> its values' keys, one per web
         self.shifted = False            # whether objects that meet at different offsets are merged
         self.share = False              # whether templates refer to memory reachable from fixed addresses
         self.embedded = set()           # (root, offset, root, offset) of those kept apart
@@ -303,16 +304,84 @@ class Collector:
         self.s, self.fn, self.macros = shapes, fn, macros   # macros: {name: (address, type)}
         self.summaries, self.together = summaries or {}, set(together)
 
-    def key(self, name):
-        return ("var", self.fn.name, name)
+    def key(self, name, write=False, entry=False):
+        """The value of variable name here: one per web of its definitions (webs), so that a variable
+        the C keeps whole (one asm writes: RISC-V's a0, the queue and later its list at 16) is as
+        many values as it holds."""
+        if entry:
+            w = self.entry_web.get(name)
+        elif self.node is None:
+            w = None
+        elif write:
+            w = self.def_web.get((name, self.node))
+        else:
+            w = self.use_web.get((name, self.node))
+        k = ("var", self.fn.name, name, w)
+        self.s.var_webs.setdefault((self.fn.name, name), set()).add(k)
+        return k
+
+    def webs(self):
+        """Each definition's web and each use's (definitions that reach a common use are one web, as
+        dread.tidy webs), over the body's flow graph with its conditional blocks spread out; the
+        statements' nodes (a statement inside one without a node of its own takes its parent's)."""
+        from dread.cflow import Graph
+        from dread.tidy import flat_view
+        self.node, self.node_of = None, {}
+        self.def_web, self.use_web, self.entry_web = {}, {}, {}
+        try:
+            view = flat_view(self.fn)
+            g = Graph(view)
+            reach = g.reaching()
+        except C.ParseError:
+            return
+        for n in g.nodes:
+            self.node_of[id(n.stmt)] = n.index
+        for stand_in, original in view.pairs:
+            self.node_of[id(original)] = self.node_of.get(id(stand_in))
+        parent = {}
+
+        def find(x):
+            while parent.get(x, x) != x:
+                parent[x] = parent.get(parent[x], parent[x])
+                x = parent[x]
+            return x
+        from dread.tidy import simple
+        for n in g.nodes:
+            for v in n.reads:
+                defs = sorted(reach[n.index].get(v) or ())
+                for d in defs[1:]:
+                    a, b = find((v, defs[0])), find((v, d))
+                    if a != b:
+                        parent[b] = a
+                # (a statement with others in it, a loop or a block, that reads and writes v: its node
+                # cannot say which read sees its own write, so they are one web; a simple one reads first)
+                if defs and v in n.writes and not simple(n.stmt):
+                    a, b = find((v, defs[0])), find((v, n.index))
+                    if a != b:
+                        parent[b] = a
+        for n in g.nodes:
+            for v in n.writes:
+                self.def_web[(v, n.index)] = find((v, n.index))[1]
+            for v in n.reads:
+                defs = sorted(reach[n.index].get(v) or ())
+                if defs:
+                    self.use_web[(v, n.index)] = find((v, defs[0]))[1]
+        self.entry_web = {v: find((v, -1))[1] for v in g.scope}
 
     def run(self):
+        self.webs()
         for i, (_, pname) in enumerate(self.fn.params):
-            self.s.unify(self.key(pname), ("param", self.fn.name, i))
+            self.s.unify(self.key(pname, entry=True), ("param", self.fn.name, i))
         for st in self.fn.body.body:
             self.stmt(st)
 
     def stmt(self, st):
+        outer = self.node
+        self.node = self.node_of.get(id(st), self.node)
+        self._stmt(st)
+        self.node = outer
+
+    def _stmt(self, st):
         if isinstance(st, C.ExprStmt):
             self.value(st.e)
         elif isinstance(st, C.Return):
@@ -333,7 +402,7 @@ class Collector:
                 if d.init is not None:
                     v = self.value(d.init)
                     if v is not None:
-                        self.s.unify(self.key(d.name), v)
+                        self.s.unify(self.key(d.name, write=True), v)
         from dread.naming import _inner
         for inner in _inner(st):
             self.stmt(inner)
@@ -379,7 +448,7 @@ class Collector:
         if isinstance(e, C.Assign):
             v = self.value(e.value)
             if isinstance(e.target, C.Name) and e.target.id not in self.macros:
-                t = self.key(e.target.id)
+                t = self.key(e.target.id, write=True)
             else:
                 t = self.value(e.target)
             if e.op == "=" and t is not None and v is not None:
@@ -404,9 +473,10 @@ class Collector:
                             s.calls.append((location, tmpl[2]))
                 t = ("result", self.fn.name, id(e))
                 if summary.get("ret") is not None:
+                    # (its fields, but no kind: a function the source declares void hands back what
+                    # its last call left in the result register, FreeRTOS's vListInsert's list, and
+                    # every caller that passes that on linked lists with tasks)
                     s.instantiate(summary["ret"], s.pointer(t))
-                    if structure(summary["ret"]):
-                        s.calls.append((s.pointer(t), summary["ret"][2]))
                 return t
             for i, a in enumerate(e.args):
                 v = self.value(a)
@@ -817,7 +887,7 @@ def pointer_candidates(fn):
 
 def kinds(s, trees):
     """{kind root: Kind} of the analysed functions' memory, worked out on the final objects: an
-    object's base is where most of the functions' variables point into it; a call's argument and the
+    object's base is the lowest offset the functions' variables point to in it; a call's argument and the
     callee's parameter (s.calls) make their objects one kind when both are at their bases, so the
     bases line up (a list item a task block holds at 4 is inside it: s.embeds, not the task's kind).
     Merging objects or copying a template's inner parts says nothing about kinds: through FreeRTOS's
@@ -825,21 +895,61 @@ def kinds(s, trees):
     targets = {}
     for _, fn, _ in trees:
         for v in function_variables(fn):
-            r = s.find(("var", fn.name, v))
-            if r in s.points:
-                o, off = s.loc(s.points[r])
-                slot = targets.setdefault(o, {})
-                slot[off] = slot.get(off, 0) + 1
-    base = {o: min(t, key=lambda off: (-t[off], off)) for o, t in targets.items()}
+            for key in s.var_webs.get((fn.name, v), ()):
+                r = s.find(key)
+                if r in s.points:
+                    o, off = s.loc(s.points[r])
+                    slot = targets.setdefault(o, {})
+                    slot[off] = slot.get(off, 0) + 1
+    # A structure's base is the lowest offset a variable points to: members it holds (a queue's two
+    # lists at 16 and 36) and what is handed out past a header lie above it. (The most frequent
+    # pointer made RISC-V's queues start at their first list, and queues and lists one kind.)
+    base = {o: min(t) for o, t in targets.items()}
     parent = {}
+    shape = {}                              # kind root -> {offset from its base: size}
 
     def find(o):
         while parent.get(o, o) != o:
             parent[o] = parent.get(parent[o], parent[o])
             o = parent[o]
         return o
+
+    def layout_of(o):
+        b = base.get(o, 0)
+        out = {}
+        for off, f in s.fields[o].items():
+            if off >= b:
+                out[off - b] = max(SIZES.get(t, 4) for t in (f.types or {"u32"}))
+        return out
+
+    def fits(x, y):
+        """Whether two layouts can be one structure: the same size where both have a field, and no
+        field of one across a field of the other (a queue's byte cRxLock at 68 is not a task block's
+        word uxMutexesHeld there)."""
+        a, b = shape.get(x, {}), shape.get(y, {})
+        for off, size in a.items():
+            if off in b:
+                if b[off] != size:
+                    return False
+            elif any(o < off < o + z for o, z in b.items()) or any(off < o < off + size for o in b):
+                return False
+        return True
+
+    def union(x, y):
+        x, y = find(x), find(y)
+        if x == y or not fits(x, y):
+            return False
+        parent[y] = x
+        merged = dict(shape.get(x, {}))
+        merged.update(shape.get(y, {}))
+        shape[x] = merged
+        return True
+    for o, (p, _) in s.obj_parent.items():
+        if p == o:
+            shape[o] = layout_of(o)
     s.embeds = set()
     frames = {s.loc((o, 0))[0] for o in s.frames}
+    links = []
     for a, b in s.calls:
         (ra, oa), (rb, ob) = s.loc(a), s.loc(b)
         if ra == rb:
@@ -848,11 +958,17 @@ def kinds(s, trees):
         # FreeRTOS's prvStaticallyAllocatedCreator handed one slot as a static queue and later as a
         # static event group, which made the two one kind)
         if ra not in frames and oa == base.get(ra, 0) and ob == base.get(rb, 0):
-            x, y = find(ra), find(rb)
-            if x != y:
-                parent[y] = x
+            links.append((ra, rb))
         elif ra not in frames:
             s.embeds.add((ra, oa, rb, ob))
+    # The strongest links first: the more identical fields two sides share, the surer they are one
+    # structure; a link whose layouts do not fit is left (one structure handed to a helper that takes
+    # several, clang's vPortFree whose free list walk reaches past its header, comes last and fails).
+    def strength(link):
+        a, b = shape.get(link[0], {}), shape.get(link[1], {})
+        return -sum(1 for off, size in a.items() if b.get(off) == size)
+    for ra, rb in sorted(links, key=lambda l: (strength(l), l)):
+        union(ra, rb)
     # What sits at one offset of one kind is one kind: every list function's item, given as a task
     # block's xStateListItem at 4, is the same structure.
     changed = True
@@ -866,8 +982,7 @@ def kinds(s, trees):
             inner = find(rb)
             if key not in place:
                 place[key] = inner
-            elif find(place[key]) != inner:
-                parent[inner] = find(place[key])
+            elif find(place[key]) != inner and union(place[key], inner):
                 changed = True
     out = {}
     for o, (p, _) in s.obj_parent.items():
@@ -979,14 +1094,17 @@ def plan(s, trees, digests=None, least=2):
     frames = {s.loc((o, 0))[0] for o in s.frames}
     for _, fn, _ in trees:
         for v in sorted(pointer_candidates(fn) - _uses(fn) - {FRAME}):
-            r = s.find(("var", fn.name, v))
-            if r in s.points:
-                o, off = s.loc(s.points[r])
-                if o in frames:             # (a function's own stack frame is its locals, not a structure:
-                    continue                # GCC -O0's 253 functions had one each)
-                k = s.kind_root.get(o)
-                if k in ks and off == s.kind_base.get(o, 0):
-                    pointing.setdefault(k, []).append((fn.name, v))
+            seen = set()                    # (what each of its webs points to: one structure's base, or
+            for key in s.var_webs.get((fn.name, v), ()):        # it stays an integer)
+                r = s.find(key)
+                if r in s.points:
+                    o, off = s.loc(s.points[r])
+                    k = s.kind_root.get(o)
+                    # (a function's own stack frame is its locals, not a structure: GCC -O0's 253
+                    # functions had one each)
+                    seen.add(k if o not in frames and k in ks and off == s.kind_base.get(o, 0) else None)
+            if len(seen) == 1 and None not in seen:
+                pointing.setdefault(next(iter(seen)), []).append((fn.name, v))
     out = Plan()
     eligible = [k for k in ks if ks[k].base is not None and len(layout(ks[k])) >= least and k in pointing]
     for n, k in enumerate(sorted(eligible, key=lambda k: min(pointing[k])), 1):

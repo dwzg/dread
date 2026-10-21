@@ -26,7 +26,11 @@ Newest first. "Status" says whether the choice is in the code yet.
   static event group one slot); items at one offset of one kind one kind (97 %, one item type for
   all list functions). Then, for the gate on clang -O2 and GCC -O0: only u32 variables the function
   dereferences, no C variable's address, no stack frame (GCC -Os 97 %, -O0 98 %, clang -O2 68 %,
-  RISC-V GCC -Os 61 %: the last two not traced yet).
+  RISC-V GCC -Os 61 %). Then for clang and RISC-V: values per web of definitions on the C before
+  structuring (RISC-V 84 %), the lowest pointer target as a structure's base, joins only where
+  layouts fit, strongest first (clang 90 %, GCC -Os 100 %), no kinds through calls' results (RISC-V
+  97 %, clang 91 %). Considered and left: joining kinds through pointer fields (an item's owner, a
+  void *, holds tasks and timers).
 - **Choice:** the last. Typed C is compiled with -fno-delete-null-pointer-checks (a file's marker
   line, dread.build): GCC dropped a pointer's comparison with 0 once the pointer was dereferenced,
   and address 0 is memory on these targets. Typed C compiles to other code than the integer C (GCC

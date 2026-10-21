@@ -215,3 +215,16 @@ def test_a_variable_given_a_c_variable_s_address_stays_an_integer():
                 "    a_1 = (u32)&s1;\n    r6 = *(volatile u32 *)a_1 + *(volatile u32 *)(a_1 + 4);\n"
                 "    return t(a_1) + r6;\n}\n")
     assert "a_1" not in p.typed.get("g", {}), p.typed
+
+
+def test_a_variable_the_c_keeps_whole_is_as_many_values_as_it_holds():
+    """RISC-V's xQueueGenericReset: a0 is the queue, then a0 + 16 its first list, kept as one variable
+    (an asm block writes a0); the analysis follows definitions, so the list function's structure does
+    not take the queue's fields, and a0, two structures' bases, stays an integer."""
+    p = plan_of("u32 init(u32 a0)\n{\n    *(volatile u32 *)a0 = 0u;\n    *(volatile u32 *)(a0 + 4) = a0;\n"
+                "    *(volatile u32 *)(a0 + 8) = a0;\n    return a0;\n}\n"
+                "u32 reset(u32 a0)\n{\n    u32 s0;\n    s0 = a0;\n    *(volatile u32 *)(a0 + 60) = 0u;\n"
+                "    *(volatile u32 *)(a0 + 64) = 0u;\n    a0 = a0 + 16u;\n    init(a0);\n    init(s0 + 36u);\n"
+                "    return 0;\n}\n")
+    assert p.structs[p.typed["init"]["a0"]] == [(0, "u32"), (4, "u32"), (8, "u32")], p.structs
+    assert "a0" not in p.typed.get("reset", {}), p.typed

@@ -151,8 +151,16 @@ its sources.
   GCC -Os 316/328 with 56 structures in 99 functions, clang -O2 275/286 with 54 in 80, RISC-V GCC -Os
   251/258 with 24 in 82, GCC -O0 353/357 with 38 in 92). The fields the plan declares for typed
   parameters against their source structures: GCC -Os 519 of 537 (97 %), GCC -O0 52 of 53, but
-  clang -O2 470 of 687 (68 %) and RISC-V GCC -Os 521 of 848 (61 %): kinds still joined there, not
-  traced (every access is at its offset either way; what is wrong is a structure shared by two). Typed
+  clang -O2 470 of 687 (68 %) and RISC-V GCC -Os 521 of 848 (61 %) at first. Traced the same day:
+  RISC-V keeps a register an asm block writes whole (a0 the queue, then a0 + 16 its first list), so
+  the analysis now follows definitions, not names (a value per web, on the C before structuring, a
+  variable typed only when all its webs point to one structure's base); a structure's base is the
+  lowest offset a variable points to; kinds join only where their layouts fit (the same size where
+  both have a field, none across another), the links with most identical fields first; and calls'
+  results link no kinds (a function the source declares void hands back its last call's leftover,
+  vListInsert's list). Now GCC -Os 526 of 528 (100 %), clang -O2 439 of 480 (91 %), RISC-V GCC -Os
+  485 of 502 (97 %), GCC -O0 52 of 53, with more structures than kinds in the source (one source
+  structure can be two types, each right; every access is at its offset either way). Typed
   C compiles with -fno-delete-null-pointer-checks (GCC dropped null checks of dereferenced pointers).
   A function whose readable C does not compile now stays lifted instead of ending the check (printi's
   structure with a pad of 4 GB: + 0xffffffffu is - 1, offsets are signed now). Open: a pointer to a
