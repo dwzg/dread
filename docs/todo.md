@@ -428,9 +428,12 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   The lab's rebuilding compiler asked for -mfpu=auto, also GCC 8's, and every hard-float lab build
   gave no verdicts (a fault of DREAD's: cclab now asks the compiler and names the core's FPU
   otherwise). The full-room test assumed 256 bytes hold gizmo's hand-written C (GCC 7's did not fit,
-  and the check had nothing left to drop): the room is measured now. Left: the same with older
-  GCC (4.9 defaults to C90, and some snippets declare in for loops) and with older clang, and the
-  RISC-V GCC of the older images.
+  and the check had nothing left to drop): the room is measured now. Then under Ubuntu 16.04's GCC
+  4.9.3: 607 passed, 6 failed, again all assumptions of the tests: two snippets declared in for loops
+  (C99; GCC 4.9 defaults to C90), the C++ probe expected the sized delete (_ZdlPvj, C++14: GCC 5 on),
+  GCC 4.9's libgcc __aeabi_uldivmod moves sp in a way the walk counts (the test asserted the refusal
+  newer ones get), and GCC 4.9's code of the chase test is covered without the chase (it skips now,
+  saying so). Left: older clang, and the RISC-V GCC of the older images.
 - [x] **The pilot without names**: Haiku's inputs on a copy of the GCC -Os build with every name made
   FUN_address and the calls' names gone too: how much of what it finds comes from knowing FreeRTOS
   (open source, its names in the listing) and how much from reading the code. Private firmware has

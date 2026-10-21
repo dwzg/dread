@@ -170,7 +170,7 @@ def stale_target(tmp_path, cases):
         "{ queue[0] = m->id; queue[1] = m->a; queue[2] = m->b; queue[3] = m->c; }\n"
         "__attribute__((noinline)) void send(unsigned id, unsigned a) { struct msg m; m.id = id; m.a = a; put(&m); }\n"
         "__attribute__((noinline)) void leave(unsigned x)\n"
-        "{ volatile unsigned junk[16]; for (int i = 0; i < 16; i++) junk[i] = x * 3 + i; }\n"
+        "{ volatile unsigned junk[16]; int i; for (i = 0; i < 16; i++) junk[i] = x * 3 + i; }\n"
         "void start(unsigned x) { leave(x); send(1, x); done = 1; }\n"     # (no tail call: send's frame
         "void start2(unsigned x) { leave(x); send(2, x); done = 2; }\n"    # lies where leave's did)
         "void plain(unsigned x) { other = x + 1; }\n")

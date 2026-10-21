@@ -462,7 +462,7 @@ def test_cxx_on_the_arm_cxx_abi(tmp_path):
         assert r["_Z7make_ntv"]["where"].startswith("memory at the address in r0")
     o0, o2 = got["cortex-m3-O0"], got["cortex-m3-O2"]
     called = [h["function"] for h in o0["_Z14cxx_new_deletei"]["helpers"] if h["depth"] == 1]
-    assert called[0] == "_Znwj" and called[-1] == "_ZdlPvj"
+    assert called[0] == "_Znwj" and called[-1] in ("_ZdlPvj", "_ZdlPv")   # (sized delete from C++14 on: GCC 5)
     for r in (o0, o2):
         v = r["_Z11cxx_virtuali"]
         taken = "_ZNK1W1fEi" in [h["function"] for h in v["helpers"] if h["depth"] == 1]

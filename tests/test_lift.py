@@ -443,7 +443,7 @@ def test_the_stack_pointer_stored_as_a_value(tmp_path, opt):
     (tmp_path / "t.c").write_text(NOIPA_DEF +
         "struct obj { unsigned a, b; };\n"
         "NOIPA unsigned use(struct obj **all, int n)\n"
-        "{ unsigned t = 0; for (int i = 0; i < n; i++) t += all[i]->a * all[i]->b; return t; }\n"
+        "{ unsigned t = 0; int i; for (i = 0; i < n; i++) t += all[i]->a * all[i]->b; return t; }\n"
         "unsigned f(unsigned x) { struct obj p = {x, 1}, q = {x + 1, 2}; struct obj *all[] = {&p, &q};"
         " return use(all, 2); }\n")
     (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
@@ -643,8 +643,10 @@ def test_the_run_time_abi_helpers_take_no_stack_arguments(tmp_path):
     p = Program(t, t.image())
     lifter = lift.make_lifter(p)
     helper = p.by_name["__aeabi_uldivmod"]
-    with pytest.raises(lift.Refused, match="changes the stack pointer"):    # (libgcc's: strd ip, lr, [sp, #-16]!)
-        lifter.depths(helper, strict=False, switch=True)
+    try:                                    # (libgcc's since GCC 5 or so: strd ip, lr, [sp, #-16]!;
+        lifter.depths(helper, strict=False, switch=True)    # GCC 4.9's moves sp in a way the walk counts)
+    except lift.Refused as e:
+        assert "changes the stack pointer" in str(e)
     assert lifter.stack_args(helper) == 0
     assert "__aeabi_uldivmod(r0, r1, r2, r3)" in lifter.lift(p.by_name["q"]).text
     flow = regflow.analyse(p)
