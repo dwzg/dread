@@ -1337,7 +1337,21 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   stub answers; on a copy of the GCC -Os build four of its seventeen task loops are accepted that
   were not (prvLowPriorityMutexTask, prvStaticallyAllocatedCreator, prvTestMasterTask,
   vPrimaryBlockTimeTestTask), prvTimerTestTask misses 228 instructions instead of 436,
-  prvNotifiedTask 654 instead of 720, none worse; (2) a cycle that changes nothing (registers alike at a pc, no store, no peripheral) as a
+  prvNotifiedTask 654 instead of 720, none worse. What was left was mostly inner waits: a stub answers
+  0 past a case's list, which a wait takes for "not yet" (prvNotifiedTask's cases made all 230 stub
+  calls and reached 253 of 671 instructions; an answer stage turning single answers changed nothing).
+  Then the item's plan, the same day: dread sysrecord records a task's loop as a loop case, the answers
+  its callees gave it in the system run (r0 back in its own context), what its own instructions read,
+  and what callees stored behind pointers it passed (in registers and on the stack: the stubs of loop
+  cases see their callees' stack arguments since); replayed, the round goes the run's way (all 161
+  recorded calls of prvNotifiedTask), and each answer turned once (a site's first two rounds), with a
+  stop where the turned run leaves the recorded calls (the assertion's), reaches the paths the run
+  never took. On a copy of the GCC -Os build three more task loops are accepted (prvEchoClient twice,
+  prvQueueSetReceivingTask), prvNotifiedTask misses 17 instead of 90 and 521 instead of 654, prvTimerTask
+  10 instead of 20. (Found on the way: sysrecord looked cases up with a key of its own that had fallen
+  behind and took a loop function's coverage from plain cases it made: now one key, autocase.case_key.)
+  Left of the task loops: prvCheckTask (its run reaches no round), prvTimerTestTask, prvSenderTask and
+  xPortStartScheduler (not traced); (2) a cycle that changes nothing (registers alike at a pc, no store, no peripheral) as a
   defined end, like a branch to itself (vAssertCalled's wait for a debugger; it stays uncovered for
   its exit path, so mostly time: the failing generations of vAssertCalled, Reset_Handler, main and
   vRegTest2Implementation take 400 to 500 s a build); (3) the M4F builds' libgcc compare helpers that

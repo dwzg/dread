@@ -927,14 +927,7 @@ class Generator:
         deciders = set()                    # callees stubbed because the search stalled behind their call
         stops = []                          # loop cases: callees that never return end the run
         if self.loop:
-            have = {c[0] for c in calls}
-            for fn in self.callees(words, depth=1):
-                if fn.entry in have:
-                    continue
-                if fn.name in self.endless():
-                    stops.append(fn.entry)
-                else:
-                    calls.append([fn.entry, self.reads_mask(fn.name), 0])
+            calls, stops = self.loop_stubs(words, calls)
         # Inputs a run jumped to are learned as code pointers (the pointer stub in later inputs) in
         # every function that reaches a call through a register: a pointer two loads deep (C++'s
         # object, its vtable, the method) faults in every input until it is the stub, so no input
@@ -1569,6 +1562,33 @@ class Generator:
         return sorted(a for a in reach & set(sites)
                       if self.program.insn(a) is not None and arch.flow(self.program.insn(a))[0] == "ijump")
 
+    def loop_stubs(self, words, calls=()):
+        """(calls, stops) of a loop case of these instructions: every callee they call directly
+        stubbed (with the argument registers its callers set up, and its stack arguments: what a
+        callee stores behind a pointer passed on the stack is a fill of its stub too, FreeRTOS's
+        xTaskGenericNotify's previous value), after the given calls; those that never return as stops
+        (their call ends the run). dread.sysrecord makes its loop cases so."""
+        calls = [list(c) for c in calls]
+        have, stops = {c[0] for c in calls}, []
+        for fn in self.callees(words, depth=1):
+            if fn.entry in have:
+                continue
+            if fn.name in self.endless():
+                stops.append(fn.entry)
+            else:
+                calls.append([fn.entry, self.reads_mask(fn.name), self.stack_words(fn)])
+        return calls, stops
+
+    def stack_words(self, fn):
+        """How many stack arguments a function reads (dread.lift's stack analysis), 0 where unknown."""
+        from dread import lift
+        try:
+            lifter = self.__dict__.get("_frame_lifter") or lift.make_lifter(self.program, self.flow() or None)
+            self.__dict__["_frame_lifter"] = lifter
+            return min(lifter.stack_args(fn) or 0, 8)
+        except Exception:
+            return 0
+
     def loop_calls_for(self, words):
         """The stub calls a loop case of these instructions ends at: twice their call sites, at least
         LOOP_CALLS and at most LOOP_CALLS_MAX (a round of the loop makes each call once, mostly)."""
@@ -2200,9 +2220,13 @@ def cases_for(run, name, fn, make=True):
     return out
 
 
-def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True):
-    """The generated cases of cases_for, from the cache or made and cached (make=False: none when
-    the cache holds none for this key)."""
+def case_key(gen, name, fn, options, calls, frame):
+    """(key, calls): the cache key of a function's generated cases (cases_for: its auto() options
+    without calls and frame, the calls resolved, the frame), and the calls they are made with (the
+    stack switches its calls reach added). One place for both: dread.sysrecord looked the cases up
+    with a key of its own, which had fallen behind (no switch stubs, sweep cap, pointer tails or loop
+    length), found no loop function's cases and judged their coverage by plain cases it made instead."""
+    prog = gen.program
     sizes = {a: prog.insn_size(a) for a in fn.insns}
     have = {c[0] for c in calls}
     calls = calls + [c for c in gen.switch_stubs(name) if c[0] not in have]   # (in the key: the cases of a
@@ -2211,10 +2235,18 @@ def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True
         keyed["sweep_steps"] = SWEEP_STEPS
     if options.get("loop") and gen.loop_calls_for(fn.insns) != LOOP_CALLS:      # (only those: the other
         keyed["loop_calls"] = gen.loop_calls_for(fn.insns)                       # loop functions keep theirs)
+    if options.get("loop"):                 # (their stubs see their callees' stack arguments since 2026-10-21)
+        keyed["loop_stubs"] = 2
     tails = gen.pointer_tails_reached(fn.insns)
     if tails:                               # (only those: tail calls through a pointer count with the
         keyed["pointer_tails"] = tails      # calls through a register since 2026-10-21, drop_wild)
-    key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, keyed, prog.arch, gen.environment())
+    return cache_key(gen.payload, gen.image.base, fn.insns, sizes, fn.entry, keyed, prog.arch, gen.environment()), calls
+
+
+def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True):
+    """The generated cases of cases_for, from the cache or made and cached (make=False: none when
+    the cache holds none for this key)."""
+    key, calls = case_key(gen, name, fn, options, calls, frame)
     path = os.path.join(run["target"].build, "autocases", image.name, name + ".json")
     cached = cache_load(path)
     if (not cached or cached.get("key") != key) and not make:

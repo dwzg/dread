@@ -221,3 +221,46 @@ def test_a_later_stage_leaves_nothing_for_the_next_case(tmp_path):
     gen.apply(m, case)
     assert m.call(fn.entry).ret == 5
     assert int.from_bytes(gen.machine().read(flag, 4), "little") == 0
+
+
+def test_a_loop_is_recorded_as_the_answers_its_callees_gave(target):
+    """A function that never returns (gizmo's main loop) is recorded as a loop case: the answers its
+    callees gave it in the run become the stubs' (in the keys scenario ring_get's -1 round after round,
+    then the 's' typed), what changed under its own reads later stages (the timer's ticks it waits
+    for), and the replay makes the run's calls: handle_key's where the key came. With the key taken out
+    of the answers (ring_get's -1 every round), an answer turned once (0: a key) takes the case into
+    handle_key, which those answers never call (FreeRTOS's task loops: the error paths behind their
+    checks)."""
+    image = target.image()
+    program = Program(target, image)
+    gen = autocase.Generator(target, image, program=program)
+    fn = program.by_name["main"]
+    loops = {fn.entry: {a + program.insn(a).size: a for a in fn.insns if program.insn(a) is not None
+                        and program.arch.flow(program.insn(a))[0] in ("call", "icall")}}
+    scenario = dict(target.scenarios["keys"], _name="keys")
+    system = sysrun.System(target, image, image.payload(), program=program, scenario=scenario)
+    recorder = sysrecord.Recorder(system, {fn.entry: "main"}, extents={fn.entry: (fn.entry, program.end(fn))},
+                                  loops=loops)
+    system.run(int(scenario.get("limit", sysrun.LIMIT)))
+    call = next(c for c in recorder.active if c["entry"] == fn.entry)
+    ring, handle = program.by_name["ring_get"].entry, program.by_name["handle_key"].entry
+    calls_of = lambda target_: [a for a in fn.insns if program.arch.is_call(program.insn(a)) and
+                                program.arch.target(program.insn(a)) == target_]
+    sites = calls_of(handle)
+    assert sites and ring in [program.arch.target(program.insn(s)) for s in call["sites"]]
+
+    def covered(cases):
+        got = set()
+        for c in cases:
+            got |= gen.coverage(fn.entry, fn.insns, c, c["limit"])
+        return got
+    cases = sysrecord.loop_cases(gen, fn, recorder, set(), 8)
+    assert cases and all(c["hang"] and c["stub_calls"] and c["returns"] for c in cases)
+    assert set(sites) <= covered([c for c in cases if not c.get("_turned")])      # the run's own answers
+    keyless = [0xFFFFFFFF if site in calls_of(ring) and answer != 0xFFFFFFFF else answer
+               for answer, site in zip(call["answers"], call["sites"])]
+    assert keyless != call["answers"]
+    call["answers"] = keyless
+    cases = sysrecord.loop_cases(gen, fn, recorder, set(), 8)
+    assert not set(sites) & covered([c for c in cases if not c.get("_turned")])
+    assert any(c.get("_turned") for c in cases) and set(sites) <= covered(cases)
