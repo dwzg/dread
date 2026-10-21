@@ -531,6 +531,28 @@ class Arm:
             return {self._name(insn.reg_name(o.reg)) for o in ops[1:] if o.type == csarm.ARM_OP_REG}
         return set()
 
+    def store_slots(self, insn):
+        """[(register, base register, displacement)] of each register a store writes: str, strh, strb,
+        strd (the pair at the displacement and four above), stm (from the base up), stmdb and push
+        (below the base); else [] (dread.regflow: where a variadic function's save area lies)."""
+        ops, i = insn.operands, insn.id
+        regs = [self._name(insn.reg_name(o.reg)) for o in ops if o.type == csarm.ARM_OP_REG]
+        if i in (csarm.ARM_INS_STR, csarm.ARM_INS_STRH, csarm.ARM_INS_STRB, csarm.ARM_INS_STRD):
+            at = next((k for k, o in enumerate(ops) if o.type == csarm.ARM_OP_MEM), None)
+            if at is None or ops[at].mem.index or insn.writeback:
+                return []
+            base = self._name(insn.reg_name(ops[at].mem.base))
+            stored = [self._name(insn.reg_name(o.reg)) for o in ops[:at] if o.type == csarm.ARM_OP_REG]
+            return [(r, base, ops[at].mem.disp + 4 * k) for k, r in enumerate(stored)]
+        if i == csarm.ARM_INS_PUSH:
+            return [(r, "sp", -4 * (len(regs) - k)) for k, r in enumerate(regs)]
+        if i in (csarm.ARM_INS_STM, csarm.ARM_INS_STMDB) and len(regs) > 1:
+            base, stored = regs[0], regs[1:]
+            if i == csarm.ARM_INS_STM:
+                return [(r, base, 4 * k) for k, r in enumerate(stored)]
+            return [(r, base, -4 * (len(stored) - k)) for k, r in enumerate(stored)]
+        return []
+
     def load_address(self, insn):
         """(base register, displacement) of a load from a register plus a constant: ldr, ldrb, ldrh,
         ldrsb, ldrsh, ldrd (post-indexed: the base itself, before it moves), else None (dread.regflow:

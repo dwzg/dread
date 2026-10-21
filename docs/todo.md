@@ -298,6 +298,12 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   changed on eleven FreeRTOS builds and every gizmo build; clang keeps those arguments in registers).
   The unnamed registers a va_list walks over stay no use, as before. regflow uses the lifter's frame
   analysis here for the first time, a first step of "one analysis of base registers" (below).
+  (3) found by callconv on GCC -O2 the same night, regflow 22: the variadic rule took a lone r3
+  stored at the entry for a save area of one register (three named arguments before it): FreeRTOS's
+  xStreamBufferSend spills its fourth argument far below the entry, and its r3 counted as no use on
+  every GCC build. A save area now has to lie right below the stack arguments (the last argument
+  register a word below the entry's stack pointer: the lifter's states and the layers' store_slots);
+  xStreamBufferSend reads r0-r3 since, nothing else changed (thirteen FreeRTOS builds, gizmo).
 - [ ] **Refusals to a language model as rule writer**: the categories the benchmark leaves (a code
   shape the tools do not know) go with their listings to a model that proposes the rule (a
   recognizer, an input, the C); nothing is taken that the comparison does not accept.

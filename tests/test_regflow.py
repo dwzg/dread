@@ -735,3 +735,74 @@ def test_a_named_argument_loaded_back_from_the_save_area_is_read(tmp_path):
     assert flow.read_regs("pf") == ["r0"], flow.read_regs("pf")
     assert flow.read_regs("spf") == ["r0", "r1"], flow.read_regs("spf")
     assert flow.read_regs("plain") == [], flow.read_regs("plain")      # (r0 only pads the push)
+
+
+SPILL_OR_SAVE_AREA_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global walk2, spill, va, caller2
+    .type walk2, %function
+    .thumb_func
+walk2:  ldr     r0, [r0]
+        bx      lr
+    .size walk2, . - walk2
+    .type spill, %function
+    .thumb_func
+spill:  push    {r4, r5, r6, r7, lr}    @ GCC -O2: the fourth argument kept far below the entry
+        sub     sp, #28
+        str     r3, [sp, #12]
+        adds    r0, r0, r1
+        adds    r0, r0, r2
+        ldr     r3, [sp, #12]
+        adds    r0, r0, r3
+        add     sp, #28
+        pop     {r4, r5, r6, r7, pc}
+    .size spill, . - spill
+    .type va, %function
+    .thumb_func
+va:     sub     sp, #12                 @ a save area right below the stack arguments
+        str     r1, [sp, #0]
+        str     r2, [sp, #4]
+        str     r3, [sp, #8]
+        push    {r4, lr}
+        mov     r0, sp
+        bl      walk2
+        pop     {r4, lr}
+        add     sp, #12
+        bx      lr
+    .size va, . - va
+    .type caller2, %function
+    .thumb_func
+caller2:
+        push    {r4, lr}
+        bl      spill
+        bl      va
+        pop     {r4, pc}
+    .size caller2, . - caller2
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),
+                    reason="needs arm-none-eabi binutils")
+def test_a_spill_far_below_is_no_save_area(tmp_path):
+    """regflow 22: a variadic save area lies right below the stack arguments; a function that spills
+    its fourth argument at the entry far below (FreeRTOS's xStreamBufferSend at GCC -O2) is no
+    variadic one and reads r3. A save area where it belongs stays no use (va hands it on unread)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(SPILL_OR_SAVE_AREA_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "caller2", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    flow = regflow.analyse(Program(Target.load(str(tmp_path))))
+    assert flow.read_regs("spill") == ["r0", "r1", "r2", "r3"], flow.read_regs("spill")
+    assert flow.read_regs("va") == [], flow.read_regs("va")

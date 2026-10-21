@@ -441,6 +441,14 @@ class RiscV:
             return {NAMES[f.rs2]}
         return set()
 
+    def store_slots(self, insn):
+        """[(register, base register, displacement)] of what sw, sh or sb stores, else [] (dread.regflow:
+        where a variadic function's save area lies)."""
+        f = fields(insn)
+        if f.op in ("sw", "sh", "sb") and f.rs2:
+            return [(NAMES[f.rs2], NAMES[f.rs1], f.imm)]
+        return []
+
     def frame_slot(self, insn):
         """("store" or "load", register, offset) of sw rs2, imm(sp) and lw rd, imm(sp) (their compressed
         forms too), else None (dread.regflow: saves and restores around a call)."""

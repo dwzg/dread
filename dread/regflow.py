@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 21                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 22                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -102,6 +102,10 @@ VERSION = 21                # 3: entry spills (variadic functions) are no use; 4
                             # variadic function's save area) is read where a load at a known offset reads
                             # its slot back: GCC's printf pushes r0-r3 and loads its format from r0's slot,
                             # sprintf keeps its format r1 there (found by dread callconv on every ARM build)
+                            # 22: a save area lies right below the stack arguments (the last argument
+                            # register just below the entry's stack pointer): FreeRTOS's xStreamBufferSend
+                            # spills its fourth argument r3 at the entry far below, and was taken for
+                            # variadic, its r3 no use (dread callconv, GCC -O2)
 
 
 class RegFlow:
@@ -352,7 +356,45 @@ def variadic_save_area(program, fn, insns, joins):
     first = len(args) - 1
     while first > 0 and args[first - 1] in saved:
         first -= 1
-    return set(args[first:]) if first > 0 else set()     # (all of them stored: -O0 keeping its arguments)
+    area = set(args[first:]) if first > 0 else set()     # (all of them stored: -O0 keeping its arguments)
+    if area and below_the_stack_arguments(program, fn, insns, joins, area) is False:
+        return set()
+    return area
+
+
+def below_the_stack_arguments(program, fn, insns, joins, area):
+    """Whether the entry's straight run stores each register of area right below the stack arguments
+    (a variadic function's save area: the last argument register a word below the entry's stack
+    pointer, the one before it a word lower and so on, so that a va_list walks on into the stack
+    arguments); None when it cannot be told (the layer names no store slots, or the lifter's states
+    fail). FreeRTOS's xStreamBufferSend at GCC -O2 spills its fourth argument r3 at the entry, far
+    below, and was taken for variadic, its r3 for no use (found by dread callconv)."""
+    arch = program.arch
+    if not hasattr(arch, "store_slots"):
+        return None
+    from dread import lift
+    lifter = _STATES.get(id(program))
+    try:
+        if lifter is None or lifter.prog is not program:
+            lifter = _STATES[id(program)] = lift.make_lifter(program)
+        states = lifter.states(fn, strict=False)
+    except Exception:
+        return None
+    args = list(program.target.abi.arg_regs)
+    word = getattr(arch, "reg_bits", 32) // 8
+    where = {}
+    for a, insn in zip(fn.insns, insns):
+        if insn is None or (a != fn.entry and a in joins) or a not in states:
+            break
+        depth, values = states[a]
+        for reg, base, disp in arch.store_slots(insn):
+            if reg in area and reg not in where:
+                value = ("sp", depth) if base == "sp" else values.get(base)
+                if isinstance(value, tuple) and len(value) == 2 and value[0] == "sp":
+                    where[reg] = value[1] - disp
+        if arch.flow(insn)[0] != "next":
+            break
+    return all(where.get(r) == word * (len(args) - args.index(r)) for r in area)
 
 
 def scratch_names(target, arch):
