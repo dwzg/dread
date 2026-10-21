@@ -1326,7 +1326,10 @@ def trim_calls(fn, run):
 
 def params(fn, run=None):
     """A parameter the body only copies into its register's variable (u32 r0 = a0) is that variable;
-    trailing parameters nobody reads go (the callers' registers are ignored, as they were). Only for a
+    a parameter whose value at the entry nothing reads is none: trailing ones go (the callers'
+    registers are ignored, as they were), one before a parameter that stays is renamed, and its
+    register's variable, when the body uses it, becomes a local of its own (prvAddCurrentTaskTo-
+    DelayedList's r3, written before every read, was a fourth parameter the model named). Only for a
     plain head (type name(parameters)), which is written anew."""
     import re
     m = re.match(r"^(\w+) (\w+)\((.*)\)$", fn.head.strip())
@@ -1370,9 +1373,33 @@ def params(fn, run=None):
                 used |= {x.id for x in walk_expr(e) if isinstance(x, C.Name)}
             if isinstance(st, C.Decl):
                 used |= {d.name for d in st.items}
-    while new and new[-1][1] not in used:
-        new.pop()
+    fn.params = new                         # (the graph and the names see the parameters as they are now)
+    try:
+        g = Graph(fn)
+        reach = g.reaching()
+        entry_read = set()
+        for n in g.nodes:
+            for v in n.reads:
+                if -1 in (reach[n.index].get(v) or ()):
+                    entry_read.add(v)
+    except C.ParseError:                    # (no graph: only parameters nobody names go, as before)
+        entry_read = used
+    locals_ = []                            # (type, name): a register's variable no parameter now
+    while new and new[-1][1] not in entry_read:
+        ptype, pname = new.pop()
+        if pname in used:
+            locals_.append((ptype, pname))
         changed = True
+    taken = all_names(fn)
+    for i, (ptype, pname) in enumerate(new):
+        if pname not in entry_read and pname in used:
+            name = "a%d" % i if "a%d" % i not in taken else fresh(fn, "a%d" % i, taken)
+            taken.add(name)
+            new[i] = (ptype, name)
+            locals_.append((ptype, pname))
+            changed = True
+    for ptype, pname in reversed(locals_):
+        fn.body.body.insert(0, C.Decl(ptype, [C.Declarator(pname)]))
     if changed:
         fn.params = new
         fn.head = "%s %s(%s)" % (m.group(1), fn.name, ", ".join("%s %s" % p for p in new) or "void")
@@ -1386,13 +1413,56 @@ def _flat(s):
     return out
 
 
+def flat_view(fn):
+    """A stand-in for fn whose body has its conditional blocks spread out (if (c) goto then; goto
+    else; then: ...; goto end; else: ...; end:) for dread.cflow.Graph: a graph of it tells the reads
+    inside a block (an IT block, merged ifs) apart from the definitions before it. The statements and
+    expressions are fn's own, so what is renamed through the stand-in is renamed in fn. A block that
+    declares, labels, loops or switches stays one statement, as does an if that writes nothing."""
+    import types
+    out, count = [], [0]
+
+    def plain(s):
+        if isinstance(s, C.Block):
+            return all(plain(x) for x in s.body)
+        if isinstance(s, C.If):
+            return plain(s.then) and (s.orelse is None or plain(s.orelse))
+        return not isinstance(s, (C.Decl, C.Label, C.While, C.DoWhile, C.For, C.Switch, C.Case, C.Asm))
+
+    def writes(s):
+        return any(isinstance(x, C.ExprStmt) for x in _flat(s))
+
+    def spread(s):
+        if isinstance(s, C.Block) and plain(s):
+            for x in s.body:
+                spread(x)
+        elif isinstance(s, C.If) and plain(s) and writes(s):
+            count[0] += 1
+            then_l, else_l, end_l = ("flat_%s_%d" % (w, count[0]) for w in ("then", "else", "end"))
+            out.extend([C.If(s.cond, C.Goto(then_l)), C.Goto(else_l if s.orelse is not None else end_l),
+                        C.Label(then_l)])
+            spread(s.then)
+            if s.orelse is not None:
+                out.extend([C.Goto(end_l), C.Label(else_l)])
+                spread(s.orelse)
+            out.append(C.Label(end_l))
+        else:
+            out.append(s)
+    for s in fn.body.body:
+        spread(s)
+    return types.SimpleNamespace(name=fn.name, params=fn.params, head=fn.head,
+                                 body=types.SimpleNamespace(body=out))
+
+
 def webs(fn):
     """A variable that holds unrelated values in turn (a register: the first argument, later a
     callee's result) split into one variable per web: definitions that reach a common use are one
     web, and each web but the one the entry's value belongs to (or the first) gets a name of its own
-    (r0_2, r0_3). Not for a variable written inside a nested statement (a conditional block: the
-    statement-level flow cannot tell its reads apart), a parameter's or one written by asm."""
-    g = Graph(fn)
+    (r0_2, r0_3); a parameter keeps its name for its value at the entry. The flow is that of the
+    body with its conditional blocks spread out (flat_view), so a variable written inside one is
+    split too. Not for a variable written inside a statement that stays whole (a loop, a block that
+    declares) or written by asm, a chain or an increment."""
+    g = Graph(flat_view(fn))
     reach = g.reaching()
     top_writes, nested = {}, set()
     for n in g.nodes:
@@ -1435,7 +1505,16 @@ def webs(fn):
         for (u, node), defs in uses.items():
             if u == v and defs:
                 classes.setdefault(find((v, defs[0])), [])
-        if len(classes) < 2 or v not in decls or decls[v][1].dims or decls[v][1].ptr:
+        ptype = {n: t for t, n in fn.params}.get(v)
+        if len(classes) < 2:
+            continue
+        if v in decls:
+            if decls[v][1].dims or decls[v][1].ptr:
+                continue
+            specs = decls[v][0].specs
+        elif ptype is not None:             # a parameter: its value at the entry keeps its name
+            specs = ptype
+        else:
             continue
         keep = entry if entry in classes else min(classes, key=lambda c: min(classes[c]) if classes[c] else 0)
         for cls in sorted(classes, key=lambda c: min(classes[c]) if classes[c] else -1):
@@ -1448,7 +1527,7 @@ def webs(fn):
             for (u, node), defs in uses.items():
                 if u == v and defs and find((v, defs[0])) == cls:
                     _rename_reads(g.nodes[node].stmt, v, name)
-            decl = C.Decl(decls[v][0].specs, [C.Declarator(name)])
+            decl = C.Decl(specs, [C.Declarator(name)])
             last = max((i for i, x in enumerate(fn.body.body) if isinstance(x, C.Decl)), default=-1)
             fn.body.body.insert(last + 1, decl)
             changed = True
@@ -1489,6 +1568,37 @@ def _rename_reads(s, old, new):
             ren(e)
 
 
+def group_declarations(fn):
+    """The body's plain declarations (no initial value, array, pointer or register binding) of one
+    type in one line, in the order of their names (r0, r0_1, r2, r10), at the place of the first
+    declaration of that type: the splits add one declaration each."""
+    import re
+
+    def key(name):
+        return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name)]
+
+    def plain(d):
+        return d.init is None and not d.dims and not d.ptr and not d.asm
+    first, merged = {}, False
+    out = []
+    for s in fn.body.body:
+        if isinstance(s, C.Decl) and s.items and all(plain(d) for d in s.items):
+            spec = " ".join(s.specs.split())
+            if spec in first:
+                first[spec].items += s.items
+                merged = True
+                continue
+            first[spec] = s
+        out.append(s)
+    for s in first.values():
+        order = sorted(s.items, key=lambda d: key(d.name))
+        if [d.name for d in order] != [d.name for d in s.items]:
+            s.items[:] = order
+            merged = True
+    fn.body.body[:] = out
+    return merged
+
+
 def tidy(fn, run=None, passes=None, rounds=8):
     """All passes, again until none changes anything (at most rounds times); then the calls' and the
     function's own arguments (trim_calls, params) and the passes once more."""
@@ -1511,4 +1621,5 @@ def tidy(fn, run=None, passes=None, rounds=8):
             split_any = True
         if split_any:
             settle()
+        group_declarations(fn)
     return fn

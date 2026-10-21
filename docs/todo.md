@@ -103,12 +103,19 @@ its sources.
   is read before something stores it; then the other passes treat them as any variable (a register
   spilled and reloaded becomes a copy). And the register webs (dread.tidy webs): definitions that
   reach a common use are one web, each web but the entry's a variable of its own (xQueueGenericSend's
-  r6 the flag that the time-out was set, r6_1 the queue's message count); not for a variable a
-  nested statement writes (the flow by statements cannot tell its reads apart; the first version
-  renamed only a conditional block's condition, not its store, and gizmo's parse_kv stored the
-  wrong character: the gate failed it). Small unsigned literals are written plainly where C means
-  the same (r3 == 2, not 0x2u: beside an unsigned operand, assigned, as an argument or a shift's
-  count). Open: frames whose address goes to a callee (FreeRTOS's TimeOut_t on xQueueGenericSend's
+  r6 the flag that the time-out was set, r6_1 the queue's message count). The flow is that of the
+  body with its conditional blocks spread out (dread.tidy flat_view: if (c) goto then; ... end:,
+  the statements shared), so a variable written inside an IT block or merged ifs is split too; a
+  parameter keeps its name for its value at the entry only. The first version split neither (the
+  flow by statements could not tell a block's reads apart, and it left parameters alone): the model
+  had one name for prvAddCurrentTaskToDelayedList's r0, the ticks to wait, then the current TCB,
+  then uxListRemove's result. (Before that, a version renamed only a conditional block's condition,
+  not its store, and gizmo's parse_kv stored the wrong character: the gate failed it.) A parameter
+  whose value at the entry nothing reads is none: trailing ones go, one before a parameter that
+  stays is renamed aN (the same function had r2 and r3, written before every read, as parameters);
+  plain declarations of one type share a line. Small unsigned literals are written plainly where C
+  means the same (r3 == 2, not 0x2u: beside an unsigned operand, assigned, as an argument or a
+  shift's count). Open: frames whose address goes to a callee (FreeRTOS's TimeOut_t on xQueueGenericSend's
   stack: the frame stays whole). MSP430 (paused):
   ulTaskGenericNotifyTake's readable C makes every case stack-dependent (refused, so it stays
   lifted), not traced; its critical sections are asm on the real stack beside the lifted frame.
@@ -125,12 +132,11 @@ its sources.
   them (55 %), 34 sharing a word (69 %), 20 of 78 local names among the source's; 26,106 tokens in
   and 26,125 out, about $0.02. Sonnet 5.5: all 30, 23 of 48 (48 %), 35 (73 %), 21 of 89; 26,106 in
   and 10,362 out, about $0.16. Haiku is the one to use. The first 30 by name, mostly newlib's (terse
-  names: ptr, fp, g), got 12 of 37 exact with Haiku. Most misses are a register that holds two
-  values the webs did not split (xQueueGenericSend's r0, the queue and later the result, named
-  xResult): webs leaves alone a variable a nested statement writes. Next: split those too
-  (conservatively), then types: the structures behind pointers derived by code (accesses at
-  constant offsets through the same pointer, unified across functions), their names and fields'
-  names proposed the same way.
+  names: ptr, fp, g), got 12 of 37 exact with Haiku. Most misses were a register holding several
+  values one name had to cover: parameters were not split (xQueueGenericSend's r0, the queue and
+  later the result, named xResult). They are now (Variables). Next: types: the structures behind
+  pointers derived by code (accesses at constant offsets through the same pointer, unified across
+  functions), their names and fields' names proposed the same way.
 - [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
 

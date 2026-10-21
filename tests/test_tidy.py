@@ -229,6 +229,65 @@ def test_a_split_renames_the_reads_inside_a_conditional_block_too():
     assert "= (u8)r5_1;" in out and "return r5_1 + r2;" in out, out
 
 
+def test_a_variable_written_inside_a_conditional_block_is_split_too():
+    """The webs see the block spread out: the value stored inside it is a variable of its own, and
+    the load after it another (before, a variable written inside a block was left whole)."""
+    text = ("u32 f(u32 a0, u32 a1, u32 a2, u32 a3)\n{\n"
+            "    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r5;\n"
+            "    r5 = *(volatile u32 *)r0;  /* 0: ldr r5, [r0] */\n"
+            "    if (r5 == 0) { r5 = r1 + 2u; *(volatile u32 *)(r0 + 4) = r5; }  /* 2: it eq */\n"
+            "    r5 = *(volatile u32 *)(r0 + 8);  /* 8: ldr r5, [r0, #8] */\n"
+            "    return r5 + 1u;  /* 10: adds r0, r5, #1 */\n}\n")
+    fn = cparse.parse("typedef unsigned int u32;\n" + text).function("f")
+    assert tidy.webs(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "if (r5 == 0)" in out and "r5_1 = r1 + 2u;" in out and "(r0 + 4) = r5_1;" in out, out
+    assert "r5_2 = *(volatile u32 *)(r0 + 8);" in out and "return r5_2 + 1u;" in out, out
+    assert not tidy.webs(fn)
+
+
+def test_a_parameter_keeps_its_name_for_its_value_at_the_entry_only():
+    text = ("u32 f(u32 r0, u32 r1)\n{\n"
+            "    u32 r3;\n"
+            "    r3 = r0 + 4u;  /* 0: adds r3, r0, #4 */\n"
+            "    r0 = *(volatile u32 *)r1;  /* 2: ldr r0, [r1] */\n"
+            "    *(volatile u32 *)r3 = r0;  /* 4: str r0, [r3] */\n"
+            "    return r0;  /* 6: bx lr */\n}\n")
+    fn = cparse.parse("typedef unsigned int u32;\n" + text).function("f")
+    assert tidy.webs(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "u32 f(u32 r0, u32 r1)" in out and "r3 = r0 + 4u;" in out, out
+    assert "u32 r0_1;" in out and "r0_1 = *(volatile u32 *)r1;" in out and "return r0_1;" in out, out
+
+
+def test_a_parameter_whose_value_at_the_entry_nothing_reads_is_none():
+    """Trailing ones go, one before a parameter that stays is renamed; the register's variable is a
+    local then (prvAddCurrentTaskToDelayedList's r2 and r3, written before every read, were two more
+    parameters)."""
+    text = ("u32 f(u32 a0, u32 a1, u32 a2, u32 a3)\n{\n"
+            "    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3;\n"
+            "    r1 = r0 + r2;  /* 0: adds r1, r0, r2 */\n"
+            "    r3 = r1 * 2u;  /* 2: lsls r3, r1, #1 */\n"
+            "    return r3;  /* 4: mov r0, r3 */\n}\n")
+    fn = cparse.parse("typedef unsigned int u32;\n" + text).function("f")
+    assert tidy.params(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "u32 f(u32 r0, u32 a1, u32 r2)" in out, out
+    assert "u32 r1;" in out and "u32 r3;" in out and "r1 = r0 + r2;" in out, out
+    assert not tidy.params(fn)
+
+
+def test_plain_declarations_of_one_type_share_a_line_in_the_order_of_their_names():
+    text = ("u32 f(u32 r0)\n{\n"
+            "    u32 r3;\n    u32 r2, r10;\n    u64 t_7;\n    u32 r0_1;\n    u32 r5 = 0u;\n"
+            "    r3 = r0; r2 = r3; r10 = r2; r0_1 = r10; t_7 = r0_1; r5 = (u32)t_7;\n    return r5;\n}\n")
+    fn = cparse.parse("typedef unsigned int u32;\ntypedef unsigned long long u64;\n" + text).function("f")
+    assert tidy.group_declarations(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "u32 r0_1, r2, r3, r10;" in out and "u64 t_7;" in out and "u32 r5 = 0u;" in out, out
+    assert not tidy.group_declarations(fn)
+
+
 @needs_z3
 def test_a_compare_against_minus_one_names_the_constant():
     """The lifters' adds r3, r4, #1; bne is x + 1 == 0: x == 0xffffffff (FreeRTOS's portMAX_DELAY in
