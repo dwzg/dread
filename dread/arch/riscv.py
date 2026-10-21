@@ -225,6 +225,10 @@ class RiscV:
     # R_RISCV_RVC_JUMP" (FreeRTOS's GCC 12, 13 and 14 builds, 2026-10-21: the lift check's link failed
     # and no function of the build was lifted)
     required_cflags = ["-mno-relax"]
+    # The registers a call may leave its return address in: the convention's x1 for calls and x5 for
+    # millicode (GCC's -msave-restore enters __riscv_save_N with jal t0); dread.regflow takes what such
+    # a call writes there for the callee's, not the caller's
+    link_regs = ("ra", "t0")
     default_args = 8
     default_callee_saved = ("s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11")
     default_result = ("a0", "a1")

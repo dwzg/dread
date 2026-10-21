@@ -487,6 +487,37 @@ spare:
 
 
 @needs_riscv_gcc
+def test_a_call_through_another_link_register_reads_none_of_it(tmp_path):
+    """GCC's millicode is entered with jal t0, __riscv_save_N and returns through t0 (picolibc's
+    _init_tls): the callee reads t0, but the call wrote it, so the caller does not read t0 (regflow
+    20; before, every function on a path to _init_tls looked as if it read t0)."""
+    flow = _rv_flow(tmp_path, {"t.S": '''
+    .text
+    .globl millicode, f, g
+    .type millicode, @function
+millicode:
+    mv t1, t0
+    jr t0
+    .size millicode, .-millicode
+    .type f, @function
+f:  jal t0, millicode
+    li a0, 5
+    ret
+    .size f, .-f
+    .type g, @function
+g:  addi sp, sp, -16
+    sw ra, 12(sp)
+    call f
+    lw ra, 12(sp)
+    addi sp, sp, 16
+    ret
+    .size g, .-g
+'''})
+    assert "t0" in flow.read_regs("millicode"), flow.read_regs("millicode")
+    assert "t0" not in flow.read_regs("f") and "t0" not in flow.read_regs("g"), (flow.read_regs("f"), flow.read_regs("g"))
+
+
+@needs_riscv_gcc
 def test_a_register_saved_around_a_call_is_not_read_behind_it(tmp_path):
     """GCC -Os saves an argument it needs after an assertion call around that call (FreeRTOS on
     RISC-V: a2 around vAssertCalled). The restore puts back the entry's value, so the register is the

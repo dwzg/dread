@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 19                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 20                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -93,6 +93,11 @@ VERSION = 19                # 3: entry spills (variadic functions) are no use; 4
                             # register when it is live behind the restore, which writes it (newlib's
                             # _free_r spills r0 around __malloc_lock, which writes r0, and stores errno
                             # through it after: r0 was not seen read; found by dread callconv)
+                            # 20: what a call itself writes (its link register) is no read of the callee's
+                            # in front of the call: picolibc's _init_tls enters GCC's millicode with jal t0,
+                            # __riscv_save_0, which returns through t0, and every FreeRTOS function on a
+                            # path to it looked as if it read t0 (GCC 12 to 14 with picolibc: 19 functions
+                            # refused for reading t0 behind vAssertCalled alone)
 
 
 class RegFlow:
@@ -321,6 +326,11 @@ class Analysis:
         if flag_bits:                       # "flags" stands for them all (the layer's and callers' name)
             self.bit["flags"] = sum(flag_bits)
         self.everything = (1 << len(self.names)) - 1
+        # the registers a call may leave its return address in (the layer's link_regs: RISC-V's ra and
+        # t0): what the call writes there the callee reads from the call, not from the caller. Only
+        # those: the MSP430 layer counts what a call clobbers as its writes, which the callee reads
+        # from the caller first (its arguments)
+        self.link_mask = sum(self.bit.get(r, 0) for r in getattr(arch, "link_regs", ()))
         entries = {fn.entry: fn.name for fn in program.functions}
 
         def entry_name(address):
@@ -687,8 +697,8 @@ class Analysis:
         for i, callee in tails:
             exits[i] |= self.reads[callee] | (passed & ~self.may[callee])
         for i, callee in calls:
-            if callee is not None:
-                uses[i] |= self.reads[callee] & ~code[i].covered
+            if callee is not None:      # (the call writes its link register before the callee reads it)
+                uses[i] |= self.reads[callee] & ~code[i].covered & ~(code[i].writes & self.link_mask)
                 kills[i] = 0 if code[i].conditional else self.may[callee]
             else:
                 kills[i] = 0 if code[i].conditional else self.everything
