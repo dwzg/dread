@@ -10,7 +10,12 @@ a function that fails is built from its lifted C again. The functions accepted g
 readable table (config/readable.txt), and dread recon builds them from readable C. Names and types
 are left to the pilot (dread pilot).
 
-Stages so far: none, the identity (parse and print again: dread.cparse's round trip).
+Stages so far: the clean-up (dread.tidy: what only the machine needed out, compares and their
+branches as comparisons), then the structure (dread.structure: gotos as if/else and loops).
+
+Where the image with lifted C alone already differs from the original in the scenarios (the system
+run's clock on some builds), the scenarios decide nothing and the function-level runs decide alone;
+elsewhere a difference with readable C sends the guilty functions back to lifted C, found by halves.
 
 Not yet: functions that never return and were accepted by the system run (they stay lifted).
 """
@@ -18,16 +23,26 @@ import argparse
 import os
 import sys
 
-from dread import cparse
+from dread import cparse, structure, tidy
 from dread import target as tgt
 
-STAGES = []     # (name, function(tree: cparse.Function)): applied in order to the lifted function
+STAGES = [("tidy", tidy.tidy), ("structure", structure.structure)]     # (name, function(tree)): in order
+
+
+_MEMO = {}          # (name, text, stages) -> the readable C: a check's rounds build the same again
 
 
 def transform(name, text, stages=None):
     """The readable C of a lifted file (text) whose function is name, or None when it is not the
     lifters' dialect (it then stays lifted). The file's other functions (an MSP430 file's helpers)
     are printed as they were written."""
+    key = (name, text, id(STAGES if stages is None else stages))
+    if key not in _MEMO:
+        _MEMO[key] = _transform(name, text, stages)
+    return _MEMO[key]
+
+
+def _transform(name, text, stages):
     try:
         tree = cparse.parse(text)
     except cparse.ParseError:
@@ -35,10 +50,13 @@ def transform(name, text, stages=None):
     fn = tree.function(name)
     if fn is None:
         return None
+    if tidy.fixed_registers(tree):         # (registers the C must keep as they are: behaviour)
+        stages = []
     for _, stage in (STAGES if stages is None else stages):
         stage(fn)
     others = [f.name for f in tree.items if isinstance(f, cparse.Function) and f.name != name]
-    return cparse.unparse(tree, verbatim=others)
+    return cparse.unparse(tree, verbatim=others, style="readable" if (STAGES if stages is None else stages)
+                          else "lifted")
 
 
 def chooser(names):
@@ -135,10 +153,33 @@ def check(target, image, names=None, out=print, jobs=None):
         if not gone:
             break
     runs = target.scenarios and hasattr(program.arch, "reset")
-    whole = lift.whole_image(target, image, program, lifted, out, lifter, transform=chooser(accepted)) \
-        if runs and accepted else None
-    if whole:
-        out("the whole image: %s" % whole)
+    whole_note = "not run"
+
+    def whole(names):
+        return lift.whole_image(target, image, program, lifted, out, lifter, transform=chooser(names))
+    found = whole(accepted) if runs and accepted else None
+    baseline = whole([]) if found else None
+    if baseline:
+        # The image with lifted C alone differs already (the lift check reports it and keeps its
+        # functions: FreeRTOS on RISC-V GCC -Os and Cortex-M clang -O2, where the rebuilt runs get
+        # further before the limit than the original, by the clock of code both share). There the
+        # scenarios cannot tell readable C from lifted C: whether a run agrees depends on how the
+        # clock falls (the halves of RISC-V's 258 readable functions each agreed, all together not),
+        # so the function-level runs decide, as for lifted C
+        out("the whole image differs with lifted C alone (%s): the scenarios decide nothing here" % baseline)
+        whole_note = "differs with lifted C alone: not decisive"
+        found = None
+    else:
+        whole_note = "agrees"
+    while found:
+        # The function-level cases agreed, the scenarios do not: a readable function behaves otherwise
+        # on an input its cases lack. Halves of the accepted ones until the guilty ones are found; they
+        # go back to lifted C and the rest is tried again (RISC-V GCC -Os: the image printed nothing)
+        out("the whole image: %s" % found)
+        guilty = bisect(accepted, lambda names: whole(names) if names else None)
+        drop(guilty, "the whole image differs with its readable C (found by halves): %s" % found)
+        accepted = [n for n in accepted if n not in guilty]
+        found = whole(accepted) if accepted else None
     for name in accepted:
         verdicts[name] = ("readable", "")
     os.makedirs(work, exist_ok=True)
@@ -147,7 +188,7 @@ def check(target, image, names=None, out=print, jobs=None):
         f.writelines("%s\t%s\t%s\n" % (n, v, r.replace("\t", " ").replace("\n", " "))
                      for n, (v, r) in sorted(verdicts.items()))
     path = image.table("readable")
-    kept = [] if whole else sorted(accepted)        # (an image that differs keeps none: not yet traced)
+    kept = sorted(accepted)
     with open(path, "w") as f:
         f.write("# Functions built from readable C (dread readable): made from their lifted C at every build;\n"
                 "# their cases agree with the original and run every instruction it can reach, and the whole\n"
@@ -155,8 +196,21 @@ def check(target, image, names=None, out=print, jobs=None):
         f.write("".join(n + "\n" for n in kept))
     out("dread readable --check: %d of %d lifted functions readable after %d rounds (%d stay lifted; the whole "
         "image %s), into %s" % (len(kept), len(lifted), rounds, len(lifted) - len(kept),
-                                "differs" if whole else "agrees" if runs else "not run", os.path.relpath(path)))
+                                whole_note if runs and candidates else "not run", os.path.relpath(path)))
     return kept
+
+
+def bisect(names, differs):
+    """The names whose readable C makes differs(subset) true: halves tried until single ones are left
+    (a few whole-image runs per guilty function). Two that differ only together are both returned."""
+    if len(names) <= 1:
+        return list(names)
+    half = len(names) // 2
+    left, right = names[:half], names[half:]
+    a, b = differs(left), differs(right)
+    if not a and not b:
+        return list(names)              # (only together: both halves stay lifted)
+    return (bisect(left, differs) if a else []) + (bisect(right, differs) if b else [])
 
 
 def main(argv=None):

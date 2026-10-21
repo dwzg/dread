@@ -9,6 +9,27 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## z3 proves dread readable's rewrites of conditions and values (2026-10-21)
+
+**Decided by recommendation**; the user, the same day: "If additional python packages help us, feel
+free to install and use them."
+
+- **Question.** The clean-up (dread.tidy) turns the lifters' flag arithmetic into comparisons and
+  values (a compare and its branch as `r1 == r3`) by proposing simple expressions and keeping one that
+  computes the same. How to know it does?
+- **Options.** (a) Test on boundary and random values (dread.cexpr evaluates C with its types). (b)
+  Prove with an SMT solver (z3: bit vectors, decidable for these expressions, milliseconds).
+- **Choice: (b), with (a) as the filter in front.** Testing passed `r5 == 0x41` for the range check
+  `(r5 & ~0x20) - 0x41 <= 0x19` (gizmo's parse_kv): none of the values tried was a letter. The gate
+  caught it (the cases failed), but a rewrite must not depend on the cases' luck. Now a proposal is
+  kept only when z3 proves that wherever the lifted expression is defined, the proposal is defined
+  and has its value; testing (with each constant's neighbours and sums among the values since)
+  discards the others cheaply. z3-solver is an optional extra (`pip install -e ".[prove]"`, CI
+  installs it); without it, conditions and values stay as the lifter wrote them (the other clean-ups
+  are sound by construction and stay).
+- **Undo.** Remove the extra; dread.tidy then skips both passes.
+- **Status.** Done (dread/cexpr.py prove, dread/tidy.py conditions and values).
+
 ## A transformer from lifted C to readable C, next after the fragile-case fix (2026-10-21)
 
 **Decided by recommendation**, on the user's question (2026-10-21: "Could we also build a tool that

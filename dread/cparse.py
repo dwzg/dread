@@ -1053,10 +1053,12 @@ def note_text(addr):
 
 class Printer:
     """unparse's state: lines of text, the current indentation. notes: the instructions' comments
-    (the addresses and texts the statements came from), one per line, as the lifters print them."""
+    (the addresses and texts the statements came from), one per line, as the lifters print them.
+    style "lifted": the lifters' (a block on one line, an if's arm in braces); "readable": an arm of
+    one statement without braces, else if, a block of more than one statement on lines of its own."""
 
-    def __init__(self, notes=True, indent="    "):
-        self.notes, self.unit = notes, indent
+    def __init__(self, notes=True, indent="    ", style="lifted"):
+        self.notes, self.unit, self.style = notes, indent, style
         self.lines = []
 
     def emit(self, depth, text, addr=None):
@@ -1082,11 +1084,15 @@ class Printer:
         if isinstance(s, Asm):
             return asm_text(s)
         if isinstance(s, If) and s.orelse is None:
-            inner = self.simple(s.then)
-            if inner is not None and not isinstance(s.then, If):
+            then = s.then
+            if self.style == "readable" and isinstance(then, Block) and len(then.body) == 1 and \
+                    not isinstance(then.body[0], (If, Label, Case, Note, Block)):
+                then = then.body[0]
+            inner = self.simple(then)
+            if inner is not None and not isinstance(then, If):
                 return "if (%s) %s" % (expr_text(s.cond), inner)
         if isinstance(s, Block) and all(self.simple(x) is not None and not isinstance(x, (Label, Case, Note))
-                                        for x in s.body) and len(s.body) <= 8:
+                                        for x in s.body) and len(s.body) <= (1 if self.style == "readable" else 8):
             return "{ %s }" % " ".join(self.simple(x) for x in s.body) if s.body else "{ }"
         if isinstance(s, For) and isinstance(s.body, (Empty, Block)) and (
                 isinstance(s.body, Empty) or not s.body.body):
@@ -1144,8 +1150,14 @@ class Printer:
                 then = Block([then])            # (the else is this if's, not the inner one's)
             self.body(then, depth)
             if s.orelse is not None:
-                self.emit(depth, "else")
-                self.body(s.orelse, depth)
+                inner = s.orelse.body[0] if isinstance(s.orelse, Block) and len(s.orelse.body) == 1 else s.orelse
+                if self.style == "readable" and isinstance(inner, If):
+                    start = len(self.lines)
+                    self.stmts([inner], depth)
+                    self.lines[start] = self.unit * depth + "else " + self.lines[start].lstrip()
+                else:
+                    self.emit(depth, "else")
+                    self.body(s.orelse, depth)
         elif isinstance(s, While):
             self.emit(depth, "while (%s)" % expr_text(s.cond), s.addr)
             self.body(s.body, depth)
@@ -1171,10 +1183,10 @@ class Printer:
             self.stmts([s], depth + 1)
 
 
-def unparse(tree, notes=True, verbatim=()):
+def unparse(tree, notes=True, verbatim=(), style="lifted"):
     """C text of a File, a Function or a statement. notes: the instructions' comments; verbatim:
-    names of functions printed as they were written (helpers of the lifted file)."""
-    p = Printer(notes)
+    names of functions printed as they were written (helpers of the lifted file); style: see Printer."""
+    p = Printer(notes, style=style)
     if isinstance(tree, File):
         out = []
         for item in tree.items:
@@ -1183,7 +1195,7 @@ def unparse(tree, notes=True, verbatim=()):
             elif item.name in verbatim:
                 out.append(item.raw)
             else:
-                out.append(unparse(item, notes))
+                out.append(unparse(item, notes, style=style))
         return "\n".join(out) + "\n"
     if isinstance(tree, Function):
         p.lines.append(tree.head)

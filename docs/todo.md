@@ -41,15 +41,46 @@ its sources.
   with the cases cached; the 12 the system run accepted stay lifted until readable C is checked
   there too. (The first try built those 12 from lifted C in the function-level runs too, and a case
   of prvRegTestTaskEntry1 the lift check had accepted failed: the configurations differed.)
-- [ ] **Clean-up.** A control-flow graph from labels and gotos; liveness and reaching definitions over
+- [x] **Clean-up.** A control-flow graph from labels and gotos; liveness and reaching definitions over
   registers, flags and frame words; flags and registers nobody reads dropped; copies and constants
   propagated; a temporary used once folded into its use; a flag-setting compare and the branch that
   tests it as one comparison (signed or unsigned from the condition). Done when the gate accepts as
   many functions per build as the lift check, with statements per function against the lifted C's
   and the source's in the bench report.
-- [ ] **Structure.** Gotos to if/else, while, do-while and switch (pattern-independent structuring,
+  Done 2026-10-21 (dread/tidy.py on dread/cflow.py's graph, liveness and reaching definitions as bit
+  sets; dread/cexpr.py): chains of assignments split, the (void)s gone, the instructions' blocks
+  flattened into fresh variables, dead assignments out (a call or a volatile load keeps its effect; a
+  dead load of the function's own frame goes), frame stores nothing can read out, constants and
+  copies propagated, temporaries folded along straight paths without moving an effect, x + 0 and
+  casts to the same type out, constants folded, and conditions and values proposed from the
+  expression's own parts, filtered by testing and kept only when z3 proves them (docs/decisions.md).
+  Over the 10,633 lifted functions of the 38 bench builds: no failure, the lines to 48-65 % on ARM
+  and RISC-V (MSP430 96 %: its flags go through helpers with asm, not cleaned yet), 4 to 39 s a
+  build on one core, the slowest function 5 s. The gate on gizmo a32, m3, m4, rv32 and on FreeRTOS
+  GCC -Os, GCC -O0, clang -O2, RISC-V GCC -Os and MSP430 GCC -Os accepts every function it checks
+  but those the system run accepted and one task loop whose cached cases were older than the code.
+  The statements against the source's come with the scoring item. Found on the way: testing alone
+  took `r5 == 0x41` for a letter test (z3 since); a memory load abstracted as unsigned int instead of
+  its own type (a byte is promoted to int: fixed); the whole image of two builds differs with lifted
+  C alone, so the check now asks the lifted baseline first and lets the function-level runs decide
+  where the scenarios cannot (and finds guilty functions by halves where they can).
+- [x] **Structure.** Gotos to if/else, while, do-while and switch (pattern-independent structuring,
   "No More Gotos", NDSS 2015); a goto left only where the flow is irreducible. Done when the gotos
   left per build are in the bench report and the gate accepts as many as before.
+  Done 2026-10-21 (dread/structure.py): basic blocks, dominators and post-dominators; a natural loop
+  as for (;;) with break and continue, refined into while and do-while (a test at the top, at the
+  end, or trailing continues: do { } while (a || b)); a branch as if/else up to its post-dominator,
+  an else after an arm that returns written after the if; two branches to one target merged into
+  || (and && by De Morgan); a block that only returns repeated instead of a goto; the labels nobody
+  names dropped. Correct whatever it decides: each block once, under its label, every transfer a
+  fall-through to the block that really follows, a break or continue of the loop it leaves, or a
+  goto (tests/test_structure.py: 400 random functions with irreducible flow, compiled with the
+  host's cc before and after, the same results on random arguments; 10 % of their gotos remain).
+  The readable C is printed in a style of its own (dread.cparse: an arm of one statement without
+  braces, else if). On the bench, the 11,061 lifted functions of the 39 builds: gotos 49,093 ->
+  12,512 (25 %), lines to 67 % of the lifted C's (the braces count); the gate on the nine builds as
+  for the clean-up (every function it checks). Not yet: a switch (its function keeps its gotos), a
+  loop with exits to several places beyond the one taken for its break.
 - [ ] **Variables.** Frame words as locals (regflow's frames), a register split into the variables it
   holds, parameters and a result as dread.regflow and dread callconv measured them. Done when the
   signatures are the measured conventions and the gate accepts as many as before.
@@ -67,6 +98,14 @@ C keeps registers exact for its callers (bound calls, -ffixed-REG, registers a c
 may stay lifted.
 
 ## Compiler diversity (the user, 2026-10-20: first, on ARM/Cortex-M and RISC-V)
+
+- [ ] **The whole image of FreeRTOS RISC-V GCC -Os and Cortex-M clang -O2 differs with lifted C
+  alone** (BUILD/lift-check/main/whole.txt of both, measure-38): the rebuilt run gets further before
+  the limit than the original by the clock of code both share (RISC-V: 412 log entries against 158,
+  the original printing nothing, the rebuilt "FreeRTOS Demo Start"), and whether a run agrees
+  depends on how the clock falls (each half of the 258 readable functions agreed, all together not).
+  Find where the clocks part (dread sysrun --log on both, the first block counted in one and not the
+  other), so that the scenarios decide there for lifted and readable C alike.
 
 Real firmware comes from many compilers, versions and options; DREAD was tested on one version of
 each. CI on Ubuntu 24.04's GCC 13, binutils 2.42 and clang 18 found two gaps of DREAD's own that

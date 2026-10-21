@@ -24,8 +24,10 @@ def test_a_lifted_file_comes_back_readable_or_not_at_all(tmp_path):
     target = Target.load(gizmo_dir("m3"))
     image = target.image()
     text = lifted_text(target, image, "fmt_dec", tmp_path)
-    out = readable.transform("fmt_dec", text)
+    out = readable.transform("fmt_dec", text, stages=[])         # (no stage: the same tree)
     assert out is not None and cparse.parse(out) == cparse.parse(text)
+    out = readable.transform("fmt_dec", text)                    # (the stages: shorter, still C of the dialect)
+    assert out is not None and cparse.parse(out).function("fmt_dec") is not None and len(out) < len(text)
     assert readable.transform("fmt_dec", "u32 fmt_dec(u32 a0) { return ({ a0; }); }") is None   # not the dialect
     assert readable.transform("other", text) is None                                         # no such function
     seen = []
@@ -50,7 +52,9 @@ def gizmo_copy(tmp_path):
 
 @pytest.mark.slow
 @needs_gcc
-def test_the_gate_takes_every_lifted_function_and_builds_the_same_image(tmp_path):
+def test_the_gate_takes_every_lifted_function_and_builds_the_same_image(tmp_path, monkeypatch):
+    """With no stage (the identity): every lifted function, and the image lifted C gives."""
+    monkeypatch.setattr(readable, "STAGES", [])
     target = gizmo_copy(tmp_path)
     image = target.image()
     lifted = build.read_names(image.table("lifted"))
@@ -96,3 +100,23 @@ def test_a_stage_that_breaks_a_function_leaves_it_lifted(tmp_path, monkeypatch):
     assert any(line.startswith("lifted   fmt_dec") and "FAIL fmt_dec" in line for line in lines), lines
     verdicts = open(os.path.join(target.build, "readable-check", image.name, "verdicts.tsv")).read()
     assert "fmt_dec\tlifted\tFAIL fmt_dec" in verdicts
+
+
+@pytest.mark.slow
+@needs_gcc
+def test_the_clean_up_passes_the_gate_and_is_shorter(tmp_path):
+    """With the clean-up (dread.tidy): every lifted function of gizmo-m3 is accepted, the whole image
+    agrees, and the readable C has fewer lines than the lifted (the flags, the (void)s, the zeroed
+    registers after calls are gone)."""
+    target = gizmo_copy(tmp_path)
+    image = target.image()
+    lifted = build.read_names(image.table("lifted"))
+    lines = []
+    accepted = readable.check(target, image, out=lines.append)
+    assert accepted == sorted(lifted), lines
+    before = after = 0
+    for name in lifted:
+        text = lifted_text(target, image, name, tmp_path)
+        before += text.count("\n")
+        after += readable.transform(name, text).count("\n")
+    assert after < before * 0.8, (before, after)
