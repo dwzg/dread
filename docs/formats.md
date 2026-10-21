@@ -142,6 +142,7 @@ image's `kept_cases/NAME.json` (cases that once showed a difference; `--keep-fai
 | `limit`, `stub_calls` | instructions (default 200,000: a budget of that many of the instruction set's shortest instructions, counted in bytes of code entered) and stub calls (default 256) one run may take |
 | `hang` | true: not returning is the result (compared up to the limit) |
 | `tight` | true: a stub's fill stops at the first stack word the function stored itself |
+| `carried` | true: an input of an earlier generation, kept when the cases were made anew because it runs instructions the new ones do not (dread.autocase's carried; for reading only, the runner treats it like any case) |
 | `why`, `by` | where a written case comes from and why (`dread mutate --kill`, `dread record`); nothing reads them but people |
 | `kept` | in kept cases: `"stubbed"` or `"real callees"` |
 

@@ -120,7 +120,11 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     stage, and the compare-guided stage's retry with a stop) brings them back; which other rare
     paths a build covers changes with every change of the generator, in both directions (of eleven
     functions measure-35 gained or lost on GCC -Os, eight are accepted with generator 33; with
-    generator 32 six). Generator 33's whole effect: measure-36.
+    generator 32 six). Generator 33's whole effect: measure-36. Since then a regeneration keeps the
+    last generation's cases that still run as a case must and reach instructions the new ones do not
+    (carried, autocase.Generator.carried): coverage no longer goes down when the generator changes,
+    except by a case the current rules refuse. In effect from the next regeneration on (no VERSION
+    bump: caches still valid stay as they are).
     callconv against regflow: 0 to 3 functions a build disagree on ARM and RISC-V: printf's r0 and
     sprintf's r1 on ARM GCC (named arguments loaded back from the save area: regflow 21, after this
     measurement), sprintf's a2 on RISC-V GCC 10 (an unnamed argument: listed apart since). On MSP430

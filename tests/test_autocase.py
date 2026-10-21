@@ -733,3 +733,48 @@ def test_the_null_stage_reaches_a_null_check_no_other_stage_offers(tmp_path, mon
     cases = g.generate("set_state", fn.entry, fn.insns)
     got, words = covered(g, "set_state", cases)
     assert got == words, sorted(hex(a) for a in words - got)
+
+
+def test_cases_made_anew_keep_what_the_last_ones_reached(gen, tmp_path, monkeypatch):
+    """When a function's cases are made anew (another key: a new generator, a changed image), the
+    inputs of the last generation that still run as a case must and reach instructions the new ones
+    do not are kept, marked carried: every measurement that made the cases anew lost functions it had
+    had (rare paths one search found and the next missed: measure-35 and -36, 2 to 7 a build). An old
+    case that stubs an address no function starts at is not kept."""
+    import os
+    from dread import autocase
+    fn = gen.program.by_name["parse_uint"]
+    full = gen.generate("parse_uint", fn.entry, fn.insns)
+    reach = [gen.coverage(fn.entry, fn.insns, c) for c in full]
+    every = set().union(*reach)
+    assert every == set(fn.insns)
+    # a poorer generation: the cases that reach the least, until something is missed
+    poor = [c for c, r in sorted(zip(full, reach), key=lambda p: len(p[1]))][:1]
+    assert set().union(*(gen.coverage(fn.entry, fn.insns, c) for c in poor)) < every
+    bogus = dict(full[0], calls=[[fn.entry + 2, 1, 0]])     # (a stub where no function starts)
+    kept = gen.carried(fn.entry, fn.insns, poor, [bogus] + full)
+    assert kept and all(c.get("carried") for c in kept)
+    assert all(c["calls"] != [[fn.entry + 2, 1, 0]] for c in kept)
+    got = set().union(*(gen.coverage(fn.entry, fn.insns, c) for c in poor + kept))
+    assert got == every
+    # and cases_for does it when the key changes: a cache file of another key, a generation that
+    # makes the poor cases
+    from dread.cases import Suite
+    from dread.emu import Layout
+    from dread.program import Program
+    target = gen.target
+    target.build = str(tmp_path / "build")          # not the example's own cache
+    image = target.image()
+    image.extra_cases, image.kept_cases = str(tmp_path / "extra"), str(tmp_path / "kept")
+    program, layout = Program(target, image), Layout(target, image)
+    suite = Suite(target, image, program, layout)
+    suite.auto["parse_uint"] = {}
+    run = {"target": target, "image": image, "program": program, "layout": layout, "original": image.payload(),
+           "suite": suite}
+    path = os.path.join(target.build, "autocases", image.name, "parse_uint.json")
+    autocase.cache_store(path, {"key": "an older generator's", "cases": full})
+    monkeypatch.setattr(autocase.Generator, "generate", lambda self, *a, **k: [dict(c) for c in poor])
+    monkeypatch.setattr(autocase, "_GENERATORS", {})
+    cases = [c for *_, c in autocase.cases_for(run, "parse_uint", program.by_name["parse_uint"]) if c]
+    assert any(c.get("carried") for c in cases) and len(cases) > len(poor)
+    assert autocase.cache_load(path)["key"] != "an older generator's"

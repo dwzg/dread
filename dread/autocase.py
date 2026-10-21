@@ -1563,6 +1563,40 @@ class Generator:
         return sorted(a for a in reach & set(sites)
                       if self.program.insn(a) is not None and arch.flow(self.program.insn(a))[0] == "ijump")
 
+    def carried(self, entry, words, cases, old, limit=200_000):
+        """The cases of an earlier generation (old: what the cache held under another key) that still
+        run as a case must and run instructions none of cases runs, the most new ones first, each
+        marked "carried". A change of the generator or of the image around a function sends its
+        search other ways, and a rare path one search found the next may miss: every measurement
+        that made the cases anew lost functions it had and gained others (measure-35 and -36, 2 to 7
+        lost a build). Those earlier inputs are inputs all the same; the original decides what they
+        do. Not carried: a case that stubs an address no function starts at (the image changed
+        around it), that does not end as a case must (attempt with the image check), or that calls
+        through a register into the middle of a function (drop_wild repairs or drops it)."""
+        entries = self.program.by_entry
+        covered = set()
+        for c in cases:
+            covered |= self.coverage(entry, words, c, c.get("limit", limit))
+        pool = []
+        for c in old:
+            if any(x[0] not in entries and x[0] != self.fake_pointer for x in c.get("calls", ())) or \
+                    any(s not in entries for s in c.get("stops", ())):
+                continue
+            got, why = self.attempt(entry, words, c, c.get("limit", limit), check_image=True)
+            if why is None and set(got) - covered:
+                pool.append((set(got), {k: v for k, v in c.items() if k != "carried"}))
+        out = []
+        while pool:
+            pool.sort(key=lambda p: -len(p[0] - covered))
+            got, c = pool.pop(0)
+            if not got - covered:
+                break
+            covered |= got
+            out.append(dict(c, carried=True))
+        if out:
+            out, _ = self.drop_wild(entry, words, out, limit)
+        return out
+
     def drop_wild(self, entry, words, cases, limit):
         """(the cases, each whose run calls through a register into the image at no function's entry
         repaired or dropped, (argument indices, memory addresses) of the inputs that gave such an
@@ -2166,12 +2200,15 @@ def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True
     if (not cached or cached.get("key") != key) and not make:
         return {"cases": []}
     if not cached or cached.get("key") != key:
+        previous = (cached or {}).get("cases") or []
         started = time.time()
         failed = None
         try:
             made = gen.generate(name, fn.entry, fn.insns, calls=calls, frame=frame, **options)
         except GenerationError as e:
             made, failed = [], str(e)
+        if failed is None and previous:     # what the last generation reached stays reached (carried)
+            made = made + gen.carried(fn.entry, fn.insns, made, previous)
         cached = {"key": key, "seed": seed_name(fn.entry), "cases": made,
                   "seconds": round(time.time() - started, 2)}      # for reading only; not in the key
         if failed is not None:
