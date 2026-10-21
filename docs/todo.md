@@ -142,6 +142,15 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     The lab's probes: GCC -Os every one (94; the three that take a stack argument's address too),
     the other compiler's -On 94 of 95, -Ohz 95 of 95 in both versions. ARM state and Thumb-2 only:
     RISC-V and Thumb-1 (which cannot push r12) keep the refusal.
+    Measured 2026-10-21 (measure-32, the refusal, before the wrapper): every ARM build lost printf
+    and sprintf and nothing else. The RISC-V builds lost them too and gained functions that had
+    failed in every measurement since 2026-10-20 (virt-gcc-Os prvInitialiseNewTask_constprop_0 and
+    xPortStartScheduler, 238 of 316; virt-gcc-O2 those and prvRegTestTaskEntry1 but not xTaskCreate,
+    177 of 300; virt-clang-Os prvInitialiseNewTask and prvRegTestTaskEntry2, 217 of 308). Not from
+    the refusal: the measurement made most of the image's cases anew (their key holds the whole image
+    and dread.regflow's results), and measure-31's code accepts the two of virt-gcc-Os and printf
+    with the new cases (a full check on a copy). Why the cache was renewed, and why the old cases
+    failed them, is not traced.
   - [x] **The caller's r4-r11 at the entry, for the C**: the other compiler keeps the stack aligned
     with `push {r7, lr}` and drops the pad on the way out into a scratch register, `pop {r0, pc}` in
     a function without a result (its -On make_nt): r0 then holds the caller's r7. The lifter does not
