@@ -1373,3 +1373,59 @@ def test_shared_code_goes_on_behind_a_conditional_return(tmp_path):
     t = Target.load(str(tmp_path))
     lines = []
     assert lift.check(t, t.image(), ["guest"], out=lines.append, jobs=1) == ["guest"], "\n".join(lines)
+
+
+R12_HANDED_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global shift, callshift
+    .type shift, %function
+    .thumb_func
+shift:  push    {r4, lr}
+        cmp     r0, #10
+        it      le
+        rsble   ip, r0, #32     @ ip written under le only
+        lsr.w   r1, r1, ip      @ read on every path (what the caller left, when gt)
+        it      le
+        orrle   r0, r0, r1      @ the result used under le only
+        pop     {r4, pc}
+    .size shift, . - shift
+    .type callshift, %function
+    .thumb_func
+callshift:
+        push    {r4, lr}
+        bl      shift
+        pop     {r4, pc}
+    .size callshift, . - callshift
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_r12_read_where_its_predicated_write_did_not_run_is_handed_in(tmp_path):
+    """libgcc's double helpers share __adddf3's tail, which writes ip under a condition, reads it on
+    every path and uses the result under that condition only: on the other path it reads what the
+    caller left in r12. The C gets r12 as the caller left it (compiled with -ffixed-r12), as it does
+    r4-r11, instead of refusing (three of them on the hard-float builds)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.s").write_text(R12_HANDED_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "callshift", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    text = lift.make_lifter(p, regflow.analyse(p)).lift(p.by_name["shift"]).text
+    assert '"mov %0, r12"' in text, text[:600]       # (dread.build compiles the file with -ffixed-r12)
+    lines = []
+    assert lift.check(t, t.image(), ["shift"], out=lines.append, jobs=1) == ["shift"], "\n".join(lines)

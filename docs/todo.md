@@ -211,7 +211,10 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     share __adddf3's tail, which returns with popge {r4, r5, pc}): the hard-float builds refused six
     for falling through there; on a copy of the GCC one two lift now (__gtdf2, __ltdf2), three stop
     at r12 read on the path where a predicated write did not run (its result used only under the
-    same condition), one at coverage.
+    same condition), one at coverage. Then r12 is handed in like r4-r11 (the C gets it as the caller
+    left it, the file compiled with -ffixed-r12): the three get past it and stop at coverage too
+    (__adddf3's tail for subnormal results, which a conversion from an integer never makes: not
+    reachable from those entries, not a gap of the generator's).
   - [x] **Two-byte functions**: a function that is one `b.n` into shared code (or a `nop` that falls
     into it) leaves no room for the four-byte branch to its C. A `b.n` reaches 2 KB: a four-byte
     trampoline (or the C itself) in freed room within reach would do (eight of the other compiler's

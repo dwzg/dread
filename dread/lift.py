@@ -114,8 +114,10 @@ BOUND = frozenset(("r1", "r2", "r3", "r12", "flags"))
 # What a bound call can hand a callee besides r0-r3: the registers the convention has the callee keep,
 # which a compiler's shared code reads from its caller (mov r1, r6; b.w __addsf3)
 BOUND_IN = frozenset(("r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11"))
-# What the C of a function can get as its caller left it (Lifter.can_hand): the same registers
-HANDED = BOUND_IN
+# What the C of a function can get as its caller left it (Lifter.can_hand): the same registers, and
+# r12, which code may read on a path where a predicated write did not run and use only under that
+# condition again (libgcc's rsble ip, r2, #32; lsr.w ip, r0, ip; orrle r1, r1, ip in __adddf3's tail)
+HANDED = BOUND_IN | {"r12"}
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
