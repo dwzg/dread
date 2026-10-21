@@ -41,8 +41,9 @@ waits for a debugger, a wait for a flag nothing sets) is stubbed in later inputs
 its stubs, so both images get the same (FreeRTOS's demo: configASSERT's handler spins, and every
 null-pointer check stayed uncovered). A real callee answers one way (newlib's _read stub always
 fails): when code is still left after every other stage, the callee whose call stands nearest in
-front of it is stubbed in a last stage of inputs, its result an input (decider; only inputs that run
-new code are kept, so the earlier stages are as they were). A generic stub returns a generated value (the first eight calls of a
+front of it is stubbed in a last stage, its result an input (decider): the compare-guided stage runs
+once more with the stub in every input (its result and what it leaves are inputs there), then random
+inputs; only inputs that run new code are kept, so the earlier stages are as they were. A generic stub returns a generated value (the first eight calls of a
 run, later ones 0) and logs the argument registers in the mask and the stack words, with addresses
 inside the stack replaced by the word "stack". Peripheral registers are inputs like memory; with
 "io": "fixed" they read what the case says whatever was written.
@@ -82,7 +83,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 31       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 32       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -129,7 +130,10 @@ VERSION = 31       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # through a pointer put two bytes off, and the aligned runs never got its vtable
                   # pointer as a whole word; C++ on RISC-V); 31: a last stage stubs the callee whose call
                   # stands in front of the code still left, its result an input (decider: newlib's _read
-                  # stub always fails, and _read_r's code for a read that succeeded went uncovered)
+                  # stub always fails, and _read_r's code for a read that succeeded went uncovered);
+                  # 32: that stage first runs the compare-guided stage with the stub in every input
+                  # (newlib's __sfp, _sbrk_r: the stub's result, what it leaves, and the chase), and the
+                  # memory map is in the cache key (environment)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -577,6 +581,7 @@ class Generator:
         """A digest of what a function's cases depend on besides its own instructions: the whole
         image (a literal pool holds the addresses of globals and callees: a rebuild that moved the
         data left a function's instructions alike and its cases stale, setting cells nobody reads),
+        the memory map (what an input may reach),
         what the loader puts into RAM, and what dread.regflow found in the image (a hung callee's
         stub logs what it reads, a function's float arguments get values): its result, not its
         version, so that a new version that finds the same in an image keeps that image's cases (a
@@ -593,6 +598,9 @@ class Generator:
                 h.update(b"stall %d" % self.stall_part)
             if self.pointer_slots != [self.scratch + POINTER_BASE + POINTER_STEP * k for k in range(POINTER_SLOTS)]:
                 h.update(b"pointer slots " + repr(self.pointer_slots).encode())     # (a small scratch only)
+            # the memory map: what an input may reach (the lab's page at address 0 let a probe's null
+            # path end, which cases cached before it kept unseen)
+            h.update(b"memory " + repr([(r.name, r.base, r.size, r.kind) for r in self.target.memory.regions]).encode())
             self._environment = h.hexdigest()
         return self._environment
 
@@ -734,6 +742,15 @@ class Generator:
 
     def touches_image(self, m):
         return m.code_reads or m.wrote_into(self.image.base, self.program.writable_end())
+
+    def image_stores(self, m, most=4):
+        """The first addresses the last run stored to inside the image (a pointer an input gave as a
+        small number: on a Cortex-M the flash lies at 0, readable, so it faults nowhere)."""
+        lo, hi = self.image.base, self.program.writable_end()
+        ranges = getattr(m, "written_ranges", None)
+        if ranges is None:
+            return sorted(a for a in m.written if lo <= a < hi)[:most]
+        return [max(a, lo) for a, b in sorted(ranges) if a < hi and lo < b][:most]
 
     @staticmethod
     def ends_badly(m):
@@ -947,17 +964,19 @@ class Generator:
             return rng.randrange(1, 4) if rng.random() < POINTER_MISALIGN else 0
 
         def learn_pointers(m, case):
-            """After a fault on unmapped memory: the inputs whose value lies just in front of the
-            address that faulted were pointers."""
-            if m.unmapped is None:
-                return
-            address = m.unmapped[1]
-            for i, v in enumerate(case["args"][:nregs]):
-                if 0 <= address - v < POINTER_REACH and i not in data_args and i not in pin_args:
-                    data_args[i] = buffer_for(("arg", i))
-            for a, n, v in case["mem"]:
-                if n == 4 and 0 <= address - (v & 0xFFFFFFFF) < POINTER_REACH and a not in data_mem and a not in pin_mem:
-                    data_mem[a] = buffer_for(("mem", a))
+            """After a fault on unmapped memory, or a store into the image: the inputs whose value lies
+            just in front of that address were pointers (on a Cortex-M the flash lies at 0, so a pointer
+            an input gave as a small number faults nowhere, and what is stored through it goes into the
+            image: newlib's __sfp stored errno through its reent pointer 0x8)."""
+            addresses = ([m.unmapped[1]] if m.unmapped is not None else []) + self.image_stores(m)
+            for address in addresses:
+                for i, v in enumerate(case["args"][:nregs]):
+                    if 0 <= address - (v & 0xFFFFFFFF) < POINTER_REACH and i not in data_args and i not in pin_args:
+                        data_args[i] = buffer_for(("arg", i))
+                for a, n, v in case["mem"]:
+                    if n == 4 and 0 <= address - (v & 0xFFFFFFFF) < POINTER_REACH and a not in data_mem \
+                            and a not in pin_mem:
+                        data_mem[a] = buffer_for(("mem", a))
 
         def value():
             return rng.choice(hot) if rng.random() < 0.5 else rng.choice(pool)
@@ -1251,6 +1270,7 @@ class Generator:
                 spins.setdefault(m.spinning[0], m.spinning[1:])     # next inputs get a poll stage)
             if self.touches_image(m) or (self.loop and self.ends_badly(m)):
                 faults += 1
+                learn_pointers(m, case)         # (a store into the image through an input's small number)
                 continue
             known.learn(m.reads)
             got = m.covered_insns(words)
@@ -1396,6 +1416,23 @@ class Generator:
                 break
             deciders.add(stub.entry)
             extra = [stub.entry, self.reads_mask(stub.name), 0]
+            # First the compare-guided stage with the stub in every input: the stub's result and what
+            # it leaves in memory are inputs there, and the chase points an input that a new path
+            # stores through at scratch (newlib's __sfp stores errno through its reent pointer when
+            # __sfmoreglue fails, and the inputs had that pointer in the flash, readable at address 8 on
+            # a Cortex-M; _sbrk_r stores errno only when _sbrk fails and left errno set). On a copy of
+            # the corpus, so that what it adds keeps the stub and nothing else changes.
+            if corpus and not self.late():
+                stubbed = []
+                for case in corpus:
+                    c = json.loads(json.dumps(case))
+                    c["calls"] = [list(x) for x in c.get("calls", ()) if x[0] != stub.entry] + [list(extra)]
+                    c["returns"] = c.get("returns") or [0] * 8
+                    stubbed.append(c)
+                before = len(stubbed)
+                self._solve(name, entry, words, end, [list(x) for x in calls if x[0] != stub.entry] + [list(extra)],
+                            limit, rng, pool, known, covered, stubbed, dict(reach), edge)
+                corpus.extend(stubbed[before:])
             for _ in range(DECIDER_RUNS):
                 if words_set <= covered or self.late():
                     break
@@ -1641,12 +1678,20 @@ class Generator:
             fresh = [a for a, n in sorted(m.reads.items()) if n == width_bytes and a not in given
                      and not image.base <= a < image.end and not self.target.memory.is_io(a)
                      and not args_room[0] <= a < args_room[1]][:CHASE_WORDS]
-            used = sum(1 for a, n, v in case["mem"] if v in chase_set)
-            if not fresh or used + len(fresh) > len(self.chase_buffers):
+            # an argument the failing access went through (the access lies just behind its value):
+            # a pointer given as a small number, readable flash on a Cortex-M, faulted nowhere and the
+            # store through it went into the image (newlib's __sfp, its reent pointer 0x8)
+            failed = ([m.unmapped[1]] if getattr(m, "unmapped", None) is not None else []) + self.image_stores(m)
+            via = [i for i, v in enumerate(case["args"][:nregs]) if v not in chase_set and
+                   any(0 <= a - (v & 0xFFFFFFFF) < POINTER_REACH for a in failed)]
+            used = sum(1 for a, n, v in case["mem"] if v in chase_set) + sum(1 for v in case["args"] if v in chase_set)
+            if not fresh and not via or used + len(fresh) + len(via) > len(self.chase_buffers):
                 return None, None
             chases[0] -= 1
             for k, a in enumerate(fresh):
                 case["mem"].append([a, width_bytes, self.chase_buffers[used + k]])
+            for k, i in enumerate(via):
+                case["args"][i] = self.chase_buffers[used + len(fresh) + k]
             return attempt(case, watch, record, steps - 1)
 
         effects, fillable = [], []

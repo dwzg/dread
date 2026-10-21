@@ -53,7 +53,15 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     (2026-10-21): a last stage stubs the callee whose call stands in front of the code still left
     (decider): the GCC 9 build's _read_r, _write_r, _close_r, _lseek_r and __sread lift; gizmo's rv32
     and msp430 gain handle_key. Left: _sbrk_r (its errno store needs a stub that writes errno: stub
-    effects), _free_r, _fflush_r, __sfp, strcmp (other causes, not traced).
+    effects), _free_r, _fflush_r, __sfp, strcmp (other causes, not traced). Generator 32
+    (2026-10-21): that stage runs the compare-guided stage once more with the stub in every input
+    (the stub's result and what it leaves are inputs there: _sbrk_r's errno), and a store into the
+    image just behind an input's value makes that input a learned pointer, also in the chase (on a
+    Cortex-M a pointer given as a small number is readable flash and faults nowhere: __sfp stored
+    errno through its reent pointer 0x8 when __sfmoreglue failed). On a copy of the GCC 9 build
+    __sfp and _sbrk_r lift, _free_r misses 4 instructions instead of 11. Left: _fflush_r (its paths
+    for newlib's fake stdio objects read the real FILE pointer from the reent, which lay in flash),
+    strcmp (2), _free_r (4).
   - [ ] The -O2 builds and the RISC-V GCC builds (RISC-V newlib-nano is not packaged by the
     distributions: xPack's riscv-none-elf-gcc in an image, or picolibc). RISC-V done 2026-10-21:
     GCC 10.2, 12.2, 13.2 and 14.2 with the distributions' picolibc (bench/freertos.toml's
@@ -423,12 +431,12 @@ undone). Other decisions are taken by the recommended option and written down in
 
 ## Phase 4: cases, mutation, coverage (rest)
 
-- [ ] **The memory map in the cases' cache key** (found 2026-10-21): the key holds the image, its
+- [x] **The memory map in the cases' cache key** (found 2026-10-21): the key holds the image, its
   startup copies and dread.regflow's results, not the target's [memory]: a target whose memory
   changes keeps the cases made under the old map (they still run alike; the generator would find
   others: the lab's page at address 0 let a probe's null path end, but only after its cached cases
   were removed). Add the regions to Generator.environment with the next generator VERSION bump,
-  which renews every cache anyway.
+  which renews every cache anyway. Done with generator 32 (2026-10-21).
 
 - [x] **Dictionary inputs for parsers.** Buffers behind learned pointers also get text made from the
   strings a function and its callees compare against (string constants in their literal pools,

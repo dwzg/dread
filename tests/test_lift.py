@@ -1256,3 +1256,61 @@ def test_risc_v_wraps_a_va_list_walk_and_stack_arguments(tmp_path):
         got.append((m.call(p.by_name["vsum"].entry, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9, max_instructions=10_000).ret,
                     m.call(p.by_name["many"].entry, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, max_instructions=10_000).ret))
     assert got[0] == got[1] == (45, (1 - 2 + 3 - 4 + 5 - 6 + 7 - 8 + 27 - 50) & 0xFFFFFFFF), got
+
+
+DECIDER_SOLVE_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global ones, g, useg
+    .type ones, %function
+    .thumb_func
+ones:   movs    r0, #1          @ answers one way
+        bx      lr
+    .size ones, . - ones
+    .type g, %function
+    .thumb_func
+g:      push    {r4, lr}
+        bl      ones
+        cmp     r0, #3
+        bne     1f
+        movs    r0, #7          @ only where ones returns 3: no input of g's makes it
+        pop     {r4, pc}
+1:      movs    r0, #9
+        pop     {r4, pc}
+    .size g, . - g
+    .type useg, %function
+    .thumb_func
+useg:   push    {r4, lr}
+        bl      g
+        pop     {r4, pc}
+    .size useg, . - useg
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_a_stubbed_callees_result_is_solved_for(tmp_path, monkeypatch):
+    """Generator 32: with a callee that answers one way stubbed, the compare-guided stage runs again,
+    the stub's result an input it solves for (g's path needs ones to return 3, which no input of g
+    makes it). The random inputs after it are turned off here: they would find the 3 too, a constant
+    of the code, which a value read from memory would not give them."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import autocase, elfimport
+    monkeypatch.setattr(autocase, "DECIDER_RUNS", 0)
+    (tmp_path / "t.s").write_text(DECIDER_SOLVE_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "useg", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    lines = []
+    assert lift.check(t, t.image(), ["g"], out=lines.append, jobs=1) == ["g"], "\n".join(lines)
