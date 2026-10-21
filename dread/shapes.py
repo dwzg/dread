@@ -52,6 +52,10 @@ class Shapes:
         self.count = 0
         self.globals = {}               # address -> object of the memory there
         self.pending = []               # (kind, a, b, k): relations that wait for a pointer
+        self.kind_parent = {}           # object -> (object, shift): what the memory is, as obj_parent
+        self.embeds = set()             # (kind, offset, kind, offset): one kind's memory inside another's
+        self.calls = []                 # (the argument's location, the callee's parameter's): kinds (kinds())
+        self.frames = set()             # objects that are a function's stack frame (reached from sp0)
         self.shifted = False            # whether objects that meet at different offsets are merged
         self.share = False              # whether templates refer to memory reachable from fixed addresses
         self.embedded = set()           # (root, offset, root, offset) of those kept apart
@@ -78,6 +82,14 @@ class Shapes:
             ra, rb = self.find(a), self.find(b)
             if ra == rb:
                 continue
+            if not self.shifted and ra in self.points and rb in self.points:
+                (xa, oa), (xb, ob) = self.loc(self.points[ra]), self.loc(self.points[rb])
+                if oa != ob:                # (pointers that cannot be aligned: the two values stay apart,
+                    if xa != xb:            # or the one left would point to one of the two objects only
+                        self.embeds.add((xa, oa, xb, ob))   # and take the other's accesses there: FreeRTOS's
+                    else:                   # pxIndex, a list's own end marker and its items, made the
+                        self.conflicts.add(xa)      # items' kind the task block's)
+                    continue
             self.tv_parent[rb] = ra
             pa, pb = self.points.pop(ra, None), self.points.pop(rb, None)
             if pa and pb:
@@ -101,8 +113,35 @@ class Shapes:
         self.count += 1
         o = "o%d" % self.count
         self.obj_parent[o] = (o, 0)
+        self.kind_parent[o] = (o, 0)
         self.fields[o] = {}
         return o
+
+    # --- kinds: which objects hold the same kind of structure (a template copied from a callee's
+    # parameter makes the caller's memory there the callee's kind); objects stay apart
+    def kind_find(self, o):
+        shift = 0
+        while self.kind_parent[o][0] != o:
+            p, d = self.kind_parent[o]
+            shift += d
+            o = p
+        return o, shift
+
+    def kind_of(self, location):
+        root, off = self.loc(location)
+        k, shift = self.kind_find(root)
+        return k, off + shift
+
+    def link_kinds(self, a, b):
+        """The memory at locations a and b is of one kind: kinds that meet at one offset become one,
+        at different offsets one is recorded inside the other (embeds)."""
+        (ka, oa), (kb, ob) = self.kind_of(a), self.kind_of(b)
+        if ka == kb:
+            return
+        if oa != ob:
+            self.embeds.add((ka, oa, kb, ob))
+            return
+        self.kind_parent[kb] = (ka, 0)
 
     def obj_find(self, o):
         """(root, shift): offset x of o is offset x + shift of root."""
@@ -200,7 +239,7 @@ class Shapes:
             if t in self.points:
                 child = self.template(self.points[t], shared, depth - 1, path + ((root, off0),))
             out[off - off0] = (frozenset(f.types), child)
-        return ("copy", out)
+        return ("copy", out, (root, off0))
 
     def instantiate(self, tmpl, location, stack=()):
         """Copy a template onto the memory at location (an object of the caller)."""
@@ -221,6 +260,7 @@ class Shapes:
                     self.instantiate(child, self.pointer(f.content), stack)
 
 
+
 class Field:
     __slots__ = ("content", "types")
 
@@ -229,6 +269,8 @@ class Field:
 
 
 ACCESS = re.compile(r"^volatile (\w+) \*$")
+SMALLEST_ADDRESS = 0x100            # a constant below is a number (NULL, a count), not an address
+FRAME = "sp0"                       # the lifters' variable for the stack frame's address
 
 
 def _access(e):
@@ -239,9 +281,16 @@ def _access(e):
             return None
         a = e.e.e
         if isinstance(a, C.Binary) and a.op in ("+", "-") and isinstance(a.r, C.Num) and isinstance(a.r.value, int):
-            return a.l, a.r.value if a.op == "+" else -a.r.value, m.group(1)
+            return a.l, signed32(a.r.value if a.op == "+" else -a.r.value), m.group(1)
         return a, 0, m.group(1)
     return None
+
+
+def signed32(k):
+    """An offset as the 32-bit arithmetic means it: + 0xffffffffu is - 1 (printi's buffer walk made a
+    structure with a pad of 4 GB of it)."""
+    k &= 0xffffffff
+    return k - 0x100000000 if k & 0x80000000 else k
 
 
 class Collector:
@@ -290,19 +339,24 @@ class Collector:
             self.stmt(inner)
 
     def address(self, e):
-        """The location an address expression points to, or None (an integer we know nothing of)."""
+        """The location an address expression points to, or None (an integer we know nothing of; a
+        small constant: NULL is no memory at address 0, and FreeRTOS hands NULL for the current task
+        to a dozen functions, which made every structure given NULL one kind)."""
         if isinstance(e, C.Num) and isinstance(e.value, int):
-            return (self.s.global_object(e.value), 0)
+            return (self.s.global_object(e.value), 0) if e.value >= SMALLEST_ADDRESS else None
         if isinstance(e, C.Binary) and e.op in ("+", "-") and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
             base = self.address(e.l)
             if base is None:
                 return None
-            k = e.r.value if e.op == "+" else -e.r.value
+            k = signed32(e.r.value if e.op == "+" else -e.r.value)
             return (base[0], base[1] + k)
         v = self.value(e)
         if v is None:
             return None
-        return self.s.pointer(v)
+        location = self.s.pointer(v)
+        if isinstance(e, C.Name) and e.id == FRAME:
+            self.s.frames.add(location[0])
+        return location
 
     def value(self, e):
         """The type variable of e's value (None when it is no plain value: arithmetic, a comparison),
@@ -346,9 +400,13 @@ class Collector:
                     location = self.address(a)
                     if location is not None:
                         s.instantiate(tmpl, location)
+                        if structure(tmpl):
+                            s.calls.append((location, tmpl[2]))
                 t = ("result", self.fn.name, id(e))
                 if summary.get("ret") is not None:
                     s.instantiate(summary["ret"], s.pointer(t))
+                    if structure(summary["ret"]):
+                        s.calls.append((s.pointer(t), summary["ret"][2]))
                 return t
             for i, a in enumerate(e.args):
                 v = self.value(a)
@@ -364,7 +422,15 @@ class Collector:
                 base = self.value(e.l)
                 if base is not None:
                     t = ("tmp", self.fn.name, id(e))
-                    s.pending.append(("offset", t, base, e.r.value if e.op == "+" else -e.r.value))
+                    k = signed32(e.r.value if e.op == "+" else -e.r.value)
+                    frame = isinstance(e.l, C.Name) and e.l.id == FRAME
+                    if frame or s.has_pointer(base):    # (known now: the variable it goes to points there
+                        o, off = s.pointer(base)        # before a call makes it a fresh object of its own)
+                        if frame:
+                            s.frames.add(o)
+                        s.points[s.find(t)] = (o, off + k)
+                    else:
+                        s.pending.append(("offset", t, base, k))
                     return t
                 return None
             if e.op in ("==", "!="):
@@ -390,6 +456,13 @@ class Collector:
                 out = self.value(x)
             return out
         return None
+
+
+def structure(tmpl):
+    """Whether a template says its memory is a structure: two fields or more at or after the pointer.
+    A header in front alone (vPortFree's) says nothing, nor does one field: memset, memcpy and strcmp
+    touch offset 0 of whatever they get, and made task blocks, queues and timer messages one kind."""
+    return tmpl is not None and tmpl[0] == "copy" and sum(1 for rel in tmpl[1] if rel >= 0) >= 2
 
 
 def settle(shapes):
@@ -692,3 +765,372 @@ def score(s, program, functions, elf_path):
                 acc[2] += len(leaves)
                 acc[3] += 1
     return per, total
+
+
+# --- C structures for readable C ----------------------------------------------------------------
+
+class Kind:
+    """A kind of memory: its fields ({offset: {type: count}}) and where values point into it
+    ({offset: count}); its base is where most of them point (a structure's start)."""
+    __slots__ = ("root", "fields", "targets", "base")
+
+    def __init__(self, root):
+        self.root, self.fields, self.targets, self.base = root, {}, {}, None
+
+
+def function_variables(fn):
+    """The function's parameters and the variables its body declares at the top level."""
+    out = [p[1] for p in fn.params]
+    for st in fn.body.body:
+        if isinstance(st, C.Decl):
+            out += [d.name for d in st.items]
+    return out
+
+
+def pointer_candidates(fn):
+    """The variables readable C may declare as pointers: declared u32 (a parameter or a plain local:
+    a u64 that the lifters' carry arithmetic holds, t_7 = (u64)r5 + r0, cut to a pointer lost its
+    carry and clang -O2's prvAddCurrentTaskToDelayedList woke its task at the wrong time) and
+    dereferenced by the function itself (*(T *)(v + k)): a value it only copies, stores, compares or
+    hands on stays an integer (a tick count stored in a list item's value field took a pointer type
+    from what met it elsewhere)."""
+    from dread.cflow import walk_expr
+    from dread.naming import _exprs, _inner
+    u32 = {n for t, n in fn.params if " ".join(t.split()) == "u32"}
+    for st in fn.body.body:
+        if isinstance(st, C.Decl) and " ".join(st.specs.split()) == "u32":
+            u32.update(d.name for d in st.items if not d.ptr and not d.dims)
+    bases = set()
+
+    def visit(st):
+        for e in _exprs(st):
+            for x in walk_expr(e):
+                acc = _access(x)
+                if acc is not None and isinstance(acc[0], C.Name):
+                    bases.add(acc[0].id)
+        for inner in _inner(st):
+            visit(inner)
+    for st in fn.body.body:
+        visit(st)
+    return u32 & bases
+
+
+def kinds(s, trees):
+    """{kind root: Kind} of the analysed functions' memory, worked out on the final objects: an
+    object's base is where most of the functions' variables point into it; a call's argument and the
+    callee's parameter (s.calls) make their objects one kind when both are at their bases, so the
+    bases line up (a list item a task block holds at 4 is inside it: s.embeds, not the task's kind).
+    Merging objects or copying a template's inner parts says nothing about kinds: through FreeRTOS's
+    rings of list items, list ends and task blocks that made everything one kind."""
+    targets = {}
+    for _, fn, _ in trees:
+        for v in function_variables(fn):
+            r = s.find(("var", fn.name, v))
+            if r in s.points:
+                o, off = s.loc(s.points[r])
+                slot = targets.setdefault(o, {})
+                slot[off] = slot.get(off, 0) + 1
+    base = {o: min(t, key=lambda off: (-t[off], off)) for o, t in targets.items()}
+    parent = {}
+
+    def find(o):
+        while parent.get(o, o) != o:
+            parent[o] = parent.get(parent[o], parent[o])
+            o = parent[o]
+        return o
+    s.embeds = set()
+    frames = {s.loc((o, 0))[0] for o in s.frames}
+    for a, b in s.calls:
+        (ra, oa), (rb, ob) = s.loc(a), s.loc(b)
+        if ra == rb:
+            continue
+        # (a stack frame says nothing either: GCC gives locals whose lives do not overlap one slot, and
+        # FreeRTOS's prvStaticallyAllocatedCreator handed one slot as a static queue and later as a
+        # static event group, which made the two one kind)
+        if ra not in frames and oa == base.get(ra, 0) and ob == base.get(rb, 0):
+            x, y = find(ra), find(rb)
+            if x != y:
+                parent[y] = x
+        elif ra not in frames:
+            s.embeds.add((ra, oa, rb, ob))
+    # What sits at one offset of one kind is one kind: every list function's item, given as a task
+    # block's xStateListItem at 4, is the same structure.
+    changed = True
+    while changed:
+        changed = False
+        place = {}
+        for ra, oa, rb, ob in sorted(s.embeds):
+            if ob != base.get(rb, 0):
+                continue
+            key = (find(ra), oa - base.get(ra, 0))
+            inner = find(rb)
+            if key not in place:
+                place[key] = inner
+            elif find(place[key]) != inner:
+                parent[inner] = find(place[key])
+                changed = True
+    out = {}
+    for o, (p, _) in s.obj_parent.items():
+        if p != o:
+            continue
+        k = find(o)
+        kind = out.setdefault(k, Kind(k))
+        kind.base = 0
+        b = base.get(o, 0)
+        for off, f in s.fields[o].items():
+            slot = kind.fields.setdefault(off - b, {})
+            for t in f.types or {"u32"}:
+                slot[t] = slot.get(t, 0) + 1
+        for off, n in targets.get(o, {}).items():
+            kind.targets[off - b] = kind.targets.get(off - b, 0) + n
+    s.kind_root = {o: find(o) for o, (p, _) in s.obj_parent.items() if p == o}
+    s.kind_base = base
+    return out
+
+
+def layout(kind):
+    """[(offset from the base, type)] of the fields a C structure holds at their offsets without
+    packing: at or after the base, naturally aligned, not overlapping a field before them; an offset
+    read with several types takes its most frequent size, unsigned unless only signed reads it."""
+    rows, end = [], 0
+    for off in sorted(o for o in kind.fields if kind.base is not None and o >= kind.base):
+        types = kind.fields[off]
+        by_size = {}
+        for t, c in types.items():
+            by_size[SIZES.get(t, 4)] = by_size.get(SIZES.get(t, 4), 0) + c
+        size = max(by_size, key=lambda z: (by_size[z], z))
+        signed = [t for t in types if SIZES.get(t, 4) == size and t.startswith("s")]
+        unsigned = [t for t in types if SIZES.get(t, 4) == size and not t.startswith("s")]
+        ctype = ("s%d" if signed and not unsigned else "u%d") % (size * 8)
+        rel = off - kind.base
+        if rel % size or rel < end:
+            continue
+        rows.append((rel, ctype))
+        end = rel + size
+    return rows
+
+
+def struct_text(name, rows):
+    """The C definition of a structure with these fields, gaps filled with bytes."""
+    lines, pos = ["struct %s" % name, "{"], 0
+    for rel, ctype in rows:
+        if rel > pos:
+            lines.append("    u8 pad_%x[%d];" % (pos, rel - pos))
+        lines.append("    %s f_%x;" % (ctype, rel))
+        pos = rel + SIZES[ctype]
+    lines.append("};")
+    return "\n".join(lines)
+
+
+TABLE = "readable_types"
+
+
+class Plan:
+    """What readable C declares (the image's readable_types table): structures ({name: [(offset,
+    type)]}) and, per function, which variables point to one ({function: {variable: name}}) with the
+    digest of the readable C it was made for ({function: digest}: dread.naming.digest)."""
+
+    def __init__(self):
+        self.structs, self.typed, self.digests = {}, {}, {}
+
+    def to_json(self):
+        return {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
+                "functions": {f: {"digest": self.digests.get(f), "vars": dict(sorted(v.items()))}
+                              for f, v in sorted(self.typed.items())}}
+
+    @classmethod
+    def from_json(cls, data):
+        p = cls()
+        p.structs = {n: [tuple(r) for r in rows] for n, rows in data.get("structs", {}).items()}
+        for f, entry in data.get("functions", {}).items():
+            p.typed[f] = dict(entry.get("vars", {}))
+            p.digests[f] = entry.get("digest")
+        return p
+
+
+def load_plan(image):
+    import json
+    import os
+    path = image.table(TABLE)
+    if not os.path.exists(path):
+        return Plan()
+    with open(path) as f:
+        return Plan.from_json(json.load(f))
+
+
+def store_plan(image, p):
+    import json
+    import os
+    path = image.table(TABLE)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(p.to_json(), f, indent=1)
+        f.write("\n")
+    os.replace(path + ".tmp", path)
+
+
+def plan(s, trees, digests=None, least=2):
+    """The plan for the analysed functions: a structure for every kind with a base and at least
+    least fields, named s_1, s_2 ... in the order of the first (function, variable) pointing to it;
+    a variable typed as a pointer to it when it points to the base. digests: {function: the digest
+    of its readable C before names} (readable_trees)."""
+    ks = kinds(s, trees)
+    pointing = {}
+    frames = {s.loc((o, 0))[0] for o in s.frames}
+    for _, fn, _ in trees:
+        for v in sorted(pointer_candidates(fn) - _uses(fn) - {FRAME}):
+            r = s.find(("var", fn.name, v))
+            if r in s.points:
+                o, off = s.loc(s.points[r])
+                if o in frames:             # (a function's own stack frame is its locals, not a structure:
+                    continue                # GCC -O0's 253 functions had one each)
+                k = s.kind_root.get(o)
+                if k in ks and off == s.kind_base.get(o, 0):
+                    pointing.setdefault(k, []).append((fn.name, v))
+    out = Plan()
+    eligible = [k for k in ks if ks[k].base is not None and len(layout(ks[k])) >= least and k in pointing]
+    for n, k in enumerate(sorted(eligible, key=lambda k: min(pointing[k])), 1):
+        name = "s_%d" % n
+        out.structs[name] = layout(ks[k])
+        for fname, v in pointing[k]:
+            out.typed.setdefault(fname, {})[v] = name
+    out.digests = {f: (digests or {}).get(f) for f in out.typed}
+    return out
+
+
+def _uses(fn):
+    """Variables the rewrite must leave alone: written other than by a plain assignment (+=, ++),
+    their address taken, named in asm, declared with an initial value, or given the address of a C
+    variable (a_1 = (u32)&s1: the lifter reads a stack argument and the one after it through it;
+    typed, clang -O2 took the second read as outside s1, and xTaskCreateStatic read unmapped memory)."""
+    from dread.cflow import walk_expr
+    from dread.naming import _exprs, _inner
+    out = set()
+
+    def visit(st):
+        if isinstance(st, C.Decl):
+            out.update(d.name for d in st.items if d.init is not None or d.ptr or d.dims)
+        if isinstance(st, C.Asm):
+            for o in st.outputs + st.inputs:
+                out.update(x.id for x in walk_expr(o.e) if isinstance(x, C.Name))
+        for e in _exprs(st):
+            for x in walk_expr(e):
+                if isinstance(x, C.Assign) and x.op != "=" and isinstance(x.target, C.Name):
+                    out.add(x.target.id)
+                if isinstance(x, C.Assign) and isinstance(x.target, C.Name) and any(
+                        isinstance(y, C.Unary) and y.op == "&" for y in walk_expr(x.value)):
+                    out.add(x.target.id)
+                if isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--", "&") and isinstance(x.e, C.Name):
+                    out.add(x.e.id)
+        for inner in _inner(st):
+            visit(inner)
+    for st in fn.body.body:
+        visit(st)
+    return out
+
+
+def apply_types(tree, fn, p, made_for=None):
+    """The function's pointer variables declared as pointers to the plan's structures (volatile, so
+    that every access stays one), their accesses written as members (p->f_2c; with a cast where the
+    access reads another type of the field's size, as raw access where the structure has no such
+    field), every other use cast to u32; the structures defined above the function. Only when the
+    plan was made for this C (made_for: its digest before names). Returns the names of the
+    structures it used."""
+    from dread.naming import _rewrite, _rewrite_stmt
+    if made_for is not None and p.digests.get(fn.name) not in (None, made_for):
+        return []
+    typed = {v: k for v, k in p.typed.get(fn.name, {}).items() if k in p.structs}
+    allowed = pointer_candidates(fn) - _uses(fn)
+    typed = {v: k for v, k in typed.items() if v in allowed}
+    if not typed:
+        return []
+    fields = {k: dict(p.structs[k]) for k in set(typed.values())}
+    ptype = {k: "volatile struct %s *" % k for k in fields}
+
+    def member(e):
+        """(member expression, its type) for an access through a typed variable, or the raw access
+        through its integer value; None when e is no such access."""
+        acc = _access(e)
+        if acc is None or not isinstance(acc[0], C.Name) or acc[0].id not in typed:
+            return None
+        base, k, ctype = acc
+        rows = fields[typed[base.id]]
+        if rows.get(k) is not None and SIZES[rows[k]] == SIZES.get(ctype):
+            return C.Member(C.Name(base.id), "f_%x" % k, True), rows[k], ctype
+        address = C.Cast("u32", C.Name(base.id))
+        if k:
+            address = C.Binary("+" if k > 0 else "-", address, C.Num("%d" % abs(k)))
+        return C.Unary("*", C.Cast("volatile %s *" % ctype, address)), ctype, ctype
+
+    def value(e):
+        return _rewrite(e, f)
+
+    own = {i: typed[n] for i, (_, n) in enumerate(fn.params) if n in typed}     # (its own typed parameters)
+
+    def f(e):
+        if isinstance(e, C.Call) and isinstance(e.f, C.Name) and e.f.id == fn.name and own:
+            args = []                       # (a call of itself passes pointers where its parameters are)
+            for i, a in enumerate(e.args):
+                if i in own:
+                    args.append(C.Name(a.id) if isinstance(a, C.Name) and typed.get(a.id) == own[i]
+                                else C.Cast(ptype[own[i]], value(a)))
+                else:
+                    args.append(value(a))
+            return C.Call(C.Name(fn.name), args)
+        if isinstance(e, C.Assign):
+            if isinstance(e.target, C.Name) and e.target.id in typed and e.op == "=":
+                k = typed[e.target.id]
+                v = e.value
+                if isinstance(v, C.Name) and typed.get(v.id) == k:
+                    return C.Assign("=", C.Name(e.target.id), C.Name(v.id))
+                return C.Assign("=", C.Name(e.target.id), C.Cast(ptype[k], value(v)))
+            m = member(e.target)
+            if m is not None:
+                return C.Assign(e.op, m[0], value(e.value))
+            return None
+        m = member(e)
+        if m is not None:
+            expr, ftype, ctype = m
+            return expr if ftype == ctype else C.Cast(ctype, expr)
+        if isinstance(e, C.Binary) and e.op in ("==", "!="):
+            a, b = e.l, e.r
+            if isinstance(a, C.Name) and a.id in typed and (
+                    (isinstance(b, C.Num) and b.value == 0) or (isinstance(b, C.Name) and typed.get(b.id) == typed[a.id])):
+                return C.Binary(e.op, C.Name(a.id), C.Name(b.id) if isinstance(b, C.Name) else b)
+            return None
+        if isinstance(e, C.Name) and e.id in typed:
+            return C.Cast("u32", C.Name(e.id))
+        return None
+    for st in fn.body.body:
+        _rewrite_stmt(st, f)
+    # the declarations: parameters' types, locals out of their u32 lines into pointer lines
+    params = [(ptype[typed[n]] if n in typed else t, n) for t, n in fn.params]
+    if params != fn.params:
+        m = re.match(r"^(\w+) (\w+)\((.*)\)$", fn.head.strip())
+        if m:
+            fn.params = params
+            fn.head = "%s %s(%s)" % (m.group(1), m.group(2), ", ".join(
+                "%s%s" % (t, n) if t.endswith("*") else "%s %s" % (t, n) for t, n in params) or "void")
+            for item in tree.items:         # (a function that calls itself declares itself: the same types)
+                if isinstance(item, C.Raw) and re.match(r"^extern \w+ %s\(" % re.escape(fn.name), item.text):
+                    item.text = "extern %s %s(%s);" % (m.group(1), fn.name, ", ".join(t for t, _ in params) or "void")
+    moved = {}
+    for st in fn.body.body:
+        if isinstance(st, C.Decl):
+            keep = []
+            for d in st.items:
+                if d.name in typed:
+                    moved.setdefault(typed[d.name], []).append(d.name)
+                else:
+                    keep.append(d)
+            st.items[:] = keep
+    fn.body.body[:] = [st for st in fn.body.body if not (isinstance(st, C.Decl) and not st.items)]
+    for k in sorted(moved, reverse=True):
+        fn.body.body.insert(0, C.Decl("volatile struct %s" % k, [C.Declarator(n, ptr="*") for n in sorted(moved[k])]))
+    at = next((i + 1 for i, item in enumerate(tree.items)       # (after the #include: before the file's
+               if isinstance(item, C.Raw) and item.text.startswith("#include")), tree.items.index(fn))    # declarations)
+    for k in sorted(fields, reverse=True):
+        tree.items.insert(at, C.Raw(struct_text(k, p.structs[k])))
+    from dread.build import NULL_CHECKS     # (a pointer it dereferences may be 0 and still be compared with 0:
+    tree.items.insert(0, C.Raw(NULL_CHECKS))    # dread.build compiles it so)
+    return sorted(fields)

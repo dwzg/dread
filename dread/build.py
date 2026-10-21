@@ -39,17 +39,22 @@ def recon_dir(target, image):
 
 CALL_SAVED = "/* dread: call-saved "     # a lifted file's first line: registers to keep (Lifter.call_saved)
 FIXED = "/* dread: fixed "               # ... or registers the C gets as the caller left them (handed)
+NULL_CHECKS = "/* dread: null checks kept */"   # readable C with pointers (dread.shapes): address 0 is memory
 
 
 def file_flags(target, path):
-    """Compiler flags a source asks for on its first two lines: GCC's -fcall-saved-REG for the
-    registers of a CALL_SAVED line, -ffixed-REG for those of a FIXED line (the C reads them as the
-    caller left them); other compilers have no such options for these targets: none."""
+    """Compiler flags a source asks for on its first lines: GCC's -fcall-saved-REG for the registers
+    of a CALL_SAVED line, -ffixed-REG for those of a FIXED line (the C reads them as the caller left
+    them; other compilers have no such options for these targets); -fno-delete-null-pointer-checks
+    for a NULL_CHECKS line (GCC and clang: readable C that dereferences a pointer would otherwise
+    lose its comparisons of that pointer with 0, and address 0 is memory on these targets)."""
     with open(path) as f:
-        lines = [f.readline(), f.readline()]
-    if target.compiler.kind != "gcc":
-        return []
+        lines = [f.readline() for _ in range(4)]
     flags = []
+    if any(line.startswith(NULL_CHECKS) for line in lines):
+        flags.append("-fno-delete-null-pointer-checks")
+    if target.compiler.kind != "gcc":
+        return flags
     for line in lines:
         if line.startswith(CALL_SAVED):
             flags += ["-fcall-saved-" + r for r in line[len(CALL_SAVED):].split("*/")[0].split()]
@@ -128,7 +133,8 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
         if p.returncode:
             failed.append(c)
     if failed:
-        raise overlay.OverlayError("compiling failed: %s" % ", ".join(os.path.relpath(c) for c in failed))
+        raise overlay.OverlayError("compiling failed: %s" % ", ".join(os.path.relpath(c) for c in failed),
+                                   failed=failed)
     if not same:                        # written last: an interrupted run leaves the old stamp
         os.makedirs(objdir, exist_ok=True)
         with open(stamp_path, "w") as f:

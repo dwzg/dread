@@ -9,6 +9,33 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C's structures: kinds from calls between bases, null checks kept (2026-10-21)
+
+**Decided by me**, on the user's standing rule (decisions by recommendation; review here).
+
+- **Question.** dread.shapes finds each pointer's fields (99 % the source's), but readable C needs
+  types: which pointers, across functions, are the same structure? And may typed C be compiled as
+  the integer C was?
+- **Options, measured** as the fields the plan declares for typed parameters against their source
+  structures (FreeRTOS GCC -Os): kinds linked whenever objects merge or a template is copied (58 %:
+  one kind of task blocks, queues, lists and items: FreeRTOS's rings of items, list ends and tasks);
+  only through calls, between the argument and the parameter, on the final objects (63 %); only for
+  callees that reach two fields or more (79 %: memset, memcpy and strcmp touch offset 0 of anything);
+  no constant below 0x100 as an address (93 %: NULL for the current task went to a dozen functions);
+  no stack frame, offsets from a known pointer resolved at once (97 %: GCC gave a static queue and a
+  static event group one slot); items at one offset of one kind one kind (97 %, one item type for
+  all list functions). Then, for the gate on clang -O2 and GCC -O0: only u32 variables the function
+  dereferences, no C variable's address, no stack frame (GCC -Os 97 %, -O0 98 %, clang -O2 68 %,
+  RISC-V GCC -Os 61 %: the last two not traced yet).
+- **Choice:** the last. Typed C is compiled with -fno-delete-null-pointer-checks (a file's marker
+  line, dread.build): GCC dropped a pointer's comparison with 0 once the pointer was dereferenced,
+  and address 0 is memory on these targets. Typed C compiles to other code than the integer C (GCC
+  addresses [r0, #4] where it computed r0 + 4 first, a signed read of an unsigned field adds a sxth):
+  the gate decides on behaviour, as for every transformation.
+- **Undo.** Delete readable_types.json and take apply_types out of dread.readable's transform.
+- **Status.** Built; the gate accepts as many functions as before on the bench's builds
+  (docs/todo.md, Types).
+
 ## Structures behind pointers: polymorphic unification, measured against debug information (2026-10-21)
 
 **Decided by me**, on the user's standing rule (decisions by recommendation; review here).

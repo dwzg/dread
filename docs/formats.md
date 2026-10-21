@@ -121,6 +121,17 @@ io`), `rom_c6e4` (a rom region), `g_20029aac` (anything else), with the type for
 than a u32 one (`g_20029aac_u8`). The pilot asks for these before the functions' variables; they
 need no digest, since an address does not change with the transformations.
 
+### `readable_types.json` (`readable_types`)
+
+The structures readable C declares (dread.shapes): `{"version": 1, "structs": {NAME: [[offset,
+type], ...]}, "functions": {FUNCTION: {"digest", "vars": {VARIABLE: NAME}}}}`. A structure's fields
+are those a C structure holds at their offsets without packing (naturally aligned, not overlapping,
+the gaps bytes); a function's variables listed there are declared `volatile struct NAME *` and their
+accesses written as members (`p->f_2c`), every other use cast to u32. `digest` is the readable C's
+before names (dread.naming): a function whose C changed since gets no types until the next check.
+Written by `dread readable --check` from every lifted function's readable C before it checks any;
+the builds read it. Not edited by hand.
+
 ### `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
 
 Described with the tools that use them, as those tools arrive in DREAD.

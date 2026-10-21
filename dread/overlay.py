@@ -52,14 +52,15 @@ EXTENT_TAIL = 1024      # bytes behind a function's last instruction that may st
 
 
 class OverlayError(Exception):
-    """The link cannot be made; `function` names the one function at fault when there is one, and
+    """The link cannot be made; `function` names the one function at fault when there is one,
     `room`, when the room for the C is full, says (bytes over, the functions without room largest
-    first, {function: size})."""
+    first, {function: size}), and `failed` the sources that did not compile."""
 
-    def __init__(self, message, function=None, room=None):
+    def __init__(self, message, function=None, room=None, failed=()):
         super().__init__(message)
         self.function = function
         self.room = room
+        self.failed = list(failed)
 
 
 TAIL_SECTIONS = (".text", ".rodata", ".srodata", ".glue_7", ".v4_bx", ".vfp11_veneer", ".iplt")

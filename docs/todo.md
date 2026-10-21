@@ -138,13 +138,30 @@ its sources.
   each pointer parameter's structure): FreeRTOS GCC -Os 618 of 622 (99 %), clang -O2 432 of 474
   (91 %), RISC-V GCC -Os 439 of 462 (95 %), GCC -O0 634 of 638 (99 %); 25-32 % of the source's
   members found (what the code reaches through those pointers). Weak: clang's lists (48 found, 20
-  right) and RISC-V's event groups (35, 16), not traced. Next: the rewrite: a structure per type
-  (objects grouped by what their templates came from), its fields at their offsets with padding,
-  a pointer variable declared volatile struct s_N * so that every access stays volatile and reads
-  p->f_58, a cast where it is used as an integer; the gate decides. Then the pilot names the
-  structures and their fields from their uses, as it names globals. The stages over every readable
-  function take 49 s for GCC -Os's 316 (once for the globals' uses, once for the shapes): a pool or a
-  cache of the trees when it is run often.
+  right) and RISC-V's event groups (35, 16), not traced.
+  Rewrite done 2026-10-21 (dread.shapes plan and apply_types, the readable_types table written by
+  the check): a structure per kind of memory, kinds linked only by calls between the argument and
+  the parameter at their bases (and items at one offset of one kind), its fields at their offsets
+  with byte gaps; a variable pointing to a base declared volatile struct s_N *, its accesses p->f_2c,
+  other uses cast to u32, the structures above the function. Only a variable declared u32 that the
+  function itself dereferences, given no C variable's address, not pointing into its stack frame
+  (clang -O2 failed the gate on a u64 carry cut to a pointer and on a stack argument's address read
+  past; GCC -O0's 253 frames became structures). Each rule measured (docs/decisions.md). The gate
+  accepts the same functions as without types on all eight builds (gizmo a32, m3, m4, rv32; FreeRTOS
+  GCC -Os 316/328 with 56 structures in 99 functions, clang -O2 275/286 with 54 in 80, RISC-V GCC -Os
+  251/258 with 24 in 82, GCC -O0 353/357 with 38 in 92). The fields the plan declares for typed
+  parameters against their source structures: GCC -Os 519 of 537 (97 %), GCC -O0 52 of 53, but
+  clang -O2 470 of 687 (68 %) and RISC-V GCC -Os 521 of 848 (61 %): kinds still joined there, not
+  traced (every access is at its offset either way; what is wrong is a structure shared by two). Typed
+  C compiles with -fno-delete-null-pointer-checks (GCC dropped null checks of dereferenced pointers).
+  A function whose readable C does not compile now stays lifted instead of ending the check (printi's
+  structure with a pad of 4 GB: + 0xffffffffu is - 1, offsets are signed now). Open: a pointer to a
+  field inside a structure (a task's xStateListItem at 4) stays an integer; a list reached through an
+  item's pointer field is a kind of its own (joining kinds through pointer fields would join what a
+  void * field holds, an item's owner: tasks and timers); an address computed once and used for two
+  accesses (an ldrd's a_1 = r0 + 4) keeps the raw accesses; fields typed as pointers (now u32 with a
+  cast at each load); embedded structures as members. Then the pilot names the structures and their
+  fields from their uses, as it names globals.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
   Thought 2026-10-21: plain accesses let GCC merge and hoist loads, and a loop that waits for a flag
@@ -353,6 +370,12 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     measurement), sprintf's a2 on RISC-V GCC 10 (an unnamed argument: listed apart since). On MSP430
     every function seems to change r4 to r10 (162 of 162), a fault of the measurement there, not
     traced (MSP430 is paused).
+    Measured again 2026-10-21 (measure-39, from a worktree at a35c4d2: the fragile cases' fix, the
+    readable C's first stages beside it; 4 h 2 min, 122,100 s of CPU): 11,359 of 13,684 lifted (83.0 %),
+    +34 and -5 against measure-38. Gained: prvNotifyQueueSetContainer on most builds, a few ISR demo
+    functions. Lost: xFirstTimerHandler (GCC 10 -Os, mps2f GCC -Os), vCreateSuicidalTasks (clang 18
+    -Os), vTaskStartScheduler (clang 14 -Os), prvSenderTask_7abc (GCC -O0: its loop cases' stale cache,
+    known); not traced yet.
 - [x] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
   clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
   2026-10-20, here 6). Done 2026-10-20: the suite under `bin/with-toolchain ubuntu-22.04` first found

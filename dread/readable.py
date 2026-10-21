@@ -39,8 +39,11 @@ class Context:
         self.names = {}                 # the image's readable_names table (dread.naming): functions
         self.globals = {}               # and memory at fixed addresses
         self.memory = None              # the target's [memory] (default names for fixed addresses)
+        from dread import shapes
+        self.plan = shapes.Plan()       # the image's readable_types table (dread.shapes)
         if target is None:
             return
+        self.plan = shapes.load_plan(image)
         self.names = naming.load(image)
         self.globals = naming.load(image, "globals")
         self.memory = target.memory
@@ -147,11 +150,12 @@ def readable_tree(name, text, stages=None, context=None):
     return tree, fn
 
 
-def readable_trees(program, context, lifter, names, named=None):
+def readable_trees(program, context, lifter, names, named=None, digests=None):
     """[(tree, function, macros)] of the functions' readable C after the stages, their memory at
     fixed addresses written as names (dread.naming apply_globals: named, the table's globals part, or
     the default names); macros: {name: (address, type)}. Functions that do not lift or are not the
-    dialect are left out."""
+    dialect are left out. digests, a dict: filled with each function's digest before the names (what
+    the readable_names and readable_types tables are made for)."""
     from dread import lift
     out = []
     for name in names:
@@ -166,6 +170,8 @@ def readable_trees(program, context, lifter, names, named=None):
         if made is None:
             continue
         tree, fn = made
+        if digests is not None:
+            digests[name] = naming.digest(fn)
         chosen = naming.apply_globals(tree, fn, named, context.memory if context is not None else None)
         out.append((tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}))
     return out
@@ -190,6 +196,9 @@ def _transform(name, text, stages, context=None):
         mine = set((entry or {}).get("names", {}).values()) if (entry or {}).get("digest") == made_for else set()
         naming.apply_globals(tree, fn, context.globals if context is not None else None,
                              context.memory if context is not None else None, avoid=mine)
+        if context is not None:
+            from dread import shapes
+            shapes.apply_types(tree, fn, context.plan, made_for)
         if entry:
             naming.apply(tree, fn, entry, made_for)     # (only for the C it was made for: its digest)
     return print_file(tree, fn, stages)
@@ -215,6 +224,15 @@ def check(target, image, names=None, out=print, jobs=None):
     context = Context(target, image, program, flow)
     work = os.path.join(target.build, "readable-check", image.name)
     lifted = build.read_names(image.table("lifted"))
+    # The structures (dread.shapes) from every lifted function's readable C, before any is checked:
+    # the readable_types table, which the builds read too.
+    from dread import shapes
+    digests = {}
+    trees = readable_trees(program, context, lifter, lifted, named=context.globals, digests=digests)
+    context.plan = shapes.plan(shapes.analyse(trees), trees, digests)
+    shapes.store_plan(image, context.plan)
+    out("dread readable --check: %d structures, pointers to them in %d functions (readable_types)" % (
+        len(context.plan.structs), len(context.plan.typed)))
     by_system = build.system_names(image.table("lifted"))
     verdicts = {}                           # name -> (verdict, reason)
     candidates = []
@@ -254,6 +272,11 @@ def check(target, image, names=None, out=print, jobs=None):
             if e.function in accepted:
                 drop([e.function], "the overlay: %s" % e)
                 accepted = [n for n in accepted if n != e.function]
+                continue
+            bad = [n for n in accepted if any(os.path.basename(c) == n + ".c" for c in e.failed)]
+            if bad:                         # (a function whose readable C does not compile stays lifted)
+                drop(bad, "its readable C does not compile")
+                accepted = [n for n in accepted if n not in bad]
                 continue
             if e.room:                      # no room for all: the largest readable ones without room go
                 over, unplaced, sizes = e.room

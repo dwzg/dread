@@ -74,3 +74,144 @@ def test_the_source_s_layouts_come_from_debug_information(tmp_path):
     assert found and found[0][0][1] == leaves, layouts
     opaque = [v for v in layouts.values() if 1 in v]        # (b.c only declares struct S: looked up by name)
     assert opaque and opaque[0][1] == ("S", leaves), layouts
+
+
+GET = """/* get */
+#include "dread.h"
+u32 get(u32 r0)
+{
+    return *(volatile u32 *)(r0 + 8) + *(volatile u32 *)(r0 + 4);
+}
+"""
+CALLER = """/* caller */
+#include "dread.h"
+extern u32 get(u32);
+extern u32 caller(u32);
+u32 caller(u32 r0)
+{
+    u32 r2, r3;
+    *(volatile u32 *)(r0 + 4) = 1u;
+    r3 = *(volatile u16 *)(r0 + 12);
+    r2 = (u32)*(volatile s16 *)(r0 + 12);
+    if (r0 == 0) return 0;
+    if (r3 == 7) return caller(r0);
+    return get(r0) + r3 + r2;
+}
+"""
+
+
+def typed_plan():
+    trees = []
+    for text, name in ((GET, "get"), (CALLER, "caller")):
+        tree = cparse.parse(text)
+        trees.append((tree, tree.function(name), {}))
+    return shapes.plan(shapes.analyse(trees), trees)
+
+
+def test_a_plan_declares_a_structure_for_what_pointers_reach_with_its_fields_at_their_offsets():
+    p = typed_plan()
+    assert p.structs == {"s_1": [(4, "u32"), (8, "u32"), (12, "u16")]}, p.structs
+    assert p.typed == {"caller": {"r0": "s_1"}, "get": {"r0": "s_1"}}, p.typed
+    assert shapes.struct_text("s_1", p.structs["s_1"]) == (
+        "struct s_1\n{\n    u8 pad_0[4];\n    u32 f_4;\n    u32 f_8;\n    u16 f_c;\n};")
+    again = shapes.Plan.from_json(p.to_json())
+    assert again.structs == p.structs and again.typed == p.typed
+
+
+def test_the_rewrite_writes_members_through_a_volatile_struct_pointer():
+    p = typed_plan()
+    tree = cparse.parse(CALLER)
+    fn = tree.function("caller")
+    assert shapes.apply_types(tree, fn, p) == ["s_1"]
+    out = cparse.unparse(tree, notes=False)
+    assert "u32 caller(volatile struct s_1 *r0)" in out, out
+    assert "extern u32 caller(volatile struct s_1 *);" in out, out        # (it calls itself)
+    assert out.index("struct s_1\n{") < out.index("extern u32 get"), out
+    assert "r0->f_4 = 1u;" in out and "r3 = r0->f_c;" in out, out
+    assert "r2 = (u32)(s16)r0->f_c;" in out, out           # (a signed read of the field: cast, not zero-extended)
+    assert "if (r0 == 0)" in out and "get((u32)r0)" in out, out
+    assert "struct s_1\n{" in out, out
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_rewritten_functions_compile_and_keep_their_null_checks(tmp_path):
+    """get compiles to the same code; caller compiles (to other code: the integer version computed
+    r0 + 4 and r0 + 12 ahead of the loop GCC makes of its call of itself, the typed one addresses
+    [r0, #4]: the gate decides on behaviour, not bytes). The file asks for
+    -fno-delete-null-pointer-checks: without it GCC drops caller's r0 == 0 once r0 is dereferenced."""
+    from conftest import gizmo_dir
+    from dread import build, naming
+    from dread.target import Target
+    target = Target.load(gizmo_dir("m3"))
+    image = target.image()
+    p = typed_plan()
+    tree = cparse.parse(GET)
+    before = cparse.unparse(tree, notes=False)
+    shapes.apply_types(tree, tree.function("get"), p)
+    after = cparse.unparse(tree, notes=False)
+    assert "return r0->f_8 + r0->f_4;" in after and after.startswith(build.NULL_CHECKS), after
+    assert naming.same_code(target, image, before, after, str(tmp_path / "get"))
+    tree = cparse.parse(CALLER)
+    shapes.apply_types(tree, tree.function("caller"), p)
+    src = tmp_path / "caller"
+    src.mkdir()
+    (src / "caller.c").write_text(cparse.unparse(tree, notes=False))
+    assert "-fno-delete-null-pointer-checks" in build.file_flags(target, str(src / "caller.c"))
+    assert build.compile_all(target, image, str(src), str(tmp_path / "obj"), quiet=True,
+                             flags=target.compiler.lifted_cflags)
+
+
+def plan_of(*texts):
+    trees = []
+    for text in texts:
+        tree = cparse.parse(HEAD + text)
+        trees += [(tree, item, {}) for item in tree.items if isinstance(item, cparse.Function)]
+    return shapes.plan(shapes.analyse(trees), trees)
+
+
+TWO = ("u32 t(u32 r0)\n{\n    return *(volatile u32 *)(r0 + 4) + *(volatile u32 *)(r0 + 8);\n}\n"
+       "u32 u(u32 r0)\n{\n    return *(volatile u16 *)(r0 + 2) + *(volatile u16 *)(r0 + 6);\n}\n")
+
+
+def test_what_touches_one_field_or_is_null_makes_no_two_structures_one():
+    """memset, memcpy and strcmp touch offset 0 of whatever they get, and FreeRTOS hands NULL for the
+    current task to a dozen functions: neither may make the structures given to them one kind."""
+    p = plan_of(TWO, "u32 clear(u32 r0)\n{\n    *(volatile u8 *)r0 = 0;\n    return r0;\n}\n"
+                "u32 a(u32 r0)\n{\n    clear(r0);\n    return t(r0) + *(volatile u32 *)(r0 + 4);\n}\n"
+                "u32 b(u32 r0)\n{\n    clear(r0);\n    return u(r0) + *(volatile u16 *)(r0 + 2);\n}\n"
+                "u32 n(u32 r0)\n{\n    return t(0) + u(0);\n}\n")
+    assert p.typed["t"]["r0"] == p.typed["a"]["r0"] and p.typed["u"]["r0"] == p.typed["b"]["r0"], p.typed
+    assert p.typed["t"]["r0"] != p.typed["u"]["r0"], p.typed
+    assert "n" not in p.typed                       # (it dereferences nothing: no pointers)
+
+
+def test_a_stack_slot_given_as_two_structures_makes_no_kind():
+    """GCC gives locals whose lives do not overlap one stack slot: FreeRTOS's
+    prvStaticallyAllocatedCreator handed one as a static queue and later as a static event group."""
+    p = plan_of(TWO, "u32 creator(u32 r0)\n{\n    u32 sp0, r4;\n    *(volatile u32 *)(sp0 - 4) = 0u;\n"
+                "    r4 = sp0 - 64;\n    t(r4);\n    return u(sp0 - 64);\n}\n")
+    assert p.typed["t"]["r0"] != p.typed["u"]["r0"], p.typed
+
+
+def test_an_offset_added_as_a_large_constant_is_negative():
+    """+ 0xffffffffu is - 1 in 32 bits (printi's buffer walk declared a structure with a pad of 4 GB)."""
+    assert shapes.signed32(0xffffffff) == -1 and shapes.signed32(8) == 8
+    s = analysed("u32 back(u32 r0)\n{\n    return *(volatile u8 *)(r0 + 0xffffffffu) + *(volatile u8 *)(r0 + 4);\n}\n")
+    assert fields(s, "back") == {(4, 1)}                # (-1 is in front of the pointer: no member)
+
+
+def test_only_what_a_function_dereferences_and_declares_u32_becomes_a_pointer():
+    """A u64 the carry arithmetic holds stays a u64 (cut to a pointer it lost its carry: clang -O2's
+    prvAddCurrentTaskToDelayedList), a value only stored or handed on stays an integer."""
+    p = plan_of(TWO, "u32 f(u32 r0)\n{\n    u32 r3, r4;\n    u64 t_7;\n    r3 = r0;\n    r4 = *(volatile u32 *)(r3 + 4);\n"
+                "    t_7 = (u64)r4 + r0;\n    return t(r0) + (u32)t_7;\n}\n")
+    assert set(p.typed.get("f", {})) == {"r3"}, p.typed
+
+
+def test_a_variable_given_a_c_variable_s_address_stays_an_integer():
+    """a_1 = (u32)&s1: the lifter reads a stack argument and the next one through it; as a pointer to
+    a structure, clang -O2 took the second read as outside s1 (xTaskCreateStatic read unmapped memory)."""
+    p = plan_of(TWO, "u32 g(u32 r0, u32 r1, u32 r2, u32 r3, u32 s0, u32 s1)\n{\n    u32 a_1, r6;\n"
+                "    a_1 = (u32)&s1;\n    r6 = *(volatile u32 *)a_1 + *(volatile u32 *)(a_1 + 4);\n"
+                "    return t(a_1) + r6;\n}\n")
+    assert "a_1" not in p.typed.get("g", {}), p.typed

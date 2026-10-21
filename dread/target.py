@@ -40,6 +40,7 @@ TABLES = {
     "lifted": "lifted.txt",
     "readable": "readable.txt",
     "readable_names": "readable_names.json",
+    "readable_types": "readable_types.json",
     "domains": "domains.tsv",
     "stale_readers": "stale_readers.tsv",
     "wide_results": "wide_results.txt",
