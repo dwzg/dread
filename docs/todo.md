@@ -252,6 +252,13 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   The way: liveness of frame slots as of registers (a store to a slot reads its register only when
   a later load from that slot feeds a live register), which would also replace the special cases of
   regflow 4 and 13. On GCC 16 -Os: printf, sprintf, _free_r; GCC 9 and 10: printf, sprintf.
+  (2) done 2026-10-21, regflow 19: the cause was narrower. regflow 4's pair (a save and restore
+  around a call of a register that still holds the entry's value) did read the register through the
+  call, but __malloc_lock writes r0 (newlib's retargetable lock: the lock's address for the lock
+  routine), so the call ended r0 in front of the restore. The pair is now a copy through the slot:
+  the save reads the register when it is live behind the restore, which writes it within the
+  function. On three FreeRTOS builds (GCC 16 and 9 -Os, RISC-V GCC) one answer changed, _free_r's
+  (reads r0 r1); gizmo none. (1) stays open: the variadic save area.
 - [ ] **Refusals to a language model as rule writer**: the categories the benchmark leaves (a code
   shape the tools do not know) go with their listings to a model that proposes the rule (a
   recognizer, an input, the C); nothing is taken that the comparison does not accept.

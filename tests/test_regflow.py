@@ -443,6 +443,50 @@ k:  addi sp, sp, -16
 
 
 @needs_riscv_gcc
+def test_a_restored_register_read_after_the_call_is_read_at_the_entry(tmp_path):
+    """A save and restore around a call is a copy through the slot (regflow 19): newlib's _free_r
+    spills r0 around __malloc_lock, which writes r0 (the lock's address for the lock routine), and
+    stores errno through the restored r0 after; regflow had taken the pair for neither a read nor a
+    write and the call for the end of r0, so _free_r did not read r0 (found by dread callconv). A
+    restored register nothing reads afterwards is still no read (spare)."""
+    flow = _rv_flow(tmp_path, {"t.S": '''
+    .text
+    .globl lockfn, f, spare
+    .type lockfn, @function
+lockfn:
+    li a0, 5
+    ret
+    .size lockfn, .-lockfn
+    .type f, @function
+f:  addi sp, sp, -16
+    sw ra, 12(sp)
+    sw a0, 8(sp)
+    call lockfn
+    lw a0, 8(sp)
+    li a5, 12
+    sw a5, 0(a0)
+    lw ra, 12(sp)
+    addi sp, sp, 16
+    ret
+    .size f, .-f
+    .type spare, @function
+spare:
+    addi sp, sp, -16
+    sw ra, 12(sp)
+    sw t1, 8(sp)
+    call lockfn
+    lw t1, 8(sp)
+    li a0, 0
+    lw ra, 12(sp)
+    addi sp, sp, 16
+    ret
+    .size spare, .-spare
+'''})
+    assert "a0" in flow.read_regs("f"), flow.read_regs("f")
+    assert "t1" not in flow.read_regs("spare"), flow.read_regs("spare")
+
+
+@needs_riscv_gcc
 def test_a_register_saved_around_a_call_is_not_read_behind_it(tmp_path):
     """GCC -Os saves an argument it needs after an assertion call around that call (FreeRTOS on
     RISC-V: a2 around vAssertCalled). The restore puts back the entry's value, so the register is the

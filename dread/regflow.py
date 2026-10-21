@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 18                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 19                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -89,6 +89,10 @@ VERSION = 18                # 3: entry spills (variadic functions) are no use; 4
                             # read r3, and every soft-float caller that kept a value in r3 was refused)
                             # 18: the ARM layer's abi_results (the RTABI's helpers: __aeabi_uldivmod
                             # returns r0-r3, __aeabi_uidivmod r0 and r1, ...)
+                            # 19: such a save and restore is a copy through the slot: the save reads the
+                            # register when it is live behind the restore, which writes it (newlib's
+                            # _free_r spills r0 around __malloc_lock, which writes r0, and stores errno
+                            # through it after: r0 was not seen read; found by dread callconv)
 
 
 class RegFlow:
@@ -330,6 +334,7 @@ class Analysis:
                        for fn in program.functions}
         self.edges = {name: self._edge_masks(self.rows[name], self.graphs[name][0]) for name in self.rows}
         self.shadowed = {}                  # name -> {call index: registers not read behind it} (_neutral_saves)
+        self.copies = {}                    # name -> {save index: (restore index, register bit)} (_neutral_saves)
         for fn in program.functions:
             self._neutral_saves(fn)
         self.may = self._may_write()
@@ -624,8 +629,14 @@ class Analysis:
             bit = self.bit[reg]
             if before[i] is None or before[i] & bit or reg in args:
                 continue
+            # A copy through the slot: the save reads the register only where something reads the
+            # restored value (liveness: what is live behind the restore is live in front of the save),
+            # and the restore writes it within the function (a callee between may have changed it:
+            # newlib's __malloc_lock writes r0, which _free_r saves around it and stores errno through
+            # after). For the function's callers the restore puts back what the save found: no write.
             code[i] = code[i]._replace(uses=code[i].uses & ~bit)
-            code[j] = code[j]._replace(kills=code[j].kills & ~bit, writes=code[j].writes & ~bit)
+            code[j] = code[j]._replace(writes=code[j].writes & ~bit)
+            self.copies.setdefault(fn.name, {})[i] = (j, bit)
             # The restore passes the entry's value on, so the register looked live behind the calls
             # the pair encloses, as if their callers read what the callee left there (FreeRTOS on
             # RISC-V saves a2 around its assertion call: 23 functions refused for reading a2 behind
@@ -688,6 +699,7 @@ class Analysis:
         succ, _, calls, tails, _ = self.graphs[name]
         uses, kills, exits = self.effects(name, own)
         edges = self.edges.get(name, {})
+        copies = self.copies.get(name, {})
         n = len(uses)
         live_in, live_out = [0] * n, [0] * n
         changed = True
@@ -698,6 +710,9 @@ class Analysis:
                 for j in succ[i]:
                     o |= live_in[j] & ~edges.get((i, j), 0)
                 v = uses[i] | (o & ~kills[i])
+                if i in copies:             # a save: it reads what the restore's readers read (_neutral_saves)
+                    j, bit = copies[i]
+                    v |= live_out[j] & bit
                 if o != live_out[i] or v != live_in[i]:
                     live_out[i], live_in[i], changed = o, v, True
         shadow = self.shadowed.get(name, {})
