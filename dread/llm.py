@@ -89,14 +89,19 @@ class Provider:
         self.name, self.config = name, dict(config)
         self.model = self.config.get("model", "?")
         self.last = {}
+        self.used = {"answers": 0, "input": 0, "output": 0}     # this object's own answers (spent())
 
     def label(self):
         return "%s (%s)" % (self.name, self.model)
 
     def record(self):
-        """Add the last answer's tokens to the usage ledger (a failure to write is not an error)."""
+        """Add the last answer's tokens to the usage ledger (a failure to write is not an error) and to
+        this object's own count (spent())."""
         import time
         info = self.last
+        self.used["answers"] += 1
+        self.used["input"] += info.get("input") or 0
+        self.used["output"] += info.get("tokens") or 0
         try:
             os.makedirs(os.path.dirname(USAGE), exist_ok=True)
             new = not os.path.exists(USAGE)
@@ -108,6 +113,17 @@ class Provider:
                                                      info.get("finish") or ""))
         except OSError:
             pass
+
+    def spent(self):
+        """What this provider object used, its own answers only, with the cost where the configuration
+        gives prices (price_in, price_out). The ledger is shared: a run that counted the difference of
+        its totals counted every run beside it too (six pilot runs at once, 2026-10-21, each reported
+        about six times its own tokens)."""
+        out = dict(self.used, cost=None)
+        if "price_in" in self.config and "price_out" in self.config:
+            out["cost"] = (out["input"] * float(self.config["price_in"]) +
+                           out["output"] * float(self.config["price_out"])) / 1e6
+        return out
 
     def ask(self, system, messages):
         raise NotImplementedError

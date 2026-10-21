@@ -822,13 +822,12 @@ def main(argv=None):
             print("dread pilot --task input --dry-run: %d functions, %d missed instructions would be asked "
                   "about; nothing asked" % (len(asked), sum(len(a) for _, a in asked)))
             return 0
-        started, before = time.time(), llm.usage_summary().get(provider.name, {})
+        started = time.time()
         line = input_task(target, image, program, provider, asked, args.tries, flow)
-        after = llm.usage_summary().get(provider.name, {})
-        spent = {k: (after.get(k) or 0) - (before.get(k) or 0) for k in ("answers", "input", "output", "cost")}
+        spent = provider.spent()            # (its own answers: the ledger also holds runs beside it)
         print("dread pilot --task input: %s; %d answers, %d tokens in, %d out%s, %.0f s" % (
             line, spent["answers"], spent["input"], spent["output"],
-            ", $%.2f" % spent["cost"] if after.get("cost") is not None else "", time.time() - started))
+            ", $%.2f" % spent["cost"] if spent["cost"] is not None else "", time.time() - started))
         return 0
     names = shown(target, args.names) if args.names else candidates(target, image, program, args.limit)
     if not names:

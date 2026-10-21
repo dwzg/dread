@@ -273,6 +273,11 @@ def test_the_usage_ledger(tmp_path, monkeypatch):
     other.record()
     summary = llm.usage_summary()
     assert summary["cloud"]["answers"] == 2 and summary["cloud"]["input"] == 1000000
+    priced = llm.Provider("cloud", {"model": "m", "price_in": 3, "price_out": 15})
+    priced.last = {"finish": "end_turn", "tokens": 1000, "input": 500000}
+    priced.record()                     # its own count, not the ledger's (runs beside it share that)
+    assert priced.spent() == {"answers": 1, "input": 500000, "output": 1000, "cost": 1.5 + 0.015}
+    assert p.spent()["answers"] == 2 and p.spent()["cost"] is None
     assert abs(summary["cloud"]["cost"] - (3.0 + 0.03)) < 1e-9
     assert summary["local"]["cost"] is None and summary["local"]["output"] == 10
     assert "\tcloud\tm\t500000\t1000\tend_turn" in ledger.read_text()

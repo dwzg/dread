@@ -284,14 +284,17 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   dropped (strings in the image stay, as in a private firmware), Haiku 5.5's --task input three
   times each:
   - The question as it was: named 7, 9, 10 functions covered whole and 37, 44, 47 instructions;
-    nameless 6, 6, 7 and 27, 27, 30 ($0.15 to $0.36 a run). Names won every time on vTaskDelete,
+    nameless 6, 6, 7 and 27, 27, 30 (about $0.09 a run: 240,000 tokens in, 130,000 out). Names won every time on vTaskDelete,
     xTaskGetHandle and vTaskSuspend: there Haiku set up FreeRTOS's lists by what the names say.
     Without them it wrote that it could not see the helpers' code, and its inputs faulted inside
     them, which the tools reported only as "does not finish".
   - With the callees' listings in the question and a stopped input told where and why (pilot
     --task input since): named 11, 10, 9 and 44, 50, 36; nameless 9, 11, 10 and 47, 52, 47. The gap
     is gone: nameless vTaskSuspend went from 0 of 13 in all three runs to 8, 10, 8. A run costs about
-    two and a half times as much ($0.72 to $0.84: 2.1 to 2.6 million tokens in, the listings).
+    one and a half times as much ($0.14: 440,000 tokens in, the listings; 65 answers as before).
+    (Each run's own summary had counted every run beside it: the input task took the difference of
+    the shared usage ledger's totals. Providers count their own answers since, Provider.spent; the
+    figures here are the ledger's per batch, divided by the runs.)
     Not separated: what the listings and what the stop reasons each bring (a named run with stop
     reasons only would say whether named firmware needs the listings, which cost most).
 
