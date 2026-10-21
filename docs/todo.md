@@ -86,6 +86,23 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     relaxation under the overlay's fixed placement; the overlay's C is compiled with -mno-relax since,
     and a copy of the GCC 12 build lifts 199 of 321), and on GCC 12 and 13 regflow took t0 for read on
     every path to picolibc's _init_tls (its millicode call jal t0; regflow 20).
+    Measured 2026-10-21 (measure-34, from a worktree at af62f26: regflow 19 and 20, the RISC-V frame
+    wrapper, -mno-relax, callconv, the nine new builds; 2 h 34 min): no build lost a function. ARM
+    unchanged; RISC-V +1 to +2 each (the wrapper: printf and sprintf); GCC 12, 13 and 14 on RISC-V
+    lift 244/325, 246/325, 249/315 (75 to 79 %, nothing before). The new builds: GCC -O2 on the M3
+    for 9, 10, 12, 13, 14: 278/371, 271/360, 266/358, 272/355, 270/354 (73 to 77 %); clang on RISC-V
+    14, 18, 19: 230/316, 227/318, 226/308; clang 16 lifted nothing: it writes no RISC-V mapping
+    symbols, picolibc's objects put a few into the same .text, and the import took everything of
+    clang's in front of the first for data (299 of 315 functions without code bytes; the check then
+    stopped on the first with an IndexError). Fixed the same morning: the import reads what lies in
+    front of a section's first mapping symbol like a section without them, and a sized function
+    that holds none is code where the marks say data; the check refuses a function without
+    instructions. The 33 other builds import exactly as before.
+    callconv against regflow: 0 to 3 functions a build disagree on ARM and RISC-V: printf's r0 and
+    sprintf's r1 on ARM GCC (named arguments loaded back from the save area: regflow 21, after this
+    measurement), sprintf's a2 on RISC-V GCC 10 (an unnamed argument: listed apart since). On MSP430
+    every function seems to change r4 to r10 (162 of 162), a fault of the measurement there, not
+    traced (MSP430 is paused).
 - [x] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
   clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
   2026-10-20, here 6). Done 2026-10-20: the suite under `bin/with-toolchain ubuntu-22.04` first found

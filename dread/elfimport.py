@@ -66,8 +66,18 @@ def code_intervals(elf, isa="a32"):
     """[(start, end, kind)] of every allocated section, kind an isa or "data", from the mapping
     symbols ($a, $t for ARM; $x, code of `isa`, for RISC-V; $d data). An executable section without
     mapping symbols (GNU as for MSP430 writes none) is code of `isa` where its function symbols and
-    its entry labels say so (their extents) and data elsewhere; with neither it is all code. A
-    section that is not executable is data."""
+    its entry labels say so (their extents) and data elsewhere; with neither it is all code.
+
+    Objects without mapping symbols can be linked beside objects with them (clang 16 writes none for
+    RISC-V, LLVM 17 and GNU as do; the C library's objects put a few into the same .text, and
+    everything of clang's in front of the first was taken for data: 299 of 315 FreeRTOS functions
+    without code bytes). So in a section with mapping symbols, what lies in front of the first is
+    read like a section without them (with its global and weak untyped labels: the port's assembly
+    names its routines so; they make code, not functions, as the marks of another build would), and
+    what the symbols leave as data inside a sized function symbol that holds none is code of `isa`
+    (of Thumb for an odd ARM symbol). An unmarked function inside a code run keeps its run's kind
+    (libgcc's assembly has several functions under one $t). A section that is not executable is
+    data."""
     mapping = {index: [(a, isa if k == "code" else k) for a, k in marks] for index, marks in elf.mapping().items()}
     labels = entry_labels(elf)
     out = []
@@ -82,21 +92,41 @@ def code_intervals(elf, isa="a32"):
             if not spans:
                 out.append((s.addr, s.addr + s.size, isa if s.code else "data"))
                 continue
-            at = s.addr
-            for lo, hi in spans:
-                if lo > at:
-                    out.append((at, lo, "data"))
-                if hi > at:
-                    out.append((max(lo, at), hi, isa))
-                    at = hi
-            if at < s.addr + s.size:
-                out.append((at, s.addr + s.size, "data"))
+            out.extend(_runs(s.addr, s.addr + s.size, spans, isa))
             continue
-        if marks[0][0] != s.addr:
-            out.append((s.addr, marks[0][0], "data"))
+        here = []
+        first = marks[0][0]
+        if first != s.addr and s.code:          # (an object without mapping symbols in front)
+            funcs = [(sym.value & ~1, min(first, (sym.value & ~1) + sym.size)) for sym in elf.symbols
+                     if sym.kind == STT_FUNC and sym.size and sym.shndx == index and s.addr <= sym.value & ~1 < first]
+            starts = sorted({lo for lo, _ in funcs} | {lo for lo, _, _ in labels if s.addr <= lo < first} |
+                            {sym.value for sym in elf.symbols
+                             if sym.shndx == index and sym.name and sym.name[0] not in ".$" and s.addr <= sym.value < first
+                             and sym.kind == STT_NOTYPE and sym.bind in (STB_GLOBAL, STB_WEAK)
+                             and not any(lo <= sym.value < hi for lo, hi in funcs)})
+            spans = funcs + [(lo, min([a for a in starts if a > lo] + [first])) for lo in starts
+                             if not any(f_lo <= lo < f_hi for f_lo, f_hi in funcs)]
+            here.extend(_runs(s.addr, first, sorted(spans), isa))
+        elif first != s.addr:
+            here.append((s.addr, first, "data"))
         for (a, k), nxt in zip(marks, marks[1:] + [(s.addr + s.size, None)]):
             if nxt[0] > a:
-                out.append((a, nxt[0], k))
+                here.append((a, nxt[0], k))
+        if s.code:
+            unmarked = [(sym.value & ~1, (sym.value & ~1) + sym.size, THUMB.get(isa, isa) if sym.value & 1 else isa)
+                        for sym in elf.symbols
+                        if sym.kind == STT_FUNC and sym.size and sym.shndx == index
+                        and not any((sym.value & ~1) <= a < (sym.value & ~1) + sym.size for a, _ in marks)]
+            for lo, hi, kind in sorted(unmarked):
+                pieces = []
+                for a, b, k in here:
+                    if k != "data" or b <= lo or hi <= a:
+                        pieces.append((a, b, k))
+                        continue
+                    pieces += [p for p in ((a, lo, k), (max(a, lo), min(b, hi), kind), (hi, b, k))
+                               if p[0] < p[1]]
+                here = pieces
+        out.extend(here)
     out.sort()
     merged = []
     for start, end, kind in out:                # adjacent intervals of one kind become one
@@ -107,7 +137,22 @@ def code_intervals(elf, isa="a32"):
     return merged
 
 
+def _runs(start, end, spans, isa):
+    """[start, end) cut into code of `isa` where the sorted spans [(lo, hi)] are, data elsewhere."""
+    out, at = [], start
+    for lo, hi in spans:
+        if lo > at:
+            out.append((at, lo, "data"))
+        if hi > at:
+            out.append((max(lo, at), hi, isa))
+            at = hi
+    if at < end:
+        out.append((at, end, "data"))
+    return out
+
+
 PADDING = {"t32": (b"\x00\xbf", b"\xc0\x46"), "a32": (b"\x00\x00\xa0\xe1", b"\x00\xf0\x20\xe3")}
+THUMB = {"a32": "t32"}                  # the instruction set of an odd function symbol (code_intervals)
 
 
 def padding(elf, start, end, isa):

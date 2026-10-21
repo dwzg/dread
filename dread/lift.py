@@ -2529,6 +2529,9 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
             verdicts[name] = ("by hand", "src defines it", "")
             continue
         refused += 1
+        if not fn.insns:                    # (an import that found no code in it: one took clang 16's
+            refuse(name, "has no instructions (config/functions.tsv gives it no code bytes)")  # RISC-V
+            continue                        # code for data, and the check stopped on the first)
         if program.stored(fn.entry) != fn.entry or not program.in_image(fn.entry):
             refuse(name, "runs from a copy in RAM (the overlay cannot place C there)")
             continue

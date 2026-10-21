@@ -201,6 +201,31 @@ def test_a_check_by_name_says_what_left_the_table(tmp_path, capsys):
     assert "%d it listed before are built from the original's code again" % (before - 1) in capsys.readouterr().out
 
 
+@pytest.mark.compiles
+def test_a_function_without_instructions_is_refused(tmp_path):
+    """A function that config/functions.tsv gives no code bytes is refused, and the check goes on (an
+    import that took clang 16's RISC-V code for data left 299 such functions, and the check stopped
+    on the first with an IndexError)."""
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    for cache in ("autocases", "regflow"):
+        here = os.path.join(gizmo_dir("m3"), "build", cache)
+        if os.path.isdir(here):
+            shutil.copytree(here, copy / "m3" / "build" / cache)
+    table = copy / "m3" / "config" / "functions.tsv"
+    rows = table.read_text().splitlines()
+    rows = [("\t".join(r.split("\t")[:2] + ["0"]) if r.split("\t")[1:2] == ["fmt_dec"] else r) for r in rows]
+    table.write_text("\n".join(rows) + "\n")
+    target = Target.load(str(copy / "m3"))
+    lines = []
+    lift.check(target, target.image(), ["fmt_dec", "keys_read"], out=lines.append, jobs=2)
+    assert any(line.startswith("refused  fmt_dec") and "has no instructions" in line for line in lines), lines
+    from dread.gui import read_tsv
+    verdicts = {r["function"]: r["verdict"] for r in read_tsv(os.path.join(target.build, "lift-check",
+                                                                           target.image().name, "verdicts.tsv"))}
+    assert verdicts == {"fmt_dec": "refused", "keys_read": "accepted"}, lines         # (and it went on)
+
+
 @pytest.mark.slow
 @pytest.mark.compiles
 def test_check_accepts_what_agrees(variant, copies):

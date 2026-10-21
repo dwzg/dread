@@ -196,3 +196,96 @@ def test_import_makes_a_called_label_a_function(tmp_path):
     p = Program(t, t.image())
     fn = p.by_entry[tail]
     assert fn.name == "FUN_%08x" % tail and fn.insns == [tail, tail + 2]
+
+
+RISCV_TARGET = """[target]
+name = "mapping"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "rom", base = 0x80000000, size = 0x10000, kind = "rom"},
+           {name = "ram", base = 0x80080000, size = 0x10000}]
+stack = {top = 0x80090000, size = 0x1000}
+sentinel = 0x7fff0000
+[image.main]
+original = "original/t.bin"
+base = 0x80000000
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32"]
+"""
+
+UNMARKED_FRONT_S = """
+    .text
+    .globl front, port_entry
+    .type front, @function
+front:  addi a0, a0, 1
+        addi a0, a0, 2
+        ret
+    .size front, .-front
+port_entry:                     # an untyped global label (the port's assembly names its routines so)
+        addi a0, a0, 3
+        ret
+"""
+MARKED_S = """
+    .text
+    .globl marked
+    .type marked, @function
+marked: addi a0, a0, 4
+        ret
+    .size marked, .-marked
+    .word 0x12345678            # data at the end: $d
+"""
+UNMARKED_AFTER_S = """
+    .text
+    .globl after
+    .type after, @function
+after:  addi a0, a0, 5
+        ret
+    .size after, .-after
+"""
+
+
+def test_objects_without_mapping_symbols_beside_objects_with_them(tmp_path):
+    """clang 16 writes no RISC-V mapping symbols ($x, $d), GNU as and LLVM 17 do; picolibc's objects
+    put a few into the same .text, and everything of clang's in front of the first was taken for
+    data: 299 of 315 FreeRTOS functions imported without code bytes, and the lift check stopped on
+    the first. Here GNU as objects with their mapping symbols stripped stand for clang 16's: one in
+    front of a marked object (a function and an untyped global label) and one after its closing $d."""
+    from conftest import RISCV_CROSS, RISCV_MARCH, riscv_toml
+    if RISCV_CROSS is None:
+        pytest.skip("needs a RISC-V GCC")
+    from dread import elfimport
+    from dread.target import Target
+    objs = []
+    for name, text in (("front", UNMARKED_FRONT_S), ("marked", MARKED_S), ("after", UNMARKED_AFTER_S)):
+        (tmp_path / (name + ".S")).write_text(text)
+        obj = str(tmp_path / (name + ".o"))
+        subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-c", "-o", obj,
+                        str(tmp_path / (name + ".S"))], check=True)
+        if name != "marked":
+            subprocess.run([RISCV_CROSS + "objcopy", "--wildcard", "--strip-symbol=$x*", "--strip-symbol=$d*", obj],
+                           check=True)
+        objs.append(obj)
+    if not any(s.name.startswith("$") for s in Elf(objs[1]).symbols):
+        pytest.skip("this binutils writes no RISC-V mapping symbols")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run([RISCV_CROSS + "ld", "-m", "elf32lriscv", "-Ttext=0x80000000", "-e", "front", "-o", elf] + objs,
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(riscv_toml(RISCV_TARGET))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    sym = {s.name: s.value for s in Elf(elf).symbols if s.name}
+    assert len(p.by_name["front"].insns) == 3          # (none before: data in front of the first $x)
+    assert len(p.by_name["after"].insns) == 2          # (none before: inside the marked object's $d)
+    assert len(p.by_name["marked"].insns) == 2
+    ranges = [tuple(int(x, 16) for x in line.split("\t")[:2])
+              for line in open(tmp_path / "config" / "code_ranges.tsv") if line[0] != "#"]
+    assert any(lo <= sym["port_entry"] < hi for lo, hi in ranges)      # code, not data
+    assert "port_entry" not in p.by_name                # (code, not a function: as another build's marks)
+    word = sym["marked"] + 4
+    assert not any(lo <= word < hi for lo, hi in ranges)               # the marked data stays data
