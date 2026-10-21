@@ -699,6 +699,108 @@ link = ["-nostartfiles", "-Wl,--gc-sections", "-Wl,--defsym=__stack_size=350"]
 dread_cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
                 "-fno-builtin-printf", "-Os"]
 
+# The -O2 builds of the compiler-version axis on the M3 (the flags of mps2-gcc-O2)
+
+[[builds]]
+name = "mps2-gcc9-O2"
+project = "mps2"
+toolchain = "ubuntu-20.04"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-O2", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc10-O2"
+project = "mps2"
+toolchain = "ubuntu-22.04"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-O2", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc12-O2"
+project = "mps2"
+toolchain = "debian-12"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-O2", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc13-O2"
+project = "mps2"
+toolchain = "ubuntu-24.04"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-O2", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc14-O2"
+project = "mps2"
+toolchain = "debian-13"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-O2", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+# clang's versions on RISC-V: the images' clang compiles with picolibc's headers, their GCC links
+# (picolibc and libgcc of its rv32imac multilib, as virt-clang-Os does with the host's newlib). clang
+# 14 and 16 know no _zicsr in -march and assemble the CSR instructions without it.
+
+[[builds]]
+name = "virt-clang14-Os"
+project = "virt"
+toolchain = "ubuntu-22.04"
+cc = "clang"
+cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac", "-mabi=ilp32", "-mcmodel=medlow", "-mno-relax",
+          "-isystem", "/usr/lib/picolibc/riscv64-unknown-elf/include", "-ffreestanding", "-ffunction-sections",
+          "-fdata-sections", "-fno-builtin-printf", "-Os", "-g"]
+ld = "riscv64-elf-gcc"
+lflags = ["-march=rv32imac", "-mabi=ilp32", "-mcmodel=medlow", "--specs=picolibc.specs"]
+link = ["-nostartfiles", "-Wl,--gc-sections", "-Wl,--defsym=__stack_size=350"]
+dread_cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mno-relax", "-ffreestanding",
+                "-Os", "-ffunction-sections"]
+
+[[builds]]
+name = "virt-clang16-Os"
+project = "virt"
+toolchain = "debian-12"
+cc = "clang"
+cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac", "-mabi=ilp32", "-mcmodel=medlow", "-mno-relax",
+          "-isystem", "/usr/lib/picolibc/riscv64-unknown-elf/include", "-ffreestanding", "-ffunction-sections",
+          "-fdata-sections", "-fno-builtin-printf", "-Os", "-g"]
+ld = "riscv64-elf-gcc"
+lflags = ["-march=rv32imac", "-misa-spec=2.2", "-mabi=ilp32", "-mcmodel=medlow", "--specs=picolibc.specs"]
+link = ["-nostartfiles", "-Wl,--gc-sections", "-Wl,--defsym=__stack_size=350"]
+dread_cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mno-relax", "-ffreestanding",
+                "-Os", "-ffunction-sections"]
+
+[[builds]]
+name = "virt-clang18-Os"
+project = "virt"
+toolchain = "ubuntu-24.04"
+cc = "clang"
+cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-mno-relax",
+          "-isystem", "/usr/lib/picolibc/riscv64-unknown-elf/include", "-ffreestanding", "-ffunction-sections",
+          "-fdata-sections", "-fno-builtin-printf", "-Os", "-g"]
+ld = "riscv64-elf-gcc"
+lflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "--specs=picolibc.specs"]
+link = ["-nostartfiles", "-Wl,--gc-sections", "-Wl,--defsym=__stack_size=350"]
+dread_cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mno-relax", "-ffreestanding",
+                "-Os", "-ffunction-sections"]
+
+[[builds]]
+name = "virt-clang19-Os"
+project = "virt"
+toolchain = "debian-13"
+cc = "clang"
+cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-mno-relax",
+          "-isystem", "/usr/lib/picolibc/riscv64-unknown-elf/include", "-ffreestanding", "-ffunction-sections",
+          "-fdata-sections", "-fno-builtin-printf", "-Os", "-g"]
+ld = "riscv64-elf-gcc"
+lflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "--specs=picolibc.specs"]
+link = ["-nostartfiles", "-Wl,--gc-sections", "-Wl,--defsym=__stack_size=350"]
+dread_cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mno-relax", "-ffreestanding",
+                "-Os", "-ffunction-sections"]
+
 [[builds]]
 name = "msp430-gcc-Os"
 project = "msp430"

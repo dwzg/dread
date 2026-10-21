@@ -60,8 +60,11 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     virt-gccN-Os; a build's own `link` replaces the project's newlib-nano); Ubuntu 20.04's GCC 9.3
     has no C library. Flags by version: GCC 10 has no _zicsr, GCC 12 needs -misa-spec=2.2 for its
     multilib (bench/toolchains/README.md). Toolchain images are named by their file's digest now, so a
-    worktree's changed image does not replace one a measurement uses. Left: the -O2 builds, the clang
-    RISC-V builds in the images (clang 14 to 19 with picolibc).
+    worktree's changed image does not replace one a measurement uses. Then (the same night) the
+    -O2 builds on the M3 for GCC 9 to 14 (mps2-gccN-O2) and clang's versions on RISC-V
+    (virt-clang14/16/18/19-Os: the images' clang with picolibc's headers, their GCC linking; clang 14
+    and 16 know no _zicsr in -march): all nine build (354 to 371 functions at -O2, 304 to 316 on
+    RISC-V). Left: measuring them, and the categories they show.
 - [x] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
   clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
   2026-10-20, here 6). Done 2026-10-20: the suite under `bin/with-toolchain ubuntu-22.04` first found
