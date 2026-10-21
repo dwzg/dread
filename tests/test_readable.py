@@ -143,3 +143,13 @@ def test_the_clean_up_passes_the_gate_and_is_shorter(tmp_path):
         before += text.count("\n")
         after += readable.transform(name, text).count("\n")
     assert after < before * 0.8, (before, after)
+
+
+@needs_gcc
+def test_the_command_prints_readable_c_and_the_shapes(capsys):
+    """dread readable NAME and --shapes run (a commit took the --shapes option out and kept its use:
+    every call but --check failed, and no test called the command)."""
+    assert readable.main(["--target", gizmo_dir("m3"), "fmt_dec"]) in (0, None)
+    assert "fmt_dec" in capsys.readouterr().out
+    assert readable.main(["--target", gizmo_dir("m3"), "--shapes", "fmt_dec"]) in (0, None)
+    assert "dread readable --shapes:" in capsys.readouterr().out

@@ -359,6 +359,8 @@ def main(argv=None):
     parser.add_argument("--score", metavar="ELF", help="how close the readable_names table's names come to the "
                         "source's, from ELF's debug information (dread.naming.score); with --shapes, the "
                         "structures' fields too")
+    parser.add_argument("--shapes", action="store_true", help="the structures behind pointers (dread.shapes) of "
+                        "the readable functions (or those named), largest first")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     try:
