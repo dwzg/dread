@@ -183,6 +183,14 @@ Each of these cost time once and is now a check or a rule in a tool:
   fixed after (its bound check had to feed the jump).
 - A measurement that runs from the checkout holds the checkout: a CI fix waited three hours behind
   one. Measurements run from a worktree at the commit they measure.
+- Random search covers rare paths by luck, and a change to the generator changes the luck: every
+  measurement that made the cases anew lost functions and gained others (2 to 7 lost a build in
+  measure-35). Judged one function at a time, any change looks good or bad; judged by a build's
+  totals it shows what it does. A real regression hid among the reshuffle: generator 32 had made
+  configASSERT null checks unreachable (a learned pointer almost never null), found by tracing the
+  runs of one lost function, not by counting. Since then the cases made anew keep what the last
+  ones reached (carried), and a cheap deterministic stage takes the commonest rare path (a null
+  argument) out of the lottery.
 - A block cut out between two markers takes everything between them: regflow 24's first version
   removed the shape methods of the RISC-V layer from the first to the method behind the last, and
   regflow 23's register_only, which sat between them, went too (16 functions of one build changed).
