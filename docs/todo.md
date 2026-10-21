@@ -98,6 +98,11 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     front of a section's first mapping symbol like a section without them, and a sized function
     that holds none is code where the marks say data; the check refuses a function without
     instructions. The 33 other builds import exactly as before.
+    Older GCC (2026-10-21): 4.9.3, 5.4.1, 6.3.1, 7.3.1 and 8.3.1 from Ubuntu 16.04, Debian 9, Ubuntu
+    18.04, Debian 10 and Debian 11 (bench/toolchains/, archive mirrors for the archived releases):
+    the versions of ARM's GNU Arm Embedded toolchains that vendor SDKs shipped from 2015 to 2019.
+    mps2-gcc4-Os to mps2-gcc8-Os build as they are (GCC 4.9 compiles the demo in its default C90
+    mode): 362 to 373 functions. Left: measuring them, and what they show.
     callconv against regflow: 0 to 3 functions a build disagree on ARM and RISC-V: printf's r0 and
     sprintf's r1 on ARM GCC (named arguments loaded back from the save area: regflow 21, after this
     measurement), sprintf's a2 on RISC-V GCC 10 (an unnamed argument: listed apart since). On MSP430

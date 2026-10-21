@@ -426,6 +426,46 @@ cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-
 # compiled and linked with distributions' packaged toolchains (bench/toolchains/), the flags as above
 
 [[builds]]
+name = "mps2-gcc4-Os"                # GCC 4.9.3
+project = "mps2"
+toolchain = "ubuntu-16.04"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc5-Os"                # GCC 5.4.1
+project = "mps2"
+toolchain = "debian-9"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc6-Os"                # GCC 6.3.1
+project = "mps2"
+toolchain = "ubuntu-18.04"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc7-Os"                # GCC 7.3.1
+project = "mps2"
+toolchain = "debian-10"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
+name = "mps2-gcc8-Os"                # GCC 8.3.1
+project = "mps2"
+toolchain = "debian-11"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-mfloat-abi=soft", "-ffreestanding", "-Os", "-ffunction-sections",
+          "-fdata-sections", "-g"]
+
+[[builds]]
 name = "mps2-gcc9-Os"
 project = "mps2"
 toolchain = "ubuntu-20.04"
