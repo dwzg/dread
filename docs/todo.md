@@ -281,10 +281,21 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   ce-list`; GCC 13.2 against the local GCC 16: the same on all 62 probes that matter for linking,
   four differences in the code. Not yet: RISC-V clang (no built-in clang-riscv adapter to start
   from), SDCC and TI's Arm clang (their own adapters first).
-- [ ] **One analysis of base registers instead of shapes**: what each register holds as sp plus a
+- [x] **One analysis of base registers instead of shapes**: what each register holds as sp plus a
   constant, an argument plus a constant, or a constant, through every move and add, for regflow's
   save areas and frame stores, the lifter's frames and the generator's frames (regflow 15 followed
-  one more shape; the next compiler brings another).
+  one more shape; the next compiler brings another). Done 2026-10-21 for the frame (regflow 24): the
+  lifter's states were that analysis already (sp minus a constant and constants through moves, adds,
+  subs and frame slots), and the generator took its loop frames from them; regflow had shapes of its
+  own (the layers' sp_copy, base_copy, frame_stores, and frame_slot for sp-relative slots only). Now
+  regflow's Frames reads the states: the save area, the spills on the entry run, saves and restores
+  around a call (paired by depth, through any base) and whether a frame address is taken; the
+  layers give slot_access (a single-register store or load with its base) instead. What the states
+  follow and the shapes did not: a sub from a copy of sp, a frame address kept in a slot and loaded
+  back, an address taken through a frame pointer (a save and restore around a call whose callee got
+  the slot's address was taken for a copy through the slot). On the benchmark's 34 builds and gizmo
+  no answer changed; regflow takes about a sixth longer (the states are made only where a cheap
+  check says they can matter). Argument plus a constant: left until something needs it.
 - [x] **Calling conventions measured, not only read**: a function run with poisoned registers says
   which it reads before it writes them and which it changes; regflow's answer is checked against
   that on every build of the benchmark, disagreements listed. Done 2026-10-21: `dread callconv`

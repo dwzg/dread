@@ -589,14 +589,17 @@ unsigned clear(unsigned *p, unsigned i, unsigned bits) { if (i > 2) fail("x", 1)
     assert "fail(" in text
 
 
-def test_arm_frame_slots():
-    """The ARM layer's frame slots: single-register str/ldr at sp plus a constant; writeback forms
-    (pushes and pops) and loads of pc are none."""
+def test_arm_slot_accesses():
+    """The ARM layer's slot accesses: single-register str/ldr at a base register plus a constant (sp
+    or any other: whether it is the frame says regflow's Frames); writeback forms (pushes and pops)
+    and loads of pc are none."""
     from dread.arch.arm import Arm
     a = Arm(isa="t32", profile="m", cpu="cortex-m3")
-    slot = lambda code: a.frame_slot(a.decode(code, 0x1000, "t32"))
-    assert slot(b"\xcd\xf8\x08\xc0") == ("store", "r12", 8) and slot(b"\xdd\xf8\x08\xc0") == ("load", "r12", 8)
-    assert slot(b"\x02\x93") == ("store", "r3", 8) and slot(b"\x02\x9b") == ("load", "r3", 8)
+    slot = lambda code: a.slot_access(a.decode(code, 0x1000, "t32"))
+    assert slot(b"\xcd\xf8\x08\xc0") == ("store", "r12", "sp", 8)
+    assert slot(b"\xdd\xf8\x08\xc0") == ("load", "r12", "sp", 8)
+    assert slot(b"\x02\x93") == ("store", "r3", "sp", 8) and slot(b"\x02\x9b") == ("load", "r3", "sp", 8)
+    assert slot(b"\xbb\x60") == ("store", "r3", "r7", 8)                  # str r3, [r7, #8]
     assert slot(b"\x4d\xf8\x04\x3d") is None and slot(b"\x5d\xf8\x04\xfb") is None
 
 
@@ -858,3 +861,103 @@ def test_a_spill_far_below_is_no_save_area(tmp_path):
     flow = regflow.analyse(Program(Target.load(str(tmp_path))))
     assert flow.read_regs("spill") == ["r0", "r1", "r2", "r3"], flow.read_regs("spill")
     assert flow.read_regs("va") == [], flow.read_regs("va")
+
+
+FRAMES_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global walk3, clobber, va_sub, va_slot, nsave, caller3
+    .type walk3, %function
+    .thumb_func
+walk3:  ldr     r0, [r0]
+        bx      lr
+    .size walk3, . - walk3
+    .type clobber, %function
+    .thumb_func
+clobber:
+        movs    r1, #0
+        str     r1, [r0]
+        bx      lr
+    .size clobber, . - clobber
+    .type va_sub, %function
+    .thumb_func
+va_sub: sub     sp, #12                 @ a save area right below the stack arguments
+        push    {r4, r5, lr}
+        add     r4, sp, #24             @ the entry's stack pointer
+        sub     r5, r4, #12             @ the area, made with sub (the old shapes knew add and mov)
+        stm     r5, {r1, r2, r3}
+        mov     r0, r5
+        bl      walk3
+        pop     {r4, r5, lr}
+        add     sp, #12
+        bx      lr
+    .size va_sub, . - va_sub
+    .type va_slot, %function
+    .thumb_func
+va_slot:
+        sub     sp, #12
+        push    {r4, lr}
+        sub     sp, #8
+        add     r4, sp, #16             @ the area
+        str     r4, [sp, #4]            @ kept in a slot (a pointer variable at -O0)
+        ldr     r4, [sp, #4]            @ and loaded back: the same frame address
+        stm     r4, {r1, r2, r3}
+        mov     r0, r4
+        bl      walk3
+        add     sp, #8
+        pop     {r4, lr}
+        add     sp, #12
+        bx      lr
+    .size va_slot, . - va_slot
+    .type nsave, %function
+    .thumb_func
+nsave:  push    {r7, lr}
+        mov     r7, sp                  @ a frame pointer
+        sub     sp, #8
+        str     r12, [sp, #0]           @ r12 saved around the call, never set before
+        sub     r0, r7, #8              @ the slot's address, through the frame pointer
+        bl      clobber                 @ which may write (or read) the slot
+        ldr     r12, [sp, #0]
+        add     sp, #8
+        pop     {r7, pc}
+    .size nsave, . - nsave
+    .type caller3, %function
+    .thumb_func
+caller3:
+        push    {r4, lr}
+        bl      va_sub
+        bl      va_slot
+        bl      nsave
+        pop     {r4, pc}
+    .size caller3, . - caller3
+"""
+
+
+def test_frames_from_the_lifters_states(tmp_path):
+    """regflow 24: where a store or load goes in the frame says the lifter's states, whatever register
+    addresses it, instead of regflow's own shapes (a copy of sp, a copy of that copy by add or mov,
+    sp-relative slots), each found when a compiler used one they lacked. A save area reached through
+    a sub from a copy of sp (va_sub) or through a frame address loaded back from a slot (va_slot) is
+    no use; before, r1-r3 were read. A save and restore around a call whose callee gets the slot's
+    address through the frame pointer (nsave) is no copy through the slot: the callee may read or
+    write it, so the save reads r12; before, the frame address went unseen (it was not made from sp)
+    and r12 was not read."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(FRAMES_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "caller3", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    flow = regflow.analyse(Program(Target.load(str(tmp_path))))
+    assert flow.read_regs("va_sub") == [], flow.read_regs("va_sub")
+    assert flow.read_regs("va_slot") == [], flow.read_regs("va_slot")
+    assert flow.read_regs("nsave") == ["r12"], flow.read_regs("nsave")

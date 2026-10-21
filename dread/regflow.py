@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 23                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 24                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -110,6 +110,10 @@ VERSION = 23                # 3: entry spills (variadic functions) are no use; 4
                             # afterwards reads nothing: GCC 10 on RISC-V copies a register nothing set into
                             # s0 and never reads s0 again (xTaskCheckForTimeOut: mv s0, a4), and a4 seemed an
                             # input of it and of every function on a path to it (13 refused on that build)
+                            # 24: where a store or load goes in the frame says the lifter's states (Frames:
+                            # sp, a frame pointer, any copy, a frame address loaded back from a slot) instead
+                            # of shapes of regflow's own (the layers' sp_copy, base_copy, frame_stores and
+                            # frame_slot, sp-relative only); saves and restores pair by depth
 
 
 class RegFlow:
@@ -209,13 +213,13 @@ def _rows(program, fn, mask, entry_name):
     out, state = [], {}
     flags = mask(["flags"])
     # The entry's straight run: a variadic function's save area, the unnamed argument registers
-    # stored where sp points (or a copy of sp plus a constant) before anything writes them, is no use,
-    # like a push: clang's variadic functions keep r1-r3 so (add r0, sp, #12; stm r0!, {r1, r2, r3})
-    # where GCC pushes them, and printf made every caller of an assertion handler look as if it read
-    # r3. Other stores so stay uses: -O0 keeps every argument in its frame and loads it later.
-    entry, sp_based, written = True, {"sp"}, set()
-    spills = hasattr(arch, "frame_stores")
-    save_area = variadic_save_area(program, fn, insns, joins) if spills else set()
+    # stored in its frame before anything writes them, is no use, like a push: clang's variadic
+    # functions keep r1-r3 so (add r0, sp, #12; stm r0!, {r1, r2, r3}) where GCC pushes them, and
+    # printf made every caller of an assertion handler look as if it read r3. Other stores so stay
+    # uses: -O0 keeps every argument in its frame and loads it later.
+    entry, written = True, set()
+    frames = Frames(program, fn) if hasattr(arch, "store_slots") else None
+    save_area = variadic_save_area(program, fn, insns, joins, frames) if frames is not None else set()
     for a, insn in zip(fn.insns, insns):
         if a != fn.entry and a in joins:
             entry = False
@@ -232,14 +236,10 @@ def _rows(program, fn, mask, entry_name):
             reads = (set(reads) - {"flags"}) | {"flags:" + n for n in fr}
             writes = (set(writes) - {"flags"}) | {"flags:" + n for n in fw}
         stack = arch.stack_kind(insn)
-        if entry and spills:
-            spilled = {r for r in arch.frame_stores(insn, sp_based) if r not in written} & save_area
+        if entry and save_area:
+            spilled = {r for r, _ in frames.stores(a, insn) if r not in written} & save_area
             if spilled:
                 reads = set(reads) - spilled
-            copy = based_copy(arch, insn, sp_based)
-            sp_based -= set(writes) - {"sp"}    # (sub sp, #8 moves it: sp stays a base)
-            if copy is not None:
-                sp_based.add(copy)
             written |= set(writes)
             if kind != "next":
                 entry = False
@@ -265,7 +265,7 @@ def _rows(program, fn, mask, entry_name):
             # condition false), and so did everything before it under that condition (libgcc's
             # __aeabi_fmul: ittt ne; andsne r3, ...; teqne r2, ip; teqne r3, ip reads its own r3).
             state = {pred: state[pred]} if pred is not None else {}
-    loaded = save_area_reads(program, fn, insns)
+    loaded = save_area_reads(program, fn, insns, frames)
     if loaded and out:                      # the push saved them for those loads: a read of each
         out[0] = out[0]._replace(uses=out[0].uses | mask(loaded))
     return out
@@ -274,15 +274,112 @@ def _rows(program, fn, mask, entry_name):
 _STATES = {}                                # id(program) -> a lifter without regflow, for its states()
 
 
-def save_area_reads(program, fn, insns):
+def frame_states(program, fn):
+    """The lifter's states of fn (dread.lift: before each instruction a path reaches, how far sp is
+    below the entry's and what each register and frame slot holds; ("sp", k) is the address k bytes
+    below the entry's stack pointer), up to a context switch; None when the lifter refuses the stack
+    pointer's moves (start-up code that sets sp) or anything else fails."""
+    from dread import lift
+    lifter = _STATES.get(id(program))
+    try:
+        if lifter is None or lifter.prog is not program:
+            lifter = _STATES[id(program)] = lift.make_lifter(program)
+        return lifter.states(fn, strict=False, switch=True)
+    except Exception:
+        return None
+
+
+class Frames:
+    """One function's frame as the lifter's states see it (frame_states): which depth below the
+    entry's stack pointer a register addresses, whatever it is (sp, a frame pointer, a copy of either
+    plus or minus a constant, a frame address kept in a slot and loaded back). One analysis instead of
+    a shape per compiler: regflow followed sp and its copies by shapes of its own (a copy of sp, then a
+    copy of that copy for clang 18's frame pointer, regflow 15), each found when a compiler used one
+    it lacked. ok is False without states; every answer is then the cautious one (no slot known, a
+    frame address taken). The states are made when first asked for (callers check cheaply first
+    whether they could matter: making them for every function took regflow from 79 to 138 seconds
+    over the benchmark's builds)."""
+
+    def __init__(self, program, fn):
+        self.program, self.arch, self.fn = program, program.arch, fn
+        self._states = False                # (not made yet)
+        self._addressed = None
+
+    @property
+    def states(self):
+        if self._states is False:
+            self._states = frame_states(self.program, self.fn)
+        return self._states
+
+    @property
+    def ok(self):
+        return self.states is not None
+
+    def depth(self, address, base):
+        """How far below the entry's stack pointer the register base points before the instruction at
+        address, or None."""
+        state = self.states.get(address) if self.ok else None
+        if state is None:
+            return None
+        depth, values = state
+        value = ("sp", depth) if base == "sp" else values.get(base)
+        if isinstance(value, tuple) and len(value) == 2 and value[0] == "sp":
+            return value[1]
+        return None
+
+    def access(self, address, insn):
+        """("store" or "load", register, depth) of a single register's store or load in the frame (the
+        layer's slot_access), else None."""
+        got = self.arch.slot_access(insn) if insn is not None and hasattr(self.arch, "slot_access") else None
+        if got is None:
+            return None
+        kind, reg, base, disp = got
+        k = self.depth(address, base)
+        return (kind, reg, k - disp) if k is not None else None
+
+    def stores(self, address, insn):
+        """[(register, depth)] of each register a store puts in the frame (the layer's store_slots)."""
+        if insn is None or not hasattr(self.arch, "store_slots"):
+            return []
+        out = []
+        for reg, base, disp in self.arch.store_slots(insn):
+            k = self.depth(address, base)
+            if k is not None:
+                out.append((reg, k - disp))
+        return out
+
+    def takes_address(self, address, insn):
+        """Whether the instruction at address leaves a frame address in a register other than sp (a
+        frame pointer, a pointer to a local); True where it cannot be told."""
+        if not self.ok:
+            return True
+        state = self.states.get(address)
+        if state is None or insn is None:
+            return False                    # (no path reaches it)
+        try:
+            _, after = _STATES[id(self.program)].step(insn, *state)
+        except Exception:
+            return True
+        _, writes = self.arch.reg_effects(insn)
+        return any(isinstance(after.get(r), tuple) and len(after[r]) == 2 and after[r][0] == "sp"
+                   for r in writes if r != "sp")
+
+    def addressed(self):
+        """Whether an instruction a path reaches takes a frame address (True without states)."""
+        if self._addressed is None:
+            self._addressed = not self.ok or any(self.takes_address(a, self.program.insn(a)) for a in self.states)
+        return self._addressed
+
+
+def save_area_reads(program, fn, insns, frames=None):
     """The argument registers a function pushes at its entry together with the last one (a variadic
     function's save area, which may hold named arguments too) and later loads back from their slots
-    at a known offset (the lifter's states: what each register holds as the entry's stack pointer
-    minus a constant): those are read, by the load if not by the push. GCC's printf pushes r0-r3 and
-    loads its format from r0's slot through a copy of sp; sprintf pushes r1-r3, its format in r1. The
-    unnamed ones a va_list walks over are read through a pointer that moves (in a callee, mostly) and
-    stay no use, as before (an assertion handler's callers would look as if they read r3). Needs the
-    layer's pushed_registers and load_address; else, and on any trouble, the empty set."""
+    (Frames: through sp or any register that holds a frame address): those are read, by the load if
+    not by the push. GCC's printf pushes r0-r3 and loads its format from r0's slot through a copy of
+    sp; sprintf pushes r1-r3, its format in r1. The unnamed ones a va_list walks over are read through
+    a pointer that moves (in a callee, mostly) and stay no use, as before (an assertion handler's
+    callers would look as if they read r3). Needs the layer's pushed_registers and load_address;
+    else, and without states, the empty set."""
     arch = program.arch
     if not insns or insns[0] is None or not hasattr(arch, "pushed_registers") or not hasattr(arch, "load_address"):
         return set()
@@ -296,109 +393,78 @@ def save_area_reads(program, fn, insns):
     for k, r in enumerate(pushed):
         if r is not None:
             slots[total - 4 * k] = r
-    from dread import lift
-    lifter = _STATES.get(id(program))
-    try:
-        if lifter is None or lifter.prog is not program:
-            lifter = _STATES[id(program)] = lift.make_lifter(program)
-        states = lifter.states(fn, strict=False)
-    except Exception:
+    frames = frames if frames is not None else Frames(program, fn)
+    if not frames.ok:
         return set()
     found = set()
     for a, insn in zip(fn.insns, insns):
-        if insn is None or a not in states:
-            continue
-        got = arch.load_address(insn)
+        got = arch.load_address(insn) if insn is not None else None
         if got is None:
             continue
         base, disp = got
-        depth, values = states[a]
-        value = ("sp", depth) if base == "sp" else values.get(base)
-        if isinstance(value, tuple) and len(value) == 2 and value[0] == "sp" and value[1] - disp in slots:
-            found.add(slots[value[1] - disp])
+        k = frames.depth(a, base)
+        if k is not None and k - disp in slots:
+            found.add(slots[k - disp])
     return found
 
 
-def based_copy(arch, insn, bases):
-    """The register an instruction sets to a base (sp, or a register already set to sp plus a
-    constant) plus a constant, else None: the layer's sp_copy, and its base_copy for copies of copies
-    (clang 18's frame pointer: add r7, sp, #8; add.w r12, r7, #8)."""
-    copy = arch.sp_copy(insn)
-    if copy is not None:
-        return copy
-    pair = arch.base_copy(insn) if hasattr(arch, "base_copy") else None
-    if pair is not None and pair[1] in bases:
-        return pair[0]
-    return None
+def _stores_on_entry(program, fn, insns, joins, reg):
+    """Whether the entry's straight run stores reg (anywhere, not by a push) before it writes it."""
+    arch = program.arch
+    for a, insn in zip(fn.insns, insns):
+        if insn is None or (a != fn.entry and a in joins):
+            return False
+        if arch.stack_kind(insn) != "push" and any(r == reg for r, _, _ in arch.store_slots(insn)):
+            return True
+        if reg in arch.reg_effects(insn)[1] or arch.flow(insn)[0] != "next":
+            return False
+    return False
 
 
-def variadic_save_area(program, fn, insns, joins):
+def variadic_save_area(program, fn, insns, joins, frames=None):
     """The argument registers a variadic function stores in its frame on the entry's straight run
     before anything writes them: the run of stored ones that ends with the last argument register and
     has an argument register below it that is not stored (r1-r3 or a1-a7 behind one named argument;
     sprintf also keeps its first argument there, a use: its address goes to a callee); else the empty
-    set. -O0 stores every argument register from the first on, and those stay uses."""
+    set. -O0 stores every argument register from the first on, and those stay uses. Where a store
+    goes says Frames (through sp, a frame pointer or any copy: clang keeps r1-r3 with add r0, sp, #12;
+    stm r0!, {r1, r2, r3}, clang 18 through its frame pointer), and each register of the area must lie
+    right below the stack arguments (the last argument register a word below the entry's stack
+    pointer, the one before it a word lower and so on, so that a va_list walks on into the stack
+    arguments): FreeRTOS's xStreamBufferSend at GCC -O2 spills its fourth argument r3 at the entry,
+    far below, and was taken for variadic, its r3 for no use (found by dread callconv). Pushes are
+    left to the rows (a push is no use anyway). The empty set without states."""
     arch = program.arch
+    if not hasattr(arch, "store_slots"):
+        return set()
     args = list(program.target.abi.arg_regs)
-    sp_based, written, stored = {"sp"}, set(), set()
+    if not _stores_on_entry(program, fn, insns, joins, args[-1]):
+        return set()                        # (cheap: no states for most functions)
+    frames = frames if frames is not None else Frames(program, fn)
+    if not frames.ok:
+        return set()
+    word = getattr(arch, "reg_bits", 32) // 8
+    written, where = set(), {}
     for a, insn in zip(fn.insns, insns):
         if insn is None or (a != fn.entry and a in joins):
             break
-        kind, _, _ = arch.flow(insn)
+        if arch.stack_kind(insn) != "push":
+            for reg, depth in frames.stores(a, insn):
+                if reg in args and reg not in written and reg not in where:
+                    where[reg] = depth
         _, writes = arch.reg_effects(insn)
-        stored |= {r for r in arch.frame_stores(insn, sp_based) if r not in written}
-        copy = based_copy(arch, insn, sp_based)
-        sp_based -= set(writes) - {"sp"}        # (clang's variadic functions begin with sub sp)
-        if copy is not None:
-            sp_based.add(copy)
         written |= set(writes)
-        if kind != "next":
-            break
-    saved = stored & set(args)
-    if args[-1] not in saved:
-        return set()
-    first = len(args) - 1
-    while first > 0 and args[first - 1] in saved:
-        first -= 1
-    area = set(args[first:]) if first > 0 else set()     # (all of them stored: -O0 keeping its arguments)
-    if area and below_the_stack_arguments(program, fn, insns, joins, area) is False:
-        return set()
-    return area
-
-
-def below_the_stack_arguments(program, fn, insns, joins, area):
-    """Whether the entry's straight run stores each register of area right below the stack arguments
-    (a variadic function's save area: the last argument register a word below the entry's stack
-    pointer, the one before it a word lower and so on, so that a va_list walks on into the stack
-    arguments); None when it cannot be told (the layer names no store slots, or the lifter's states
-    fail). FreeRTOS's xStreamBufferSend at GCC -O2 spills its fourth argument r3 at the entry, far
-    below, and was taken for variadic, its r3 for no use (found by dread callconv)."""
-    arch = program.arch
-    if not hasattr(arch, "store_slots"):
-        return None
-    from dread import lift
-    lifter = _STATES.get(id(program))
-    try:
-        if lifter is None or lifter.prog is not program:
-            lifter = _STATES[id(program)] = lift.make_lifter(program)
-        states = lifter.states(fn, strict=False)
-    except Exception:
-        return None
-    args = list(program.target.abi.arg_regs)
-    word = getattr(arch, "reg_bits", 32) // 8
-    where = {}
-    for a, insn in zip(fn.insns, insns):
-        if insn is None or (a != fn.entry and a in joins) or a not in states:
-            break
-        depth, values = states[a]
-        for reg, base, disp in arch.store_slots(insn):
-            if reg in area and reg not in where:
-                value = ("sp", depth) if base == "sp" else values.get(base)
-                if isinstance(value, tuple) and len(value) == 2 and value[0] == "sp":
-                    where[reg] = value[1] - disp
         if arch.flow(insn)[0] != "next":
             break
-    return all(where.get(r) == word * (len(args) - args.index(r)) for r in area)
+    if args[-1] not in where:
+        return set()
+    first = len(args) - 1
+    while first > 0 and args[first - 1] in where:
+        first -= 1
+    area = set(args[first:]) if first > 0 else set()     # (all of them stored: -O0 keeping its arguments)
+    if any(where[r] != word * (len(args) - args.index(r)) for r in area):
+        return set()
+    return area
 
 
 def scratch_names(target, arch):
@@ -686,15 +752,20 @@ class Analysis:
         run, and an argument register only counts in a function that takes no frame address at all
         (g(&a) keeps an argument so for a callee to read)."""
         arch = self.program.arch
-        slot_of = getattr(arch, "frame_slot", None)
         code = self.rows[fn.name]
-        if slot_of is None or not code:
+        if not hasattr(arch, "slot_access") or not code:
+            return
+        insns = [self.program.insn(row.address) for row in code]
+        raw = [arch.slot_access(i) if i is not None else None for i in insns]
+        if not {s[1] for s in raw if s and s[0] == "store" and self.bit.get(s[1])} & \
+                {s[1] for s in raw if s and s[0] == "load"}:
+            return                          # (cheap: no states for most functions)
+        frames = Frames(self.program, fn)
+        if not frames.ok:
             return
         succ = self.graphs[fn.name][0]
-        insns = [self.program.insn(row.address) for row in code]
-        addressed = any(i is not None and arch.sp_copy(i) not in (None, "sp") for i in insns)
-        args = set(self.program.target.abi.arg_regs) if addressed else set()
-        slots = [slot_of(i) if i is not None else None for i in insns]
+        args = set(self.program.target.abi.arg_regs)
+        slots = [frames.access(row.address, i) for row, i in zip(code, insns)]  # (by depth: any base)
         preds = [0] * len(code)
         for i in range(len(code)):
             for j in succ[i]:
@@ -715,7 +786,7 @@ class Analysis:
                         pairs.append((i, j, reg, offset))
                     break
                 if code[j].writes & bit or "sp" in code[j].written or (slots[j] and slots[j][2] == offset) or \
-                        (insns[j] is not None and arch.sp_copy(insns[j]) not in (None, "sp")):
+                        frames.takes_address(code[j].address, insns[j]):
                     break
         restores = {j for _, j, _, _ in pairs}
         held = {s[2] for k, s in enumerate(slots) if s and s[0] == "load" and k not in restores}
@@ -741,7 +812,7 @@ class Analysis:
                     work.append(j)
         for i, j, reg, offset in pairs:
             bit = self.bit[reg]
-            if before[i] is None or before[i] & bit or reg in args:
+            if before[i] is None or before[i] & bit or (reg in args and frames.addressed()):
                 continue
             # A copy through the slot: the save reads the register only where something reads the
             # restored value (liveness: what is live behind the restore is live in front of the save),
@@ -780,7 +851,8 @@ class Analysis:
             return None
         bit = self._saved_bit
         every = (1 << len(bit)) - 1
-        slot_of = getattr(arch, "frame_slot", None)
+        access = getattr(arch, "slot_access", None) if reads_only else None
+        frames = None
         n = len(code)
         uses, kills, effects = [every] * n, [0] * n, [None] * n
         for i, row in enumerate(code):
@@ -789,8 +861,11 @@ class Analysis:
                 continue
             reads, writes = arch.reg_effects(insn)
             effects[i] = (reads, writes)
-            slot = slot_of(insn) if reads_only and slot_of is not None else None
+            slot = access(insn) if access is not None else None
             save = slot is not None and slot[0] == "store" and slot[1] in bit
+            if save and slot[2] != "sp":        # (through a frame pointer or another copy: Frames)
+                frames = frames or Frames(self.program, fn)
+                save = frames.depth(row.address, slot[2]) is not None
             uses[i] = 0 if row.stack == "push" or save else sum(bit.get(r, 0) for r in reads)
             kills[i] = 0 if row.conditional else sum(bit.get(r, 0) for r in writes)
         exits = [0] * n

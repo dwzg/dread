@@ -420,27 +420,6 @@ class RiscV:
     def sets_flags(self, insn):
         return False
 
-    def sp_copy(self, insn):
-        """rd of addi rd, sp, imm (and mv rd, sp), else None (dread.regflow)."""
-        f = fields(insn)
-        if f.op == "addi" and f.rs1 == 2 and f.rd:
-            return NAMES[f.rd]
-        return None
-
-    def base_copy(self, insn):
-        """(rd, rs1) of addi rd, rs1, imm (and mv), else None (dread.regflow: copies of sp's copies)."""
-        f = fields(insn)
-        if f.op == "addi" and f.rd and f.rs1:
-            return NAMES[f.rd], NAMES[f.rs1]
-        return None
-
-    def frame_stores(self, insn, sp_based):
-        """The register sw, sh or sb puts where a register of sp_based points (an entry spill)."""
-        f = fields(insn)
-        if f.op in ("sw", "sh", "sb") and f.rs2 and NAMES[f.rs1] in sp_based:
-            return {NAMES[f.rs2]}
-        return set()
-
     REGISTER_OPS = frozenset(("add", "sub", "xor", "or", "and", "sll", "srl", "sra", "slt", "sltu", "addi", "xori",
                               "ori", "andi", "slli", "srli", "srai", "slti", "sltiu", "lui", "auipc", "mul", "mulh",
                               "mulhsu", "mulhu", "div", "divu", "rem", "remu"))
@@ -458,14 +437,14 @@ class RiscV:
             return [(NAMES[f.rs2], NAMES[f.rs1], f.imm)]
         return []
 
-    def frame_slot(self, insn):
-        """("store" or "load", register, offset) of sw rs2, imm(sp) and lw rd, imm(sp) (their compressed
-        forms too), else None (dread.regflow: saves and restores around a call)."""
+    def slot_access(self, insn):
+        """("store" or "load", register, base register, displacement) of sw rs2, imm(rs1) and
+        lw rd, imm(rs1) (their compressed forms too), else None (see the ARM layer's)."""
         f = fields(insn)
-        if f.rs1 == 2 and f.op == "sw" and f.rs2:
-            return "store", NAMES[f.rs2], f.imm
-        if f.rs1 == 2 and f.op == "lw" and f.rd:
-            return "load", NAMES[f.rd], f.imm
+        if f.op == "sw" and f.rs2:
+            return "store", NAMES[f.rs2], NAMES[f.rs1], f.imm
+        if f.op == "lw" and f.rd:
+            return "load", NAMES[f.rd], NAMES[f.rs1], f.imm
         return None
 
     def stack_kind(self, insn):
@@ -473,7 +452,7 @@ class RiscV:
         return None
 
     def pushed_registers(self, insn):
-        """None pushed (single stores save registers: frame_slot)."""
+        """None pushed (single stores save registers: slot_access)."""
         return []
 
     def literal(self, insn, isa):

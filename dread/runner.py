@@ -144,7 +144,7 @@ def saves_touched(name, addr, args, limit, setup, kept, why):
     if not hasattr(arch, "pushed_registers"):
         return None
     keep = set(lay.target.abi.callee_saved) | ({arch.link_reg} if getattr(arch, "link_reg", None) else set())
-    has_slot = hasattr(arch, "frame_slot")
+    has_slot = hasattr(arch, "slot_access")     # (sp-relative ones: the run reads sp itself)
     m = Machine(lay, RUN["original"], isa_of=RUN["isa_of"])
     m.plan, m.replay, m.function = [], False, name
     m.kept, m.kept_why = kept, why
@@ -153,8 +153,8 @@ def saves_touched(name, addr, args, limit, setup, kept, why):
     def own(insn, register):
         if arch.stack_kind(insn) in ("push", "pop"):
             return True
-        slot = arch.frame_slot(insn) if has_slot else None
-        return slot is not None and slot[1] == register
+        slot = arch.slot_access(insn) if has_slot else None
+        return slot is not None and slot[2] == "sp" and slot[1] == register
 
     def on_insn(uc, address, size, user):
         insn = prog.insn(address & ~1)
@@ -168,11 +168,11 @@ def saves_touched(name, addr, args, limit, setup, kept, why):
                     for b in range(4):
                         saved[sp + 4 * k + b] = r
             return
-        slot = arch.frame_slot(insn) if has_slot else None
-        if slot and slot[0] == "store" and slot[1] in keep:
+        slot = arch.slot_access(insn) if has_slot else None
+        if slot and slot[0] == "store" and slot[2] == "sp" and slot[1] in keep:
             sp = uc.reg_read(lay.sp)
             for b in range(4):
-                saved[sp + slot[2] + b] = slot[1]
+                saved[sp + slot[3] + b] = slot[1]
 
     def touched(uc, access, address, size, value, user):
         if found or not saved:

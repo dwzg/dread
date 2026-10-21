@@ -496,41 +496,6 @@ class Arm:
             return targets
         return None
 
-    def sp_copy(self, insn):
-        """rd of an instruction that sets rd to sp plus a constant (add rd, sp, #imm; mov rd, sp), else
-        None (dread.regflow follows such copies through a function's entry)."""
-        ops = insn.operands
-        if insn.id in (csarm.ARM_INS_ADD, csarm.ARM_INS_MOV) and self.predicate(insn) is None and len(ops) >= 2 \
-                and ops[0].type == csarm.ARM_OP_REG and ops[1].type == csarm.ARM_OP_REG \
-                and ops[1].reg == csarm.ARM_REG_SP and (len(ops) == 2 or ops[2].type == csarm.ARM_OP_IMM):
-            return self._name(insn.reg_name(ops[0].reg))
-        return None
-
-    def base_copy(self, insn):
-        """(rd, rn) of an instruction that sets rd to the register rn plus a constant (add rd, rn,
-        #imm; mov rd, rn), else None (dread.regflow follows copies of sp's copies: a frame pointer)."""
-        ops = insn.operands
-        if insn.id in (csarm.ARM_INS_ADD, csarm.ARM_INS_MOV) and self.predicate(insn) is None and len(ops) >= 2 \
-                and ops[0].type == csarm.ARM_OP_REG and ops[1].type == csarm.ARM_OP_REG \
-                and (len(ops) == 2 or ops[2].type == csarm.ARM_OP_IMM) and not ops[1].shift.type:
-            return self._name(insn.reg_name(ops[0].reg)), self._name(insn.reg_name(ops[1].reg))
-        return None
-
-    def frame_stores(self, insn, sp_based):
-        """The registers a store puts where a register of sp_based (sp, or a copy of it plus a
-        constant) points: str, strd, strh, strb, stm and stmdb. An entry spill (a variadic function
-        keeps r1-r3 next to its stack arguments) is no use of them (dread.regflow)."""
-        ops = insn.operands
-        i = insn.id
-        if i in (csarm.ARM_INS_STR, csarm.ARM_INS_STRD, csarm.ARM_INS_STRH, csarm.ARM_INS_STRB) and ops \
-                and ops[-1].type == csarm.ARM_OP_MEM and not ops[-1].mem.index:
-            if self._name(insn.reg_name(ops[-1].mem.base)) in sp_based:
-                return {self._name(insn.reg_name(o.reg)) for o in ops[:-1] if o.type == csarm.ARM_OP_REG}
-        if i in (csarm.ARM_INS_STM, csarm.ARM_INS_STMDB) and ops and ops[0].type == csarm.ARM_OP_REG \
-                and self._name(insn.reg_name(ops[0].reg)) in sp_based:
-            return {self._name(insn.reg_name(o.reg)) for o in ops[1:] if o.type == csarm.ARM_OP_REG}
-        return set()
-
     NOT_REGISTER_ONLY = frozenset(getattr(csarm, "ARM_INS_" + n) for n in (
         "LDM", "LDMDA", "LDMDB", "LDMIB", "STM", "STMDA", "STMDB", "STMIB", "PUSH", "POP", "VLDMIA", "VLDMDB",
         "VSTMIA", "VSTMDB", "VPUSH", "VPOP", "MRS", "MSR", "CPS", "SVC", "BKPT", "WFI", "WFE", "SEV", "DMB", "DSB",
@@ -590,16 +555,17 @@ class Arm:
         regs = [r if r in self.general_regs() or r == "lr" else None for r in regs]
         return regs + [None] * (self.stack_bytes(insn) // 4 - len(regs))
 
-    def frame_slot(self, insn):
-        """("store" or "load", register, offset) of str rN, [sp, #imm] and ldr rN, [sp, #imm] without
-        writeback, index or condition (not ldr pc), else None (dread.regflow: saves and restores around
-        a call)."""
+    def slot_access(self, insn):
+        """("store" or "load", register, base register, displacement) of str rN, [rB, #imm] and
+        ldr rN, [rB, #imm] without writeback, index or condition (not ldr pc), else None. Whether the
+        base addresses the frame (sp, a frame pointer, a copy of either) says dread.regflow's Frames,
+        from the lifter's states (saves and restores around a call, saves of callee-saved registers)."""
         ops = insn.operands
         if insn.id in (csarm.ARM_INS_STR, csarm.ARM_INS_LDR) and not insn.writeback and self.predicate(insn) is None \
                 and len(ops) == 2 and ops[0].type == csarm.ARM_OP_REG and ops[1].type == csarm.ARM_OP_MEM \
-                and not ops[1].mem.index and ops[1].mem.base == csarm.ARM_REG_SP and ops[0].reg != csarm.ARM_REG_PC:
+                and ops[1].mem.base and not ops[1].mem.index and ops[0].reg != csarm.ARM_REG_PC:
             return ("store" if insn.id == csarm.ARM_INS_STR else "load"), self._name(insn.reg_name(ops[0].reg)), \
-                ops[1].mem.disp
+                self._name(insn.reg_name(ops[1].mem.base)), ops[1].mem.disp
         return None
 
     def stack_kind(self, insn):

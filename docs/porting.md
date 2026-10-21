@@ -52,7 +52,7 @@ generator, the lifter, the reading aids)
 | `delay_slot(insn)`, `likely(insn)` | optional: whether the instruction behind a branch runs before it goes (MIPS), and whether only when it is taken (a branch-likely) |
 | `discard_sections` | optional: allocated sections the toolchain adds to every object that no image wants (MIPS: .MIPS.abiflags, .reginfo, a .got); dread asm and dread overlay discard them |
 | `word`, `reg_bits` | the size of a stack argument (bytes) and of a register (bits) |
-| `frame_stores(insn, sp_based)`, `sp_copy(insn)`, `frame_slot(insn)` | optional, for dread.regflow: the registers a store puts where sp (or a copy of it) points, the register an instruction sets to sp plus a constant, and ("store" or "load", register, offset) of a single-register access at sp plus a constant (a variadic save area at the entry, and saves around a call, are no reads) |
+| `store_slots(insn)`, `slot_access(insn)`, `load_address(insn)` | optional, for dread.regflow: [(register, base, displacement)] of what a store writes, ("store" or "load", register, base, displacement) of a single-register access, and (base, displacement) of a load; whether a base addresses the frame (sp, a frame pointer, any copy) says regflow's Frames from the lifter's states (a variadic save area at the entry, and saves around a call, are no reads) |
 
 **Placing C** (the overlay)
 

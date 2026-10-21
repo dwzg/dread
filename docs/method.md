@@ -183,3 +183,8 @@ Each of these cost time once and is now a check or a rule in a tool:
   fixed after (its bound check had to feed the jump).
 - A measurement that runs from the checkout holds the checkout: a CI fix waited three hours behind
   one. Measurements run from a worktree at the commit they measure.
+- A block cut out between two markers takes everything between them: regflow 24's first version
+  removed the shape methods of the RISC-V layer from the first to the method behind the last, and
+  regflow 23's register_only, which sat between them, went too (16 functions of one build changed).
+  The comparison of every build's answers against main caught it before a commit; the diff of what
+  a cut removes is read before anything else.
