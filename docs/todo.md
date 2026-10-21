@@ -207,6 +207,11 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     of a two-byte `b.n` into it failed before). The other compiler's -Ohz builds: 83 to 85 of 95
     probe functions, its older version's 77 to 85 (its shared code has no symbol); -On and GCC's
     unchanged. What stays at -Ohz is mostly two-byte functions (below).
+    Also 2026-10-21: behind a conditional return the shared piece goes on (libgcc's double helpers
+    share __adddf3's tail, which returns with popge {r4, r5, pc}): the hard-float builds refused six
+    for falling through there; on a copy of the GCC one two lift now (__gtdf2, __ltdf2), three stop
+    at r12 read on the path where a predicated write did not run (its result used only under the
+    same condition), one at coverage.
   - [x] **Two-byte functions**: a function that is one `b.n` into shared code (or a `nop` that falls
     into it) leaves no room for the four-byte branch to its C. A `b.n` reaches 2 KB: a four-byte
     trampoline (or the C itself) in freed room within reach would do (eight of the other compiler's

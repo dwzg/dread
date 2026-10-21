@@ -369,8 +369,10 @@ class Lifter:
     def _piece(self, entries, have, isa, room):
         """The instructions reachable from entries without leaving the shared code: the next one and
         branch targets (not those of calls), up to returns, indirect jumps and the entries of other
-        functions (tail calls, or more shared code for the next round); None when it grows past room
-        or meets what does not decode."""
+        functions (tail calls, or more shared code for the next round); behind a conditional return
+        it goes on (libgcc's double helpers share __adddf3's tail, which returns with popge {r4, r5,
+        pc}: the hard-float builds refused six of them for falling through there). None when it
+        grows past room or meets what does not decode."""
         prog, arch = self.prog, self.arch
         out, work, starts = set(), list(entries), set(entries)
         while work:
@@ -384,8 +386,8 @@ class Lifter:
             if len(out) > room:
                 return None
             kind, target, falls = arch.flow(insn)
-            if kind in ("return", "ijump"):
-                continue
+            if kind in ("return", "ijump") and not falls:
+                continue                    # (a conditional return goes on behind: libgcc's popge {r4, r5, pc})
             nexts = []
             if (kind in ("next", "call", "icall") or falls) and not self.dead_end(insn):
                 nexts.append(a + insn.size)

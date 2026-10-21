@@ -1314,3 +1314,62 @@ def test_a_stubbed_callees_result_is_solved_for(tmp_path, monkeypatch):
     t = Target.load(str(tmp_path))
     lines = []
     assert lift.check(t, t.image(), ["g"], out=lines.append, jobs=1) == ["g"], "\n".join(lines)
+
+
+SHARED_CONDRET_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global host, guest, both
+    .type host, %function
+    .thumb_func
+host:   push    {r4, r5, lr}
+        adds    r0, r0, #1
+tail:   subs    r4, r0, #3      @ the shared tail: returns under ge, or goes on
+        itt     ge
+        addge   r0, r0, r4
+        popge   {r4, r5, pc}
+        movs    r0, #0
+        pop     {r4, r5, pc}
+    .size host, . - host
+    .type guest, %function
+    .thumb_func
+guest:  push    {r4, r5, lr}    @ libgcc's double helpers enter __adddf3's tail so
+        lsls    r0, r0, #1
+        b       tail
+    .size guest, . - guest
+    .type both, %function
+    .thumb_func
+both:   push    {r4, lr}
+        bl      host
+        bl      guest
+        pop     {r4, pc}
+    .size both, . - both
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_shared_code_goes_on_behind_a_conditional_return(tmp_path):
+    """A function that enters another's tail with its frame open takes that tail as its own (shared
+    code); the tail returns under a condition (popge {r4, r5, pc}) and goes on otherwise. The piece
+    stopped at the conditional return, and the function was refused for falling through there
+    (libgcc's double helpers in __adddf3's tail: six refused on each hard-float build)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.s").write_text(SHARED_CONDRET_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "both", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    lines = []
+    assert lift.check(t, t.image(), ["guest"], out=lines.append, jobs=1) == ["guest"], "\n".join(lines)
