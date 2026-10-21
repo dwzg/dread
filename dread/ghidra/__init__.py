@@ -9,7 +9,8 @@ module writes from the target description:
 - the image's data ranges as not executable;
 - the names and function starts of the image's symbols and function_starts tables;
 - the reset entry. On an M-profile core the reset entry and every handler come from the vector
-  table at the image's base.
+  table at image.vectors (the image's base by default, or past a vendor header when the image has
+  one: the layer reads the table there).
 
 After the analysis DreadExportMap.java writes functions.tsv and code_ranges.tsv (docs/formats.md)
 and, unless --no-decompile is given, DreadExportC.java writes Ghidra's C for reading.
@@ -69,12 +70,21 @@ def subtract(span, taken):
 
 
 def vector_handlers(image):
-    """[(index, handler address)] of an M-profile vector table at the image's base: entries from 1
-    on, 0 (reserved) skipped, ending at the first word that is not a Thumb address in the image."""
+    """[(index, handler address)] of an M-profile vector table at image.vectors: entries from 1
+    on, 0 (reserved) skipped, ending at the first word that is not a Thumb address in the image.
+
+    The table need not sit at the image's base. A vendor container may store the image behind a
+    header (a magic, a CRC); image.vectors then points past that header to the real table, and the
+    words are read from that offset into the payload. image.vectors defaults to image.base, so an
+    image whose table is at the base is unaffected."""
     data, base = image.payload(), image.base
+    start = image.vectors - base
     out = []
-    for i in range(1, min(M_VECTORS, len(data) // 4)):
-        word = struct.unpack_from("<I", data, 4 * i)[0]
+    for i in range(1, M_VECTORS):
+        off = start + 4 * i
+        if off + 4 > len(data):
+            break
+        word = struct.unpack_from("<I", data, off)[0]
         if word == 0:
             continue
         if not word & 1 or not (base <= (word & ~1) < base + len(data)):

@@ -30,6 +30,30 @@ def test_subtract():
     assert ghidra.subtract((0, 100), [(0, 100)]) == []
 
 
+def test_vector_table_behind_a_header():
+    """vector_handlers reads the M-profile table at image.vectors, which may sit behind a vendor
+    header (the image's base below it), not at the base. image.vectors defaults to base, so the
+    other tests, whose tables are at the base, still exercise the start-at-base path."""
+    import struct
+    base = 0x08010000
+    vectors = base + 0x200                          # a 0x200-byte header precedes the table
+    table = struct.pack("<4I", 0x20001000,          # index 0: initial SP, not a handler
+                        (base + 0x20) | 1,          # index 1: reset
+                        (base + 0x40) | 1,          # index 2: a handler
+                        0x12345678)                 # index 3: not a Thumb address, ends the table
+    payload = b"\xaa" * 0x200 + table + b"\x00" * 0x100
+
+    class FakeImage:
+        def __init__(self):
+            self.base, self.vectors = base, vectors
+
+        def payload(self):
+            return payload
+
+    handlers = ghidra.vector_handlers(FakeImage())
+    assert handlers == [(1, base + 0x20), (2, base + 0x40)]
+
+
 @pytest.mark.slow
 @pytest.mark.ghidra
 @pytest.mark.skipif(ghidra.find_ghidra() is None, reason="needs Ghidra (GHIDRA_INSTALL_DIR)")
