@@ -79,10 +79,13 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   front of the host's: a change that depends on compiler versions is tried on CI's older ones first.
 - **Stay polite on the machine**: long runs go to the background (polite, as the tools are);
   nothing that fills memory or runs without a bound.
-- **Beside a long run**: a bench measurement runs from the checkout and starts every step anew, so
-  changes made meanwhile go into a worktree (`bin/dev-worktree NAME`: a branch, the `.venv` linked,
-  the examples' caches copied; without them the suite regenerates gizmo's cases, fifteen minutes
-  more), are tested there in full and come onto `main` when the measurement is done or stopped.
+- **Beside a long run**: a bench measurement starts every step anew from the tree it runs from, so
+  it runs from a worktree of its own at the commit it measures (`bin/dev-worktree measure-N`, then
+  `bin/dread bench all freertos` there), and `main` can take fixes and be pushed meanwhile (until
+  2026-10-21 measurements ran from the checkout, which then had to stay put: a CI fix waited three
+  hours behind one). Changes go into worktrees too (`bin/dev-worktree NAME`: a branch, the `.venv`
+  linked, the examples' caches copied; without them the suite regenerates gizmo's cases, fifteen
+  minutes more), are tested there in full and come onto `main` when they are done.
   Before the push, `bin/take-caches WORKTREE` copies the caches the worktree's suite made back
   into the checkout; without it the push's fast tests make them again after a VERSION change.
 - **Look for performance regularly** (the user, 2026-10-18): every few items, measure what is slow
