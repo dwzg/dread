@@ -106,6 +106,44 @@ for _regs, _names in (
         RTABI_RESULTS["__aeabi_" + _n] = _regs
 
 
+DATA_PROCESSING = {getattr(csarm, "ARM_INS_" + n) for n in (
+    "MOV", "MVN", "ADD", "SUB", "RSB", "ADC", "SBC", "RSC", "AND", "ORR", "EOR", "BIC", "CMP", "CMN", "TST",
+    "TEQ", "MSR") if hasattr(csarm, "ARM_INS_" + n)}
+
+
+class Rotated:
+    """A data-processing instruction whose immediate capstone gives as two operands, the eight bits
+    and an explicit rotation (sub sp, sp, #50, #30: 50 rotated right by 30, which is 200), with one
+    operand holding the value instead. Capstone writes it so when the encoding is not the one an
+    assembler chooses; an old non-optimising ARM compiler's code is full of them, and read as two
+    operands its frames looked a quarter as deep as they were, every local above as a stack
+    argument (most of a firmware's functions refused through the callers of its printf). All
+    else, the bytes (the carry of a rotated immediate comes from them) and the text, is capstone's;
+    what the tools set on it (link_call) is its own."""
+
+    def __init__(self, insn, operands):
+        self._insn, self.operands = insn, operands
+
+    def __getattr__(self, name):
+        if name == "_insn":                 # (not yet set: while being copied or unpickled)
+            raise AttributeError(name)
+        return getattr(self._insn, name)
+
+
+def fold_rotation(insn):
+    """insn, or a Rotated around it when its last two operands are an immediate and its rotation."""
+    if insn.id not in DATA_PROCESSING:
+        return insn
+    ops = insn.operands
+    if len(ops) < 2 or ops[-1].type != csarm.ARM_OP_IMM or ops[-2].type != csarm.ARM_OP_IMM:
+        return insn
+    value, rot = ops[-2].imm & 0xFFFFFFFF, ops[-1].imm & 31
+    value = ((value >> rot) | (value << (32 - rot))) & 0xFFFFFFFF if rot else value
+    op = type(ops[-2]).from_buffer_copy(ops[-2])
+    op.value.imm = value - (1 << 32) if value & 0x80000000 else value
+    return Rotated(insn, list(ops[:-2]) + [op])
+
+
 class Arm:
     """The ARM layer. Constructed from [arch]: isa, profile, cpu, endian, ghidra."""
 
@@ -224,10 +262,16 @@ class Arm:
         return md
 
     def decode(self, code, address, isa=None):
-        """The instruction at the start of `code` (capstone CsInsn), or None if it does not decode."""
+        """The instruction at the start of `code` (capstone CsInsn, or Rotated around one), or None if
+        it does not decode."""
         for insn in self.disassembler(isa).disasm(bytes(code), address, 1):
-            return insn
+            return self.adapt(insn)
         return None
+
+    def adapt(self, insn):
+        """A decoded instruction as the tools take it (dread.program decodes runs with capstone and
+        hands each through this): an immediate with an explicit rotation as one operand (Rotated)."""
+        return fold_rotation(insn)
 
     def pc_value(self, address, isa):
         """What pc reads as in the instruction at `address`."""

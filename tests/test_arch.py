@@ -347,3 +347,26 @@ def test_a_narrow_thumb_branch_reaches_2_kib():
     with pytest.raises(ValueError):
         arch.short_branch(0x1000, 0x1008, "a32")
     assert arch.short_branch_target(b"\x00\xbf", 0x1000, "t32") is None        # a nop, no branch
+
+
+def test_an_immediate_with_an_explicit_rotation_is_one_operand():
+    """Capstone gives an immediate whose encoding an assembler would not choose as two operands, the
+    eight bits and the rotation (sub sp, sp, #200, #30); an old ARM compiler's code is full of them.
+    The layer folds them into one operand with the value (200), so that a frame is as deep as it is
+    and the lifter takes mov r0, #3, #30 as mov r0, #12; the canonical form stays as it was."""
+    import capstone.arm as A
+    from dread import arch
+    arm = arch.get({"name": "arm", "isa": "a32", "profile": "a"})
+
+    def ops(word):
+        insn = arm.decode(word.to_bytes(4, "little"), 0x1000, "a32")
+        return insn, [(o.type, o.imm if o.type == A.ARM_OP_IMM else o.reg) for o in insn.operands]
+    insn, got = ops(0xE24DDF32)                     # sub sp, sp, #50, #30
+    assert got == [(A.ARM_OP_REG, A.ARM_REG_SP), (A.ARM_OP_REG, A.ARM_REG_SP), (A.ARM_OP_IMM, 200)], got
+    assert insn.mnemonic == "sub" and insn.op_str == "sp, sp, #50, #30" and bytes(insn.bytes) == b"\x32\xdf\x4d\xe2"
+    assert ops(0xE3A00F03)[1] == [(A.ARM_OP_REG, A.ARM_REG_R0), (A.ARM_OP_IMM, 12)]          # mov r0, #3, #30
+    assert ops(0xE3500F05)[1] == [(A.ARM_OP_REG, A.ARM_REG_R0), (A.ARM_OP_IMM, 20)]          # cmp r0, #5, #30
+    # (as capstone holds them: signed, so 0x80000000 is -0x80000000, folded or not)
+    assert ops(0xE3A00320)[1] == [(A.ARM_OP_REG, A.ARM_REG_R0), (A.ARM_OP_IMM, -0x80000000)]  # mov r0, #32, #6
+    assert ops(0xE3E00102)[1] == [(A.ARM_OP_REG, A.ARM_REG_R0), (A.ARM_OP_IMM, -0x80000000)]  # (canonical)
+    assert ops(0xE3A00B02)[1] == [(A.ARM_OP_REG, A.ARM_REG_R0), (A.ARM_OP_IMM, 0x800)]       # (canonical)

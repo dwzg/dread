@@ -384,6 +384,7 @@ class Program:
             return
         md = self.arch.disassembler(isa)
         link = getattr(self.arch, "link_pair", None)
+        adapt = getattr(self.arch, "adapt", None)   # (ARM: an immediate with an explicit rotation folded)
         a = lo
         while a < hi:
             try:
@@ -392,6 +393,8 @@ class Program:
                 return
             got, prev = False, None
             for insn in md.disasm(code, a):
+                if adapt is not None:
+                    insn = adapt(insn)
                 if link is not None and link(prev, insn, isa):
                     insn.link_call = True       # a call through a register (arch.link_pair)
                 self._insns[insn.address] = insn
