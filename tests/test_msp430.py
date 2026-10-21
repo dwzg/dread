@@ -455,9 +455,11 @@ def test_gizmo_msp430_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_pat
 def test_a_stack_argument_read_from_the_wrong_place_shows(tmp_path, monkeypatch):
     """udivmodsi4 takes on the stack whether its callers want the remainder. Read from the frame's
     top word instead (a planted mistake), __mspabi_remul, which passes 1 there from its frame,
-    differs, and udivmodsi4 is not accepted. (Its own cases pass the word in a cell at the stack top,
-    which the check that moves the stack does not move, dread.runner.stack_moves_it: those that
-    differ are refused, and udivmodsi4 is dropped as uncovered.)"""
+    differs, and udivmodsi4 is not accepted: its own cases fail. (They pass the word in a cell at
+    the stack top. The check that moves the stack left that cell behind until 2026-10-21, so every
+    case changed with the stack moved and those that differed were refused, not failed; dropped as
+    uncovered then, and accepted once the firm-up had found an input with the word 0, where the wrong
+    place reads the same. The room for stack arguments moves with the stack since.)"""
     from dread import lift, lift_msp430
     target, image = msp430_copy(tmp_path)
     slot = lift_msp430.Msp430Lifter._slot
@@ -465,6 +467,7 @@ def test_a_stack_argument_read_from_the_wrong_place_shows(tmp_path, monkeypatch)
     lines = []
     accepted = lift.check(target, image, ["udivmodsi4", "__mspabi_remul"], out=lines.append, jobs=4)
     assert "udivmodsi4" not in accepted, lines
+    assert any(line.startswith("dropped  FAIL udivmodsi4") for line in lines), lines
     assert any(line.startswith("dropped  FAIL __mspabi_remul") for line in lines), lines
 
 

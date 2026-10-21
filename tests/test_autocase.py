@@ -813,3 +813,54 @@ def test_a_long_loop_round_is_run_past_the_48th_call(tmp_path):
     cases = g.generate("task", fn.entry, fn.insns, loop=True)
     got, words = covered(g, "task", cases)
     assert got == words, sorted(hex(a) for a in words - got)
+
+
+FRAGILE_C = NOIPA_DEF + """
+volatile unsigned sink;
+NOIPA void copy(char *dst, const char *src, unsigned n) { while (n--) *dst++ = *src++; }
+unsigned user(const char *src, unsigned n, unsigned k)
+{ char buf[4]; copy(buf, src, n); if (k == 7) sink = buf[1]; return k * 5 + buf[0]; }
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_case_that_touches_saved_registers_stands_for_nothing(tmp_path):
+    """user copies n bytes into a 4-byte local and stores to sink only when k is 7. An input with n 8
+    reaches that store but writes over user's saved r4 (Generator.fragile: the lift check refuses such
+    a case when the images differ, and then nothing runs the store). The firm-up adds the input with n
+    small (marked firm), and carried keeps an earlier generation's input with n 2 that runs the store
+    although a fragile new case runs it too (measure-38 lost prvNotifyQueueSetContainer so)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(FRAGILE_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "user", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    g = Generator(t, t.image())
+    fn = g.program.by_name["user"]
+    text = [[0x20100000 + i, 1, 0x41 + i] for i in range(16)]
+
+    def case(n, k):
+        return {"args": [0x20100000, n, k], "mem": [list(x) for x in text], "returns": [], "calls": []}
+    smash, calm, earlier = case(8, 7), case(2, 1), case(2, 7)
+    why = g.fragile(fn.entry, smash)
+    assert why and "saved" in why, why
+    assert g.fragile(fn.entry, calm) is None and g.fragile(fn.entry, earlier) is None
+    store = covered(g, "user", [smash])[0] - covered(g, "user", [calm])[0]
+    assert store and store <= covered(g, "user", [earlier])[0]
+    firm = g.firm_up(fn.entry, fn.insns, [smash, calm])
+    assert firm and all(c.get("firm") and c["args"][2] == 7 for c in firm), firm
+    assert store <= covered(g, "user", firm)[0] and all(g.fragile(fn.entry, c) is None for c in firm)
+    assert g.firm_up(fn.entry, fn.insns, [smash, calm, earlier]) == []     # (a sturdy case runs the store)
+    kept = g.carried(fn.entry, fn.insns, [smash, calm], [earlier])
+    assert [c["args"] for c in kept] == [[0x20100000, 2, 7]] and kept[0]["carried"], kept

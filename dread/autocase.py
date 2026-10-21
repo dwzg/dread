@@ -62,7 +62,9 @@ parser's progress inside the callee that checks a line shows nowhere else.
 
 Generated cases are cached per function (BUILD/autocases/IMAGE/NAME.json), keyed by the function's
 bytes, the generator VERSION and the options. A change that alters what the generator produces
-needs a VERSION bump; SEED stays, so that a bump does not reshuffle every function's search. The
+needs a VERSION bump; SEED stays, so that a bump does not reshuffle every function's search. What
+is added to a generation afterwards has a version of its own instead and is added to cached cases
+without making them anew: the firm-up (FIRM, Generator.firm_up). The
 search ends after a budget of runs and, in its last-resort stage, after LONG_SECONDS without any
 input that finished: on a much slower machine that stage can find less.
 
@@ -199,6 +201,10 @@ TEXT_TOKENS = 8             # tokens per text at most
 STRING_MAX = 64             # longest string constant taken into the dictionary
 STEPPING_MAX = 48           # inputs kept for new code in callees only (mutated further, not cases)
 REPAIR_RUNS = 256           # runs per function to repair near misses (an input that ran new code, then faulted)
+FIRM = 1                    # the firm-up's version (Generator.firm_up): cached cases without it get it once
+FIRM_RUNS = 300             # runs per function for variants of fragile cases (Generator.firm_up)
+FIRM_VALUES = (4, 1, 0)     # the values one input of a fragile case is set to, one at a time (a length
+                            # that fills a word-sized local first: 0 copies nothing and tells least)
 SPIN_READS = 256            # one register read this often in a row with one value: the run spins
 SPIN_POLL = 0.5             # share of inputs that get a poll stage for a register runs spun on
 # String and memory routines that generated cases do not stub: small, pure, and what they write is
@@ -1600,6 +1606,86 @@ class Generator:
                 sites += 1
         return max(LOOP_CALLS, min(LOOP_CALLS_MAX, 2 * sites))
 
+    def fragile(self, entry, case, limit=200_000):
+        """Why a case's outcome belongs to the original's frames, or None (dread.fragile: it changes
+        with the stack 64 bytes lower, or the input made code touch a saved register). The lift check
+        refuses such a case when its images differ, and then it covers nothing: FreeRTOS's
+        prvNotifyQueueSetContainer copies an item of the queue set's size from its own local, and
+        every case of generator 33 that reached three of its instructions had a size past the local."""
+        from dread import fragile
+
+        def setup(m):
+            self.apply(m, case)
+        m = self.machine()
+        try:
+            setup(m)
+            first = m.call(entry, *case["args"], max_instructions=limit)
+        except Exception:                   # (no outcome to compare: the lift check checks none)
+            return None
+        if fragile.stack_moves(self.machine, self.layout, setup, entry, case["args"], limit, first):
+            return "its outcome changes with the stack %d bytes lower" % fragile.STACK_SHIFT
+        return fragile.saves_touched(self.machine, self.program, self.layout, setup, entry, case["args"], limit)
+
+    def sturdy(self, entry, words, cases, limit=200_000, want=None, reach=None):
+        """(the instructions of want (default: all) that cases whose outcome is not the original's
+        frames' reach, {index: why} of the fragile cases checked). A case is checked only while it
+        reaches an instruction of want that no sturdy case checked so far reaches, the widest first:
+        most functions need a check of the cases that stand for something, and none has frames
+        enough to need more. reach: each case's coverage, when the caller has it."""
+        if reach is None:
+            reach = [self.coverage(entry, words, c, c.get("limit", limit)) for c in cases]
+        want = set(words) if want is None else set(want)
+        firm, frail = set(), {}
+        for i in sorted(range(len(cases)), key=lambda i: -len(reach[i] & want)):
+            if not (reach[i] & want) - firm:
+                continue
+            why = self.fragile(entry, cases[i], cases[i].get("limit", limit))
+            if why:
+                frail[i] = why
+            else:
+                firm |= reach[i] & want
+        return firm, frail
+
+    def firm_up(self, entry, words, cases, limit=200_000):
+        """Cases to add for the instructions only fragile cases run (Generator.fragile; the lift check
+        refuses those when the images differ, and then nothing runs the instructions): each such
+        case, the one that runs most of them first, with one input at a time (an argument, a memory
+        cell, a callee's answer) set to each of FIRM_VALUES in turn; a variant that runs some of them as a case
+        must and is not fragile is added, marked "firm". A fragile case mostly has one input past the
+        frame it is meant for (a queue's item size larger than the item copied from a local:
+        FreeRTOS's prvNotifyQueueSetContainer), and that input set small gives the path without the
+        frame. At most FIRM_RUNS runs; loop cases are left alone (their runs end at a stub call, with
+        no outcome the checks compare)."""
+        if any(c.get("stub_calls") for c in cases):
+            return []
+        reach = [self.coverage(entry, words, c, c.get("limit", limit)) for c in cases]
+        firm, frail = self.sturdy(entry, words, cases, limit, reach=reach)
+        need = (set().union(*reach) if reach else set()) - firm
+        out, runs = [], [FIRM_RUNS]
+
+        def variants(base):
+            for kind in ("args", "mem", "returns"):
+                for k in range(len(base.get(kind, ()))):
+                    for v in FIRM_VALUES:
+                        now = base[kind][k][2] if kind == "mem" else base[kind][k]
+                        if now != v:
+                            trial = json.loads(json.dumps(base))
+                            if kind == "mem":
+                                trial[kind][k][2] = v
+                            else:
+                                trial[kind][k] = v
+                            yield trial
+        for i in sorted(frail, key=lambda i: -len(reach[i] & need)):
+            for trial in variants(cases[i]):
+                if not need or not reach[i] & need or runs[0] <= 0:
+                    break
+                runs[0] -= 1
+                got, why = self.attempt(entry, words, trial, trial.get("limit", limit), check_image=True)
+                if why is None and got & need and not self.fragile(entry, trial, trial.get("limit", limit)):
+                    need -= got
+                    out.append(dict(trial, firm=True))
+        return out
+
     def carried(self, entry, words, cases, old, limit=200_000):
         """The cases of an earlier generation (old: what the cache held under another key) that still
         run as a case must and run instructions none of cases runs, the most new ones first, each
@@ -1609,27 +1695,43 @@ class Generator:
         lost a build). Those earlier inputs are inputs all the same; the original decides what they
         do. Not carried: a case that stubs an address no function starts at (the image changed
         around it), that does not end as a case must (attempt with the image check), or that calls
-        through a register into the middle of a function (drop_wild repairs or drops it)."""
+        through a register into the middle of a function (drop_wild repairs or drops it).
+
+        An instruction that only fragile new cases run (Generator.fragile: the lift check refuses
+        them when the images differ, and then they cover nothing) counts as not run: an old case
+        that runs it and is not fragile itself is carried too (measure-38: generator 33's cases of
+        prvNotifyQueueSetContainer reached three instructions with a queue item past a local only,
+        and generator 31's case with an item that fits stayed behind, so the function was lost)."""
         entries = self.program.by_entry
-        covered = set()
-        for c in cases:
-            covered |= self.coverage(entry, words, c, c.get("limit", limit))
+        reach = [self.coverage(entry, words, c, c.get("limit", limit)) for c in cases]
+        covered = set().union(*reach) if reach else set()
         pool = []
         for c in old:
             if any(x[0] not in entries and x[0] != self.fake_pointer for x in c.get("calls", ())) or \
                     any(s not in entries for s in c.get("stops", ())):
                 continue
             got, why = self.attempt(entry, words, c, c.get("limit", limit), check_image=True)
-            if why is None and set(got) - covered:
+            if why is None and got:
                 pool.append((set(got), {k: v for k, v in c.items() if k != "carried"}))
         out = []
         while pool:
             pool.sort(key=lambda p: -len(p[0] - covered))
-            got, c = pool.pop(0)
-            if not got - covered:
+            if not pool[0][0] - covered:
                 break
+            got, c = pool.pop(0)
             covered |= got
             out.append(dict(c, carried=True))
+        offered = set().union(*(got for got, _ in pool)) & covered if pool else set()
+        if offered:                         # what an old case could stand for, if no new one stands firm
+            firm, _ = self.sturdy(entry, words, cases, limit, want=offered, reach=reach)
+            need = offered - firm
+            for got, c in sorted(pool, key=lambda p: -len(p[0] & need)):
+                if not need or not got & need:
+                    break
+                if self.fragile(entry, c, c.get("limit", limit)):
+                    continue
+                need -= got
+                out.append(dict(c, carried=True))
         if out:
             out, _ = self.drop_wild(entry, words, out, limit)
         return out
@@ -2261,7 +2363,9 @@ def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True
             made, failed = [], str(e)
         if failed is None and previous:     # what the last generation reached stays reached (carried)
             made = made + gen.carried(fn.entry, fn.insns, made, previous)
-        cached = {"key": key, "seed": seed_name(fn.entry), "cases": made,
+        if failed is None:                  # what only fragile cases reach, by sturdy ones too (firm_up)
+            made = made + gen.firm_up(fn.entry, fn.insns, made)
+        cached = {"key": key, "seed": seed_name(fn.entry), "cases": made, "firm": FIRM,
                   "seconds": round(time.time() - started, 2)}      # for reading only; not in the key
         if failed is not None:
             # the search is deterministic: under the same key it fails again (it took the eight
@@ -2272,6 +2376,10 @@ def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True
             cached["failed"] = failed
         if failed is None or cached["seconds"] >= FAILURE_SECONDS:
             cache_store(path, cached)
+    elif cached.get("firm") != FIRM and not cached.get("failed") and make:
+        # cases made before the firm-up (or an earlier one): it is added once, the cases stay
+        cached = dict(cached, cases=cached["cases"] + gen.firm_up(fn.entry, fn.insns, cached["cases"]), firm=FIRM)
+        cache_store(path, cached)
     if cached.get("failed") and not extra_load(image, name):
         raise GenerationError(cached["failed"])
     return cached

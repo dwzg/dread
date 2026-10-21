@@ -115,7 +115,13 @@ recommendations here."), on a recommendation.
   refused" (such cases fail again).
 - **Status.** Done (runner, saves_touched, 2026-10-20). Against measurement 26 on seven builds: +8
   (xFirstTimerHandler, TIMER0_Handler, xQueueSelectFromSetFromISR, prvNotifyQueueSetContainer on three
-  builds, prvUnlockQueue, vQueueOverwritePeriodicISRDemo), none lost.
+  builds, prvUnlockQueue, vQueueOverwritePeriodicISRDemo), none lost. 2026-10-21: the check kept the
+  slots of frames that had returned, so a later frame's local there counted as a saved register
+  touched, and a case whose images differed for another reason could be refused instead of
+  failing; fixed (sp rising frees the slots below it), together with the check that moves the
+  stack, which left a case's stack arguments behind (dread.fragile). Some of those +8 may have
+  rested on such a refusal: a function the next measurement loses that way was wrongly accepted
+  before, and the loss is the correction.
 
 ## A variadic callee's argument registers the caller did not set (2026-10-20)
 

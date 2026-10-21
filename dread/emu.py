@@ -890,6 +890,14 @@ class Machine:
             uc.reg_write(reg, value & 0xFFFFFFFF)
         top = lay.stack_top - self.stack_shift
         uc.reg_write(lay.sp, top)
+        if self.stack_shift:
+            # The room for stack arguments moves with the stack: a stack argument a case gives as a
+            # memory cell at the stack top (the generator learns it from the read there) is where the
+            # function looks for it. Left behind, every case of a function with stack arguments
+            # changed its outcome with the stack moved, and dread test refused those whose images
+            # differed instead of failing them (MSP430's udivmodsi4, its stack argument read from
+            # the wrong place on purpose: refused, not failed)
+            uc.mem_write(top, bytes(uc.mem_read(lay.stack_top, ARGS_ROOM)))
         word = lay.word
         if word * len(stacked) > ARGS_ROOM:
             raise EmuError("more stack arguments than the %d bytes above the stack top hold" % ARGS_ROOM)

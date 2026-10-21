@@ -125,6 +125,33 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     (carried, autocase.Generator.carried): coverage no longer goes down when the generator changes,
     except by a case the current rules refuse. In effect from the next regeneration on (no VERSION
     bump: caches still valid stay as they are).
+    Measure-38 still lost seven on GCC -O0 (the first build it regenerated from generator 31's cases:
+    +10 -7). Traced on a copy: generator 31's cases of all seven pass carried's filters, but for
+    prvNotifyQueueSetContainer and xSecondTimerHandler a fragile new case (dread.fragile: its outcome
+    changes with the stack, or its input makes code touch a saved register; the lift check refuses it
+    when the images differ) already ran the instructions, so the old case was not carried and the
+    lift check then ran them in no case it compared. And the check that a saved register was touched
+    kept the slots of frames that had returned: a later frame's local there counted as a saved
+    register written (FreeRTOS's xQueueIsQueueFullFromISR over prvQueueAccessLogError's pushed r7),
+    so a case whose images differ could be refused instead of failing: a comparison weakened by
+    accident (fixed: sp rising frees the slots below it; test: a wrong outer over a reused frame
+    FAILs). Since: carried counts only cases that are not fragile (Generator.sturdy), and a firm-up
+    (Generator.firm_up, version FIRM, added to cached cases once without regenerating) varies a
+    fragile case one input at a time to 4, 1 or 0 until a sturdy variant runs the same instructions.
+    On the copy: the firm-up alone over generator 33's cached cases gets prvNotifyQueueSetContainer
+    accepted (27 s for the seven); regenerated over generator 31's cases all seven are accepted. The
+    other five of the bench's seven were plain search luck: their generator 31 cases are gone from
+    the bench's caches (overwritten by measure-38's regeneration), so only a later search finds them
+    again. Checking every case of a build for both properties costs 97 s of one core (12,116 cases of
+    GCC -O0, 362 fragile); the firm-up checks only the cases that stand for something.
+    The suite found what the firm-up must not do: MSP430's udivmodsi4 with a stack argument read
+    from the wrong place on purpose was accepted, its cases varied to the argument 0, where the wrong
+    place reads the same. Behind it a fault of the stack check: the stack moved, a stack argument a
+    case gives as a memory cell at the stack top stayed behind, so every case of a function with
+    stack arguments looked stack-dependent and those that differed were refused, not failed. The
+    room for stack arguments moves with the stack since (Machine.call, also for dread integration's
+    check): the planted mistake now FAILs in udivmodsi4's own cases. The firm-up tries 4 and 1
+    before 0 (0 copies nothing and tells least).
     callconv against regflow: 0 to 3 functions a build disagree on ARM and RISC-V: printf's r0 and
     sprintf's r1 on ARM GCC (named arguments loaded back from the save area: regflow 21, after this
     measurement), sprintf's a2 on RISC-V GCC 10 (an unnamed argument: listed apart since). On MSP430

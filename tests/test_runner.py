@@ -345,3 +345,65 @@ def test_a_case_whose_original_touches_its_saved_registers_is_refused(tmp_path):
     assert "REFUSED user [n = 8]: the input makes the original touch its own saved registers" in text, text
     assert "write of the saved r4" in text and "by copy" in text, text
     assert "FAIL user" not in text and "ok   user" in text, text
+
+
+REUSE_C = NOIPA_DEF + """
+volatile unsigned sink;
+NOIPA unsigned helper(unsigned a) { return a * 3 + sink; }
+NOIPA unsigned pusher(unsigned a) { unsigned b = helper(a); return helper(b) + a; }
+NOIPA unsigned local_user(unsigned a)
+{ volatile unsigned buf[4]; buf[0] = a; buf[1] = a + 1; buf[2] = a + 2; buf[3] = a + 3;
+  return buf[0] + buf[1] + buf[2] + buf[3]; }
+unsigned outer(unsigned a) { return local_user(pusher(a)) + 1; }
+"""
+
+
+def test_a_frame_that_returned_leaves_no_saved_registers_behind(tmp_path):
+    """pusher saves r4 and lr and returns; local_user, called next from the same frame, lays its
+    locals where pusher's saves were and stores to them. Those slots are free again once sp rose above
+    them: a case of outer whose images differ (the C adds 2, not 1) is a FAIL, compared, not refused
+    as one whose input made code write a saved register (the check kept the slots of frames that had
+    returned until an access below sp: FreeRTOS's xQueueIsQueueFullFromISR's local, where
+    prvQueueAccessLogError had pushed r7, counted as a write of a saved r7)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    if not shutil.which("arm-none-eabi-gcc"):
+        pytest.skip("needs arm-none-eabi-gcc")
+    (tmp_path / "t.c").write_text(REUSE_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "outer", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    program = Program(target, image)
+    # (the layout tested: pusher saves r4, local_user's locals lie on the stack without a save of their own)
+    ops = lambda name: [(i.mnemonic, i.op_str) for i in program.instructions(program.by_name[name])]
+    assert any(m == "push" and "r4" in o for m, o in ops("pusher")), ops("pusher")
+    assert not any(m == "push" for m, o in ops("local_user")) and \
+        any(m.startswith("sub") and "sp" in o for m, o in ops("local_user")), ops("local_user")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "rewritten.c").write_text(
+        "unsigned pusher(unsigned a);\nunsigned local_user(unsigned a);\n"
+        "unsigned outer(unsigned a) { return local_user(pusher(a)) + 2; }\n")
+    os.makedirs(image.cases)
+    with open(os.path.join(image.cases, "few.py"), "w") as f:
+        f.write('def none(m):\n    pass\n'
+                'case("outer", "a = 5", none, 5)\n')
+    payload = build.build(target, image, src=str(src), out=str(tmp_path / "recon"), quiet=True)
+    failed, uncovered, text = run_all(target, payload)
+    assert "FAIL outer [a = 5]" in text, text
+    assert "REFUSED outer" not in text, text

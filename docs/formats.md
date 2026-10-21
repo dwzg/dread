@@ -142,7 +142,8 @@ image's `kept_cases/NAME.json` (cases that once showed a difference; `--keep-fai
 | `limit`, `stub_calls` | instructions (default 200,000: a budget of that many of the instruction set's shortest instructions, counted in bytes of code entered) and stub calls (default 256) one run may take |
 | `hang` | true: not returning is the result (compared up to the limit) |
 | `tight` | true: a stub's fill stops at the first stack word the function stored itself |
-| `carried` | true: an input of an earlier generation, kept when the cases were made anew because it runs instructions the new ones do not (dread.autocase's carried; for reading only, the runner treats it like any case) |
+| `carried` | true: an input of an earlier generation, kept when the cases were made anew because it runs instructions the new ones do not, or that only new ones run whose outcome belongs to the original's frames (dread.autocase's carried; for reading only, the runner treats it like any case) |
+| `firm` | true: a fragile case (its outcome changes with the stack, or its input makes code touch a saved register: dread.fragile) with one input set small, added because it runs instructions only fragile cases ran (dread.autocase's firm_up; for reading only) |
 | `why`, `by` | where a written case comes from and why (`dread mutate --kill`, `dread record`); nothing reads them but people |
 | `kept` | in kept cases: `"stubbed"` or `"real callees"` |
 
@@ -158,7 +159,9 @@ Written by every parallel run (`dread test`, `dread integration`): `NAME.json` k
 per item of the last full run, for handing the slowest out first; `NAME.tsv` is the report of the
 last run, `item` and `seconds`, slowest first, ending with a comment line with the total seconds of
 work and the wall-clock time of the run. A generated-case cache entry
-(`BUILD/autocases/IMAGE/NAME.json`) also says how many `seconds` its generation took.
+(`BUILD/autocases/IMAGE/NAME.json`) also says how many `seconds` its generation took, and with
+`firm` the version of the firm-up its cases had (dread.autocase.FIRM: an entry without it, or with an
+older one, gets the firm-up once, its cases kept; a `failed` entry holds the generation's error).
 
 ### `argued.tsv` (beside the cases directory)
 
