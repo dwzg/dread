@@ -65,6 +65,19 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     (virt-clang14/16/18/19-Os: the images' clang with picolibc's headers, their GCC linking; clang 14
     and 16 know no _zicsr in -march): all nine build (354 to 371 functions at -O2, 304 to 316 on
     RISC-V). Left: measuring them, and the categories they show.
+    Measured 2026-10-21 (measure-33: generator 31, the ARM frame wrapper, the RISC-V GCC builds;
+    2 h 15 min, every case made anew after the generator's VERSION): no build lost a function, every
+    one gained. GCC -Os 9 to 16: 315, 321, 319, 318, 310, 317 (+8 to +14); clang 12 to 19: 311, 308,
+    308, 304, 308 (+11 to +17); GCC -O0 354/437 (+17), -O2 266/349 (+12); clang -Os 304 (+10), -O2 278
+    (+9); M4F GCC 332/394 (+6), clang 322/384 (+8); RISC-V GCC -Os 244/316 (+6), -O2 185/300 (+8),
+    clang 226/308 (+9); MSP430 156/250 (+5). printf and sprintf came back on every ARM build (the
+    wrapper), newlib's _read_r, _write_r, _close_r, _lseek_r and __sread on the distributions' builds
+    and FreeRTOS functions behind callees that answer one way on every architecture (the decider:
+    xQueueGenericReset, xTimerCreateTimerTask, the sanity checks). The new RISC-V builds: GCC 10
+    234/323 (72 %); GCC 12, 13 and 14 lifted nothing: the lift check's link failed (linker
+    relaxation under the overlay's fixed placement; the overlay's C is compiled with -mno-relax since,
+    and a copy of the GCC 12 build lifts 199 of 321), and on GCC 12 and 13 regflow took t0 for read on
+    every path to picolibc's _init_tls (its millicode call jal t0; regflow 20).
 - [x] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
   clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
   2026-10-20, here 6). Done 2026-10-20: the suite under `bin/with-toolchain ubuntu-22.04` first found
