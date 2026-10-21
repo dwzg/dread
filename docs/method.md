@@ -172,3 +172,14 @@ Each of these cost time once and is now a check or a rule in a tool:
   call, the generator stubs that callee, its result an input.
 - A script that counts verdicts is code too: one read "dropped  FAIL fn" as a function named FAIL,
   and the numbers it reported were wrong for an evening.
+- A static analysis checked against a measurement: `dread callconv` found four gaps of regflow's in
+  one night on FreeRTOS (a save and restore around a call that writes the register, a named argument
+  in a variadic save area, a spill taken for a save area, GCC 10's dead copies into callee-saved
+  registers), each invisible to the tests because the analysis erred where nothing compared. Its own
+  tests plant each kind of disagreement: a check that only ever agrees proves nothing.
+- A simplification that trusts the control flow needs all of it: regflow 23's first version dropped a
+  real read in a function whose switch had one case of five resolved (the others unreachable to the
+  analysis). Functions with code no edge reaches are left as they are, and the switch resolution was
+  fixed after (its bound check had to feed the jump).
+- A measurement that runs from the checkout holds the checkout: a CI fix waited three hours behind
+  one. Measurements run from a worktree at the commit they measure.
