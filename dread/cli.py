@@ -18,6 +18,7 @@ COMMANDS = {
     "mutate": ("dread.mutate", "break rewritten C on purpose and list the changes no case notices"),
     "integration": ("dread.integration", "run generated inputs with real callees, original against rebuilt"),
     "regflow": ("dread.regflow", "registers callers read after a call, and those a function reads at entry"),
+    "callconv": ("dread.callconv", "the registers each function reads and changes, measured against regflow"),
     "record": ("dread.record", "written cases from Python models of a function's callees"),
     "sysrun": ("dread.sysrun", "the image from reset with device models, original against rebuilt"),
     "sysrecord": ("dread.sysrecord", "written cases recorded from a system run, for the functions it enters"),

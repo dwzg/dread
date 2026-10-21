@@ -73,8 +73,9 @@ def test_a_local_recipe_builds_and_measures(tmp_path, monkeypatch):
     assert os.path.exists(os.path.join(where, "firmware.elf"))
     toml = open(os.path.join(where, "dread.toml")).read()
     assert 'cross = "arm-none-eabi-"' in toml and '"-g"' not in toml and "startup = [" in toml
-    metrics = bench.measure(r, "m3-Os", steps=("asm", "noreturn"), out=lambda *a: None)
+    metrics = bench.measure(r, "m3-Os", steps=("asm", "noreturn", "callconv"), out=lambda *a: None)
     assert metrics["functions"] > 30 and metrics["asm"]["identical"] and metrics["asm"]["raw_words"] <= 2
+    assert metrics["callconv"]["ran"] and metrics["callconv"]["measured"] == 0     # (no lift check: no cases)
     assert metrics["noreturn"]["functions"] >= 2          # main's loop, and the reset handler that calls it
     assert json.load(open(os.path.join(where, "metrics.json")))["functions"] == metrics["functions"]
     report = open(bench.report(r, out=lambda *a: None)).read()

@@ -21,6 +21,8 @@ it measures what DREAD makes of the image, running its tools as they are run on 
   functions the lifter left uncovered or got no inputs for in each scenario, and the lift check
   runs again with the cases kept (a rebuild whose image differs drops them);
 - noreturn: the functions found never to return;
+- callconv: dread callconv, the registers each function's cases show it reads and changes, against
+  dread.regflow's answers: the functions that disagree, by kind and by name;
 - the seconds each step took.
 
 A build keeps a digest of what in the recipe made it (build.json, made_from): measuring a build
@@ -71,7 +73,7 @@ compiler gives (cc --version), which the report shows: a compiler's version deci
     dread bench toolchain NAME... [--rebuild] [--prune]
     dread bench fetch RECIPE
     dread bench build RECIPE [BUILD...]
-    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,noreturn]
+    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,noreturn,callconv]
     dread bench report RECIPE
     dread bench all RECIPE [BUILD...] [--steps ...]
 """
@@ -85,7 +87,7 @@ import subprocess
 import sys
 import time
 
-STEPS = ("asm", "ghidra", "lift", "record", "noreturn")
+STEPS = ("asm", "ghidra", "lift", "record", "noreturn", "callconv")
 RECORDABLE = ("UNCOVERED", "[case generation]")     # refusals that recorded inputs may lift
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -474,6 +476,19 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
         seconds, code, text = dread("noreturn", "--target", where, log=os.path.join(where, "work", "noreturn.log"))
         metrics["noreturn"] = {"functions": len([l for l in text.splitlines() if l.strip()]) if code == 0 else None,
                                "seconds": round(seconds, 1)}
+    if "callconv" in steps:                # (after the lift check: its cases are what it measures with)
+        found = os.path.join(where, "work", "callconv.json")
+        seconds, code, text = dread("callconv", "--target", where, "--json", found,
+                                    log=os.path.join(where, "work", "callconv.log"))
+        if code == 0 and os.path.exists(found):
+            with open(found) as f:
+                data = json.load(f)
+            s = data["summary"]
+            metrics["callconv"] = {"ran": True, "measured": s["measured"], "agree": s["agree"],
+                                   "functions": s["functions"], "seconds": round(seconds, 1),
+                                   "disagree": {n: r["found"] for n, r in data["functions"].items() if r["found"]}}
+        else:
+            metrics["callconv"] = {"ran": False, "seconds": round(seconds, 1)}
     if "lift" in steps and earlier is not None and "accepted" in metrics.get("lift", {}):
         now = set(metrics["lift"]["accepted"])
         metrics["lift"]["against_last"] = {"gained": sorted(now - set(earlier)), "lost": sorted(set(earlier) - now)}
@@ -559,6 +574,9 @@ def summary_line(m):
     r = m.get("record", {})
     if r.get("kept"):
         parts.append("%d recorded cases (%d before them)" % (r["kept"], r.get("accepted_before") or 0))
+    c = m.get("callconv", {})
+    if c.get("ran"):
+        parts.append("registers measured: %d of %d disagree with regflow" % (c["measured"] - c["agree"], c["measured"]))
     return ", ".join(parts)
 
 
@@ -579,13 +597,15 @@ def report(recipe, bench=None, out=print):
     lines = ["# %s: what DREAD makes of it" % recipe["name"], "",
              "Made by `dread bench report` from each build's metrics.json; figures only.", "",
              "| build | compiler | functions | code bytes | listing | Ghidra found / missed / extra | lifted | "
-             "recorded cases (lifted before them) | never return | seconds (asm, ghidra, lift) |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             "recorded cases (lifted before them) | never return | registers measured, against regflow | "
+             "seconds (asm, ghidra, lift) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for m in rows:
         g, lf = m.get("ghidra", {}), m.get("lift", {})
         v = lf.get("verdicts", {})
         r = m.get("record", {})
-        lines.append("| %s | %s | %d | %d | %s | %s | %s | %s | %s | %s |" % (
+        c = m.get("callconv", {})
+        lines.append("| %s | %s | %d | %d | %s | %s | %s | %s | %s | %s | %s |" % (
             m["build"], compiler_cell(m), m["functions"], m["instruction_bytes"],
             ("identical" if m["asm"]["identical"] else "differs") + (" (%d raw)" % m["asm"]["raw_words"]
                                                                      if m["asm"]["raw_words"] else "")
@@ -595,12 +615,18 @@ def report(recipe, bench=None, out=print):
                                     max(1, sum(v.values()))) if v else "-",
             "%d (%s)" % (r["kept"], r.get("accepted_before", "-")) if r.get("kept") else "-",
             m.get("noreturn", {}).get("functions", "-"),
+            "%d of %d disagree" % (c["measured"] - c["agree"], c["measured"]) if c.get("ran") else "-",
             ", ".join("%.0f" % m[s]["seconds"] if s in m else "-" for s in ("asm", "ghidra", "lift"))))
     for m in rows:
         reasons = m.get("lift", {}).get("reasons")
         if reasons:
             lines += ["", "## %s: why the rest is not lifted" % m["build"], ""]
             lines += ["- %d x %s" % (n, r) for r, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:15]]
+        disagree = m.get("callconv", {}).get("disagree")
+        if disagree:
+            lines += ["", "## %s: registers measured against regflow (dread callconv)" % m["build"], ""]
+            lines += ["- %s: %s" % (n, "; ".join("%s %s" % (k, ", ".join(v)) for k, v in found.items()))
+                      for n, found in sorted(disagree.items())[:20]]
     path = os.path.join(bench or bench_dir(), recipe["name"], "report.md")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:

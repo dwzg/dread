@@ -232,9 +232,26 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   constant, an argument plus a constant, or a constant, through every move and add, for regflow's
   save areas and frame stores, the lifter's frames and the generator's frames (regflow 15 followed
   one more shape; the next compiler brings another).
-- [ ] **Calling conventions measured, not only read**: a function run with poisoned registers says
+- [x] **Calling conventions measured, not only read**: a function run with poisoned registers says
   which it reads before it writes them and which it changes; regflow's answer is checked against
-  that on every build of the benchmark, disagreements listed.
+  that on every build of the benchmark, disagreements listed. Done 2026-10-21: `dread callconv`
+  (each function's cases on the original, once more per register with another value at the entry:
+  a different outcome is a read, a register not as at the entry a change; a case whose finding comes
+  from code touching a saved slot is left out, as dread test refuses it) and the bench step
+  `callconv`. Gizmo agrees everywhere; FreeRTOS's GCC builds show regflow's gaps, below. A few
+  seconds a build.
+- [ ] **regflow follows values through stack slots** (found by `dread callconv`, 2026-10-21): what a
+  function stores in its frame and loads back is the same value, and regflow does not follow it.
+  (1) A named argument kept in a variadic save area and read back from it: printf pushes r0-r3 and
+  loads its format from r0's slot (variadic_save_area takes a push of all four for -O0 keeping its
+  arguments, and pushes count as no use), sprintf pushes r1-r3 with its format in r1 (the rule
+  expects one named argument): regflow says they do not read r0 and r1, so a stub of printf would not
+  log the format a caller passes. (2) A register saved around a call and restored, then used:
+  newlib's _free_r spills r0 (the reent pointer) around __malloc_lock and stores errno through it
+  (regflow 4: "a save around a call of a register never set before is neither a read nor a write").
+  The way: liveness of frame slots as of registers (a store to a slot reads its register only when
+  a later load from that slot feeds a live register), which would also replace the special cases of
+  regflow 4 and 13. On GCC 16 -Os: printf, sprintf, _free_r; GCC 9 and 10: printf, sprintf.
 - [ ] **Refusals to a language model as rule writer**: the categories the benchmark leaves (a code
   shape the tools do not know) go with their listings to a model that proposes the rule (a
   recognizer, an input, the C); nothing is taken that the comparison does not accept.

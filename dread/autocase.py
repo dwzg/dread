@@ -1953,9 +1953,10 @@ def generator_for(run):
     return gen
 
 
-def cases_for(run, name, fn):
+def cases_for(run, name, fn, make=True):
     """The generated, kept and written cases of a function with auto() for the runner:
-    [(label, address, setup, args, limit, case)]."""
+    [(label, address, setup, args, limit, case)]. make=False: no generation, only cached cases made
+    for the image as it is (dread.callconv measures with what a lift check left)."""
     gen = generator_for(run)
     image = run["image"]
     options = dict(run["suite"].auto[name])
@@ -1968,7 +1969,7 @@ def cases_for(run, name, fn):
     if generate is False:
         cached = {"cases": []}
     else:
-        cached = _generated(run, name, fn, gen, image, prog, options, calls, frame)
+        cached = _generated(run, name, fn, gen, image, prog, options, calls, frame, make)
     out = []
 
     def setup(case):
@@ -1983,8 +1984,9 @@ def cases_for(run, name, fn):
     return out
 
 
-def _generated(run, name, fn, gen, image, prog, options, calls, frame):
-    """The generated cases of cases_for, from the cache or made and cached."""
+def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True):
+    """The generated cases of cases_for, from the cache or made and cached (make=False: none when
+    the cache holds none for this key)."""
     sizes = {a: prog.insn_size(a) for a in fn.insns}
     have = {c[0] for c in calls}
     calls = calls + [c for c in gen.switch_stubs(name) if c[0] not in have]   # (in the key: the cases of a
@@ -1994,6 +1996,8 @@ def _generated(run, name, fn, gen, image, prog, options, calls, frame):
     key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, keyed, prog.arch, gen.environment())
     path = os.path.join(run["target"].build, "autocases", image.name, name + ".json")
     cached = cache_load(path)
+    if (not cached or cached.get("key") != key) and not make:
+        return {"cases": []}
     if not cached or cached.get("key") != key:
         started = time.time()
         failed = None
