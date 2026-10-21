@@ -5,8 +5,50 @@ finish it with tests on both gizmo builds, commit, run the leak check, push, and
 the same commit. What was done and learned goes into the commit message; this file only keeps the
 queue. The order was agreed with the user: the ARM phases, then `dread pilot`, then RISC-V; since
 2026-10-20 compiler diversity on the architectures DREAD has, ARM/Cortex-M and RISC-V, before more
-architectures (docs/decisions.md). How the queue may change while the user is away: CLAUDE.md,
+architectures, and since 2026-10-21 readable C from lifted C before the rest of that, on the user's
+question (both in docs/decisions.md; the bench measurements go on meanwhile). How the queue may change while the user is away: CLAUDE.md,
 "Working unattended".
+
+## Readable C from lifted C (the user, 2026-10-21; first since then: docs/decisions.md)
+
+`dread readable`: lifted C turned into C a person can read, by transformations in code. Every result
+goes through the lift check's gate and is accepted only as lifted C is (cases that run every
+instruction agree, the whole image agrees); what fails stays lifted. Names and types stay with the
+pilot, which gets the readable draft instead of the lifted C. Measured on the FreeRTOS bench against
+its sources.
+
+- [ ] **The tree.** Parse the lifted C of all three lifters into a syntax tree and print it back
+  (pycparser if it reads the lifted dialect with a header of typedefs, else a parser of the dialect
+  of DREAD's own). Done when every lifted function of an ARM, a RISC-V and an MSP430 bench build
+  parses, and the printed C, built in its place, passes the gate as the lifted C does (a round trip).
+- [ ] **The gate.** `dread readable --check`: like `dread lift --check`, with each lifted function's C
+  replaced by its transformed C: the rounds, the whole image, a table of what was accepted and why
+  the rest was not; the overlay builds the accepted ones from it. Done with the identity
+  transformation on gizmo and one bench build: the same functions accepted as by the lift check.
+- [ ] **Clean-up.** A control-flow graph from labels and gotos; liveness and reaching definitions over
+  registers, flags and frame words; flags and registers nobody reads dropped; copies and constants
+  propagated; a temporary used once folded into its use; a flag-setting compare and the branch that
+  tests it as one comparison (signed or unsigned from the condition). Done when the gate accepts as
+  many functions per build as the lift check, with statements per function against the lifted C's
+  and the source's in the bench report.
+- [ ] **Structure.** Gotos to if/else, while, do-while and switch (pattern-independent structuring,
+  "No More Gotos", NDSS 2015); a goto left only where the flow is irreducible. Done when the gotos
+  left per build are in the bench report and the gate accepts as many as before.
+- [ ] **Variables.** Frame words as locals (regflow's frames), a register split into the variables it
+  holds, parameters and a result as dread.regflow and dread callconv measured them. Done when the
+  signatures are the measured conventions and the gate accepts as many as before.
+- [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
+  peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
+- [ ] **The pilot on the draft.** The pilot asks for names and types on the readable C instead of
+  writing from the lifted C: acceptance, tokens and time per function against the old question, on
+  gizmo and the GCC -Os bench build.
+- [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
+  accepted, gotos left, statements and nesting against the source's functions.
+
+Limits known up front: readable C compiles to other code, often larger than the original's slot, so
+more functions need freed space (the overlay's placement report says where); a function whose lifted
+C keeps registers exact for its callers (bound calls, -ffixed-REG, registers a callee reads stale)
+may stay lifted.
 
 ## Compiler diversity (the user, 2026-10-20: first, on ARM/Cortex-M and RISC-V)
 

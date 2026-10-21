@@ -9,6 +9,37 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## A transformer from lifted C to readable C, next after the fragile-case fix (2026-10-21)
+
+**Decided by recommendation**, on the user's question (2026-10-21: "Could we also build a tool that
+transforms lifted C into readable C?").
+
+- **Question.** Lifted C is exact and accepted only with cases that run every instruction and agree,
+  but it has no structure: every register a variable, every branch a goto, every load and store
+  volatile. `dread pilot` has a language model write readable C from the listing and the lifted C,
+  through the same checks; nothing turns lifted C into readable C by itself. Build that, how, and
+  before or after what is left of compiler diversity?
+- **Options.** (a) Leave readability to the pilot: a model per function, with its cost, its time
+  and its refusals. (b) An LLVM route: clang turns the lifted C into optimised IR, and a structurer
+  such as Rellic (pattern-independent structuring after "No More Gotos", NDSS 2015) prints goto-free
+  C from it. (c) A C-to-C transformer of DREAD's own, in Python, on the lifted C: a clean-up
+  (copies and constants propagated, flags nobody reads dropped, a compare and the branch that tests
+  it as one comparison), structuring (gotos to if/else, loops and switch; a goto stays where the
+  flow is irreducible), variables (stack slots as locals from regflow's frames, registers as
+  parameters and a result from regflow and callconv) and memory (volatile only where order is
+  behaviour: peripherals); names and types left to the pilot, which then starts from a draft that
+  already passes.
+- **Choice: (c), next after the fragile-case fix**, ahead of the long tail of compiler diversity
+  (measurement 38 gains 4 to 13 functions a build; the bench measurements go on meanwhile). It reads
+  the lifters' output, so one transformer serves ARM, RISC-V and MSP430; its input is a narrow
+  dialect DREAD writes itself; there is no LLVM build to carry (whether Rellic is still maintained
+  was not checked). Every result goes through the lift check's gate (cases that run every
+  instruction, agreement, the whole image), so the transformer need not be proven correct: what it
+  gets wrong is refused, and the lifted C stays. Measured on the FreeRTOS bench against its sources
+  (gotos left, statements and nesting against the source's) and by what the gate accepts per build.
+- **Undo.** Drop the section "Readable C from lifted C" from docs/todo.md; the pilot stays as it is.
+- **Status.** Not started (the plan: docs/todo.md, "Readable C from lifted C").
+
 ## Compiler diversity before more architectures; MIPS paused after step 1 (2026-10-20)
 
 **Decided by the user** ("we need to focus on the most important architectures which are already
