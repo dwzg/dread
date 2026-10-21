@@ -17,10 +17,18 @@ instruction agree, the whole image agrees); what fails stays lifted. Names and t
 pilot, which gets the readable draft instead of the lifted C. Measured on the FreeRTOS bench against
 its sources.
 
-- [ ] **The tree.** Parse the lifted C of all three lifters into a syntax tree and print it back
+- [x] **The tree.** Parse the lifted C of all three lifters into a syntax tree and print it back
   (pycparser if it reads the lifted dialect with a header of typedefs, else a parser of the dialect
   of DREAD's own). Done when every lifted function of an ARM, a RISC-V and an MSP430 bench build
   parses, and the printed C, built in its place, passes the gate as the lifted C does (a round trip).
+  Done 2026-10-21 with a parser of DREAD's own (dread/cparse.py): the dialect has GNU extended asm
+  with operands, register variables (__asm__("r0") on a declarator), compound literals with
+  designators (MSP430's 32-bit results) and an attribute with a string in a function's head, which
+  pycparser reads none of, and every statement keeps the instruction of its line's comment (address
+  and text), which a preprocessor would have dropped. The round trip is checked harder than by the
+  gate: all 10,633 lifted functions of the 38 bench builds that have them (ARM, Cortex-M4F, RISC-V,
+  MSP430; GCC 4.9 to 16, clang 12 to 19) parse, and the printed C compiles to the same code and
+  relocations as the lifter's (tests/test_cparse.py: every gizmo build, and the dialect's pieces).
 - [ ] **The gate.** `dread readable --check`: like `dread lift --check`, with each lifted function's C
   replaced by its transformed C: the rounds, the whole image, a table of what was accepted and why
   the rest was not; the overlay builds the accepted ones from it. Done with the identity
