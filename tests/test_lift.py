@@ -76,6 +76,16 @@ def test_translation_shapes(variant):
         0x40000000 if variant == "a32" else 0x20000001) in veneer
 
 
+def test_a_pop_in_front_of_a_return_restores_only_the_result():
+    """ARMv4T's epilogue pop {r4, lr}; bx lr (GCC for that core, and an old ARM compiler) restores
+    only what carries the result, as a pop that loads pc does: the saved registers die with the
+    function, and as volatile loads of the frame they cost code where room is short."""
+    target, image, lifted, refused = lift_all("a32")
+    text = lifted["beep_off"].text
+    assert "pop {r4, lr}" in text and "return r0;" in text, text
+    assert not re.search(r"\b(r4|lr) = \*\(volatile u32 \*\)\(sp0", text), text
+
+
 def test_never_returns(variant):
     from dread import noreturn
     target = Target.load(gizmo_dir(variant))

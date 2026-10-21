@@ -1417,7 +1417,7 @@ class Lifter:
         if stack == "push":
             return self._push(insn)
         if stack == "pop":
-            return self._pop(insn)
+            return self._pop(insn, returning=self._returns_next(insn))
         if kind == "next" and "sp" in arch.reg_effects(insn)[1]:
             return None                     # the stack pointer's depth is known statically
         lit = arch.literal(insn, isa)
@@ -1917,6 +1917,22 @@ class Lifter:
             else:
                 out.append("%s = *(volatile u32 *)(sp0 - %d);" % (r, key))
         return " ".join(out)
+
+    def _returns_next(self, insn):
+        """Whether an unconditional pop is followed by an unconditional return: ARMv4T's pop {r4, r5,
+        lr}; bx lr, which GCC for that core and an old ARM compiler end functions with. The pop then
+        restores only what carries the result, as a pop that loads pc does: the saved registers'
+        values die with the function (the C's own epilogue restores the caller's), and as volatile
+        loads of the frame they cost five instructions a function where room is short."""
+        if self.arch.predicate(insn) is not None:
+            return False
+        try:
+            nxt = self.prog.insn(insn.address + insn.size)
+        except Exception:
+            return False
+        if nxt is None or self.arch.predicate(nxt) is not None or self.arch.stack_kind(nxt) == "pop":
+            return False
+        return self.arch.flow(nxt)[0] == "return"
 
     def _pop(self, insn, returning=False):
         """The popped registers from the frame; when returning, only those that carry the result."""
