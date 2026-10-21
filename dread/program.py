@@ -364,6 +364,17 @@ class Program:
                 for a in range(max(f.insns[0] & ~1, self.base), min(stop, end), 2):
                     if owners[(a - self.base) >> 1] != ROOM:
                         owners[(a - self.base) >> 1] = min(k + 1, ROOM - 1)
+            # A pool inside a function (behind a branch, where an old compiler puts its constants and
+            # its neighbours load them too) is no part of the extent where another function loads
+            # from it either: the overlay builds C only over runs of instructions there and keeps
+            # the pool, and its loads are constants, not code (an old ARM compiler's code, whose
+            # functions load from pools inside each other, lost almost every generated input so).
+            for ref, ks in readers.items():
+                for a in (ref, ref + 2):
+                    h = (a - self.base) >> 1
+                    if 0 <= h < len(owners) and owners[h] not in (0, ROOM) and a not in self.code \
+                            and ks - {owners[h] - 1}:
+                        owners[h] = 0
             self._owners = owners
         return self._owners
 
