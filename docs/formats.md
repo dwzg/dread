@@ -91,6 +91,16 @@ The lifted C itself is made again at every build (`BUILD/recon/IMAGE/lifted/`) a
 that the src directory defines is left to src. `BUILD/recon/IMAGE/lifted.txt` says which functions
 the last build lifted, and `dread test` gives each of them its generated cases.
 
+### `readable.txt` (`readable`)
+
+The functions of the lifted table that `dread recon` builds from readable C (`dread readable`): one
+name per line, `#` comments. Written by `dread readable --check`, which lists a function only when its
+readable C, built over the original with the other lifted functions, passes the cases its lifted C
+passed (they agree and run every instruction) and the whole image's scenarios agree; not edited by
+hand. The readable C is made from the lifted C at every build, as the lifted C is from the original:
+after `dread lift --check` or a change of the transformations, `dread test` tests what the build now
+makes, and `dread readable --check` decides again. A name not in the lifted table is ignored.
+
 ### `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
 
 Described with the tools that use them, as those tools arrive in DREAD.

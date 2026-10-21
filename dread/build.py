@@ -167,12 +167,14 @@ def called_functions(objects):
     return {sym.name for obj in objects for sym in Elf(obj).symbols if sym.shndx == 0 and sym.name}
 
 
-def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_calls=None):
+def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_calls=None, transform=None):
     """Lifted C for `names` (dread.lift) in outdir, a file each, written only when it changed;
     returns ({name: the instructions no path from its entry reaches}, [the names that never return:
     the system run tests them]). A name that no longer lifts is reported and left out. lifter: one
     already made for this image (dread lift --check builds many times with one: what it lifts is kept
-    in it, lifter.lifted). src_calls: what the hand-written C calls (dread.lift.Lifter.src_calls)."""
+    in it, lifter.lifted). src_calls: what the hand-written C calls (dread.lift.Lifter.src_calls).
+    transform(name, text): the C to write instead of the lifted text, or None to keep it (dread
+    readable: readable C for the functions of its table)."""
     from dread import lift, regflow
     from dread.program import Program
     if lifter is None:
@@ -199,6 +201,8 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
                 raise kept[name]
             result = kept[name]
             text = result.text
+            if transform is not None:
+                text = transform(name, text) or text
             saved = lifter.call_saved(fn)
             handed = getattr(result, "handed", None)
             if handed:                      # (compile_all reads it: GCC's -ffixed-REG)
@@ -236,18 +240,22 @@ def system_names(path):
                 and l.split("#", 1)[0].strip()}
 
 
-def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=None, lifter=None):
+def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=None, lifter=None, transform=None):
     """Compile and link; returns the path of the rebuilt image. lifted: names to build from lifted C
-    (default: the image's lifted table); a name src defines is left to src. lifter: see lift_sources."""
+    (default: the image's lifted table, those of its readable table from readable C: dread
+    readable); a name src defines is left to src. lifter, transform: see lift_sources."""
     workdir = out or recon_dir(target, image)
     objects = compile_all(target, image, src or image.src, os.path.join(workdir, "obj"))
     names = read_names(image.table("lifted")) if lifted is None else list(lifted)
+    if lifted is None and transform is None and os.path.exists(image.table("readable")):
+        from dread import readable
+        transform = readable.chooser(read_names(image.table("readable")))
     record = os.path.join(workdir, "lifted.txt")
     if names:
         defined = defined_functions(objects)
         made, endless, loops, bodies = lift_sources(target, image, [n for n in names if n not in defined],
                                             os.path.join(workdir, "lifted"), quiet=quiet, lifter=lifter,
-                                            src_calls=called_functions(objects))
+                                            src_calls=called_functions(objects), transform=transform)
         if lifted is None:                  # the image's table: the system run's acceptances stay its own
             by_system = system_names(image.table("lifted"))
             loops = [n for n in loops if n not in by_system]

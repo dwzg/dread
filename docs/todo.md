@@ -29,10 +29,18 @@ its sources.
   gate: all 10,633 lifted functions of the 38 bench builds that have them (ARM, Cortex-M4F, RISC-V,
   MSP430; GCC 4.9 to 16, clang 12 to 19) parse, and the printed C compiles to the same code and
   relocations as the lifter's (tests/test_cparse.py: every gizmo build, and the dialect's pieces).
-- [ ] **The gate.** `dread readable --check`: like `dread lift --check`, with each lifted function's C
+- [x] **The gate.** `dread readable --check`: like `dread lift --check`, with each lifted function's C
   replaced by its transformed C: the rounds, the whole image, a table of what was accepted and why
   the rest was not; the overlay builds the accepted ones from it. Done with the identity
   transformation on gizmo and one bench build: the same functions accepted as by the lift check.
+  Done 2026-10-21 (dread/readable.py): the function-level runs build what the lift check's built
+  (the lifted functions but those the system run accepted, which come in for the whole image), a
+  function that fails goes back to its lifted C, the accepted ones go into the readable table
+  (config/readable.txt) and dread recon builds them from readable C. With the identity: gizmo-m3 all
+  36 and the same image byte for byte; FreeRTOS GCC -Os 316 of 328, the whole image agreeing, 19 s
+  with the cases cached; the 12 the system run accepted stay lifted until readable C is checked
+  there too. (The first try built those 12 from lifted C in the function-level runs too, and a case
+  of prvRegTestTaskEntry1 the lift check had accepted failed: the configurations differed.)
 - [ ] **Clean-up.** A control-flow graph from labels and gotos; liveness and reaching definitions over
   registers, flags and frame words; flags and registers nobody reads dropped; copies and constants
   propagated; a temporary used once folded into its use; a flag-setting compare and the branch that

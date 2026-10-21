@@ -31,6 +31,7 @@ COMMANDS = {
     "callpair": ("dread.callpair", "names for another image's functions from the order of calls"),
     "noreturn": ("dread.noreturn", "the functions that never return"),
     "lift": ("dread.lift", "translate functions to C instruction by instruction"),
+    "readable": ("dread.readable", "turn lifted C into readable C, each function checked as lifted C is"),
     "liftfuzz": ("dread.liftfuzz", "check the lifter on random instructions against the emulator"),
     "pilot": ("dread.pilot", "the reconstruction loop run by code, a language model only for the judgement"),
     "llm": ("dread.llm", "the language-model providers: list them, or ask one a question"),

@@ -2849,17 +2849,19 @@ def system_check(target, image, program, lifter, names, out=print, verdicts=None
     return kept
 
 
-def whole_image(target, image, program, names, out=print, lifter=None):
+def whole_image(target, image, program, names, out=print, lifter=None, transform=None):
     """Every scenario on the original and on the image with all of `names` built from lifted C: the
     function-level cases test each function on its own, this the whole (a frame that grew in C can
-    overflow a task's small stack). Returns None when they agree, else the first difference."""
+    overflow a task's small stack). Returns None when they agree, else the first difference.
+    transform: see dread.build.lift_sources (dread readable's check)."""
     import json
     from dread import build, overlay, sysrun
     if not names or not target.scenarios:
         return None
     work = os.path.join(target.build, "lift-whole", image.name)
     try:
-        payload = build.build(target, image, out=work, lifted=list(names), quiet=True, lifter=lifter)
+        payload = build.build(target, image, out=work, lifted=list(names), quiet=True, lifter=lifter,
+                              transform=transform)
     except overlay.OverlayError as e:
         return "the build failed: %s" % e
     with open(os.path.join(work, "placement.json")) as f:
