@@ -102,7 +102,13 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     18.04, Debian 10 and Debian 11 (bench/toolchains/, archive mirrors for the archived releases):
     the versions of ARM's GNU Arm Embedded toolchains that vendor SDKs shipped from 2015 to 2019.
     mps2-gcc4-Os to mps2-gcc8-Os build as they are (GCC 4.9 compiles the demo in its default C90
-    mode): 362 to 373 functions. Left: measuring them, and what they show.
+    mode): 362 to 373 functions. Measured the same morning (from a worktree with regflow 24): GCC
+    4.9.3 309 of 362, 5.4.1 311 of 372, 6.3.1 319 of 372, 7.3.1 318 of 373, 8.3.1 316 of 373, on par
+    with GCC 9 to 14 (315 to 323 of 371 to 374 in measure-34): nothing in DREAD depends on a newer
+    GCC's code. What stops the rest has the same shape (25 to 35 functions whose cases leave
+    instructions unrun, 18 to 20 that never return and are not run whole, 5 to 8 refused); callconv
+    finds 0 to 2 disagreements a build. The whole suite under Debian 10's GCC 7.3 found test
+    assumptions and one fault of the lab's (-mfpu=auto), not of DREAD's results (below).
     Measured 2026-10-21 (measure-35, from a worktree at aee092e: generator 32, regflow 21 to 23, the
     RISC-V switches with the bound first, the import of code without mapping symbols; every case made
     anew): stopped after eleven builds, the M3's GCC -Os builds and clang's. Each gained 4 to 12
