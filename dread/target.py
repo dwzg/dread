@@ -252,6 +252,7 @@ class Compiler:
         if self.kind == "clang" and not self.triple:
             raise TargetError("%s: [compiler] kind = \"clang\" needs triple (clang's --target)" % target.file)
         self.cflags = list(data.get("cflags", []))
+        self.layer_required = list(getattr(getattr(target, "arch", None), "required_cflags", ()))
         layer = list(getattr(getattr(target, "arch", None), "lifted_cflags", {}).get(self.kind, ()))
         self.lifted_cflags = list(data.get("lifted_cflags", ["-Os"] + layer))
         self.cxxflags = list(data.get("cxxflags", self.cflags + self.CXX_FLAGS))
@@ -297,9 +298,11 @@ class Compiler:
     def required(self):
         """Flags dread recon adds to every compile: a section per function and no common
         symbols, so that the overlay can place each function; for GCC also
-        -fno-reorder-functions (else main goes to .text.startup)."""
+        -fno-reorder-functions (else main goes to .text.startup); and what the architecture layer
+        names (required_cflags: RISC-V's -mno-relax)."""
         flags = ["-ffunction-sections", "-fno-common"]
-        return flags + (["-fno-reorder-functions"] if self.kind == "gcc" else [])
+        return flags + (["-fno-reorder-functions"] if self.kind == "gcc" else []) + \
+            [f for f in self.layer_required if f not in self.cflags]
 
     def tool(self, name):
         """The program of one tool, as one string (a GNU toolchain's name; for clang, the first word)."""

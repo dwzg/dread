@@ -152,3 +152,18 @@ def test_the_float_convention_comes_from_the_flags():
     m4, m3 = Target.load(gizmo_dir("m4")), Target.load(gizmo_dir("m3"))
     assert m4.abi.float == "hard" and m4.abi.fp_arg_regs == ["s%d" % k for k in range(16)]
     assert m3.abi.float == "soft" and m3.abi.fp_arg_regs == []
+
+
+def test_risc_v_compiles_the_overlays_c_without_linker_relaxation(tmp_path):
+    """The overlay puts each function at an address of its own; the linker's relaxation shortened
+    calls between them to c.jal, which the placement then put out of reach (FreeRTOS's GCC 12 to 14
+    builds, 2026-10-21: relocation truncated to fit, and no function of a build lifted). Every
+    compile for RISC-V gets -mno-relax (the architecture layer's required_cflags), once; ARM gets
+    nothing of the kind."""
+    rv = Target.load(gizmo_dir("rv32")).compiler
+    assert "-mno-relax" in rv.cflags and "-mno-relax" not in rv.required()     # (its own, not twice)
+    text = open(os.path.join(gizmo_dir("rv32"), "dread.toml")).read()
+    (tmp_path / "rv").mkdir()
+    bare = Target.load(write(tmp_path / "rv", text.replace('"-mno-relax"', '"-Os"', 1))).compiler
+    assert "-mno-relax" not in bare.cflags and "-mno-relax" in bare.required()
+    assert "-mno-relax" not in Target.load(gizmo_dir("m3")).compiler.required()

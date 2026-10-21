@@ -219,6 +219,12 @@ class RiscV:
     """The RISC-V layer. Constructed from [arch]: isa, extensions, endian, ghidra."""
 
     name = "riscv"
+    # Flags every compile of C for the overlay needs (dread.target.Compiler.required): the overlay puts
+    # each function at an address of its own, and the linker's relaxation shortened calls between them
+    # (to c.jal) that the placement then put out of reach: "relocation truncated to fit:
+    # R_RISCV_RVC_JUMP" (FreeRTOS's GCC 12, 13 and 14 builds, 2026-10-21: the lift check's link failed
+    # and no function of the build was lifted)
+    required_cflags = ["-mno-relax"]
     default_args = 8
     default_callee_saved = ("s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11")
     default_result = ("a0", "a1")
