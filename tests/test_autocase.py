@@ -686,3 +686,49 @@ def test_a_loop_case_stub_fills_the_buffer_it_is_handed(tmp_path):
         return set(fn.insns) - got
     assert missed(gen.loop_frame("reader")) == set()
     assert missed(0)
+
+
+def test_the_null_stage_reaches_a_null_check_no_other_stage_offers(tmp_path, monkeypatch):
+    """FreeRTOS's vTaskSetTimeOutState and xQueueReceive assert their pointer argument and store
+    through it after. With it 0 and the assertion handler stubbed, the run goes on into the image at
+    address 0 (the MPS2 builds map flash there), and since generator 32 that store makes the argument
+    a learned pointer at once, which takes its buffer in nine of ten random inputs and a random value
+    otherwise, rarely 0. The sweep tries 0 only in the few slots it samples; the compare-guided stage
+    flipped the check to 0, but its runs waited in the handler (it waits for a debugger on a local:
+    it may return, so it is no stop) and were dropped. measure-35 lost such functions on every build.
+    Here the random routes to a null input are closed (learned pointers always take their buffer, no 0
+    among the constants), as they were in effect there: generator 32 left the assertion's call unrun;
+    generator 33's null stage (each argument 0 once, ending at the callees runs hung in) and the
+    compare-guided stage's retry with a stop reach it."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import autocase, elfimport
+    (tmp_path / "t.c").write_text(NOIPA_DEF +
+                                  "NOIPA void assert_failed(int line) { volatile int go = 0; while (!go) ; }\n"
+                                  "void set_state(int *p) { if (!p) assert_failed(5510); p[0] = 7; p[1] = 9; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "set_state", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    target = TARGET.replace('{name = "flash", base = 0x08000000,', '{name = "flash", base = 0x00000000,')
+    (tmp_path / "dread.toml").write_text(target + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x0\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    monkeypatch.setattr(autocase, "POINTER_KEEP", 1.0)
+    monkeypatch.setattr(autocase, "SMALL_ARGS", (1, 2, 3))
+    real_ladder = autocase.Generator.ladder
+    monkeypatch.setattr(autocase.Generator, "ladder",
+                        lambda self, words, rng=None: [v for v in real_ladder(self, words, rng) if v] or [1])
+    real_constants = autocase.Generator.constants
+    monkeypatch.setattr(autocase.Generator, "constants",
+                        lambda self, words: tuple({v for v in part if v} for part in real_constants(self, words)))
+    t = Target.load(str(tmp_path))
+    g = Generator(t, t.image())
+    fn = g.program.by_name["set_state"]
+    cases = g.generate("set_state", fn.entry, fn.insns)
+    got, words = covered(g, "set_state", cases)
+    assert got == words, sorted(hex(a) for a in words - got)

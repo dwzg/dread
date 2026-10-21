@@ -103,6 +103,18 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     the versions of ARM's GNU Arm Embedded toolchains that vendor SDKs shipped from 2015 to 2019.
     mps2-gcc4-Os to mps2-gcc8-Os build as they are (GCC 4.9 compiles the demo in its default C90
     mode): 362 to 373 functions. Left: measuring them, and what they show.
+    Measured 2026-10-21 (measure-35, from a worktree at aee092e: generator 32, regflow 21 to 23, the
+    RISC-V switches with the bound first, the import of code without mapping symbols; every case made
+    anew): stopped after eleven builds, the M3's GCC -Os builds and clang's. Each gained 4 to 12
+    functions and lost 2 to 7 (net -3 to +6): most of the losses were configASSERT null checks
+    (vTaskSetTimeOutState, xQueueReceive, xQueueGenericSend: three instructions each), which
+    generator 32 had made unreachable (a store into the image at address 0 behind a null pointer
+    teaches that the input is a pointer, which then takes its buffer; the compare-guided stage
+    flipped the check to 0 but dropped the run that waited in the handler). Generator 33 (a null
+    stage, and the compare-guided stage's retry with a stop) brings them back; which other rare
+    paths a build covers changes with every change of the generator, in both directions (of eleven
+    functions measure-35 gained or lost on GCC -Os, eight are accepted with generator 33; with
+    generator 32 six). Generator 33's whole effect: measure-36.
     callconv against regflow: 0 to 3 functions a build disagree on ARM and RISC-V: printf's r0 and
     sprintf's r1 on ARM GCC (named arguments loaded back from the save area: regflow 21, after this
     measurement), sprintf's a2 on RISC-V GCC 10 (an unnamed argument: listed apart since). On MSP430

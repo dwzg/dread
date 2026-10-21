@@ -70,6 +70,7 @@ Case format (also of the image's kept_cases and extra_cases files): docs/formats
 """
 import hashlib
 import json
+import re
 import os
 import random
 import struct
@@ -83,7 +84,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 32       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 33       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -133,7 +134,11 @@ VERSION = 32       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # stub always fails, and _read_r's code for a read that succeeded went uncovered);
                   # 32: that stage first runs the compare-guided stage with the stub in every input
                   # (newlib's __sfp, _sbrk_r: the stub's result, what it leaves, and the chase), and the
-                  # memory map is in the cache key (environment)
+                  # memory map is in the cache key (environment); 33: a run of the compare-guided stage
+                  # that hangs in a callee, or fails behind the stub of a callee runs hung in, is tried
+                  # once more, ending at that call (the sweep's did so for hangs); and a null stage
+                  # gives each argument and learned pointer 0 once, from the first inputs, ending at
+                  # the callees runs hung in (NULL_BASES)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -176,6 +181,7 @@ POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTE
 POINTER_STEP = 0x400        # ... this far apart ...
 POINTER_SLOTS = 16          # ... at most this many different ones (then they are reused)
 POINTER_KEEP = 0.9          # share of inputs that use the buffer (the rest keep their value: null checks)
+NULL_BASES = 3              # inputs the null stage starts from (_generate_once)
 MAX_CELLS = 512             # memory locations an input gives values to at most (in first-access order):
                             # a run over a long buffer would otherwise make every input carry one value
                             # per byte read (14,000 for a script interpreter given a long length), and
@@ -1338,9 +1344,54 @@ class Generator:
                     frontier = edge()
                     gained = attempt
 
+
+        # Null stage: each argument and each learned pointer cell at 0 once, from the first inputs,
+        # ending at the callees runs hung in (an assertion handler that waits for a debugger; a run
+        # that hangs in another callee is tried once more ending there). A null check's assertion
+        # path (configASSERT) needs exactly that input, which the random stages make rarely (a
+        # learned pointer takes its buffer) and lose or find anew with every change of the
+        # generator: measure-35 (generator 32) lost such paths on every build and found others.
+        def null_run(case):
+            m = self.machine()
+            m.plan = []
+            m.spin_limit = SPIN_READS
+            self.apply(m, case)
+            m.cover(start, end)
+            m.trace_reads(image.base, image.end, self.code, self.owners)
+            try:
+                m.call(entry, *case["args"], max_instructions=limit, stall=self.stall_for(limit))
+                return m, True
+            except EmuError:
+                return m, False
+        if corpus and not words_set <= covered and not self.loop:    # (cheap: before the long stages)
+            for base in corpus[:NULL_BASES]:
+                slots = [("args", i) for i in range(nregs) if base["args"][i] != 0] + \
+                    [("mem", k) for k, cell in enumerate(base["mem"]) if cell[0] in data_mem and cell[1] == 4 and cell[2]]
+                for kind, i in slots:
+                    if words_set <= covered:
+                        break
+                    case = json.loads(json.dumps(base))
+                    if kind == "args":
+                        case["args"][i] = 0
+                    else:
+                        case["mem"][i][2] = 0
+                    if hung and not case.get("stops"):
+                        case.update({"hang": True, "limit": limit, "stops": sorted(hung)})
+                    m, ok = null_run(case)
+                    inside = self.program.function_at(m.reg("pc") & ~1) if not ok and m.timed_out else None
+                    if inside is not None and inside.entry != entry and not case.get("stops"):
+                        case.update({"hang": True, "limit": limit, "stops": [inside.entry]})
+                        m, ok = null_run(case)
+                    if not ok or self.touches_image(m) or self.ends_badly(m):
+                        continue
+                    got = m.covered_insns(words)
+                    if got - covered:
+                        covered |= got
+                        corpus.append(case)
+
         first_stages = len(corpus)
         if not words_set <= covered and corpus and not self.late():
-            self._solve(name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, reach, edge)
+            self._solve(name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, reach, edge, hung)
 
         # Boundary sweep: step each value of a few inputs through the constants and their
         # neighbours; where the observable result changes from one value to the next, both sides
@@ -1431,7 +1482,7 @@ class Generator:
                     stubbed.append(c)
                 before = len(stubbed)
                 self._solve(name, entry, words, end, [list(x) for x in calls if x[0] != stub.entry] + [list(extra)],
-                            limit, rng, pool, known, covered, stubbed, dict(reach), edge)
+                            limit, rng, pool, known, covered, stubbed, dict(reach), edge, hung)
                 corpus.extend(stubbed[before:])
             for _ in range(DECIDER_RUNS):
                 if words_set <= covered or self.late():
@@ -1614,7 +1665,8 @@ class Generator:
                 case.pop("limit", None)
         return cases
 
-    def _solve(self, name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, reach, edge):
+    def _solve(self, name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, reach, edge,
+               hung=()):
         """The compare-guided stage (see the module's docstring); adds to corpus and covered."""
         image, lay = self.image, self.layout
         words_set = set(words)
@@ -1667,12 +1719,38 @@ class Generator:
                 m.call(entry, *case["args"], max_instructions=min(limit, SOLVE_LIMIT),
                        stall=self.stall_for(min(limit, SOLVE_LIMIT)))
             except EmuError:
+                if stop_retry(case, m):
+                    return attempt(case, watch, record, steps)
                 return chase(case, m, watch, record, steps)
             if self.touches_image(m):
+                if stop_retry(case, m):
+                    return attempt(case, watch, record, steps)
                 return chase(case, m, watch, record, steps)
             known.learn(m.reads)
             m.covered = m.covered_insns(words)
             return m, seen
+
+        def stop_retry(case, m):
+            """Whether a run that failed is to be tried once more, ending at a call (the case gets the
+            stop): the run hung in a callee, or it called the stub of a callee runs hung in (hung)
+            and failed behind it. This stage is where a null check is flipped (cbnz r0 solved to 0),
+            and the run then waits in the assertion handler for a debugger, or with the handler
+            stubbed goes on into the null pointer: FreeRTOS's vTaskSetTimeOutState had 44 such runs
+            and xQueueReceive 19, every one dropped, and their configASSERT paths stayed unrun (since
+            generator 32 learns such a pointer at once, the random stage gives it null too rarely)."""
+            if case.get("stops") or self.loop:
+                return False
+            inside = self.program.function_at(m.reg("pc") & ~1) if m.timed_out else None
+            if inside is not None and inside.entry != entry:
+                stop = inside.entry
+            else:
+                called = [int(x.group(1), 16) for x in (re.match(r"call 0x([0-9a-f]+)", c[0]) for c in m.calls
+                                                        if c and isinstance(c[0], str)) if x]
+                stop = next((t for t in called if t in hung), None)
+            if stop is None:
+                return False
+            case.update({"hang": True, "limit": limit, "stops": [stop]})
+            return True
 
         def chase(case, m, watch, record, steps):
             """A near miss: a run that reached code no input had reached and then failed, at a fault or
