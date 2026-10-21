@@ -518,6 +518,58 @@ g:  addi sp, sp, -16
 
 
 @needs_riscv_gcc
+def test_a_dead_copy_into_a_callee_saved_register_reads_nothing(tmp_path):
+    """regflow 23: GCC 10 on RISC-V copies a register nothing set into s0 and never reads s0 again
+    before restoring it (FreeRTOS's xTaskCheckForTimeOut: c.mv s0, a4): no read of a4, also with a
+    call behind it whose callee reads none of its caller's callee-saved registers (f). A copy into a
+    register the callee does read from its caller (a compiler's shared code reads its caller's r6)
+    stays a read (g)."""
+    flow = _rv_flow(tmp_path, {"t.S": '''
+    .text
+    .globl helper, reader, f, g
+    .type helper, @function
+helper:
+    addi sp, sp, -16
+    sw s0, 8(sp)
+    li s0, 3
+    mv a0, s0
+    lw s0, 8(sp)
+    addi sp, sp, 16
+    ret
+    .size helper, .-helper
+    .type reader, @function
+reader:
+    mv a0, s1
+    ret
+    .size reader, .-reader
+    .type f, @function
+f:  addi sp, sp, -16
+    sw ra, 12(sp)
+    sw s0, 8(sp)
+    mv s0, a4
+    call helper
+    lw s0, 8(sp)
+    lw ra, 12(sp)
+    addi sp, sp, 16
+    ret
+    .size f, .-f
+    .type g, @function
+g:  addi sp, sp, -16
+    sw ra, 12(sp)
+    sw s1, 8(sp)
+    mv s1, a3
+    call reader
+    lw s1, 8(sp)
+    lw ra, 12(sp)
+    addi sp, sp, 16
+    ret
+    .size g, .-g
+'''})
+    assert "a4" not in flow.read_regs("f"), flow.read_regs("f")
+    assert "a3" in flow.read_regs("g"), flow.read_regs("g")
+
+
+@needs_riscv_gcc
 def test_a_register_saved_around_a_call_is_not_read_behind_it(tmp_path):
     """GCC -Os saves an argument it needs after an assertion call around that call (FreeRTOS on
     RISC-V: a2 around vAssertCalled). The restore puts back the entry's value, so the register is the

@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 22                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 23                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -106,6 +106,10 @@ VERSION = 22                # 3: entry spills (variadic functions) are no use; 4
                             # register just below the entry's stack pointer): FreeRTOS's xStreamBufferSend
                             # spills its fourth argument r3 at the entry far below, and was taken for
                             # variadic, its r3 no use (dread callconv, GCC -O2)
+                            # 23: an instruction that only computes callee-saved registers nothing reads
+                            # afterwards reads nothing: GCC 10 on RISC-V copies a register nothing set into
+                            # s0 and never reads s0 again (xTaskCheckForTimeOut: mv s0, a4), and a4 seemed an
+                            # input of it and of every function on a path to it (13 refused on that build)
 
 
 class RegFlow:
@@ -444,6 +448,9 @@ class Analysis:
         self.copies = {}                    # name -> {save index: (restore index, register bit)} (_neutral_saves)
         for fn in program.functions:
             self._neutral_saves(fn)
+        self._saved_reads = self._callee_saved_reads()
+        for fn in program.functions:
+            self._dead_saved_writes(fn)
         self.may = self._may_write()
         # a runtime helper's result by the ABI is read, whatever the original's callers do with it:
         # compiled C calls the helper by that contract (the layer's abi_results)
@@ -757,6 +764,111 @@ class Analysis:
                 if code[c].kind in ("call", "icall") and not any(code[q].uses & bit for q in path[n + 1:-1]):
                     shadow = self.shadowed.setdefault(fn.name, {})
                     shadow[c] = shadow.get(c, 0) | bit
+
+    def _saved_liveness(self, fn, summary, reads_only=False):
+        """(live after each row, live at the entry, the rows' (reads, writes)) of the callee-saved
+        registers inside fn, as bit masks over _saved_names: live where it returns or tail-calls (its
+        caller has them back), used at a call as far as the callee reads them from its caller
+        (summary; all of them for a call through a register), ended by a write not under a condition.
+        A push is no use (it saves them, as regflow takes pushes of scratch registers). reads_only:
+        what fn reads of its caller's (_callee_saved_reads): a return passes nothing on, and a store
+        of one into the frame is no use either (a save: RISC-V's sw s0, 8(sp)). None for a function
+        that may go where the analysis cannot follow."""
+        arch, code = self.program.arch, self.rows[fn.name]
+        succ, returns, calls, tails, unknown = self.graphs[fn.name]
+        if unknown or not code:
+            return None
+        bit = self._saved_bit
+        every = (1 << len(bit)) - 1
+        slot_of = getattr(arch, "frame_slot", None)
+        n = len(code)
+        uses, kills, effects = [every] * n, [0] * n, [None] * n
+        for i, row in enumerate(code):
+            insn = self.program.insn(row.address)
+            if insn is None:
+                continue
+            reads, writes = arch.reg_effects(insn)
+            effects[i] = (reads, writes)
+            slot = slot_of(insn) if reads_only and slot_of is not None else None
+            save = slot is not None and slot[0] == "store" and slot[1] in bit
+            uses[i] = 0 if row.stack == "push" or save else sum(bit.get(r, 0) for r in reads)
+            kills[i] = 0 if row.conditional else sum(bit.get(r, 0) for r in writes)
+        exits = [0] * n
+        if not reads_only:
+            for i in returns:
+                exits[i] = every
+            for i, _ in tails:
+                exits[i] = every
+        for i, callee in calls:
+            uses[i] |= summary.get(callee, every) if callee else every
+        live_in, live_out = [0] * n, [0] * n
+        changed = True
+        while changed:
+            changed = False
+            for i in range(n - 1, -1, -1):
+                o = exits[i]
+                for j in succ[i]:
+                    o |= live_in[j]
+                v = uses[i] | (o & ~kills[i])
+                if o != live_out[i] or v != live_in[i]:
+                    live_out[i], live_in[i], changed = o, v, True
+        return live_out, live_in[0], effects
+
+    def _callee_saved_reads(self):
+        """{name: the callee-saved registers fn reads from its caller} (bit masks over _saved_names),
+        all functions together: an ordinary function saves what it uses and reads none; a compiler's
+        shared code reads its caller's (IAR's ?Subroutine0: mov r1, r6). A function that may go where
+        the analysis cannot follow reads all of them."""
+        saved = [r for r in self.program.target.abi.callee_saved if r != "sp"]
+        self._saved_names = saved
+        self._saved_bit = {r: 1 << k for k, r in enumerate(saved)}
+        every = (1 << len(saved)) - 1
+        summary = {name: 0 for name in self.rows}
+        changed = True
+        while changed:
+            changed = False
+            for fn in self.program.functions:
+                got = self._saved_liveness(fn, summary, reads_only=True)
+                new = every if got is None else got[1]
+                if new != summary[fn.name]:
+                    summary[fn.name], changed = new, True
+        return summary
+
+    def _dead_saved_writes(self, fn):
+        """An instruction that only computes callee-saved registers (the layer's register_only: no
+        memory, no branch) whose results nothing reads before the function puts them back reads none of
+        its registers. GCC 10 on RISC-V copies a register nothing set into s0 and never reads s0 again
+        (FreeRTOS's xTaskCheckForTimeOut: c.mv s0, a4 behind its critical section's entry), and a4
+        seemed an input of it, and through it of vAssertCalled's callers: 13 functions of that build
+        refused for registers their callers seemed to read. The callee-saved registers are followed
+        inside the function (_saved_liveness), a call using what its callee reads from its caller
+        (_callee_saved_reads)."""
+        arch = self.program.arch
+        only = getattr(arch, "register_only", None)
+        code = self.rows[fn.name]
+        if only is None or not code or not self._saved_bit:
+            return
+        succ = self.graphs[fn.name][0]
+        reached = {j for ss in succ for j in ss} | {0}
+        if len(reached) < len(code):
+            # code no edge leads to: a switch whose cases were not all found (GCC 12's RISC-V
+            # xTaskGenericNotifyFromISR: one case of five), so what is live there would be lost
+            return
+        got = self._saved_liveness(fn, self._saved_reads)
+        if got is None:
+            return
+        live_out, _, effects = got
+        saved, bit = set(self._saved_names), self._saved_bit
+        insns = [self.program.insn(row.address) for row in code]
+        for i, (row, insn) in enumerate(zip(code, insns)):
+            if insn is None or effects[i] is None or row.kind != "next" or not only(insn):
+                continue
+            written = set(effects[i][1])
+            if not written or written - saved:
+                continue                    # it writes something else too (a scratch register, the flags)
+            if live_out[i] & sum(bit[r] for r in written):
+                continue
+            code[i] = code[i]._replace(uses=0)
 
     def _may_write(self):
         """Registers each function may write, its callees included (least fixpoint)."""

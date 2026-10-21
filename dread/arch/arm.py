@@ -531,6 +531,19 @@ class Arm:
             return {self._name(insn.reg_name(o.reg)) for o in ops[1:] if o.type == csarm.ARM_OP_REG}
         return set()
 
+    NOT_REGISTER_ONLY = frozenset(getattr(csarm, "ARM_INS_" + n) for n in (
+        "LDM", "LDMDA", "LDMDB", "LDMIB", "STM", "STMDA", "STMDB", "STMIB", "PUSH", "POP", "VLDMIA", "VLDMDB",
+        "VSTMIA", "VSTMDB", "VPUSH", "VPOP", "MRS", "MSR", "CPS", "SVC", "BKPT", "WFI", "WFE", "SEV", "DMB", "DSB",
+        "ISB", "VMRS", "VMSR") if hasattr(csarm, "ARM_INS_" + n))
+
+    def register_only(self, insn):
+        """Whether the instruction only computes registers from registers: no memory operand, no
+        block transfer, no system or barrier instruction, no branch (dread.regflow: one whose results
+        are dead reads nothing)."""
+        if insn.id in self.NOT_REGISTER_ONLY or self.flow(insn)[0] != "next":
+            return False
+        return not any(o.type == csarm.ARM_OP_MEM for o in insn.operands)
+
     def store_slots(self, insn):
         """[(register, base register, displacement)] of each register a store writes: str, strh, strb,
         strd (the pair at the displacement and four above), stm (from the base up), stmdb and push

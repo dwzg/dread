@@ -441,6 +441,15 @@ class RiscV:
             return {NAMES[f.rs2]}
         return set()
 
+    REGISTER_OPS = frozenset(("add", "sub", "xor", "or", "and", "sll", "srl", "sra", "slt", "sltu", "addi", "xori",
+                              "ori", "andi", "slli", "srli", "srai", "slti", "sltiu", "lui", "auipc", "mul", "mulh",
+                              "mulhsu", "mulhu", "div", "divu", "rem", "remu"))
+
+    def register_only(self, insn):
+        """Whether the instruction only computes registers from registers: no memory, no branch, no
+        CSR (dread.regflow: one whose results are dead reads nothing)."""
+        return fields(insn).op in self.REGISTER_OPS
+
     def store_slots(self, insn):
         """[(register, base register, displacement)] of what sw, sh or sb stores, else [] (dread.regflow:
         where a variadic function's save area lies)."""

@@ -307,6 +307,22 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   every GCC build. A save area now has to lie right below the stack arguments (the last argument
   register a word below the entry's stack pointer: the lifter's states and the layers' store_slots);
   xStreamBufferSend reads r0-r3 since, nothing else changed (thirteen FreeRTOS builds, gizmo).
+  (4) regflow 23 (the same night): GCC 10 on RISC-V copies registers nothing set into callee-saved
+  ones and never reads them again before restoring them (xTaskCheckForTimeOut: c.mv s0, a4;
+  xStreamBufferReset, prvCheckForValidListAndQueue: c.mv s1/s0, a5): a4 and a5 seemed inputs, and
+  through vAssertCalled and the list functions 13 functions of that build were refused for registers
+  their callers seemed to read. An instruction that only computes callee-saved registers nobody reads
+  afterwards reads nothing now: the callee-saved registers are followed inside each function, a call
+  using what its callee reads of its caller's (a summary for all functions: none for ordinary C, its
+  r6 for a compiler's shared code). Functions with code no edge reaches are left as they are (GCC 12's
+  RISC-V xTaskGenericNotifyFromISR: its switch's cases were not all found, below). 16 answers of the
+  GCC 10 RISC-V build changed, none elsewhere (fifteen FreeRTOS builds, gizmo).
+- [ ] **RISC-V switches with the bound first** (found 2026-10-21 by regflow 23's check): GCC 12's
+  RISC-V xTaskGenericNotifyFromISR checks its switch index with bltu a5, s3 (the bound 4 in a5, the
+  index in s3) and jumps through a table in .rodata; the switch resolution found one of the five
+  cases, so the others have no edge in regflow's graph (and the flat listing says "goes to L12").
+  Probably the bound check is read with the operands the other way round. RISC-V's most frequent
+  refusal on the benchmark ("jumps through a register to targets not known") may be the same.
 - [ ] **Refusals to a language model as rule writer**: the categories the benchmark leaves (a code
   shape the tools do not know) go with their listings to a model that proposes the rule (a
   recognizer, an input, the C); nothing is taken that the comparison does not accept.
