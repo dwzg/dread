@@ -249,7 +249,9 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
     names = read_names(image.table("lifted")) if lifted is None else list(lifted)
     if lifted is None and transform is None and os.path.exists(image.table("readable")):
         from dread import readable
-        transform = readable.chooser(read_names(image.table("readable")))
+        names_ = read_names(image.table("readable"))
+        if names_:
+            transform = readable.chooser(names_, readable.Context(target, image))
     record = os.path.join(workdir, "lifted.txt")
     if names:
         defined = defined_functions(objects)

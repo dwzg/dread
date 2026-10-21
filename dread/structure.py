@@ -581,7 +581,7 @@ def gotos_in(stmts):
     return names
 
 
-def structure(fn):
+def structure(fn, run=None):
     """The function's body with its gotos as if/else and loops where they can be; unchanged when the
     body holds what the cut does not handle (a switch: not yet)."""
     body = fn.body.body

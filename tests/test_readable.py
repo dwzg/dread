@@ -31,7 +31,7 @@ def test_a_lifted_file_comes_back_readable_or_not_at_all(tmp_path):
     assert readable.transform("fmt_dec", "u32 fmt_dec(u32 a0) { return ({ a0; }); }") is None   # not the dialect
     assert readable.transform("other", text) is None                                         # no such function
     seen = []
-    out = readable.transform("fmt_dec", text, stages=[("look", lambda fn: seen.append(fn.name))])
+    out = readable.transform("fmt_dec", text, stages=[("look", lambda fn, run: seen.append(fn.name))])
     assert seen == ["fmt_dec"]
     change = readable.chooser(["fmt_dec"])
     assert change("fmt_dec", text) is not None and change("parse_uint", text) is None
@@ -76,7 +76,7 @@ def test_a_stage_that_breaks_a_function_leaves_it_lifted(tmp_path, monkeypatch):
     target = gizmo_copy(tmp_path)
     image = target.image()
 
-    def off_by_one(fn):
+    def off_by_one(fn, run=None):
         if fn.name != "fmt_dec":
             return
 

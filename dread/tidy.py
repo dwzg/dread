@@ -126,6 +126,8 @@ def stmt_exprs(s):
         if isinstance(s.then, C.Return) and s.then.e is not None:
             out.append((lambda t=s.then: t.e, lambda v, t=s.then: setattr(t, "e", v)))
         return out
+    if isinstance(s, C.If):                 # (a conditional block: its condition; the arms are its own)
+        return [(lambda s=s: s.cond, lambda v, s=s: setattr(s, "cond", v))]
     if isinstance(s, C.Switch):
         return [(lambda s=s: s.e, lambda v, s=s: setattr(s, "e", v))]
     return []
@@ -135,6 +137,14 @@ def simple(s):
     """A statement whose every read is in stmt_exprs (nothing nested that runs on its own)."""
     return isinstance(s, (C.ExprStmt, C.Return, C.Switch)) or (
         isinstance(s, C.If) and isinstance(s.then, (C.Goto, C.Return)) and s.orelse is None)
+
+
+def foldable_into(s, v):
+    """Whether v may be folded into statement s: a simple one, or an if whose condition alone reads v
+    (its arms run after the condition and read other things)."""
+    if simple(s):
+        return True
+    return isinstance(s, C.If) and _reads_in_cond_only(s, v)
 
 
 def fixed_registers(tree):
@@ -433,6 +443,33 @@ def selects(fn):
     return changed
 
 
+def merge_ifs(fn):
+    """if (X) a; if (X) b;  ->  if (X) { a; b; }  when a writes nothing X reads (X pure)."""
+    body = fn.body.body
+    out, changed = [], False
+    for s in body:
+        prev = out[-1] if out else None
+        if isinstance(s, C.If) and isinstance(prev, C.If) and s.orelse is None and prev.orelse is None and \
+                isinstance(s.then, C.Block) and isinstance(prev.then, C.Block) and \
+                C.expr_text(s.cond) == C.expr_text(prev.cond) and not has_effects(s.cond) and \
+                not any(isinstance(x, (C.Label, C.Case, C.Goto, C.Return, C.Break, C.Continue)) for x in prev.then.body):
+            written = set()
+            for x in prev.then.body:
+                for st in _flat(x):         # (nested ones too: an IT block's conditional compare is a
+                    for e in _stmt_all_exprs(st):       # block of its own inside the if, and writes z)
+                        written |= {y.target.id for y in walk_expr(e)
+                                    if isinstance(y, C.Assign) and isinstance(y.target, C.Name)}
+                    if isinstance(st, C.Asm):
+                        written |= {o.e.id for o in st.outputs if isinstance(o.e, C.Name)}
+            if not written & _reads_of(s.cond):
+                prev.then = C.Block(prev.then.body + s.then.body)
+                changed = True
+                continue
+        out.append(s)
+    body[:] = out
+    return changed
+
+
 def frame_address(e):
     """Whether e is an address in the function's own frame: sp0 plus or minus constants (the lifters'
     frame base, the address of a local array whose address nobody else is given through it)."""
@@ -499,6 +536,132 @@ def frame_stores(fn):
         out.append(st)
     fn.body.body[:] = out
     return changed
+
+
+def frame_offset(e):
+    """The constant offset of a frame address (sp0 plus or minus constants), or None."""
+    if isinstance(e, C.Name) and e.id == "sp0":
+        return 0
+    if isinstance(e, C.Binary) and e.op in ("+", "-") and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
+        base = frame_offset(e.l)
+        if base is None:
+            return None
+        return base + e.r.value if e.op == "+" else base - e.r.value
+    if isinstance(e, C.Cast) and e.type in ("u32", "u16"):
+        return frame_offset(e.e)
+    return None
+
+
+def frame_locals(fn):
+    """The frame's words as variables of their own when no frame address leaves the function (sp0
+    only in the addresses of its own loads and stores), every slot is accessed with one type and no
+    two overlap: *(volatile u32 *)(sp0 - 36) becomes s36. Undone when a slot may be read before it is
+    written (what earlier frames left there: the lift check compares such reads apart)."""
+    import copy
+    accesses, escapes = {}, [False]
+
+    def visit(e):
+        if e is None:
+            return
+        if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and frame_address(e.e.e):
+            off = frame_offset(e.e.e)
+            pointee = e.e.type.replace("volatile", " ").replace("*", " ").split()
+            if off is None or len(pointee) != 1:
+                escapes[0] = True
+                return
+            accesses.setdefault(off, set()).add(pointee[0])
+            return
+        if isinstance(e, C.Name) and e.id == "sp0":
+            escapes[0] = True
+            return
+        for c in _children(e) if not isinstance(e, C.Assign) else [e.target, e.value]:
+            visit(c)
+
+    def visit_stmt(st):
+        if isinstance(st, C.Decl):
+            for d in st.items:
+                if d.name != "sp0":
+                    visit(d.init)
+        elif isinstance(st, C.Asm):
+            for o in st.outputs + st.inputs:
+                visit(o.e)
+        else:
+            for e in _stmt_all_exprs(st):
+                visit(e)
+        for inner in _inner(st):
+            visit_stmt(inner)
+    for st in fn.body.body:
+        visit_stmt(st)
+    if escapes[0] or not accesses:
+        return False
+    sizes = {"u8": 1, "s8": 1, "u16": 2, "s16": 2, "u32": 4, "s32": 4, "u64": 8, "s64": 8}
+    spans = []
+    for off, types in accesses.items():
+        if len(types) != 1 or next(iter(types)) not in sizes:
+            return False
+        spans.append((off, off + sizes[next(iter(types))]))
+    spans.sort()
+    if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
+        return False
+    before = copy.deepcopy(fn.body.body)
+    names = {off: ("s%d" % -off if off < 0 else "s_%d" % off) for off in accesses}
+    taken = all_names(fn)
+    if set(names.values()) & taken:
+        return False
+
+    def rewrite(e):
+        if e is None:
+            return None
+        if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and frame_address(e.e.e):
+            return C.Name(names[frame_offset(e.e.e)])
+        if isinstance(e, C.Assign):
+            return C.Assign(e.op, rewrite(e.target), rewrite(e.value))
+        if isinstance(e, C.Unary):
+            return C.Unary(e.op, rewrite(e.e))
+        if isinstance(e, C.Cast):
+            return C.Cast(e.type, rewrite(e.e))
+        if isinstance(e, C.Binary):
+            return C.Binary(e.op, rewrite(e.l), rewrite(e.r))
+        if isinstance(e, C.Cond):
+            return C.Cond(rewrite(e.c), rewrite(e.t), rewrite(e.f))
+        if isinstance(e, C.Call):
+            return C.Call(rewrite(e.f), [rewrite(a) for a in e.args])
+        if isinstance(e, C.Post):
+            return C.Post(e.op, rewrite(e.e))
+        return e
+
+    def rewrite_stmt(st):
+        if isinstance(st, C.ExprStmt):
+            st.e = rewrite(st.e)
+        elif isinstance(st, C.Return) and st.e is not None:
+            st.e = rewrite(st.e)
+        elif isinstance(st, C.If):
+            st.cond = rewrite(st.cond)
+        elif isinstance(st, (C.While, C.DoWhile)):
+            st.cond = rewrite(st.cond)
+        elif isinstance(st, C.Switch):
+            st.e = rewrite(st.e)
+        elif isinstance(st, C.Asm):
+            for o in st.outputs + st.inputs:
+                o.e = rewrite(o.e)
+        for inner in _inner(st):
+            rewrite_stmt(inner)
+    for st in fn.body.body:
+        if not isinstance(st, C.Decl):
+            rewrite_stmt(st)
+    decls = [C.Decl(next(iter(accesses[off])), [C.Declarator(names[off])]) for off in sorted(accesses)]
+    last = max((i for i, x in enumerate(fn.body.body) if isinstance(x, C.Decl)), default=-1)
+    fn.body.body[last + 1:last + 1] = decls
+    g = Graph(fn)                           # (a slot read where nothing stored it yet: undo)
+    reach = g.reaching()
+    slots = set(names.values())
+    for n in g.nodes:
+        for v in n.reads & slots:
+            if -1 in (reach[n.index].get(v) or ()) or any(isinstance(g.nodes[d].stmt, C.Decl)
+                                                          for d in (reach[n.index].get(v) or ()) if d >= 0):
+                fn.body.body[:] = before
+                return False
+    return True
 
 
 def _effects_outside(e, name):
@@ -570,9 +733,12 @@ def fold(fn):
             if len(uses) != 1 or reach[uses[0].index].get(v) != {n.index}:
                 continue
             nxt = uses[0]
-            if nxt.index <= n.index or not simple(nxt.stmt) or not _straight(g, n.index, nxt.index, s.e.value):
+            if nxt.index <= n.index or not foldable_into(nxt.stmt, v) or \
+                    not _straight(g, n.index, nxt.index, s.e.value):
                 continue
             value = s.e.value
+            if isinstance(value, C.Call) and not is_pure_call(value) and _in_call_argument(nxt.stmt, v):
+                continue                        # (a call into another call's arguments: kept a statement)
             many = reads_count_stmt(nxt.stmt, v)
             if many != 1 and not (many > 1 and isinstance(nxt.stmt, C.If) and not has_effects(value)
                                   and not _reads_memory(value) and size(value) <= 24):
@@ -635,15 +801,27 @@ def spread(fn):
     return False
 
 
+def _in_call_argument(s, v):
+    """Whether statement s reads v as (part of) an argument of a call."""
+    for get, _ in stmt_exprs(s):
+        for x in walk_expr(get()):
+            if isinstance(x, C.Call) and any(reads_count(a, v) for a in x.args):
+                return True
+    return False
+
+
 def _reads_in_cond_only(s, v):
     """Whether an if reads v in its condition only (its arms do not)."""
     from dread.cflow import _reads_of as reads
     inner = set()
     for arm in (s.then, s.orelse):
         if arm is not None:
-            for x in (arm.body if isinstance(arm, C.Block) else [arm]):
-                for e in _stmt_all_exprs(x):
+            for st in _flat(arm):           # (nested blocks too)
+                for e in _stmt_all_exprs(st):
                     inner |= reads(e)
+                if isinstance(st, C.Asm):
+                    for o in st.outputs + st.inputs:
+                        inner |= reads(o.e)
     return v not in inner
 
 
@@ -846,13 +1024,13 @@ def conditions(fn):
     changed = False
 
     def simpler(cond):
-        if size(cond) <= 3 or has_effects(cond) or cexpr.z3 is None:
+        if size(cond) <= 3 or loads_once(cond) is None or cexpr.z3 is None:
             return None
         check = cexpr.Checker(cond, ctx, as_bool=True)
         for cand in candidates(cond, ctx):
             if size(cand) >= size(cond):
                 return None
-            if check.stands_for(cand):
+            if same_loads(cond, cand) and check.stands_for(cand):
                 return cand
         return None
     for s in fn.body.body:
@@ -963,7 +1141,31 @@ def value_candidates(e, ctx):
                 continue
             for op in VALUE_OPS:
                 out.append(C.Binary(op, copy.deepcopy(a), copy.deepcopy(b)))
+            for op in ("<", ">=", ">", "<="):       # (a carry or a borrow)
+                out.append(C.Binary(op, copy.deepcopy(a), copy.deepcopy(b)))
     return out
+
+
+def loads_once(e):
+    """The texts of e's volatile loads when e's only effects are such loads, each read once: a
+    rewrite that reads each of them once again keeps them (None when e has other effects)."""
+    texts = []
+    for x in walk_expr(e):
+        if isinstance(x, C.Call) and not is_pure_call(x):
+            return None
+        if isinstance(x, (C.Assign, C.Post)) or (isinstance(x, C.Unary) and x.op in ("++", "--")):
+            return None
+        if is_volatile_access(x):
+            texts.append(C.expr_text(x))
+    if len(set(texts)) != len(texts):
+        return None
+    return sorted(texts)
+
+
+def same_loads(a, b):
+    """Whether b reads the volatile loads a reads, each once (and nothing else with an effect)."""
+    la, lb = loads_once(a), loads_once(b)
+    return la is not None and la == lb
 
 
 def values(fn):
@@ -976,7 +1178,7 @@ def values(fn):
         if not is_assign(s):
             continue
         value = s.e.value
-        if size(value) < 6 or has_effects(value) or len(operands(value)) > 3:
+        if size(value) < 6 or loads_once(value) is None or len(operands(value)) > 3:
             continue
         target = ctx.types.get(s.e.target.id)
         if target is None or cexpr.z3 is None:
@@ -986,7 +1188,7 @@ def values(fn):
         for cand in sorted(value_candidates(value, ctx), key=size):
             if size(cand) >= size(value):
                 break
-            if check.stands_for(C.Cast(cast, cand)):
+            if same_loads(value, cand) and check.stands_for(C.Cast(cast, cand)):
                 s.e.value = cand
                 changed = True
                 break
@@ -994,19 +1196,143 @@ def values(fn):
 
 
 PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("dead", dead), ("frame", frame_stores),
+          ("locals", frame_locals),
           ("propagate", propagate),
-          ("selects", selects), ("fold", fold), ("spread", spread), ("expressions", tidy_expressions),
+          ("selects", selects), ("merge", merge_ifs), ("fold", fold), ("spread", spread),
+          ("expressions", tidy_expressions),
           ("values", values),
           ("conditions", conditions),
           ("declarations", tidy_declarations)]
 
 
-def tidy(fn, passes=None, rounds=8):
-    """All passes, again until none changes anything (at most rounds times)."""
-    for _ in range(rounds):
-        changed = False
-        for _, p in (PASSES if passes is None else passes):
-            changed = p(fn) or changed
-        if not changed:
+def all_calls(fn):
+    """[(call, whether its value is used)] of every call in the function's statements, nested ones
+    included (a call that is a statement of its own gives nothing anyone reads)."""
+    out = []
+
+    def visit(s):
+        for e in _stmt_all_exprs(s):
+            alone = isinstance(s, C.ExprStmt) and e is s.e
+            out.extend((x, not (alone and x is e)) for x in walk_expr(e) if isinstance(x, C.Call))
+        for inner in _inner(s):
+            visit(inner)
+    for s in fn.body.body:
+        visit(s)
+    return out
+
+
+def trim_calls(fn, run):
+    """A call passes only the argument registers its callee reads (dread.regflow, the run's context):
+    the lifters pass them all. Every call of a callee or none, and only calls of the lifters' form (as
+    many arguments as the target has argument registers: one with stack arguments stays); the
+    callee's extern declaration follows (readable's transform). A callee ignores registers it does
+    not read, so the trimmed call is the same call; the gate checks it all the same."""
+    ctx = run.context if run is not None else None
+    if ctx is None or not ctx.arg_regs:
+        return False
+    k = len(ctx.arg_regs)
+    by_callee, used = {}, set()
+    for call, value_used in all_calls(fn):
+        if isinstance(call.f, C.Name):
+            by_callee.setdefault(call.f.id, []).append(call)
+            if value_used:
+                used.add(call.f.id)
+    changed = False
+    for name, calls in by_callee.items():
+        n = ctx.arity(name)
+        if n is None or name in run.trimmed:
+            continue
+        if name in used:
+            # The call's value is read: what the callee leaves in its result registers is what the
+            # caller passed there when it does not write them (newlib's empty lock functions: the lock's
+            # address comes back, and __malloc_lock returns it), and the lift check compares a result
+            # whether callers read it or not. So the arguments in the result registers stay.
+            n = max(n, 2 if run.returns.get(name) in ("u64", "s64") else 1)
+        if n >= k:
+            continue
+        if any(len(c.args) != k or any(has_effects(a) for a in c.args[n:]) for c in calls):
+            continue
+        for c in calls:
+            del c.args[n:]
+        run.trimmed[name] = n
+        changed = True
+    return changed
+
+
+def params(fn, run=None):
+    """A parameter the body only copies into its register's variable (u32 r0 = a0) is that variable;
+    trailing parameters nobody reads go (the callers' registers are ignored, as they were). Only for a
+    plain head (type name(parameters)), which is written anew."""
+    import re
+    m = re.match(r"^(\w+) (\w+)\((.*)\)$", fn.head.strip())
+    if not m or m.group(2) != fn.name:
+        return False
+    names = all_names(fn)
+    reads = {}
+    for s in fn.body.body:
+        for e in _stmt_all_exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Name):
+                    reads[x.id] = reads.get(x.id, 0) + 1
+        for inner in _inner(s):
+            for st in _flat(inner):
+                for e in _stmt_all_exprs(st):
+                    for x in walk_expr(e):
+                        if isinstance(x, C.Name):
+                            reads[x.id] = reads.get(x.id, 0) + 1
+    changed = False
+    new = list(fn.params)
+    for i, (ptype, pname) in enumerate(fn.params):
+        if reads.get(pname, 0) != 1:
+            continue
+        for s in fn.body.body:
+            if not isinstance(s, C.Decl) or " ".join(s.specs.split()) != ptype:
+                continue
+            for d in s.items:
+                if isinstance(d.init, C.Name) and d.init.id == pname and not d.dims and not d.ptr and not d.asm:
+                    new[i] = (ptype, d.name)
+                    s.items.remove(d)
+                    changed = True
+                    break
+            else:
+                continue
             break
+    fn.body.body[:] = [s for s in fn.body.body if not (isinstance(s, C.Decl) and not s.items)]
+    used = set()
+    for s in fn.body.body:
+        for st in _flat(s):
+            for e in _stmt_all_exprs(st):
+                used |= {x.id for x in walk_expr(e) if isinstance(x, C.Name)}
+            if isinstance(st, C.Decl):
+                used |= {d.name for d in st.items}
+    while new and new[-1][1] not in used:
+        new.pop()
+        changed = True
+    if changed:
+        fn.params = new
+        fn.head = "%s %s(%s)" % (m.group(1), fn.name, ", ".join("%s %s" % p for p in new) or "void")
+    return changed
+
+
+def _flat(s):
+    out = [s]
+    for inner in _inner(s):
+        out += _flat(inner)
+    return out
+
+
+def tidy(fn, run=None, passes=None, rounds=8):
+    """All passes, again until none changes anything (at most rounds times); then the calls' and the
+    function's own arguments (trim_calls, params) and the passes once more."""
+    def settle():
+        for _ in range(rounds):
+            changed = False
+            for _, p in (PASSES if passes is None else passes):
+                changed = p(fn) or changed
+            if not changed:
+                break
+    settle()
+    if passes is None and (trim_calls(fn, run) | params(fn, run)):
+        settle()
+        params(fn, run)
     return fn

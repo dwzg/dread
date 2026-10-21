@@ -101,6 +101,25 @@ def test_the_clean_up_leaves_the_comparison_and_the_call():
     assert "/* 6: bls #0xc */" in text                   # (each statement keeps its instruction)
 
 
+def test_calls_pass_what_their_callees_read():
+    """With what regflow measured (a context): g reads r0 and r1, so its call passes two arguments
+    and its declaration follows; f's own parameters are its registers, the unread ones gone. A call
+    whose value is read keeps its first argument even when the callee reads none: an empty callee
+    leaves it as its result (newlib's lock functions)."""
+    from dread import readable
+    ctx = readable.Context()
+    ctx.arg_regs = ["r0", "r1", "r2", "r3"]
+    ctx.reads = {"g": {"r0", "r1"}, "f": {"r0"}}
+    out = readable.transform("f", SNIPPET, context=ctx)
+    assert "extern u32 g(u32, u32);" in out and "r0 = g(r0, r1);" in out, out
+    assert "u32 f(u32 r0, u32 r1)" in out, out          # (r1 is passed on to g: read)
+    ctx = readable.Context()                            # (a new one: transform remembers by context)
+    ctx.arg_regs = ["r0", "r1", "r2", "r3"]
+    ctx.reads = {"g": set(), "f": {"r0"}}
+    out = readable.transform("f", SNIPPET, context=ctx)
+    assert "r0 = g(r0);" in out and "extern u32 g(u32);" in out, out
+
+
 def test_without_z3_no_condition_is_rewritten(monkeypatch):
     monkeypatch.setattr(cexpr, "z3", None)
     text = tidied()
@@ -116,3 +135,67 @@ def test_a_load_is_abstracted_with_its_own_type():
     load = "*(volatile u8 *)p"
     assert cexpr.prove(expr("%s - 1 < 0" % load), expr("%s == 0" % load), c, as_bool=True)
     assert not cexpr.prove(expr("%s - 1 < 0" % load), expr("0"), c, as_bool=True)
+
+
+FRAME = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 g(u32, u32, u32, u32);
+u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r12 = 0;
+    u32 n = 0, z = 0, c = 0, v = 0;
+    u32 frame[4] __attribute__((aligned(8)));
+    u32 sp0 = (u32)&frame[4];
+    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)sp0;
+    *(volatile u32 *)(sp0 - 8) = r1;  /* 0: str r1, [sp, #8] */
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* 2: bl g */
+    r1 = *(volatile u32 *)(sp0 - 8);  /* 6: ldr r1, [sp, #8] */
+    r0 = r0 + r1;  /* 8: adds r0, r1 */
+    return r0;  /* a: pop {pc} */
+}
+"""
+
+
+def test_a_frame_word_nobody_else_sees_is_a_variable():
+    tree = cparse.parse(FRAME)
+    fn = tree.function("h")
+    tidy.tidy(fn)
+    text = cparse.unparse(fn, notes=False)
+    assert "sp0" not in text and "frame" not in text, text
+    assert "g(" in text and "return" in text, text
+    escaped = FRAME.replace("r0 = g(r0, r1, r2, r3);", "r0 = g(r0, sp0 - 8, r2, r3);")
+    tree = cparse.parse(escaped)
+    fn = tree.function("h")
+    tidy.tidy(fn)
+    text = cparse.unparse(fn, notes=False)
+    assert "*(volatile u32 *)(sp0 - 8)" in text, text      # (its address leaves: the frame stays)
+
+
+@needs_z3
+def test_a_carry_over_a_load_is_a_comparison_that_still_loads_once():
+    tree = cparse.parse(SNIPPET.replace(
+        "    { u32 x = r0, y = r3; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 4: cmp r0, r3 */\n"
+        "    if (!c || z) goto L_c;  /* 6: bls #0xc */",
+        "    c = (u32)((u64)r3 + (u32)~*(volatile u32 *)r1 + 1 >> 32);  /* 4: cmp r3, [r1] */\n"
+        "    if (!c) { r0 = 1u; }  /* 6: movlo r0, #1 */\n"
+        "    if (!c) { r2 = 5u; }  /* 6: movlo r2, #5 */\n"
+        "    goto L_c;  /* 7: b */"))
+    fn = tree.function("f")
+    tidy.tidy(fn)
+    text = cparse.unparse(fn, notes=False, style="readable")
+    assert text.count("*(volatile u32 *)r1") == 1, text
+    assert "if (0x10u < *(volatile u32 *)r1)" in text or "if (*(volatile u32 *)r1 > 0x10u)" in text, text
+    assert text.count("if (") == 1, text                # (the two conditional moves under one if)
+
+
+def test_an_if_that_writes_its_own_condition_inside_a_block_is_not_merged():
+    """An IT block's conditional compare (cmpne r0, #0) is a block inside the if and writes z, which
+    the next conditional instructions test: if (!z) { { z = r0 == 0; } } if (!z) r1 = 1; are two ifs."""
+    body = ("    if (!z) { { u32 x = r0; z = x == 0; } }  /* 4: cmpne r0, #0 */\n"
+            "    if (!z) { r1 = 0x1u; }  /* 6: movne r1, #1 */\n")
+    text = SNIPPET.replace(
+        "    { u32 x = r0, y = r3; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 4: cmp r0, r3 */\n"
+        "    if (!c || z) goto L_c;  /* 6: bls #0xc */\n", "    z = r1 == 0;  /* 3: cmp r1, #0 */\n" + body)
+    tree = cparse.parse(text)
+    fn = tree.function("f")
+    assert tidy.merge_ifs(fn) is False

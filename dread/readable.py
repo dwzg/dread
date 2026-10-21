@@ -21,6 +21,7 @@ Not yet: functions that never return and were accepted by the system run (they s
 """
 import argparse
 import os
+import re
 import sys
 
 from dread import cparse, structure, tidy
@@ -29,20 +30,90 @@ from dread import target as tgt
 STAGES = [("tidy", tidy.tidy), ("structure", structure.structure)]     # (name, function(tree)): in order
 
 
-_MEMO = {}          # (name, text, stages) -> the readable C: a check's rounds build the same again
+class Context:
+    """What the stages may know beyond the lifted file: the target's argument registers (in order) and
+    the registers each function reads at its entry (dread.regflow). Empty without a target."""
+
+    def __init__(self, target=None, image=None, program=None, flow=None):
+        self.arg_regs, self.reads, self.preserved, self.variadic = [], {}, {}, set()
+        if target is None:
+            return
+        from dread import regflow
+        from dread.program import Program
+        program = program or Program(target, image)
+        flow = flow or regflow.load(target, image, program)
+        self.arg_regs = list(target.abi.arg_regs)
+        self.reads = {fn.name: set(flow.read_regs(fn.name)) for fn in program.functions}
+        self.preserved = {fn.name: set(flow.preserved_regs(fn.name)) for fn in program.functions}
+        self.variadic = variadic_reach(program)
+
+    def unknown(self, name):
+        """Whether what a function reads cannot be told from regflow: it is variadic or calls one on
+        (regflow counts a variadic function's unnamed argument registers in its save area as no use,
+        right for the lifter, which passes them all; FreeRTOS's vAssertCalled hands its line number on
+        to printf, and trimmed to its first argument it printed garbage on clang -O2)."""
+        return self.variadic is None or name in self.variadic
+
+    def arity(self, name):
+        """How many argument registers a function reads at its entry, counted from the first up to the
+        last it reads; None when it is not known (unknown)."""
+        if name not in self.reads or self.unknown(name):
+            return None
+        return max((i + 1 for i, r in enumerate(self.arg_regs) if r in self.reads[name]), default=0)
 
 
-def transform(name, text, stages=None):
+def variadic_reach(program):
+    """The functions that are variadic (dread.regflow's save area) or call one directly (a wrapper
+    that hands its arguments on: vAssertCalled to printf); None when it cannot be worked out. Not
+    further up: nearly every FreeRTOS function calls vAssertCalled, with constants of its own. A
+    function that hands an argument on two levels down is not seen; the gate is there for it."""
+    try:
+        from dread.lift import direct_callees
+        from dread.regflow import variadic_save_area
+        found = set()
+        for fn in program.functions:
+            insns = [program.insn(a) for a in fn.insns]
+            joins = {fn.entry}
+            for insn in insns:
+                if insn is not None:
+                    kind, target, _ = program.arch.flow(insn)
+                    if kind == "jump" and target is not None:
+                        joins.add(target & ~1)
+            if variadic_save_area(program, fn, insns, joins):
+                found.add(fn.name)
+        calls = {fn.name: set(direct_callees(program, fn)) for fn in program.functions}
+    except Exception:
+        return None
+    return found | {name for name, callees in calls.items() if callees & found}
+
+
+class Run:
+    """One transform's state for the stages: the context, and the callees whose calls lost arguments
+    nobody reads ({name: arguments left}: their extern declarations follow)."""
+
+    def __init__(self, context):
+        self.context = context or Context()
+        self.trimmed = {}
+        self.returns = {}           # callee -> its declared result type (the file's extern declarations)
+
+
+_MEMO = {}          # (name, text, stages, context) -> the readable C: a check's rounds build the same again
+
+
+def transform(name, text, stages=None, context=None):
     """The readable C of a lifted file (text) whose function is name, or None when it is not the
     lifters' dialect (it then stays lifted). The file's other functions (an MSP430 file's helpers)
-    are printed as they were written."""
-    key = (name, text, id(STAGES if stages is None else stages))
+    are printed as they were written. context: a Context (the calls' arguments)."""
+    key = (name, text, id(STAGES if stages is None else stages), id(context))
     if key not in _MEMO:
-        _MEMO[key] = _transform(name, text, stages)
+        _MEMO[key] = _transform(name, text, stages, context)
     return _MEMO[key]
 
 
-def _transform(name, text, stages):
+EXTERN = re.compile(r"^extern (\w+) (\w+)\(([^)]*)\);$")
+
+
+def _transform(name, text, stages, context=None):
     try:
         tree = cparse.parse(text)
     except cparse.ParseError:
@@ -52,19 +123,30 @@ def _transform(name, text, stages):
         return None
     if tidy.fixed_registers(tree):         # (registers the C must keep as they are: behaviour)
         stages = []
+    run = Run(context)
+    for item in tree.items:
+        m = EXTERN.match(item.text) if isinstance(item, cparse.Raw) else None
+        if m:
+            run.returns[m.group(2)] = m.group(1)
     for _, stage in (STAGES if stages is None else stages):
-        stage(fn)
+        stage(fn, run)
+    for item in tree.items:                 # the callees' declarations as their calls now are
+        m = EXTERN.match(item.text) if isinstance(item, cparse.Raw) else None
+        if m and m.group(2) in run.trimmed:
+            params = [p.strip() for p in m.group(3).split(",")]
+            item.text = "extern %s %s(%s);" % (m.group(1), m.group(2),
+                                                ", ".join(params[:run.trimmed[m.group(2)]]) or "void")
     others = [f.name for f in tree.items if isinstance(f, cparse.Function) and f.name != name]
     return cparse.unparse(tree, verbatim=others, style="readable" if (STAGES if stages is None else stages)
                           else "lifted")
 
 
-def chooser(names):
+def chooser(names, context=None):
     """build.build's transform for the functions of names (the others stay lifted)."""
     names = set(names)
 
     def change(name, text):
-        return transform(name, text) if name in names else None
+        return transform(name, text, context=context) if name in names else None
     return change
 
 
@@ -74,7 +156,9 @@ def check(target, image, names=None, out=print, jobs=None):
     from dread import build, lift, overlay, regflow, runner
     from dread.program import Program
     program = Program(target, image)
-    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = Context(target, image, program, flow)
     work = os.path.join(target.build, "readable-check", image.name)
     lifted = build.read_names(image.table("lifted"))
     by_system = build.system_names(image.table("lifted"))
@@ -92,7 +176,7 @@ def check(target, image, names=None, out=print, jobs=None):
             except lift.Refused as e:
                 verdicts[name] = ("lifted", "no longer lifts: %s" % e)
                 continue
-            if result is None or transform(name, result.text) is None:
+            if result is None or transform(name, result.text, context=context) is None:
                 verdicts[name] = ("lifted", "its lifted C is not the dialect dread.cparse reads")
                 continue
             candidates.append(name)
@@ -111,7 +195,7 @@ def check(target, image, names=None, out=print, jobs=None):
         rounds += 1
         try:
             payload = build.build(target, image, out=work, lifted=base, quiet=True, lifter=lifter,
-                                  transform=chooser(accepted))
+                                  transform=chooser(accepted, context))
         except overlay.OverlayError as e:
             if e.function in accepted:
                 drop([e.function], "the overlay: %s" % e)
@@ -156,7 +240,7 @@ def check(target, image, names=None, out=print, jobs=None):
     whole_note = "not run"
 
     def whole(names):
-        return lift.whole_image(target, image, program, lifted, out, lifter, transform=chooser(names))
+        return lift.whole_image(target, image, program, lifted, out, lifter, transform=chooser(names, context))
     found = whole(accepted) if runs and accepted else None
     baseline = whole([]) if found else None
     if baseline:
@@ -233,7 +317,9 @@ def main(argv=None):
     from dread import lift, regflow
     from dread.program import Program
     program = Program(target, image)
-    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = Context(target, image, program, flow)
     if args.out:
         os.makedirs(args.out, exist_ok=True)
     status = 0
@@ -244,7 +330,7 @@ def main(argv=None):
             status = 1
             continue
         try:
-            text = transform(name, lifter.lift(fn).text)
+            text = transform(name, lifter.lift(fn).text, context=context)
         except lift.Refused as e:
             print("dread readable: %s does not lift: %s" % (name, e), file=sys.stderr)
             continue

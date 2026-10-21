@@ -81,9 +81,30 @@ its sources.
   12,512 (25 %), lines to 67 % of the lifted C's (the braces count); the gate on the nine builds as
   for the clean-up (every function it checks). Not yet: a switch (its function keeps its gotos), a
   loop with exits to several places beyond the one taken for its break.
-- [ ] **Variables.** Frame words as locals (regflow's frames), a register split into the variables it
-  holds, parameters and a result as dread.regflow and dread callconv measured them. Done when the
-  signatures are the measured conventions and the gate accepts as many as before.
+- [x] **Calls and parameters.** Parameters and a result as dread.regflow and dread callconv measured
+  them. Done when the signatures are the measured conventions and the gate accepts as many as
+  before. Done 2026-10-21 (dread.tidy trim_calls and params, readable.Context): a call passes the
+  argument registers its callee reads at its entry (regflow), every call of a callee or none, the
+  file's extern declaration following; a call whose value is read keeps the arguments in its
+  result registers (newlib's empty lock functions leave the lock's address as their result, which
+  __malloc_lock returns, and the lift check compares every function's result: trimmed to nothing,
+  ten FreeRTOS functions failed); a parameter the body only copies into its register's variable is
+  that variable, and trailing parameters nobody reads go. Calls of a variadic function or of one
+  that calls one directly keep all their arguments: regflow counts the unnamed argument registers a
+  variadic function keeps in its save area as no use (right for the lifter, which passes them all),
+  and vAssertCalled, which hands its line number on to printf, trimmed to one argument printed
+  garbage on clang -O2 (readable.variadic_reach; one level: nearly every FreeRTOS function calls
+  vAssertCalled with constants of its own). The gate as before on the builds tried.
+- [ ] **Variables.** Frame words as locals (regflow's frames: a word a function only stores and loads
+  itself, its address given to nobody), a register split into the variables it holds (each web of
+  definitions and uses a variable of its own). Done when the gate accepts as many as before.
+  So far (2026-10-21, dread.tidy frame_locals): the frame's words as variables (s36 for sp0 - 36)
+  where no frame address leaves the function, every slot has one type and none overlaps, and no slot
+  is read before something stores it; then the other passes treat them as any variable (a register
+  spilled and reloaded becomes a copy). Open: frames whose address goes to a callee (FreeRTOS's
+  TimeOut_t on xQueueGenericSend's stack: the frame stays whole), the register webs. MSP430 (paused):
+  ulTaskGenericNotifyTake's readable C makes every case stack-dependent (refused, so it stays
+  lifted), not traced; its critical sections are asm on the real stack beside the lifted frame.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
 - [ ] **The pilot on the draft.** The pilot asks for names and types on the readable C instead of
@@ -249,6 +270,13 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     room for stack arguments moves with the stack since (Machine.call, also for dread integration's
     check): the planted mistake now FAILs in udivmodsi4's own cases. The firm-up tries 4 and 1
     before 0 (0 copies nothing and tells least).
+    Measured 2026-10-21 (measure-38, from a worktree at b2b26fb: generator 33 with the carried cases
+    before their fix for fragile ones, the loop cases' length, the switches seeded, pointer tail
+    calls, regflow 24; the GCC 4.9 to 8 builds; 5 h 20 min, 238,500 s of CPU): all 39 builds, 11,330
+    of 13,684 functions lifted (82.8 %), +605 and -21 against each build's last measurement. The
+    losses are the ones traced above: seven on GCC -O0 (search luck and fragile cases), one or two on
+    the -O2 builds (the same, their caches made anew from generator 31's). MSP430 (paused): dread
+    callconv disagrees with regflow on all 162 functions it measured, not looked at.
     callconv against regflow: 0 to 3 functions a build disagree on ARM and RISC-V: printf's r0 and
     sprintf's r1 on ARM GCC (named arguments loaded back from the save area: regflow 21, after this
     measurement), sprintf's a2 on RISC-V GCC 10 (an unnamed argument: listed apart since). On MSP430
