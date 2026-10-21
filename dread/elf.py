@@ -1,14 +1,17 @@
-"""A small reader of 32-bit little-endian ELF files: sections, program headers, symbols.
+"""A small reader of 32-bit little-endian ELF files: sections, program headers, symbols, and the
+relocations of an object file.
 
 Enough for what DREAD takes from an ELF: the image bytes as they lie in flash (what
 `objcopy -O binary` writes), the sections the startup copies elsewhere, the function and data
 symbols, and ARM's mapping symbols ($a, $t, $d), which mark code of either instruction set and data
-inside a section. No binutils needed.
+inside a section; from an object (a library's member, dread.whatcc) where the linker writes into a
+section. No binutils needed.
 """
 import struct
 
 SHT_NOBITS = 8
 SHT_SYMTAB = 2
+SHT_RELA, SHT_REL = 4, 9
 SHF_ALLOC = 0x2
 SHF_EXECINSTR = 0x4
 PT_LOAD = 1
@@ -20,9 +23,10 @@ class ElfError(Exception):
 
 
 class Section:
-    def __init__(self, name, kind, flags, addr, offset, size, link, align=1):
+    def __init__(self, name, kind, flags, addr, offset, size, link, align=1, info=0):
         self.name, self.kind, self.flags, self.addr = name, kind, flags, addr
         self.offset, self.size, self.link, self.align = offset, size, link, max(align, 1)
+        self.info = info                        # a relocation section's: the section it applies to
         self.lma = addr                         # set from the program headers
 
     @property
@@ -50,10 +54,12 @@ class Symbol:
 
 
 class Elf:
-    def __init__(self, path):
-        with open(path, "rb") as f:
-            self.raw = f.read()
-        raw = self.raw
+    def __init__(self, path, raw=None):
+        """path: the file; raw: its bytes when they are at hand already (an archive's member)."""
+        if raw is None:
+            with open(path, "rb") as f:
+                raw = f.read()
+        self.raw = raw
         if raw[:4] != b"\x7fELF":
             raise ElfError("%s is not an ELF file" % path)
         if raw[4] != 1 or raw[5] != 1:
@@ -63,8 +69,8 @@ class Elf:
         self.sections = []
         heads = [struct.unpack_from("<IIIIIIIIII", raw, shoff + i * shentsize) for i in range(shnum)]
         names = heads[shstrndx][4] if shnum else 0
-        for (name, kind, flags, addr, offset, size, link, _, align, _) in heads:
-            self.sections.append(Section(self._str(names, name), kind, flags, addr, offset, size, link, align))
+        for (name, kind, flags, addr, offset, size, link, info, align, _) in heads:
+            self.sections.append(Section(self._str(names, name), kind, flags, addr, offset, size, link, align, info))
         self.segments = []
         for i in range(phnum):
             (kind, offset, vaddr, paddr, filesz, memsz, flags, _) = struct.unpack_from(
@@ -136,6 +142,22 @@ class Elf:
                 raise ElfError("section at 0x%x lies before the base 0x%x" % (lma, start))
             out[lma - start:lma - start + len(data)] = data
         return bytes(out), start
+
+    def relocations(self, index):
+        """[(offset in the section, type, symbol index, addend)] of the relocations that apply to the
+        section with that index (REL: addend 0, it lies in the section; RELA: given)."""
+        out = []
+        for s in self.sections:
+            if s.kind not in (SHT_REL, SHT_RELA) or s.info != index:
+                continue
+            step = 12 if s.kind == SHT_RELA else 8
+            for k in range(s.size // step):
+                if s.kind == SHT_RELA:
+                    offset, info, addend = struct.unpack_from("<IIi", self.raw, s.offset + k * step)
+                else:
+                    (offset, info), addend = struct.unpack_from("<II", self.raw, s.offset + k * step), 0
+                out.append((offset, info & 0xFF, info >> 8, addend))
+        return sorted(out)
 
     def mapping(self):
         """Mapping symbols as {section index: [(address, kind)]}, kind "a32", "t32", "code" or "data",

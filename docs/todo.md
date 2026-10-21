@@ -406,7 +406,18 @@ across compilers and replacing shape catalogues with analyses, not a profile per
 - [ ] **`dread whatcc` by matching**: a function's C compiled with many compilers and options until
   the bytes match the original's, as matching decompilation does (decomp.me); on Compiler Explorer
   for open targets only, with a Compiler Explorer of our own in podman for private ones (C written
-  from a private image must not leave the machine).
+  from a private image must not leave the machine). First step done 2026-10-21, without C: the
+  libraries. dread whatcc takes the C library, libgcc and libm of every toolchain image (and the
+  host's, and archives given with --archive: a vendor's at work, kept local) for the image's
+  multilib, makes each library function a signature (its bytes, the relocated ones masked) and
+  compares them at every function entry of the image. On the benchmark's ARM builds 26 to 49
+  functions match; the toolchain with the most is the one that linked the build wherever their
+  libraries differ, and a tie otherwise (Debian 11's and Ubuntu 20.04's newlib give FreeRTOS the same
+  35 functions; said as a tie); every name given as certain is right (23 of 23 on GCC 7's build, 39
+  of 39 on the M4F's). Names that land on several functions are given as ambiguous (newlib's __errno
+  has the code of every getter: FreeRTOS's xTaskGetTickCount; the nosys stubs), and a match whose
+  calls go to functions matched under other names is dropped. Left: RISC-V (its linker relaxes calls
+  and shortens linked code: 3 to 12 functions match there), and compiled C (the item itself).
 - [ ] **Tests that state properties, not one compiler's output**: the tests that compile snippets
   checked for what they assume of the code (three CI failures on 2026-10-20 were such assumptions);
   the snippet tests run in the CI job of the older distribution too. 2026-10-21: the whole suite
