@@ -276,10 +276,24 @@ across compilers and replacing shape catalogues with analyses, not a profile per
 - [ ] **Tests that state properties, not one compiler's output**: the tests that compile snippets
   checked for what they assume of the code (three CI failures on 2026-10-20 were such assumptions);
   the snippet tests run in the CI job of the older distribution too.
-- [ ] **The pilot without names**: Haiku's inputs on a copy of the GCC -Os build with every name made
+- [x] **The pilot without names**: Haiku's inputs on a copy of the GCC -Os build with every name made
   FUN_address and the calls' names gone too: how much of what it finds comes from knowing FreeRTOS
   (open source, its names in the listing) and how much from reading the code. Private firmware has
-  no names.
+  no names. Done 2026-10-21, on copies of measure-33's GCC -Os build (26 functions with 142 missed
+  instructions), one with every function renamed FUN_address (dread rename) and the data symbols
+  dropped (strings in the image stay, as in a private firmware), Haiku 5.5's --task input three
+  times each:
+  - The question as it was: named 7, 9, 10 functions covered whole and 37, 44, 47 instructions;
+    nameless 6, 6, 7 and 27, 27, 30 ($0.15 to $0.36 a run). Names won every time on vTaskDelete,
+    xTaskGetHandle and vTaskSuspend: there Haiku set up FreeRTOS's lists by what the names say.
+    Without them it wrote that it could not see the helpers' code, and its inputs faulted inside
+    them, which the tools reported only as "does not finish".
+  - With the callees' listings in the question and a stopped input told where and why (pilot
+    --task input since): named 11, 10, 9 and 44, 50, 36; nameless 9, 11, 10 and 47, 52, 47. The gap
+    is gone: nameless vTaskSuspend went from 0 of 13 in all three runs to 8, 10, 8. A run costs about
+    two and a half times as much ($0.72 to $0.84: 2.1 to 2.6 million tokens in, the listings).
+    Not separated: what the listings and what the stop reasons each bring (a named run with stop
+    reasons only would say whether named firmware needs the listings, which cost most).
 
 
 ## Compiler lab (`dread cclab`; the user, 2026-10-19: before anything else)
