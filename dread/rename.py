@@ -2,6 +2,7 @@
 
 A function's name is in the image's function table and in symbols.txt (where a regenerated table
 takes its names from), and other files refer to it by name:
+- the target file: an image's entry (entry = "name") and [abi] stack_args' keys;
 - the lifted table, the argued survivors and kept registers (argued.tsv, kept.tsv);
 - the case files (auto("name"), case("name", ...), entry("name") and any other quoted name), and
   the files they read (a file of cases shared by several targets, say);
@@ -129,6 +130,20 @@ def plan(target, image, pairs, outside=False):
         return "".join(pairs[l.strip()] + "\n" if l.strip() in pairs and not l.startswith("#") else l
                        for l in text.splitlines(True))
 
+    keys = re.compile(r"\b(%s)(\s*=)" % "|".join(re.escape(o) for o in sorted(pairs, key=len, reverse=True)))
+
+    def target_file(text):
+        """An image's entry and [abi] stack_args' keys (an inline table: one line)."""
+        out = []
+        for line in text.splitlines(True):
+            if re.match(r'\s*entry\s*=\s*"', line):
+                line = quoted.sub(lambda m: m.group(1) + pairs[m.group(2)] + m.group(1), line)
+            elif re.match(r"\s*stack_args\s*=", line):
+                line = keys.sub(lambda m: pairs[m.group(1)] + m.group(2), line)
+            out.append(line)
+        return "".join(out)
+
+    edit(target.file, target_file)
     for img in images:
         mine = {o: n for o, n in pairs.items() if o in programs[img.name].by_name}
         if not mine:

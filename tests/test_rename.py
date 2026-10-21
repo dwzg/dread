@@ -73,3 +73,16 @@ def test_a_renamed_function_builds_and_agrees(gizmo):
     lines = []
     failed, uncovered, results = runner.run(["buzzer_start", "cmd_beep"], only=True, out=lines.append, jobs=4)
     assert not failed and not uncovered and len(results) == 2, "\n".join(lines)
+
+
+@needs_gcc
+def test_the_entry_in_the_target_file_follows(gizmo):
+    """The image's entry names a function in the target file (entry = "Reset_Handler"): it follows
+    the rename, or the target no longer loads (found renaming every function of a FreeRTOS build to
+    FUN_address for the pilot without names)."""
+    target, image = gizmo
+    old = next(fn.name for fn in Program(target, image).functions if fn.entry == image.entry & ~1)
+    rename.rename(target, image, {old: "start_here"}, outside=True)
+    again = Target.load(target.file)
+    assert 'entry = "start_here"' in open(target.file).read()
+    assert Program(again, again.image()).by_name["start_here"].entry == again.image().entry & ~1
