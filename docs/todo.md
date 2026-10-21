@@ -476,7 +476,11 @@ undone). Other decisions are taken by the recommended option and written down in
   _zicsr), `riscv_toml` writes both into a test's target; CI installs Ubuntu's RISC-V GCC (13.2 on
   24.04, 10.2 on 22.04). Checked with the images: the nine pass with GCC 10.2, 12.2, 13.2 and the
   host's 16 (six failed with GCC 10 before, all on the -march), the compiler lab's RISC-V test with
-  10.2 and 13.2.
+  10.2 and 13.2. CI's first run with both (2026-10-21, run 39534455108): green on all three jobs,
+  578 passed and 27 skipped each (35 skipped the day before), none of the skips a RISC-V or newlib
+  test. The distributions CI does not cover, by bin/with-toolchain: Debian 12 (GCC 12.2, clang 16)
+  596 passed; Debian 13 (GCC 14.2, clang 19) one test that assumed GCC stores sp itself at -O2
+  (fixed the same night: its C cases skip with the reason, an asm case has the shape).
 
 ## Performance, first pass
 
