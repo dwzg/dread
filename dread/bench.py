@@ -23,6 +23,9 @@ it measures what DREAD makes of the image, running its tools as they are run on 
 - noreturn: the functions found never to return;
 - callconv: dread callconv, the registers each function's cases show it reads and changes, against
   dread.regflow's answers: the functions that disagree, by kind and by name;
+- whatcc: dread whatcc, which toolchain's libraries the image links by the bytes of their functions,
+  against the toolchain that built it (its image, or the host's), and how many of the names it gives
+  as certain are the functions' own;
 - the seconds each step took.
 
 A build keeps a digest of what in the recipe made it (build.json, made_from): measuring a build
@@ -73,7 +76,7 @@ compiler gives (cc --version), which the report shows: a compiler's version deci
     dread bench toolchain NAME... [--rebuild] [--prune]
     dread bench fetch RECIPE
     dread bench build RECIPE [BUILD...]
-    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,noreturn,callconv]
+    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,noreturn,callconv,whatcc]
     dread bench report RECIPE
     dread bench all RECIPE [BUILD...] [--steps ...]
 """
@@ -87,7 +90,7 @@ import subprocess
 import sys
 import time
 
-STEPS = ("asm", "ghidra", "lift", "record", "noreturn", "callconv")
+STEPS = ("asm", "ghidra", "lift", "record", "noreturn", "callconv", "whatcc")
 RECORDABLE = ("UNCOVERED", "[case generation]")     # refusals that recorded inputs may lift
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -489,6 +492,23 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
                                    "disagree": {n: r["found"] for n, r in data["functions"].items() if r["found"]}}
         else:
             metrics["callconv"] = {"ran": False, "seconds": round(seconds, 1)}
+    if "whatcc" in steps:
+        found = os.path.join(where, "work", "whatcc.json")
+        seconds, code, text = dread("whatcc", "--target", where, "--json", found,
+                                    log=os.path.join(where, "work", "whatcc.log"))
+        try:
+            with open(os.path.join(where, "build.json")) as f:
+                truth = json.load(f).get("toolchain") or "host"
+        except (OSError, ValueError):
+            truth = None
+        if code == 0 and os.path.exists(found):
+            with open(found) as f:
+                s = json.load(f)
+            metrics["whatcc"] = {"ran": True, "truth": truth, "best": s["best"], "right": truth in s["best"],
+                                 "matched": s["matched"], "sure": s["sure"], "agree": s["agree"],
+                                 "seconds": round(seconds, 1)}
+        else:
+            metrics["whatcc"] = {"ran": False, "seconds": round(seconds, 1)}
     if "lift" in steps and earlier is not None and "accepted" in metrics.get("lift", {}):
         now = set(metrics["lift"]["accepted"])
         metrics["lift"]["against_last"] = {"gained": sorted(now - set(earlier)), "lost": sorted(set(earlier) - now)}
@@ -657,6 +677,16 @@ def report(recipe, bench=None, out=print):
             m["build"], compiler_cell(m), sum(n for v, n in lf["verdicts"].items() if v != "accepted"),
             " | ".join(str(counts.get(c, 0)) for c in CATEGORIES), sum(refused.values()),
             "%d x %s" % (top[1], top[0][len("refused: "):]) if top else "-"))
+    if any(m.get("whatcc", {}).get("ran") for m in rows):
+        lines += ["", "## Library functions by their bytes (dread whatcc)", "",
+                  "| build | built with | best (ties) | right | functions matched | named as certain | "
+                  "of those right |", "|---|---|---|---|---|---|---|"]
+        for m in rows:
+            w = m.get("whatcc", {})
+            if w.get("ran"):
+                lines.append("| %s | %s | %s | %s | %d | %d | %d |" % (
+                    m["build"], w.get("truth") or "-", ", ".join(w["best"]) or "-", "yes" if w["right"] else "no",
+                    w["matched"], w["sure"], w["agree"]))
     for m in rows:
         reasons = m.get("lift", {}).get("reasons")
         if reasons:

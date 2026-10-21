@@ -82,6 +82,27 @@ def test_a_local_recipe_builds_and_measures(tmp_path, monkeypatch):
     assert "| m3-Os | arm-none-eabi-gcc " in report and "identical" in report     # (its --version line)
 
 
+@needs_gcc
+def test_the_whatcc_step_names_the_toolchain_that_linked_the_build(tmp_path, monkeypatch):
+    """bench's whatcc step: dread whatcc on the build, its best toolchains against the one that built
+    it (the host's here), how many names it gives as certain and how many of those are the
+    functions' own; a section of the report. (The host's compilers only here: a machine with podman
+    would otherwise build every toolchain image first.)"""
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    real = bench.dread
+    monkeypatch.setattr(bench, "dread", lambda *a, **k: real(*(a + ("--no-toolchains",) if a[0] == "whatcc" else a),
+                                                             **k))
+    r = recipe(tmp_path)
+    bench.build(r, "m3-Os", out=lambda *a: None)
+    metrics = bench.measure(r, "m3-Os", steps=("whatcc",), out=lambda *a: None)
+    w = metrics["whatcc"]
+    assert w["ran"] and w["truth"] == "host" and w["best"] == ["host"] and w["right"], w
+    assert w["matched"] >= 1 and w["agree"] == w["sure"] >= 1, w     # (libgcc's functions the build links)
+    report = open(bench.report(r, out=lambda *a: None)).read()
+    assert "## Library functions by their bytes (dread whatcc)" in report
+    assert "| m3-Os | host | host | yes |" in report
+
+
 def test_a_toolchain_runs_the_compiler_in_its_container(tmp_path, monkeypatch):
     """A build that names a toolchain compiles and links in that image's container, the source
     read-only and the build's directory writable at their own paths, without network; its image is

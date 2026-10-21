@@ -29,8 +29,13 @@ library function with a relaxed call does not match byte for byte (one without c
 benchmark's RISC-V builds 3 to 12 functions match, against 26 to 49 on ARM.
 
     dread whatcc [--target DIR] [--image NAME] [--toolchain NAME...] [--archive PATH...] [--no-host]
-                 [--no-toolchains]
+                 [--no-toolchains] [--json FILE]
+
+--json writes a summary for dread bench: the best toolchains (ties included), how many functions
+matched, how many got a name no other function gets, and how many of those agree with the name the
+function has.
 """
+import json
 import argparse
 import hashlib
 import os
@@ -267,7 +272,7 @@ def report(program, found, versions):
     for g in ranking:
         alone = sum(1 for e in found[g] if by_entry[e] == {g})
         lines.append("%-14s %4d %5d  %s" % (g, len(found[g]), alone, versions.get(g) or ""))
-    best = ranking[0] if ranking else None
+    best = ranking[0] if ranking and found[ranking[0]] else None     # (none where nothing matched)
     if best is not None:
         tied = [g for g in ranking if g != best and set(found[g]) == set(found[best])]
         lines.append("best: %s%s" % (best, " = " + ", ".join(tied) + " (the same functions: a tie)" if tied else ""))
@@ -298,6 +303,7 @@ def main(argv=None):
     parser.add_argument("--archive", action="append", default=[], help="an archive or object of one's own")
     parser.add_argument("--no-host", action="store_true", help="leave out the host's compilers")
     parser.add_argument("--no-toolchains", action="store_true", help="no toolchain images (no podman)")
+    parser.add_argument("--json", help="write a summary here")
     args = parser.parse_args(argv)
     from dread.program import Program
     target = tgt.Target.load(args.target)
@@ -339,6 +345,11 @@ def main(argv=None):
             f.write("0x%x\t%s\t%s\t%s\t%s\n" % (entry, have, ",".join(names_), ",".join(amb), ",".join(groups_)))
     with open(os.path.join(out_dir, "toolchains.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")
+    if args.json:
+        tied = [g for g in found if best is not None and set(found[g]) == set(found[best])]
+        with open(args.json, "w") as f:
+            json.dump({"best": sorted(tied, key=lambda g: g != best), "matched": len(rows), "sure": len(sure),
+                       "agree": agree, "toolchains": {g: len(found[g]) for g in found}}, f, indent=1)
     return 0
 
 
