@@ -186,3 +186,58 @@ def test_the_pilot_names_the_globals_before_the_variables(tmp_path):
     out = readable.transform("uart_putc", lifter.lift(program.by_name["uart_putc"]).text,
                              context=readable.Context(target, image, program, flow))
     assert "#define UART_DATA (*(volatile u32 *)0x40011000u)" in out and "UART_DATA = c_r0;" in out, out
+
+
+def plan_with(number):
+    from dread import shapes
+    p = shapes.Plan()
+    p.structs = {"s_%d" % number: [(0, "u32"), (4, "u32"), (8, "u16")]}
+    p.typed = {"get": {"r0": "s_%d" % number}, "put": {"r1": "s_%d" % number}}
+    return p
+
+
+def test_a_structure_s_names_follow_its_anchors_and_hold_only_as_c_names():
+    """An entry goes to the structure its anchors point to now (the numbers change whenever the plan
+    is made anew); a name that is a keyword, a global's macro or a default name is left out."""
+    entries = {"get:r0": {"name": "Item", "fields": {"0": "value", "4": "next", "8": "u32", "12": "gone"},
+                          "anchors": ["get:r0", "put:r1"]}}
+    assert naming.struct_names(plan_with(1), entries) == {"s_1": ("Item", {0: "value", 4: "next"})}
+    assert naming.struct_names(plan_with(7), entries) == {"s_7": ("Item", {0: "value", 4: "next"})}
+    assert naming.struct_names(plan_with(1), entries, taken={"Item"}) == {}
+    assert naming.struct_names(plan_with(1), {"get:r0": {"name": "s_3", "anchors": ["get:r0"]}}) == {}
+
+
+def test_named_structures_and_fields_in_the_c():
+    from dread import shapes
+    text = ("/* get */\n#include \"dread.h\"\nu32 get(u32 r0)\n{\n"
+            "    return *(volatile u32 *)(r0 + 4) + *(volatile u16 *)(r0 + 8);\n}\n")
+    tree = cparse.parse(text)
+    names = {"s_1": ("Item", {4: "next"})}
+    assert shapes.apply_types(tree, tree.function("get"), plan_with(1), names=names) == ["s_1"]
+    out = cparse.unparse(tree, notes=False)
+    assert "struct Item\n{\n    u32 f_0;\n    u32 next;\n    u16 f_8;\n};" in out, out
+    assert "u32 get(volatile struct Item *r0)" in out and "return r0->next + r0->f_8;" in out, out
+
+
+def test_the_pilot_names_structures_from_their_uses(tmp_path):
+    from conftest import GIZMO
+    from dread import llm, pilot
+    from dread.program import Program
+    from dread.target import Target
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    target = Target.load(str(copy / "m3"))
+    image = target.image()
+    asked = []
+
+    def answer(messages):
+        asked.append(messages[0]["content"])
+        return '```json\n{"s_1": {"name": "Item", "fields": {"f_4": "next", "f_8": "while"}}}\n```'
+    uses = {"s_1": [("get", "return r0->f_4 + r0->f_8;"), ("put", "r1->f_0 = 0u;")]}
+    lines = []
+    assert pilot.name_structs(target, image, Program(target, image), llm.Scripted(answer), plan_with(1), uses,
+                              ["s_1"], out=lines.append) == 1
+    assert "struct s_1\n{" in asked[0] and "get: return r0->f_4 + r0->f_8;" in asked[0], asked
+    entry = naming.load(image, "structs")["get:r0"]
+    assert entry["name"] == "Item" and entry["anchors"] == ["get:r0", "put:r1"], entry
+    assert naming.struct_names(plan_with(3), naming.load(image, "structs")) == {"s_3": ("Item", {4: "next"})}

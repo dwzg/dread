@@ -497,3 +497,99 @@ def score(program, image, elf_path):
         totals["locals"] += len(local_names)
         totals["local_hits"] += hits
     return rows, totals
+
+
+DEFAULT_STRUCT = re.compile(r"^(s_\d+|f_[0-9a-f]+|pad_[0-9a-f]+)$")
+
+
+def struct_names(plan, entries, taken=()):
+    """{s_N: (name, {offset: field name})} of the plan's structures (dread.shapes) that the table's
+    structs part names. An entry carries anchors, the function:variable pairs that pointed to its
+    structure when it was named; it goes to the structure that shares most of them now (the numbers
+    s_N change whenever the plan is made anew), its field names to the offsets the structure still
+    has. A name that is no C identifier, a keyword, one of taken (the globals' names: macros, which
+    would expand inside a tag or a member) or a default name (s_3, f_2c) is left out; a name two
+    entries give goes to the structure with more anchors."""
+    pointing = {}
+    for f, variables_ in plan.typed.items():
+        for v, k in variables_.items():
+            pointing.setdefault(k, set()).add("%s:%s" % (f, v))
+    choices = []
+    for key, entry in entries.items():
+        anchors = set(entry.get("anchors", [key]))
+        for k, ps in pointing.items():
+            n = len(anchors & ps)
+            if n:
+                choices.append((n, key, k))
+    bad = set(KEYWORDS) | set(taken)
+
+    def good(name):
+        return isinstance(name, str) and IDENT.match(name) and name not in bad and not DEFAULT_STRUCT.match(name)
+    out, used_entries, used_names = {}, set(), set()
+    for n, key, k in sorted(choices, key=lambda c: (-c[0], c[1], c[2])):
+        if k in out or key in used_entries:
+            continue
+        entry = entries[key]
+        name = entry.get("name")
+        if not good(name) or name in used_names:
+            continue
+        offsets = {off for off, _ in plan.structs.get(k, [])}
+        fields, seen = {}, set()
+        for off, fname in sorted((entry.get("fields") or {}).items(), key=lambda kv: int(kv[0])):
+            off = int(off)
+            if off in offsets and good(fname) and fname not in seen:
+                fields[off] = fname
+                seen.add(fname)
+        out[k] = (name, fields)
+        used_entries.add(key)
+        used_names.add(name)
+    return out
+
+
+def struct_anchors(plan, k):
+    """The function:variable pairs pointing to structure k of the plan, sorted."""
+    return sorted("%s:%s" % (f, v) for f, variables_ in plan.typed.items() for v, kk in variables_.items() if kk == k)
+
+
+def score_structs(program, plan, names, elf_path):
+    """The structures' and fields' names against the source's (debug information): for each typed
+    parameter whose source type is a pointer to a structure, our structure's name against the names
+    of that type (its typedefs and its tag, as compared below), and each named field against the
+    member names on the way to the source's leaf at its offset (xStateListItem, pxNext). Each pair of
+    our structure and the source's counted once. Names compare without case and a trailing _t:
+    exactly, or by a shared word (words). ([rows], totals)."""
+    from dread import shapes
+    src = shapes.source_params(elf_path)
+    regs = list(program.target.abi.arg_regs)
+    rows, seen = [], set()
+    totals = {"structs": 0, "exact": 0, "words": 0, "fields": 0, "field_exact": 0, "field_words": 0}
+
+    def norm(n):
+        return re.sub(r"_t$", "", n.lower())
+    for f, variables_ in sorted(plan.typed.items()):
+        fn = program.by_name.get(f)
+        members = src.get(fn.entry, {}) if fn is not None else {}
+        for v, k in sorted(variables_.items()):
+            if v not in regs or k not in names or regs.index(v) not in members:
+                continue
+            tnames, leaves = members[regs.index(v)]
+            if (k, tnames[-1]) in seen:
+                continue
+            seen.add((k, tnames[-1]))
+            mine, fields = names[k]
+            by_off = {off: path for (off, _size), path in leaves.items() if path}
+            row = {"struct": k, "name": mine, "source": tnames, "exact": any(norm(mine) == norm(t) for t in tnames),
+                   "words": any(words(mine) & words(t) for t in tnames), "fields": []}
+            for off, fname in sorted(fields.items()):
+                path = by_off.get(off)
+                if path:
+                    row["fields"].append((fname, ".".join(path), fname.lower() == path[-1].lower(),
+                                          any(words(fname) & words(p) for p in path)))
+            totals["structs"] += 1
+            totals["exact"] += row["exact"]
+            totals["words"] += row["words"]
+            totals["fields"] += len(row["fields"])
+            totals["field_exact"] += sum(1 for x in row["fields"] if x[2])
+            totals["field_words"] += sum(1 for x in row["fields"] if x[3])
+            rows.append(row)
+    return rows, totals

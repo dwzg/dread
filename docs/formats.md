@@ -121,6 +121,15 @@ io`), `rom_c6e4` (a rom region), `g_20029aac` (anything else), with the type for
 than a u32 one (`g_20029aac_u8`). The pilot asks for these before the functions' variables; they
 need no digest, since an address does not change with the transformations.
 
+Its `structs` part names the structures of the readable_types plan and their fields:
+`{"FUNCTION:VARIABLE": {"name", "fields": {"OFFSET": name}, "anchors": ["FUNCTION:VARIABLE", ...],
+"by"}}`. The anchors are the variables that pointed to the structure when it was named; an entry
+goes to the plan's structure that most of them point to now (its number s_N changes whenever the
+plan is made anew), its field names to the offsets that structure still has (dread.naming
+struct_names). A name that is a keyword, a global's name (a macro: it would expand inside a tag or a
+member) or a default name (s_3, f_2c) is not used. The pilot asks for these after the globals and
+before the functions' variables, which then see the names.
+
 ### `readable_types.json` (`readable_types`)
 
 The structures readable C declares (dread.shapes): `{"version": 1, "structs": {NAME: [[offset,

@@ -732,6 +732,14 @@ def fields_at(s, location):
 def source_layouts(elf_path):
     """{function entry: {parameter index: (struct name, {(offset, size)} of its members' leaves)}} of
     the parameters that are pointers to a structure, from the ELF's debug information."""
+    return {entry: {i: (names[-1], set(leaves)) for i, (names, leaves) in params.items()}
+            for entry, params in source_params(elf_path).items()}
+
+
+def source_params(elf_path):
+    """{function entry: {parameter index: ([the type's names, its typedefs first and the structure's
+    tag last], {(offset, size): [the member names on the way to that leaf]})}} of the parameters that
+    are pointers to a structure, from the ELF's debug information (pyelftools)."""
     from elftools.elf.elffile import ELFFile
     out = {}
     complete = {}                           # struct name -> its definition (a file that only declares it:
@@ -756,7 +764,7 @@ def source_layouts(elf_path):
             return 4
         return None
 
-    def leaves(die, base, into, depth=0):
+    def leaves(die, base, into, depth=0, path=()):
         die = strip(die)
         if die is None or depth > 6:
             return
@@ -766,7 +774,9 @@ def source_layouts(elf_path):
                     continue
                 loc = m.attributes.get("DW_AT_data_member_location")
                 off = loc.value if loc is not None and isinstance(loc.value, int) else 0
-                leaves(m.get_DIE_from_attribute("DW_AT_type"), base + off, into, depth + 1)
+                mname = m.attributes.get("DW_AT_name")
+                leaves(m.get_DIE_from_attribute("DW_AT_type"), base + off, into, depth + 1,
+                       path + ((mname.value.decode(errors="replace"),) if mname else ()))
         elif die.tag == "DW_TAG_array_type":
             elem = die.get_DIE_from_attribute("DW_AT_type") if "DW_AT_type" in die.attributes else None
             esize = size_of(elem) if elem is not None else None
@@ -779,11 +789,22 @@ def source_layouts(elf_path):
                         count = sub.attributes["DW_AT_upper_bound"].value + 1
             if esize and count:
                 for k in range(min(count, 64)):
-                    leaves(elem, base + k * esize, into, depth + 1)
+                    leaves(elem, base + k * esize, into, depth + 1, path)
         else:
             size = size_of(die)
             if size:
-                into.add((base, size))
+                into.setdefault((base, size), list(path))
+
+    def type_names(die):
+        """The names on the way from a parameter's pointer target to its structure."""
+        names = []
+        while die is not None and die.tag in ("DW_TAG_typedef", "DW_TAG_const_type", "DW_TAG_volatile_type"):
+            if die.tag == "DW_TAG_typedef" and "DW_AT_name" in die.attributes:
+                names.append(die.attributes["DW_AT_name"].value.decode(errors="replace"))
+            if "DW_AT_type" not in die.attributes:
+                return names, None
+            die = die.get_DIE_from_attribute("DW_AT_type")
+        return names, die
 
     with open(elf_path, "rb") as f:
         dwarf = ELFFile(f).get_dwarf_info()
@@ -801,14 +822,18 @@ def source_layouts(elf_path):
                 for p in die.iter_children():
                     if p.tag != "DW_TAG_formal_parameter":
                         continue
-                    t = strip(p.get_DIE_from_attribute("DW_AT_type")) if "DW_AT_type" in p.attributes else None
+                    handle, t = type_names(p.get_DIE_from_attribute("DW_AT_type")) if "DW_AT_type" in p.attributes \
+                        else ([], None)
+                    t = strip(t)
                     if t is not None and t.tag == "DW_TAG_pointer_type" and "DW_AT_type" in t.attributes:
-                        target = strip(t.get_DIE_from_attribute("DW_AT_type"))
+                        names, target = type_names(t.get_DIE_from_attribute("DW_AT_type"))
+                        target = strip(target)
                         if target is not None and target.tag in ("DW_TAG_structure_type", "DW_TAG_union_type"):
-                            into = set()
+                            into = {}
                             leaves(target, 0, into)
                             name = target.attributes.get("DW_AT_name")
-                            out.setdefault(entry, {})[k] = (name.value.decode() if name else "?", into)
+                            out.setdefault(entry, {})[k] = (handle + names + [name.value.decode() if name else "?"],
+                                                            into)
                     k += 1
     return out
 
@@ -1025,13 +1050,19 @@ def layout(kind):
     return rows
 
 
-def struct_text(name, rows):
-    """The C definition of a structure with these fields, gaps filled with bytes."""
+def field_name(fields, rel):
+    """A field's name: fields' ({offset: name}, from the readable_names table) or f_<offset>."""
+    return (fields or {}).get(rel) or "f_%x" % rel
+
+
+def struct_text(name, rows, fields=None):
+    """The C definition of a structure with these fields, gaps filled with bytes; fields: their names
+    by offset where they have one."""
     lines, pos = ["struct %s" % name, "{"], 0
     for rel, ctype in rows:
         if rel > pos:
             lines.append("    u8 pad_%x[%d];" % (pos, rel - pos))
-        lines.append("    %s f_%x;" % (ctype, rel))
+        lines.append("    %s %s;" % (ctype, field_name(fields, rel)))
         pos = rel + SIZES[ctype]
     lines.append("};")
     return "\n".join(lines)
@@ -1106,7 +1137,10 @@ def plan(s, trees, digests=None, least=2):
             if len(seen) == 1 and None not in seen:
                 pointing.setdefault(next(iter(seen)), []).append((fn.name, v))
     out = Plan()
-    eligible = [k for k in ks if ks[k].base is not None and len(layout(ks[k])) >= least and k in pointing]
+    # (a structure has a field wider than a byte: bytes alone are a buffer walked, gizmo's strings, and
+    # read better as the raw accesses than as r0->f_0 and r0->f_1)
+    eligible = [k for k in ks if ks[k].base is not None and len(layout(ks[k])) >= least and k in pointing
+                and any(SIZES[t] > 1 for _, t in layout(ks[k]))]
     for n, k in enumerate(sorted(eligible, key=lambda k: min(pointing[k])), 1):
         name = "s_%d" % n
         out.structs[name] = layout(ks[k])
@@ -1147,13 +1181,21 @@ def _uses(fn):
     return out
 
 
-def apply_types(tree, fn, p, made_for=None):
+def apply_types(tree, fn, p, made_for=None, names=None):
     """The function's pointer variables declared as pointers to the plan's structures (volatile, so
     that every access stays one), their accesses written as members (p->f_2c; with a cast where the
     access reads another type of the field's size, as raw access where the structure has no such
     field), every other use cast to u32; the structures defined above the function. Only when the
-    plan was made for this C (made_for: its digest before names). Returns the names of the
+    plan was made for this C (made_for: its digest before names). names: {s_N: (name, {offset: field
+    name})} from the readable_names table (dread.naming struct_names). Returns the names of the
     structures it used."""
+    names = names or {}
+
+    def cname(k):
+        return names.get(k, (k, {}))[0]
+
+    def fname(k, rel):
+        return field_name(names.get(k, (k, {}))[1], rel)
     from dread.naming import _rewrite, _rewrite_stmt
     if made_for is not None and p.digests.get(fn.name) not in (None, made_for):
         return []
@@ -1163,7 +1205,7 @@ def apply_types(tree, fn, p, made_for=None):
     if not typed:
         return []
     fields = {k: dict(p.structs[k]) for k in set(typed.values())}
-    ptype = {k: "volatile struct %s *" % k for k in fields}
+    ptype = {k: "volatile struct %s *" % cname(k) for k in fields}
 
     def member(e):
         """(member expression, its type) for an access through a typed variable, or the raw access
@@ -1174,7 +1216,7 @@ def apply_types(tree, fn, p, made_for=None):
         base, k, ctype = acc
         rows = fields[typed[base.id]]
         if rows.get(k) is not None and SIZES[rows[k]] == SIZES.get(ctype):
-            return C.Member(C.Name(base.id), "f_%x" % k, True), rows[k], ctype
+            return C.Member(C.Name(base.id), fname(typed[base.id], k), True), rows[k], ctype
         address = C.Cast("u32", C.Name(base.id))
         if k:
             address = C.Binary("+" if k > 0 else "-", address, C.Num("%d" % abs(k)))
@@ -1244,11 +1286,12 @@ def apply_types(tree, fn, p, made_for=None):
             st.items[:] = keep
     fn.body.body[:] = [st for st in fn.body.body if not (isinstance(st, C.Decl) and not st.items)]
     for k in sorted(moved, reverse=True):
-        fn.body.body.insert(0, C.Decl("volatile struct %s" % k, [C.Declarator(n, ptr="*") for n in sorted(moved[k])]))
+        fn.body.body.insert(0, C.Decl("volatile struct %s" % cname(k), [C.Declarator(n, ptr="*")
+                                                                          for n in sorted(moved[k])]))
     at = next((i + 1 for i, item in enumerate(tree.items)       # (after the #include: before the file's
                if isinstance(item, C.Raw) and item.text.startswith("#include")), tree.items.index(fn))    # declarations)
     for k in sorted(fields, reverse=True):
-        tree.items.insert(at, C.Raw(struct_text(k, p.structs[k])))
+        tree.items.insert(at, C.Raw(struct_text(cname(k), p.structs[k], names.get(k, (k, {}))[1])))
     from dread.build import NULL_CHECKS     # (a pointer it dereferences may be 0 and still be compared with 0:
     tree.items.insert(0, C.Raw(NULL_CHECKS))    # dread.build compiles it so)
     return sorted(fields)

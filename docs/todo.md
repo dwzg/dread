@@ -168,8 +168,20 @@ its sources.
   item's pointer field is a kind of its own (joining kinds through pointer fields would join what a
   void * field holds, an item's owner: tasks and timers); an address computed once and used for two
   accesses (an ldrd's a_1 = r0 + 4) keeps the raw accesses; fields typed as pointers (now u32 with a
-  cast at each load); embedded structures as members. Then the pilot names the structures and their
-  fields from their uses, as it names globals.
+  cast at each load); embedded structures as members. A structure needs a field wider than a byte
+  (gizmo's string walks made structures of two u8 fields). Names: the pilot asks for the structures'
+  and their fields' names after the globals (dread pilot --task readable: each structure's definition
+  with its fields' uses in up to four functions, eight a question), kept in readable_names' structs
+  part by anchors (docs/formats.md); dread readable --score compares them with the source's type
+  names (typedefs and tag) and member paths. Measured 2026-10-21 on the same 30 kernel functions of
+  GCC -Os with Haiku 5.5 (globals, then structures, then variables, every answer checked): the 8
+  structures they point to named TCB_t, Queue_t, ListItem_t, List_t, StreamBuffer_t (5 as the
+  source's typedefs, all 8 sharing a word); 42 fields, 25 as the source (pxTopOfStack, uxPriority,
+  pcHead, uxMessagesWaiting, cRxLock, pxContainer, uxNumberOfItems, pxIndex ...), 32 sharing a word;
+  misses where the structure is flattened (a task's xStateListItem.xItemValue named xStateItemValue)
+  or the source has dummies (StaticQueue_t's pvDummy1). Parameters 35 of 49 as the source (71 %), 46
+  sharing a word (94 %); 7 of 14 globals. 39 answers, 41,180 tokens in and 41,378 out, about $0.025.
+  The model knows FreeRTOS, and the functions' names tell it: a stripped firmware is the harder test.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
   Thought 2026-10-21: plain accesses let GCC merge and hoist loads, and a loop that waits for a flag

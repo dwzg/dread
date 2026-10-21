@@ -41,9 +41,12 @@ class Context:
         self.memory = None              # the target's [memory] (default names for fixed addresses)
         from dread import shapes
         self.plan = shapes.Plan()       # the image's readable_types table (dread.shapes)
+        self.structs = {}               # the readable_names table's structs part
+        self._struct_names = None
         if target is None:
             return
         self.plan = shapes.load_plan(image)
+        self.structs = naming.load(image, "structs")
         self.names = naming.load(image)
         self.globals = naming.load(image, "globals")
         self.memory = target.memory
@@ -55,6 +58,14 @@ class Context:
         self.reads = {fn.name: set(flow.read_regs(fn.name)) for fn in program.functions}
         self.preserved = {fn.name: set(flow.preserved_regs(fn.name)) for fn in program.functions}
         self.variadic = variadic_reach(program)
+
+    def struct_names(self):
+        """{s_N: (name, {offset: field name})} for the plan's structures the table names (computed
+        once; set _struct_names to None after the table or the plan changes)."""
+        if self._struct_names is None:
+            taken = {e.get("name") for e in self.globals.values() if isinstance(e, dict)}
+            self._struct_names = naming.struct_names(self.plan, self.structs, taken)
+        return self._struct_names
 
     def unknown(self, name):
         """Whether what a function reads cannot be told from regflow: it is variadic or calls one on
@@ -228,7 +239,7 @@ def _transform(name, text, stages, context=None):
                              context.memory if context is not None else None, avoid=mine)
         if context is not None:
             from dread import shapes
-            shapes.apply_types(tree, fn, context.plan, made_for)
+            shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
         if entry:
             naming.apply(tree, fn, entry, made_for)     # (only for the C it was made for: its digest)
     return print_file(tree, fn, stages)
@@ -260,6 +271,7 @@ def check(target, image, names=None, out=print, jobs=None):
     digests = {}
     trees = analysis_trees(program, context, lifter, lifted, named=context.globals, digests=digests)
     context.plan = shapes.plan(shapes.analyse(trees), trees, digests)
+    context._struct_names = None
     shapes.store_plan(image, context.plan)
     out("dread readable --check: %d structures, pointers to them in %d functions (readable_types)" % (
         len(context.plan.structs), len(context.plan.typed)))
@@ -457,6 +469,18 @@ def main(argv=None):
               "word of the source's (%.0f %%); %d of %d local names among the source's" % (
                   totals["functions"], totals["params"], totals["exact"], 100.0 * totals["exact"] / p,
                   totals["words"], 100.0 * totals["words"] / p, totals["local_hits"], totals["locals"]))
+        context = Context(target, image)
+        if context.plan.structs:
+            srows, st = naming.score_structs(Program(target, image), context.plan, context.struct_names(), args.score)
+            for r in srows:
+                print("%-8s %s/%s: %s" % (r["struct"], r["name"], "/".join(r["source"]), ", ".join(
+                    "%s/%s" % (a, b) for a, b, _, _ in r["fields"])[:300]))
+            s_ = max(st["structs"], 1)
+            f_ = max(st["fields"], 1)
+            print("dread readable --score: %d structures named against a parameter's source type: %d as the source "
+                  "(%.0f %%), %d with a word of its; %d fields: %d as the source (%.0f %%), %d with a word of its" % (
+                      st["structs"], st["exact"], 100.0 * st["exact"] / s_, st["words"], st["fields"],
+                      st["field_exact"], 100.0 * st["field_exact"] / f_, st["field_words"]))
         rows, totals = naming.score_globals(image, args.score)
         for r in rows:
             where = ("%s+%d" % (r["symbol"], r["offset"]) if r["offset"] else r["symbol"]) if r["symbol"] else "?"

@@ -581,6 +581,128 @@ def name_globals(target, image, program, provider, keys, uses, batch=40, shown_f
     return named
 
 
+STRUCTS_SYSTEM = """You name the structures of a binary image and their fields. Its C was made from
+the machine code by tools: memory reached through a pointer is declared as structures named s_1,
+s_2 ..., their fields named after their offsets (f_0, f_4, f_2c: hexadecimal), gaps as bytes (pad_8).
+Each structure is shown with its definition and lines of the image's C that use its fields, under
+the name of the function they are in. Give each structure a name that says what it is and each field
+a name that says what it holds; the functions' names show the project's style (its prefixes, its
+case): follow it.
+
+Answer with one ```json block:
+
+```json
+{"s_1": {"name": "<name>", "fields": {"f_0": "<name>", "f_4": "<name>"}}}
+```
+
+A name is a C identifier of at most 48 characters, no C keyword; no two structures alike, no two
+fields of one structure alike. Leave out what you cannot name."""
+
+
+def struct_uses(program, context, lifter, names, per=3):
+    """{s_N: [(function, line)]} of the lines of the functions' typed readable C that reach a field of
+    a plan structure (dread.shapes), at most per lines a function, with the default names (s_N, f_2c,
+    the registers' names): what a question about the structures shows."""
+    import copy
+    from dread import lift, readable
+    context = copy.copy(context)            # (a context of its own: readable.transform keeps its results
+    context.names, context.structs, context._struct_names = {}, {}, None    # by context, names apart)
+    uses = {k: [] for k in context.plan.structs}
+    for name in names:
+        typed = context.plan.typed.get(name)
+        fn_p = program.by_name.get(name)
+        if not typed or fn_p is None:
+            continue
+        try:
+            text = lifter.lift(fn_p).text
+        except lift.Refused:
+            continue
+        out = readable.transform(name, text, context=context)
+        if not out:
+            continue
+        lines = [line.split("  /*")[0].strip() for line in out.splitlines()]
+        for k in sorted(set(typed.values())):
+            pattern = re.compile(r"\b(%s)->" % "|".join(re.escape(v) for v, kk in typed.items() if kk == k))
+            uses.setdefault(k, []).extend((name, line[:160]) for line in lines if pattern.search(line))
+    for k in uses:
+        by_fn, kept = {}, []
+        for fname, line in uses[k]:
+            if by_fn.get(fname, 0) < per:
+                kept.append((fname, line))
+                by_fn[fname] = by_fn.get(fname, 0) + 1
+        uses[k] = kept
+    return uses
+
+
+def name_structs(target, image, program, provider, plan, uses, wanted, taken=(), batch=8, shown_functions=4,
+                 out=print):
+    """Ask for names of the plan's structures in wanted and of their fields, batch at a time, each with
+    its definition and its uses in up to shown_functions functions; keep in the readable_names table's
+    structs part what dread.naming.struct_names accepts (keyed by the structure's first anchor, with
+    all its anchors: the function:variable pairs pointing to it). Returns how many were named."""
+    import json
+    from dread import naming, shapes
+    table = naming.load(image, "structs")
+    done = naming.struct_names(plan, table, taken)
+    todo = [k for k in wanted if k in plan.structs and k not in done and uses.get(k)]
+    folder = os.path.join(target.build, "pilot", image.name)
+    os.makedirs(folder, exist_ok=True)
+    named = 0
+    for start in range(0, len(todo), batch):
+        part = todo[start:start + batch]
+        blocks = []
+        for k in part:
+            fns = []
+            lines = [shapes.struct_text(k, plan.structs[k])]
+            for fname, line in uses[k]:
+                if fname not in fns:
+                    if len(fns) >= shown_functions:
+                        continue
+                    fns.append(fname)
+                lines.append("    %s: %s" % (fname, line))
+            blocks.append("\n".join(lines))
+        user = "\n\n".join(blocks)
+        try:
+            answer = provider.ask(STRUCTS_SYSTEM, [{"role": "user", "content": user}])
+        except Exception as e:
+            out("dread pilot: the structures' names: the provider: %s" % e)
+            break
+        with open(os.path.join(folder, "structs-%d.md" % (start // batch)), "w") as f:
+            f.write("# Structures, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s\n\n## Answer\n\n%s\n" % (
+                provider.label(), STRUCTS_SYSTEM, user, answer))
+        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+            out("dread pilot: the structures' names: the provider declined")
+            break
+        m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
+        try:
+            proposed = json.loads(m.group(1)) if m else None
+        except ValueError:
+            proposed = None
+        if not isinstance(proposed, dict):
+            out("dread pilot: the structures' names: no ```json block in the answer")
+            continue
+        for k in part:
+            entry = proposed.get(k)
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            fields = {}
+            for fkey, fname in (entry.get("fields") or {}).items():
+                fm = re.match(r"^f_([0-9a-f]+)$", str(fkey))
+                if fm:
+                    fields[str(int(fm.group(1), 16))] = fname
+            anchors = naming.struct_anchors(plan, k)
+            candidate = dict(table, **{anchors[0]: {"name": entry["name"], "fields": fields, "anchors": anchors,
+                                                     "by": provider.label()}})
+            if k not in naming.struct_names(plan, candidate, taken):
+                continue                    # (refused: no C name, taken, or another structure has it)
+            table = candidate
+            naming.store(image, anchors[0], table[anchors[0]], part="structs")
+            named += 1
+        out("dread pilot: the structures' names: %d of %d named" % (
+            sum(1 for k in part if k in naming.struct_names(plan, table, taken)), len(part)))
+    return named
+
+
 def parse_names(answer):
     """(what, {variable: name}) of an answer's ```json block, or None."""
     import json
@@ -629,6 +751,9 @@ def name_readable(target, image, program, provider, name, context, lifter, tries
         return known
     naming.apply_globals(tree, fn, context.globals if context is not None else None,
                          context.memory if context is not None else None)
+    if context is not None:                 # (the structures, named where the table names them)
+        from dread import shapes
+        shapes.apply_types(tree, fn, context.plan, digest, names=context.struct_names())
     unnamed = readable.print_file(tree, fn)
     callers = [c for c in callers_of(program, name) if may_show(target, c)][:12]
     user = "The function %s (readable C):\n\n```c\n%s\n```" % (name, cparse.unparse(fn, notes=False, style="readable"))
@@ -1030,6 +1155,12 @@ def main(argv=None):
             wanted = sorted(set().union(*(by_function.get(n, set()) for n in names))) if names else []
             name_globals(target, image, program, provider, wanted, uses)
             context.globals = naming.load(image, "globals")
+            if context.plan.structs:            # (then the structures, which the variables' C shows)
+                suses = struct_uses(program, context, lifter, sorted(set(everything) | set(names)))
+                swanted = sorted({k for n in names for k in context.plan.typed.get(n, {}).values()})
+                taken = {e.get("name") for e in context.globals.values() if isinstance(e, dict)}
+                name_structs(target, image, program, provider, context.plan, suses, swanted, taken)
+                context.structs, context._struct_names = naming.load(image, "structs"), None
             asking, named = Asking(provider), 0
             for name in names:
                 if not asking.go_on():
