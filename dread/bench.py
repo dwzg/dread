@@ -53,19 +53,22 @@ Recipe format:
     toolchain = "ubuntu-22.04"  # optional: compile and link in that toolchain's container (below)
     cc = "arm-none-eabi-gcc"  # the compiler; ld: the link driver (default cc)
     cflags = [...]            # for compiling (and linking, unless lflags gives the link driver's own)
+    link = [...]              # optional: replaces the project's link options (another C library)
     dread_cflags = [...]      # optional: the flags rewritten C is compiled with (default: cflags
                               # without -g, -W, -M, -I and -D options)
     [[builds.patches]]        # optional: substitutions of this build only, after the project's
 
 Toolchains: a build that names `toolchain = NAME` is compiled and linked in a podman container of the
-image localhost/dread-tc-NAME, made from bench/toolchains/NAME.containerfile (a distribution's
-packaged cross compilers; `dread bench toolchain NAME...` builds images, which a build also does when
-its image is missing or older than its file). The source is mounted read-only and the build's
+image localhost/dread-tc-NAME:DIGEST, made from bench/toolchains/NAME.containerfile, DIGEST the start
+of the file's (a distribution's packaged cross compilers; `dread bench toolchain NAME...` builds
+images, which a build also does when the image of its file is missing; `--prune` removes the images
+of older files). With the digest in the name, a worktree that changes a file builds an image of its
+own and does not take the image from under a measurement that runs from the checkout. The source is mounted read-only and the build's
 directory read-write, both at their own paths, without network; DREAD itself runs on the host and
 compiles rewritten and lifted C with the host's compiler. Every build records the version its
 compiler gives (cc --version), which the report shows: a compiler's version decides code shapes.
 
-    dread bench toolchain NAME... [--rebuild]
+    dread bench toolchain NAME... [--rebuild] [--prune]
     dread bench fetch RECIPE
     dread bench build RECIPE [BUILD...]
     dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,noreturn]
@@ -143,21 +146,39 @@ def toolchain_digest(name):
         return hashlib.sha1(f.read()).hexdigest()
 
 
+def toolchain_image(name):
+    """The name of a toolchain's image: its file's digest is the tag, so that an image is never
+    replaced under a run that uses it (a worktree that changes the file builds one of its own)."""
+    return "%s%s:%s" % (IMAGE_PREFIX, name, toolchain_digest(name)[:12])
+
+
 def ensure_toolchain(name, rebuild=False, out=print):
-    """The image of a toolchain, built with podman when it is missing, older than its file, or
-    rebuild is set; returns the image's name."""
+    """The image of a toolchain, built with podman when the image of its file is missing or rebuild
+    is set; returns the image's name."""
     if shutil.which("podman") is None:
         raise BenchError("toolchain %s needs podman" % name)
-    digest, image = toolchain_digest(name), IMAGE_PREFIX + name
-    r = subprocess.run(["podman", "image", "inspect", "--format", "{{index .Labels \"dread.digest\"}}", image],
-                       capture_output=True, text=True)
-    if rebuild or r.returncode or r.stdout.strip() != digest:
+    digest, image = toolchain_digest(name), toolchain_image(name)
+    if rebuild or subprocess.run(["podman", "image", "exists", image]).returncode:
         out("toolchain %s: building %s" % (name, image))
         import tempfile
         with tempfile.TemporaryDirectory() as context:
             run(["podman", "build", "-q", "--label", "dread.digest=" + digest, "-t", image, "-f",
                  toolchain_file(name), context], timeout=3600)
     return image
+
+
+def prune_toolchain(name, out=print):
+    """Remove the images of a toolchain other than the one of its file as it is now (older files',
+    and the untagged name of before 2026-10-21); returns their names. An image a worktree still uses
+    is built again when that worktree needs it."""
+    keep = toolchain_image(name)
+    r = subprocess.run(["podman", "images", "--format", "{{.Repository}}:{{.Tag}}", IMAGE_PREFIX + name],
+                       capture_output=True, text=True)
+    old = [i for i in r.stdout.split() if i != keep and i.startswith(IMAGE_PREFIX + name + ":")]
+    for image in old:
+        out("toolchain %s: removing %s" % (name, image))
+        run(["podman", "rmi", image])
+    return old
 
 
 def in_container(cmd, image, mounts, cwd):
@@ -334,8 +355,9 @@ def build(recipe, name, bench=None, jobs=None, out=print):
         objects = list(pool.map(compile_one, sorted(files.items())))
     elf = os.path.join(where, "firmware.elf")
     script = ["-T", os.path.join(src, project["ldscript"])] if project.get("ldscript") else []
+    link = b["link"] if "link" in b else project.get("link", ())      # (a build of another C library)
     run(tool([ld] + home(b.get("lflags", b["cflags"])) + script + ["-Wl,-Map=" + os.path.join(work, "firmware.map"),
-                                                                   "-o", elf] + objects + home(project.get("link", ()))),
+                                                                   "-o", elf] + objects + home(link)),
         cwd=src)
     seconds = time.time() - started
     os.makedirs(os.path.join(where, "original"), exist_ok=True)
@@ -593,6 +615,8 @@ def main(argv=None):
     parser.add_argument("recipe", help="a recipe file, or the name of one in DREAD's bench/ (toolchain: a toolchain)")
     parser.add_argument("builds", nargs="*", help="builds of the recipe (default: all; toolchain: more toolchains)")
     parser.add_argument("--rebuild", action="store_true", help="toolchain: build the image again")
+    parser.add_argument("--prune", action="store_true",
+                        help="toolchain: remove the images of older versions of the toolchains' files")
     parser.add_argument("--steps", default=",".join(STEPS), help="measuring steps (default: %s)" % ",".join(STEPS))
     parser.add_argument("--jobs", type=int, help="compilers at once")
     args = parser.parse_args(argv)
@@ -600,6 +624,8 @@ def main(argv=None):
         if args.action == "toolchain":
             for name in [args.recipe] + args.builds:
                 print("%s: %s" % (name, ensure_toolchain(name, rebuild=args.rebuild)))
+                if args.prune:
+                    prune_toolchain(name)
             return 0
         recipe = load(args.recipe)
         names = args.builds or [b["name"] for b in recipe["builds"]]

@@ -84,7 +84,8 @@ def test_a_local_recipe_builds_and_measures(tmp_path, monkeypatch):
 def test_a_toolchain_runs_the_compiler_in_its_container(tmp_path, monkeypatch):
     """A build that names a toolchain compiles and links in that image's container, the source
     read-only and the build's directory writable at their own paths, without network; its image is
-    built (with its Containerfile's digest as a label) when missing or older than the file."""
+    named by its Containerfile's digest (a changed file builds an image of its own beside the old
+    one, which a run may still use) and built when missing."""
     argv = bench.in_container(["arm-none-eabi-gcc", "-c", "a.c"], "localhost/dread-tc-x", [("/src", True),
                               ("/out", False)], "/src")
     assert argv[:4] == ["podman", "run", "--rm", "--network=none"]
@@ -93,9 +94,11 @@ def test_a_toolchain_runs_the_compiler_in_its_container(tmp_path, monkeypatch):
     with pytest.raises(bench.BenchError, match="no toolchain"):
         bench.toolchain_digest("no-such-toolchain")
     assert os.path.exists(bench.toolchain_file("ubuntu-22.04"))
+    image = bench.toolchain_image("ubuntu-22.04")
+    assert image == "localhost/dread-tc-ubuntu-22.04:" + bench.toolchain_digest("ubuntu-22.04")[:12]
     import shutil as sh
     import subprocess
-    if not sh.which("podman") or subprocess.run(["podman", "image", "exists", "localhost/dread-tc-ubuntu-22.04"]).returncode:
+    if not sh.which("podman") or subprocess.run(["podman", "image", "exists", image]).returncode:
         pytest.skip("needs podman and the image of the toolchain ubuntu-22.04 (dread bench toolchain ubuntu-22.04)")
     monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
     path = tmp_path / "gizmo.toml"
@@ -106,6 +109,29 @@ def test_a_toolchain_runs_the_compiler_in_its_container(tmp_path, monkeypatch):
     info = json.load(open(os.path.join(where, "build.json")))
     assert info["toolchain"] == "ubuntu-22.04" and " 10.3." in info["version"], info
     assert os.path.exists(os.path.join(where, "firmware.elf"))
+
+
+@needs_gcc
+def test_a_build_may_link_with_options_of_its_own(tmp_path, monkeypatch):
+    """A build's link replaces its project's link options: a build of the same project with another
+    C library (the RISC-V version builds link picolibc, the project newlib-nano)."""
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    path = recipe(tmp_path)["_file"]
+    with open(path, "a") as f:
+        f.write('''
+[[builds]]
+name = "m3-own-link"
+project = "m3"
+cc = "arm-none-eabi-gcc"
+cflags = ["-mcpu=cortex-m3", "-mthumb", "-mfloat-abi=soft", "-Os", "-ffreestanding", "-fno-builtin",
+          "-ffunction-sections", "-fno-common"]
+link = ["-nostdlib", "-lgcc", "-Wl,--cref"]
+''')
+    r = bench.load(path)
+    own = bench.build(r, "m3-own-link", out=lambda *a: None)
+    project = bench.build(r, "m3-Os", out=lambda *a: None)
+    assert "Cross Reference Table" in open(os.path.join(own, "work", "firmware.map")).read()
+    assert "Cross Reference Table" not in open(os.path.join(project, "work", "firmware.map")).read()
 
 
 @needs_gcc

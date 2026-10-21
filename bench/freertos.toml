@@ -648,6 +648,57 @@ lflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow"]
 dread_cflags = ["--target=riscv32-unknown-elf", "-march=rv32imac_zicsr", "-mabi=ilp32", "-mno-relax", "-ffreestanding",
                 "-Os", "-ffunction-sections"]
 
+# The compiler-version axis on RISC-V: the distributions' riscv64-unknown-elf-gcc (by the host's name in
+# the images) with their picolibc, since they package no newlib for RISC-V: the C library differs
+# from the host's builds' (newlib-nano) as well, FreeRTOS's own code is the same source. GCC 10 knows
+# no _zicsr in -march (its ISA spec has the CSR instructions in the base); GCC 12 knows it but then
+# picks no multilib (the 64-bit picolibc: "ELFCLASS64 incompatible"), so it gets the old ISA spec
+# too; Ubuntu 20.04's GCC 9.3 has no C library for RISC-V at all. DREAD compiles the rewritten C with the host's GCC (dread_cflags).
+
+[[builds]]
+name = "virt-gcc10-Os"
+project = "virt"
+toolchain = "ubuntu-22.04"
+cc = "riscv64-elf-gcc"
+cflags = ["-march=rv32imac", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
+          "-fno-builtin-printf", "-Os", "-g", "--specs=picolibc.specs"]
+link = ["-nostartfiles", "-Wl,--gc-sections", "-Wl,--defsym=__stack_size=350"]
+dread_cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
+                "-fno-builtin-printf", "-Os"]
+
+[[builds]]
+name = "virt-gcc12-Os"
+project = "virt"
+toolchain = "debian-12"
+cc = "riscv64-elf-gcc"
+cflags = ["-march=rv32imac", "-misa-spec=2.2", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
+          "-fno-builtin-printf", "-Os", "-g", "--specs=picolibc.specs"]
+link = ["-nostartfiles", "-Wl,--gc-sections", "-Wl,--defsym=__stack_size=350"]
+dread_cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
+                "-fno-builtin-printf", "-Os"]
+
+[[builds]]
+name = "virt-gcc13-Os"
+project = "virt"
+toolchain = "ubuntu-24.04"
+cc = "riscv64-elf-gcc"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
+          "-fno-builtin-printf", "-Os", "-g", "--specs=picolibc.specs"]
+link = ["-nostartfiles", "-Wl,--gc-sections", "-Wl,--defsym=__stack_size=350"]
+dread_cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
+                "-fno-builtin-printf", "-Os"]
+
+[[builds]]
+name = "virt-gcc14-Os"
+project = "virt"
+toolchain = "debian-13"
+cc = "riscv64-elf-gcc"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
+          "-fno-builtin-printf", "-Os", "-g", "--specs=picolibc.specs"]
+link = ["-nostartfiles", "-Wl,--gc-sections", "-Wl,--defsym=__stack_size=350"]
+dread_cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-mcmodel=medlow", "-ffunction-sections", "-fdata-sections",
+                "-fno-builtin-printf", "-Os"]
+
 [[builds]]
 name = "msp430-gcc-Os"
 project = "msp430"

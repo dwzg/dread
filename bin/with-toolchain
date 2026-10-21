@@ -13,16 +13,18 @@ set -eu
 name=$1
 shift
 root=$(cd "$(dirname "$0")/.." && pwd)
-image=localhost/dread-tc-$name
-"$root/.venv/bin/python" -m dread.cli bench toolchain "$name" > /dev/null    # (built when missing or old)
+# the image of the toolchain's file as it is (its digest is the tag; built when missing)
+image=$("$root/.venv/bin/python" -m dread.cli bench toolchain "$name" | sed -n "s/^$name: //p")
+[ -n "$image" ] || { echo "with-toolchain: no image for $name" >&2; exit 1; }
 bench=${DREAD_BENCH:-$HOME/dread-bench}
 mkdir -p "$bench"
 shims=$(mktemp -d "${TMPDIR:-/tmp}/dread-with-$name.XXXXXX")
 trap 'rm -rf "$shims"' EXIT INT TERM
-# the image's tools: GNU's cross tools by name, LLVM's from its versioned directory (only those the
-# image has: a script for a tool it lacks would hide the host's)
+# the image's tools: GNU's cross tools by name (RISC-V's also by the host's prefix, riscv64-elf-, which
+# the images link), LLVM's from its versioned directory (only those the image has: a script for a tool
+# it lacks would hide the host's)
 tools=$(podman run --rm --network=none "$image" sh -c \
-    'ls /usr/bin/arm-none-eabi-* /usr/bin/riscv64-*-elf-* 2>/dev/null; ls -d /usr/lib/llvm-*/bin 2>/dev/null | tail -1')
+    'ls /usr/bin/arm-none-eabi-* /usr/bin/riscv64-*-elf-* /usr/local/bin/riscv64-elf-* 2>/dev/null; ls -d /usr/lib/llvm-*/bin 2>/dev/null | tail -1')
 llvm=$(printf '%s\n' "$tools" | grep '^/usr/lib/llvm-' || true)
 have=""
 [ -n "$llvm" ] && have=$(podman run --rm --network=none "$image" ls "$llvm")

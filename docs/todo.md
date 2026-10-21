@@ -55,7 +55,13 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     and msp430 gain handle_key. Left: _sbrk_r (its errno store needs a stub that writes errno: stub
     effects), _free_r, _fflush_r, __sfp, strcmp (other causes, not traced).
   - [ ] The -O2 builds and the RISC-V GCC builds (RISC-V newlib-nano is not packaged by the
-    distributions: xPack's riscv-none-elf-gcc in an image, or picolibc).
+    distributions: xPack's riscv-none-elf-gcc in an image, or picolibc). RISC-V done 2026-10-21:
+    GCC 10.2, 12.2, 13.2 and 14.2 with the distributions' picolibc (bench/freertos.toml's
+    virt-gccN-Os; a build's own `link` replaces the project's newlib-nano); Ubuntu 20.04's GCC 9.3
+    has no C library. Flags by version: GCC 10 has no _zicsr, GCC 12 needs -misa-spec=2.2 for its
+    multilib (bench/toolchains/README.md). Toolchain images are named by their file's digest now, so a
+    worktree's changed image does not replace one a measurement uses. Left: the -O2 builds, the clang
+    RISC-V builds in the images (clang 14 to 19 with picolibc).
 - [x] **CI on an older distribution too**: a second job on Ubuntu 22.04 (GCC 10, binutils 2.38,
   clang 14), and `pytest -rs` so that the log says what is skipped and why (CI skipped 35 tests on
   2026-10-20, here 6). Done 2026-10-20: the suite under `bin/with-toolchain ubuntu-22.04` first found
