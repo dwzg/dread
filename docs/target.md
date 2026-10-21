@@ -91,7 +91,7 @@ default. `--image NAME` or `$DREAD_IMAGE` selects another.
 | `free` | ranges `[[start, end], ...]` inside the image that hold nothing (erased flash between the code and a vector table at the top of a microcontroller's flash): the overlay puts moved functions and the C's own code there; `dread import-elf --write-startup` writes them from the gaps between the ELF's sections |
 | `erased` | the value of unprogrammed flash (default `0xff`) |
 | `entry` | the reset entry, an address or a symbol name from the image's symbols (default: `base`) |
-| `vectors` | where the exception vectors lie (A profile) or the vector table (M profile: the system run takes the stack pointer and the reset handler from its first two words); default `base` |
+| `vectors` | where the exception vectors lie (A profile) or the vector table (M profile: the system run takes the stack pointer and the reset handler from its first two words, and `dread ghidra` reads the reset entry and the handlers there); default `base`. Set it past a vendor header when the image stores one in front of the table |
 | `config` | the directory of the image's tables (default `config`) |
 | `cases`, `extra_cases`, `kept_cases`, `record_specs` | where its test cases live (defaults under `tests/`) |
 | `src` | the directory of its C (default `[paths] src`) |
