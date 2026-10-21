@@ -96,11 +96,15 @@ def test_the_whatcc_step_names_the_toolchain_that_linked_the_build(tmp_path, mon
     bench.build(r, "m3-Os", out=lambda *a: None)
     metrics = bench.measure(r, "m3-Os", steps=("whatcc",), out=lambda *a: None)
     w = metrics["whatcc"]
-    assert w["ran"] and w["truth"] == "host" and w["best"] == ["host"] and w["right"], w
-    assert w["matched"] >= 1 and w["agree"] == w["sure"] >= 1, w     # (libgcc's functions the build links)
+    assert w["ran"] and w["truth"] == "host", w
     report = open(bench.report(r, out=lambda *a: None)).read()
     assert "## Library functions by their bytes (dread whatcc)" in report
-    assert "| m3-Os | host | host | yes |" in report
+    if w["matched"]:                        # (GCC 16's build links two of libgcc's functions; Ubuntu's
+        assert w["best"] == ["host"] and w["right"] and w["agree"] == w["sure"] >= 1, w    # GCC 10 and 13's none)
+        assert "| m3-Os | host | host | yes |" in report
+    else:                                   # nothing matched: no best toolchain, and not right
+        assert w["best"] == [] and not w["right"], w
+        assert "| m3-Os | host | - | no | 0 |" in report
 
 
 def test_a_toolchain_runs_the_compiler_in_its_container(tmp_path, monkeypatch):
