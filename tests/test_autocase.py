@@ -7,6 +7,7 @@ import pytest
 
 from dread.autocase import Generator
 from dread.target import Target
+from conftest import NOIPA_DEF
 from conftest import gizmo_dir
 
 
@@ -118,7 +119,7 @@ def test_a_callee_that_never_returns_makes_hang_cases(tmp_path):
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
-    (tmp_path / "t.c").write_text("__attribute__((noipa)) void hook(void) { for (;;) ; }\n"
+    (tmp_path / "t.c").write_text(NOIPA_DEF + "NOIPA void hook(void) { for (;;) ; }\n"
                                   "int alloc(int n) { if (n < 0) { hook(); return 0; } return n * 2; }\n")
     (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
                                    "SECTIONS { .text : { *(.text*) } > FLASH }\n")
@@ -150,9 +151,9 @@ def test_a_hook_deeper_down_stubs_the_callee_it_was_reached_by(tmp_path):
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
-    (tmp_path / "t.c").write_text("__attribute__((noipa)) void hook(void) { for (;;) ; }\n"
-                                  "__attribute__((noipa)) int alloc(int n) { if (n != 12345) hook(); return n; }\n"
-                                  "__attribute__((noipa)) int side(int r) { return r + 3; }\n"
+    (tmp_path / "t.c").write_text(NOIPA_DEF + "NOIPA void hook(void) { for (;;) ; }\n"
+                                  "NOIPA int alloc(int n) { if (n != 12345) hook(); return n; }\n"
+                                  "NOIPA int side(int r) { return r + 3; }\n"
                                   "int make(int n) { int r = alloc(n); if (r == 12345) return 1; return side(r); }\n")
     (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
                                    "SECTIONS { .text : { *(.text*) } > FLASH }\n")
@@ -222,9 +223,9 @@ def test_loop_cases_for_a_function_that_never_returns(tmp_path):
     from test_bench import TARGET
     from dread import elfimport
     from dread.emu import EmuError
-    (tmp_path / "t.c").write_text("volatile int flag;\n"
-                                  "__attribute__((noipa)) void fail(void) { for (;;) ; }\n"
-                                  "__attribute__((noipa)) int poll(int x) { return x + flag; }\n"
+    (tmp_path / "t.c").write_text(NOIPA_DEF + "volatile int flag;\n"
+                                  "NOIPA void fail(void) { for (;;) ; }\n"
+                                  "NOIPA int poll(int x) { return x + flag; }\n"
                                   "void task(int p) { for (;;) { int v = poll(p); if (v == 77) fail();"
                                   " if (v & 1) flag++; } }\n")
     (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
@@ -630,9 +631,9 @@ def test_a_near_miss_is_chased_through_pointers_no_input_set(tmp_path, monkeypat
     assert missed(False)
 
 
-READER_C = """
+READER_C = NOIPA_DEF + """
 volatile int status;
-__attribute__((noinline, noipa)) int receive(char *buf, int n) { buf[0] = 0; return n; }  /* (fills it) */
+NOIPA int receive(char *buf, int n) { buf[0] = 0; return n; }  /* (fills it) */
 __attribute__((noreturn)) void reader(void)
 {
     char buf[8];

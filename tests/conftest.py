@@ -68,6 +68,14 @@ def _riscv_gcc():
     return None, None
 
 
+# What keeps a test's small function a call of its own whose body its callers know nothing of:
+# noipa from GCC 8 on. GCC 7 and older ignore it and inline (Debian 10's GCC 7.3 did so in four
+# tests: the calls they are about were gone), so there noinline and noclone; clang knows neither
+# noipa nor noclone. A snippet that uses NOIPA starts with NOIPA_DEF.
+NOIPA_DEF = ("#if defined(__clang__)\n#define NOIPA __attribute__((noinline))\n"
+             "#elif __GNUC__ >= 8\n#define NOIPA __attribute__((noipa))\n"
+             "#else\n#define NOIPA __attribute__((noinline, noclone))\n#endif\n")
+
 RISCV_CROSS, RISCV_MARCH = _riscv_gcc()
 needs_riscv_gcc = pytest.mark.skipif(RISCV_CROSS is None, reason="needs a RISC-V GCC (riscv64-elf-gcc or "
                                      "riscv64-unknown-elf-gcc)")

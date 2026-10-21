@@ -10,7 +10,7 @@ import pytest
 
 from dread import build, integration, regflow, switches
 from dread.program import Program
-from conftest import have, needs_riscv_gcc, RISCV_CROSS, RISCV_MARCH, riscv_toml
+from conftest import NOIPA_DEF, have, needs_riscv_gcc, RISCV_CROSS, RISCV_MARCH, riscv_toml
 from test_runner import run_all, src_copy
 
 SIGNATURES = {           # registers each function reads at its entry, from the C (beyond 4: the stack)
@@ -578,8 +578,8 @@ def test_a_register_saved_around_a_call_is_not_read_behind_it(tmp_path):
     from dread import lift
     from dread.program import Program
     from dread.target import Target
-    flow = _rv_flow(tmp_path, {"t.c": '''
-__attribute__((noinline, noipa)) void fail(const char *file, int line) { while (*file != line) { } }
+    flow = _rv_flow(tmp_path, {"t.c": NOIPA_DEF + '''
+NOIPA void fail(const char *file, int line) { while (*file != line) { } }
 unsigned clear(unsigned *p, unsigned i, unsigned bits) { if (i > 2) fail("x", 1); return p[i] & ~bits; }
 '''}, ("-Os",))
     assert flow.read_regs("clear") == ["a0", "a1", "a2"], flow.read_regs("clear")

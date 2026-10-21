@@ -6,7 +6,7 @@ import shutil
 import pytest
 
 from dread import build, runner
-from conftest import GIZMO
+from conftest import GIZMO, NOIPA_DEF
 
 pytestmark = pytest.mark.compiles
 
@@ -286,9 +286,9 @@ cross = "arm-none-eabi-"
     assert watch(0x20000001) == [] and watch(0x20000001, anywhere=True) == [0x20000000]   # RAM: only anywhere
 
 
-SMASH_C = """
+SMASH_C = NOIPA_DEF + """
 volatile unsigned sink;
-__attribute__((noinline, noipa)) void copy(char *dst, const char *src, unsigned n) { while (n--) *dst++ = *src++; }
+NOIPA void copy(char *dst, const char *src, unsigned n) { while (n--) *dst++ = *src++; }
 unsigned user(const char *src, unsigned n, unsigned k) { char buf[4]; copy(buf, src, n); sink = k; return k * 5 + buf[0]; }
 """
 

@@ -11,7 +11,7 @@ import pytest
 from dread import build, lift, regflow
 from dread.program import Program
 from dread.target import Target
-from conftest import GIZMO, gizmo_dir, have, needs_riscv_gcc, RISCV_CROSS, RISCV_MARCH, riscv_toml
+from conftest import GIZMO, NOIPA_DEF, gizmo_dir, have, needs_riscv_gcc, RISCV_CROSS, RISCV_MARCH, riscv_toml
 
 needs_gcc = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 
@@ -360,7 +360,7 @@ def test_a_branch_on_a_constant_the_function_stored_is_decided(tmp_path, opt):
     from dread import elfimport
     from dread.program import Program
     from dread.target import Target
-    (tmp_path / "t.c").write_text("__attribute__((noipa)) void fail(void) { for (;;) ; }\n"
+    (tmp_path / "t.c").write_text(NOIPA_DEF + "NOIPA void fail(void) { for (;;) ; }\n"
                                   "int check(int n) { volatile int x = 92; if (__builtin_expect(x != 92, 0)) fail();"
                                   " return n + 1; }\n")      # (unlikely: -O2 puts the call behind the return)
     (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
@@ -440,9 +440,9 @@ def test_the_stack_pointer_stored_as_a_value(tmp_path, opt):
     from dread import elfimport
     if opt == "asm":
         (tmp_path / "t.s").write_text(SP_STORE_S)
-    (tmp_path / "t.c").write_text(
+    (tmp_path / "t.c").write_text(NOIPA_DEF +
         "struct obj { unsigned a, b; };\n"
-        "__attribute__((noipa)) unsigned use(struct obj **all, int n)\n"
+        "NOIPA unsigned use(struct obj **all, int n)\n"
         "{ unsigned t = 0; for (int i = 0; i < n; i++) t += all[i]->a * all[i]->b; return t; }\n"
         "unsigned f(unsigned x) { struct obj p = {x, 1}, q = {x + 1, 2}; struct obj *all[] = {&p, &q};"
         " return use(all, 2); }\n")
@@ -508,19 +508,34 @@ def test_a_register_the_callee_never_writes_keeps_its_value_across_the_call(tmp_
 def test_a_full_room_drops_the_largest_and_the_check_goes_on(tmp_path):
     """When the C does not fit into its room behind the image (an MSP430's 64 KiB: FreeRTOS's build
     filled it), the overlay says by how much and which functions it could not place; the check drops
-    the largest of them until that is covered and builds again, instead of failing whole."""
+    the largest of them until that is covered and builds again, instead of failing whole. The room is
+    measured, not assumed: halfway between what gizmo's hand-written C needs behind the image and what
+    it needs with the lifted functions too (a fixed 256 bytes held the hand-written C of GCC 16 but not
+    that of Debian 10's GCC 7.3, and the check then had nothing left to drop)."""
+    import json
     copy = tmp_path / "gizmo"
     shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
     for cache in ("autocases", "regflow"):
         here = os.path.join(gizmo_dir("m3"), "build", cache)
         if os.path.isdir(here):
             shutil.copytree(here, copy / "m3" / "build" / cache)
-    image = Target.load(str(copy / "m3")).image()
+    target = Target.load(str(copy / "m3"))
+    image = target.image()
     end = image.base + len(image.payload())
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+
+    def needs(lifted):
+        out = str(tmp_path / ("room-%d" % len(lifted)))
+        build.build(target, image, out=out, lifted=lifted, quiet=True, lifter=lifter)
+        with open(os.path.join(out, "placement.json")) as f:
+            return json.load(f)["summary"]["image_bytes"] - len(image.payload())
+    hand, everything = needs([]), needs(NAMES)
+    assert everything > hand + 0x40, (hand, everything)    # (else the lifted C needs no room: nothing shown)
     toml = copy / "m3" / "dread.toml"
     text = toml.read_text()
     assert text.count("limit = 0x08010000") == 1
-    toml.write_text(text.replace("limit = 0x08010000", "limit = 0x%x" % (end + 0x100)))
+    toml.write_text(text.replace("limit = 0x08010000", "limit = 0x%x" % (end + (hand + everything) // 2)))
     target = Target.load(str(copy / "m3"))
     lines = []
     accepted = lift.check(target, target.image(), NAMES, out=lines.append, jobs=4)

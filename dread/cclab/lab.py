@@ -33,6 +33,7 @@ instructions: what tells a function's start in a stripped image of the same comp
 import glob
 import json
 import os
+import subprocess
 import shutil
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -814,6 +815,27 @@ MEASURES = {"arg": measure_arg, "result": measure_result, "value": measure_value
 
 # ---- lifting (run --lift) ----
 
+# The FPU of a core, for a GCC that knows no -mfpu=auto (before GCC 8): Debian 10's GCC 7.3 rejected it,
+# and every hard-float build of the lab gave no verdicts.
+CORE_FPU = {"cortex-m4": "fpv4-sp-d16", "cortex-m7": "fpv5-d16", "cortex-m33": "fpv5-sp-d16",
+            "cortex-m35p": "fpv5-sp-d16", "cortex-r5": "vfpv3-d16", "cortex-a9": "vfpv3"}
+_FPU_AUTO = {}
+
+
+def fpu_flag(cross, cpu):
+    """-mfpu=auto where the compiler takes it with this core (GCC 8 and later), else the core's FPU
+    by CORE_FPU; -mfpu=auto again where neither is known (the compiler's message then says why)."""
+    key = (cross, cpu)
+    if key not in _FPU_AUTO:
+        try:
+            r = subprocess.run([cross + "gcc", "-mthumb", "-mcpu=" + cpu, "-mfloat-abi=hard", "-mfpu=auto", "-E",
+                                "-x", "c", "-", "-o", os.devnull], input="", capture_output=True, text=True)
+            _FPU_AUTO[key] = r.returncode == 0
+        except OSError:
+            _FPU_AUTO[key] = True
+    return "-mfpu=auto" if _FPU_AUTO[key] or cpu not in CORE_FPU else "-mfpu=%s" % CORE_FPU[cpu]
+
+
 def rebuild_compiler(adapter, picked, results):
     """The [compiler] of a build's dread.toml for `run --lift`: the compiler DREAD rebuilds the
     build's functions with. The adapter's [rebuild] table when it has one; else, by architecture,
@@ -825,8 +847,9 @@ def rebuild_compiler(adapter, picked, results):
         return dict(own)
     if adapter.arch == "arm":
         hard = str((results.get("pick_f_1") or {}).get("where", "")).startswith("s")
-        flags = ["-mthumb", "-mcpu=%s" % (adapter.cpu_model(picked) or "cortex-m3")]
-        flags += ["-mfloat-abi=hard", "-mfpu=auto"] if hard else ["-mfloat-abi=soft"]
+        cpu = adapter.cpu_model(picked) or "cortex-m3"
+        flags = ["-mthumb", "-mcpu=%s" % cpu]
+        flags += ["-mfloat-abi=hard", fpu_flag("arm-none-eabi-", cpu)] if hard else ["-mfloat-abi=soft"]
         return {"cross": "arm-none-eabi-", "cflags": flags + ["-ffreestanding", "-Os", "-ffunction-sections"]}
     if adapter.arch == "riscv":
         march = next((v for v in picked.values() if str(v).startswith("rv32")), "rv32imc")

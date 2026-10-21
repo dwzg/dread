@@ -391,7 +391,17 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   from a private image must not leave the machine).
 - [ ] **Tests that state properties, not one compiler's output**: the tests that compile snippets
   checked for what they assume of the code (three CI failures on 2026-10-20 were such assumptions);
-  the snippet tests run in the CI job of the older distribution too.
+  the snippet tests run in the CI job of the older distribution too. 2026-10-21: the whole suite
+  under Debian 10's ARM GCC 7.3 (bin/with-toolchain debian-10; the image came with the older GCC
+  builds): 603 passed, 6 failed, none of them DREAD's results. Four snippets relied on noipa, which
+  GCC 8 introduced: GCC 7 ignores it and inlined the helper whose call the test is about (tests
+  now use NOIPA from conftest: noipa, or noinline and noclone before GCC 8, noinline for clang).
+  The lab's rebuilding compiler asked for -mfpu=auto, also GCC 8's, and every hard-float lab build
+  gave no verdicts (a fault of DREAD's: cclab now asks the compiler and names the core's FPU
+  otherwise). The full-room test assumed 256 bytes hold gizmo's hand-written C (GCC 7's did not fit,
+  and the check had nothing left to drop): the room is measured now. Left: the same with older
+  GCC (4.9 defaults to C90, and some snippets declare in for loops) and with older clang, and the
+  RISC-V GCC of the older images.
 - [x] **The pilot without names**: Haiku's inputs on a copy of the GCC -Os build with every name made
   FUN_address and the calls' names gone too: how much of what it finds comes from knowing FreeRTOS
   (open source, its names in the listing) and how much from reading the code. Private firmware has
