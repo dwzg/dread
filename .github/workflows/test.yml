@@ -28,7 +28,8 @@ jobs:
       - name: Cross compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi clang lld llvm
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi \
+              libnewlib-arm-none-eabi clang lld llvm
           arm-none-eabi-gcc --version | head -1
           clang --version | head -1
       - name: Install

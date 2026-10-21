@@ -25,6 +25,19 @@ def adapter_ready(name):
     return os.path.exists(path) or bool(shutil.which(path))
 
 
+def have_newlib():
+    """Whether arm-none-eabi-gcc finds a C library: Ubuntu's gcc-arm-none-eabi only recommends
+    libnewlib-arm-none-eabi, so a lean installation has none (CI's had none until 2026-10-21, and the
+    relink test failed there on its -lc)."""
+    if not have("arm-none-eabi-gcc"):
+        return False
+    import subprocess
+    r = subprocess.run(["arm-none-eabi-gcc", "-mthumb", "-mcpu=cortex-m3", "-print-file-name=libc.a"],
+                       capture_output=True, text=True)
+    return os.path.isabs(r.stdout.strip())
+
+
+needs_newlib = pytest.mark.skipif(not have_newlib(), reason="needs newlib for arm-none-eabi-gcc")
 needs_riscv = pytest.mark.skipif(not adapter_ready("gcc-riscv"), reason="needs a RISC-V GCC")
 needs_msp430 = pytest.mark.skipif(not adapter_ready("gcc-msp430"), reason="needs msp430-elf-gcc")
 
@@ -681,7 +694,7 @@ def test_run_lift_checks_each_build_with_dread(tmp_path):
     assert "## What DREAD lifts" in (tmp_path / "gcc-arm" / "report.md").read_text()
 
 
-@needs_gcc
+@needs_newlib
 def test_a_bundles_objects_relinked_here_measure_the_same(tmp_path):
     """relink:DIR: the objects of a bundle's builds (a compiler that runs elsewhere: at work), copied
     instead of compiled and linked here with GNU's linker, newlib and libgcc, nothing of the other
