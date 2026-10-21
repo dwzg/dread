@@ -558,6 +558,28 @@ def reason_kind(reason):
     return text[:90]
 
 
+CATEGORIES = ("cases leave instructions unrun", "never returns, not all of it run", "a case differs",
+              "no generated input ends")
+
+
+def reason_category(key):
+    """A reasons key ("verdict: kind", lift_step) as a category across builds: the drops by what
+    stopped them (CATEGORIES), a refusal by its kind with the functions' names gone."""
+    import re
+    verdict, _, text = key.partition(": ")
+    if text.startswith("UNCOVERED"):
+        return CATEGORIES[0]
+    if text.startswith("never returns"):
+        return CATEGORIES[1]
+    if "[case generation]" in text:
+        return CATEGORIES[3]
+    if text.startswith("FAIL"):
+        return CATEGORIES[2]
+    text = re.sub(r"\b(call of|calls|into|of|after|behind) (?!REG\b)([A-Za-z_][A-Za-z0-9_]*[A-Z_0-9][A-Za-z0-9_]*)",
+                  lambda m: m.group(1) + " F", text)
+    return verdict + ": " + re.sub(r"\s*\(.*$", "", text).strip()[:80]
+
+
 def summary_line(m):
     parts = ["%d functions" % m["functions"]]
     if "asm" in m:
@@ -617,6 +639,24 @@ def report(recipe, bench=None, out=print):
             m.get("noreturn", {}).get("functions", "-"),
             "%d of %d disagree" % (c["measured"] - c["agree"], c["measured"]) if c.get("ran") else "-",
             ", ".join("%.0f" % m[s]["seconds"] if s in m else "-" for s in ("asm", "ghidra", "lift"))))
+    # The same across builds: what stops the rest by category, so that a category only some
+    # compilers or versions show stands out (docs/todo.md, "The benchmark across compiler versions")
+    lines += ["", "## What stops the rest, by build", "",
+              "| build | compiler | not lifted | %s | refused | refused most for |" % " | ".join(CATEGORIES),
+              "|---|---|---|%s---|---|" % ("---|" * len(CATEGORIES))]
+    for m in rows:
+        lf = m.get("lift", {})
+        if not lf.get("verdicts"):
+            continue
+        counts = {}
+        for key, n in lf.get("reasons", {}).items():
+            counts[reason_category(key)] = counts.get(reason_category(key), 0) + n
+        refused = {k: n for k, n in counts.items() if k.startswith("refused: ")}
+        top = max(refused.items(), key=lambda kv: kv[1]) if refused else None
+        lines.append("| %s | %s | %d | %s | %d | %s |" % (
+            m["build"], compiler_cell(m), sum(n for v, n in lf["verdicts"].items() if v != "accepted"),
+            " | ".join(str(counts.get(c, 0)) for c in CATEGORIES), sum(refused.values()),
+            "%d x %s" % (top[1], top[0][len("refused: "):]) if top else "-"))
     for m in rows:
         reasons = m.get("lift", {}).get("reasons")
         if reasons:

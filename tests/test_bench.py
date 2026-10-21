@@ -518,3 +518,19 @@ def test_measuring_builds_again_what_the_recipe_changed(tmp_path, monkeypatch):
     bench.measure(recipe(tmp_path, patch), "m3-Os", steps=("asm",), out=lines.append)
     assert any("building it again" in line for line in lines), lines
     assert b"STEADY" in open(os.path.join(where, "original", "firmware.bin"), "rb").read()
+
+
+def test_reasons_fall_into_categories_across_builds():
+    """The report's table across builds counts the drops by what stopped them and a refusal by its
+    kind with the functions' names gone, so that the same category counts alike on every build."""
+    c = bench.reason_category
+    assert c("dropped: UNCOVERED xTaskGetHandle: N of N instructions of the original never ran: N") == \
+        "cases leave instructions unrun"
+    assert c("dropped: never returns; the system run and its loop cases never ran N of its N instructions") == \
+        "never returns, not all of it run"
+    assert c("dropped: FAIL vAssertCalled [case generation]: only N of N generated inputs ran") == \
+        "no generated input ends"
+    assert c("dropped: FAIL xQueuePeek [generated N]") == "a case differs"
+    a = c("refused: N reads REG behind the call of vAssertCalled (what the callee leaves)")
+    b = c("refused: N reads REG behind the call of xQueueGenericSendFromISR (what the callee leaves)")
+    assert a == b == "refused: N reads REG behind the call of F", a
