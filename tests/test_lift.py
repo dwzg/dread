@@ -358,15 +358,62 @@ def test_a_branch_on_a_constant_the_function_stored_is_decided(tmp_path, opt):
     assert "fail" not in result.text
 
 
+SP_STORE_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global use, f
+    .type use, %function
+    .thumb_func
+use:    movs    r3, #0
+        mov     r2, r3
+        push    {r4, r5, lr}
+1:      cmp     r3, r1
+        blt     2f
+        mov     r0, r2
+        pop     {r4, r5, pc}
+2:      ldr     r4, [r0, r3, lsl #2]
+        adds    r3, r3, #1
+        ldrd    r5, r4, [r4]
+        mla     r2, r4, r5, r2
+        b       1b
+    .size use, . - use
+    .type f, %function
+    .thumb_func
+f:      push    {r0, r1, r2, r3, r4, r5, r6, lr}
+        movs    r3, #1
+        movs    r1, #2
+        str     r0, [sp]
+        add     r0, r0, r3
+        str     r3, [sp, #4]
+        str     r0, [sp, #8]
+        add     r3, sp, #8
+        add     r0, sp, #16
+        str     r1, [sp, #12]
+        str     sp, [sp, #16]
+        str     r3, [sp, #20]
+        bl      use
+        add     sp, sp, #28
+        pop     {pc}
+    .size f, . - f
+"""
+
+
 @pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
-@pytest.mark.parametrize("opt", ["-Os", "-O2"])
+@pytest.mark.parametrize("opt", ["-Os", "-O2", "asm"])
 def test_the_stack_pointer_stored_as_a_value(tmp_path, opt):
     """GCC keeps the address of a local at the bottom of the frame with str sp, [sp, #k] (C++ keeps
     the object a call through its vtable gets as `this` so): the lifter stores the frame's address
-    there, as it gives it for mov rX, sp, instead of refusing; the lift check accepts the function."""
+    there, as it gives it for mov rX, sp, instead of refusing; the lift check accepts the function.
+    The C cases test what this compiler makes of the snippet and are skipped where it stores no sp
+    (GCC 14.2 at -O2 builds the array otherwise); "asm" is GCC 16's -Os code of it, the shape on any
+    compiler."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
+    if opt == "asm":
+        (tmp_path / "t.s").write_text(SP_STORE_S)
     (tmp_path / "t.c").write_text(
         "struct obj { unsigned a, b; };\n"
         "__attribute__((noipa)) unsigned use(struct obj **all, int n)\n"
@@ -376,20 +423,22 @@ def test_the_stack_pointer_stored_as_a_value(tmp_path, opt):
     (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K }\n"
                                    "SECTIONS { .text : { *(.text*) } > FLASH }\n")
     elf = str(tmp_path / "t.elf")
-    flags = ["-mcpu=cortex-m3", "-mthumb", opt, "-nostdlib", "-ffunction-sections"]
+    flags = ["-mcpu=cortex-m3", "-mthumb", "-Os" if opt == "asm" else opt, "-nostdlib", "-ffunction-sections"]
     subprocess.run(["arm-none-eabi-gcc"] + flags + ["-T", str(tmp_path / "t.ld"), "-e", "f", "-o", elf,
-                    str(tmp_path / "t.c")], check=True)
+                    str(tmp_path / ("t.s" if opt == "asm" else "t.c"))], check=True)
     (tmp_path / "original").mkdir()
     (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
                                          'limit = 0x08010000\n\n[compiler]\ncross = "arm-none-eabi-"\n'
-                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "%s"]\n' % opt)
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "%s"]\n' % flags[2])
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
                            "--write-startup", elf]) == 0
     t = Target.load(str(tmp_path))
     p = Program(t, t.image())
     fn = p.by_name["f"]
     stores = [a for a in fn.insns if p.insn(a).mnemonic.startswith("str") and p.insn(a).op_str.startswith("sp,")]
-    assert stores, "GCC stores sp itself"
+    if not stores and opt != "asm":
+        pytest.skip("this compiler's %s code of the snippet stores no sp (the asm case has the shape)" % opt)
+    assert stores, "the code stores sp itself"
     result = lift.make_lifter(p).lift(fn)
     assert re.search(r"= \(u32\)\(sp0 - \d+\);", result.text), result.text
     lines = []
