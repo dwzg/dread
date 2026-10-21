@@ -72,7 +72,7 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   does not know (now given only where the linker's --help lists it), then 10 from LLVM tools the
   images lacked (llvm-N added); then 570 passed, 6 skipped (each for a build's own reason). The CI
   matrix: Ubuntu 24.04 with Python 3.11 and 3.13, Ubuntu 22.04 with 3.11.
-- [ ] **What a second compiler's code needs** (found 2026-10-20 on a commercial compiler's lab
+- [x] **What a second compiler's code needs** (found 2026-10-20 on a commercial compiler's lab
   builds: the probes' objects from a bundle, linked here with GNU ld, newlib and libgcc, so none of
   its library is involved; what the lab learned about that compiler stays in `~/dread-private/`,
   not here; below only what DREAD lacks, in general terms). `dread lift --check`
@@ -219,6 +219,13 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     that its code is measured and lifted without its library (2026-10-20: a hand-made adapter in
     `~/dread-private/`, whose compile step copies the bundle's object). Done 2026-10-21:
     `--adapter relink:DIR` (docs/cclab.md, "A compiler that runs elsewhere").
+  - [x] **The probe left at -On**: the other compiler checks what operator new returns, and its path
+    for a null result reads through the pointer; the real allocator never fails, and nothing was
+    mapped at address 0. Done 2026-10-21: generator 31's last stage stubs operator new (its second
+    pick; the constructor's call stands nearer), and the lab maps a page at 0 on ARM (a Cortex-M
+    part's boot alias is readable): that probe function is accepted (checked on its own; the whole
+    -On build not measured again). What is left of the item needs the user's machine: the lift check
+    at work on the real images, with the compiler's own library (`dread cclab run --lift`).
 - [x] **A cclab adapter for Compiler Explorer** (its public API: 52 ARM GCC versions, 21 ARM clang,
   48 RISC-V GCC, 42 RISC-V clang, TI Arm clang, 17 MSP430 GCC, SDCC on 2026-10-20): the probes
   compiled there to assembly, assembled and linked here, measured in the emulator as now; answers
@@ -379,6 +386,13 @@ undone). Other decisions are taken by the recommended option and written down in
   and optimisation levels matter to you?
 
 ## Phase 4: cases, mutation, coverage (rest)
+
+- [ ] **The memory map in the cases' cache key** (found 2026-10-21): the key holds the image, its
+  startup copies and dread.regflow's results, not the target's [memory]: a target whose memory
+  changes keeps the cases made under the old map (they still run alike; the generator would find
+  others: the lab's page at address 0 let a probe's null path end, but only after its cached cases
+  were removed). Add the regions to Generator.environment with the next generator VERSION bump,
+  which renews every cache anyway.
 
 - [x] **Dictionary inputs for parsers.** Buffers behind learned pointers also get text made from the
   strings a function and its callees compare against (string constants in their literal pools,

@@ -319,6 +319,20 @@ def test_other_compilers(adapter, tmp_path):
 
 
 @needs_gcc
+def test_arm_builds_have_a_readable_page_at_address_zero(tmp_path):
+    """On a Cortex-M part address 0 is readable (the boot memory's alias, with the vector table), so
+    the lab maps a page there (zeros, memory of its own): a probe that reads through a null pointer
+    goes on as on the hardware. A commercial compiler checks what operator new returns, and its
+    probe's path for a null result reads through it: no input of that path ended before."""
+    from dread.emu import Layout, Machine
+    from dread.target import Target
+    measured(tmp_path, "gcc-arm", ["cortex-m3-O2"])
+    t = Target.load(str(tmp_path / "gcc-arm" / "cortex-m3-O2"))
+    m = Machine(Layout(t, t.image()), t.image().payload())
+    assert bytes(m.read(0, 8)) == b"\0" * 8
+
+
+@needs_gcc
 def test_the_bundle_leaves_images_and_tables_behind(tmp_path):
     """What may leave the work directory: results, logs, reports, probe sources and objects; not the
     linked image, its binary or the tables made from it (a vendor's runtime code is in them). A

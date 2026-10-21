@@ -43,10 +43,15 @@ STACK_WORDS = 16                    # stack words that get a marker (arg)
 
 # Where the probes are linked and the emulator maps memory, per architecture (an adapter's [memory]
 # table, with the same keys, overrides): the stack at the top of RAM, the sentinel (the return
-# address of a run) in unmapped memory.
+# address of a run) in unmapped memory. ARM's boot page: on a Cortex-M part address 0 is readable (the
+# boot memory's alias, where the vector table lies), so a probe that reads through a null pointer
+# goes on there as on the hardware; here it is memory of its own, zeros (a commercial compiler checks
+# what operator new returns, and its probe's path for a null result read through it: no input of
+# that path ended while nothing was mapped at 0).
 MAPS = {
     "arm": {"flash": 0x08000000, "flash_size": 0x100000, "ram": 0x20000000, "ram_size": 0x40000,
-            "scratch": 0x20100000, "scratch_size": 0x20000, "stack": 0x2000, "sentinel": 0x1FFF0000, "io": []},
+            "scratch": 0x20100000, "scratch_size": 0x20000, "stack": 0x2000, "sentinel": 0x1FFF0000, "io": [],
+            "boot_size": 0x1000},
     "riscv": {"flash": 0x20000000, "flash_size": 0x100000, "ram": 0x20400000, "ram_size": 0x40000,
               "scratch": 0x20500000, "scratch_size": 0x20000, "stack": 0x2000, "sentinel": 0x1FFF0000, "io": []},
     "msp430": {"flash": 0x4000, "flash_size": 0xBF00, "ram": 0x0200, "ram_size": 0x1E00,
@@ -122,7 +127,7 @@ entry = "cclab_entry"
 
 [memory]
 regions = [
-    {{name = "flash", base = 0x{flash:x}, size = 0x{flash_size:x}, kind = "rom"}},
+{boot}    {{name = "flash", base = 0x{flash:x}, size = 0x{flash_size:x}, kind = "rom"}},
     {{name = "ram", base = 0x{ram:x}, size = 0x{ram_size:x}}},
     {{name = "scratch", base = 0x{scratch:x}, size = 0x{scratch_size:x}}},
 ]
@@ -264,6 +269,8 @@ def build(adapter, key, picked, flags, probe_files, work, guard=None):
                               profile='profile = "%s"\n' % adapter.profile if adapter.profile else "",
                               cpu='cpu = "%s"\n' % cpu if cpu else "",
                               llm=LLM.format(names=json.dumps(keep)) if guard else "",
+                              boot='    {name = "boot", base = 0x0, size = 0x%x, kind = "alias"},\n' % mem["boot_size"]
+                              if mem.get("boot_size") else "",
                               **dict(mem, io=json.dumps(mem.get("io", [])).replace('"', ""))))
     import contextlib
     import io
