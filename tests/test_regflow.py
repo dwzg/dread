@@ -646,3 +646,92 @@ def test_why_names_the_abi_as_a_reader(tmp_path, capsys):
     assert regflow.main(["--target", str(tmp_path), "--why", "__aeabi_uldivmod"]) in (0, None)
     out = capsys.readouterr().out
     assert "by the ABI: read after every call" in out, out
+
+
+SAVE_AREA_LOADS_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global walk, pf, spf, plain, caller
+    .type walk, %function
+    .thumb_func
+walk:   ldr     r0, [r1]
+        bx      lr
+    .size walk, . - walk
+    .type pf, %function
+    .thumb_func
+pf:     push    {r0, r1, r2, r3}        @ GCC -Os printf: the format kept in the save area too
+        movs    r3, #0
+        push    {r0, r1, r2, lr}
+        add     r2, sp, #16
+        ldr     r1, [r2], #4            @ the format, back from r0's slot
+        mov     r0, r3
+        str     r2, [sp, #4]
+        bl      walk
+        add     sp, sp, #12
+        ldr     lr, [sp], #4
+        add     sp, sp, #16
+        bx      lr
+    .size pf, . - pf
+    .type spf, %function
+    .thumb_func
+spf:    push    {r1, r2, r3}            @ GCC -Os sprintf: the format in r1, kept in the save area
+        push    {r0, r1, r2, r3, lr}
+        add     r2, sp, #20
+        ldr     r1, [r2], #4
+        str     r0, [sp, #4]
+        movs    r3, #0
+        add     r0, sp, #4
+        str     r2, [sp, #12]
+        bl      walk
+        add     sp, sp, #16
+        ldr     lr, [sp], #4
+        add     sp, sp, #12
+        bx      lr
+    .size spf, . - spf
+    .type plain, %function
+    .thumb_func
+plain:  push    {r1, r2, r3}            @ a va_list handed on unread: the save area stays no use
+        push    {r0, lr}
+        add     r1, sp, #8
+        bl      walk
+        pop     {r0, lr}
+        add     sp, sp, #12
+        bx      lr
+    .size plain, . - plain
+    .type caller, %function
+    .thumb_func
+caller: push    {r4, lr}
+        bl      pf
+        bl      spf
+        bl      plain
+        pop     {r4, pc}
+    .size caller, . - caller
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),
+                    reason="needs arm-none-eabi binutils")
+def test_a_named_argument_loaded_back_from_the_save_area_is_read(tmp_path):
+    """regflow 21: GCC -Os pushes printf's format with the save area (push {r0-r3}) and sprintf's
+    (push {r1-r3}) and loads it back from its slot through a copy of sp: that register is read (dread
+    callconv measured it on every ARM build; regflow had counted the whole save area as no use). The
+    unnamed ones stay no use, as does a save area whose slots nothing loads at a known offset."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(SAVE_AREA_LOADS_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "caller", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    flow = regflow.analyse(Program(Target.load(str(tmp_path))))
+    assert flow.read_regs("pf") == ["r0"], flow.read_regs("pf")
+    assert flow.read_regs("spf") == ["r0", "r1"], flow.read_regs("spf")
+    assert flow.read_regs("plain") == [], flow.read_regs("plain")      # (r0 only pads the push)

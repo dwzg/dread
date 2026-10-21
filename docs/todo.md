@@ -260,7 +260,7 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   from code touching a saved slot is left out, as dread test refuses it) and the bench step
   `callconv`. Gizmo agrees everywhere; FreeRTOS's GCC builds show regflow's gaps, below. A few
   seconds a build.
-- [ ] **regflow follows values through stack slots** (found by `dread callconv`, 2026-10-21): what a
+- [x] **regflow follows values through stack slots** (found by `dread callconv`, 2026-10-21): what a
   function stores in its frame and loads back is the same value, and regflow does not follow it.
   (1) A named argument kept in a variadic save area and read back from it: printf pushes r0-r3 and
   loads its format from r0's slot (variadic_save_area takes a push of all four for -O0 keeping its
@@ -278,7 +278,13 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   routine), so the call ended r0 in front of the restore. The pair is now a copy through the slot:
   the save reads the register when it is live behind the restore, which writes it within the
   function. On three FreeRTOS builds (GCC 16 and 9 -Os, RISC-V GCC) one answer changed, _free_r's
-  (reads r0 r1); gizmo none. (1) stays open: the variadic save area.
+  (reads r0 r1); gizmo none. (1) done the same night, regflow 21: an argument register an entry
+  push of the argument registers saved is read where a load at a known offset reads its slot back
+  (the lifter's states() say what each register holds as the entry's stack pointer minus a constant;
+  the ARM layer's load_address): printf reads r0 and sprintf r1 on every GCC build (no other answer
+  changed on eleven FreeRTOS builds and every gizmo build; clang keeps those arguments in registers).
+  The unnamed registers a va_list walks over stay no use, as before. regflow uses the lifter's frame
+  analysis here for the first time, a first step of "one analysis of base registers" (below).
 - [ ] **Refusals to a language model as rule writer**: the categories the benchmark leaves (a code
   shape the tools do not know) go with their listings to a model that proposes the rule (a
   recognizer, an input, the C); nothing is taken that the comparison does not accept.

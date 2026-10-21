@@ -53,7 +53,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 20                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 21                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -98,6 +98,10 @@ VERSION = 20                # 3: entry spills (variadic functions) are no use; 4
                             # __riscv_save_0, which returns through t0, and every FreeRTOS function on a
                             # path to it looked as if it read t0 (GCC 12 to 14 with picolibc: 19 functions
                             # refused for reading t0 behind vAssertCalled alone)
+                            # 21: an argument register an entry push of the argument registers saved (a
+                            # variadic function's save area) is read where a load at a known offset reads
+                            # its slot back: GCC's printf pushes r0-r3 and loads its format from r0's slot,
+                            # sprintf keeps its format r1 there (found by dread callconv on every ARM build)
 
 
 class RegFlow:
@@ -253,7 +257,58 @@ def _rows(program, fn, mask, entry_name):
             # condition false), and so did everything before it under that condition (libgcc's
             # __aeabi_fmul: ittt ne; andsne r3, ...; teqne r2, ip; teqne r3, ip reads its own r3).
             state = {pred: state[pred]} if pred is not None else {}
+    loaded = save_area_reads(program, fn, insns)
+    if loaded and out:                      # the push saved them for those loads: a read of each
+        out[0] = out[0]._replace(uses=out[0].uses | mask(loaded))
     return out
+
+
+_STATES = {}                                # id(program) -> a lifter without regflow, for its states()
+
+
+def save_area_reads(program, fn, insns):
+    """The argument registers a function pushes at its entry together with the last one (a variadic
+    function's save area, which may hold named arguments too) and later loads back from their slots
+    at a known offset (the lifter's states: what each register holds as the entry's stack pointer
+    minus a constant): those are read, by the load if not by the push. GCC's printf pushes r0-r3 and
+    loads its format from r0's slot through a copy of sp; sprintf pushes r1-r3, its format in r1. The
+    unnamed ones a va_list walks over are read through a pointer that moves (in a callee, mostly) and
+    stay no use, as before (an assertion handler's callers would look as if they read r3). Needs the
+    layer's pushed_registers and load_address; else, and on any trouble, the empty set."""
+    arch = program.arch
+    if not insns or insns[0] is None or not hasattr(arch, "pushed_registers") or not hasattr(arch, "load_address"):
+        return set()
+    args = list(program.target.abi.arg_regs)
+    pushed = arch.pushed_registers(insns[0])
+    named = [r for r in pushed if r is not None]
+    if not named or args[-1] not in named or not set(named) <= set(args):
+        return set()
+    total = arch.stack_bytes(insns[0])
+    slots = {}                              # depth below the entry's stack pointer -> the register there
+    for k, r in enumerate(pushed):
+        if r is not None:
+            slots[total - 4 * k] = r
+    from dread import lift
+    lifter = _STATES.get(id(program))
+    try:
+        if lifter is None or lifter.prog is not program:
+            lifter = _STATES[id(program)] = lift.make_lifter(program)
+        states = lifter.states(fn, strict=False)
+    except Exception:
+        return set()
+    found = set()
+    for a, insn in zip(fn.insns, insns):
+        if insn is None or a not in states:
+            continue
+        got = arch.load_address(insn)
+        if got is None:
+            continue
+        base, disp = got
+        depth, values = states[a]
+        value = ("sp", depth) if base == "sp" else values.get(base)
+        if isinstance(value, tuple) and len(value) == 2 and value[0] == "sp" and value[1] - disp in slots:
+            found.add(slots[value[1] - disp])
+    return found
 
 
 def based_copy(arch, insn, bases):

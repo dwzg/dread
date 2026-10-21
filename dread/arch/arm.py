@@ -531,6 +531,20 @@ class Arm:
             return {self._name(insn.reg_name(o.reg)) for o in ops[1:] if o.type == csarm.ARM_OP_REG}
         return set()
 
+    def load_address(self, insn):
+        """(base register, displacement) of a load from a register plus a constant: ldr, ldrb, ldrh,
+        ldrsb, ldrsh, ldrd (post-indexed: the base itself, before it moves), else None (dread.regflow:
+        a variadic function's named argument loaded back from its save area)."""
+        if insn.id not in (csarm.ARM_INS_LDR, csarm.ARM_INS_LDRB, csarm.ARM_INS_LDRH, csarm.ARM_INS_LDRSB,
+                           csarm.ARM_INS_LDRSH, csarm.ARM_INS_LDRD):
+            return None
+        ops = insn.operands
+        at = next((k for k, o in enumerate(ops) if o.type == csarm.ARM_OP_MEM), None)
+        if at is None or ops[at].mem.index:
+            return None
+        post = at + 1 < len(ops) and ops[at + 1].type == csarm.ARM_OP_IMM
+        return self._name(insn.reg_name(ops[at].mem.base)), 0 if post else ops[at].mem.disp
+
     def pushed_registers(self, insn):
         """The core registers a push stores, from the lowest address up (an FPU register or the
         unused word of str lr, [sp, #-8]! as None): a function's save area (dread.runner)."""
