@@ -245,6 +245,9 @@ class Lifter:
     # does not have, which may read more of a result than the original's callers do. dread.lift_msp430
     # gives them all four result registers; this translator and dread.lift_riscv do not use it.
     src_calls = frozenset()
+    # Whether dread.switches may seed its runs with the constants these states know (False for the
+    # plain lifter it takes them from: its own switches are resolved without, so nothing recurses).
+    seed_switches = True
 
     def __init__(self, program, flow=None, endless=None):
         """flow: the image's RegFlow (dread.regflow); endless: the names of the functions that never
@@ -262,7 +265,7 @@ class Lifter:
         key = (fn.name, address)
         if key not in self._resolved:
             from dread import switches
-            self._resolved[key] = switches.resolve(self.prog, fn, address)
+            self._resolved[key] = switches.resolve(self.prog, fn, address, seed=self.seed_switches)
         return self._resolved[key]
 
     def never_returns(self, name):
@@ -2446,7 +2449,10 @@ class Lifter:
         got = self.resolve(self.ctx["fn"], insn.address)
         callees = [self.prog.by_entry.get(t & ~1) for t in got[1]] if got and not got[0] else []
         if not callees or not all(callees):
-            raise Refused("0x%x: an indirect jump that is neither a resolved switch nor a tail call" % insn.address)
+            through = self._pointer_tail(insn, got)
+            if through is None:
+                raise Refused("0x%x: an indirect jump that is neither a resolved switch nor a tail call" % insn.address)
+            return through
         if self.ctx["depth"][insn.address]:
             raise Refused("0x%x: an indirect tail call with a frame" % insn.address)
         for callee in callees:
@@ -2479,7 +2485,7 @@ class Lifter:
             insn = self.prog.insn(a)
             if a not in self.ctx["depth"] or self.arch.flow(insn)[0] != "ijump":
                 continue
-            mapping = switches.mapping(self.prog, fn, a)
+            mapping = switches.mapping(self.prog, fn, a, seed=self.seed_switches)
             if not mapping:
                 continue
             check, reg, values, limit = mapping
@@ -2488,6 +2494,33 @@ class Lifter:
                 raise Refused("0x%x: a switch whose target for index %d is not known" % (a, missing[0]))
             self.ctx["switch"][a] = (check, reg, values)
             self.ctx["switch_targets"].update(values.values())
+
+    def _pointer_tail(self, insn, got):
+        """A jump through a register to targets no run can tell (a function pointer read from memory:
+        FreeRTOS's timer callback, `pxTimer->pxCallbackFunction(pxTimer)` at the end of
+        prvProcessExpiredTimer, a jump behind the epilogue on every build of both architectures) with
+        the frame gone and the return address back in its register: a call through the register whose
+        result is returned, as an indirect call is lifted (the argument registers). Only where the
+        function takes no stack arguments itself (so a callee can find none its callers passed) and its
+        callers read no second result register (an unknown callee may not set it), and no run landed
+        inside the function (a switch). None otherwise."""
+        from dread import switches
+        fn = self.ctx["fn"]
+        if (got and got[0]) or self.ctx["depth"][insn.address] or \
+                self.values().get(self.arch.link_reg) != self.RET or not switches.pointer_tail(self.prog, fn, insn.address):
+            return None                     # (pointer_tail: the inputs of such a jump get the pointer stub)
+        pointer = self._jump_register(insn)
+        if pointer is None or self.stack_args(fn) != 0 or self._wide(fn.name):
+            return None
+        return "return ((u32 (*)(%s))%s)(%s);" % (", ".join(["u32"] * len(self.ARGS)), pointer, ", ".join(self.ARGS))
+
+    def _jump_register(self, insn):
+        """The C expression of the register an indirect jump goes through (bx rN, mov pc, rN), or None."""
+        ops = insn.operands
+        if insn.id in (A.ARM_INS_BX, A.ARM_INS_MOV) and ops and ops[-1].type == A.ARM_OP_REG \
+                and ops[-1].reg not in (A.ARM_REG_LR, A.ARM_REG_PC, A.ARM_REG_SP):
+            return self.reg(ops[-1].reg)
+        return None
 
     def _switch_jump(self, insn):
         got = self.ctx["switch"].get(insn.address)

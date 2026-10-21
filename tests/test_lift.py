@@ -4,6 +4,7 @@ the translator is dread.lift_riscv (dread.lift.make_lifter)."""
 import os
 import re
 import shutil
+import subprocess
 
 import pytest
 
@@ -1454,3 +1455,77 @@ def test_r12_read_where_its_predicated_write_did_not_run_is_handed_in(tmp_path):
     assert '"mov %0, r12"' in text, text[:600]       # (dread.build compiles the file with -ffixed-r12)
     lines = []
     assert lift.check(t, t.image(), ["shift"], out=lines.append, jobs=1) == ["shift"], "\n".join(lines)
+
+
+POINTER_TAIL_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global helper4, cb_tail, leaf_tail, callback, user
+    .type helper4, %function
+    .thumb_func
+helper4:
+        movs    r0, #4
+        bx      lr
+    .size helper4, . - helper4
+    .type callback, %function
+    .thumb_func
+callback:
+        adds    r0, r0, #1
+        bx      lr
+    .size callback, . - callback
+    .type cb_tail, %function
+    .thumb_func
+cb_tail:                        @ return obj->callback(obj), as a jump behind the epilogue
+        push    {r4, lr}
+        mov     r4, r0
+        bl      helper4
+        ldr     r3, [r4, #8]
+        mov     r0, r4
+        pop     {r4, lr}
+        bx      r3
+    .size cb_tail, . - cb_tail
+    .type leaf_tail, %function
+    .thumb_func
+leaf_tail:                      @ a leaf's jump through a register: no frame anywhere, not counted
+        bx      r0
+    .size leaf_tail, . - leaf_tail
+    .type user, %function
+    .thumb_func
+user:
+        push    {r4, lr}
+        bl      cb_tail
+        pop     {r4, pc}
+    .size user, . - user
+"""
+
+
+def test_a_tail_call_through_a_pointer(tmp_path):
+    """FreeRTOS's prvProcessExpiredTimer ends with pxTimer->pxCallbackFunction(pxTimer), which every
+    build of both architectures compiles as a jump through a register behind the epilogue: refused
+    ("neither a resolved switch nor a tail call"). With the frame gone and the return address back in
+    its register (dread.switches.pointer_tail) it is a call through the register whose result is
+    returned, and it counts with the calls through a register (Program.icall_sites), so generated
+    inputs give it the pointer stub, not the middle of a function (one did on the ARM build, and the
+    real jump and the C's call ran that code with other stacks). A leaf's bx r0 is not one."""
+    from test_bench import TARGET
+    from dread import elfimport, switches
+    from dread.program import Program
+    (tmp_path / "t.s").write_text(POINTER_TAIL_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "user", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    program = Program(Target.load(str(tmp_path)))
+    jump = lambda name: next(a for a in program.by_name[name].insns
+                             if program.arch.flow(program.insn(a))[0] == "ijump")
+    assert switches.pointer_tail(program, program.by_name["cb_tail"], jump("cb_tail"))
+    assert not switches.pointer_tail(program, program.by_name["leaf_tail"], jump("leaf_tail"))
+    sites = program.icall_sites()
+    assert jump("cb_tail") in sites and jump("leaf_tail") not in sites
+    text = lift.make_lifter(program, regflow.analyse(program)).lift(program.by_name["cb_tail"]).text
+    assert "return ((u32 (*)(u32, u32, u32, u32))r3)(r0, r1, r2, r3);" in text, text

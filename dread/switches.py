@@ -121,9 +121,64 @@ def _helper(program, address):
     return (callee.entry, program.end(callee)) if callee is not None else None
 
 
-def _run(program, uc, state, isa, runs, first, address):
+_PLAIN = {}                                 # id(program) -> the lifter whose states seed the runs
+
+
+def _presets(program, fn, address):
+    """{register: value} of the constants known before the instruction at address on every path the
+    states of a plain lifter know (dread.lift: lui, auipc, li, addi on RISC-V, mov #imm on ARM, kept
+    in callee-saved registers across calls): a switch's table address that RISC-V code loads in front
+    of a loop into s1 or s2, out of the straight run (FreeRTOS's prvBlockingTask and prvTimerTask on
+    every RISC-V build). That lifter resolves its own switches without seeds and assumes every call
+    returns (no dread.noreturn, which resolves switches too), so nothing recurses; on a path through
+    a switch it cannot resolve the states know nothing, and a constant may then be one of several
+    (a wrong table is caught by the cases: the switch's C would disagree). {} on any trouble."""
+    _, states = _plain_states(program, fn)
+    if states is None:
+        return {}
+    _, values = states.get(address, (None, {}))
+    return {r: v[1] for r, v in values.items()
+            if isinstance(r, str) and r not in ("sp", "pc") and isinstance(v, tuple) and len(v) == 2 and v[0] == "const"}
+
+
+def _plain_states(program, fn):
+    """(the plain lifter, its states of fn) for _presets and pointer_tail; (lifter, None) on trouble."""
+    from dread import lift
+    lifter = _PLAIN.get(id(program))
+    try:
+        if lifter is None or lifter.prog is not program:
+            lifter = _PLAIN[id(program)] = lift.make_lifter(program, None, endless=())
+            lifter.seed_switches = False
+        return lifter, lifter.states(fn, strict=False, switch=True)
+    except Exception:
+        return lifter, None
+
+
+def pointer_tail(program, fn, address):
+    """Whether the jump through a register at address is a tail call through a pointer (a function
+    pointer read from memory or passed in: FreeRTOS's timer callback, `pxTimer->pxCallbackFunction(
+    pxTimer)` jumped to behind prvProcessExpiredTimer's epilogue on every build of both
+    architectures): the plain states know it, the function had a frame and it is gone there, the
+    return address is back in its register and the jump does not go through it (a return), and no
+    run lands inside the function (a switch). Strict on purpose: dread.program counts such a jump
+    with the calls through a register, whose generated inputs get the pointer stub instead of the
+    middle of a function, and a switch counted so would have its callers' cases dropped (their runs
+    reach a computed target). A leaf function's jump (no frame anywhere) is not one."""
+    lifter, states = _plain_states(program, fn)
+    state = states.get(address) if states else None
+    insn = program.insn(address)
+    if state is None or insn is None or state[0] or not any(d for d, _ in states.values()):
+        return False
+    link = getattr(program.arch, "link_reg", None)
+    if link is None or state[1].get(link) != lifter.RET or lifter.ret_jump(insn, state[1]):
+        return False
+    got = resolve(program, fn, address)
+    return not (got and got[0])
+
+
+def _run(program, uc, state, isa, runs, first, address, presets=None):
     """Run from `first` once per entry of `runs`; where each run lands after the jump (None: it
-    faulted or left the run before the jump)."""
+    faulted or left the run before the jump). presets: {register: value} written over the fill."""
     arch = program.arch
     landings = []
     try:
@@ -132,6 +187,8 @@ def _run(program, uc, state, isa, runs, first, address):
             while True:
                 for r in arch.general_regs():
                     uc.reg_write(arch.reg_id(r), fill)
+                for r, v in (presets or {}).items():
+                    uc.reg_write(arch.reg_id(r), v)
                 arch.initial_status(uc)
                 state.update(set_at=set_at, reg=reg, value=value, lo=first, jump=address, landed=None, last=None,
                              called=False, through=_helper(program, address), want=set())
@@ -177,7 +234,7 @@ def _run_start(program, fn, i):
     return start
 
 
-def _find_check(program, fn, i, start):
+def _find_check(program, fn, i, start, seed=True):
     """(index in fn.insns, (register, limit, before)) of the bound check in front of the jump
     fn.insns[i], nearest first, whose register feeds the jump; or None. An instruction that looks
     like a bound check of another register does not count (GCC 12's RISC-V xTaskGenericNotifyFromISR:
@@ -192,6 +249,8 @@ def _find_check(program, fn, i, start):
             continue
         prior = [program.insn(fn.insns[j]) for j in range(k - 1, start - 1, -1)]
         found = arch.bound_check(insn, prior)
+        if not found and seed and arch.flow(insn)[0] == "jump":    # (the bound in a register: _presets)
+            found = arch.bound_check(insn, prior, _presets(program, fn, fn.insns[k]))
         if not found:
             continue
         reg, _, before = found
@@ -213,14 +272,16 @@ def _find_check(program, fn, i, start):
     return None
 
 
-def resolve(program, fn, address):
-    """(inside, outside) targets of the indirect jump at `address` (see the module), or None."""
+def resolve(program, fn, address, seed=True):
+    """(inside, outside) targets of the indirect jump at `address` (see the module), or None. seed:
+    the runs start with the constants known there (_presets)."""
     arch = program.arch
     if address not in fn.insns:
         return None
     i = fn.insns.index(address)
     start = _run_start(program, fn, i)
-    check = _find_check(program, fn, i, start)
+    check = _find_check(program, fn, i, start, seed)
+    presets = (lambda at: _presets(program, fn, at)) if seed else (lambda at: None)
     isa = program.isa_at(address)
     uc, state = _engine(program, isa)
     if check is not None:
@@ -236,7 +297,7 @@ def resolve(program, fn, address):
     # registers at zero), from the check itself.
     starts = [start] + ([check[0]] if check is not None and check[0] != start else [])
     for first in starts:
-        landings = _run(program, uc, state, isa, runs, fn.insns[first], address)
+        landings = _run(program, uc, state, isa, runs, fn.insns[first], address, presets(fn.insns[first]))
         if any(a is not None for a in landings):
             break
     if check is not None and not any(a is not None for a in landings):
@@ -247,7 +308,7 @@ def resolve(program, fn, address):
         runs = [(FILLS[-1], set_at, reg_id, value) for _, set_at, reg_id, value in runs]
         here = set(fn.insns)
         for first in starts:
-            landings = _run(program, uc, state, isa, runs, fn.insns[first], address)
+            landings = _run(program, uc, state, isa, runs, fn.insns[first], address, presets(fn.insns[first]))
             # (where the fill itself is the target, the jump went nowhere: only code counts)
             landings = [a if a is not None and (a in here or a in program.by_entry) else None for a in landings]
             if any(a is not None for a in landings):
@@ -262,7 +323,7 @@ def resolve(program, fn, address):
     return sorted(a for a in found if a in inside), sorted(a for a in found if a not in inside)
 
 
-def mapping(program, fn, address):
+def mapping(program, fn, address, seed=True):
     """For a switch with a bound check: (address where the index is taken, the register it is in,
     {index value: target in fn} for the values that reach the jump, the largest value the check lets
     through); None otherwise. What dread.lift needs to switch over the index instead of reading the
@@ -272,7 +333,7 @@ def mapping(program, fn, address):
         return None
     i = fn.insns.index(address)
     start = _run_start(program, fn, i)
-    check = _find_check(program, fn, i, start)
+    check = _find_check(program, fn, i, start, seed)
     if check is None:
         return None
     k, (reg, limit, before) = check
@@ -286,7 +347,8 @@ def mapping(program, fn, address):
     for fill in FILLS[:1] + FILLS[-1:]:     # (registers filled when zero ones store into the image: resolve)
         runs = [(fill, set_at, reg_id, value) for _, set_at, reg_id, value in runs]
         for first in [fn.insns[start]] + ([fn.insns[k]] if k != start else []):
-            landings = _run(program, uc, state, isa, runs, first, address)
+            landings = _run(program, uc, state, isa, runs, first, address,
+                            _presets(program, fn, first) if seed else None)
             values = {run[3]: at for run, at in zip(runs, landings) if at is not None and at in inside}
             if values:
                 break

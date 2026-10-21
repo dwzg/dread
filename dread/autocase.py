@@ -1501,6 +1501,17 @@ class Generator:
             return None
         return self.program.function_at(target)
 
+    def pointer_tails_reached(self, words):
+        """The tail calls through a pointer (dread.switches.pointer_tail) among the sites drop_wild
+        looks at for these instructions (theirs and their callees', CALLEE_DEPTH), sorted."""
+        sites = self.program.icall_sites()
+        if not sites:
+            return []
+        reach = set(words).union(*(f.insns for f in self.callees(words)))
+        arch = self.program.arch
+        return sorted(a for a in reach & set(sites)
+                      if self.program.insn(a) is not None and arch.flow(self.program.insn(a))[0] == "ijump")
+
     def drop_wild(self, entry, words, cases, limit):
         """(the cases, each whose run calls through a register into the image at no function's entry
         repaired or dropped, (argument indices, memory addresses) of the inputs that gave such an
@@ -2068,6 +2079,9 @@ def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True
     keyed = dict(options, calls=calls, frame=frame)                         # function that reaches none stay)
     if len(gen.ladder(fn.insns)) > SWEEP_STEPS:     # (only those: the other functions keep their cases)
         keyed["sweep_steps"] = SWEEP_STEPS
+    tails = gen.pointer_tails_reached(fn.insns)
+    if tails:                               # (only those: tail calls through a pointer count with the
+        keyed["pointer_tails"] = tails      # calls through a register since 2026-10-21, drop_wild)
     key = cache_key(gen.payload, image.base, fn.insns, sizes, fn.entry, keyed, prog.arch, gen.environment())
     path = os.path.join(run["target"].build, "autocases", image.name, name + ".json")
     cached = cache_load(path)

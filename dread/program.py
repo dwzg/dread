@@ -286,13 +286,17 @@ class Program:
 
     def icall_sites(self):
         """{address: size} of every call through a register in the image's functions (the layer's
-        flow kind "icall"), for dread.emu.Machine.watch_calls."""
+        flow kind "icall"), and of every tail call through a pointer (an indirect jump that
+        dread.switches.pointer_tail finds is one: the lifter makes it a call), for
+        dread.emu.Machine.watch_calls and the generator's pointer stub."""
         if getattr(self, "_icall_sites", None) is None:
+            from dread import switches
             sites = {}
             for fn in self.functions:
                 for a in fn.insns:
                     insn = self.insn(a)
-                    if insn is not None and self.arch.flow(insn)[0] == "icall":
+                    kind = self.arch.flow(insn)[0] if insn is not None else None
+                    if kind == "icall" or (kind == "ijump" and switches.pointer_tail(self, fn, a)):
                         sites[a] = self.insn_size(a)
             self._icall_sites = sites
         return self._icall_sites

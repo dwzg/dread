@@ -107,14 +107,23 @@ class RiscVLifter(lift.Lifter):
 
     def made_value(self, insn, depth, values):
         """(register, value) for addi rd, sp or a frame address, imm (a frame address), a plain
-        copy, and lw rd from a frame slot (what the slot holds: a saved return address)."""
+        copy, and lw rd from a frame slot (what the slot holds: a saved return address); and the
+        constants ("const", value) of lui, auipc, li and addi of a constant (a switch's table address
+        kept in a callee-saved register across a loop: dread.switches seeds its runs with them)."""
         f = fields(insn)
         if not f.rd or f.rd == 2:
             return None
+        if f.op == "lui":
+            return NAMES[f.rd], ("const", f.imm & 0xFFFFFFFF)
+        if f.op == "auipc":
+            return NAMES[f.rd], ("const", (insn.address + f.imm) & 0xFFFFFFFF)
         if f.op == "addi":
             v = self.frame_value(f.rs1, depth, values)
             if v is not None:
                 return NAMES[f.rd], ("sp", v[1] - f.imm)
+            c = ("const", 0) if f.rs1 == 0 else values.get(NAMES[f.rs1])
+            if isinstance(c, tuple) and len(c) == 2 and c[0] == "const":
+                return NAMES[f.rd], ("const", (c[1] + f.imm) & 0xFFFFFFFF)
         src = self.copied(f)
         if src is not None:
             v = self.frame_value(src, depth, values) or values.get(NAMES[src])
@@ -471,9 +480,19 @@ class RiscVLifter(lift.Lifter):
         for a, (check, reg, values) in list(self.ctx["switch"].items()):
             self.ctx["switch"][a] = (check, cname(reg), values)
 
+    def _jump_register(self, insn):
+        """The C variable of the register jr goes through (jalr zero, 0(rs1), rs1 not ra), or None."""
+        f = fields(insn)
+        if f.op == "jalr" and not f.rd and f.rs1 and f.rs1 != 1 and not f.imm:
+            return cname(NAMES[f.rs1])
+        return None
+
     def _switch_jump(self, insn):
         got = self.ctx["switch"].get(insn.address)
         if got is None:
+            through = self._pointer_tail(insn, self.resolve(self.ctx["fn"], insn.address))
+            if through is not None:
+                return through
             raise Refused("0x%x jumps through a register to targets not known" % insn.address)
         check, reg, values = got
         cases = " ".join("case %d: goto L_%x;" % (k, t) for k, t in sorted(values.items()))

@@ -466,28 +466,35 @@ class RiscV:
         """The address auipc or lui + addi computes (joined by link_pair), else None."""
         return getattr(insn, "rv_address", None)
 
-    def bound_check(self, insn, prior=()):
+    def bound_check(self, insn, prior=(), known=None):
         """(register, limit, before) when the instruction bounds a switch index (dread.switches):
         andi rN, rM, 2^n - 1 (rN takes 0 .. 2^n - 1; set after it), or a branch that compares the
         index with a constant loaded in front of it (li + bltu and kin, joined by link_pair when they
         are next to each other; else the li among prior, the instructions in front nearest first, as
-        long as nothing else writes its register: GCC 12 puts an andi of another register between:
-        values up to the constant are tried; set before the branch)."""
+        long as nothing else writes its register: GCC 12 puts an andi of another register between;
+        or a register known to hold the constant there, known: {name: value} from dread.switches'
+        seeds, clang keeps the bound in s5 across a loop: values up to the constant are tried; set
+        before the branch)."""
         f = fields(insn)
         if f.op == "andi" and f.rd and 0 < f.imm < 0x10000 and f.imm & (f.imm + 1) == 0:
             return NAMES[f.rd], f.imm, False
         compare = getattr(insn, "rv_compare", None)
         if compare is None and f.op in ("beq", "bne", "blt", "bge", "bltu", "bgeu"):
+            written = set()                 # (the index may be adjusted between: addi a5, a5, -1)
             for p in prior:
                 pf = fields(p) if p is not None else None
                 if pf is None:
                     break
-                if pf.op == "addi" and pf.rs1 == 0 and pf.rd and pf.rd in (f.rs1, f.rs2):
+                if pf.op == "addi" and pf.rs1 == 0 and pf.rd and pf.rd in (f.rs1, f.rs2) and pf.rd not in written:
                     other = f.rs2 if f.rs1 == pf.rd else f.rs1
                     compare = (other, pf.imm) if other else None
                     break
-                if pf.rd and pf.rd in (f.rs1, f.rs2):
-                    break                   # the compared register is written otherwise
+                if pf.rd:
+                    written.add(pf.rd)
+            if compare is None and known:
+                a, b = NAMES[f.rs1] in known, NAMES[f.rs2] in known
+                if a != b and f.rs1 and f.rs2:
+                    compare = (f.rs2, known[NAMES[f.rs1]]) if a else (f.rs1, known[NAMES[f.rs2]])
         if compare is not None and 0 <= compare[1] < 0x10000:
             return NAMES[compare[0]], compare[1], True
         return None

@@ -350,6 +350,24 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   r6 for a compiler's shared code). Functions with code no edge reaches are left as they are (GCC 12's
   RISC-V xTaskGenericNotifyFromISR: its switch's cases were not all found, below). 16 answers of the
   GCC 10 RISC-V build changed, none elsewhere (fifteen FreeRTOS builds, gizmo).
+- [x] **Switches whose table or bound lies in a register, and tail calls through a pointer**
+  (2026-10-21, from the categories of measure-34: every RISC-V build refused prvBlockingTask,
+  prvTimerTask and prvProcessExpiredTimer, every ARM build prvProcessExpiredTimer). RISC-V code
+  loads a switch's table address in front of the loop into a callee-saved register (GCC: s1, s2),
+  clang the bound as well (s5), and GCC adjusts the index between the bound's li and the branch.
+  dread.switches seeds its runs with the constants the lifter's states know at the run's start (a
+  plain lifter: its own switches unseeded, no dread.noreturn, so nothing recurses; the RISC-V states
+  learned lui, auipc, li and addi of a constant), takes a register known to hold a constant as the
+  bound, and lets the bound's li stand behind a write of the index. prvProcessExpiredTimer ends with
+  the timer's callback, a jump through a register behind the epilogue: with the frame gone and the
+  return address back in its register (switches.pointer_tail, strict: a frame elsewhere in the
+  function, no run landing inside) it is lifted as a call through the register whose result is
+  returned, and it counts with the calls through a register, so generated inputs give it the pointer
+  stub (one ARM case pointed it into the middle of a function, where the real jump and the C's call
+  ran on other stacks: r4 differed). Every indirect jump of the benchmark's builds and gizmo, main
+  against this: only the intended ones changed (21 jumps on the RISC-V builds); regflow's answers
+  unchanged. On copies of four builds prvProcessExpiredTimer and prvBlockingTask lift; prvTimerTask
+  is a matter of coverage now (a task that never returns).
 - [x] **RISC-V switches with the bound first** (found 2026-10-21 by regflow 23's check): GCC 12's
   RISC-V xTaskGenericNotifyFromISR checks its switch index with bltu a5, s3 (the bound 4 in a5, the
   index in s3) and jumps through a table in .rodata; the switch resolution found one of the five

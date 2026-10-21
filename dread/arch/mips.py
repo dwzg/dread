@@ -482,7 +482,7 @@ class Mips:
         """The address lui + addiu or ori computes (joined by link_pair), else None."""
         return getattr(insn, "mips_address", None)
 
-    def bound_check(self, insn, prior=()):
+    def bound_check(self, insn, prior=(), known=None):
         """(register, limit, before) when the instruction bounds a switch index: andi rN, rM,
         2^n - 1 (rN takes 0 .. 2^n - 1; set after it), sltiu rN, rM, k (rM below k when rN is set)."""
         f = fields(insn)
