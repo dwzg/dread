@@ -9,6 +9,26 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Memory at fixed addresses as names: macros that are the access (2026-10-21)
+
+**Decided by me**, on the user's standing rule (decisions by recommendation; review here).
+
+- **Question.** Readable C wrote every global and device register as `*(volatile u32 *)0x20029aacu`:
+  the same variable is hard to recognise from function to function, and the model naming a
+  function's variables had to guess what the address holds. How should such memory be named?
+- **Options.** (a) An extern variable per address, defined by the linker script or an assembler
+  file at that address. (b) A macro per address and type above each function that is the access
+  itself: `#define g_20029aac (*(volatile u32 *)0x20029aacu)`. (c) Leave the addresses.
+- **Choice: (b).** The macro expands to the very expression it replaces, so the code cannot change
+  (the gate checks it anyway) and nothing changes in the build: no symbols, no linker script, no
+  question of what a symbol's type does to the code. Default names say where the memory is (io_,
+  rom_, g_ from the target's [memory]); the model names them for the whole image from their uses
+  in every readable function, before the functions' variables, which then see the names.
+- **Undo.** Take apply_globals out of dread.readable's transform; the readable_names table's
+  globals part is then unused.
+- **Status.** Built (dread.naming apply_globals, dread pilot --task readable); measured in
+  docs/todo.md (the pilot on the draft).
+
 ## Names for readable C: the model proposes a map, code applies and checks it (2026-10-21)
 
 **Decided by the user** ("go ahead with the pilot that way"), on a recommendation.

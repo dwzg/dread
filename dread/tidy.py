@@ -368,8 +368,10 @@ def dead(fn):
 
 
 def propagate(fn):
-    """Constants and copies into the simple statements that read them."""
-    g = Graph(fn)
+    """Constants and copies into the simple statements that read them, those inside a conditional
+    block too (flat_view: a constant address in a register reaches an IT block's load)."""
+    view = flat_view(fn)
+    g = Graph(view)
     reach = g.reaching()
     changed = False
     for n in g.nodes:
@@ -400,6 +402,7 @@ def propagate(fn):
                 if reads_count(get(), v):
                     put(substitute(get(), v, value))
                     changed = True
+    write_back(view)
     return changed
 
 
@@ -990,7 +993,14 @@ def candidates(e, ctx, most=10):
     Operands: its subexpressions (subexpressions), the most smallest ones."""
     import copy
     subs = subexpressions(e)
-    consts = [x for x in subs if isinstance(x, C.Num)]
+    # An address a memory access is made at is no operand to compare with (gizmo's uart_putc waited
+    # while io_40011004 << 31 < 0x40011004u: true, but the bound was the register's own address).
+    access = [x for x in walk_expr(e) if isinstance(x, C.Unary) and x.op == "*" and isinstance(x.e, C.Cast)
+              and isinstance(x.e.e, C.Num)]
+    at = {id(x.e.e) for x in access}
+    addresses = {C.expr_text(x.e.e) for x in access} - {
+        C.expr_text(x) for x in walk_expr(e) if isinstance(x, C.Num) and id(x) not in at}
+    consts = [x for x in subs if isinstance(x, C.Num) and C.expr_text(x) not in addresses]
     if not any(isinstance(x, C.Num) and x.value == 0 for x in consts):
         consts.append(C.Num("0"))
     seen = {x.value for x in consts if isinstance(x.value, int)}
@@ -999,6 +1009,15 @@ def candidates(e, ctx, most=10):
             if d not in seen:
                 seen.add(d)
                 consts.append(C.Num("0x%xu" % d if d > 9 else "%du" % d))
+    for x in walk_expr(e):                  # (x << 31's sign is x's bit 0: the bit a shift moves there)
+        if isinstance(x, C.Binary) and x.op == "<<" and isinstance(x.r, C.Num) and isinstance(x.r.value, int):
+            t = type_of_expr(x.l, ctx)
+            bits = t[0] if t else ctx.int_bits
+            if 0 <= x.r.value < bits:
+                d = 1 << (bits - 1 - x.r.value)
+                if d not in seen:
+                    seen.add(d)
+                    consts.append(C.Num("0x%xu" % d if d > 9 else "%du" % d))
     terms = [x for x in subs if not isinstance(x, C.Num)][:most]
     leaves = [x for x in terms if isinstance(x, C.Name) or (isinstance(x, C.Unary) and x.op == "*")]
     pairs = [(a, b) for a in terms for b in consts] + [(a, b) for a in leaves for b in leaves if a is not b]
@@ -1081,6 +1100,13 @@ def peephole(e, ctx):
         if isinstance(r, C.Num) and r.value == 0 and e.op in ("+", "-", "|", "^", "<<", ">>") and t is not None \
                 and t[0] >= ctx.int_bits:
             return l
+        if (e.op == ">>" and isinstance(r, C.Num) and isinstance(l, C.Binary) and l.op == "<<"
+                and isinstance(l.r, C.Num) and isinstance(r.value, int) and isinstance(l.r.value, int)
+                and 0 < l.r.value <= r.value < 32 and type_of_expr(l.l, ctx) == (32, False)):
+            # x << a >> b of a 32-bit unsigned x is a field of it: (x >> (b - a)) & mask
+            shift, mask = r.value - l.r.value, (1 << (32 - r.value)) - 1
+            inner = l.l if shift == 0 else C.Binary(">>", l.l, C.Num("%d" % shift))
+            return C.Binary("&", inner, C.Num("0x%xu" % mask if mask > 9 else "%du" % mask))
         return C.Binary(e.op, l, r)
     if isinstance(e, C.Cast):
         inner = peephole(e.e, ctx)
@@ -1120,16 +1146,18 @@ def fold_constants(op, l, r, ctx):
 
 
 def tidy_expressions(fn):
-    """peephole in every simple statement."""
+    """peephole in every simple statement, those inside a conditional block too (flat_view)."""
     ctx = context(fn)
     changed = False
-    for s in fn.body.body:
+    view = flat_view(fn)
+    for s in view.body.body:
         for get, put in stmt_exprs(s):
             before = get()
             after = peephole(before, ctx)
             if C.expr_text(after) != C.expr_text(before):
                 put(after)
                 changed = True
+    write_back(view)
     return changed
 
 
@@ -1417,10 +1445,11 @@ def flat_view(fn):
     """A stand-in for fn whose body has its conditional blocks spread out (if (c) goto then; goto
     else; then: ...; goto end; else: ...; end:) for dread.cflow.Graph: a graph of it tells the reads
     inside a block (an IT block, merged ifs) apart from the definitions before it. The statements and
-    expressions are fn's own, so what is renamed through the stand-in is renamed in fn. A block that
-    declares, labels, loops or switches stays one statement, as does an if that writes nothing."""
+    expressions are fn's own, so what is renamed through the stand-in is renamed in fn; a condition
+    replaced in a stand-in's if (pairs: (stand-in, fn's if)) is copied back by write_back. A block
+    that declares, labels, loops or switches stays one statement, as does an if that writes nothing."""
     import types
-    out, count = [], [0]
+    out, count, pairs = [], [0], []
 
     def plain(s):
         if isinstance(s, C.Block):
@@ -1439,8 +1468,9 @@ def flat_view(fn):
         elif isinstance(s, C.If) and plain(s) and writes(s):
             count[0] += 1
             then_l, else_l, end_l = ("flat_%s_%d" % (w, count[0]) for w in ("then", "else", "end"))
-            out.extend([C.If(s.cond, C.Goto(then_l)), C.Goto(else_l if s.orelse is not None else end_l),
-                        C.Label(then_l)])
+            stand_in = C.If(s.cond, C.Goto(then_l))
+            pairs.append((stand_in, s))
+            out.extend([stand_in, C.Goto(else_l if s.orelse is not None else end_l), C.Label(then_l)])
             spread(s.then)
             if s.orelse is not None:
                 out.extend([C.Goto(end_l), C.Label(else_l)])
@@ -1451,7 +1481,13 @@ def flat_view(fn):
     for s in fn.body.body:
         spread(s)
     return types.SimpleNamespace(name=fn.name, params=fn.params, head=fn.head,
-                                 body=types.SimpleNamespace(body=out))
+                                 body=types.SimpleNamespace(body=out), pairs=pairs)
+
+
+def write_back(view):
+    """The conditions a pass replaced in a flat_view's stand-in ifs, into the function's own ifs."""
+    for stand_in, original in view.pairs:
+        original.cond = stand_in.cond
 
 
 def webs(fn):

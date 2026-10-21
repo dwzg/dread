@@ -963,9 +963,23 @@ def expr_prec(e):
     return 16
 
 
+# Parentheses C does not need but a reader does (GCC's -Wparentheses): an operand of a bitwise
+# operation that is a shift, arithmetic, a comparison or another bitwise operation; arithmetic under a
+# shift; && under ||.
+_COMPARE = ("==", "!=", "<", "<=", ">", ">=")
+CLEAR = {"&": ("<<", ">>", "+", "-", "|", "^") + _COMPARE, "|": ("<<", ">>", "+", "-", "&", "^") + _COMPARE,
+         "^": ("<<", ">>", "+", "-", "&", "|") + _COMPARE, "<<": ("+", "-"), ">>": ("+", "-"), "||": ("&&",)}
+
+
 def expr_text(e, least=0):
     s = _expr(e)
     return "(" + s + ")" if expr_prec(e) < least else s
+
+
+def _operand(x, op, least):
+    if isinstance(x, Binary) and x.op in CLEAR.get(op, ()):
+        return "(" + _expr(x) + ")"
+    return expr_text(x, least)
 
 
 def _expr(e):
@@ -977,7 +991,7 @@ def _expr(e):
         return " ".join(e.parts)
     if isinstance(e, Binary):
         p = PREC[e.op]
-        return "%s %s %s" % (expr_text(e.l, p), e.op, expr_text(e.r, p + 1))
+        return "%s %s %s" % (_operand(e.l, e.op, p), e.op, _operand(e.r, e.op, p + 1))
     if isinstance(e, Assign):
         return "%s %s %s" % (expr_text(e.target, 14), e.op, expr_text(e.value, 2))
     if isinstance(e, Cond):
@@ -1159,8 +1173,11 @@ class Printer:
                     self.emit(depth, "else")
                     self.body(s.orelse, depth)
         elif isinstance(s, While):
-            self.emit(depth, "while (%s)" % expr_text(s.cond), s.addr)
-            self.body(s.body, depth)
+            if isinstance(s.body, Empty) or (isinstance(s.body, Block) and not s.body.body):
+                self.emit(depth, "while (%s);" % expr_text(s.cond), s.addr)     # (a wait: nothing in it)
+            else:
+                self.emit(depth, "while (%s)" % expr_text(s.cond), s.addr)
+                self.body(s.body, depth)
         elif isinstance(s, DoWhile):
             self.emit(depth, "do", s.addr)
             self.body(s.body, depth)

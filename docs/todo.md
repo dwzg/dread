@@ -63,7 +63,13 @@ its sources.
   took `r5 == 0x41` for a letter test (z3 since); a memory load abstracted as unsigned int instead of
   its own type (a byte is promoted to int: fixed); the whole image of two builds differs with lifted
   C alone, so the check now asks the lifted baseline first and lets the function-level runs decide
-  where the scenarios cannot (and finds guilty functions by halves where they can).
+  where the scenarios cannot (and finds guilty functions by halves where they can). Later the same
+  day: an address a memory access is made at is no constant to compare with (gizmo's uart_putc
+  waited while io_40011004 << 31 < 0x40011004u, true but the bound was the register's address); the
+  bit a left shift moves into the sign is a mask to test (now (io_40011004 & 1)); x << a >> b of a
+  32-bit unsigned x is (x >> (b - a)) & mask; propagation and the expressions' clean-up reach the
+  statements inside a conditional block (flat_view: uart_getc's IT block loads io_40011000, not
+  *(r3 + 0)); the printer adds the parentheses GCC's -Wparentheses asks for ((x >> 1) & 1u).
 - [x] **Structure.** Gotos to if/else, while, do-while and switch (pattern-independent structuring,
   "No More Gotos", NDSS 2015); a goto left only where the flow is irreducible. Done when the gotos
   left per build are in the bench report and the gate accepts as many as before.
@@ -77,7 +83,8 @@ its sources.
   goto (tests/test_structure.py: 400 random functions with irreducible flow, compiled with the
   host's cc before and after, the same results on random arguments; 10 % of their gotos remain).
   The readable C is printed in a style of its own (dread.cparse: an arm of one statement without
-  braces, else if). On the bench, the 11,061 lifted functions of the 39 builds: gotos 49,093 ->
+  braces, else if; a loop with nothing in it as while (c);, and do {} while (c) as that, since both
+  test c first). On the bench, the 11,061 lifted functions of the 39 builds: gotos 49,093 ->
   12,512 (25 %), lines to 67 % of the lifted C's (the braces count); the gate on the nine builds as
   for the clean-up (every function it checks). Not yet: a switch (its function keeps its gotos), a
   loop with exits to several places beyond the one taken for its break.
@@ -134,9 +141,23 @@ its sources.
   and 10,362 out, about $0.16. Haiku is the one to use. The first 30 by name, mostly newlib's (terse
   names: ptr, fp, g), got 12 of 37 exact with Haiku. Most misses were a register holding several
   values one name had to cover: parameters were not split (xQueueGenericSend's r0, the queue and
-  later the result, named xResult). They are now (Variables). Next: types: the structures behind
-  pointers derived by code (accesses at constant offsets through the same pointer, unified across
-  functions), their names and fields' names proposed the same way.
+  later the result, named xResult). They are now (Variables). Memory at fixed addresses is written
+  as a name, a macro above the function that is the access itself (#define g_20029aac (*(volatile
+  u32 *)0x20029aacu)): by default where it is (io_ a device register of [memory] io, rom_ in a rom
+  region, g_ anything else), or the readable_names table's globals, which the pilot asks for first
+  (40 a question, each with its uses in up to four functions; a name no function or other global
+  has) and shows in the functions' C. Measured again 2026-10-21 on the same 30 functions with
+  Haiku 5.5, both changes in: parameters 32 of 46 as the source (70 %, 55 % before), 45 sharing a
+  word (98 %, 69 %), 23 of 128 local names among the source's (more variables now, fewer exact);
+  the 14 globals they use: 12 at a data symbol's address, 8 named as the source (pxCurrentTCB,
+  uxSchedulerSuspended, xNextTaskUnblockTime, uxTopReadyPriority, the timer task's four), 11
+  sharing a word; one is a member (xSuspendedTaskList's pxIndex, named xTickCount), the device
+  register ICSR got portNVIC_INT_CTRL_REG, FreeRTOS's own name for it. 32 answers, 30,324 tokens
+  in and 30,632 out, about $0.02. Collecting the globals' uses runs the stages over every readable
+  function (49 s for GCC -Os's 316 on one core: worth a pool when it grows). Next: types: the
+  structures behind pointers derived by code (accesses at constant offsets through the same
+  pointer, unified across functions), with volatile in the pointer's declaration so that a field
+  reads p->f, their names and fields' names proposed the same way.
 - [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
 

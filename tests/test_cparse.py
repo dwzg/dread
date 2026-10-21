@@ -115,6 +115,16 @@ def test_printing_keeps_precedence_and_the_else_with_its_if():
     assert isinstance(again.then, cparse.Block) and again.then.body[0].orelse is None, printed
 
 
+def test_printing_adds_the_parentheses_a_reader_needs():
+    """Those GCC's -Wparentheses asks for, though C does not need them: the tree stays the same."""
+    for source, printed in (("x = a >> 1 & 1;", "x = (a >> 1) & 1;"), ("x = a << b + c;", "x = a << (b + c);"),
+                            ("x = a & b == c;", "x = a & (b == c);"), ("x = a | b & c;", "x = a | (b & c);"),
+                            ("x = a || b && c;", "x = a || (b && c);"), ("x = a + b * c;", "x = a + b * c;")):
+        tree = statement(source)
+        assert cparse.unparse(tree, notes=False).strip() == printed, source
+        assert statement(printed) == tree, source
+
+
 def test_what_is_not_the_dialect_is_an_error():
     for source in ("x = ({ int y = 1; y; });", "x = a +;", "if (a) goto;"):
         with pytest.raises(cparse.ParseError):

@@ -37,6 +37,29 @@ def test_a_lifted_file_comes_back_readable_or_not_at_all(tmp_path):
     assert change("fmt_dec", text) is not None and change("parse_uint", text) is None
 
 
+@needs_gcc
+def test_device_registers_by_name_and_their_bits_as_bit_tests(tmp_path):
+    """gizmo-m3's UART: the status register's bit tests as such (not the register's own address as a
+    bound: io_40011004 << 31 < 0x40011004u), x << 30 >> 31 as a field of x, and the data register's
+    address in r3 carried into the IT block's load (flat_view), which then names it."""
+    from dread import lift, regflow
+    from dread.program import Program
+    from dread.target import Target
+    target = Target.load(gizmo_dir("m3"))
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    context = readable.Context(target, image, program)
+
+    def text(name):                         # (what dread.build hands the transform: no header lines)
+        return readable.transform(name, lifter.lift(program.by_name[name]).text, context=context)
+    putc = text("uart_putc")
+    assert "while (!(io_40011004 & 1));" in putc, putc
+    getc = text("uart_getc")
+    assert "(io_40011004 >> 1) & 1u" in getc and "r0 = io_40011000;" in getc, getc
+    assert "#define io_40011000 (*(volatile u32 *)0x40011000u)" in getc, getc
+
+
 def gizmo_copy(tmp_path):
     """gizmo in tmp_path (its builds share sources), gizmo-m3's target with the cases the lift check
     accepted its functions with when they are cached."""

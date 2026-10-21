@@ -115,3 +115,74 @@ def test_the_pilot_names_a_readable_function(tmp_path):
                              context=readable.Context(target, image, program, flow))
     assert "value_r0" in out and "/* fmt_dec: writes a number in decimal" in out, out
     assert os.path.exists(os.path.join(target.build, "pilot", image.name, "fmt_dec.readable.md"))
+
+
+def test_memory_at_fixed_addresses_is_written_as_names():
+    """A macro per address and type, the access itself: the default name says where it is (a device
+    register, read-only memory, anything else), the table's name is taken when the file does not
+    use it otherwise."""
+    from dread.target import Memory
+    memory = Memory({"regions": [{"name": "flash", "base": 0, "size": 0x10000, "kind": "rom"},
+                                 {"name": "ram", "base": 0x20000000, "size": 0x10000}],
+                     "io": [[0x40000000, 0x50000000]]}, "test")
+    text = ("/* f */\n#include \"dread.h\"\nu32 f(u32 r0)\n{\n    u32 r3;\n"
+            "    r3 = *(volatile u32 *)0x20000034u;\n"
+            "    *(volatile u32 *)0x40011000u = r3;\n"
+            "    if (*(volatile u8 *)0x100u != 0) r3 = r3 + 1;\n"
+            "    return r3;\n}\n")
+    t = cparse.parse(text)
+    fn = t.function("f")
+    chosen = naming.apply_globals(t, fn, None, memory)
+    out = cparse.unparse(t)
+    assert chosen == {"0x20000034 u32": "g_20000034", "0x40011000 u32": "io_40011000", "0x100 u8": "rom_100_u8"}
+    assert "#define io_40011000 (*(volatile u32 *)0x40011000u)" in out and "io_40011000 = r3;" in out, out
+    assert "if (rom_100_u8 != 0)" in out and "r3 = g_20000034;" in out, out
+    t = cparse.parse(text)
+    fn = t.function("f")
+    named = {"0x20000034 u32": {"name": "volume"}, "0x40011000 u32": {"name": "r3"}}
+    naming.apply_globals(t, fn, named, memory)
+    out = cparse.unparse(t)
+    assert "r3 = volume;" in out and "io_40011000 = r3;" in out, out    # (r3 is a variable: the default)
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_pilot_names_the_globals_before_the_variables(tmp_path):
+    """dread pilot --task readable on gizmo's uart_putc, the model played: the globals first (one
+    question, a function's name refused), then the variables, asked with the globals' names in the C."""
+    import json
+    import re
+    from conftest import GIZMO
+    from dread import build, lift, llm, pilot, readable, regflow
+    from dread.program import Program
+    from dread.target import Target
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    target = Target.load(str(copy / "m3"))
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+    asked = []
+
+    def answer(messages):
+        asked.append(messages)
+        code = messages[0]["content"]
+        if len(asked) == 1:
+            assert "io_40011000 (0x40011000, u32, in " in code, code
+            return '```json\n{"io_40011000": "UART_DATA", "io_40011004": "uart_putc"}\n```'
+        assert "UART_DATA = " in code, code
+        found = sorted(set(re.findall(r"\b(r\d+(?:_\d+)?)\b", code)))
+        return '```json\n{"what": "sends a character", "names": %s}\n```' % json.dumps({v: "c_" + v for v in found})
+    provider = llm.Scripted(answer)
+    names = [f.name for f in program.functions]
+    uses, by_function = pilot.global_uses(program, context, lifter, names)
+    lines = []
+    assert pilot.name_globals(target, image, program, provider, sorted(by_function["uart_putc"]), uses,
+                              out=lines.append) == 1
+    assert "refused io_40011004=uart_putc" in lines[-1], lines
+    context.globals = naming.load(image, "globals")
+    assert pilot.name_readable(target, image, program, provider, "uart_putc", context, lifter, out=lines.append)
+    out = readable.transform("uart_putc", lifter.lift(program.by_name["uart_putc"]).text,
+                             context=readable.Context(target, image, program, flow))
+    assert "#define UART_DATA (*(volatile u32 *)0x40011000u)" in out and "UART_DATA = c_r0;" in out, out

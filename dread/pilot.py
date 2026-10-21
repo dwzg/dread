@@ -479,6 +479,118 @@ variable you cannot name. Nothing else changes: the names are put into the C by 
 that the C still compiles to the same code."""
 
 
+GLOBALS_SYSTEM = """You name the global variables and device registers of a binary image. Its C was
+made from the machine code by tools; memory at a fixed address is written as a name that says only
+where it is: g_20029aac (RAM), io_40004004 (a device register), rom_c6e4 (read-only memory), with a
+suffix when it is read or written narrower or wider than a word (g_20029aac_u8). Each is shown with
+lines of the image's C that use it, under the name of the function they are in. Give each a name
+that says what it holds; the functions' names show the project's style (its prefixes, its case):
+follow it.
+
+Answer with one ```json block mapping the shown names to yours:
+
+```json
+{"g_20029aac": "<name>", "io_40004004": "<name>"}
+```
+
+A name is a C identifier of at most 48 characters, no C keyword, no function's name, no two alike.
+Leave out one you cannot name."""
+DEFAULT_GLOBAL = re.compile(r"^(g|io|rom)_[0-9a-f]+(_[us]\d+)?$")
+
+
+def global_uses(program, context, lifter, names, per=2):
+    """What the readable C of the functions names says about its memory at fixed addresses:
+    ({key: {"name": its default name, "functions": [names], "uses": [(function, line)]}},
+    {function: {keys}}), at most per lines a function."""
+    from dread import cparse, lift, naming, readable
+    uses, by_function = {}, {}
+    for name in names:
+        fn_p = program.by_name.get(name)
+        if fn_p is None:
+            continue
+        try:
+            text = lifter.lift(fn_p).text
+        except lift.Refused:
+            continue
+        made = readable.readable_tree(name, text, context=context)
+        if made is None:
+            continue
+        tree, fn = made
+        chosen = naming.apply_globals(tree, fn, None, context.memory)
+        body = cparse.unparse(fn, notes=False, style="readable").splitlines()
+        by_function[name] = set(chosen)
+        for key, gname in chosen.items():
+            u = uses.setdefault(key, {"name": gname, "functions": [], "uses": []})
+            u["functions"].append(name)
+            pattern = re.compile(r"\b%s\b" % re.escape(gname))
+            u["uses"] += [(name, line.strip()[:160]) for line in body if pattern.search(line)][:per]
+    return uses, by_function
+
+
+def name_globals(target, image, program, provider, keys, uses, batch=40, shown_functions=4, out=print):
+    """Ask for names of the memory at fixed addresses in keys that the readable_names table does not
+    name yet, batch at a time, each with its uses in up to shown_functions functions; keep the names
+    that are C identifiers no function or other global has. Returns how many were named."""
+    from dread import naming
+    table = naming.load(image, "globals")
+    todo = [k for k in keys if k not in table and k in uses]
+    taken = set(program.by_name) | {e.get("name") for e in table.values()} | naming.KEYWORDS
+    folder = os.path.join(target.build, "pilot", image.name)
+    os.makedirs(folder, exist_ok=True)
+    named = 0
+    for start in range(0, len(todo), batch):
+        part = todo[start:start + batch]
+        lines = []
+        for key in part:
+            u = uses[key]
+            lines.append("%s (%s, in %d functions):" % (u["name"], key.replace(" ", ", "), len(u["functions"])))
+            fns = []
+            for fname, line in u["uses"]:
+                if fname not in fns:
+                    if len(fns) >= shown_functions:
+                        continue
+                    fns.append(fname)
+                lines.append("    %s: %s" % (fname, line))
+        user = "\n".join(lines)
+        by_default = {uses[k]["name"]: k for k in part}
+        try:
+            answer = provider.ask(GLOBALS_SYSTEM, [{"role": "user", "content": user}])
+        except Exception as e:
+            out("dread pilot: the globals' names: the provider: %s" % e)
+            break
+        with open(os.path.join(folder, "globals-%d.md" % (start // batch)), "w") as f:
+            f.write("# Globals, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s\n\n## Answer\n\n%s\n" % (
+                provider.label(), GLOBALS_SYSTEM, user, answer))
+        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+            out("dread pilot: the globals' names: the provider declined")
+            break
+        import json
+        m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
+        try:
+            proposed = json.loads(m.group(1)) if m else None
+        except ValueError:
+            proposed = None
+        if not isinstance(proposed, dict):
+            out("dread pilot: the globals' names: no ```json block in the answer")
+            continue
+        refused = []
+        for shown_name, new in proposed.items():
+            key = by_default.get(shown_name)
+            if key is None:
+                continue
+            if (not isinstance(new, str) or not naming.IDENT.match(new) or new in taken
+                    or DEFAULT_GLOBAL.match(new)):
+                refused.append("%s=%s" % (shown_name, new))
+                continue
+            taken.add(new)
+            naming.store(image, key, {"name": new, "by": provider.label()}, part="globals")
+            named += 1
+        out("dread pilot: the globals' names: %d of %d named%s" % (
+            sum(1 for k in part if k in naming.load(image, "globals")), len(part),
+            "; refused %s" % ", ".join(refused[:8]) if refused else ""))
+    return named
+
+
 def parse_names(answer):
     """(what, {variable: name}) of an answer's ```json block, or None."""
     import json
@@ -525,6 +637,8 @@ def name_readable(target, image, program, provider, name, context, lifter, tries
     if known and known.get("digest") == digest:
         out("%-24s named already" % name)
         return known
+    naming.apply_globals(tree, fn, context.globals if context is not None else None,
+                         context.memory if context is not None else None)
     unnamed = readable.print_file(tree, fn)
     callers = [c for c in callers_of(program, name) if may_show(target, c)][:12]
     user = "The function %s (readable C):\n\n```c\n%s\n```" % (name, cparse.unparse(fn, notes=False, style="readable"))
@@ -911,9 +1025,9 @@ def main(argv=None):
                 print("dread pilot: %s" % e, file=sys.stderr)
                 return 1
         if args.task == "readable":
-            from dread import build, lift, readable
-            names = shown(target, args.names) if args.names else shown(
-                target, build.read_names(image.table("readable")))
+            from dread import build, lift, naming, readable
+            everything = shown(target, build.read_names(image.table("readable")), out=lambda *_: None)
+            names = shown(target, args.names) if args.names else everything
             names = names[:args.limit] if args.limit else names
             if args.dry_run:
                 print("\n".join(names))
@@ -922,6 +1036,10 @@ def main(argv=None):
                 return 0
             context = readable.Context(target, image, program, flow)
             lifter = lift.make_lifter(program, flow)
+            uses, by_function = global_uses(program, context, lifter, sorted(set(everything) | set(names)))
+            wanted = sorted(set().union(*(by_function.get(n, set()) for n in names))) if names else []
+            name_globals(target, image, program, provider, wanted, uses)
+            context.globals = naming.load(image, "globals")
             asking, named = Asking(provider), 0
             for name in names:
                 if not asking.go_on():

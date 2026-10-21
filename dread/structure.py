@@ -514,6 +514,8 @@ def refine_loops(stmts):
                     s.body = C.Block(body)
             else:
                 s.body = C.Block(body)
+        if isinstance(s, C.DoWhile) and not _list(s.body):     # (do {} while (c) is while (c);: both
+            s = C.While(s.cond, C.Block([]), s.addr)            # test c first)
         out.append(s)
     return out
 

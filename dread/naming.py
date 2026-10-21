@@ -9,6 +9,14 @@ alike; and the function's C with the names compiles to the same code as without 
 it goes a digest of the C it was made for: when the transformations change that C later, the names
 wait for a new proposal instead of landing on other variables (apply).
 
+Memory at fixed addresses (*(volatile u32 *)0x20029aacu) is written as a name: a macro per address
+and type above the function, which is the access itself, so the code cannot change. The name is the
+table's (its globals, proposed for the whole image: dread pilot --task readable asks for them before
+the functions' variables, from their uses in every readable function) or a default one that says
+where it is: io_40004004 a device register ([memory] io), rom_c6e4 in a rom region, g_20029aac
+anything else (apply_globals). A function's names are made for its C before the globals' names, so
+naming a global later does not invalidate them.
+
 No tool can tell whether a name is right; the same code tells that it changed nothing else. How
 close the names come to the source's: score (the bench's builds with debug information).
 """
@@ -159,23 +167,24 @@ def rename(fn, names):
         fn.params = new_params
 
 
-def load(image):
-    """{function: entry} of the image's readable_names table ({} when there is none)."""
+def load(image, part="functions"):
+    """{function: entry} of the image's readable_names table, or with part="globals" {key: entry} of
+    its globals ({} when there is none)."""
     path = image.table(TABLE)
     if not os.path.exists(path):
         return {}
     with open(path) as f:
-        return json.load(f).get("functions", {})
+        return json.load(f).get(part, {})
 
 
-def store(image, name, entry):
-    """Put one function's entry into the table (written sorted, one entry per function)."""
+def store(image, name, entry, part="functions"):
+    """Put one function's entry (or one global's: part="globals") into the table (written sorted)."""
     path = image.table(TABLE)
     data = {"version": 1, "functions": {}}
     if os.path.exists(path):
         with open(path) as f:
             data = json.load(f)
-    data.setdefault("functions", {})[name] = entry
+    data.setdefault(part, {})[name] = entry
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path + ".tmp", "w") as f:
         json.dump(data, f, indent=1, sort_keys=True)
@@ -183,10 +192,11 @@ def store(image, name, entry):
     os.replace(path + ".tmp", path)
 
 
-def apply(tree, fn, entry):
-    """Apply a table entry to the function when it was made for this C (its digest) and still holds;
-    returns whether it was applied. The sentence goes above the function as a comment."""
-    if not entry or entry.get("digest") != digest(fn) or problems(tree, fn, entry.get("names", {})):
+def apply(tree, fn, entry, made_for=None):
+    """Apply a table entry to the function when it was made for this C (its digest, or made_for: the
+    digest taken before the globals got their names) and still holds; returns whether it was
+    applied. The sentence goes above the function as a comment."""
+    if not entry or entry.get("digest") != (made_for or digest(fn)) or problems(tree, fn, entry.get("names", {})):
         return False
     rename(fn, entry.get("names", {}))
     what = (entry.get("what") or "").strip()
@@ -195,6 +205,130 @@ def apply(tree, fn, entry):
         text = "/* %s: %s (names: %s) */" % (fn.name, what.replace("*/", "* /"), entry.get("by", "proposed"))
         tree.items.insert(k, C.Raw(text))
     return True
+
+
+ACCESS = re.compile(r"^volatile (\w+) \*$")
+
+
+def fixed_access(e):
+    """(address, type) when e is an access to memory at a fixed address (*(volatile u32 *)0x2000u)."""
+    if (isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and isinstance(e.e.e, C.Num)
+            and isinstance(e.e.e.value, int)):
+        m = ACCESS.match(" ".join(e.e.type.split()))
+        if m:
+            return e.e.e.value, m.group(1)
+    return None
+
+
+def global_key(address, ctype):
+    return "0x%x %s" % (address, ctype)
+
+
+def default_name(address, ctype, memory=None):
+    """io_40004004 (a device register: the target's [memory] io), rom_c6e4 (in a rom region),
+    g_20029aac (anything else); an access other than a u32 one carries its type: g_20029aac_u8."""
+    prefix = "g"
+    if memory is not None:
+        region = memory.region(address)
+        if memory.is_io(address):
+            prefix = "io"
+        elif region is not None and region.kind == "rom":
+            prefix = "rom"
+    name = "%s_%x" % (prefix, address)
+    return name if ctype == "u32" else "%s_%s" % (name, ctype)
+
+
+def globals_in(fn):
+    """{(address, type)} of the function's accesses to memory at fixed addresses."""
+    from dread.cflow import walk_expr
+    found = set()
+
+    def visit(s):
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                a = fixed_access(x)
+                if a is not None:
+                    found.add(a)
+        for inner in _inner(s):
+            visit(inner)
+    for s in fn.body.body:
+        visit(s)
+    return found
+
+
+def _rewrite(e, f):
+    """e with every subexpression x for which f(x) gives a replacement replaced (in place where it can)."""
+    r = f(e)
+    if r is not None:
+        return r
+    for slot in type(e).__slots__:
+        v = getattr(e, slot, None)
+        if isinstance(v, C.Expr):
+            setattr(e, slot, _rewrite(v, f))
+        elif isinstance(v, list) and any(isinstance(x, C.Expr) for x in v):
+            setattr(e, slot, [_rewrite(x, f) if isinstance(x, C.Expr) else x for x in v])
+    return e
+
+
+def _rewrite_stmt(s, f):
+    if isinstance(s, C.ExprStmt):
+        s.e = _rewrite(s.e, f)
+    elif isinstance(s, C.Return):
+        if s.e is not None:
+            s.e = _rewrite(s.e, f)
+    elif isinstance(s, (C.If, C.While, C.DoWhile)):
+        s.cond = _rewrite(s.cond, f)
+    elif isinstance(s, C.For):
+        if s.init is not None and not isinstance(s.init, C.Decl):
+            s.init = _rewrite(s.init, f)
+        if s.cond is not None:
+            s.cond = _rewrite(s.cond, f)
+        if s.step is not None:
+            s.step = _rewrite(s.step, f)
+    elif isinstance(s, C.Switch):
+        s.e = _rewrite(s.e, f)
+    elif isinstance(s, C.Decl):
+        for d in s.items:
+            if d.init is not None:
+                d.init = _rewrite(d.init, f)
+            d.dims = [_rewrite(x, f) if x is not None else None for x in d.dims]
+    elif isinstance(s, C.Asm):
+        for o in s.outputs + s.inputs:
+            o.e = _rewrite(o.e, f)
+    elif isinstance(s, C.Case):
+        if s.value is not None:
+            s.value = _rewrite(s.value, f)
+    for inner in _inner(s):
+        _rewrite_stmt(inner, f)
+
+
+def apply_globals(tree, fn, named=None, memory=None, avoid=()):
+    """The function's accesses to memory at fixed addresses written as names, a macro for each above
+    the function (#define g_20029aac (*(volatile u32 *)0x20029aacu)): the table's name (named: the
+    globals part) where it has one the file does not use for something else (nor avoid: the names the
+    function's own variables will get), else default_name. Returns {key: name} of what it named."""
+    named = named or {}
+    found = globals_in(fn)
+    if not found:
+        return {}
+    busy = other_names(tree, fn) | set(variables(fn)) | set(avoid)
+    chosen = {}
+    for address, ctype in sorted(found):
+        name = (named.get(global_key(address, ctype)) or {}).get("name")
+        if (not isinstance(name, str) or not IDENT.match(name) or name in busy or name in KEYWORDS
+                or name in chosen.values()):
+            name = default_name(address, ctype, memory)
+        chosen[(address, ctype)] = name
+
+    def f(e):
+        a = fixed_access(e)
+        return C.Name(chosen[a]) if a in chosen else None
+    for s in fn.body.body:
+        _rewrite_stmt(s, f)
+    k = tree.items.index(fn)
+    tree.items.insert(k, C.Raw("\n".join("#define %s (*(volatile %s *)0x%xu)" % (chosen[a], a[1], a[0])
+                                         for a in sorted(chosen))))
+    return {global_key(*a): n for a, n in chosen.items()}
 
 
 def same_code(target, image, before, after, work):
@@ -278,6 +412,54 @@ def words(name):
     pxNewListItem -> {new, list, item}; rx_buffer_len -> {buffer, len}."""
     parts = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name or "")
     return {p.lower() for p in parts if len(p) > 2}
+
+
+def data_symbols(elf_path):
+    """[(address, size, name)] of the ELF's data objects (its symbol table), sorted."""
+    try:
+        from elftools.elf.elffile import ELFFile
+        from elftools.elf.sections import SymbolTableSection
+    except ImportError:
+        return []
+    out = []
+    with open(elf_path, "rb") as f:
+        for section in ELFFile(f).iter_sections():
+            if isinstance(section, SymbolTableSection):
+                for sym in section.iter_symbols():
+                    if sym["st_info"]["type"] == "STT_OBJECT" and sym.name:
+                        out.append((sym["st_value"], sym["st_size"], sym.name))
+    return sorted(set(out))
+
+
+def score_globals(image, elf_path):
+    """The table's globals against the ELF's data symbols: ([rows], totals); a row says whether the
+    name is the symbol's at that address (exact, ignoring case), shares a word with it, or names a
+    place inside a symbol (a member of a structure, an element of an array: inside)."""
+    table = load(image, "globals")
+    symbols = data_symbols(elf_path)
+    rows = []
+    totals = {"globals": 0, "exact": 0, "words": 0, "inside": 0, "unknown": 0}
+    for key, entry in sorted(table.items()):
+        address = int(key.split()[0], 16)
+        sym = next(((a, s, n) for a, s, n in symbols if a == address), None) or next(
+            ((a, s, n) for a, s, n in symbols if a < address < a + s), None)
+        name = entry.get("name", "")
+        row = {"key": key, "name": name, "symbol": sym[2] if sym else None,
+               "offset": address - sym[0] if sym else None}
+        totals["globals"] += 1
+        if sym is None:
+            totals["unknown"] += 1
+        elif address != sym[0]:
+            totals["inside"] += 1
+            row["words"] = bool(words(name) & words(sym[2]))
+            totals["words"] += row["words"]
+        else:
+            row["exact"] = name.lower() == sym[2].lower()
+            row["words"] = bool(words(name) & words(sym[2]))
+            totals["exact"] += row["exact"]
+            totals["words"] += row["words"]
+        rows.append(row)
+    return rows, totals
 
 
 def score(program, image, elf_path):

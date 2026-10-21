@@ -36,10 +36,14 @@ class Context:
 
     def __init__(self, target=None, image=None, program=None, flow=None):
         self.arg_regs, self.reads, self.preserved, self.variadic = [], {}, {}, set()
-        self.names = {}                 # the image's readable_names table (dread.naming)
+        self.names = {}                 # the image's readable_names table (dread.naming): functions
+        self.globals = {}               # and memory at fixed addresses
+        self.memory = None              # the target's [memory] (default names for fixed addresses)
         if target is None:
             return
         self.names = naming.load(image)
+        self.globals = naming.load(image, "globals")
+        self.memory = target.memory
         from dread import regflow
         from dread.program import Program
         program = program or Program(target, image)
@@ -154,9 +158,16 @@ def _transform(name, text, stages, context=None):
     if made is None:
         return None
     tree, fn = made
-    entry = context.names.get(name) if context is not None else None
-    if entry and (STAGES if stages is None else stages):
-        naming.apply(tree, fn, entry)       # (only for the C it was made for: its digest)
+    if tidy.fixed_registers(tree):          # (kept as the lifter wrote it: readable_tree ran no stage)
+        stages = []
+    if STAGES if stages is None else stages:
+        made_for = naming.digest(fn)        # (a function's names are made for its C before the globals')
+        entry = context.names.get(name) if context is not None else None
+        mine = set((entry or {}).get("names", {}).values()) if (entry or {}).get("digest") == made_for else set()
+        naming.apply_globals(tree, fn, context.globals if context is not None else None,
+                             context.memory if context is not None else None, avoid=mine)
+        if entry:
+            naming.apply(tree, fn, entry, made_for)     # (only for the C it was made for: its digest)
     return print_file(tree, fn, stages)
 
 
@@ -346,6 +357,15 @@ def main(argv=None):
               "word of the source's (%.0f %%); %d of %d local names among the source's" % (
                   totals["functions"], totals["params"], totals["exact"], 100.0 * totals["exact"] / p,
                   totals["words"], 100.0 * totals["words"] / p, totals["local_hits"], totals["locals"]))
+        rows, totals = naming.score_globals(image, args.score)
+        for r in rows:
+            where = ("%s+%d" % (r["symbol"], r["offset"]) if r["offset"] else r["symbol"]) if r["symbol"] else "?"
+            print("%-32s %s" % (r["key"], "%s/%s" % (r["name"], where)))
+        g = max(totals["globals"] - totals["inside"] - totals["unknown"], 1)
+        print("dread readable --score: %d globals: %d at a symbol's address, %d named as the source (%.0f %%), %d with a "
+              "word of the source's; %d inside a symbol (a member, an element), %d at no symbol" % (
+                  totals["globals"], totals["globals"] - totals["inside"] - totals["unknown"], totals["exact"],
+                  100.0 * totals["exact"] / g, totals["words"], totals["inside"], totals["unknown"]))
         return 0
     from dread import lift, regflow
     from dread.program import Program

@@ -113,6 +113,14 @@ entry only when every name is a C identifier nothing else in the file uses and t
 compiles to the same code; not edited by hand. `dread readable --score ELF` compares the names with
 the source's (the ELF's debug information).
 
+Its `globals` part names memory at fixed addresses: `{"0xADDRESS TYPE": {"name", "by"}}` (TYPE the
+access's: u32, u8, ...). dread readable writes such an access as the name, a macro above the
+function that is the access itself; without an entry, or where the function's C uses the name for
+something else, the default name says where it is: `io_40004004` (a device register: `[memory]
+io`), `rom_c6e4` (a rom region), `g_20029aac` (anything else), with the type for an access other
+than a u32 one (`g_20029aac_u8`). The pilot asks for these before the functions' variables; they
+need no digest, since an address does not change with the transformations.
+
 ### `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
 
 Described with the tools that use them, as those tools arrive in DREAD.
