@@ -389,6 +389,20 @@ undone). Other decisions are taken by the recommended option and written down in
     push; the test looks at the first four).
   Since: ~/.config/dread/checked-push.sh refuses to push while CI's last finished run on main is red
   (`--ci-red-ok` for the push that fixes it).
+- [x] **Red again, 2026-10-21, and what CI did not run**: the push of `cclab relink:` failed one
+  test on all three jobs: the relink adapter links newlib (-lc), and Ubuntu's gcc-arm-none-eabi only
+  recommends libnewlib-arm-none-eabi, which `--no-install-recommends` leaves out. Every machine here
+  has newlib, so the suite passed here and in each toolchain image (`bin/with-toolchain ubuntu-24.04`
+  ran the test green, which told the missing library apart from the compiler version). CI installs
+  newlib now, and the test skips where arm-none-eabi-gcc finds no libc.a. The lesson: a test's
+  marker names the compiler, but the library it links is a dependency too.
+  The same look found that CI ran none of the nine tests that compile RV32 with GCC: they asked for
+  `riscv64-elf-gcc` (Arch's name; Ubuntu's is riscv64-unknown-elf-gcc) and CI installed neither.
+  conftest's `riscv_gcc` finds either and the -march spelling the version takes (GCC 10 knows no
+  _zicsr), `riscv_toml` writes both into a test's target; CI installs Ubuntu's RISC-V GCC (13.2 on
+  24.04, 10.2 on 22.04). Checked with the images: the nine pass with GCC 10.2, 12.2, 13.2 and the
+  host's 16 (six failed with GCC 10 before, all on the -march), the compiler lab's RISC-V test with
+  10.2 and 13.2.
 
 ## Performance, first pass
 

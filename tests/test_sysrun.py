@@ -8,6 +8,7 @@ import os
 import pytest
 
 from dread import build, sysrun
+from conftest import needs_riscv_gcc, RISCV_CROSS, RISCV_MARCH, riscv_toml
 from test_runner import src_copy
 
 pytestmark = pytest.mark.compiles
@@ -279,7 +280,7 @@ def test_clint_timer_and_software_interrupts():
     assert c.read(0x0200BFF8, 4) == 15
 
 
-@pytest.mark.skipif(not __import__("shutil").which("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+@needs_riscv_gcc
 def test_riscv_traps_from_reset(tmp_path):
     """A program with a vectored mtvec: ecall traps to the base with mepc on the ecall (the handler
     steps over it), the timer interrupt comes at base + 4 * 7 once mtime reaches mtimecmp and MTIE
@@ -326,11 +327,11 @@ __asm__(".section .text.start\n.global _start\n.type _start, @function\n_start:\
     (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text.start) *(.text*) }\n"
                                    " . = 0x80080000; .bss : { *(.sbss*) *(.bss*) } }\n")
     elf = str(tmp_path / "t.elf")
-    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac_zicsr", "-mabi=ilp32", "-O2", "-nostdlib",
+    subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-O2", "-nostdlib",
                     "-ffunction-sections", "-T", str(tmp_path / "t.ld"), "-e", "_start", "-o", elf, str(tmp_path / "t.c")],
                    check=True)
     (tmp_path / "original").mkdir()
-    (tmp_path / "dread.toml").write_text('''[target]
+    (tmp_path / "dread.toml").write_text(riscv_toml('''[target]
 name = "traps"
 [arch]
 name = "riscv"
@@ -364,7 +365,7 @@ rate = 1
 [scenarios.traps]
 until = {uart = "c"}
 limit = 200_000
-''')
+'''))
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
                            "--write-startup", elf]) == 0
     t = Target.load(str(tmp_path))

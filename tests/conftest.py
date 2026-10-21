@@ -52,3 +52,29 @@ def program(target):
 
 def have(tool):
     return shutil.which(tool) is not None
+
+
+def _riscv_gcc():
+    """The RISC-V GCC here, as (cross prefix, -march for RV32IMAC with the CSR instructions), or
+    (None, None): Arch names it riscv64-elf-gcc, Debian and Ubuntu riscv64-unknown-elf-gcc (CI's);
+    GCC 10 knows no _zicsr (its ISA spec has the CSR instructions in the base), GCC 12 and later need
+    it for them."""
+    import subprocess
+    for cross in ("riscv64-elf-", "riscv64-unknown-elf-"):
+        if have(cross + "gcc"):
+            r = subprocess.run([cross + "gcc", "-march=rv32imac_zicsr", "-mabi=ilp32", "-E", "-x", "c", "-"],
+                               input="", capture_output=True, text=True)
+            return cross, "rv32imac_zicsr" if r.returncode == 0 else "rv32imac"
+    return None, None
+
+
+RISCV_CROSS, RISCV_MARCH = _riscv_gcc()
+needs_riscv_gcc = pytest.mark.skipif(RISCV_CROSS is None, reason="needs a RISC-V GCC (riscv64-elf-gcc or "
+                                     "riscv64-unknown-elf-gcc)")
+
+
+def riscv_toml(text):
+    """A target's text for the RISC-V GCC here: its cross prefix and the -march it takes for the CSR
+    instructions in place of riscv64-elf- and rv32imac_zicsr."""
+    return text.replace('cross = "riscv64-elf-"', 'cross = "%s"' % RISCV_CROSS).replace(
+        '"-march=rv32imac_zicsr"', '"-march=%s"' % RISCV_MARCH)

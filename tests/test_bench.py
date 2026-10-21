@@ -10,7 +10,7 @@ import subprocess
 import pytest
 
 from dread import bench
-from conftest import GIZMO, have
+from conftest import GIZMO, have, needs_riscv_gcc, RISCV_CROSS, riscv_toml
 
 needs_gcc = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 
@@ -320,7 +320,7 @@ def test_an_extent_does_not_take_a_free_range(tmp_path):
     assert os.path.getsize(payload) > 0
 
 
-@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+@needs_riscv_gcc
 def test_gp_holds_one_value(tmp_path):
     """GCC's RISC-V code addresses small data from gp, which the startup sets to __global_pointer$
     once: import-elf writes it as a fixed register, the emulator sets it before every call, and the
@@ -337,11 +337,11 @@ def test_gp_holds_one_value(tmp_path):
         "SECTIONS { .text : { *(.text*) } > ROM\n .sdata : { __global_pointer$ = . + 0x100; *(.sdata*) } > RAM AT > ROM\n"
         " .sbss : { *(.sbss*) } > RAM }\n")
     elf = str(tmp_path / "t.elf")
-    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac", "-mabi=ilp32", "-Os", "-nostdlib", "-ffunction-sections",
+    subprocess.run([RISCV_CROSS + "gcc", "-march=rv32imac", "-mabi=ilp32", "-Os", "-nostdlib", "-ffunction-sections",
                     "-msmall-data-limit=8", "-T", str(tmp_path / "t.ld"), "-e", "next", "-o", elf, str(tmp_path / "t.c")],
                    check=True)
     (tmp_path / "original").mkdir()
-    (tmp_path / "dread.toml").write_text('''[target]
+    (tmp_path / "dread.toml").write_text(riscv_toml('''[target]
 name = "gp"
 [arch]
 name = "riscv"
@@ -358,7 +358,7 @@ base = 0x80000000
 [compiler]
 cross = "riscv64-elf-"
 cflags = ["-march=rv32imac", "-mabi=ilp32", "-Os"]
-''')
+'''))
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
                            "--write-startup", elf]) == 0
     target = Target.load(str(tmp_path))
@@ -400,15 +400,15 @@ def tiny_rv(tmp_path, source):
     (tmp_path / "t.c").write_text(source)
     (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text*) } }\n")
     elf = str(tmp_path / "t.elf")
-    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac", "-mabi=ilp32", "-Os", "-nostdlib", "-ffunction-sections",
+    subprocess.run([RISCV_CROSS + "gcc", "-march=rv32imac", "-mabi=ilp32", "-Os", "-nostdlib", "-ffunction-sections",
                     "-T", str(tmp_path / "t.ld"), "-o", elf, str(tmp_path / "t.c")], check=True)
     (tmp_path / "original").mkdir()
-    (tmp_path / "dread.toml").write_text(RV_TARGET)
+    (tmp_path / "dread.toml").write_text(riscv_toml(RV_TARGET))
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
     return Target.load(str(tmp_path))
 
 
-@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+@needs_riscv_gcc
 def test_a_system_call_runs_as_a_logged_no_op(tmp_path):
     """FreeRTOS's RISC-V port yields with ecall: in the emulator it was a fault (no input of such a
     function finished) and the lifter refused it. A system call now runs as a no-op logged in order,

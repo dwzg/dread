@@ -10,7 +10,7 @@ import pytest
 from dread import build, lift, regflow
 from dread.program import Program
 from dread.target import Target
-from conftest import GIZMO, gizmo_dir, have
+from conftest import GIZMO, gizmo_dir, have, needs_riscv_gcc, RISCV_CROSS, RISCV_MARCH, riscv_toml
 
 needs_gcc = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 
@@ -1168,7 +1168,7 @@ cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-Os"]
 """
 
 
-@pytest.mark.skipif(not shutil.which("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+@needs_riscv_gcc
 def test_risc_v_wraps_a_va_list_walk_and_stack_arguments(tmp_path):
     """RISC-V as ARM (test_a_va_list_walks_on_into_the_stack_arguments): a variadic function saves
     a1-a7 next to its stack arguments and its va_list walks from the one into the other (FreeRTOS's
@@ -1182,12 +1182,12 @@ def test_risc_v_wraps_a_va_list_walk_and_stack_arguments(tmp_path):
     from dread.overlay import load_placement
     (tmp_path / "t.c").write_text(VA_LIST_RV_C)
     obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
-    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac_zicsr", "-mabi=ilp32", "-Os", "-ffreestanding",
+    subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-Os", "-ffreestanding",
                     "-ffunction-sections", "-c", "-o", obj, str(tmp_path / "t.c")], check=True)
-    subprocess.run(["riscv64-elf-ld", "-m", "elf32lriscv", "-Ttext=0x20000000", "-e", "use", "-o", elf, obj],
+    subprocess.run([RISCV_CROSS + "ld", "-m", "elf32lriscv", "-Ttext=0x20000000", "-e", "use", "-o", elf, obj],
                    check=True)
     (tmp_path / "original").mkdir()
-    (tmp_path / "dread.toml").write_text(RV_TARGET)
+    (tmp_path / "dread.toml").write_text(riscv_toml(RV_TARGET))
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
     t = Target.load(str(tmp_path))
     p = Program(t, t.image())

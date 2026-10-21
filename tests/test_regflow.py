@@ -10,7 +10,7 @@ import pytest
 
 from dread import build, integration, regflow, switches
 from dread.program import Program
-from conftest import have
+from conftest import have, needs_riscv_gcc, RISCV_CROSS, RISCV_MARCH, riscv_toml
 from test_runner import run_all, src_copy
 
 SIGNATURES = {           # registers each function reads at its entry, from the C (beyond 4: the stack)
@@ -293,7 +293,7 @@ def test_a_variadic_save_area_behind_sub_sp(tmp_path):
     assert flow.read_regs("fmt") == ["r0", "r1"], flow.read_regs("fmt")
 
 
-@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+@needs_riscv_gcc
 def test_an_ecall_reads_nothing(tmp_path):
     """FreeRTOS's RISC-V port yields with ecall, and its handler saves every register. Counted as a
     system call that reads a0-a7, the ecall made every callee in front of a yield look as if its
@@ -306,10 +306,10 @@ def test_an_ecall_reads_nothing(tmp_path):
                                   "int yield_after(int x) { int r = helper(x); __asm__ volatile (\"ecall\"); return r; }\n")
     elf = str(tmp_path / "t.elf")
     (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text*) } }\n")
-    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac", "-mabi=ilp32", "-Os", "-nostdlib", "-ffunction-sections",
+    subprocess.run([RISCV_CROSS + "gcc", "-march=rv32imac", "-mabi=ilp32", "-Os", "-nostdlib", "-ffunction-sections",
                     "-T", str(tmp_path / "t.ld"), "-e", "yield_after", "-o", elf, str(tmp_path / "t.c")], check=True)
     (tmp_path / "original").mkdir()
-    (tmp_path / "dread.toml").write_text('''[target]
+    (tmp_path / "dread.toml").write_text(riscv_toml('''[target]
 name = "ecall"
 [arch]
 name = "riscv"
@@ -325,7 +325,7 @@ base = 0x80000000
 [compiler]
 cross = "riscv64-elf-"
 cflags = ["-march=rv32imac", "-mabi=ilp32", "-Os"]
-''')
+'''))
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
     target = Target.load(str(tmp_path))
     flow = regflow.analyse(Program(target))
@@ -342,11 +342,11 @@ def _rv_flow(tmp_path, files, cflags=("-O2",)):
         (tmp_path / name).write_text(text)
     (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text*) } }\n")
     elf = str(tmp_path / "t.elf")
-    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac_zicsr", "-mabi=ilp32", "-nostdlib", "-ffunction-sections",
+    subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-nostdlib", "-ffunction-sections",
                     *cflags, "-T", str(tmp_path / "t.ld"), "-Wl,-e,0", "-o", elf] + [str(tmp_path / n) for n in files],
                    check=True)
     (tmp_path / "original").mkdir()
-    (tmp_path / "dread.toml").write_text('''[target]
+    (tmp_path / "dread.toml").write_text(riscv_toml('''[target]
 name = "flow"
 [arch]
 name = "riscv"
@@ -362,12 +362,12 @@ base = 0x80000000
 [compiler]
 cross = "riscv64-elf-"
 cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32"]
-''')
+'''))
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
     return regflow.analyse(Program(Target.load(str(tmp_path))))
 
 
-@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+@needs_riscv_gcc
 def test_arguments_kept_in_the_frame_are_read(tmp_path):
     """-O0 keeps every argument in its frame at the entry and loads it later: a use, not a variadic
     save area (the rule for those made every -O0 function read nothing)."""
@@ -375,7 +375,7 @@ def test_arguments_kept_in_the_frame_are_read(tmp_path):
     assert flow.read_regs("add") == ["a0", "a1"], flow.read_regs("add")
 
 
-@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+@needs_riscv_gcc
 def test_a_variadic_save_area_beside_a_named_argument(tmp_path):
     """sprintf keeps its unnamed argument registers and its first argument in its frame (the first
     one's address goes to a callee): the save area is no use, the first argument is."""
@@ -386,7 +386,7 @@ int fmt2(char *buf, const char *fmt, ...) { va_list ap; va_start(ap, fmt); int r
     assert flow.read_regs("fmt2") == ["a0", "a1"], flow.read_regs("fmt2")
 
 
-@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+@needs_riscv_gcc
 def test_a_save_around_a_call_of_a_register_never_set(tmp_path):
     """GCC saves a register it believes live around a call also where nothing set it (FreeRTOS's
     tick on RISC-V: t1 around its assertion call, and 135 functions looked as if their callers read
@@ -442,7 +442,7 @@ k:  addi sp, sp, -16
     assert flow.sites_of("g", "t1") == [], flow.sites_of("g", "t1")     # f puts t1 back itself: not g's
 
 
-@pytest.mark.skipif(not have("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+@needs_riscv_gcc
 def test_a_register_saved_around_a_call_is_not_read_behind_it(tmp_path):
     """GCC -Os saves an argument it needs after an assertion call around that call (FreeRTOS on
     RISC-V: a2 around vAssertCalled). The restore puts back the entry's value, so the register is the

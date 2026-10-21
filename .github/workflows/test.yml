@@ -1,8 +1,11 @@
 # The test suite on every push and pull request: the gizmo builds (ARM state, Cortex-M3, RV32IMC),
-# with the cross compiler and LLVM from the distribution, on Ubuntu 24.04 (GCC 13, binutils 2.42,
-# clang 18) and 22.04 (GCC 10, binutils 2.38, clang 14): DREAD meets older compilers than the host's
-# (2026-10-20: two gaps only GCC 13 showed, a default only binutils 2.39 knows). Ghidra tests are
-# skipped (no Ghidra on the runner); -rs lists every skip with its reason.
+# with the cross compilers and LLVM from the distribution, on Ubuntu 24.04 (GCC 13, binutils 2.42,
+# clang 18; RISC-V GCC 13.2) and 22.04 (GCC 10, binutils 2.38, clang 14; RISC-V GCC 10.2, binutils
+# 2.35.1): DREAD meets older compilers than the host's (2026-10-20: two gaps only GCC 13 showed, a
+# default only binutils 2.39 knows). Newlib for the relink test; the RISC-V GCC (Ubuntu's
+# riscv64-unknown-elf-, without a C library) for the tests that compile RV32 with GCC (conftest's
+# riscv_gcc: either name, the -march each version takes). Ghidra tests are skipped (no Ghidra on
+# the runner); -rs lists every skip with its reason.
 name: tests
 on:
   push:
@@ -29,8 +32,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi \
-              libnewlib-arm-none-eabi clang lld llvm
+              libnewlib-arm-none-eabi gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf clang lld llvm
           arm-none-eabi-gcc --version | head -1
+          riscv64-unknown-elf-gcc --version | head -1
           clang --version | head -1
       - name: Install
         run: |
