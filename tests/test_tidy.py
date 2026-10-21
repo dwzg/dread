@@ -199,3 +199,46 @@ def test_an_if_that_writes_its_own_condition_inside_a_block_is_not_merged():
     tree = cparse.parse(text)
     fn = tree.function("f")
     assert tidy.merge_ifs(fn) is False
+
+
+def test_a_register_with_two_unrelated_values_becomes_two_variables():
+    text = ("u32 f(u32 a0, u32 a1, u32 a2, u32 a3)\n{\n"
+            "    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r5;\n"
+            "    r5 = r1 + 1u;  /* 0: adds r5, r1, #1 */\n"
+            "    r2 = r5 * 2u;  /* 2: lsls r2, r5, #1 */\n"
+            "    r5 = r3 ^ r0;  /* 4: eors r5, r3, r0 */\n"
+            "    return r5 + r2;  /* 6: adds r0, r5, r2 */\n}\n")
+    fn = cparse.parse("typedef unsigned int u32;\n" + text).function("f")
+    assert tidy.webs(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "r5_1 = r3 ^ r0;" in out and "return r5_1 + r2;" in out and "r2 = r5 * 2u;" in out, out
+    assert not tidy.webs(fn)                            # (one web each now)
+
+
+def test_a_split_renames_the_reads_inside_a_conditional_block_too():
+    text = ("u32 f(u32 a0, u32 a1, u32 a2, u32 a3)\n{\n"
+            "    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r5;\n"
+            "    r5 = r1 + 1u;  /* 0: adds r5, r1, #1 */\n"
+            "    r2 = r5 * 2u;  /* 2: lsls r2, r5, #1 */\n"
+            "    r5 = r3 ^ r0;  /* 4: eors r5, r3, r0 */\n"
+            "    if (r1 != 0) { *(volatile u8 *)r0 = (u8)r5; }  /* 6: strbne r5, [r0] */\n"
+            "    return r5 + r2;  /* 8: adds r0, r5, r2 */\n}\n")
+    fn = cparse.parse("typedef unsigned int u32;\ntypedef unsigned char u8;\n" + text).function("f")
+    assert tidy.webs(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "= (u8)r5_1;" in out and "return r5_1 + r2;" in out, out
+
+
+@needs_z3
+def test_a_compare_against_minus_one_names_the_constant():
+    """The lifters' adds r3, r4, #1; bne is x + 1 == 0: x == 0xffffffff (FreeRTOS's portMAX_DELAY in
+    vListInsert), a constant that is not in the expression itself (its negation is)."""
+    tree = cparse.parse(SNIPPET.replace(
+        "    { u32 x = r0, y = r3; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 4: cmp r0, r3 */\n"
+        "    if (!c || z) goto L_c;  /* 6: bls #0xc */",
+        "    { u32 x = r0, y = 0x1u; u64 t = (u64)x + y + 0; r12 = (u32)t; n = r12 >> 31; z = r12 == 0; c = (u32)(t >> 32); v = ((x ^ r12) & (y ^ r12)) >> 31; }  /* 4: adds r12, r0, #1 */\n"
+        "    if (!z) goto L_c;  /* 6: bne #0xc */"))
+    fn = tree.function("f")
+    tidy.tidy(fn)
+    text = cparse.unparse(fn, notes=False)
+    assert "if (r0 != 0xffffffffu) goto L_c;" in text, text

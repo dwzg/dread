@@ -993,6 +993,12 @@ def candidates(e, ctx, most=10):
     consts = [x for x in subs if isinstance(x, C.Num)]
     if not any(isinstance(x, C.Num) and x.value == 0 for x in consts):
         consts.append(C.Num("0"))
+    seen = {x.value for x in consts if isinstance(x.value, int)}
+    for k in sorted(seen):                  # (x + 1 == 0 is x == 0xffffffff: the negated constant, and
+        for d in ((-k) & 0xffffffff, (~k) & 0xffffffff):     # the inverted one)
+            if d not in seen:
+                seen.add(d)
+                consts.append(C.Num("0x%xu" % d if d > 9 else "%du" % d))
     terms = [x for x in subs if not isinstance(x, C.Num)][:most]
     leaves = [x for x in terms if isinstance(x, C.Name) or (isinstance(x, C.Unary) and x.op == "*")]
     pairs = [(a, b) for a in terms for b in consts] + [(a, b) for a in leaves for b in leaves if a is not b]
@@ -1195,13 +1201,72 @@ def values(fn):
     return changed
 
 
+def plain_literal(n, other_type, ctx):
+    """A small unsigned literal (0x5u) written as 5 where that is the same: the value fits int, and the
+    other operand is unsigned and at least int's width (the int converts to it anyway)."""
+    if not isinstance(n, C.Num) or isinstance(n.value, float) or not 0 <= n.value < 10:
+        return n
+    t = cexpr.num_type(n.text, n.value, ctx)
+    if not t[1] and other_type is not None and not other_type[1] and other_type[0] >= ctx.int_bits:
+        return C.Num(str(n.value))
+    return n
+
+
+def literals(fn):
+    """Small unsigned literals as plain numbers where the C means the same (plain_literal): beside an
+    unsigned operand, assigned to an unsigned variable, as a call's argument (the prototype converts),
+    as a shift's count."""
+    ctx = context(fn)
+    unsigned = (ctx.int_bits, False)
+
+    def fix(e):
+        if isinstance(e, C.Binary):
+            l, r = fix(e.l), fix(e.r)
+            if e.op in ("<<", ">>"):
+                r = plain_literal(r, unsigned, ctx)
+            elif e.op not in ("&&", "||"):
+                l = plain_literal(l, type_of_expr(r, ctx), ctx)
+                r = plain_literal(r, type_of_expr(l, ctx), ctx)
+            return C.Binary(e.op, l, r)
+        if isinstance(e, C.Assign):
+            value = fix(e.value)
+            if isinstance(e.target, C.Name):
+                value = plain_literal(value, ctx.types.get(e.target.id), ctx)
+            return C.Assign(e.op, e.target if isinstance(e.target, C.Name) else fix(e.target), value)
+        if isinstance(e, C.Call):
+            return C.Call(e.f, [plain_literal(fix(a), unsigned, ctx) for a in e.args])
+        if isinstance(e, C.Unary):
+            return C.Unary(e.op, fix(e.e))
+        if isinstance(e, C.Cast):
+            return C.Cast(e.type, fix(e.e))
+        if isinstance(e, C.Cond):
+            return C.Cond(fix(e.c), fix(e.t), fix(e.f))
+        return e
+    changed = False
+
+    def visit(st):
+        nonlocal changed
+        for get, put in stmt_exprs(st):
+            before = C.expr_text(get())
+            after = fix(get())
+            if C.expr_text(after) != before:
+                put(after)
+                changed = True
+        for inner in _inner(st):
+            visit(inner)
+    for st in fn.body.body:
+        if not isinstance(st, C.Decl):
+            visit(st)
+    return changed
+
+
 PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("dead", dead), ("frame", frame_stores),
           ("locals", frame_locals),
           ("propagate", propagate),
           ("selects", selects), ("merge", merge_ifs), ("fold", fold), ("spread", spread),
           ("expressions", tidy_expressions),
           ("values", values),
-          ("conditions", conditions),
+          ("conditions", conditions), ("literals", literals),
           ("declarations", tidy_declarations)]
 
 
@@ -1321,6 +1386,109 @@ def _flat(s):
     return out
 
 
+def webs(fn):
+    """A variable that holds unrelated values in turn (a register: the first argument, later a
+    callee's result) split into one variable per web: definitions that reach a common use are one
+    web, and each web but the one the entry's value belongs to (or the first) gets a name of its own
+    (r0_2, r0_3). Not for a variable written inside a nested statement (a conditional block: the
+    statement-level flow cannot tell its reads apart), a parameter's or one written by asm."""
+    g = Graph(fn)
+    reach = g.reaching()
+    top_writes, nested = {}, set()
+    for n in g.nodes:
+        s = n.stmt
+        if is_assign(s):
+            top_writes.setdefault(s.e.target.id, []).append(n.index)
+        elif isinstance(s, C.ExprStmt):
+            nested |= n.writes             # (a chain, an increment: left alone)
+        elif not isinstance(s, C.Decl):
+            nested |= n.writes
+    parent = {}
+
+    def find(x):
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent[x], parent[x])
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+    candidates = {v for v in top_writes if v in g.scope and v not in nested}
+    uses = {}                               # (v, node) -> the definitions reaching it
+    for n in g.nodes:
+        for v in n.reads & candidates:
+            defs = reach[n.index].get(v) or set()
+            defs = sorted(defs)
+            for d in defs[1:]:
+                union((v, defs[0]), (v, d))
+            uses[(v, n.index)] = defs
+    changed = False
+    taken = all_names(fn)
+    decls = declarations(fn)
+    for v in sorted(candidates):
+        classes = {}
+        for d in top_writes[v]:
+            classes.setdefault(find((v, d)), []).append(d)
+        entry = find((v, -1))
+        for (u, node), defs in uses.items():
+            if u == v and defs:
+                classes.setdefault(find((v, defs[0])), [])
+        if len(classes) < 2 or v not in decls or decls[v][1].dims or decls[v][1].ptr:
+            continue
+        keep = entry if entry in classes else min(classes, key=lambda c: min(classes[c]) if classes[c] else 0)
+        for cls in sorted(classes, key=lambda c: min(classes[c]) if classes[c] else -1):
+            if cls == keep:
+                continue
+            name = fresh(fn, v, taken)
+            members = set(classes[cls])
+            for d in members:                # the definitions: the assignment's target
+                g.nodes[d].stmt.e.target.id = name
+            for (u, node), defs in uses.items():
+                if u == v and defs and find((v, defs[0])) == cls:
+                    _rename_reads(g.nodes[node].stmt, v, name)
+            decl = C.Decl(decls[v][0].specs, [C.Declarator(name)])
+            last = max((i for i, x in enumerate(fn.body.body) if isinstance(x, C.Decl)), default=-1)
+            fn.body.body.insert(last + 1, decl)
+            changed = True
+        if changed:
+            return True                     # (indices moved: the next round sees the rest)
+    return changed
+
+
+def _rename_reads(s, old, new):
+    """The reads of old in statement s renamed, in what it contains too (its plain assignment targets
+    stay): webs splits only variables no nested statement writes, so every read in s sees the
+    definitions that reach s (a conditional block's store of r5 was left with the old name, and
+    gizmo's parse_kv stored the wrong character)."""
+    def ren(e):
+        if e is None:
+            return
+        if isinstance(e, C.Name):
+            if e.id == old:
+                e.id = new
+            return
+        if isinstance(e, C.Assign):
+            if not (isinstance(e.target, C.Name) and e.op == "="):
+                ren(e.target)
+            ren(e.value)
+            return
+        for c in _children(e):
+            ren(c)
+    for st in _flat(s):
+        if isinstance(st, C.Asm):
+            for o in st.inputs:
+                ren(o.e)
+            continue
+        if isinstance(st, C.Decl):
+            for d in st.items:
+                ren(d.init)
+            continue
+        for e in _stmt_all_exprs(st):
+            ren(e)
+
+
 def tidy(fn, run=None, passes=None, rounds=8):
     """All passes, again until none changes anything (at most rounds times); then the calls' and the
     function's own arguments (trim_calls, params) and the passes once more."""
@@ -1335,4 +1503,12 @@ def tidy(fn, run=None, passes=None, rounds=8):
     if passes is None and (trim_calls(fn, run) | params(fn, run)):
         settle()
         params(fn, run)
+    if passes is None:
+        split_any = False
+        for _ in range(16):                 # (one variable a round: webs renumbers)
+            if not webs(fn):
+                break
+            split_any = True
+        if split_any:
+            settle()
     return fn

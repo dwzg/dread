@@ -101,8 +101,15 @@ its sources.
   So far (2026-10-21, dread.tidy frame_locals): the frame's words as variables (s36 for sp0 - 36)
   where no frame address leaves the function, every slot has one type and none overlaps, and no slot
   is read before something stores it; then the other passes treat them as any variable (a register
-  spilled and reloaded becomes a copy). Open: frames whose address goes to a callee (FreeRTOS's
-  TimeOut_t on xQueueGenericSend's stack: the frame stays whole), the register webs. MSP430 (paused):
+  spilled and reloaded becomes a copy). And the register webs (dread.tidy webs): definitions that
+  reach a common use are one web, each web but the entry's a variable of its own (xQueueGenericSend's
+  r6 the flag that the time-out was set, r6_1 the queue's message count); not for a variable a
+  nested statement writes (the flow by statements cannot tell its reads apart; the first version
+  renamed only a conditional block's condition, not its store, and gizmo's parse_kv stored the
+  wrong character: the gate failed it). Small unsigned literals are written plainly where C means
+  the same (r3 == 2, not 0x2u: beside an unsigned operand, assigned, as an argument or a shift's
+  count). Open: frames whose address goes to a callee (FreeRTOS's TimeOut_t on xQueueGenericSend's
+  stack: the frame stays whole). MSP430 (paused):
   ulTaskGenericNotifyTake's readable C makes every case stack-dependent (refused, so it stays
   lifted), not traced; its critical sections are asm on the real stack beside the lifted frame.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
