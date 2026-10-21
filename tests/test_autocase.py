@@ -778,3 +778,38 @@ def test_cases_made_anew_keep_what_the_last_ones_reached(gen, tmp_path, monkeypa
     cases = [c for *_, c in autocase.cases_for(run, "parse_uint", program.by_name["parse_uint"]) if c]
     assert any(c.get("carried") for c in cases) and len(cases) > len(poor)
     assert autocase.cache_load(path)["key"] != "an older generator's"
+
+
+def test_a_long_loop_round_is_run_past_the_48th_call(tmp_path):
+    """FreeRTOS's test tasks call 64 to 175 times a round of their loop, and the checks that set
+    xErrorDetected lie behind most of those calls; a loop case ended at its 48th stub call, so no case
+    reached them (prvLowPriorityMutexTask, vPrimaryBlockTimeTestTask and others stayed uncovered on
+    every build). A loop case now ends at twice the function's call sites (at least 48, at most
+    512), and the compare-guided stage solves stub answers that far."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    steps = " ".join("step(%d);" % k for k in range(60))
+    (tmp_path / "t.c").write_text(NOIPA_DEF + "volatile int err;\n"
+                                  "NOIPA int step(int k) { return k + 1; }\n"
+                                  "NOIPA int check(void) { return 1; }\n"
+                                  "__attribute__((noreturn)) void task(void) { for (;;) { %s if (check() != 1) err = 1; } }\n"
+                                  % steps)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "task", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    g = Generator(t, t.image())
+    fn = g.program.by_name["task"]
+    assert g.loop_calls_for(fn.insns) > 48
+    cases = g.generate("task", fn.entry, fn.insns, loop=True)
+    got, words = covered(g, "task", cases)
+    assert got == words, sorted(hex(a) for a in words - got)

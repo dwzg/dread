@@ -1328,7 +1328,14 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
 - [ ] (Later) **What the lifter leaves, round two**: (1) loop cases seeded with what the system run
   saw each callee of a task return and write (dread.sysrecord for loop functions: their stub answers
   as returns, fills and effects; about twenty task loops a build miss instructions behind checks in a
-  row); (2) a cycle that changes nothing (registers alike at a pc, no store, no peripheral) as a
+  row). Found 2026-10-21 that most of it was the loop cases' length: they ended at their 48th stub
+  call, and FreeRTOS's test tasks call 64 to 175 times a round, so the checks behind the 48th call
+  (the stores of xErrorDetected) were reached by no case. A loop case now ends at twice the
+  function's call sites (at least 48, at most 512), and the compare-guided stage solves that many
+  stub answers; on a copy of the GCC -Os build four of its seventeen task loops are accepted that
+  were not (prvLowPriorityMutexTask, prvStaticallyAllocatedCreator, prvTestMasterTask,
+  vPrimaryBlockTimeTestTask), prvTimerTestTask misses 228 instructions instead of 436,
+  prvNotifiedTask 654 instead of 720, none worse; (2) a cycle that changes nothing (registers alike at a pc, no store, no peripheral) as a
   defined end, like a branch to itself (vAssertCalled's wait for a debugger; it stays uncovered for
   its exit path, so mostly time: the failing generations of vAssertCalled, Reset_Handler, main and
   vRegTest2Implementation take 400 to 500 s a build); (3) the M4F builds' libgcc compare helpers that

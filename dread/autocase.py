@@ -147,6 +147,9 @@ STUB_CALLS = 2000           # stub calls per run; beyond that the run is stopped
                             # count kept going; but a -O0 build's functions lost coverage: a loop that
                             # empties a list a generated count long, calling a hung callee each time)
 LOOP_CALLS = 48             # a loop case (a function that never returns) ends at this many stub calls
+LOOP_CALLS_MAX = 512        # ... or at twice its call sites, up to this (Generator.loop_calls_for): FreeRTOS's
+                            # test tasks call 64 to 175 times a round, and what lay behind the 48th call
+                            # (the checks that set xErrorDetected) no loop case reached
 SOLVE_RUNS = 3000           # emulator runs per function in the compare-guided stage ...
 SOLVE_COST = 1_500_000      # ... and memory values written for them
 SOLVE_EFFECTS = 64          # memory changes by callees examined per starting input
@@ -232,6 +235,7 @@ class Generator:
         self._stall_part = None             # see stall_part
         self.wild_pins = None               # see drop_wild
         self.loop = False                   # generating loop cases (generate(loop=True))
+        self.loop_calls = LOOP_CALLS        # their stub calls (loop_calls_for)
         self.payload = payload if payload is not None else image.payload()
         self.arch = image.arch
         mem = target.memory
@@ -832,6 +836,7 @@ class Generator:
         before, self.current = self.current, name
         self.deadline = time.time() + seconds if seconds else None
         loop_before, self.loop = self.loop, loop
+        calls_before, self.loop_calls = self.loop_calls, self.loop_calls_for(words) if loop else LOOP_CALLS
         try:
             if not fallbacks:
                 return self._generate_once(name, entry, words, calls, frame, count, budget, limit, sweep, learn=True)
@@ -840,6 +845,7 @@ class Generator:
             self.current = before
             self.deadline = None
             self.loop = loop_before
+            self.loop_calls = calls_before
 
     def late(self):
         return self.deadline is not None and time.time() > self.deadline
@@ -1074,7 +1080,7 @@ class Generator:
                     "returns": [value() for _ in range(8)] if calls else [], "calls": [list(c) for c in calls],
                     **({"fregs": list(fregs), "fargs": [fvalue() for _ in fregs]} if fregs else {}),
                     "frame": frame, **({"io": "fixed"} if self.io_fixed else {}), **({"limit": self.long} if self.long else {}),
-                    **({"hang": True, "limit": limit, "stub_calls": LOOP_CALLS, "stops": list(stops)} if self.loop else {})}
+                    **({"hang": True, "limit": limit, "stub_calls": self.loop_calls, "stops": list(stops)} if self.loop else {})}
             # A callee a run hung in either returns from its stub (the code behind the call runs) or
             # ends the run at its call: an assertion handler that waits for a debugger, stubbed, let
             # the run go on into the null pointer it was called for, and the run faulted, so the path
@@ -1563,6 +1569,17 @@ class Generator:
         return sorted(a for a in reach & set(sites)
                       if self.program.insn(a) is not None and arch.flow(self.program.insn(a))[0] == "ijump")
 
+    def loop_calls_for(self, words):
+        """The stub calls a loop case of these instructions ends at: twice their call sites, at least
+        LOOP_CALLS and at most LOOP_CALLS_MAX (a round of the loop makes each call once, mostly)."""
+        arch = self.program.arch
+        sites = 0
+        for a in words:
+            insn = self.program.insn(a)
+            if insn is not None and arch.flow(insn)[0] in ("call", "icall"):
+                sites += 1
+        return max(LOOP_CALLS, min(LOOP_CALLS_MAX, 2 * sites))
+
     def carried(self, entry, words, cases, old, limit=200_000):
         """The cases of an earlier generation (old: what the cache held under another key) that still
         run as a case must and run instructions none of cases runs, the most new ones first, each
@@ -1935,7 +1952,8 @@ class Generator:
                             base["mem"].append([a, n, int.from_bytes(probe.read(a, n), "little")])
                         except Exception:
                             pass
-                short = min(m.stub_calls[0], SOLVE_RETURNS) - len(base["returns"])
+                short = min(m.stub_calls[0], max(SOLVE_RETURNS, self.loop_calls if self.loop else 0)) \
+                    - len(base["returns"])
                 if calls and short > 0:
                     base["returns"] += [0] * short
                 effects[:] = [[n, a, size, v] for (n, a), (size, v) in sorted(m.after.items())][:SOLVE_EFFECTS]
@@ -2191,6 +2209,8 @@ def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True
     keyed = dict(options, calls=calls, frame=frame)                         # function that reaches none stay)
     if len(gen.ladder(fn.insns)) > SWEEP_STEPS:     # (only those: the other functions keep their cases)
         keyed["sweep_steps"] = SWEEP_STEPS
+    if options.get("loop") and gen.loop_calls_for(fn.insns) != LOOP_CALLS:      # (only those: the other
+        keyed["loop_calls"] = gen.loop_calls_for(fn.insns)                       # loop functions keep theirs)
     tails = gen.pointer_tails_reached(fn.insns)
     if tails:                               # (only those: tail calls through a pointer count with the
         keyed["pointer_tails"] = tails      # calls through a register since 2026-10-21, drop_wild)
