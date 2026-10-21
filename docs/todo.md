@@ -422,7 +422,7 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   has the code of every getter: FreeRTOS's xTaskGetTickCount; the nosys stubs), and a match whose
   calls go to functions matched under other names is dropped. Left: RISC-V (its linker relaxes calls
   and shortens linked code: 3 to 12 functions match there), and compiled C (the item itself).
-- [ ] **Tests that state properties, not one compiler's output**: the tests that compile snippets
+- [x] **Tests that state properties, not one compiler's output**: the tests that compile snippets
   checked for what they assume of the code (three CI failures on 2026-10-20 were such assumptions);
   the snippet tests run in the CI job of the older distribution too. 2026-10-21: the whole suite
   under Debian 10's ARM GCC 7.3 (bin/with-toolchain debian-10; the image came with the older GCC
@@ -437,7 +437,9 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   (C99; GCC 4.9 defaults to C90), the C++ probe expected the sized delete (_ZdlPvj, C++14: GCC 5 on),
   GCC 4.9's libgcc __aeabi_uldivmod moves sp in a way the walk counts (the test asserted the refusal
   newer ones get), and GCC 4.9's code of the chase test is covered without the chase (it skips now,
-  saying so). Left: older clang, and the RISC-V GCC of the older images.
+  saying so). Then under Ubuntu 20.04's clang 12 and GCC 9.2: 619 passed, none failed. With CI's
+  Ubuntu 22.04 and 24.04 (GCC 10 and 13, clang 14 and 18, their RISC-V GCC) and the Debian 12 and 13
+  runs (GCC 12 and 14), the suite has run on GCC 4.9 to 16 and clang 12 to 23.
 - [x] **The pilot without names**: Haiku's inputs on a copy of the GCC -Os build with every name made
   FUN_address and the calls' names gone too: how much of what it finds comes from knowing FreeRTOS
   (open source, its names in the listing) and how much from reading the code. Private firmware has
