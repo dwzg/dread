@@ -161,13 +161,10 @@ def _run(program, uc, state, isa, runs, first, address):
     return landings
 
 
-def resolve(program, fn, address):
-    """(inside, outside) targets of the indirect jump at `address` (see the module), or None."""
+def _run_start(program, fn, i):
+    """The first instruction of the straight run in front of the jump fn.insns[i] (see the module)."""
     arch = program.arch
-    if address not in fn.insns:
-        return None
-    i = fn.insns.index(address)
-    start, check = i, None
+    start = i
     while start > 0 and i - start < RUN_BACK:
         prev = fn.insns[start - 1]
         insn = program.insn(prev)
@@ -177,12 +174,53 @@ def resolve(program, fn, address):
         if kind not in ("next", "jump") or (kind == "jump" and not falls):
             break
         start -= 1
+    return start
+
+
+def _find_check(program, fn, i, start):
+    """(index in fn.insns, (register, limit, before)) of the bound check in front of the jump
+    fn.insns[i], nearest first, whose register feeds the jump; or None. An instruction that looks
+    like a bound check of another register does not count (GCC 12's RISC-V xTaskGenericNotifyFromISR:
+    andi s5, s5, 0xff between its li and its bltu, and the five cases came out as one): from the
+    check on, a register written from a value derived from the index is derived from it too, and
+    the jump must read one (a jump that reads no register, a switch helper's call, takes the first
+    check as before)."""
+    arch = program.arch
     for k in range(i - 1, start - 1, -1):
         insn = program.insn(fn.insns[k])
-        found = arch.bound_check(insn) if insn is not None else None
-        if found:
-            check = (k, found)
-            break
+        if insn is None:
+            continue
+        prior = [program.insn(fn.insns[j]) for j in range(k - 1, start - 1, -1)]
+        found = arch.bound_check(insn, prior)
+        if not found:
+            continue
+        reg, _, before = found
+        derived = {reg}
+        for j in range(k + 1 if before else k + 1, i):
+            other = program.insn(fn.insns[j])
+            if other is None:
+                derived = set()
+                break
+            reads, writes = arch.reg_effects(other)
+            if set(reads) & derived:
+                derived |= set(writes)
+            else:
+                derived -= set(writes)
+        jump_reads = set(arch.reg_effects(program.insn(fn.insns[i]))[0]) - {"pc", "sp"}
+        if jump_reads and not jump_reads & derived:
+            continue                        # (it bounds something else)
+        return k, found
+    return None
+
+
+def resolve(program, fn, address):
+    """(inside, outside) targets of the indirect jump at `address` (see the module), or None."""
+    arch = program.arch
+    if address not in fn.insns:
+        return None
+    i = fn.insns.index(address)
+    start = _run_start(program, fn, i)
+    check = _find_check(program, fn, i, start)
     isa = program.isa_at(address)
     uc, state = _engine(program, isa)
     if check is not None:
@@ -233,23 +271,8 @@ def mapping(program, fn, address):
     if address not in fn.insns:
         return None
     i = fn.insns.index(address)
-    start = i
-    while start > 0 and i - start < RUN_BACK:
-        prev = fn.insns[start - 1]
-        insn = program.insn(prev)
-        if insn is None or prev + insn.size != fn.insns[start]:
-            break
-        kind, _, falls = arch.flow(insn)
-        if kind not in ("next", "jump") or (kind == "jump" and not falls):
-            break
-        start -= 1
-    check = None
-    for k in range(i - 1, start - 1, -1):
-        insn = program.insn(fn.insns[k])
-        found = arch.bound_check(insn) if insn is not None else None
-        if found:
-            check = (k, found)
-            break
+    start = _run_start(program, fn, i)
+    check = _find_check(program, fn, i, start)
     if check is None:
         return None
     k, (reg, limit, before) = check

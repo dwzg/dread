@@ -317,12 +317,20 @@ across compilers and replacing shape catalogues with analyses, not a profile per
   r6 for a compiler's shared code). Functions with code no edge reaches are left as they are (GCC 12's
   RISC-V xTaskGenericNotifyFromISR: its switch's cases were not all found, below). 16 answers of the
   GCC 10 RISC-V build changed, none elsewhere (fifteen FreeRTOS builds, gizmo).
-- [ ] **RISC-V switches with the bound first** (found 2026-10-21 by regflow 23's check): GCC 12's
+- [x] **RISC-V switches with the bound first** (found 2026-10-21 by regflow 23's check): GCC 12's
   RISC-V xTaskGenericNotifyFromISR checks its switch index with bltu a5, s3 (the bound 4 in a5, the
   index in s3) and jumps through a table in .rodata; the switch resolution found one of the five
   cases, so the others have no edge in regflow's graph (and the flat listing says "goes to L12").
   Probably the bound check is read with the operands the other way round. RISC-V's most frequent
   refusal on the benchmark ("jumps through a register to targets not known") may be the same.
+  Done the same morning, the cause another: the li of the bound was joined to the branch only right
+  in front of it (an andi of another register stood between), and that andi was taken for the bound
+  check, so the run went the same way for every value. The RISC-V layer takes the li a few
+  instructions in front as long as nothing else writes its register, and dread.switches takes a
+  bound check only when its register feeds the jump. Every indirect jump of thirteen FreeRTOS builds
+  and seven gizmo builds compared: xTaskGenericNotify and xTaskGenericNotifyFromISR on the RISC-V
+  builds of GCC 10 to 14 had one case of five (now five), on clang's RISC-V build none (now five);
+  nothing else changed.
 - [ ] **Refusals to a language model as rule writer**: the categories the benchmark leaves (a code
   shape the tools do not know) go with their listings to a model that proposes the rule (a
   recognizer, an input, the C); nothing is taken that the comparison does not accept.

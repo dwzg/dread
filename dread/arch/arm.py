@@ -421,7 +421,7 @@ class Arm:
             return "ijump", None, conditional
         return "next", None, False
 
-    def bound_check(self, insn):
+    def bound_check(self, insn, prior=()):
         """(register, limit, before) when the instruction bounds a switch index: cmp rN, #K (the
         index is rN, at most K + 1 values pass; set before the compare) or and rN, rM, #(2^n - 1)
         (rN takes 0 .. 2^n - 1; set after the and). None otherwise. Used by dread.switches."""

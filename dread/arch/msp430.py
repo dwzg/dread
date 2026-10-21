@@ -556,7 +556,7 @@ class Msp430:
         f = insn.fields
         return [o.value for o in (f.src, f.dst) if o is not None and o.mode == "imm" and not o.cg]
 
-    def bound_check(self, insn):
+    def bound_check(self, insn, prior=()):
         return None
 
     # ---- what the case generator learns from the code (dread.autocase) ----
