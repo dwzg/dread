@@ -357,3 +357,21 @@ def test_a_dry_run_of_the_input_task_asks_nothing(gizmo, tmp_path, monkeypatch, 
     assert pilot.main(["--target", target.root, "--task", "input", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "nothing asked" in out and "missed instructions" in out
+
+
+@needs_gcc
+def test_the_input_question_shows_the_callees_and_a_stopped_input_where_it_stopped(gizmo):
+    """--task input: the question holds the listings of the functions the function calls (without
+    names a model cannot tell what a helper reads: FreeRTOS made nameless, 2026-10-21), and an input
+    that does not finish comes back with where it stopped and why: the fault, the function and the
+    instruction, the registers."""
+    target, image, program, flow = gizmo
+    fn = program.by_name["uart_puts"]
+    provider = llm.Scripted(['```json\n{"args": ["0xdead0000", 0, 0, 0], "mem": [], "poll": []}\n```'])
+    pilot.find_inputs(target, image, program, provider, "uart_puts", list(fn.insns), tries=1, flow=flow,
+                      out=lambda *a: None)
+    question = provider.asked[0][1][0]["content"]
+    assert "The functions it calls" in question and "; uart_putc " in question, question[-1500:]
+    log = open(os.path.join(target.build, "pilot", image.name, "uart_puts.inputs.md")).read()
+    told = log.split("## The tools, after answer 1")[1]
+    assert "does not finish" in told and "in uart_puts" in told and "r0=0xdead0000" in told, told

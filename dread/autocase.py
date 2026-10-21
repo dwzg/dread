@@ -748,6 +748,15 @@ class Generator:
     def coverage(self, entry, words, case, limit=200_000, check_image=False):
         """The function's instructions this input executes; empty if it does not finish (or, with
         check_image, when it loads instructions as data or stores into the image)."""
+        ran, why = self.attempt(entry, words, case, limit, check_image)
+        return set() if why else ran
+
+    def attempt(self, entry, words, case, limit=200_000, check_image=False):
+        """(the function's instructions the input executes, None) when it finishes, else (what it ran
+        before it stopped, why: the fault or the limit with the function and instruction where the
+        run was then and the general registers, or that it loaded instructions as data or stored into
+        the image). dread pilot hands the why to the model: told only that an input did not finish, it
+        could not tell which callee its input failed in."""
         m = self.machine()
         m.plan = []
         try:
@@ -756,11 +765,32 @@ class Generator:
             if check_image:
                 m.trace_reads(self.image.base, self.image.end, self.code, self.owners)
             m.call(entry, *case["args"], max_instructions=limit)
+        except Exception as e:
+            return m.covered_insns(words), self.stopped_where(m, e)
+        if check_image and self.touches_image(m):
+            return m.covered_insns(words), "it loads instructions as data or stores into the image"
+        if check_image and self.ends_badly(m):
+            return m.covered_insns(words), "it ends neither by a return nor at a call that ends the run"
+        return m.covered_insns(words), None
+
+    def stopped_where(self, m, error):
+        """A line on where and why a run stopped: the error, the function and instruction at pc, the
+        general registers."""
+        prog = self.program
+        try:
+            pc = m.reg("pc") & ~1
         except Exception:
-            return set()
-        if check_image and (self.touches_image(m) or self.ends_badly(m)):
-            return set()
-        return m.covered_insns(words)
+            return str(error)
+        fn, insn = prog.function_at(pc), prog.insn(pc)
+        regs = []
+        for name in prog.arch.general_regs():
+            try:
+                regs.append("%s=0x%x" % (name, m.reg(name)))
+            except Exception:
+                pass
+        return "%s; at 0x%x in %s (%s); registers: %s" % (
+            error, pc, fn.name if fn else "no function", ("%s %s" % (insn.mnemonic, insn.op_str)).strip()
+            if insn is not None else "no instruction", " ".join(regs))
 
     # ---- the search ----
 

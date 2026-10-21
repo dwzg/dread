@@ -600,9 +600,34 @@ def wild_call(gen, program, fn, case):
     return m.wild_calls[0][1] if m.wild_calls else None
 
 
+CALLEE_LINES = 80          # a callee's listing goes into the input question up to this many lines ...
+CALLEES_LINES = 400        # ... and all of them up to this many
+
+
+def callee_listings(program, fn, flow=None):
+    """The flat listings of the functions fn calls directly, in address order, as long as they fit
+    (CALLEE_LINES each, CALLEES_LINES in all), and the names of those left out. Without names a model
+    cannot tell what a helper reads (2026-10-21, FreeRTOS with every name made FUN_address: Haiku
+    "can't see the disassembly of the helpers this function calls", and its inputs for vTaskSuspend
+    faulted in the list functions, which it had set up by their names before)."""
+    from dread import flat
+    from dread.lift import direct_callees
+    shown, left, room = [], [], CALLEES_LINES
+    for callee in sorted((program.by_name[n] for n in direct_callees(program, fn)), key=lambda f: f.entry):
+        text = flat.listing(program, callee, flow)
+        if len(text) > CALLEE_LINES or len(text) > room:
+            left.append(callee.name)
+            continue
+        shown.append("\n".join(text))
+        room -= len(text)
+    return shown, left
+
+
 def find_inputs(target, image, program, provider, name, missed, tries=3, flow=None, out=print):
     """Ask for inputs that run the missed instructions; each one that runs some becomes a written
-    case of the function (extra_cases, "by" the pilot). Returns the addresses still unrun."""
+    case of the function (extra_cases, "by" the pilot). The question holds the function's listing and
+    its callees' (callee_listings); an input that does not finish gets back where and why it stopped
+    (Generator.attempt). Returns the addresses still unrun."""
     import json
     from dread import autocase, flat
     fn = program.by_name[name]
@@ -614,9 +639,14 @@ def find_inputs(target, image, program, provider, name, missed, tries=3, flow=No
         m = re.match(r"\s+([0-9a-f]{8})\s", line)
         marked.append((">> " if m and int(m.group(1), 16) in missed else "   ") + line)
     still = set(missed)
-    user = ("The function %s:\n\n```\n%s\n```\n\nThe instructions marked >> never ran under any input yet: "
+    shown, left = callee_listings(program, fn, flow)
+    callees = ""
+    if shown:
+        callees = ("\n\nThe functions it calls, for what they read and write:\n\n```\n%s\n```%s" % (
+            "\n\n".join(shown), "\n(Not shown, too long: %s.)" % ", ".join(left) if left else ""))
+    user = ("The function %s:\n\n```\n%s\n```%s\n\nThe instructions marked >> never ran under any input yet: "
             "%s. Give one input that runs as many of them as you can." % (
-                name, "\n".join(marked), " ".join("0x%x" % a for a in sorted(still))))
+                name, "\n".join(marked), callees, " ".join("0x%x" % a for a in sorted(still))))
     messages = [{"role": "user", "content": user}]
     log = ["# Inputs for %s, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (name, provider.label(), system, user)]
     for k in range(1, tries + 1):
@@ -635,12 +665,14 @@ def find_inputs(target, image, program, provider, name, missed, tries=3, flow=No
         if case is None:
             feedback = "The answer has no ```json block with an input of the form given. Answer with one."
         else:
-            ran = gen.coverage(fn.entry, fn.insns, case, case["limit"], check_image=True)
-            new = ran & still
+            ran, why = gen.attempt(fn.entry, fn.insns, case, case["limit"], check_image=True)
+            new = ran & still if not why else set()
             wild = wild_call(gen, program, fn, case) if new else None
-            if not ran:
-                feedback = ("The input does not finish (it faults, runs on beyond its limit, or loads code as "
-                            "data or writes into the image). Give another one.")
+            if why:
+                reached = sorted(ran & still)
+                feedback = ("The input does not finish: %s.%s Give another one." % (
+                    why, " Before it stopped it ran %s of the marked ones (an input counts only when it "
+                    "finishes)." % " ".join("0x%x" % a for a in reached) if reached else ""))
             elif not new:
                 feedback = "The input runs, but none of the marked instructions. Give another one."
             elif wild is not None:
