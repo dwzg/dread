@@ -114,9 +114,23 @@ its sources.
   lifted), not traced; its critical sections are asm on the real stack beside the lifted frame.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
-- [ ] **The pilot on the draft.** The pilot asks for names and types on the readable C instead of
-  writing from the lifted C: acceptance, tokens and time per function against the old question, on
-  gizmo and the GCC -Os bench build.
+- [ ] **The pilot on the draft.** Names for the readable C: the model proposes a map of names and a
+  sentence, code applies it (docs/decisions.md). Built 2026-10-21: dread/naming.py (the
+  readable_names table, applied by digest, a map kept only when its names are C identifiers nothing
+  else uses and the C compiles to the same code), dread pilot --task readable, dread readable
+  --score ELF (parameters by position against the debug information's, local names among the
+  source's). Measured 2026-10-21 on the GCC -Os build: 30 kernel functions drawn at random (lists,
+  queues, tasks, timers, event groups, stream buffers; seed 3), each model on its own copy, every
+  map compiling to the same code. Haiku 5.5: all 30 named, 27 of 49 parameters as the source names
+  them (55 %), 34 sharing a word (69 %), 20 of 78 local names among the source's; 26,106 tokens in
+  and 26,125 out, about $0.02. Sonnet 5.5: all 30, 23 of 48 (48 %), 35 (73 %), 21 of 89; 26,106 in
+  and 10,362 out, about $0.16. Haiku is the one to use. The first 30 by name, mostly newlib's (terse
+  names: ptr, fp, g), got 12 of 37 exact with Haiku. Most misses are a register that holds two
+  values the webs did not split (xQueueGenericSend's r0, the queue and later the result, named
+  xResult): webs leaves alone a variable a nested statement writes. Next: split those too
+  (conservatively), then types: the structures behind pointers derived by code (accesses at
+  constant offsets through the same pointer, unified across functions), their names and fields'
+  names proposed the same way.
 - [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
 

@@ -12,6 +12,7 @@ dependencies = ["unicorn==2.1.4", "capstone>=5,<6"]
 [project.optional-dependencies]
 test = ["pytest"]
 prove = ["z3-solver>=4.12"]     # dread readable proves its rewrites of conditions and values with it
+dwarf = ["pyelftools>=0.29"]    # dread readable --score reads the source's names from debug information
 
 [project.scripts]
 dread = "dread.cli:main"

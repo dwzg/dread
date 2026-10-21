@@ -39,6 +39,7 @@ TABLES = {
     "asm_raw_words": "asm_raw_words.txt",
     "lifted": "lifted.txt",
     "readable": "readable.txt",
+    "readable_names": "readable_names.json",
     "domains": "domains.tsv",
     "stale_readers": "stale_readers.tsv",
     "wide_results": "wide_results.txt",

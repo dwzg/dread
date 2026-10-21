@@ -24,7 +24,7 @@ import os
 import re
 import sys
 
-from dread import cparse, structure, tidy
+from dread import cparse, naming, structure, tidy
 from dread import target as tgt
 
 STAGES = [("tidy", tidy.tidy), ("structure", structure.structure)]     # (name, function(tree)): in order
@@ -36,8 +36,10 @@ class Context:
 
     def __init__(self, target=None, image=None, program=None, flow=None):
         self.arg_regs, self.reads, self.preserved, self.variadic = [], {}, {}, set()
+        self.names = {}                 # the image's readable_names table (dread.naming)
         if target is None:
             return
+        self.names = naming.load(image)
         from dread import regflow
         from dread.program import Program
         program = program or Program(target, image)
@@ -113,7 +115,9 @@ def transform(name, text, stages=None, context=None):
 EXTERN = re.compile(r"^extern (\w+) (\w+)\(([^)]*)\);$")
 
 
-def _transform(name, text, stages, context=None):
+def readable_tree(name, text, stages=None, context=None):
+    """(tree, function) of a lifted file after the stages, before names (dread.naming): what a
+    names proposal is made for. None when the text is not the lifters' dialect."""
     try:
         tree = cparse.parse(text)
     except cparse.ParseError:
@@ -121,7 +125,7 @@ def _transform(name, text, stages, context=None):
     fn = tree.function(name)
     if fn is None:
         return None
-    if tidy.fixed_registers(tree):         # (registers the C must keep as they are: behaviour)
+    if tidy.fixed_registers(tree):
         stages = []
     run = Run(context)
     for item in tree.items:
@@ -130,15 +134,30 @@ def _transform(name, text, stages, context=None):
             run.returns[m.group(2)] = m.group(1)
     for _, stage in (STAGES if stages is None else stages):
         stage(fn, run)
-    for item in tree.items:                 # the callees' declarations as their calls now are
+    for item in tree.items:
         m = EXTERN.match(item.text) if isinstance(item, cparse.Raw) else None
         if m and m.group(2) in run.trimmed:
             params = [p.strip() for p in m.group(3).split(",")]
             item.text = "extern %s %s(%s);" % (m.group(1), m.group(2),
                                                 ", ".join(params[:run.trimmed[m.group(2)]]) or "void")
-    others = [f.name for f in tree.items if isinstance(f, cparse.Function) and f.name != name]
+    return tree, fn
+
+
+def print_file(tree, fn, stages=None):
+    others = [f.name for f in tree.items if isinstance(f, cparse.Function) and f.name != fn.name]
     return cparse.unparse(tree, verbatim=others, style="readable" if (STAGES if stages is None else stages)
                           else "lifted")
+
+
+def _transform(name, text, stages, context=None):
+    made = readable_tree(name, text, stages, context)
+    if made is None:
+        return None
+    tree, fn = made
+    entry = context.names.get(name) if context is not None else None
+    if entry and (STAGES if stages is None else stages):
+        naming.apply(tree, fn, entry)       # (only for the C it was made for: its digest)
+    return print_file(tree, fn, stages)
 
 
 def chooser(names, context=None):
@@ -302,6 +321,8 @@ def main(argv=None):
     tgt.add_arguments(parser)
     parser.add_argument("--check", action="store_true", help="test the readable C and write the readable table")
     parser.add_argument("--out", help="write NAME.c files there instead of printing")
+    parser.add_argument("--score", metavar="ELF", help="how close the readable_names table's names come to the "
+                        "source's, from ELF's debug information (dread.naming.score)")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     try:
@@ -313,6 +334,18 @@ def main(argv=None):
         from dread.util.polite import polite
         polite()
         check(target, image, args.names or None)
+        return 0
+    if args.score:
+        from dread.program import Program
+        rows, totals = naming.score(Program(target, image), image, args.score)
+        for r in rows:
+            print("%-32s %s; locals %d of %d among the source's" % (r["function"], ", ".join(
+                "%s/%s" % pair for pair in r["pairs"]) or "no parameters", r["local_hits"], r["locals"]))
+        p = max(totals["params"], 1)
+        print("dread readable --score: %d functions, %d parameters: %d named as the source (%.0f %%), %d with a "
+              "word of the source's (%.0f %%); %d of %d local names among the source's" % (
+                  totals["functions"], totals["params"], totals["exact"], 100.0 * totals["exact"] / p,
+                  totals["words"], 100.0 * totals["words"] / p, totals["local_hits"], totals["locals"]))
         return 0
     from dread import lift, regflow
     from dread.program import Program

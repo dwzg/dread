@@ -460,6 +460,121 @@ name: <the name>
 what: <one sentence: what the function does>"""
 
 
+READABLE_SYSTEM = """You name the variables of one function of a binary image. Its C below was made
+from the machine code by tools and does exactly what the machine code does; its variables are named
+after the registers and stack slots that held them (r0, r4, r2_1, s36), its memory accesses are
+written with their offsets. Give each variable a name that says what it holds, and say in one
+sentence what the function does. The names of the functions it calls and of its callers may tell you
+more; follow the style of the names you see (a project's prefixes, its case).
+
+Answer with one ```json block:
+
+```json
+{"what": "<one sentence>", "names": {"r0": "<name>", "r4": "<name>"}}
+```
+
+A name is a C identifier of at most 48 characters, no C keyword, no name the C already uses for
+something else (a function it calls, a type such as u32), no two variables alike. Leave out a
+variable you cannot name. Nothing else changes: the names are put into the C by a tool, which checks
+that the C still compiles to the same code."""
+
+
+def parse_names(answer):
+    """(what, {variable: name}) of an answer's ```json block, or None."""
+    import json
+    m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except ValueError:
+        return None
+    names = data.get("names") if isinstance(data, dict) else None
+    what = data.get("what") if isinstance(data, dict) else None
+    if not isinstance(names, dict) or not isinstance(what, str):
+        return None
+    return what.strip(), {str(k): v for k, v in names.items() if v != k}
+
+
+def callers_of(program, name):
+    """The names of the functions that call name directly."""
+    from dread.lift import direct_callees
+    return sorted(fn.name for fn in program.functions if fn.name != name and name in direct_callees(program, fn))
+
+
+def name_readable(target, image, program, provider, name, context, lifter, tries=2, out=print):
+    """Ask for the names of a function's variables in its readable C (dread readable), put them in with
+    dread.naming and keep them in the image's readable_names table when the C still compiles to the
+    same code; tell the model what was wrong and ask again up to tries answers. Returns the table
+    entry, or None. The conversation goes to BUILD/pilot/IMAGE/NAME.readable.md."""
+    import copy
+    from dread import cparse, lift, naming, readable
+    fn_p = program.by_name[name]
+    try:
+        text = lifter.lift(fn_p).text
+    except lift.Refused as e:
+        out("%-24s no readable C: %s" % (name, e))
+        return None
+    made = readable.readable_tree(name, text, context=context)
+    if made is None:
+        out("%-24s no readable C: its lifted C is not the dialect" % name)
+        return None
+    tree, fn = made
+    digest = naming.digest(fn)
+    known = context.names.get(name) if context is not None else None
+    if known and known.get("digest") == digest:
+        out("%-24s named already" % name)
+        return known
+    unnamed = readable.print_file(tree, fn)
+    callers = [c for c in callers_of(program, name) if may_show(target, c)][:12]
+    user = "The function %s (readable C):\n\n```c\n%s\n```" % (name, cparse.unparse(fn, notes=False, style="readable"))
+    if callers:
+        user += "\n\nIt is called by: %s." % ", ".join(callers)
+    messages = [{"role": "user", "content": user}]
+    log = ["# %s, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (name, provider.label(), READABLE_SYSTEM, user)]
+    folder = os.path.join(target.build, "pilot", image.name)
+    os.makedirs(folder, exist_ok=True)
+    entry, why = None, "no answer"
+    for _ in range(tries):
+        try:
+            answer = provider.ask(READABLE_SYSTEM, messages)
+        except Exception as e:
+            why = "the provider: %s" % e
+            break
+        log.append("## Answer\n\n%s" % answer)
+        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+            why = "the provider declined"
+            break
+        parsed = parse_names(answer)
+        if parsed is None:
+            problems = ['no ```json block with "what" (a sentence) and "names" (an object)']
+        else:
+            what, names = parsed
+            problems = naming.problems(tree, fn, names)
+            if not problems:
+                tree2 = copy.deepcopy(tree)
+                fn2 = tree2.function(name)
+                naming.rename(fn2, names)
+                if naming.same_code(target, image, unnamed, readable.print_file(tree2, fn2),
+                                    os.path.join(folder, "naming")):
+                    entry = {"digest": digest, "names": names, "what": what, "by": provider.label()}
+                    naming.store(image, name, entry)
+                    break
+                problems = ["with these names the C compiles to other code"]
+        why = "; ".join(problems)
+        messages += [{"role": "assistant", "content": answer},
+                     {"role": "user", "content": "These names cannot be used: %s. Answer again with the whole "
+                                                  "```json block." % why}]
+        log.append("## Back to the model\n\n%s" % messages[-1]["content"])
+    with open(os.path.join(folder, name + ".readable.md"), "w") as f:
+        f.write("\n\n".join(log) + "\n")
+    if entry is None:
+        out("%-24s no names: %s" % (name, why[:160]))
+        return None
+    out("%-24s %d names: %s" % (name, len(entry["names"]), entry["what"][:120]))
+    return entry
+
+
 def number(value):
     return int(value, 0) if isinstance(value, str) else int(value)
 
@@ -769,8 +884,9 @@ def main(argv=None):
                              "about them (input, name)")
     parser.add_argument("--usage", nargs="?", const="", metavar="YYYY-MM",
                         help="print the tokens (and costs, where llm.toml gives prices) of a month's answers; ask nothing")
-    parser.add_argument("--task", choices=("write", "input", "name"), default="write",
-                        help="write C (default), find inputs for unrun instructions, or propose names")
+    parser.add_argument("--task", choices=("write", "input", "name", "readable"), default="write",
+                        help="write C (default), find inputs for unrun instructions, propose names, or name the "
+                             "variables of readable C (dread readable)")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):  # a line a function as it ends, also into a file (a run its
@@ -794,6 +910,29 @@ def main(argv=None):
             except llm.ProviderError as e:
                 print("dread pilot: %s" % e, file=sys.stderr)
                 return 1
+        if args.task == "readable":
+            from dread import build, lift, readable
+            names = shown(target, args.names) if args.names else shown(
+                target, build.read_names(image.table("readable")))
+            names = names[:args.limit] if args.limit else names
+            if args.dry_run:
+                print("\n".join(names))
+                print("dread pilot --task readable --dry-run: %d functions would be asked about; nothing asked"
+                      % len(names))
+                return 0
+            context = readable.Context(target, image, program, flow)
+            lifter = lift.make_lifter(program, flow)
+            asking, named = Asking(provider), 0
+            for name in names:
+                if not asking.go_on():
+                    break
+                named += name_readable(target, image, program, provider, name, context, lifter,
+                                       tries=args.tries) is not None
+                asking.asked()
+            spent = provider.spent()
+            print("dread pilot --task readable: %d of %d functions named; %d answers, %d tokens in, %d out" % (
+                named, len(names), spent["answers"], spent["input"], spent["output"]))
+            return 0
         if args.task == "name":
             from dread.samecode import UNNAMED
             names = shown(target, args.names) if args.names else sorted(

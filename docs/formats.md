@@ -101,6 +101,18 @@ hand. The readable C is made from the lifted C at every build, as the lifted C i
 after `dread lift --check` or a change of the transformations, `dread test` tests what the build now
 makes, and `dread readable --check` decides again. A name not in the lifted table is ignored.
 
+### `readable_names.json` (`readable_names`)
+
+Names for the variables of readable C (dread.naming): `{"version": 1, "functions": {NAME: {"digest",
+"names", "what", "by"}}}`. `names` maps the readable C's variable names (r0, r4, r2_1, s36) to the
+proposed ones, `what` is a sentence on what the function does (a comment above it), `by` the
+provider that proposed them, `digest` a digest of the readable C without names the proposal was made
+for: when the transformations change that C, the entry is not applied (its names would land on
+other variables) until it is asked again. Written by `dread pilot --task readable`, which keeps an
+entry only when every name is a C identifier nothing else in the file uses and the C with the names
+compiles to the same code; not edited by hand. `dread readable --score ELF` compares the names with
+the source's (the ELF's debug information).
+
 ### `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
 
 Described with the tools that use them, as those tools arrive in DREAD.

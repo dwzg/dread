@@ -9,6 +9,26 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Names for readable C: the model proposes a map, code applies and checks it (2026-10-21)
+
+**Decided by the user** ("go ahead with the pilot that way"), on a recommendation.
+
+- **Question.** Readable C has the structure of the source but registers and offsets for names.
+  What a variable means takes judgement: who gives the names, and how are they kept safe?
+- **Options.** (a) The pilot writes the whole function again from the readable C (its write task: a
+  model's C, checked by cases and the mutation check). (b) The model proposes only a map of names
+  and a sentence; code applies it.
+- **Choice: (b).** A rename applied by code cannot change behaviour; it is checked anyway (the C with
+  the names must compile to the same code, a stronger check than cases). The answer is short (a
+  JSON object), so a question costs a fraction of a rewrite's tokens. Each map keeps a digest of the
+  C it was made for, so a later change of the transformations cannot put names on other variables.
+  Scored against the source's names (the FreeRTOS bench is built with -g: debug information, read
+  with pyelftools, the optional extra "dwarf"). Types (structures behind pointers, their fields)
+  follow as a second step of the same kind: derived by code, named by the model.
+- **Undo.** Delete the readable_names table; dread readable prints the registers' names again.
+- **Status.** Built (dread/naming.py, dread pilot --task readable, dread readable --score); measured
+  in docs/todo.md.
+
 ## z3 proves dread readable's rewrites of conditions and values (2026-10-21)
 
 **Decided by recommendation**; the user, the same day: "If additional python packages help us, feel
