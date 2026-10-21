@@ -116,7 +116,8 @@ Where the C cannot say what the original's code relies on, the translation says 
 
 - a frame that must be the real one (a va_list walks from the saved argument registers into the
   stack arguments; an address of a stack argument): an assembly entry reserves the original's frame
-  on the real stack and hands the C its stack pointer (ARM state and Thumb-2);
+  on the real stack and hands the C its stack pointer (ARM state, Thumb-2 and RISC-V, where it also
+  lifts functions with arguments beyond the eighth);
 - code shared between functions (a compiler's cross call or outliner): it becomes part of every
   function that enters it with its frame open;
 - what a caller reads behind a call that a C call cannot return (a 64-bit remainder in r2:r3, the

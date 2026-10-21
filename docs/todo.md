@@ -141,7 +141,11 @@ across compilers and replacing shape catalogues with analyses, not a profile per
     rebuilt sprintf of the benchmark prints what the original prints with 2, 3, 5 and 8 arguments.
     The lab's probes: GCC -Os every one (94; the three that take a stack argument's address too),
     the other compiler's -On 94 of 95, -Ohz 95 of 95 in both versions. ARM state and Thumb-2 only:
-    RISC-V and Thumb-1 (which cannot push r12) keep the refusal.
+    RISC-V and Thumb-1 (which cannot push r12) keep the refusal. RISC-V done 2026-10-21: its entry
+    (mv t0, sp; reserve the frame and 16 bytes; sw ra; sw t0 as the body's ninth argument; call;
+    restore; ret) wraps the va_list walks and also the functions that take arguments beyond the
+    eighth, refused before; the rebuilt sprintf of the RISC-V GCC build prints what the original
+    prints with 2, 6, 7 and 10 values (six arguments on the stack). Thumb-1 keeps the refusal.
     Measured 2026-10-21 (measure-32, the refusal, before the wrapper): every ARM build lost printf
     and sprintf and nothing else. The RISC-V builds lost them too and gained functions that had
     failed in every measurement since 2026-10-20 (virt-gcc-Os prvInitialiseNewTask_constprop_0 and

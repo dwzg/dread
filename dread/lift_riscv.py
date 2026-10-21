@@ -13,10 +13,16 @@ overflow (-2^31 / -1). CSR instructions, fence and wfi run as themselves in inli
 function whose returns are mret is a machine-mode trap handler: clang's interrupt("machine") writes
 its entry and its return.
 
+A function that needs the original's frame on the real stack (a va_list that walks from the saved
+a1-a7 on into the stack arguments, a stack argument's address, arguments beyond the eighth) is
+wrapped, as dread.lift does on ARM: a naked entry reserves the original's frame below the entry's
+stack pointer and calls the body with that stack pointer as its ninth argument (sp0, the first word
+on the stack), so frame and stack arguments are real memory where the original has them.
+
 Refused, with the reason: a write of sp that is not a frame adjustment the analysis follows (the
-startup's la sp, ...), an access above the entry's stack pointer (stack arguments), ebreak,
-gp or tp read before written, and what dread.lift refuses for every architecture (a stack pointer
-that differs between paths, a fall-through out of the function, a register read before written).
+startup's la sp, ...), ebreak, gp or tp read before written, and what dread.lift refuses for every
+architecture (a stack pointer that differs between paths, a fall-through out of the function, a
+register read before written).
 """
 from dread import lift
 from dread.arch.riscv import NAMES, fields
@@ -199,8 +205,25 @@ class RiscVLifter(lift.Lifter):
     def lift(self, fn):
         n = self.stack_args(fn)
         if n:
-            raise Refused("it takes %d stack words (arguments beyond the eighth)" % n)
+            if not self.can_wrap(fn):
+                raise Refused("it takes %d stack words (arguments beyond the eighth)" % n)
+            self._wrapping = True           # its stack arguments as they lie, behind the wrapper (render)
+            try:
+                return self._lift(fn)
+            finally:
+                self._wrapping = False
         return super().lift(fn)
+
+    def can_wrap(self, fn):
+        """Whether fn's C can get the original's frame on the real stack (render's wrapper): a
+        function that returns to its caller (not a trap handler), compiled by GCC or clang (naked
+        functions)."""
+        if self.prog.target.compiler.kind not in ("gcc", "clang"):
+            return False
+        try:
+            return not self.handler_kind(fn)
+        except Refused:
+            return False
 
     def compiled_isa(self):
         return "rv32"
@@ -285,6 +308,8 @@ class RiscVLifter(lift.Lifter):
         if f.rs1 == 2:
             off = f.imm - self.ctx["depth"][self.insn_now.address]
             if off >= 0:
+                if self.ctx.get("wrapped"):
+                    return "(sp0 + %d)" % off   # a stack argument, where the caller left it (render)
                 raise Refused("0x%x reads or writes above its entry's stack pointer (stack arguments)"
                               % self.insn_now.address)
             return "(sp0 - %d)" % -off
@@ -356,7 +381,7 @@ class RiscVLifter(lift.Lifter):
             if f.rd == 2:
                 return None                 # a frame adjustment (states follows it)
             base = self.frame_value(f.rs1, *self.ctx["states"][a])
-            if base is not None:            # an address in the frame, or above it
+            if base is not None and not self.ctx.get("wrapped"):     # an address in the frame, or above it
                 below = base[1] - f.imm
                 if below <= 0:
                     raise Refused("0x%x takes the address of a stack argument" % a)
@@ -480,6 +505,25 @@ class RiscVLifter(lift.Lifter):
             lines.append('void __attribute__((interrupt("machine"))) %s(void)' % fn.name)
             lines.append("{")
             init = ["%s = 0" % cname(r) for r in regs]
+        elif ctx.get("wrapped"):
+            # the original's frame on the real stack, below its stack pointer at the entry (sp0), the
+            # stack arguments above it as they lie: the entry reserves the frame and 16 bytes of its
+            # own, and calls the body with sp0 as its ninth argument (the first word on the stack)
+            body_name = fn.name + "_dread_body"
+            result = "u64" if self._wide(fn.name) else "u32"
+            params = ", ".join(["u32 p%d" % i for i in range(len(ARGS))] + ["u32 sp0"])
+            room = ((ctx["frame"] + 15) & ~15) + 16
+            lines.append("%s %s(%s);" % (result, body_name, params))
+            lines.append("__attribute__((naked)) void %s(void)" % fn.name)
+            lines.append("{")
+            lines.append('    __asm__ volatile ("mv t0, sp\\n\\tli t1, %d\\n\\tsub sp, sp, t1\\n\\tsw ra, 12(sp)\\n\\t'
+                         'sw t0, 0(sp)\\n\\tcall %s\\n\\tlw ra, 12(sp)\\n\\tli t1, %d\\n\\tadd sp, sp, t1\\n\\tret");'
+                         % (room, body_name, room))
+            lines.append("}")
+            lines.append("__attribute__((noinline, used)) %s %s(%s)" % (result, body_name, params))
+            lines.append("{")
+            init = ["ra = (u32)__builtin_return_address(0)" if r == "ra" else
+                    "%s = p%d" % (r, ARGS.index(r)) if r in ARGS else "%s = 0" % cname(r) for r in regs]
         else:
             params = ["u32 p%d" % i for i in range(len(ARGS))]
             lines.append("%s %s(%s)" % ("u64" if self._wide(fn.name) else "u32", fn.name, ", ".join(params)))
@@ -488,9 +532,10 @@ class RiscVLifter(lift.Lifter):
                     "%s = p%d" % (r, ARGS.index(r)) if r in ARGS else "%s = 0" % cname(r) for r in regs]
         lines.append("    u32 %s;" % ", ".join(init))
         lines += self.fixed_lines(cname)
-        frame = (ctx["frame"] + 15) & ~15
-        lines.append("    u32 frame[%d] __attribute__((aligned(16)));" % max(4, frame // 4))
-        lines.append("    u32 sp0 = (u32)&frame[%d];" % (frame // 4))
+        if not ctx.get("wrapped"):
+            frame = (ctx["frame"] + 15) & ~15
+            lines.append("    u32 frame[%d] __attribute__((aligned(16)));" % max(4, frame // 4))
+            lines.append("    u32 sp0 = (u32)&frame[%d];" % (frame // 4))
         if ctx["switch"]:
             lines.append("    u32 index = 0;")
         lines.append("    %s (void)sp0;" % " ".join("(void)%s;" % cname(r) for r in regs))

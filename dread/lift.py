@@ -933,7 +933,7 @@ class Lifter:
     def can_wrap(self, fn):
         """Whether fn's C can get the original's frame on the real stack (render's wrapper): ARM state
         or Thumb-2 (Thumb-1 cannot push r12), not an exception handler, GCC or clang (naked
-        functions)."""
+        functions). RISC-V has its own (dread.lift_riscv)."""
         if self.arch.name != "arm" or self.prog.target.compiler.kind not in ("gcc", "clang"):
             return False
         if self.prog.isa_at(fn.entry) == "t32" and getattr(self.arch, "thumb2", None) is False:

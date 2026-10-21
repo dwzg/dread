@@ -189,4 +189,5 @@ recommendations here."), on a recommendation.
 - **Status.** Done (lift.py, lift_riscv.py, 2026-10-21). Then (d) the same night, another way than
   a C signature: a wrapped function's C gets the original's frame on the real stack (an assembly
   entry reserves it and hands the body its stack pointer), so ARM state and Thumb-2 lift such
-  functions again, rightly; RISC-V and Thumb-1 keep the refusal.
+  functions again, rightly; RISC-V too since (the entry hands the stack pointer as the ninth
+  argument); Thumb-1 keeps the refusal.

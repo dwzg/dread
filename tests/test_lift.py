@@ -1113,3 +1113,97 @@ def test_a_callee_that_answers_one_way_is_stubbed_when_the_search_stalls(tmp_pat
     t = Target.load(str(tmp_path))
     lines = []
     assert lift.check(t, t.image(), ["f"], out=lines.append, jobs=1) == ["f"], "\n".join(lines)
+
+
+VA_LIST_RV_C = """
+#include <stdarg.h>
+int vsum(int n, ...)
+{
+    va_list ap;
+    int s = 0;
+    va_start(ap, n);
+    while (n-- > 0)
+        s += va_arg(ap, int);
+    va_end(ap);
+    return s;
+}
+int many(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j)
+{
+    return a - b + c - d + e - f + g - h + i * 3 - j * 5;      /* i and j come on the stack */
+}
+int use(void)
+{
+    return vsum(9, 1, 2, 3, 4, 5, 6, 7, 8, 9) + many(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+}
+"""
+
+RV_TARGET = """
+[target]
+name = "rv-wrap"
+
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x20000000, size = 0x100000, kind = "rom"},
+    {name = "ram", base = 0x80000000, size = 0x10000},
+    {name = "scratch", base = 0x80100000, size = 0x20000},
+]
+io = [[0x10000000, 0x10010000]]
+stack = {top = 0x80010000, size = 0x2000}
+sentinel = 0x1fff0000
+scratch = {base = 0x80100000, size = 0x20000}
+
+[image.main]
+original = "original/t.bin"
+base = 0x20000000
+limit = 0x20020000
+
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-Os"]
+"""
+
+
+@pytest.mark.skipif(not shutil.which("riscv64-elf-gcc"), reason="needs riscv64-elf-gcc")
+def test_risc_v_wraps_a_va_list_walk_and_stack_arguments(tmp_path):
+    """RISC-V as ARM (test_a_va_list_walks_on_into_the_stack_arguments): a variadic function saves
+    a1-a7 next to its stack arguments and its va_list walks from the one into the other (FreeRTOS's
+    printf and sprintf on the RISC-V builds), and a function with ten arguments reads the last two
+    on the stack. Both are wrapped: a naked entry reserves the original's frame on the real stack
+    and calls the body with the entry's stack pointer as its ninth argument. Before, the first was
+    refused for the address in its save area and the second for its stack arguments."""
+    import subprocess
+    from dread import elfimport, regflow
+    from dread.emu import Layout, Machine
+    from dread.overlay import load_placement
+    (tmp_path / "t.c").write_text(VA_LIST_RV_C)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["riscv64-elf-gcc", "-march=rv32imac_zicsr", "-mabi=ilp32", "-Os", "-ffreestanding",
+                    "-ffunction-sections", "-c", "-o", obj, str(tmp_path / "t.c")], check=True)
+    subprocess.run(["riscv64-elf-ld", "-m", "elf32lriscv", "-Ttext=0x20000000", "-e", "use", "-o", elf, obj],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(RV_TARGET)
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    for name in ("vsum", "many"):
+        text = lifter.lift(p.by_name[name]).text
+        assert "__attribute__((naked)) void %s(void)" % name in text and "u32 %s_dread_body(" % name in text, text
+    lines = []
+    assert sorted(lift.check(t, t.image(), ["vsum", "many"], out=lines.append, jobs=1)) == ["many", "vsum"], \
+        "\n".join(lines)
+    work = tmp_path / "build" / "lift-check" / "main"
+    aliases, _ = load_placement(str(work / "placement.json"))
+    rebuilt = (work / "payload.bin").read_bytes()
+    got = []
+    for payload, al in ((t.image().payload(), None), (rebuilt, aliases)):
+        m = Machine(Layout(t, t.image()), payload, al)
+        got.append((m.call(p.by_name["vsum"].entry, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9, max_instructions=10_000).ret,
+                    m.call(p.by_name["many"].entry, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, max_instructions=10_000).ret))
+    assert got[0] == got[1] == (45, (1 - 2 + 3 - 4 + 5 - 6 + 7 - 8 + 27 - 50) & 0xFFFFFFFF), got
