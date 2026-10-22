@@ -397,3 +397,28 @@ def test_names_alike_by_their_words_and_a_vote_over_them():
     assert naming.vote(["list_append", "list_insert_end"], keep="list_insert_tail") == ("list_insert_tail", 1, None)
     assert naming.vote(["uart_send", "uart_send_byte"], keep="gpio_toggle") == ("uart_send", 2, 0)
     assert naming.vote(["a_b", "c_d", "c_d"]) == ("c_d", 2, 1)            # (names of short pieces: alike or not)
+
+
+def test_words_whatever_the_naming_style():
+    """naming.style_words drops a camelCase name's Hungarian head (vTaskDelay), cuts a run of letters into
+    known words (strcmp), takes abbreviations and synonyms to one word and the forms of a word to one
+    stem; style_similarity pairs them as similarity pairs words, so that a valid name in another style
+    scores as the same while send and receive, on and off, timer 0 and timer 1 stay apart."""
+    assert naming.style_words("vTaskDelay") == ["task", "delay"] and naming.style_words("pxCurrentTCB") == ["current",
+                                                                                                         "tcb"]
+    assert naming.style_words("strcmp") == ["string", "compare"] == naming.style_words("str_cmp")
+    assert naming.style_words("global_init.part.0") == ["global", "init"]
+    assert naming.style_words("TIMER0_Handler") == ["timer", "0", "handler"]
+    assert naming.style_words("x_value") == ["value"]
+    assert naming.style_words("isEmpty") == ["empty"]                # (is: a word, not a prefix; a stop word)
+    assert naming.style_similarity("vTaskDelay", "task_sleep") == 1.0
+    assert naming.style_similarity("eTaskGetState", "task_read_status") == 1.0
+    assert naming.style_similarity("uxListRemove", "list_delete_item") == pytest.approx(2 / 3)
+    assert naming.style_similarity("xQueueReceive", "queue_send") < 0.5
+    assert naming.style_similarity("led_on", "led_off") < 0.5 and naming.style_similarity("TIMER0_Handler",
+                                                                                          "timer1_handler") < 1.0
+    assert naming.stem("notified") == naming.stem("notifies") == "notify"
+    assert naming.stem("stopped") == "stop" and naming.stem("filled") == "fill" and naming.stem("tasks") == "task"
+    rows, totals = naming.score_functions({1: "task_sleep", 2: "queue_send"}, {1: "vTaskDelay", 2: "xQueueReceive"})
+    assert [r["style"] for r in rows] == [1.0, pytest.approx(1 / 3)] and totals["style_half"] == 1
+    assert totals["style"] == pytest.approx(2 / 3) and totals["style_same"] == 1

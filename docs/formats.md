@@ -275,10 +275,18 @@ its lines as they were.
 `dread pilot --score` writes `names-score.tsv` beside it (`names-score-passN.tsv` with
 `--upto-pass N`): `address`, `true`, `proposed`, `exact`, `same_words`, `overlap`, `same_prefix`
 (empty where a name has no prefix), `judged` (the judge's `same`, `close`, `different` with
-`--judge`, else empty), and the proposal's `confidence`, `depends`, `names_shown`. `--score TRUTH --judge P --against OTHER` (another run's names.tsv) writes instead
+`--judge`, else empty), the proposal's `confidence`, `depends`, `names_shown`, and since 2026-10-22
+`style` (dread.naming.style_similarity, 0 to 1: the words whatever the naming style), `grounded` and
+`grounded_why` (with `--grounded`: the verdict of a judge that read the function's source, `right`,
+`partly`, `wrong`, and its reason, empty after `right`; both empty without the flag or for a function
+without a source), `sentence` and `sentence_why` (the same for the proposal's sentence, judged apart;
+empty with `--names-only`). A file of before 2026-10-22 ends at `names_shown`. `--score TRUTH --judge P --against OTHER` (another run's names.tsv) writes instead
 `names-pairwise.tsv` (`names-pairwise-passN.tsv`), one line per function whose two proposals differ:
 `address`, `true`, `this` (this run's), `other`, `closer` (`this`, `other`, `tie`; empty when the
-judge gave no two verdicts). Before it, on 2026-10-22, `--versus OTHER` wrote `names-versus.tsv`:
+judge gave no two verdicts). With `--grounded P` in place of `--judge` the lines are those of the
+functions with a source, `closer` the one with the better verdict against the source (the same verdict
+a tie), and two more columns give the verdicts: `this_grounded`, `other_grounded` (`right`, or
+`partly: reason`, `wrong: reason`). Before it, on 2026-10-22, `--versus OTHER` wrote `names-versus.tsv`:
 `address`, `true`, `proposed`, `other`, `closer` (`mine`, `theirs`, `equal`), each pair judged in one
 order, chosen by the address; replaced by `--against`, nothing reads it.
 

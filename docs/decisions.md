@@ -9,6 +9,100 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Function names scored against their source: a judge that reads it, the bench's main measure (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The user, 2026-10-22: "Is it good to judge the names by equality? There are probably
+  many ways to call the same things with different styles of naming that are all valid in their own
+  way. Is there a better way to judge the results of the pilot naming?" Every measure until then
+  compared a proposal with the one true name: word scores (exact, the same words, overlap), a judge's
+  verdict per pair (`--judge`: same, close, different) and the pairwise judge between two runs
+  (`--against`: which proposal is closer to the true name). Which measure says best whether a name is
+  right whatever its style, and which becomes the bench's main one?
+- **Options, measured** on the names stored from eight runs on FreeRTOS GCC -Os (mps2, 366 functions
+  made FUN_address, Haiku 5.5 naming: one question in one pass, twice; votes of five; votes with a gate
+  and four passes; votes and a second pass; the same on newer code, the defaults before the groups; the
+  groups named from the first pass's names; the groups named from code, the default since that day),
+  every measure on every run: (a) word scores: the overlap as before, and words whatever the style
+  (dread.naming.style_words: a camelCase name's Hungarian head dropped, runs of letters cut into known
+  words, abbreviations and a small table of synonyms made one word, a word's forms one stem); (b) the
+  judge against the true name (`--judge`, its stored verdicts); (c) a judge that reads the source:
+  each function's definition (DWARF's file and line, cut to its closing brace, the names of the
+  functions shown masked), a source file's functions to a question, says of each proposal right,
+  partly or wrong with a reason: first the name and its sentence judged as one, then the sentence
+  judged apart, then the names alone; Sonnet 5.5 judging, and Haiku 5.5; (d) a forced choice: the
+  proposal (alone, or with its sentence) and five functions of its source file by their true names,
+  shuffled, the judge picks the one it describes; accuracy against the 20 % of chance, two draws.
+  - Rankings: (c) ranked the eight runs alike in each form judged on all of them (the sentence with
+    its name and apart, Sonnet and Haiku; Kendall's tau 1.0), in the order the pairwise judge had
+    found (the two controls, votes, the passes gated and not, the defaults before the groups, the
+    groups from the first pass, the groups from code); (b) the same on the seven it has verdicts for;
+    (a) 0.86 (overlap and style words both put the groups from the first pass above those from code);
+    (d) 0.64-0.78.
+  - The judge's own noise: (c) judged twice, the same verdict for 88-92 % of the functions, the run's
+    mean within 0.012 (paired p 0.34 or more); two runs of one setup +0.011 +- 0.019 (p 0.86). (d):
+    two draws of one run differ by up to 0.055 (p 0.03), and with the sentences the two identical
+    controls by 0.057 (p 0.006): a difference that is not there.
+  - Resolution, paired by function with a sign test, (c) with the sentence apart: the groups from code
+    against the defaults before them +0.047 +- 0.019 (p 0.01), against one question in one pass +0.167
+    +- 0.023 (p 3e-12). (b) for the first: +0.122 (p 2e-11), the pairwise judge 153, 51, 81 (p 5e-13):
+    most of what the judges against the true name saw was the names taking the source files' words
+    as their prefixes (task_ for tasks.c, as vTask...), not names more right. (b) also put the gated
+    passes above the ungated (+0.046, p 0.002), (c) did not (+0.000).
+  - What a name gets: of 1,371 proposals (c) judged right, 187 share no word with the true name:
+    xPortPendSVHandler as sched_context_switch, pvPortMalloc as heap_alloc,
+    prvCheckTasksWaitingTermination as task_reap_deleted_tcbs, printi as fmt_write_integer; (b) called
+    73 of them different. Words alike can be wrong: uxTaskGetNumberOfTasks as task_get_tick_count,
+    xQueuePeekFromISR as queue_receive_from_isr (it leaves the item).
+  - The sentence: judged as one with its name, a wrong detail of the sentence made right names wrong
+    (vStartQueueSetTasks as queue_set_test_start: "suspends the sending task rather than deleting it";
+    Reset_Handler as an entry named after the reset). Judged apart, 12 wrong names became right and 160 partly, 285
+    partly ones right; names' means 0.59-0.77 against 0.53-0.70; the sentences 0.50-0.62, their gain
+    from the groups smaller (+0.015 against the defaults before them, p 0.41). The names alone (two
+    runs): 0.53 and 0.72, the same verdict as beside their sentences for 74 %.
+  - Per function, how well a measure tells a name (c) calls right from one it calls wrong (the area
+    under the ROC curve): style words 0.88-0.90, overlap 0.84-0.86, the same words 0.67-0.70, (b) 0.93,
+    (d) 0.65-0.71, Haiku as the judge of (c) 0.97-0.98 (style words leave 95 right names at 0, overlap
+    187).
+  - Costs at Sonnet's $2 and $10 a million tokens, 332 functions with a source: (c) about $0.80 for a
+    run alone (320,000 tokens in, of them 270,000 of source, 18,000 out with the sentences apart),
+    about $0.35 for each run judged with it (the sources read from Anthropic's prompt cache: twelve
+    judgings $4.67); Haiku as the judge about $0.05; (b) about $0.05 a run, the pairwise judge about
+    $0.13 a pair; (d) $0.11-0.18 a run and draw; (a) nothing.
+- **Choice.** (c), the sentence judged apart, Sonnet judging: the bench's main measure of names,
+  `dread pilot --score TRUTH --grounded PROVIDER` (`--names-only` for the names alone, `--source DIR`
+  where the files moved), and with `--against OTHER` function by function between two runs (the
+  proposals that differ judged, the better verdict closer, a sign test). (a)'s style words in every
+  score beside the old word scores, which stay for comparisons with earlier runs; (b) and the pairwise
+  judge against the true name stay for a target without its source (a private firmware, its people's
+  names the truth). (d) is not built.
+- **Why.** It is the only measure that asks what the user asked: whether a name says what the
+  function does, not how near it comes to one valid name; it ranks the runs as the pairwise judge did,
+  its noise is small against the differences between runs (a paired difference of 0.047 at p 0.01),
+  and it does not reward taking the source's conventions. The sentence apart because judged together a
+  wrong detail made right names wrong; its own verdict comes for a few cents more (a second measure,
+  noisier: two judgings of a control 0.024 apart, p 0.04). Sonnet rather than Haiku: Haiku ranks alike
+  and agrees closely for a fifteenth of the price, but it judged the names of its own family (the namer
+  is Haiku) and writes six times the reasons. The forced choice is noisy, saturates (names judged
+  wrong still pick their function half of the time) and found a difference between two identical
+  setups.
+- **Undo.** Nothing changes without `--grounded`: `--score` scores as before (style words added
+  beside), `--judge` and `--against` with `--judge` as they were.
+- **Status.** Done (dread/namejudge.py, dread/pilot.py score_names and compare_names, dread/naming.py
+  style_words, dread/llm.py cached parts; docs/formats.md). Not confirmed: the judge against a person
+  (a sample of 50 functions to mark was made outside the repository, it holds FreeRTOS's code; no
+  marks yet); on firmware the judge knows less than FreeRTOS (its reasons name FreeRTOS's functions);
+  the true name left in the source (not masked) was not tried. In the measurement each function's own
+  name was masked; the tool masks every function's of the question, so that a call does not show it.
+  Through the tool on the groups from code (the same day): names right 65 %, partly 27 %, wrong 8 %,
+  mean 0.783, sentences 0.623 (the measured form's two judgings 0.770 and 0.764, 0.619 and 0.617; the
+  same verdict as those for 84-86 % of the names, as each other for 92 %), $0.88; against the
+  defaults before the groups (`--against`, 251 names that differ, four questions at a time): closer
+  68, 34, ties 149 (p 0.001), $1.07 for both runs, 195,000 of their 477,000 tokens in read from the
+  cache. The vote's confidence is calibrated against it too: wrong 4 % of the names of 1.0, 21 % of
+  0.8, 47 % of 0.6.
+
 ## The graphs' motion and the whole program in dread gui (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
@@ -43,6 +137,7 @@ Newest first. "Status" says whether the choice is in the code yet.
      600 nodes, Barnes-Hut above. A group's links beyond the 400 heaviest are hairlines: in software
      raster the thick links between 221 groups had taken the frame rate from 56 to 15 fps.
 - **Status.** In the code (branch gui-wobble).
+
 
 ## Readable C's structures: what one holds inside another as members (2026-10-22)
 

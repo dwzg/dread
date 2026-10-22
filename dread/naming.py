@@ -450,6 +450,237 @@ def similarity(a, b):
     return matched / (len(wa) + len(wb) - matched)
 
 
+# ---- words whatever the naming style: what a scorer compares (style_words, style_similarity)
+
+# A camelCase name's lower-case head that is a type prefix of Hungarian notation, not a word:
+# FreeRTOS's v, x, ux, px, pv, pc, ul, us, uc and prv (private), e for an enumeration, Windows' lp,
+# sz, dw. Dropped only before a capital (vTaskDelay, prvIdleTask), never in snake_case.
+HUNGARIAN = frozenset(("v", "x", "ux", "px", "pv", "pc", "prv", "ul", "us", "uc", "pul", "pus", "puc", "pux",
+                       "ppx", "ppv", "e", "c", "s", "l", "b", "u", "p", "lp", "sz", "dw"))
+STOPWORDS = frozenset(("the", "a", "an", "of", "to", "for", "from", "and", "or", "with", "by", "at", "into",
+                       "is", "has"))
+# Words that name one thing, the first the form a name's word becomes: synonyms that names use for one
+# another and abbreviations with their whole word. Small on purpose: a class too wide makes wrong names
+# alike (send and receive, get and set stay apart). A method's constant, not a firmware's.
+SYNONYMS = (
+    ("get", "read", "fetch", "load", "query", "retrieve", "obtain"),
+    ("set", "write", "store", "assign", "save", "put"),
+    ("create", "new", "alloc", "allocate", "malloc", "make", "construct", "spawn"),
+    ("delete", "free", "remove", "destroy", "dealloc", "deallocate", "erase", "drop"),
+    ("init", "initialise", "initialize", "initialisation", "initialization", "setup"),
+    ("send", "transmit", "tx", "post", "push", "enqueue", "emit"),
+    ("receive", "recv", "rcv", "rx", "pop", "dequeue"),
+    ("start", "begin", "launch"),
+    ("stop", "halt", "terminate"),
+    ("check", "test", "verify", "validate"),
+    ("find", "search", "lookup", "locate"),
+    ("delay", "sleep"),
+    ("count", "number", "num", "cnt"),
+    ("size", "length", "len"),
+    ("interrupt", "irq", "isr"),
+    ("handler", "callback", "hook", "cb"),
+    ("message", "msg"),
+    ("buffer", "buf"),
+    ("string", "str", "text"),
+    ("task", "thread"),
+    ("error", "err", "fault", "fail", "failure"),
+    ("reset", "clear"),
+    ("add", "insert", "append"),
+    ("update", "refresh"),
+    ("enable", "activate"),
+    ("disable", "deactivate"),
+    ("increment", "inc", "increase"),
+    ("decrement", "dec", "decrease"),
+    ("resume", "wake", "wakeup"),
+    ("suspend", "pause"),
+    ("lock", "acquire", "take"),
+    ("unlock", "release", "give"),
+    ("notify", "notification", "notif", "signal"),
+    ("parameter", "param", "parm", "argument", "arg"),
+    ("print", "printf", "display", "show"),
+    ("item", "element", "node"),
+    ("compare", "cmp"),
+    ("copy", "cpy"),
+    ("queue", "fifo"),
+    ("timer", "tmr"),
+    ("semaphore", "sem", "sema", "semphr"),
+    ("mutex", "mtx"),
+    ("priority", "prio", "pri"),
+    ("current", "cur", "curr"),
+    ("previous", "prev"),
+    ("next", "nxt"),
+    ("pointer", "ptr"),
+    ("index", "idx"),
+    ("address", "addr"),
+    ("value", "val"),
+    ("config", "cfg", "conf", "configuration", "configure"),
+    ("context", "ctx"),
+    ("memory", "mem"),
+    ("command", "cmd"),
+    ("source", "src"),
+    ("destination", "dst", "dest"),
+    ("function", "func", "fn"),
+    ("handle", "hdl", "hndl"),
+    ("header", "hdr"),
+    ("information", "info"),
+    ("manager", "mgr"),
+    ("object", "obj"),
+    ("position", "pos"),
+    ("reference", "ref"),
+    ("register", "reg"),
+    ("request", "req"),
+    ("return", "ret"),
+    ("system", "sys"),
+    ("event", "evt"),
+    ("group", "grp"),
+    ("stack", "stk"),
+    ("state", "status", "sts"),
+    ("control", "ctrl", "ctl"),
+    ("scheduler", "sched", "schedule"),
+    ("clock", "clk"),
+    ("frequency", "freq"),
+    ("watchdog", "wdt", "wdog"),
+    ("uart", "usart", "serial"),
+    ("device", "dev"),
+    ("driver", "drv"),
+    ("hardware", "hw"),
+    ("available", "avail"),
+    ("temporary", "tmp"),
+    ("calculate", "calc"),
+    ("utility", "util"),
+    ("sequence", "seq"),
+    ("statistics", "stats"),
+)
+# More words a run of lower-case letters may be cut into (strcmp: str cmp; systick: sys tick), besides
+# those of SYNONYMS; a run is cut only into words of three letters or more, all of them known.
+COMMON_WORDS = frozenset((
+    "char", "byte", "word", "data", "list", "tick", "time", "flag", "bit", "mask", "mode", "flash", "port",
+    "pin", "led", "key", "line", "file", "name", "type", "event", "idle", "yield", "switch", "swap", "fill",
+    "zero", "move", "dump", "pad", "pack", "unpack", "parse", "format", "scan", "sum", "crc", "hash", "sort",
+    "min", "max", "abs", "div", "mod", "mul", "sub", "neg", "shift", "align", "round", "trim", "split",
+    "join", "cat", "chr", "dup", "tok", "case", "lower", "upper", "digit", "space", "out", "open", "close",
+    "seek", "tell", "flush", "sync", "loop", "main", "run", "exit", "abort", "assert", "panic", "trap",
+    "vector", "table", "entry", "power", "boot", "heap", "pool", "spin", "tail", "head", "first", "last",
+    "end", "all", "one", "two", "low", "high", "fast", "slow", "safe", "user", "app", "demo", "port",
+    "core", "cpu", "bus", "dma", "adc", "spi", "gpio", "can", "usb", "net", "ack", "map", "page", "sector",
+    "block", "frame", "packet", "stream", "pipe", "channel", "slot", "tag", "id", "rtc", "pwm", "led",
+))
+
+
+def stem(word):
+    """A word's stem, so that the forms of one word become one: tasks task, delayed delay, notified
+    notify, creating and creation creat, initialised initializ (-ise as -ize). A few rules, not a
+    stemmer's whole; words of three letters or fewer stay."""
+    w = word.lower()
+    if len(w) <= 3:
+        return w
+    w = re.sub(r"is(e|ed|es|ing|ation|ations)$", r"iz\1", w)
+    if w.endswith("ies") and len(w) > 4:
+        w = w[:-3] + "y"
+    elif w.endswith("sses"):
+        w = w[:-2]
+    elif w.endswith("s") and not w.endswith(("ss", "us", "is")) and len(w) > 3:
+        w = w[:-1]
+    if w.endswith("ied") and len(w) > 4:
+        w = w[:-3] + "y"
+    elif w.endswith("ing") and len(w) >= 6:
+        w = w[:-3]
+    elif w.endswith("ed") and len(w) >= 5:
+        w = w[:-2]
+    else:
+        if w.endswith("tion") and len(w) > 6:
+            w = w[:-3]
+        elif w.endswith("e") and len(w) > 3:
+            w = w[:-1]
+        return w
+    if len(w) > 2 and w[-1] == w[-2] and w[-1] not in "lsz" and w[-1] not in "aeiou":
+        w = w[:-1]                          # (stopped stop, running run; filled fill)
+    return w
+
+
+CANONICAL = {}
+for _class in SYNONYMS:
+    for _w in _class:
+        CANONICAL.setdefault(_w, _class[0])
+CANONICAL_STEMS = {}
+for _class in SYNONYMS:
+    for _w in _class:
+        CANONICAL_STEMS.setdefault(stem(_w), _class[0])
+VOCABULARY = frozenset(CANONICAL) | COMMON_WORDS
+VOCABULARY_STEMS = frozenset(stem(w) for w in VOCABULARY)
+
+
+def canonical_word(word):
+    """The form a word of a name is compared in: its class's first word (SYNONYMS), found as it is or
+    by its stem; else its stem."""
+    w = word.lower()
+    if w in CANONICAL:
+        return CANONICAL[w]
+    s = stem(w)
+    return CANONICAL_STEMS.get(s, s)
+
+
+def cut_run(run):
+    """A run of lower-case letters cut into known words (VOCABULARY, three letters or more each), the
+    fewest pieces, when it is no known word itself and the cut covers all of it: strcmp [str, cmp],
+    systick [sys, tick]; else [run]."""
+    if len(run) < 6 or not run.isalpha() or run in VOCABULARY or stem(run) in VOCABULARY_STEMS:
+        return [run]
+    best = {0: []}
+    for end in range(3, len(run) + 1):
+        for start in range(0, end - 2):
+            if start in best and run[start:end] in VOCABULARY:
+                cut = best[start] + [run[start:end]]
+                if end not in best or len(cut) < len(best[end]):
+                    best[end] = cut
+    found = best.get(len(run))
+    return found if found and len(found) > 1 else [run]
+
+
+def style_words(name):
+    """The words of a name as a scorer compares them, whatever its naming style: split at case changes,
+    underscores and digits, a compiler's clone suffix (.constprop.0) dropped; a camelCase name's
+    Hungarian head dropped (HUNGARIAN: vTaskDelay,
+    pxCurrentTCB, prvIdleTask); a run of letters cut into known words (cut_run: strcmp, systick); each
+    word in its class's form (canonical_word: abbreviations and synonyms, word forms); stop words and
+    single letters dropped, digits kept (timer0 against timer1). A list, in the name's order."""
+    name = (name or "").split(".")[0] or name or ""     # (a compiler's clone: f.constprop.0, f.part.1)
+    pieces_ = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name)
+    head = re.match(r"[_\d]*([a-z]+)[A-Z]", name)
+    if head and head.group(1) in HUNGARIAN and pieces_ and pieces_[0] == head.group(1):
+        pieces_ = pieces_[1:]
+    out = []
+    for p in pieces_:
+        for part in cut_run(p.lower()):
+            if part in STOPWORDS or (len(part) < 2 and not part.isdigit()):
+                continue
+            out.append(canonical_word(part))
+    return out
+
+
+def style_similarity(a, b):
+    """How alike two names are whatever their style, from 0 to 1: their style_words() paired one to
+    one, alike first, then words that begin one another (same_word), over the words of both (Jaccard),
+    as similarity() pairs words(): vTaskDelay and task_sleep 1.0, uxListRemove and list_delete_item
+    0.67, xQueueReceive and queue_send 0.33. Names alike but for case and separators are 1.0; names
+    without words 0. Still a measure of words: it knows the synonyms SYNONYMS lists, not meaning."""
+    if re.sub(r"[^a-z0-9]", "", (a or "").lower()) == re.sub(r"[^a-z0-9]", "", (b or "").lower()) and (a or b):
+        return 1.0
+    wa, wb = set(style_words(a)), set(style_words(b))
+    if not wa or not wb:
+        return 0.0
+    pairs = wa & wb
+    rest = sorted(wb - pairs)
+    matched = len(pairs)
+    for w in sorted(wa - pairs):
+        for v in rest:
+            if same_word(w, v):
+                rest.remove(v)
+                matched += 1
+                break
+    return matched / (len(wa) + len(wb) - matched)
+
+
 AGREE = 0.5         # two names agree when their similarity() is at least this (a vote's groups)
 
 
@@ -509,7 +740,10 @@ def score_functions(proposed, true):
     """Proposed function names ({address: name}) against true ones ({address: name}): (rows, totals)
     over the addresses both have. A row: address, true, proposed, exact (case aside), same words (in
     any order), overlap (shared words over the words of both, words as words(): pieces of three
-    letters or more), same prefix (both names of two pieces or more, the first alike: ui_, fs_)."""
+    letters or more), same prefix (both names of two pieces or more, the first alike: ui_, fs_), and
+    style (style_similarity: the words whatever the naming style, abbreviations and synonyms one).
+    Of all of them style tells best a name a judge reading the source calls right from one it calls
+    wrong (FreeRTOS, 2026-10-22: docs/decisions.md); the others stay for comparing with earlier runs."""
     rows = []
     for a in sorted(set(proposed) & set(true)):
         t, p = true[a], proposed[a]
@@ -518,7 +752,8 @@ def score_functions(proposed, true):
         rows.append({"address": a, "true": t, "proposed": p, "exact": t.lower() == p.lower(),
                      "same_words": bool(tw) and tw == pw,
                      "overlap": len(tw & pw) / len(tw | pw) if tw | pw else 0.0,
-                     "prefix": None if len(tp) < 2 or len(pp) < 2 else tp[0] == pp[0]})
+                     "prefix": None if len(tp) < 2 or len(pp) < 2 else tp[0] == pp[0],
+                     "style": style_similarity(t, p)})
     n = len(rows)
     prefixed = [r for r in rows if r["prefix"] is not None]
     totals = {"functions": n, "exact": sum(r["exact"] for r in rows),
@@ -526,7 +761,9 @@ def score_functions(proposed, true):
               "shared_word": sum(r["overlap"] > 0 for r in rows),
               "half_shared": sum(r["overlap"] >= 0.5 for r in rows),
               "overlap": sum(r["overlap"] for r in rows) / n if n else 0.0,
-              "prefixed": len(prefixed), "same_prefix": sum(bool(r["prefix"]) for r in prefixed)}
+              "prefixed": len(prefixed), "same_prefix": sum(bool(r["prefix"]) for r in prefixed),
+              "style": sum(r["style"] for r in rows) / n if n else 0.0,
+              "style_half": sum(r["style"] >= 0.5 for r in rows), "style_same": sum(r["style"] == 1.0 for r in rows)}
     return rows, totals
 
 

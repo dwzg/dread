@@ -35,21 +35,27 @@ check a name, so none is applied. Its questions show a function's readable C (dr
 constants that point to text followed by the text) or, where no C can be made, its listing; they go
 callees first, --jobs at a time, each showing the proposals made so far for the functions it calls
 and its callers; a run started again goes on where the last one stopped. --score TRUTH compares the
-proposals with true names (an ELF's symbols, or the functions table of a copy that has them), --judge
-PROVIDER adds a model's verdict per pair, and --against NAMES_TSV (another run's names.tsv) instead
-the judge's choice, for each function the two runs named otherwise, of the name closer to the true
-one, asked in both orders. --refine asks again, callers first, for every function with a proposal:
-its question shows its callers' names and its first one. --behaviour shows in each question what the
-function did in runs of its cases (dread.behaviour: its calls, device accesses, writes and results on
-a few generated inputs). --samples K asks each function K times and keeps the name most answers agree
-with (dread.naming.vote), the agreement its confidence; --gate C shows a question only the proposals
-of confidence C or more; --passes N asks again, callers first and callees first in turn, what a
-changed question would show otherwise, until nothing shown changes; --ablate asks each function also
-with no other proposal shown and flags a name that differs then. By default each function is asked
-five times and a second pass runs (--samples 5 --passes 2: measured on FreeRTOS, docs/decisions.md
-2026-10-22; about nine times the answers of one question in one pass), and the functions' groups are
-named first and shown in their questions (--subsystems, below; --no-subsystems turns it off). --score
-with --judge also gives the verdicts per confidence (the calibration) and per ablation flag.
+proposals with true names (an ELF's symbols, or the functions table of a copy that has them) by their
+words, also whatever the naming style (dread.naming.style_words), --judge PROVIDER adds a model's
+verdict per pair, and --against NAMES_TSV (another run's names.tsv) instead the judge's choice, for
+each function the two runs named otherwise, of the name closer to the true one, asked in both orders.
+--grounded PROVIDER (the bench's main measure since 2026-10-22, docs/decisions.md) has a model read
+each function's source instead (dread.namejudge: the truth ELF's debug information and the files it
+names, --source DIR where they moved) and say whether the name says what the function does, right,
+partly or wrong whatever its style, the sentence judged apart (--names-only: the names alone); with
+--against, function by function where the two runs' names differ. --refine asks again, callers
+first, for every function with a proposal: its question shows its callers' names and its first one.
+--behaviour shows in each question what the function did in runs of its cases (dread.behaviour: its
+calls, device accesses, writes and results on a few generated inputs). --samples K asks each function K
+times and keeps the name most answers agree with (dread.naming.vote), the agreement its confidence;
+--gate C shows a question only the proposals of confidence C or more; --passes N asks again, callers
+first and callees first in turn, what a changed question would show otherwise, until nothing shown
+changes; --ablate asks each function also with no other proposal shown and flags a name that differs
+then. By default each function is asked five times and a second pass runs (--samples 5 --passes 2:
+measured on FreeRTOS, docs/decisions.md 2026-10-22; about nine times the answers of one question in one
+pass), and the functions' groups are named first and shown in their questions (--subsystems, below;
+--no-subsystems turns it off). --score with --judge or --grounded also gives the verdicts per
+confidence (the calibration) and per ablation flag.
 
 --task subsystems names the groups dread groups finds from the code alone (shared memory, texts and
 devices, addresses taken, neighbours in memory): one question a group (--samples times, the prefix
@@ -90,7 +96,8 @@ stated, while Haiku 5.5 answered the same question.
                 [--no-mutate] [--no-integration] [--dry-run]
                 [--task write|input|name|readable|globals|subsystems] [--jobs N] [--refine] [--behaviour]
                 [--[no-]subsystems] [--samples K] [--temperature T] [--gate C] [--passes N] [--ablate]
-                [--score TRUTH [--judge PROVIDER] [--upto-pass N] [--against NAMES_TSV]] [NAME...]
+                [--score TRUTH [--judge PROVIDER] [--grounded PROVIDER [--source DIR] [--names-only]]
+                               [--upto-pass N] [--against NAMES_TSV]] [NAME...]
 """
 import argparse
 import collections
@@ -2416,34 +2423,83 @@ def breakdown(rows, verdicts):
     return out
 
 
-def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None):
+def grounded_sources(truth_path, roots=(), out=print):
+    """{entry: dread.namejudge.Source} of the truth ELF's functions whose source is found (its debug
+    information, the files below roots too); says so when there is none."""
+    from dread import namejudge
+    sources = namejudge.source_functions(truth_path, roots)
+    if not sources:
+        out("dread pilot --grounded: no function's source found (%s: debug information and the files it names, "
+            "--source DIR where they moved; pyelftools: pip install -e '.[dwarf]')" % truth_path)
+    return sources
+
+
+def grounded_line(label, verdicts, of, sentences=True):
+    """A line on grounded verdicts ({entry: (verdict, why, sentence verdict, why)}): their counts and mean
+    (right 1, partly 0.5, wrong 0), and the sentences' where judged."""
+    from dread import namejudge
+    n = len(verdicts)
+    if not n:
+        return "%s: no verdicts (%d proposals with a source)" % (label, of)
+    count = {v: sum(1 for x in verdicts.values() if x[0] == v) for v in namejudge.VERDICTS}
+    shares = tuple(x for v in namejudge.VERDICTS for x in (count[v], 100.0 * count[v] / n))
+    text = "%s, %d of %d proposals with a source: right %d (%.0f %%), partly %d (%.0f %%), wrong %d (%.0f %%), " \
+           "mean %.3f" % ((label, n, of) + shares + (sum(namejudge.VALUE[x[0]] for x in verdicts.values()) / n,))
+    judged = [x for x in verdicts.values() if x[2]]
+    if sentences and judged:
+        count = {v: sum(1 for x in judged if x[2] == v) for v in namejudge.VERDICTS}
+        text += "; the sentences right %d, partly %d, wrong %d (mean %.3f)" % (
+            count["right"], count["partly"], count["wrong"], sum(namejudge.VALUE[x[2]] for x in judged) / len(judged))
+    return text
+
+
+def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None, grounded=None, sources=(),
+                sentences=True, jobs=1):
     """The image's proposals (names.tsv; upto_pass: as they were after that pass) against true names
     (dread.naming.function_truth): prints a line a function into BUILD/pilot/IMAGE/names-score.tsv
-    (names-score-passN.tsv) and the totals; judge, a provider: its verdicts as well (judge_names).
-    Proposals with a confidence (--samples) get a line per confidence (the calibration: how often
-    names so sure are right); proposals with an ablation (--ablate) a line per class: the name
-    depends on the names shown or not, and, where the question showed none, the votes' own noise."""
-    from dread import naming
+    (names-score-passN.tsv) and the totals: the words (exact, the same, shared, overlap, and style:
+    dread.naming.style_similarity, whatever the naming style); judge, a provider: its verdicts against
+    the true name as well (judge_names); grounded, a provider: its verdicts against each function's
+    source (dread.namejudge: the truth ELF's debug information, the files below sources too), right,
+    partly or wrong whatever the style, with the sentence judged apart (sentences; else the names
+    alone; jobs: its questions asked at a time). Proposals with a confidence (--samples) get a line
+    per confidence (the calibration: how often names so sure are right); proposals with an ablation
+    (--ablate) a line per class: the name depends on the names shown or not, and, where the question
+    showed none, the votes' own noise."""
+    from dread import namejudge, naming
     rows = last_rows(read_name_rows(names_path(target, image), upto_pass))
     true = naming.function_truth(truth_path)
     scored, t = naming.score_functions({a: r["proposed"] for a, r in rows.items()}, true)
     verdicts = judge_names(judge, [(r["address"], r["true"], r["proposed"]) for r in scored], out=out) \
         if judge is not None and scored else {}
+    found, with_source = {}, 0
+    if grounded is not None and scored:
+        src = grounded_sources(truth_path, sources, out)
+        mine = {r["address"]: (r["proposed"], rows[r["address"]]["what"]) for r in scored if r["address"] in src}
+        with_source = len(mine)
+        found = namejudge.judge(grounded, [("this", mine)], src, sentence=sentences, out=out, jobs=jobs)["this"]
     suffix = "-pass%d" % upto_pass if upto_pass is not None else ""
     path = os.path.join(target.build, "pilot", image.name, "names-score%s.tsv" % suffix)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write("address\ttrue\tproposed\texact\tsame_words\toverlap\tsame_prefix\tjudged\tconfidence\tdepends\t"
-                "names_shown\n")
+                "names_shown\tstyle\tgrounded\tgrounded_why\tsentence\tsentence_why\n")
         for r in scored:
             row = rows[r["address"]]
-            f.write("0x%x\t%s\t%s\t%d\t%d\t%.2f\t%s\t%s\t%s\t%s\t%s\n" % (
+            g = found.get(r["address"], ("", "", "", ""))
+            f.write("0x%x\t%s\t%s\t%d\t%d\t%.2f\t%s\t%s\t%s\t%s\t%s\t%.2f\t%s\t%s\t%s\t%s\n" % (
                 r["address"], r["true"], r["proposed"], r["exact"], r["same_words"], r["overlap"],
                 "" if r["prefix"] is None else int(r["prefix"]), verdicts.get(r["address"], ""),
-                row["confidence"], row["depends"], row["names_shown"]))
+                row["confidence"], row["depends"], row["names_shown"], r["style"], g[0], " ".join(g[1].split()),
+                g[2] or "", " ".join((g[3] or "").split())))
     for v in VERDICTS:
         t["judged_" + v] = sum(1 for x in verdicts.values() if x == v)
     t["judged"] = len(verdicts)
+    t["grounded"] = {"verdicts": len(found), "with_source": with_source}
+    for v in namejudge.VERDICTS:
+        t["grounded"][v] = sum(1 for x in found.values() if x[0] == v)
+        t["grounded"]["sentence_" + v] = sum(1 for x in found.values() if x[2] == v)
+    t["grounded"]["mean"] = sum(namejudge.VALUE[x[0]] for x in found.values()) / len(found) if found else None
     n = t["functions"]
     if not n:
         out("dread pilot --score: no proposal at an address the true names have (%s)" % truth_path)
@@ -2455,10 +2511,15 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
         "half the words or more %s, mean overlap %.2f; the same prefix %d of %d with prefixes (%s)" % (
             n, pc("exact"), pc("same_words"), pc("shared_word"), pc("half_shared"), t["overlap"],
             t["same_prefix"], t["prefixed"], path))
+    out("dread pilot --score: whatever the naming style (dread.naming.style_similarity): mean %.2f, half the words "
+        "or more %s, all %s" % (t["style"], pc("style_half"), pc("style_same")))
     if judge is not None:
         out("dread pilot --score: judged by %s, %d of %d: the same %s, close %s, different %s" % (
             judge.label(), t["judged"], n, pc("judged_same", t["judged"]), pc("judged_close", t["judged"]),
             pc("judged_different", t["judged"])))
+    if grounded is not None:
+        out("dread pilot --score: " + grounded_line("against the source, judged by %s" % grounded.label(), found,
+                                                     with_source, sentences) + spent_text(grounded))
 
     def line(label, part):
         b = breakdown(part, verdicts)
@@ -2466,6 +2527,12 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
         if b["judged"]:
             judged = ", judged the same %d (%.0f %%), close %d (%.0f %%), different %d (%.0f %%)" % tuple(
                 x for v in VERDICTS for x in (b[v], 100.0 * b[v] / b["judged"]))
+        mine = {r["address"]: found[r["address"]] for r in part if r["address"] in found}
+        if mine:
+            right = sum(1 for x in mine.values() if x[0] == "right")
+            wrong = sum(1 for x in mine.values() if x[0] == "wrong")
+            judged += ", against the source right %d (%.0f %%), wrong %d (%.0f %%)" % (
+                right, 100.0 * right / len(mine), wrong, 100.0 * wrong / len(mine))
         out("dread pilot --score: %s: %d%s; a word shared %.0f %%, mean overlap %.2f" % (
             label, b["n"], judged, 100.0 * b["shared_word"] / b["n"], b["overlap"]))
         return b
@@ -2486,13 +2553,16 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
     return t
 
 
-def compare_names(target, image, truth_path, against, judge, out=print, upto_pass=None):
+def compare_names(target, image, truth_path, against, judge, out=print, upto_pass=None, grounded=None, sources=(),
+                  sentences=True, jobs=1):
     """This image's proposals (names.tsv; upto_pass: as they were after that pass) against another
-    run's (against, a names.tsv of the same image), judged pairwise: every function with a true name
-    whose two proposals differ (case aside) goes to judge_pairs, which says which one is closer to the
-    true name; wins, losses and ties with the sign test's p (sign_test), a line a function into
-    BUILD/pilot/IMAGE/names-pairwise.tsv (names-pairwise-passN.tsv). Asks no absolute verdicts:
-    names-score.tsv stays as the last --score wrote it."""
+    run's (against, a names.tsv of the same image), function by function where the two proposals
+    differ (case aside): with judge, judged pairwise (judge_pairs: which of the two is closer to the
+    true name); with grounded instead, each judged against the function's source (dread.namejudge,
+    both runs' questions of a batch sharing its cached sources), the one with the better verdict
+    closer (the same verdict a tie; functions without a source left out). Wins, losses and ties with
+    the sign test's p (sign_test), a line a function into BUILD/pilot/IMAGE/names-pairwise.tsv
+    (names-pairwise-passN.tsv). names-score.tsv stays as the last --score wrote it."""
     from dread import naming
     rows = last_rows(read_name_rows(names_path(target, image), upto_pass))
     other = last_rows(read_name_rows(against))
@@ -2500,7 +2570,22 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
     both = sorted(set(rows) & set(other) & set(true))
     items = [(a, true[a], rows[a]["proposed"], other[a]["proposed"]) for a in both
              if rows[a]["proposed"].lower() != other[a]["proposed"].lower()]
-    pairs = judge_pairs(judge, items, out=out)
+    found = {}
+    if grounded is not None:
+        from dread import namejudge
+        src = grounded_sources(truth_path, sources, out)
+        items = [it for it in items if it[0] in src]
+        runs = [(label, {a: (names[a]["proposed"], names[a]["what"]) for a, _, _, _ in items})
+                for label, names in (("this", rows), ("other", other))]
+        found = namejudge.judge(grounded, runs, src, sentence=sentences, out=out, jobs=jobs)
+        pairs = {}
+        for a, _, _, _ in items:
+            if a in found["this"] and a in found["other"]:
+                d = namejudge.VALUE[found["this"][a][0]] - namejudge.VALUE[found["other"][a][0]]
+                pairs[a] = "a" if d > 0 else "b" if d < 0 else "tie"
+        judge = grounded
+    else:
+        pairs = judge_pairs(judge, items, out=out)
     wins = sum(1 for v in pairs.values() if v == "a")
     losses = sum(1 for v in pairs.values() if v == "b")
     ties = sum(1 for v in pairs.values() if v == "tie")
@@ -2510,14 +2595,35 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
     path = os.path.join(target.build, "pilot", image.name, "names-pairwise%s.tsv" % suffix)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        f.write("address\ttrue\tthis\tother\tcloser\n")
+        f.write("address\ttrue\tthis\tother\tcloser" + ("\tthis_grounded\tother_grounded" if found else "") + "\n")
         for a, tn, x, y in items:
-            f.write("0x%x\t%s\t%s\t%s\t%s\n" % (a, tn, x, y, {"a": "this", "b": "other", "tie": "tie"}.get(
+            f.write("0x%x\t%s\t%s\t%s\t%s" % (a, tn, x, y, {"a": "this", "b": "other", "tie": "tie"}.get(
                 pairs.get(a), "")))
-    out("dread pilot --score --against %s: %d of %d proposals with a true name differ; judged by %s in both "
-        "orders, %d: this run's closer %d, the other's closer %d, ties %d (sign test p = %.3g; %s)" % (
-            against, len(items), len(both), judge.label(), len(pairs), wins, losses, ties, t["p"], path))
+            if found:
+                f.write("\t%s\t%s" % tuple(": ".join(filter(None, found[k].get(a, ("", ""))[:2]))
+                                            for k in ("this", "other")))
+            f.write("\n")
+    how = "against the source by %s" % judge.label() if found else "by %s in both orders" % judge.label()
+    out("dread pilot --score --against %s: %d of %d proposals with a true name differ%s; judged %s, %d: this run's "
+        "closer %d, the other's closer %d, ties %d (sign test p = %.3g; %s)%s" % (
+            against, len(items), len(both), " and have a source" if found else "", how, len(pairs), wins, losses,
+            ties, t["p"], path, spent_text(judge)))
+    if found:
+        for label, key in (("this run", "this"), ("the other", "other")):
+            out("dread pilot --score --against: " + grounded_line(label + " where they differ", found[key], len(items),
+                                                                    sentences))
     return t
+
+
+def spent_text(provider):
+    """"; N answers, tokens in (of them read from a cache), out ($cost)" of what a provider object spent
+    (its own answers), for a score's line; empty for one that answered nothing."""
+    sp = provider.spent() if provider is not None else {}
+    if not sp.get("answers"):
+        return ""
+    return "; %d answers, %d tokens in%s, %d out%s" % (
+        sp["answers"], sp["input"], " (%d read from the cache)" % sp["cache_read"] if sp.get("cache_read") else "",
+        sp["output"], " ($%.2f)" % sp["cost"] if sp.get("cost") is not None else "")
 
 
 def subsystems_task(target, image, program, flow, args, provider):
@@ -2595,7 +2701,8 @@ def main(argv=None):
     parser.add_argument("--usage", nargs="?", const="", metavar="YYYY-MM",
                         help="print the tokens (and costs, where llm.toml gives prices) of a month's answers; ask nothing")
     parser.add_argument("--jobs", type=int, default=4,
-                        help="--task name, readable and subsystems: questions asked at a time (default 4)")
+                        help="--task name, readable and subsystems, and --grounded: questions asked at a time "
+                             "(default 4)")
     parser.add_argument("--score", metavar="TRUTH",
                         help="--task name: compare the proposals (names.tsv) with true names (an ELF's symbols, "
                              "or a functions table of a copy that has them) and ask nothing")
@@ -2606,6 +2713,16 @@ def main(argv=None):
                              "(dread.behaviour: cached cases, or a short search for a function without)")
     parser.add_argument("--judge", metavar="PROVIDER",
                         help="with --score: a provider also judges each pair the same, close or different")
+    parser.add_argument("--grounded", metavar="PROVIDER",
+                        help="with --score: a provider judges each proposal against the function's source (the "
+                             "truth ELF's debug information and the files it names), right, partly or wrong, "
+                             "whatever the naming style (dread.namejudge); with --against, function by function")
+    parser.add_argument("--source", action="append", default=[], metavar="DIR",
+                        help="with --grounded: a directory to look for the sources in when they are not where the "
+                             "debug information says (repeatable)")
+    parser.add_argument("--names-only", action="store_true",
+                        help="with --grounded: show the judge the names alone, not their sentences (which are "
+                             "otherwise judged apart)")
     parser.add_argument("--samples", type=int, default=NAME_SAMPLES, metavar="K",
                         help="--task name: ask each function K times and keep the name most answers agree with, "
                              "with the agreement as its confidence (default %d)" % NAME_SAMPLES)
@@ -2652,20 +2769,23 @@ def main(argv=None):
     program = Program(target, image)
     flow = regflow.load(target, image, program)
     if args.task == "name" and args.score:
-        judge = None
-        if args.judge:
-            try:
-                judge = llm.load(args.judge)
-            except llm.ProviderError as e:
-                print("dread pilot: %s" % e, file=sys.stderr)
-                return 1
+        judge = grounded = None
+        try:
+            judge = llm.load(args.judge) if args.judge else None
+            grounded = llm.load(args.grounded) if args.grounded else None
+        except llm.ProviderError as e:
+            print("dread pilot: %s" % e, file=sys.stderr)
+            return 1
         if args.against:
-            if judge is None:
-                print("dread pilot: --against needs --judge (a provider that judges the pairs)", file=sys.stderr)
+            if judge is None and grounded is None:
+                print("dread pilot: --against needs --grounded or --judge (a provider that judges the pairs)",
+                      file=sys.stderr)
                 return 1
-            return 0 if compare_names(target, image, args.score, args.against, judge,
-                                      upto_pass=args.upto_pass)["both"] else 1
-        return 0 if score_names(target, image, args.score, judge=judge, upto_pass=args.upto_pass)["functions"] else 1
+            return 0 if compare_names(target, image, args.score, args.against, judge, upto_pass=args.upto_pass,
+                                      grounded=grounded, sources=args.source, sentences=not args.names_only,
+                                      jobs=args.jobs)["both"] else 1
+        return 0 if score_names(target, image, args.score, judge=judge, upto_pass=args.upto_pass, grounded=grounded,
+                                sources=args.source, sentences=not args.names_only, jobs=args.jobs)["functions"] else 1
     if args.task == "name" and args.gate and args.samples < 2:
         print("dread pilot: --gate needs --samples 2 or more (one question's proposal has no confidence)",
               file=sys.stderr)

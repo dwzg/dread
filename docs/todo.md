@@ -561,11 +561,44 @@ its sources.
   Sonnet. The default since
   2026-10-22 (NAME_SUBSYSTEMS; `--no-subsystems`); measured on one build the model knows, whose
   assertion texts name its files, not confirmed on firmware it does not know.
+  Scored against the source (2026-10-22, dread/namejudge.py, docs/decisions.md; the user: "Is it good
+  to judge the names by equality? There are probably many ways to call the same things with different
+  styles of naming that are all valid in their own way."): `--score TRUTH --grounded PROVIDER` has a
+  judge read each function's source and say of each proposal right, partly or wrong, with a reason,
+  whatever its style; the sentence gets a verdict of its own (`--names-only`: the names alone). The
+  source comes from the truth ELF's debug information (the definition's file and line, cut to its
+  closing brace; `--source DIR` where the files moved), the names of the functions a question shows
+  masked as FUNCTION_k wherever they stand (traceENTER_vTaskDelay too), a source file's functions to a
+  question; `--against OTHER` with it judges the proposals of two runs that differ, the better verdict
+  closer, both runs' questions of a file reading its sources from the provider's prompt cache
+  (dread.llm's cached parts; Anthropic's: read for a tenth, written for a quarter more). Every score
+  also gives words whatever the naming style (dread.naming.style_words: Hungarian heads, runs of
+  letters cut into known words, abbreviations, synonyms, word forms). Measured on the names stored from
+  eight FreeRTOS runs of that day (332 of 366 functions with a source; newlib's files are not on this
+  machine): the judge reading the source ranked the runs as the pairwise judge had (Kendall's tau 1.0;
+  word scores 0.86, a forced choice among five functions of the file 0.64-0.78), its own noise a
+  hundredth on a run's mean (the same verdict for 88-92 % of the functions judged twice), the groups
+  from code against the defaults before them +0.047 +- 0.019 a function (p 0.01) where the judges
+  against the true name saw +0.122 (p 2e-11): mostly the names taking the files' words as prefixes.
+  Right though sharing no word with the true name: 187 of 1,371 (xPortPendSVHandler as
+  sched_context_switch, pvPortMalloc as heap_alloc). Judged with its sentence as one, a wrong detail of
+  the sentence made right names wrong; apart, the names' means rose 0.06-0.07. Style words tell right
+  from wrong better than the overlap (area under the ROC curve 0.88-0.90 against 0.84-0.86; the judge
+  against the true name 0.93). The forced choice was dropped: two draws of one run 0.055 apart, the
+  identical controls 0.057 apart with sentences (p 0.006), names judged wrong picking their function
+  half of the time. Costs: about $0.80 a run alone with Sonnet, $0.35 for each run judged with it;
+  Haiku as the judge ranks alike for about $0.05 (not the default: it judged its own family's names).
+  Through the tool: the groups from code right 65 %, wrong 8 % ($0.88); against the defaults before
+  them 68, 34, 149 (p 0.001; the pairwise judge against the true names had 153, 51, 81), $1.07 for
+  both. Spent on the measurement: about $13 of Sonnet, $0.40 of Haiku.
   Next: `--subsystems` on the private real-life test (its misread driver, groups whose texts say
   less); a group's name asked again after the first pass with its functions' names (asked once from
   code now: subsystems.tsv keeps it), not tried; the runs of the cases (`--behaviour`) where the code
   says less (its drivers, and leaves that touch only unnamed globals: its misses) against its notes
-  with text ends, and the globals between the passes.
+  with text ends, and the globals between the passes. For the scores: a person's marks on a sample of
+  50 functions (made outside the repository: it holds FreeRTOS's code) against the judge's verdicts;
+  the judge on the bench's other builds and on a firmware it knows less; style words in the votes
+  (dread.naming.vote pairs similarity()'s words), not tried.
 - [ ] **A no-confidence vote on existing names** (the user's idea, 2026-10-22: reverse engineering as
   a puzzle, where a sub-picture can look right in one context and wrong in another). Not a periodic
   re-vote by the same model: consistency is not correctness (a misread driver was named after the

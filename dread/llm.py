@@ -61,6 +61,14 @@ output tokens, how it ended; no text of the conversation, no key), so that what 
 can be told: usage_summary(), `dread pilot --usage`. A provider's price_in and price_out (US dollars
 per million tokens, from its price list) turn the tokens into money; without them only the tokens
 are summed.
+
+A message's content is a text, or a list of parts ({"text": ..., "cache": True}) for a question whose
+first part many questions share (a function's source that several runs' names are judged against):
+Anthropic's provider marks a part with cache to be kept (cache_control, its prompt cache: a later
+question with the same beginning reads it for a tenth of the price, the first writes it for a quarter
+more, Anthropic's list in 2026-10; price_cache_read and price_cache_write override, in US dollars per
+million tokens), the others join the parts into one text (content_text). The ledger's line then gets
+the tokens read from and written to the cache as two more columns.
 """
 import json
 import os
@@ -78,10 +86,11 @@ class ProviderError(Exception):
 
 class Provider:
     """ask(system, messages, temperature=None) -> text; messages are [{"role": "user"|"assistant",
-    "content": str}]; temperature, when given, the sampling temperature of this question in place of
-    the configuration's (an OpenAI-compatible server takes it; Anthropic's API is sent it, and Haiku
-    5.5 and Sonnet 5.5 answer any other value than their default 1.0 with HTTP 400, "`temperature` is
-    deprecated for this model", tried 2026-10-22; a command provider cannot pass it on). After each
+    "content": str or [parts]}] (a list of parts: see the module); temperature, when given, the
+    sampling temperature of this question in place of the configuration's (an OpenAI-compatible
+    server takes it; Anthropic's API is sent it, and Haiku 5.5 and Sonnet 5.5 answer any other value
+    than their default 1.0 with HTTP 400, "`temperature` is deprecated for this model", tried
+    2026-10-22; a command provider cannot pass it on). After each
     answer, last says how it ended: {"finish": the provider's reason ("stop", "length", "end_turn",
     "max_tokens", ...), "tokens": tokens written or None, "reasoning": characters of reasoning the
     provider returned apart from the answer}."""
@@ -95,7 +104,7 @@ class Provider:
         self.name, self.config = name, dict(config)
         self.model = self.config.get("model", "?")
         self.last = {}
-        self.used = {"answers": 0, "input": 0, "output": 0}     # this object's own answers (spent())
+        self.used = {"answers": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0}  # (spent())
 
     def label(self):
         return "%s (%s)" % (self.name, self.model)
@@ -108,15 +117,19 @@ class Provider:
         self.used["answers"] += 1
         self.used["input"] += info.get("input") or 0
         self.used["output"] += info.get("tokens") or 0
+        self.used["cache_read"] += info.get("cache_read") or 0
+        self.used["cache_write"] += info.get("cache_write") or 0
         try:
             os.makedirs(os.path.dirname(USAGE), exist_ok=True)
             new = not os.path.exists(USAGE)
             with open(USAGE, "a") as f:
                 if new:
                     f.write("time\tprovider\tmodel\tinput\toutput\tfinish\n")
-                f.write("%s\t%s\t%s\t%d\t%d\t%s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), self.name, self.model,
-                                                     info.get("input") or 0, info.get("tokens") or 0,
-                                                     info.get("finish") or ""))
+                cached = ("\t%d\t%d" % (info.get("cache_read") or 0, info.get("cache_write") or 0)
+                          if info.get("cache_read") or info.get("cache_write") else "")
+                f.write("%s\t%s\t%s\t%d\t%d\t%s%s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), self.name, self.model,
+                                                       info.get("input") or 0, info.get("tokens") or 0,
+                                                       info.get("finish") or "", cached))
         except OSError:
             pass
 
@@ -126,9 +139,9 @@ class Provider:
         its totals counted every run beside it too (six pilot runs at once, 2026-10-21, each reported
         about six times its own tokens)."""
         out = dict(self.used, cost=None)
-        if "price_in" in self.config and "price_out" in self.config:
-            out["cost"] = (out["input"] * float(self.config["price_in"]) +
-                           out["output"] * float(self.config["price_out"])) / 1e6
+        prices = prices_of(self.config, self.kind)
+        if prices:
+            out["cost"] = cost(prices, out["input"], out["output"], out["cache_read"], out["cache_write"])
         return out
 
     def ask(self, system, messages, temperature=None):
@@ -175,7 +188,8 @@ class OpenAICompatible(Provider):
         key_env = self.config.get("key_env")
         if key_env and os.environ.get(key_env):
             headers["authorization"] = "Bearer " + os.environ[key_env]
-        body = {"model": self.model, "messages": [{"role": "system", "content": system}] + list(messages),
+        body = {"model": self.model, "messages": [{"role": "system", "content": system}] + [
+                    dict(m, content=content_text(m["content"])) for m in messages],
                 "max_tokens": int(self.config.get("max_tokens", 32000)),
                 "temperature": float(self.config.get("temperature", 0.2) if temperature is None else temperature)}
         reply = self._post(url, body, headers)
@@ -195,13 +209,22 @@ class OpenAICompatible(Provider):
 class Anthropic(Provider):
     kind = "anthropic"
 
+    @staticmethod
+    def blocks(content):
+        """A message's content as Anthropic takes it: a text as it is; parts as text blocks, a part
+        with cache marked to be cached (the prompt up to its end is kept for later questions)."""
+        if isinstance(content, str):
+            return content
+        return [dict({"type": "text", "text": part.get("text", "")},
+                     **({"cache_control": {"type": "ephemeral"}} if part.get("cache") else {})) for part in content]
+
     def ask(self, system, messages, temperature=None):
         key = os.environ.get(self.config.get("key_env", "ANTHROPIC_API_KEY"), "")
         if not key:
             raise ProviderError("%s: no key in $%s" % (self.name, self.config.get("key_env", "ANTHROPIC_API_KEY")))
         url = self.config.get("url", "https://api.anthropic.com").rstrip("/") + "/v1/messages"
         body = {"model": self.model, "max_tokens": int(self.config.get("max_tokens", 16000)), "system": system,
-                "messages": list(messages)}
+                "messages": [dict(m, content=self.blocks(m["content"])) for m in messages]}
         if temperature is not None:         # (only when asked for: see Provider)
             body["temperature"] = float(temperature)
         reply = self._post(url, body, {"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -210,6 +233,8 @@ class Anthropic(Provider):
             self.last = {"finish": reply.get("stop_reason"), "tokens": usage.get("output_tokens"),
                          "input": sum(usage.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens",
                                                                   "cache_read_input_tokens")),
+                         "cache_read": usage.get("cache_read_input_tokens") or 0,
+                         "cache_write": usage.get("cache_creation_input_tokens") or 0,
                          "reasoning": sum(len(b.get("thinking", "")) for b in reply["content"]
                                           if b.get("type") == "thinking")}
             self.record()
@@ -218,14 +243,46 @@ class Anthropic(Provider):
             raise ProviderError("%s: unexpected reply %s" % (self.name, json.dumps(reply)[:300]))
 
 
+def content_text(content):
+    """A message's content as one text: a text as it is, a list of parts ({"text": ..., "cache": ...})
+    joined by blank lines."""
+    if isinstance(content, str):
+        return content
+    return "\n\n".join(part.get("text", "") for part in content or [])
+
+
+CACHE_READ, CACHE_WRITE = 0.1, 1.25     # Anthropic's prompt cache against its input price (its list, 2026-10)
+
+
+def prices_of(config, kind=None):
+    """(in, out, cache read, cache write) in US dollars per million tokens from a provider's
+    configuration (price_in, price_out; price_cache_read and price_cache_write, else the input price
+    times Anthropic's factors for an anthropic provider, the input price for others), or None."""
+    if "price_in" not in config or "price_out" not in config:
+        return None
+    price_in = float(config["price_in"])
+    anthropic = (kind or config.get("kind")) == "anthropic"
+    return (price_in, float(config["price_out"]),
+            float(config.get("price_cache_read", price_in * (CACHE_READ if anthropic else 1))),
+            float(config.get("price_cache_write", price_in * (CACHE_WRITE if anthropic else 1))))
+
+
+def cost(prices, input_tokens, output_tokens, cache_read=0, cache_write=0):
+    """US dollars of an answer's or a run's tokens: input counts every input token, those read from or
+    written to a cache among them."""
+    price_in, price_out, price_read, price_write = prices
+    plain = max(0, input_tokens - cache_read - cache_write)
+    return (plain * price_in + cache_read * price_read + cache_write * price_write + output_tokens * price_out) / 1e6
+
+
 def conversation_text(system, messages):
     """A conversation as one text, for a provider that takes one: the system part, then the
     question; a longer conversation with each message under its role."""
     if len(messages) == 1 and messages[0]["role"] == "user":
-        return system + "\n\n" + messages[0]["content"]
+        return system + "\n\n" + content_text(messages[0]["content"])
     parts = [system, "The conversation so far follows, oldest first; your earlier answers are marked ASSISTANT. "
                      "Answer the last USER message."]
-    parts += ["=== %s ===\n%s" % (m["role"].upper(), m["content"]) for m in messages]
+    parts += ["=== %s ===\n%s" % (m["role"].upper(), content_text(m["content"])) for m in messages]
     return "\n\n".join(parts)
 
 
@@ -323,8 +380,8 @@ def usage_summary(month=None, path=None, config_path=None):
     if os.path.exists(config_path):
         with open(config_path, "rb") as f:
             for name, spec in tomllib.load(f).get("providers", {}).items():
-                if "price_in" in spec and "price_out" in spec:
-                    prices[name] = (float(spec["price_in"]), float(spec["price_out"]))
+                if prices_of(spec):
+                    prices[name] = prices_of(spec)
     out = {}
     path = path or USAGE
     if not os.path.exists(path):
@@ -334,13 +391,18 @@ def usage_summary(month=None, path=None, config_path=None):
             row = line.rstrip("\n").split("\t")
             if len(row) < 6 or not row[0].startswith(month):
                 continue
-            entry = out.setdefault(row[1], {"model": row[2], "answers": 0, "input": 0, "output": 0, "cost": None})
+            entry = out.setdefault(row[1], {"model": row[2], "answers": 0, "input": 0, "output": 0, "cost": None,
+                                            "cache_read": 0, "cache_write": 0})
             entry["answers"] += 1
             entry["input"] += int(row[3])
             entry["output"] += int(row[4])
+            if len(row) >= 8:               # (a line with cache columns, since 2026-10-22)
+                entry["cache_read"] += int(row[6] or 0)
+                entry["cache_write"] += int(row[7] or 0)
     for name, entry in out.items():
         if name in prices:
-            entry["cost"] = (entry["input"] * prices[name][0] + entry["output"] * prices[name][1]) / 1e6
+            entry["cost"] = cost(prices[name], entry["input"], entry["output"], entry["cache_read"],
+                                 entry["cache_write"])
     return out
 
 

@@ -162,8 +162,16 @@ def test_provider_wire_formats(monkeypatch):
         assert "temperature" not in body                        # (Haiku 5.5 and Sonnet 5.5 refuse all but 1.0)
         remote.ask("be brief", [{"role": "user", "content": "hello"}], temperature=1.0)
         assert Fake.seen[-1][2]["temperature"] == 1.0
-        assert remote.last == {"finish": "max_tokens", "tokens": 34, "reasoning": 4, "input": 57}
+        assert remote.last == {"finish": "max_tokens", "tokens": 34, "reasoning": 4, "input": 57, "cache_read": 7,
+                               "cache_write": 0}
         assert {k.lower(): v for k, v in headers.items()}["x-api-key"] == "secret"
+        parts = [{"text": "the sources", "cache": True}, {"text": "the names"}]
+        remote.ask("be brief", [{"role": "user", "content": parts}])     # (a part to cache: Anthropic's block)
+        assert Fake.seen[-1][2]["messages"][0]["content"] == [
+            {"type": "text", "text": "the sources", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "the names"}]
+        local.ask("be brief", [{"role": "user", "content": parts}])      # (one text for the others)
+        assert Fake.seen[-1][2]["messages"][1]["content"] == "the sources\n\nthe names"
     finally:
         server.shutdown()
 
@@ -350,11 +358,19 @@ def test_the_usage_ledger(tmp_path, monkeypatch):
     priced = llm.Provider("cloud", {"model": "m", "price_in": 3, "price_out": 15})
     priced.last = {"finish": "end_turn", "tokens": 1000, "input": 500000}
     priced.record()                     # its own count, not the ledger's (runs beside it share that)
-    assert priced.spent() == {"answers": 1, "input": 500000, "output": 1000, "cost": 1.5 + 0.015}
+    assert priced.spent() == {"answers": 1, "input": 500000, "output": 1000, "cache_read": 0, "cache_write": 0,
+                              "cost": 1.5 + 0.015}
     assert p.spent()["answers"] == 2 and p.spent()["cost"] is None
     assert abs(summary["cloud"]["cost"] - (3.0 + 0.03)) < 1e-9
     assert summary["local"]["cost"] is None and summary["local"]["output"] == 10
-    assert "\tcloud\tm\t500000\t1000\tend_turn" in ledger.read_text()
+    assert "\tcloud\tm\t500000\t1000\tend_turn\n" in ledger.read_text()
+    cached = llm.Anthropic("cloud", {"model": "m", "price_in": 3, "price_out": 15})    # (a prompt cache's tokens:
+    cached.last = {"finish": "end_turn", "tokens": 0, "input": 1000000, "cache_read": 800000, "cache_write": 100000}
+    cached.record()                     # read at a tenth of the input price, written at a quarter more)
+    assert cached.spent()["cost"] == pytest.approx((100000 * 3 + 800000 * 0.3 + 100000 * 3.75) / 1e6)
+    assert "\tcloud\tm\t1000000\t0\tend_turn\t800000\t100000\n" in ledger.read_text()
+    assert llm.usage_summary()["cloud"]["cost"] == pytest.approx(     # (three answers as before, the cached one)
+        (1500000 * 3 + 3000 * 15 + 100000 * 3 + 800000 * 0.3 + 100000 * 3.75) / 1e6)
 
 
 def test_inputs_for_what_the_lift_check_left_uncovered(tmp_path):
@@ -956,3 +972,56 @@ def test_names_do_without_their_groups_when_the_grouping_fails(gizmo, monkeypatc
     assert (made, asked) == (1, 1) and len(seen) == 1 and "named that part" not in seen[0]
     assert any("no subsystems, the grouping failed: RuntimeError: no facts today" in line for line in lines), lines
     assert not pilot.marked(pilot.read_name_rows(pilot.names_path(target, image))[0]["shown"], pilot.SUBSYSTEM)
+
+
+def test_names_judged_against_their_source(gizmo, tmp_path):
+    """--grounded: each proposal judged against its function's source (the truth ELF's debug information,
+    the files below --source), the name and its sentence apart; names-score.tsv gets each verdict and
+    its reason, the totals their counts and mean. With --against, the proposals of the two runs that
+    differ are judged, both runs' questions of a file sharing its sources, the better verdict closer."""
+    pytest.importorskip("elftools")
+    target, image, program, flow = gizmo
+    fns = [program.by_name[n] for n in ("uart_putc", "gpio_set", "delay")]
+    mine = ["serial_write_char", "pin_write", "wait_ticks"]
+    theirs = ["serial_write_char", "pin_toggle", "busy_loop"]
+    for fn, name in zip(fns, mine):
+        pilot.keep_proposal(target, image, fn, name, "does it", llm.Scripted([]), "readable")
+    other = tmp_path / "other.tsv"
+    other.write_text("address\tnow\tproposed\twhat\tprovider\tshown\n" + "".join(
+        "0x%x\t%s\t%s\tx\tp\treadable\n" % (fn.entry, fn.name, name) for fn, name in zip(fns, theirs)))
+    verdict = {"serial_write_char": "right | right", "pin_write": "right | partly: says more",
+               "wait_ticks": "partly: vague | right", "pin_toggle": "wrong: it sets the pin | right",
+               "busy_loop": "right | right"}
+    asked = []
+
+    def answer(messages):
+        parts = messages[0]["content"]
+        asked.append(parts)
+        assert "FUNCTION_1" in parts[0]["text"]
+        numbered = re.findall(r"^(\d+)\. (\w+): ", parts[1]["text"], re.M)
+        return "```json\n%s\n```" % json.dumps({n: verdict[name] for n, name in numbered})
+    fw = os.path.join(os.path.dirname(target.root), "fw")
+    lines = []
+    totals = pilot.score_names(target, image, gizmo_elf(target), out=lines.append, grounded=llm.Scripted(answer),
+                               sources=[fw])
+    g = totals["grounded"]
+    assert (g["verdicts"], g["right"], g["partly"], g["wrong"], g["sentence_partly"]) == (3, 2, 1, 0, 1), g
+    assert g["mean"] == pytest.approx(2.5 / 3)
+    assert any("against the source, judged by scripted (scripted), 3 of 3 proposals with a source: right 2 (67 %)"
+               in line for line in lines), lines
+    assert any("whatever the naming style" in line for line in lines)
+    assert not any(parts[0]["cache"] for parts in asked)      # (one run: no cache to share)
+    table = open(os.path.join(target.build, "pilot", image.name, "names-score.tsv")).read().splitlines()
+    assert table[0].endswith("\tstyle\tgrounded\tgrounded_why\tsentence\tsentence_why")
+    assert any(r.endswith("\tpartly\tvague\tright\t") and "\twait_ticks\t" in r for r in table), table
+    assert not pilot.score_names(target, image, gizmo_elf(target), out=lines.append, grounded=llm.Scripted([]),
+                                 sources=[str(tmp_path)])["grounded"]["verdicts"]       # (no source found)
+    asked.clear()
+    t = pilot.compare_names(target, image, gizmo_elf(target), str(other), None, out=lines.append,
+                            grounded=llm.Scripted(answer), sources=[fw])
+    assert (t["differ"], t["judged"], t["wins"], t["losses"], t["ties"]) == (2, 2, 1, 1, 0), t
+    assert not any("serial_write_char" in parts[1]["text"] for parts in asked)       # (alike: not asked)
+    assert all(parts[0]["cache"] for parts in asked)          # (two runs share each file's sources)
+    pairwise = open(os.path.join(target.build, "pilot", image.name, "names-pairwise.tsv")).read()
+    assert "\tpin_write\tpin_toggle\tthis\tright\twrong: it sets the pin\n" in pairwise
+    assert "against the source by scripted" in lines[-3] and "the other where they differ, 2 of 2" in lines[-1]
