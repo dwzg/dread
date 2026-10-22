@@ -133,7 +133,10 @@ before the functions' variables, which then see the names.
 ### `readable_types.json` (`readable_types`)
 
 The structures readable C declares (dread.shapes): `{"version": 1, "structs": {NAME: [[offset,
-type], ...]}, "functions": {FUNCTION: {"digest", "vars": {VARIABLE: NAME}}}}`. A structure's fields
+type], ...]}, "functions": {FUNCTION: {"digest", "vars": {VARIABLE: NAME}}}, "pointers": {NAME:
+{"OFFSET": NAME}}}`. `pointers` (left out when empty) lists the word fields that point to a
+structure's base: every object of the kind that points somewhere from the field points there; such a
+field is declared `volatile struct NAME *`. A structure's fields
 are those a C structure holds at their offsets without packing (naturally aligned, not overlapping,
 the gaps bytes); a function's variables listed there are declared `volatile struct NAME *` and their
 accesses written as members (`p->f_2c`), every other use cast to u32. `digest` is the readable C's

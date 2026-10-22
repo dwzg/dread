@@ -666,7 +666,7 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
         blocks = []
         for k in part:
             fns = []
-            lines = [shapes.struct_text(k, plan.structs[k])]
+            lines = [shapes.struct_text(k, plan.structs[k], pointers=plan.pointers.get(k))]
             for fname, line in uses[k]:
                 if fname not in fns:
                     if len(fns) >= shown_functions:

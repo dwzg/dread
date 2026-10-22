@@ -185,8 +185,20 @@ its sources.
   field inside a structure (a task's xStateListItem at 4) stays an integer; a list reached through an
   item's pointer field is a kind of its own (joining kinds through pointer fields would join what a
   void * field holds, an item's owner: tasks and timers); an address computed once and used for two
-  accesses (an ldrd's a_1 = r0 + 4) keeps the raw accesses; fields typed as pointers (now u32 with a
-  cast at each load); embedded structures as members. A structure needs a field wider than a byte
+  accesses (an ldrd's a_1 = r0 + 4) keeps the raw accesses; embedded structures as members. Fields
+  typed as pointers since 2026-10-22 (the plan's pointers part): a word field that every object of
+  its kind that points somewhere from it points to the base of one structure is declared volatile
+  struct s_N * (forward declarations first); a load of it into a variable of that structure needs
+  no cast, nor a comparison of two such pointers or a store of one; an integer stored into it is
+  cast, its use as a number cast to u32. FreeRTOS GCC -Os 48 pointer fields in 33 of 65 structures,
+  clang -O2 57 in 35 of 66, RISC-V GCC -Os 14 in 14 of 34, GCC -O0 31 in 23 of 49; the gate as
+  before on the eight builds. Against the source (dread readable --score: the structures of typed
+  parameters with a source type) 20 of 42 declared pointer fields are the source's pointers to a
+  structure (GCC -Os 7 of 9, clang -O2 8 of 24, RISC-V 2 of 5, GCC -O0 3 of 4): the wrong ones come
+  from kinds made one, a heap block (its free-list link at 0 a pointer to a block) and the queue
+  allocated inside it (pcHead at 0); newlib's _cookie, a void * that holds its FILE, counts as wrong.
+  A field that points to an item or to a list's end marker (a list's links) points to no one base and
+  stays u32: 32 of GCC -Os's source pointers to a structure. A structure needs a field wider than a byte
   (gizmo's string walks made structures of two u8 fields). Names: the pilot asks for the structures'
   and their fields' names after the globals (dread pilot --task readable: each structure's definition
   with its fields' uses in up to four functions, eight a question), kept in readable_names' structs

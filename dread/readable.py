@@ -561,6 +561,11 @@ def main(argv=None):
                   "(%.0f %%), %d with a word of its; %d fields: %d as the source (%.0f %%), %d with a word of its" % (
                       st["structs"], st["exact"], 100.0 * st["exact"] / s_, st["words"], st["fields"],
                       st["field_exact"], 100.0 * st["field_exact"] / f_, st["field_words"]))
+            from dread import shapes
+            pt = shapes.score_pointers(Program(target, image), context.plan, args.score)
+            print("dread readable --score: %d fields declared pointers to a structure, %d such pointers in the "
+                  "source (%.0f %%); %d of the source's pointers to a structure left integers" % (
+                      pt["fields"], pt["right"], 100.0 * pt["right"] / max(pt["fields"], 1), pt["missed"]))
         rows, totals = naming.score_globals(image, args.score)
         for r in rows:
             where = ("%s+%d" % (r["symbol"], r["offset"]) if r["offset"] else r["symbol"]) if r["symbol"] else "?"

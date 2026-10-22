@@ -228,3 +228,52 @@ def test_a_variable_the_c_keeps_whole_is_as_many_values_as_it_holds():
                 "    return 0;\n}\n")
     assert p.structs[p.typed["init"]["a0"]] == [(0, "u32"), (4, "u32"), (8, "u32")], p.structs
     assert "a0" not in p.typed.get("reset", {}), p.typed
+
+
+LINK = ("u32 touch(u32 r0)\n{\n    *(volatile u32 *)(r0 + 12) = 1u;\n"
+        "    return *(volatile u32 *)(r0 + 4) + *(volatile u32 *)(r0 + 8);\n}\n"
+        "u32 link(u32 r0, u32 r1, u32 r2)\n{\n    *(volatile u32 *)(r0 + 4) = r1;\n    *(volatile u32 *)(r1 + 8) = r0;\n"
+        "    *(volatile u32 *)(r1 + 4) = r2 + 0u;\n    *(volatile u32 *)(r0 + 8) = 0u;\n"
+        "    touch(r0);\n    touch(r1);\n    return 0;\n}\n"
+        "u32 follow(u32 r0)\n{\n    u32 r3;\n    r3 = *(volatile u32 *)(r0 + 4);\n    if (r3 == r0) return 0;\n"
+        "    if (*(volatile u32 *)(r3 + 8) != r0) return 3;\n"
+        "    *(volatile u32 *)(r3 + 12) = 2u;\n    touch(r3);\n    return touch(r0) + *(volatile u32 *)(r0 + 4);\n}\n")
+
+
+def test_a_field_that_points_to_a_structure_is_declared_a_pointer_to_it():
+    """A list item's links: every object of the kind that points somewhere from the field points to
+    the base of one structure, so the field is volatile struct s_N *. A load of it into a variable of
+    that structure needs no cast, nor a comparison of two such pointers or a store of one; an integer
+    stored into it is cast, a use of it as a number is cast to u32."""
+    p = plan_of(LINK)
+    assert p.structs == {"s_1": [(4, "u32"), (8, "u32"), (12, "u32")]} and p.pointers == {"s_1": {4: "s_1", 8: "s_1"}}
+    assert shapes.Plan.from_json(p.to_json()).pointers == p.pointers
+    assert "    volatile struct s_1 *f_4;\n    volatile struct s_1 *f_8;\n    u32 f_c;" in shapes.struct_text(
+        "s_1", p.structs["s_1"], pointers=p.pointers["s_1"])
+    tree = cparse.parse(HEAD + LINK)
+    shapes.apply_types(tree, tree.function("follow"), p)
+    shapes.apply_types(tree, tree.function("link"), p)
+    out = cparse.unparse(tree, notes=False)
+    assert "struct s_1;" in out and out.index("struct s_1;") < out.index("struct s_1\n{"), out
+    assert "r3 = r0->f_4;" in out and "if (r3 == r0) return 0;" in out and "if (r3->f_8 != r0) return 3;" in out, out
+    assert "return touch((u32)r0) + (u32)r0->f_4;" in out, out
+    assert "r0->f_4 = r1;" in out and "r1->f_8 = r0;" in out and "r0->f_8 = 0u;" in out, out
+    assert "r1->f_4 = (volatile struct s_1 *)(r2 + 0u);" in out, out
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_pointer_fields_compile(tmp_path):
+    from conftest import gizmo_dir
+    from dread import build
+    from dread.target import Target
+    target = Target.load(gizmo_dir("m3"))
+    image = target.image()
+    p = plan_of(LINK)
+    tree = cparse.parse('#include "dread.h"\n' + LINK.replace("u32 link(", "u32 touch(u32);\nu32 link("))
+    for name in ("follow", "link"):
+        shapes.apply_types(tree, tree.function(name), p)
+    src = tmp_path / "linked"
+    src.mkdir()
+    (src / "linked.c").write_text(cparse.unparse(tree, notes=False))
+    assert build.compile_all(target, image, str(src), str(tmp_path / "obj"), quiet=True,
+                             flags=target.compiler.lifted_cflags)

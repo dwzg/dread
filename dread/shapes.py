@@ -736,10 +736,11 @@ def source_layouts(elf_path):
             for entry, params in source_params(elf_path).items()}
 
 
-def source_params(elf_path):
+def source_params(elf_path, pointers=None):
     """{function entry: {parameter index: ([the type's names, its typedefs first and the structure's
     tag last], {(offset, size): [the member names on the way to that leaf]})}} of the parameters that
-    are pointers to a structure, from the ELF's debug information (pyelftools)."""
+    are pointers to a structure, from the ELF's debug information (pyelftools). pointers, a dict:
+    gets {function entry: {parameter index: {offsets of the leaves that point to a structure}}}."""
     from elftools.elf.elffile import ELFFile
     out = {}
     complete = {}                           # struct name -> its definition (a file that only declares it:
@@ -764,7 +765,7 @@ def source_params(elf_path):
             return 4
         return None
 
-    def leaves(die, base, into, depth=0, path=()):
+    def leaves(die, base, into, depth=0, path=(), ptrs=None):
         die = strip(die)
         if die is None or depth > 6:
             return
@@ -776,7 +777,7 @@ def source_params(elf_path):
                 off = loc.value if loc is not None and isinstance(loc.value, int) else 0
                 mname = m.attributes.get("DW_AT_name")
                 leaves(m.get_DIE_from_attribute("DW_AT_type"), base + off, into, depth + 1,
-                       path + ((mname.value.decode(errors="replace"),) if mname else ()))
+                       path + ((mname.value.decode(errors="replace"),) if mname else ()), ptrs)
         elif die.tag == "DW_TAG_array_type":
             elem = die.get_DIE_from_attribute("DW_AT_type") if "DW_AT_type" in die.attributes else None
             esize = size_of(elem) if elem is not None else None
@@ -789,11 +790,15 @@ def source_params(elf_path):
                         count = sub.attributes["DW_AT_upper_bound"].value + 1
             if esize and count:
                 for k in range(min(count, 64)):
-                    leaves(elem, base + k * esize, into, depth + 1, path)
+                    leaves(elem, base + k * esize, into, depth + 1, path, ptrs)
         else:
             size = size_of(die)
             if size:
                 into.setdefault((base, size), list(path))
+                if ptrs is not None and die.tag == "DW_TAG_pointer_type" and "DW_AT_type" in die.attributes:
+                    pointee = strip(die.get_DIE_from_attribute("DW_AT_type"))
+                    if pointee is not None and pointee.tag in ("DW_TAG_structure_type", "DW_TAG_union_type"):
+                        ptrs.add(base)
 
     def type_names(die):
         """The names on the way from a parameter's pointer target to its structure."""
@@ -829,12 +834,40 @@ def source_params(elf_path):
                         names, target = type_names(t.get_DIE_from_attribute("DW_AT_type"))
                         target = strip(target)
                         if target is not None and target.tag in ("DW_TAG_structure_type", "DW_TAG_union_type"):
-                            into = {}
-                            leaves(target, 0, into)
+                            into, ptrs = {}, set()
+                            leaves(target, 0, into, ptrs=ptrs)
+                            if pointers is not None:
+                                pointers.setdefault(entry, {})[k] = ptrs
                             name = target.attributes.get("DW_AT_name")
                             out.setdefault(entry, {})[k] = (handle + names + [name.value.decode() if name else "?"],
                                                             into)
                     k += 1
+    return out
+
+
+def score_pointers(program, p, elf_path):
+    """The plan's pointer fields against the source (debug information), for the structures of
+    typed parameters whose source type points to a structure, each pair of our structure and the
+    source's once: {"fields": pointer fields, "right": of them pointers to a structure in the
+    source, "missed": the source's pointers to a structure at word fields the plan left integers}."""
+    ptrs = {}
+    src = source_params(elf_path, pointers=ptrs)
+    regs = list(program.target.abi.arg_regs)
+    seen, out = set(), {"fields": 0, "right": 0, "missed": 0}
+    for f, variables_ in sorted(p.typed.items()):
+        fn = program.by_name.get(f)
+        params = src.get(fn.entry, {}) if fn is not None else {}
+        for v, k in sorted(variables_.items()):
+            if v not in regs or regs.index(v) not in params or k not in p.structs:
+                continue
+            i = regs.index(v)
+            if (k, params[i][0][-1]) in seen:
+                continue
+            seen.add((k, params[i][0][-1]))
+            mine, theirs = p.pointers.get(k, {}), ptrs.get(fn.entry, {}).get(i, set())
+            out["fields"] += len(mine)
+            out["right"] += sum(1 for off in mine if off in theirs)
+            out["missed"] += sum(1 for off, t in p.structs[k] if t == "u32" and off in theirs and off not in mine)
     return out
 
 
@@ -1055,14 +1088,18 @@ def field_name(fields, rel):
     return (fields or {}).get(rel) or "f_%x" % rel
 
 
-def struct_text(name, rows, fields=None):
+def struct_text(name, rows, fields=None, pointers=None):
     """The C definition of a structure with these fields, gaps filled with bytes; fields: their names
-    by offset where they have one."""
+    by offset where they have one; pointers: {offset: the name of the structure the field points to},
+    such a field declared volatile struct NAME * (a word, as its u32)."""
     lines, pos = ["struct %s" % name, "{"], 0
     for rel, ctype in rows:
         if rel > pos:
             lines.append("    u8 pad_%x[%d];" % (pos, rel - pos))
-        lines.append("    %s %s;" % (ctype, field_name(fields, rel)))
+        if (pointers or {}).get(rel):
+            lines.append("    volatile struct %s *%s;" % (pointers[rel], field_name(fields, rel)))
+        else:
+            lines.append("    %s %s;" % (ctype, field_name(fields, rel)))
         pos = rel + SIZES[ctype]
     lines.append("};")
     return "\n".join(lines)
@@ -1078,11 +1115,16 @@ class Plan:
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
+        self.pointers = {}              # structure -> {offset: the structure the field points to}
 
     def to_json(self):
-        return {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
-                "functions": {f: {"digest": self.digests.get(f), "vars": dict(sorted(v.items()))}
-                              for f, v in sorted(self.typed.items())}}
+        out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
+               "functions": {f: {"digest": self.digests.get(f), "vars": dict(sorted(v.items()))}
+                             for f, v in sorted(self.typed.items())}}
+        if self.pointers:
+            out["pointers"] = {n: {str(off): t for off, t in sorted(ps.items())}
+                               for n, ps in sorted(self.pointers.items()) if ps}
+        return out
 
     @classmethod
     def from_json(cls, data):
@@ -1091,6 +1133,7 @@ class Plan:
         for f, entry in data.get("functions", {}).items():
             p.typed[f] = dict(entry.get("vars", {}))
             p.digests[f] = entry.get("digest")
+        p.pointers = {n: {int(off): t for off, t in ps.items()} for n, ps in data.get("pointers", {}).items()}
         return p
 
 
@@ -1141,11 +1184,34 @@ def plan(s, trees, digests=None, least=2):
     # read better as the raw accesses than as r0->f_0 and r0->f_1)
     eligible = [k for k in ks if ks[k].base is not None and len(layout(ks[k])) >= least and k in pointing
                 and any(SIZES[t] > 1 for _, t in layout(ks[k]))]
+    names_of = {}
     for n, k in enumerate(sorted(eligible, key=lambda k: min(pointing[k])), 1):
-        name = "s_%d" % n
+        name = names_of[k] = "s_%d" % n
         out.structs[name] = layout(ks[k])
         for fname, v in pointing[k]:
             out.typed.setdefault(fname, {})[v] = name
+    # A word field is a pointer to a structure when every object of the kind that points somewhere
+    # from it points to the base of one structure (a list item's next and previous, its container).
+    # (Also requiring a variable of that structure loaded from or stored into the field halved what
+    # was found and kept the share the source declares so, 48 %: the wrong ones come from kinds made
+    # one, a heap block and the queue allocated in it.)
+    for k, name in names_of.items():
+        rows, found = dict(out.structs[name]), {}
+        for o, root in s.kind_root.items():
+            if root != k:
+                continue
+            b = s.kind_base.get(o, 0)
+            for off, f in s.fields.get(o, {}).items():
+                t = s.find(f.content)
+                if rows.get(off - b) != "u32" or t not in s.points:
+                    continue
+                o2, off2 = s.loc(s.points[t])
+                k2 = s.kind_root.get(o2)
+                to = names_of.get(k2) if o2 not in frames and off2 == s.kind_base.get(o2, 0) else None
+                found.setdefault(off - b, set()).add(to)
+        ptrs = {rel: next(iter(ts)) for rel, ts in found.items() if len(ts) == 1 and None not in ts}
+        if ptrs:
+            out.pointers[name] = ptrs
     out.digests = {f: (digests or {}).get(f) for f in out.typed}
     return out
 
@@ -1205,18 +1271,23 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     if not typed:
         return []
     fields = {k: dict(p.structs[k]) for k in set(typed.values())}
-    ptype = {k: "volatile struct %s *" % cname(k) for k in fields}
+    ptrs = {k: dict(p.pointers.get(k, {})) for k in fields}
+    ptype = {k: "volatile struct %s *" % cname(k) for k in set(fields) | {t for ps in ptrs.values()
+                                                                         for t in ps.values()}}
 
     def member(e):
-        """(member expression, its type) for an access through a typed variable, or the raw access
-        through its integer value; None when e is no such access."""
+        """(member expression, its type, the access's type) for an access through a typed variable,
+        or the raw access through its integer value; None when e is no such access. A field that
+        points to a structure has the type ("ptr", that structure)."""
         acc = _access(e)
         if acc is None or not isinstance(acc[0], C.Name) or acc[0].id not in typed:
             return None
         base, k, ctype = acc
         rows = fields[typed[base.id]]
         if rows.get(k) is not None and SIZES[rows[k]] == SIZES.get(ctype):
-            return C.Member(C.Name(base.id), fname(typed[base.id], k), True), rows[k], ctype
+            target = ptrs[typed[base.id]].get(k)
+            return C.Member(C.Name(base.id), fname(typed[base.id], k), True), \
+                ("ptr", target) if target else rows[k], ctype
         address = C.Cast("u32", C.Name(base.id))
         if k:
             address = C.Binary("+" if k > 0 else "-", address, C.Num("%d" % abs(k)))
@@ -1224,6 +1295,16 @@ def apply_types(tree, fn, p, made_for=None, names=None):
 
     def value(e):
         return _rewrite(e, f)
+
+    def pointer(e):
+        """(structure, expression) of what points to a structure as it is: a typed variable, a field
+        that points to one; None for anything else."""
+        if isinstance(e, C.Name) and e.id in typed:
+            return typed[e.id], C.Name(e.id)
+        m = member(e)
+        if m is not None and isinstance(m[1], tuple):
+            return m[1][1], m[0]
+        return None
 
     own = {i: typed[n] for i, (_, n) in enumerate(fn.params) if n in typed}     # (its own typed parameters)
 
@@ -1243,9 +1324,17 @@ def apply_types(tree, fn, p, made_for=None, names=None):
                 v = e.value
                 if isinstance(v, C.Name) and typed.get(v.id) == k:
                     return C.Assign("=", C.Name(e.target.id), C.Name(v.id))
+                mv = member(v)              # (a field that points to its structure: no cast)
+                if mv is not None and mv[1] == ("ptr", k):
+                    return C.Assign("=", C.Name(e.target.id), mv[0])
                 return C.Assign("=", C.Name(e.target.id), C.Cast(ptype[k], value(v)))
             m = member(e.target)
             if m is not None:
+                if isinstance(m[1], tuple) and e.op == "=":     # (a field that points to a structure)
+                    v, t = e.value, m[1][1]
+                    if (isinstance(v, C.Name) and typed.get(v.id) == t) or (isinstance(v, C.Num) and v.value == 0):
+                        return C.Assign("=", m[0], C.Name(v.id) if isinstance(v, C.Name) else v)
+                    return C.Assign("=", m[0], C.Cast(ptype[t], value(v)))
                 return C.Assign(e.op, m[0], value(e.value))
             return None
         m = member(e)
@@ -1253,10 +1342,9 @@ def apply_types(tree, fn, p, made_for=None, names=None):
             expr, ftype, ctype = m
             return expr if ftype == ctype else C.Cast(ctype, expr)
         if isinstance(e, C.Binary) and e.op in ("==", "!="):
-            a, b = e.l, e.r
-            if isinstance(a, C.Name) and a.id in typed and (
-                    (isinstance(b, C.Num) and b.value == 0) or (isinstance(b, C.Name) and typed.get(b.id) == typed[a.id])):
-                return C.Binary(e.op, C.Name(a.id), C.Name(b.id) if isinstance(b, C.Name) else b)
+            pa, pb = pointer(e.l), pointer(e.r)
+            if pa is not None and (pb is not None and pb[0] == pa[0] or isinstance(e.r, C.Num) and e.r.value == 0):
+                return C.Binary(e.op, pa[1], pb[1] if pb is not None else e.r)
             return None
         if isinstance(e, C.Name) and e.id in typed:
             return C.Cast("u32", C.Name(e.id))
@@ -1291,7 +1379,11 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     at = next((i + 1 for i, item in enumerate(tree.items)       # (after the #include: before the file's
                if isinstance(item, C.Raw) and item.text.startswith("#include")), tree.items.index(fn))    # declarations)
     for k in sorted(fields, reverse=True):
-        tree.items.insert(at, C.Raw(struct_text(cname(k), p.structs[k], names.get(k, (k, {}))[1])))
+        tree.items.insert(at, C.Raw(struct_text(cname(k), p.structs[k], names.get(k, (k, {}))[1],
+                                                {off: cname(t) for off, t in ptrs[k].items()})))
+    referred = sorted({t for ps in ptrs.values() for t in ps.values()})
+    if referred:                            # (a field may point to a structure defined after it, or not here)
+        tree.items.insert(at, C.Raw("\n".join("struct %s;" % cname(t) for t in referred)))
     from dread.build import NULL_CHECKS     # (a pointer it dereferences may be 0 and still be compared with 0:
     tree.items.insert(0, C.Raw(NULL_CHECKS))    # dread.build compiles it so)
     return sorted(fields)
