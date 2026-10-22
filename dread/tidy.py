@@ -561,14 +561,24 @@ def frame_offset(e):
 SLOT_PREFIXES = ("s", "sl", "slot")
 
 
+def _types_used(fn):
+    """The dialect's integer types the function's C names (casts, declarations): a slot named s16 would
+    hide the type s16 from them, and its signed reads become casts to such a type."""
+    import re
+    return set(re.findall(r"\b[su](?:8|16|32|64)\b", C.unparse(fn, notes=False)))
+
+
 def frame_locals(fn):
     """The frame's words as variables of their own: *(volatile u32 *)(sp0 - 36) becomes s36, where
     every slot is accessed with one type and no two overlap. When frame addresses leave the function
     (sp0 - 64 passed to a call, a local's address), only the slots wholly below the lowest of them
     (outgoing stack arguments, locals nobody else is given) become variables; from there up the frame
     stays as it is, since what the address is handed to may reach anything above it. Nothing changes
-    when an address that leaves is not a constant offset below sp0. Undone when a slot may be read
-    before it is written (what earlier frames left there: the lift check compares such reads apart)."""
+    when an address that leaves is not a constant offset below sp0. A slot accessed with one size but
+    both signs (strb, then ldrsb) becomes a variable of the unsigned type, its signed reads cast:
+    (s8)s9. A slot that may be read before it is written (what earlier frames left there, a word a
+    call through a pointer is handed: the lift check compares such reads apart) stays as it is, the
+    others become variables all the same."""
     import copy
     accesses, escapes, escaped = {}, [False], set()
 
@@ -620,31 +630,44 @@ def frame_locals(fn):
                     if all(t in sizes for t in types) and off + max(sizes[t] for t in types) <= low}
         if not accesses:
             return False
-    spans = []
+    spans, vtypes = [], {}
     for off, types in accesses.items():
-        if len(types) != 1 or next(iter(types)) not in sizes:
+        if not all(t in sizes for t in types) or len({sizes[t] for t in types}) != 1:
             return False
-        spans.append((off, off + sizes[next(iter(types))]))
+        size = sizes[next(iter(types))]     # (one size, both signs: the unsigned type, signed reads cast)
+        vtypes[off] = next(iter(types)) if len(types) == 1 else "u%d" % (8 * size)
+        spans.append((off, off + size))
     spans.sort()
     if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
         return False
     before = copy.deepcopy(fn.body.body)
-    taken = all_names(fn)
+    taken = all_names(fn) | _types_used(fn)
     for prefix in SLOT_PREFIXES:            # (the first under which no slot's name is taken)
-        names = {off: ("%s%d" % (prefix, -off) if off < 0 else "%s_%d" % (prefix, off)) for off in accesses}
-        if not set(names.values()) & taken:
+        slot_names = {off: ("%s%d" % (prefix, -off) if off < 0 else "%s_%d" % (prefix, off)) for off in accesses}
+        if not set(slot_names.values()) & taken:
             break
     else:
         return False
 
+    def slot_of(e):
+        if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and frame_address(e.e.e):
+            off = frame_offset(e.e.e)
+            return off if off in names else None
+        return None
+
+    def access_type(e):
+        return e.e.type.replace("volatile", " ").replace("*", " ").split()[0]
+
     def rewrite(e):
         if e is None:
             return None
-        if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and frame_address(e.e.e) and \
-                frame_offset(e.e.e) in names:
-            return C.Name(names[frame_offset(e.e.e)])
-        if isinstance(e, C.Assign):
-            return C.Assign(e.op, rewrite(e.target), rewrite(e.value))
+        off = slot_of(e)
+        if off is not None:                 # (read with the other sign: the variable cast to it)
+            t = access_type(e)
+            return C.Name(names[off]) if t == vtypes[off] else C.Cast(t, C.Name(names[off]))
+        if isinstance(e, C.Assign):         # (a store: the same bits whatever its sign)
+            off = slot_of(e.target)
+            return C.Assign(e.op, C.Name(names[off]) if off is not None else rewrite(e.target), rewrite(e.value))
         if isinstance(e, C.Unary):
             return C.Unary(e.op, rewrite(e.e))
         if isinstance(e, C.Cast):
@@ -675,22 +698,44 @@ def frame_locals(fn):
                 o.e = rewrite(o.e)
         for inner in _inner(st):
             rewrite_stmt(inner)
+
+    # Slots that stay raw: one changed in place with the other sign (x++, x >>= 1: the value or the
+    # bits would differ), and, found below, one that may be read before it is written (what earlier
+    # frames left there: the lift check compares such reads apart).
+    raw = set()
     for st in fn.body.body:
-        if not isinstance(st, C.Decl):
-            rewrite_stmt(st)
-    decls = [C.Decl(next(iter(accesses[off])), [C.Declarator(names[off])]) for off in sorted(accesses)]
-    last = max((i for i, x in enumerate(fn.body.body) if isinstance(x, C.Decl)), default=-1)
-    fn.body.body[last + 1:last + 1] = decls
-    g = Graph(fn)                           # (a slot read where nothing stored it yet: undo)
-    reach = g.reaching()
-    slots = set(names.values())
-    for n in g.nodes:
-        for v in n.reads & slots:
-            if -1 in (reach[n.index].get(v) or ()) or any(isinstance(g.nodes[d].stmt, C.Decl)
-                                                          for d in (reach[n.index].get(v) or ()) if d >= 0):
-                fn.body.body[:] = before
-                return False
-    return True
+        for e in _stmt_all_exprs(st) if not isinstance(st, C.Decl) else ():
+            for x in walk_expr(e):
+                inner = x.e if isinstance(x, C.Post) or (isinstance(x, C.Unary) and x.op in ("++", "--")) else \
+                    x.target if isinstance(x, C.Assign) and x.op != "=" else None
+                if inner is not None and isinstance(inner, C.Unary) and inner.op == "*" and \
+                        isinstance(inner.e, C.Cast) and frame_address(inner.e.e) and \
+                        frame_offset(inner.e.e) in vtypes and access_type(inner) != vtypes[frame_offset(inner.e.e)]:
+                    raw.add(frame_offset(inner.e.e))
+    while True:
+        names = {off: n for off, n in slot_names.items() if off not in raw}
+        if not names:
+            fn.body.body[:] = before
+            return False
+        for st in fn.body.body:
+            if not isinstance(st, C.Decl):
+                rewrite_stmt(st)
+        decls = [C.Decl(vtypes[off], [C.Declarator(names[off])]) for off in sorted(names)]
+        last = max((i for i, x in enumerate(fn.body.body) if isinstance(x, C.Decl)), default=-1)
+        fn.body.body[last + 1:last + 1] = decls
+        g = Graph(fn)                       # (a slot read where nothing stored it yet: it stays raw)
+        reach = g.reaching()
+        by_name = {n: off for off, n in names.items()}
+        unset = set()
+        for n in g.nodes:
+            for v in n.reads & set(by_name):
+                if -1 in (reach[n.index].get(v) or ()) or any(isinstance(g.nodes[d].stmt, C.Decl)
+                                                              for d in (reach[n.index].get(v) or ()) if d >= 0):
+                    unset.add(by_name[v])
+        if not unset:
+            return True
+        raw |= unset
+        fn.body.body[:] = copy.deepcopy(before)
 
 
 def _effects_outside(e, name):

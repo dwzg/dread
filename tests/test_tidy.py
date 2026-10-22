@@ -236,6 +236,45 @@ def test_a_frame_pointer_read_on_every_path_is_written_into_its_uses():
         assert ("r4 + 8" in out) == kept, out
 
 
+def test_a_slot_stored_as_a_byte_and_read_signed_is_a_variable_with_a_cast():
+    """strb, then ldrsb of the same slot: one size, both signs. The slot becomes a variable of the
+    unsigned type and the signed read a cast, (s8)s12, which sign-extends as ldrsb did."""
+    text = FRAME.replace("    *(volatile u32 *)(sp0 - 8) = r1;  /* 0: str r1, [sp, #8] */\n",
+                         "    *(volatile u8 *)(sp0 - 12) = (u8)r1;  /* 0: strb r1, [sp, #4] */\n")
+    text = text.replace("    r1 = *(volatile u32 *)(sp0 - 8);  /* 6: ldr r1, [sp, #8] */\n",
+                        "    r1 = (u32)*(volatile s8 *)(sp0 - 12);  /* 6: ldrsb r1, [sp, #4] */\n")
+    fn = cparse.parse(text.replace(" (void)sp0;", "")).function("h")
+    assert tidy.frame_locals(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "u8 s12;" in out and "(s8)s12" in out and "sp0 - 12" not in out, out
+    inplace = text.replace("    r0 = r0 + r1;  /* 8: adds r0, r1 */\n",
+                           "    (*(volatile s8 *)(sp0 - 12))++;  /* 8: (made up) */\n    r0 = r0 + r1;\n")
+    fn = cparse.parse(inplace.replace(" (void)sp0;", "")).function("h")
+    assert not tidy.frame_locals(fn)                       # (changed in place with the other sign: raw)
+
+
+def test_a_slot_read_before_it_is_written_stays_and_the_others_become_variables():
+    """A call through a pointer is handed a frame word nothing stored (sp0 - 16): that slot stays as
+    it is, what earlier frames left there; the slot the function stores (sp0 - 8) becomes a variable."""
+    text = FRAME.replace("r0 = g(r0, r1, r2, r3);", "r0 = g(r0, r1, r2, *(volatile u32 *)(sp0 - 16));")
+    fn = cparse.parse(text.replace(" (void)sp0;", "")).function("h")
+    assert tidy.frame_locals(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "*(volatile u32 *)(sp0 - 16)" in out and "sp0 - 8" not in out and "u32 s8;" in out, out
+    assert "s16" not in out, out                           # (nor the s16 the raw slot would have been)
+
+
+def test_a_slot_does_not_take_the_name_of_a_type_the_function_uses():
+    """The slot at sp0 - 8 would be s8, which is also a type; where the function uses that type (a
+    signed byte load elsewhere), its slots take the next prefix."""
+    text = FRAME.replace("    r0 = r0 + r1;  /* 8: adds r0, r1 */\n",
+                         "    r0 = r0 + r1 + (u32)*(volatile s8 *)(r0 + 3);  /* 8: (made up) */\n")
+    fn = cparse.parse(text.replace(" (void)sp0;", "")).function("h")
+    assert tidy.frame_locals(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "u32 sl8;" in out and "(volatile s8 *)" in out, out
+
+
 @needs_z3
 def test_a_carry_over_a_load_is_a_comparison_that_still_loads_once():
     tree = cparse.parse(SNIPPET.replace(

@@ -150,21 +150,26 @@ its sources.
   array (a wrapped function's is the real stack: printf, sprintf); else the function stays as it was
   (GCC -Os vPolledQueueConsumer and Producer: a push's word below the region reaches into it). One
   object for the whole region: split at each address that leaves it would read better but trust each
-  callee to stay inside its piece. Volatile, as the raw accesses were (docs/decisions.md). Regions:
-  FreeRTOS GCC -Os 76 functions, clang -O2 75, RISC-V GCC -Os 44, GCC -O0 264 (every frame: its frame
-  pointer leaves, r7 = (u32)&stack56, and the accesses through r7 stay as they were), gizmo 5 on each
-  build. Raw frame accesses left in readable C (`\(sp0 - \d+` in the views of the lifted functions):
-  FreeRTOS GCC -Os 633 -> 46 (the 642 above was an earlier state of the same copy), clang -O2 502 -> 23,
-  RISC-V GCC -Os 510 -> 93, GCC -O0 35 -> 27; the gate accepts the same functions as before on the
-  eight builds. What is left: the wrapped printf and sprintf, and frames no address leaves that
-  frame_locals declines: a call through a pointer hands the frame's words on as stack arguments, slots
-  nothing wrote (newlib's __sflush_r and _fwalk_sglue, prvReloadTimer), and on RISC-V a slot's name is
-  taken by a saved register (sp0 - 4 is s4, sp0 - 8 s8: prvSemaphoreTest,
-  prvAddCurrentTaskToDelayedList, 7 functions). Open: frame addresses that the lifter's ldrd, strd,
-  ldm and stm blocks keep in a variable (a_2 = sp0 - 40; *(volatile u32 *)a_2 = ...) count as leaving
-  (78 such in 35 functions on GCC -Os), and so does GCC -O0's frame pointer: propagated into their
-  accesses in dread.tidy, before frame_locals, most of those frames would be plain variables (it
-  changes the C the names and types tables were made for). MSP430 (paused):
+  callee to stay inside its piece. Volatile, as the raw accesses were (docs/decisions.md). Then the
+  frames that still stayed raw (2026-10-22): a frame base computed once (GCC -O0's frame pointer,
+  r7 = (sp0 - 16) + 0x0u; the ldrd, strd, ldm and stm blocks' a_2 = sp0 - 40) is written into every
+  use it alone reaches, on any path (dread.tidy's address pass: sp0 is never written), so that its
+  accesses are frame slots; a slot stored as a byte and read signed (strb, then ldrsb) is a variable
+  of the unsigned type with casts ((s8)s9); a slot that may be read before it is written (a word
+  nothing stored, handed to a call through a pointer) stays as it is instead of the whole frame; and
+  a slot takes neither a name the function has (RISC-V's saved registers s4 and s8) nor a type it
+  uses (s8, s16: such C would not compile; no function of the eight builds had one), but the next
+  prefix (sl8). Regions as structures: FreeRTOS GCC -Os 55 functions, clang -O2 53, RISC-V GCC -Os 43,
+  GCC -O0 56 (264 while the frame pointer hid the accesses: all but two without a field). Raw frame
+  accesses left in readable C (`\(sp0 [-+] \d+` in the views of the lifted functions), main before
+  -> after: GCC -Os 334 -> 40, clang -O2 282 -> 17, RISC-V GCC -Os 510 -> 41, GCC -O0 23 (35 counted
+  before, the frame pointer's accesses not among them); the gate accepts the same functions as before
+  on the eight builds. What is left: the wrapped printf and sprintf (the real stack), slots nothing
+  wrote that a call through a pointer is handed (newlib's __sflush_r and _fwalk_sglue, prvReloadTimer:
+  as it must be), and regions with two types at one offset or an access below reaching in
+  (vPolledQueueConsumer and Producer store a word and read its upper half; RISC-V prvReceivingTask),
+  which a union would express. A region nothing accesses but through its address (9 on GCC -Os, 11 on
+  clang -O2) is a structure of padding; an array would say the same more plainly. MSP430 (paused):
   ulTaskGenericNotifyTake's readable C makes every case stack-dependent (refused, so it stays
   lifted), not traced; its critical sections are asm on the real stack beside the lifted frame.
 - [ ] **Types.** The structures behind pointers, as C structures the readable C uses (p->f_58). Done
