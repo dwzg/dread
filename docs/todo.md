@@ -148,7 +148,7 @@ its sources.
   and vAssertCalled, which hands its line number on to printf, trimmed to one argument printed
   garbage on clang -O2 (readable.variadic_reach; one level: nearly every FreeRTOS function calls
   vAssertCalled with constants of its own). The gate as before on the builds tried.
-- [ ] **Variables.** Frame words as locals (regflow's frames: a word a function only stores and loads
+- [x] **Variables.** Frame words as locals (regflow's frames: a word a function only stores and loads
   itself, its address given to nobody), a register split into the variables it holds (each web of
   definitions and uses a variable of its own). Done when the gate accepts as many as before.
   So far (2026-10-21, dread.tidy frame_locals): the frame's words as variables (s36 for sp0 - 36)
@@ -209,6 +209,14 @@ its sources.
   clang -O2) is a structure of padding; an array would say the same more plainly. MSP430 (paused):
   ulTaskGenericNotifyTake's readable C makes every case stack-dependent (refused, so it stays
   lifted), not traced; its critical sections are asm on the real stack beside the lifted frame.
+  Done 2026-10-22: the gate has accepted as many functions as before on every build since the first
+  version, and the frames now read as variables and structures on all four FreeRTOS builds; what is
+  left is the next item.
+- [ ] **Frames: the rest.** A region with two types at one offset or an access below reaching in
+  (vPolledQueueConsumer and Producer store a word and read its upper half; RISC-V prvReceivingTask)
+  as a union; a region nothing accesses but through its address (9 on GCC -Os, 11 on clang -O2: a
+  structure of padding) as an array of bytes; the wrapped printf and sprintf, whose frame is the real
+  stack, stay as they are.
 - [ ] **Types.** The structures behind pointers, as C structures the readable C uses (p->f_58). Done
   when the gate accepts as many functions as before with them, and their fields against the
   source's (debug information) are measured on the bench.
