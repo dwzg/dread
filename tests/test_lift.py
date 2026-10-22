@@ -1318,6 +1318,230 @@ def test_risc_v_wraps_a_va_list_walk_and_stack_arguments(tmp_path):
     assert got[0] == got[1] == (45, (1 - 2 + 3 - 4 + 5 - 6 + 7 - 8 + 27 - 50) & 0xFFFFFFFF), got
 
 
+VECTORS_RV_S = """
+    .option norelax
+    .option norvc
+    .text
+    .global vectors, other, stop, deadtail, padded, use
+    .balign 64
+    .type vectors, @function
+vectors:                        # a vectored trap table (mtvec + 4 * cause) that the table lists as one function
+    j       other
+    j       other
+    j       other
+    j       other
+    j       other
+    j       other
+    j       other
+    j       use                 # the timer's entry (cause 7)
+    .balign 64, 0
+    .size vectors, . - vectors
+    .type other, @function
+other:  addi    a0, a0, 3
+    ret
+    .size other, . - other
+    .type stop, @function
+stop:   j       stop            # never returns
+    .size stop, . - stop
+    .type deadtail, @function
+deadtail:                       # what follows a call that never returns: unreached, entered by nothing
+    addi    sp, sp, -16
+    sw      ra, 12(sp)
+    call    stop
+    lw      ra, 12(sp)
+    addi    sp, sp, 16
+    ret
+    .size deadtail, . - deadtail
+    .type padded, @function
+padded: addi    a0, a0, 1       # padding behind the return
+    ret
+    .balign 16, 0
+    .size padded, . - padded
+    .type use, @function
+use:    addi    sp, sp, -16
+    sw      ra, 12(sp)
+    call    padded
+    call    other
+    lw      ra, 12(sp)
+    addi    sp, sp, 16
+    ret
+    .size use, . - use
+"""
+
+
+@needs_riscv_gcc
+def test_code_that_only_the_core_enters_is_not_freed(tmp_path):
+    """A vectored trap table that the function table lists as one function (an untyped label in an
+    object without mapping symbols becomes one: GCC 10's binutils, LLVM 14): its first entry is a
+    jump, a tail call, and the others are code no path from the entry reaches and no branch goes to;
+    the core enters them (mtvec + 4 * cause). Lifted, the C replaced the first entry, the overlay freed
+    the rest, and FreeRTOS's RISC-V build with GCC 10 put another function's C there: the timer
+    interrupt ran into the middle of it (an assertion, then a read of unmapped memory). The lift check
+    refuses such a function now (it lifts: the translation is not wrong, the space is not free). Code
+    no path reaches that follows a call that never returns, and padding behind a jump, are entered by
+    nothing: those functions are not refused."""
+    from dread import elfimport
+    (tmp_path / "t.s").write_text(VECTORS_RV_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-c", "-o", obj, str(tmp_path / "t.s")],
+                   check=True)
+    subprocess.run([RISCV_CROSS + "ld", "-m", "elf32lriscv", "-Ttext=0x20000000", "-e", "use", "-o", elf, obj],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(riscv_toml(RV_TARGET))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    lifter = lift.make_lifter(p, regflow.analyse(p))
+    why = lifter.entered_unseen(p.by_name["vectors"], lifter.lift(p.by_name["vectors"]))
+    assert why and "0x20000004 (j " in why and "no branch goes to" in why, why
+    for name in ("deadtail", "padded", "use", "other"):
+        got = lifter.lift(p.by_name[name])
+        assert name != "deadtail" or got.unreached, got.unreached       # (the code behind the call)
+        assert lifter.entered_unseen(p.by_name[name], got) is None
+    lines = []
+    assert lift.check(t, t.image(), ["vectors"], out=lines.append, jobs=1, system=False) == []
+    assert any(line.startswith("refused  vectors") and "no branch goes to" in line for line in lines), lines
+
+
+def test_culprits_finds_what_differs_only_together():
+    """lift.culprits, on differences made by rules: one name; a pair that differs only together and
+    lies in both halves (a search by halves found neither half differing and gave up); a sum past a
+    threshold (frames that grew adding up on a stack), where leaving out any one of the result makes
+    it agree. Each in about len(result) * log2(len(names)) calls."""
+    names = ["f%02d" % i for i in range(40)]
+    calls = []
+
+    def by(rule):
+        def differs(subset):
+            calls.append(tuple(sorted(subset)))
+            return rule(set(subset))
+        return differs
+    assert lift.culprits(names, by(lambda s: "f07" in s)) == ["f07"]
+    assert len(calls) <= 1 + 7, calls
+    calls.clear()
+    assert sorted(lift.culprits(names, by(lambda s: {"f03", "f31"} <= s))) == ["f03", "f31"]
+    assert len(calls) <= 2 * (1 + 7), calls
+    weight = {n: 30 if n in ("f10", "f20") else 1 for n in names}
+
+    def heavy(s):
+        return sum(weight[n] for n in s) > 50
+    got = lift.culprits(names, by(heavy))
+    assert heavy(set(got)) and not any(heavy(set(got) - {n}) for n in got), got
+
+
+STACK_RV_C = NOIPA_DEF + r"""
+#define THR (*(volatile unsigned char *)0x10000000)
+#define LSR (*(volatile unsigned char *)0x10000005)
+extern unsigned stack_lo[], stack_hi[];
+NOIPA void put(int c) { while (!(LSR & 0x20)) ; THR = c; }
+NOIPA int leaf(int x) { return x * 3 + 1; }
+NOIPA int mid(int x) { int a = leaf(x); int b = leaf(a + x); return a * b + x; }
+NOIPA int top(int x) { int a = mid(x); return a + mid(a + x) + x; }
+__attribute__((noreturn)) void cmain(void)
+{
+    unsigned *p = stack_lo, *sp;
+    __asm volatile ("mv %0, sp" : "=r"(sp));
+    while (p < sp)                          /* the stack below this frame, marked */
+        *p++ = 0xa5a5a5a5u;
+    put(top(5) & 0x7f);
+    for (p = stack_lo; *p == 0xa5a5a5a5u; p++)
+        ;
+    unsigned depth = (unsigned)stack_hi - (unsigned)p;      /* how deep the stack went */
+    for (int k = 12; k >= 0; k -= 4)
+        put("0123456789abcdef"[(depth >> k) & 15]);
+    put('\n');
+    for (;;)
+        ;
+}
+__asm__(".section .text.start\n.global _start\n.type _start, @function\n_start:\n la sp, stack_hi\n j cmain\n"
+        ".size _start, . - _start\n");
+"""
+
+
+STACK_RV_LD = """SECTIONS { . = 0x80000000; .text : { *(.text.start) *(.text*) }
+ .rodata : { *(.rodata*) *(.srodata*) }
+ . = 0x80080000; .bss : { *(.sbss*) *(.bss*) }
+ stack_lo = 0x8008f000; stack_hi = 0x80090000; }
+"""
+
+STACK_RV_TOML = '''[target]
+name = "depth"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "rom", base = 0x80000000, size = 0x10000, kind = "rom"},
+           {name = "ram", base = 0x80080000, size = 0x10000},
+           {name = "scratch", base = 0x80100000, size = 0x20000}]
+io = [[0x10000000, 0x10001000]]
+stack = {top = 0x8008e000, size = 0x1000}
+sentinel = 0x7fff0000
+scratch = {base = 0x80100000, size = 0x20000}
+[image.main]
+original = "original/t.bin"
+base = 0x80000000
+limit = 0x80010000
+entry = "_start"
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-Os"]
+[models.uart]
+kind = "uart"
+base = 0x10000000
+data = 0x0
+status = 0x5
+tx_ready = 0x20
+rx_ready = 0x1
+size = 0x8
+[scenarios.depth]
+until = {uart = "\\n"}
+limit = 200_000
+'''
+
+
+def stack_depth_target(folder):
+    """STACK_RV_C built with the RISC-V GCC here into folder, its tables imported: the target."""
+    from dread import elfimport
+    folder = str(folder)
+    with open(os.path.join(folder, "t.c"), "w") as f:
+        f.write(STACK_RV_C)
+    with open(os.path.join(folder, "t.ld"), "w") as f:
+        f.write(STACK_RV_LD)
+    elf = os.path.join(folder, "t.elf")
+    subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-Os", "-nostdlib", "-ffreestanding",
+                    "-ffunction-sections", "-T", os.path.join(folder, "t.ld"), "-e", "_start", "-o", elf,
+                    os.path.join(folder, "t.c")], check=True)
+    os.makedirs(os.path.join(folder, "original"), exist_ok=True)
+    with open(os.path.join(folder, "dread.toml"), "w") as f:
+        f.write(riscv_toml(STACK_RV_TOML))
+    assert elfimport.main(["--target", folder, "--payload", os.path.join(folder, "original", "t.bin"),
+                           "--write-startup", elf]) == 0
+    return Target.load(folder)
+
+
+@needs_riscv_gcc
+def test_functions_whose_c_makes_the_whole_image_differ_are_dropped(tmp_path):
+    """The program prints how deep its stack went. top and mid have frames, and their C's frames are
+    larger (the C compiler saves its own registers beside the original's frame), so with either built
+    from lifted C the depth printed differs, while each one's cases agree (they never see the depth):
+    a task's stack too small for the C's frames, which only the whole image shows. The lift check
+    finds them by halving and keeps them out; leaf, whose C has no frame either, stays, and the whole
+    image agrees. Before, the lift check kept all three and reported the difference."""
+    t = stack_depth_target(tmp_path)
+    lines = []
+    assert lift.check(t, t.image(), ["leaf", "mid", "top"], out=lines.append, jobs=2) == ["leaf"], "\n".join(lines)
+    text = "\n".join(lines)
+    assert "dropped  mid " in text and "dropped  top " in text and "the whole image differs with its lifted C" in text
+    assert "the whole image agrees once 2 were dropped for it" in lines[-1], lines[-1]
+    from dread.gui import read_tsv
+    verdicts = {r["function"]: r for r in read_tsv(str(tmp_path / "build" / "lift-check" / "main" / "verdicts.tsv"))}
+    assert verdicts["top"]["verdict"] == verdicts["mid"]["verdict"] == "dropped"
+    assert verdicts["leaf"]["verdict"] == "accepted"
+    assert build.read_names(t.image().table("lifted")) == ["leaf"]
+
+
 DECIDER_SOLVE_S = """
     .syntax unified
     .cpu cortex-m3

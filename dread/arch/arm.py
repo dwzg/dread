@@ -156,6 +156,10 @@ class Arm:
     syscall_numbers = (2,)      # Unicorn's exception number of svc (dread.emu runs it as a logged no-op)
     link_reg = "lr"         # where a call leaves the return address
     veneer_reg = "r12"      # the register a veneer or a call through a register may go through (ip)
+    # Instructions that fill a gap and do nothing besides zero bytes (dread.lift's entered_unseen):
+    # Thumb's nop, nop.w and mov r8, r8; ARM's mov r0, r0 and nop
+    padding = {"t32": (b"\x00\xbf", b"\xaf\xf3\x00\x80", b"\xc0\x46"),
+               "a32": (b"\x00\x00\xa0\xe1", b"\x00\xf0\x20\xe3")}
 
     def abi_results(self, name):
         """The registers of a run-time helper's result by Arm's RTABI (RTABI_RESULTS), whatever the

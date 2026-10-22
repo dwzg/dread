@@ -1,6 +1,7 @@
 # Functions built from lifted C: their cases (for one that never returns: its loop cases,
 # or every scenario of the system run) agree with the original and run every instruction it
-# can reach. Written by dread lift --check; not edited by hand.
+# can reach, and the image with all of them agrees. Written by dread lift --check; not edited
+# by hand.
 __clzdi2
 __mspabi_divli
 __mspabi_divul

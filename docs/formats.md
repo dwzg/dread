@@ -86,7 +86,9 @@ original bytes: one stored address per line. Maintained by `dread asm --verify`.
 
 The functions `dread recon` builds from lifted C (`dread lift`): one name per line, `#` comments.
 Written by `dread lift --check`, which lists a function only when its generated cases (and the
-kept and written ones) agree with the original and run every instruction of it; not edited by hand.
+kept and written ones) agree with the original and run every instruction of it, and when the target's
+scenarios agree on the image with all of the table built (since 2026-10-22; a table written before
+may hold functions whose C makes the whole image differ); not edited by hand.
 The lifted C itself is made again at every build (`BUILD/recon/IMAGE/lifted/`) and not kept; a name
 that the src directory defines is left to src. `BUILD/recon/IMAGE/lifted.txt` says which functions
 the last build lifted, and `dread test` gives each of them its generated cases.
@@ -279,9 +281,12 @@ order, chosen by the address; replaced by `--against`, nothing reads it.
 
 Written by `dread lift --check`: one line per function it looked at, `function`, `verdict`
 (`accepted`, `refused`: the lifter cannot translate it, `dropped`: lifted, but the cases or the
-system run disagree or do not run all of it, or the overlay cannot place it; `by hand`: src defines
-it), `reason` (the lifter's or the test run's words), `missed` (for a dropped function, the
-instructions no case ran). `dread gui` reads it; `dread rename` renames in it.
+system run disagree or do not run all of it, the overlay cannot place it, or the whole image differs
+with it, alone or together with the functions its reason names; `by hand`: src defines it), `reason`
+(the lifter's or the test run's words), `missed` (for a dropped function, the instructions no case
+ran). `dread gui` reads it; `dread rename` renames in it. Beside it `whole.txt`: the whole image's
+outcome (`agrees` or its first difference) on the first line, then one line per set of functions
+dropped for it (`dropped for it: A, B; with them alone: ...`, since 2026-10-22).
 
 ### `BUILD/relations/IMAGE/NAME.json`
 

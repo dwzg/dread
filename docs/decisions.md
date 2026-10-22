@@ -9,6 +9,90 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## A whole image that differs with lifted C: the lift check keeps out a smallest set that makes it (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The lift check's last stage runs every scenario on the image with all accepted
+  functions built from lifted C (whole_image). A difference there was reported (whole.txt) and every
+  function stayed in the lifted table. FreeRTOS's RISC-V builds with clang -Os and clang 14 differ
+  there: SetB, EventGroupsDemo's test master (configMINIMAL_STACK_SIZE, 480 bytes), overflows
+  ("Stack overflow in SetB"), because the C's frames of prvTestMasterTask and xEventGroupSetBits are
+  larger than the original's: clang -Os 176 -> 256 and 32 -> 64 bytes, 112 more on SetB's deepest
+  path (prvTestMasterTask, xEventGroupSetBits, xTaskResumeAll, the trap's context save), which had
+  100 bytes to spare in the original; clang 14 128 -> 224 and 32 -> 80, 144 more of 148 to spare (the
+  overflow check reads the stack's last 16 bytes). Each function's cases agree: they never see a
+  task's stack. Either function alone leaves the image agreeing. The growth is general: 172 of the
+  242 lifted functions of the clang -Os build have a larger frame in C (median 32 bytes), and on
+  clang 14 131 of the 171 that grew grew by exactly the original's register saves rounded up to 16
+  bytes (4,528 of their 4,784 bytes): the lifted C keeps the original's frame as an array, its save
+  slots included, and the C compiler saves the registers it uses beside it. What should the check do?
+- **Options.** (a) Report only, as before: the lifted table then holds functions whose C makes the
+  firmware fail. (b) Find the functions by halves and keep them assembly, as dread readable did for
+  readable C: two that differ only together and lie in different halves leave neither half
+  differing, and that search returned both halves. On the lift check's order of these builds the two
+  split at the second level: 121 (clang -Os) and 122 (clang 14) functions would have gone. (c) Search
+  for a smallest set that still differs (a binary search for the shortest prefix that makes the
+  difference with what was found, repeated until what was found differs alone: about |set| x log2(n)
+  whole-image runs), drop it, run again until the whole image agrees. (d) Compile lifted C so its
+  frames do not grow: leave the original's save slots out of the frame array (the C compiler saves the
+  registers itself), so that the C's frame is the original's locals plus the compiler's saves and
+  spills.
+- **Choice: (c) now, (d) as an item** (Compiler diversity, docs/todo.md). (c) is a check: whatever
+  makes the whole image differ, frames or anything else C does only together with other C, is found
+  and kept out, with the difference in the verdicts; a run of the search costs a build and two system
+  runs (3 s on FreeRTOS RISC-V; the M3 builds that run to the limit take about 100 s a pair), and it
+  runs only where the whole image differs. It drops the whole set it finds: one of the two would do
+  here, but which one cannot be told from outside, and the one kept would leave the smaller margin.
+  dread readable --check uses the same search (lift.culprits) instead of its halves. (d) goes to the
+  cause, but changes the frame model of every lifter (ARM, RISC-V, MSP430) and what readable C's
+  frame stages read; it would not make (c) unnecessary (spills and alignment still grow frames).
+- **Undo.** dread/lift.py: check()'s loop behind whole_image (history, differs) and culprits;
+  dread/readable.py's call of lift.culprits (its bisect is in git). tests/test_lift.py:
+  test_culprits_finds_what_differs_only_together and
+  test_functions_whose_c_makes_the_whole_image_differ_are_dropped (a program that prints how deep its
+  stack went).
+- **Status.** Done. On copies of the measure-38 builds the lift check drops prvTestMasterTask and
+  xEventGroupSetBits on both clang builds (17 and 19 whole-image runs, 28 s each) and their whole
+  images agree to the limit (8,218 and 8,165 log entries each; before, they differed at entries 355
+  and 359); gizmo's lift checks keep every function, their whole images agreeing as before.
+
+## Code that only the core enters: the lift check refuses a function holding it (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** FreeRTOS's RISC-V build with GCC 10 asserted at stream_buffer.c line 1367 with lifted
+  C alone and then read unmapped memory (0xfffffb85) while printing the file name. Its function table
+  lists freertos_vector_table, the vectored trap table (mtvec = table | 1: the core enters at table +
+  4 x cause), as a function of 128 bytes (GCC 10's binutils write no mapping symbols, and an untyped
+  global label then makes a function; LLVM 14's table is listed so too, refused for another reason).
+  Its first entry, a jump, is a tail call: that lifted, and its cases accepted it. The other entries
+  are code no path from the entry reaches, and the overlay freed them under the C: the 120 bytes went
+  to xStreamBufferIsFull's C, and the timer interrupt (cause 7, table + 0x1c) entered that C in the
+  middle of its lui, ran its assertion path with a0 = 1 - 0x47c, the file name's address without its
+  upper part. How should the lift check treat code inside a function that no path reaches?
+- **Options.** (a) Refuse every function with unreached code that is not padding: but such code is
+  common and harmless, behind a call that never returns or a branch decided never taken (357 lifted
+  functions of 36 benchmark builds). (b) Refuse code that nothing leads to: no instruction in front of
+  it goes on to it, no direct jump or call of any function goes there, no switch case of the function,
+  and it is not padding (zero bytes, the layer's nops). (c) Lift it and keep the unreached bytes (the
+  overlay frees nothing there): the C of the first entry (auipc and jr, 8 bytes) already covers the
+  second. (d) Take the system run's trap entries as facts and refuse a function the core enters
+  other than at its entry: only the vectors a scenario takes would be seen.
+- **Choice: (b),** in the acceptance (check, beside "other code branches into its middle"), not in
+  the translation: the C of such a function is right, the space it would free is not free, and dread
+  liftfuzz's random functions hold such code (behind their jumps) and still have to lift; refused in
+  the lifter first, three MSP430 fuzz tests failed. It needs no fact the code does not show, and on
+  the benchmark it hits nothing but the table: of the lifted functions of the 39 builds only GCC 10's
+  freertos_vector_table; of all functions, LLVM 14's table too (not lifted anyway) and none else once
+  branches from other functions count (MSP430's shift helpers are entered so). Gizmo's lift checks
+  keep every function. Not covered: hand-written C (src) of such a function, and a lifted table
+  written before (dread recon builds what the table names); the overlay does not look.
+- **Undo.** dread/lift.py: Lifter.entered_unseen and check()'s lifts; the layers' padding attributes.
+  tests/test_lift.py: test_code_that_only_the_core_enters_is_not_freed.
+- **Status.** Done; GCC 10's lift check refuses the table and its whole image agrees (257 functions,
+  the same as before but the table).
+
 ## IT blocks in readable C: one if/else, statements between written into both arms (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

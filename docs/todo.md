@@ -702,12 +702,62 @@ may stay lifted.
   the demo's timing tests assert (lift.system_check's docstring). Not kept: which runs serve the
   comparison better is a question of its own (a run that asserts early compares little; one that
   idles to the limit compares little more).
-- [ ] **Three RISC-V builds' whole images differ with lifted C alone for reasons of their own**
+- [x] **Three RISC-V builds' whole images differ with lifted C alone for reasons of their own**
   (the only ones left of the benchmark's 38 once the wait rule was fixed, 2026-10-22; they differed
   at the same entries before): the rebuilt clang -Os and clang 14 images print "Stack overflow in
   SetB" (entries 355 and 359; a task's stack too small for the C's frames, which is what the whole
   image is there to find), and GCC 10's asserts (line 1367) at entry 32 and then reads unmapped
-  memory (0xfffffb85) while it prints the file name. Not traced.
+  memory (0xfffffb85) while it prints the file name.
+  Done 2026-10-22: two causes, in neither the C of one function alone (docs/decisions.md, both
+  entries of 2026-10-22). GCC 10: its function table lists freertos_vector_table, the vectored trap
+  table (mtvec = table | 1; the core enters at table + 4 x cause), as a function of 128 bytes (GCC
+  10's binutils write no RISC-V mapping symbols, and the untyped global label makes a function;
+  LLVM 14's table too, refused there for another reason). Its first entry, a jump, lifted as a tail
+  call and its cases accepted it; the overlay freed the other entries as unreached code, and
+  xStreamBufferIsFull's C (120 bytes) took exactly that space. The timer interrupt (cause 7, table
+  + 0x1c) entered that C in the middle of its lui and ran its configASSERT path (stream_buffer.c line
+  1367) with a0 = 1 - 0x47c = 0xfffffb85 for the file name, which printf's prints then read (dread
+  sysrun with a code hook at vAssertCalled: ra in the C, a0 without its upper part). Fixed in the lift
+  check: code of a function that no path reaches, that nothing leads to (no instruction in front goes
+  on to it, no direct jump or call of any function goes there, no switch case) and that is not padding
+  is entered from outside, and the function is refused (Lifter.entered_unseen; the layers' padding;
+  tests/test_lift.py test_code_that_only_the_core_enters_is_not_freed, which failed before). In the
+  lifter itself first, it refused dread liftfuzz's random MSP430 functions (three tests failed): the
+  translation is right, the space is not free, so it is a refusal of the acceptance, as "other code
+  branches into its middle" is. On the 39 benchmark builds it refuses only GCC 10's table among the
+  lifted functions (LLVM 14's among all), on gizmo nothing. clang -Os and clang 14: the C's frames are
+  larger than the original's: prvTestMasterTask 176 -> 256 (clang 14: 128 -> 224) and
+  xEventGroupSetBits 32 -> 64 (32 -> 80) bytes. On SetB's deepest path (prvTestMasterTask,
+  xEventGroupSetBits, xTaskResumeAll, the trap's context save: a block hook that keeps a call stack
+  per task) the original leaves 100 (148) of the 480 bytes free, the rebuilt image goes 12 bytes below
+  the stack (to 4 bytes above it, inside the 16 bytes that configCHECK_FOR_STACK_OVERFLOW's method 2
+  reads).
+  Either function alone leaves the image agreeing. The lift check's whole-image stage saw it and only
+  reported it (whole.txt); now it finds a smallest set of functions that still differs (lift.culprits:
+  a binary search for the shortest prefix, repeated; halves, as dread readable used, would have
+  returned 121 and 122 functions: the two lie in different halves) and drops it, until the whole image
+  agrees (tests/test_lift.py: test_culprits_finds_what_differs_only_together;
+  test_functions_whose_c_makes_the_whole_image_differ_are_dropped, a program that prints how deep its
+  stack went, which failed before). dread readable --check uses the same search. Measured on copies of
+  the measure-38 builds with this code: GCC 10 257 functions (258, the table out), the whole image
+  agreeing to the limit with 8,147 log entries each (before: 8,150 against 104); clang -Os 241 (242:
+  the two out, prvRegTestTaskEntry1 in; this change only takes functions out, so that one came with
+  the code since measure-38), 8,218 entries
+  each (8,227 against 439), the search 17 whole-image runs and 28 s, SetB's stack again 100 bytes
+  from its end; clang 14 241 (243, the same two out), 8,165 entries each (8,166 against 443), 19 runs
+  and 28 s, SetB's stack 132 bytes from its end (148 in the original: other lifted functions' frames,
+  within it). Frame growth itself: the next item.
+- [ ] **Lifted C's frames grow by the C compiler's own register saves.** The lifted C keeps the
+  original's frame as an array, its save slots included, and the C compiler saves the registers the
+  C uses beside it: on FreeRTOS RISC-V clang -Os 172 of the 242 lifted functions have a larger frame
+  in C (median 32 bytes), and on clang 14 131 of the 171 that grew grew by exactly the original's
+  register saves rounded up to 16 bytes (4,528 of their 4,784 bytes). A task with a small stack
+  overflows (the item before), and the lift check keeps such functions out now, so lifting loses
+  them. Leave the save slots out of the frame array where only the prologue's saves and the
+  epilogue's restores touch them (no frame address handed out reaches them, not a wrapped function's
+  real frame): then the C's frame is the original's locals plus the compiler's saves and spills.
+  Changes the frame model of every lifter and what readable C's frame stages (dread.tidy's
+  frame_locals, dread.frames) read; measure the frames before and after on the benchmark.
 
 Real firmware comes from many compilers, versions and options; DREAD was tested on one version of
 each. CI on Ubuntu 24.04's GCC 13, binutils 2.42 and clang 18 found two gaps of DREAD's own that

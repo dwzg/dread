@@ -290,6 +290,9 @@ class Msp430:
         return ABI_RESULTS.get(base, ())
     veneer_reg = "r11"
     profile = None
+    # Instructions that fill a gap and do nothing besides zero bytes (dread.lift's entered_unseen):
+    # nop (mov #0, r3)
+    padding = {"msp430": (b"\x03\x43",)}
 
     def __init__(self, isa="msp430", endian="little", ghidra=None, cpu=None, extensions=None):
         if isa != "msp430":

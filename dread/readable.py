@@ -16,8 +16,9 @@ them and the tables (_named), the part of the frame that addresses handed out re
 structure (dread.frames: stack36.f_4, (u32)&stack36.f_4).
 
 Where the image with lifted C alone already differs from the original in the scenarios (the system
-run's clock on some builds), the scenarios decide nothing and the function-level runs decide alone;
-elsewhere a difference with readable C sends the guilty functions back to lifted C, found by halves.
+run's clock on some builds until 2026-10-22; a lifted table the lift check wrote since agrees), the
+scenarios decide nothing and the function-level runs decide alone; elsewhere a difference with
+readable C sends the guilty functions back to lifted C, found by halving (dread.lift.culprits).
 
 `--figures FILE` measures the readable table's functions (dread.cmetrics: statements, nesting,
 gotos, casts, raw accesses, members, typed variables) in their readable C as built, and their lifted
@@ -473,13 +474,19 @@ def check(target, image, names=None, out=print, jobs=None):
     runs = target.scenarios and hasattr(program.arch, "reset")
     whole_note = "not run"
 
+    tried = {}
+
     def whole(names):
-        return lift.whole_image(target, image, program, lifted, out, lifter, transform=chooser(names, context))
+        key = tuple(sorted(names))
+        if key not in tried:
+            tried[key] = lift.whole_image(target, image, program, lifted, out, lifter, transform=chooser(key, context))
+        return tried[key]
     found = whole(accepted) if runs and accepted else None
     baseline = whole([]) if found else None
     if baseline:
-        # The image with lifted C alone differs already (the lift check reports it and keeps its
-        # functions). There the scenarios cannot tell readable C from lifted C, so the function-level
+        # The image with lifted C alone differs already (a lifted table the lift check wrote before
+        # 2026-10-22, when it reported the difference and kept the functions; it now keeps out those
+        # that make it). There the scenarios cannot tell readable C from lifted C, so the function-level
         # runs decide, as for lifted C. (FreeRTOS on RISC-V GCC -Os and Cortex-M clang -O2 until
         # 2026-10-22: the system run's wait rule counted blocks of code the images do not share and
         # fell at other places in them, so whether a run agreed depended on how it fell: the halves
@@ -491,11 +498,13 @@ def check(target, image, names=None, out=print, jobs=None):
         whole_note = "agrees"
     while found:
         # The function-level cases agreed, the scenarios do not: a readable function behaves otherwise
-        # on an input its cases lack. Halves of the accepted ones until the guilty ones are found; they
-        # go back to lifted C and the rest is tried again (RISC-V GCC -Os: the image printed nothing)
+        # on an input its cases lack, or only together with others (frames that grew). The smallest
+        # set that still differs, found by halving, goes back to lifted C and the rest is tried again
+        # (RISC-V GCC -Os: the image printed nothing). Until 2026-10-22 halves of the accepted ones,
+        # each tried alone: two that differ only together, one in each half, sent both halves back.
         out("the whole image: %s" % found)
-        guilty = bisect(accepted, lambda names: whole(names) if names else None)
-        drop(guilty, "the whole image differs with its readable C (found by halves): %s" % found)
+        guilty = lift.culprits(sorted(accepted), lambda names: whole(names) if names else None)
+        drop(guilty, "the whole image differs with its readable C (found by halving): %s" % found)
         accepted = [n for n in accepted if n not in guilty]
         found = whole(accepted) if accepted else None
     for name in accepted:
@@ -516,19 +525,6 @@ def check(target, image, names=None, out=print, jobs=None):
         "image %s), into %s" % (len(kept), len(lifted), rounds, len(lifted) - len(kept),
                                 whole_note if runs and candidates else "not run", os.path.relpath(path)))
     return kept
-
-
-def bisect(names, differs):
-    """The names whose readable C makes differs(subset) true: halves tried until single ones are left
-    (a few whole-image runs per guilty function). Two that differ only together are both returned."""
-    if len(names) <= 1:
-        return list(names)
-    half = len(names) // 2
-    left, right = names[:half], names[half:]
-    a, b = differs(left), differs(right)
-    if not a and not b:
-        return list(names)              # (only together: both halves stay lifted)
-    return (bisect(left, differs) if a else []) + (bisect(right, differs) if b else [])
 
 
 def main(argv=None):

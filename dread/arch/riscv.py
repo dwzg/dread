@@ -237,6 +237,9 @@ class RiscV:
     syscall_numbers = (8, 9, 11)    # ecall from U, S and M mode (dread.emu runs it as a logged no-op)
     link_reg = "ra"
     veneer_reg = "t1"       # the overlay's far branch and the linker's call stubs go through t1
+    # Instructions that fill a gap and do nothing besides zero bytes (dread.lift's entered_unseen):
+    # nop, c.nop
+    padding = {"rv32": (b"\x13\x00\x00\x00", b"\x01\x00")}
 
     def __init__(self, isa="rv32", extensions="imc", endian="little", ghidra=None, cpu=None):
         if isa != "rv32":

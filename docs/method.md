@@ -172,6 +172,16 @@ Each of these cost time once and is now a check or a rule in a tool:
   image's polling loop and outside the other's (FreeRTOS on RISC-V and clang -O2, with lifted C
   alone). A wait is a loop now, found by its registers: where in a loop the clock moves on does not
   matter, as long as the interrupt comes where the core takes it.
+- Code that only the core enters looks dead to the analysis: a vectored trap table that a function
+  table listed as one function was lifted from its first entry (a jump), and the overlay freed the
+  other entries; another function's C took the space, and the timer interrupt entered that C in the
+  middle of an instruction (FreeRTOS RISC-V, GCC 10). Code that nothing leads to (no instruction
+  goes on to it, no branch goes there) and that is not padding is refused now; unreached code behind
+  a call that never returns, which 36 of the benchmark's builds have in lifted functions, is not.
+- A check that only reports keeps nothing out: the whole image showed the C's larger frames
+  overflowing a FreeRTOS task's stack, and the lift check kept the functions. It now finds a smallest
+  set that still differs and drops it; a search by halves would not have, since the two functions
+  that overflow only together lay in different halves.
 - Most of the generator's time went into Python bookkeeping per byte, not into the emulator: profile
   before moving code into C.
 - Cases that agree on every generated input can still accept a wrong translation when no input

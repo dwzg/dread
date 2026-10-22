@@ -34,7 +34,10 @@ code that falls through into what follows, or an entry in the asm_only table. A 
 that never returns (dread.noreturn) does not fall through: an endless loop follows it in the C.
 
 With --check the lifted C is put to the test: every function that lifts (and that src does not
-define by hand) is built over the original together with the others, its generated cases run
+define by hand, and that no code outside the function enters behind its entry: a branch of other
+code, or the core at a vectored trap table's other entries, which is code inside it that no path
+reaches and nothing leads to, not padding: Lifter.entered_unseen) is built over the original
+together with the others, its generated cases run
 (callees real, dread.autocase), and a function whose cases disagree or leave an instruction of the
 original unrun is dropped; the build and the run are repeated until nothing is dropped. A function
 that failed while a callee of it was lifted and failed too gets one more round without that callee.
@@ -44,8 +47,12 @@ and every A-profile exception handler, the system run decides when the target ha
 (system_check: built alone, every scenario agrees on the original and the rebuilt image, and the
 original's runs execute every instruction a path reaches that its loop cases, if they all agreed,
 did not; the lifted table marks those). Last, every scenario runs on the image with all accepted
-functions rebuilt (whole_image): a difference there is reported (lift-check/IMAGE/whole.txt). What stays is written to
-the image's lifted table (config/lifted.txt), which dread recon builds from then on (it lifts those
+functions rebuilt (whole_image): C that behaves otherwise only with other C shows there (frames that
+grew add up on a task's small stack). Where it differs, a smallest set of functions that still makes
+the difference is found by halving (culprits) and dropped, and the rest is run again until the whole
+image agrees (lift-check/IMAGE/whole.txt: the outcome, then what was dropped for it). Until
+2026-10-22 the difference was only reported, and the functions stayed. What stays is written to the
+image's lifted table (config/lifted.txt), which dread recon builds from then on (it lifts those
 functions again at every build: the C is not kept).
 
     dread lift [--target DIR] [--image NAME] [--out DIR] [NAME...]
@@ -256,6 +263,7 @@ class Lifter:
         self._stack_args, self._entry, self._resolved, self._states, self._handlers = {}, {}, {}, {}, {}
         self._switching = set()             # functions whose states(switch=True) met a StackSwitch
         self._noreturn = set(endless) if endless is not None else None
+        self._targets = None                # every direct jump's and call's target (_direct_targets)
         path = program.image.table("asm_only")
         self.asm_only = read_ranges(path) if path and os.path.exists(path) else []
 
@@ -1027,6 +1035,64 @@ class Lifter:
                      list(fn.insns) if isinstance(fn, Body) else None)
         got.handed = sorted(self.ctx["handed"], key=lambda r: int(r[1:]))
         return got
+
+    def entered_unseen(self, fn, lifted):
+        """Why fn's C would free code that something outside the code enters, or None: code of fn that
+        no path from its entry reaches (lifted.unreached, of fn's Lifted) and that nothing leads to (no
+        instruction in front of it goes on to it, no direct jump or call of any function goes there,
+        no switch of fn), and that is not padding (zero bytes, the layer's nops). The core enters such
+        code at a vectored trap table's entries (mtvec + 4 * cause on RISC-V), and a function table may
+        list the table as one function whose first entry jumps on (an untyped label in an object
+        without mapping symbols: GCC 10's binutils, LLVM 14). Lifted, the C replaced its first entry
+        and the overlay freed the rest for other functions' C: on FreeRTOS's RISC-V build with GCC 10
+        another function's C lay there, and the timer interrupt ran into its middle. Unreached code
+        behind a call that never returns or a branch decided never taken, and padding behind a jump,
+        is entered by nothing (no case can run it either). A function with an unreached indirect jump
+        whose targets are not known is not judged (they would look entered by nothing). The acceptance
+        (check) refuses what this names, as it refuses a function other code branches into; the
+        translation itself does not need it (dread liftfuzz's random functions hold such code)."""
+        unreached = list(lifted.unreached)
+        if not unreached:
+            return None
+        insns = {a: self.prog.insn(a) for a in (lifted.body or fn.insns)}
+        targets = set(self._direct_targets())
+        for a in unreached:
+            insn = insns.get(a)
+            if insn is not None and self.arch.flow(insn)[0] == "ijump":
+                got = self.resolve(fn, a)
+                if not got:
+                    return None
+                targets.update(got[0] or ())
+        ends = {a + i.size: i for a, i in insns.items() if i is not None}
+        padding = getattr(self.arch, "padding", {}).get(self.prog.isa_at(fn.entry), ())
+        for a in unreached:
+            insn, before = insns.get(a), ends.get(a)
+            if insn is None or a in targets or (before is not None and self._goes_on(before)):
+                continue
+            raw = bytes(self.prog.read(a, insn.size))
+            if not any(raw) or raw in padding:
+                continue
+            return ("0x%x (%s %s) is code no path from its entry reaches and no branch goes to: something "
+                    "outside the code enters it (a vectored trap table's entry?), and its C would free it"
+                    % (a, insn.mnemonic, insn.op_str))
+        return None
+
+    def _goes_on(self, insn):
+        """Whether the next instruction may run after insn (a call goes on, whatever its callee does)."""
+        kind, _, falls = self.arch.flow(insn)
+        return kind in ("next", "call", "icall") or falls
+
+    def _direct_targets(self):
+        """Every address a direct jump, branch or call of the program's code goes to."""
+        if self._targets is None:
+            out = set()
+            for f in self.prog.functions:
+                for insn in self.prog.instructions(f):
+                    t = self.arch.target(insn) if insn is not None else None
+                    if isinstance(t, int):
+                        out.add(t & ~1)
+            self._targets = out
+        return self._targets
 
     def uses_fpu(self, insns):
         """Whether the instructions use ARM's FPU. VFP holds capstone's ARM ids: on another
@@ -2570,6 +2636,14 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
         verdicts[name] = ("refused", str(reason), "")
         out("refused  %-24s %s" % (name, reason))
 
+    def lifts(fn):
+        """fn lifted; Refused as well when its C would free code something outside enters."""
+        got = lifter.lift(fn)
+        why = lifter.entered_unseen(fn, got)
+        if why:
+            raise Refused(why)
+        return got
+
     for name in names or [fn.name for fn in program.functions]:
         fn = program.by_name.get(name)
         if fn is None:
@@ -2594,7 +2668,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
             continue
         if system_only:
             try:
-                lifter.lift(fn)
+                lifts(fn)
                 refused -= 1
                 if loop_cases and lifter.handler_kind(fn) is None:
                     loops.add(name)         # it never returns: loop cases first (dread.autocase), then the
@@ -2605,7 +2679,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                 refuse(name, e)
             continue
         try:
-            lifter.lift(fn)
+            lifts(fn)
             candidates.append(name)
             refused -= 1
         except Refused as e:
@@ -2705,8 +2779,37 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
         verdicts[name] = ("accepted", "by " + by_system[name] if name in by_system else
                           "by loop cases" if name in loops else "", "")
     whole = whole_image(target, image, program, accepted, out, lifter) if runs and accepted else None
+    history = []                            # (names dropped for the whole image, its difference with them)
     if whole:
-        out("the whole image: %s" % whole)
+        # The function-level cases agreed (and for one that never returns, the system run with it
+        # alone), but with all of them built the scenarios differ: C that behaves otherwise only
+        # together with other C (frames that grew add up on a task's small stack: FreeRTOS's RISC-V
+        # builds with clang printed "Stack overflow in SetB"). A smallest set of functions that still
+        # makes the difference, found by halving (culprits), goes back to the original's code, and
+        # the rest is tried again until the whole image agrees.
+        tried = {tuple(sorted(accepted)): whole}
+
+        def differs(names):
+            key = tuple(sorted(names))
+            if key not in tried:
+                tried[key] = whole_image(target, image, program, list(key), out, lifter) if key else None
+            return tried[key]
+        while whole:
+            out("the whole image: %s" % whole)
+            guilty = culprits(sorted(accepted), differs)
+            alone = differs(guilty) or whole
+            for name in guilty:
+                others = [g for g in guilty if g != name]
+                why = "the whole image differs with its lifted C (%s, found by halving): %s" % (
+                    "together with " + ", ".join(others) if others else "alone", alone)
+                out("dropped  %-24s %s" % (name, why[:200]))
+                verdicts[name] = ("dropped", why[:300], "")
+                by_system.pop(name, None)
+            history.append((guilty, alone))
+            accepted = [n for n in accepted if n not in guilty]
+            by_loops = [n for n in by_loops if n not in guilty]
+            dropped += len(guilty)
+            whole = differs(accepted) if accepted else None
     os.makedirs(work, exist_ok=True)
     with open(os.path.join(work, "verdicts.tsv"), "w") as f:
         f.write("function\tverdict\treason\tmissed\n")
@@ -2717,17 +2820,20 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
     with open(path, "w") as f:
         f.write("# Functions built from lifted C: their cases (for one that never returns: its loop cases,\n"
                 "# or every scenario of the system run) agree with the original and run every instruction it\n"
-                "# can reach. Written by dread lift --check; not edited by hand.\n")
+                "# can reach, and the image with all of them agrees. Written by dread lift --check; not edited\n"
+                "# by hand.\n")
         f.write("".join(n + ("  # accepted by %s" % by_system[n] if n in by_system else "") + "\n"
                         for n in sorted(accepted)))
     with open(os.path.join(work, "whole.txt"), "w") as f:
         f.write((whole or "agrees") + "\n")
+        f.writelines("dropped for it: %s; with them alone: %s\n" % (", ".join(names), diff) for names, diff in history)
+    gone = sum(len(names) for names, _ in history)
     out("dread lift --check: %d accepted after %d rounds (%d by loop cases, %d by the system run, %d of them with "
         "loop cases; %d written by hand, %d refused, %d dropped; the whole image %s), into %s" % (
             len(accepted), rounds, len(by_loops), len(by_system),
             sum(1 for h in by_system.values() if h != "the system run"), len(by_hand & set(program.by_name)),
-            refused, dropped, "differs" if whole else "agrees" if runs else "not run",
-            os.path.relpath(path)))
+            refused, dropped, "differs" if whole else ("agrees once %d were dropped for it" % gone if gone else "agrees")
+            if runs else "not run", os.path.relpath(path)))
     return accepted
 
 
@@ -2863,6 +2969,31 @@ def system_check(target, image, program, lifter, names, out=print, verdicts=None
             out("dropped  %-24s %s" % (name, reason))
             verdicts[name] = ("dropped", reason, missed)
     return kept
+
+
+def culprits(names, differs):
+    """Names whose C together makes differs(names) true, each of them needed for it, found by halving:
+    differs(names) is true and differs([]) false. A binary search finds the shortest prefix of the
+    names left that makes the difference together with those found; its last name is needed, joins
+    them, and the search goes on in front of it, until those found differ alone (about len(result) *
+    log2(len(names)) calls). Where a difference stays with every superset (frames that grew add up on
+    a task's stack), leaving out any one of the result makes the rest of it agree; where it need not
+    (the overlay places other functions' C elsewhere when one goes), the result still differs alone,
+    and the caller looks at what is left again. Two that differ only together and lie in different
+    halves are found as well: dread.readable's search by halves, which tried each half alone, gave
+    up there and returned both halves."""
+    found, rest = [], list(names)
+    while rest and not differs(found):
+        lo, hi = 0, len(rest)               # differs(found + rest[:lo]) false, differs(found + rest[:hi]) true
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if differs(found + rest[:mid]):
+                hi = mid
+            else:
+                lo = mid
+        found.append(rest[hi - 1])
+        rest = rest[:hi - 1]
+    return found
 
 
 def whole_image(target, image, program, names, out=print, lifter=None, transform=None):
