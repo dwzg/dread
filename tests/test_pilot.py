@@ -1147,3 +1147,250 @@ def test_two_runs_are_compared_by_groups_too(gizmo, tmp_path):
             "0x%x\t%s\t%d\tk\n" % (fn.entry, fn.name, k) for k, fn in enumerate(fns)))
     by_groups, by = pilot.pair_groups(target, image, gizmo_elf(target), [fn.entry for fn in fns])
     assert by == "groups" and by_groups == {fn.entry: str(k) for k, fn in enumerate(fns)}
+
+
+# ---- the review of existing names (dread.namereview, --task review)
+
+REVIEW_NAMELESS = ("uart_init", "uart_putc", "uart_puts", "uart_getc", "gpio_set", "led_on", "led_off", "delay",
+                   "timer_start", "timer_irq", "irq_enable_timer", "parse_kv")
+
+
+def reviewed_gizmo(gizmo, monkeypatch):
+    """gizmo-m3 as a naming run leaves a stripped image: REVIEW_NAMELESS made FUN_address in its tables
+    and proposed for (names.tsv), a person's vague name (beep_on in the tables called do_work), the
+    groups of dread.groups with names (the UART's group misread as an SPI flash driver), and parse_kv
+    pointing to another file's path. Returns (target, image, program, flow, {old name: name now})."""
+    from dread import groups, namereview
+    target, image, program, flow = gizmo
+    now = {n: "FUN_%08x" % program.by_name[n].entry for n in REVIEW_NAMELESS}
+    now["beep_on"] = "do_work"
+    by_address = {"0x%x" % program.by_name[n].entry: new for n, new in now.items()}
+    path = image.table("functions")
+    rows = [r.split("\t") for r in open(path).read().splitlines()]
+    with open(path, "w") as f:
+        f.write("".join("\t".join([r[0], by_address.get(r[0], r[1])] + r[2:]) + "\n" for r in rows))
+    path = image.table("symbols")
+    lines = open(path).read().splitlines()
+    with open(path, "w") as f:
+        f.write("".join("f %s %s\n" % (l.split()[1], by_address[l.split()[1]]) if l.startswith("f ") and
+                        l.split()[1] in by_address else l + "\n" for l in lines))
+    target = Target.load(target.root)
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    proposals = {"uart_init": "spi_init", "uart_putc": "spi_send_byte", "uart_puts": "spi_send_text",
+                 "uart_getc": "spi_read_byte", "gpio_set": "led_pin_write", "led_on": "led_switch",
+                 "led_off": "led_switch", "delay": "timer_wait", "timer_start": "timer_begin",
+                 "timer_irq": "timer_tick_isr", "irq_enable_timer": "nvic_enable_timer_irq",
+                 "parse_kv": "cfg_parse_pair"}
+    for old, proposed in proposals.items():
+        sure, samples = {"delay": ("0.40", "timer_wait busy_loop sleep_ms timer_wait wait_ticks"),
+                         "gpio_set": ("0.80", "led_pin_write led_pin_write gpio_write led_pin_write led_pin_write")
+                         }.get(old, ("1.00", " ".join([proposed] * 5)))
+        pilot.keep_proposal(target, image, program.by_name[now[old]], proposed, "does %s" % proposed.replace("_", " "),
+                            llm.Scripted([]), "readable", {"confidence": sure, "samples": samples, "pass": "1"})
+    parts = {now["uart_putc"]: ("SPI flash driver", "spi_", "drives an SPI flash", "1.00"),
+             now["led_off"]: ("LED and timer helpers", "led_", "lights the LEDs", "1.00"),
+             now["delay"]: ("timer driver", "timer_", "counts time", "1.00"),
+             "cmd_led": ("command parser", "cmd_", "parses commands", "1.00"),
+             now["gpio_set"]: ("GPIO", "gpio_", "drives the pins", "0.60")}
+    found = groups.find(target, image, program, flow)
+    pilot.write_groups(target, image, program, found)
+    for k, group in enumerate(found):
+        for member, (name, prefix, what, sure) in parts.items():
+            if member in group:
+                pilot.keep_subsystem(target, image, {
+                    "group": k, "first": "0x%x" % program.by_name[group[0]].entry, "functions": len(group),
+                    "members": pilot.members_key(program, group), "name": name, "prefix": prefix, "what": what,
+                    "confidence": sure, "samples": " ".join([prefix] * 5)})
+    texts = namereview.Picture.texts
+    monkeypatch.setattr(namereview.Picture, "texts", lambda self, n: ["/src/net/socket.c"] if n == now["parse_kv"]
+                        else texts(self, n))
+    return target, image, program, flow, now
+
+
+def test_the_review_finds_reasons_against_names_by_code(gizmo, monkeypatch, capsys):
+    """dread.namereview's triggers, computed by code: a split vote, two functions of one name, a vague
+    name (a person's too), a name without its group's prefix, a helper of several parts named after
+    one, a source file's path that its name does not match; for groups, tested at their edges: a
+    described device's users in a group whose name does not say so, a device a group names but does not
+    touch, few functions taking its prefix, its vote, the files its texts name. --dry-run prints the
+    ranking and asks nothing."""
+    from dread import namereview
+    target, image, program, flow, now = reviewed_gizmo(gizmo, monkeypatch)
+    picture = namereview.Picture(target, image, program, flow)
+    assert picture.sources[now["delay"]] == "proposal" and picture.sources["do_work"] == "person"
+    assert picture.sources["main"] == "person" and picture.name(now["uart_putc"]) == "spi_send_byte"
+
+    def kinds(n):
+        return sorted(r.kind for r in namereview.function_reasons(picture, n))
+    assert kinds(now["delay"]) == ["split", "vote"]
+    assert kinds(now["led_on"]) == kinds(now["led_off"]) == ["same"]
+    assert kinds("do_work") == ["vague"] and kinds(now["irq_enable_timer"]) == ["prefix"]
+    assert kinds(now["gpio_set"]) == ["shared", "vote"] and kinds(now["parse_kv"]) == ["file"]
+    assert kinds(now["uart_puts"]) == [] and kinds("main") == []
+    vote = namereview.function_reasons(picture, now["delay"])
+    assert namereview.score_of(vote) == pytest.approx(2.0 * 0.6 + 0.5)
+    assert "agreed 40 %" in vote[0].text and "4 readings" in vote[1].text
+    assert "named the same: %s" % now["led_off"] in namereview.function_reasons(picture, now["led_on"])[0].text
+    groups = {picture.subsystems[k]["prefix"]: sorted(r.kind for r in namereview.group_reasons(picture, k))
+              for k in picture.subsystems}
+    assert groups == {"spi_": ["device"], "led_": ["members", "unused"], "timer_": [], "cmd_": ["file", "members"],
+                      "gpio_": ["members", "vote"]}, groups
+    functions, ranked_groups = namereview.ranked(picture)
+    assert functions[0][1] == now["delay"] and [x[0] for x in functions] == sorted((x[0] for x in functions),
+                                                                                    reverse=True)
+    assert [picture.subsystems[k]["prefix"] for _, k, _ in ranked_groups][:1] == ["cmd_"]
+    assert pilot.main(["--target", target.root, "--task", "review", "--dry-run"]) == 0
+    printed = capsys.readouterr().out
+    assert "would be challenged" in printed and "nothing asked" in printed and "do_work" in printed
+    assert not os.path.exists(namereview.review_path(target, image))
+    namer = pilot.Namer(target, image, program, flow)            # (a person's name given back confirms it)
+    namer.subsystem = picture.subsystem_lines()
+    result = namereview.challenge_function(llm.Scripted(lambda messages: "name: do_work\nwhat: works"), None, namer,
+                                           picture, "do_work", namereview.function_reasons(picture, "do_work"),
+                                           samples=2)
+    assert (result["outcome"], result["name"], result["samples"]) == ("confirmed", "do_work", "do_work do_work")
+    lines = []                                  # (a provider that answers nothing: one round, then it stops)
+    totals = namereview.review(target, image, program, lambda: llm.Scripted([]), flow=flow, jobs=2, samples=1,
+                               out=lines.append)
+    assert totals["rounds"] == 1 and set(totals["functions"]) == {"no candidate"}, totals
+    assert any("no challenge of round 1 got a candidate" in line for line in lines), lines
+
+
+def review_answers(candidates, modes, seen):
+    """A provider's answers for a review: a candidate question gets candidates[the function] (a group's
+    question, found by its old prefix, the three lines of candidates["group " + prefix]); a decision
+    question the verdict of modes[the function]: "new" (the candidate, whichever side it is on), "split"
+    (the candidate when it is B, else same), "old", or "general" (a more general name)."""
+    def answer(messages):
+        question = messages[0]["content"]
+        seen.append(question)
+        if "\n\nThe two names:\n" in question:
+            names = question.split("\n\nThe two names:\n")[1]
+            prefixes = re.findall(r"^[AB]: .*\(prefix (\w+)\)", names, re.M)
+            if prefixes:                        # (a group's: its key the old prefix)
+                key = next("group " + p for p in prefixes if "group " + p in candidates)
+                a, b = prefixes
+                candidate = re.search(r"prefix: (\w+)", candidates[key]).group(1)
+            else:
+                key = re.search(r"The function (\w+)", question).group(1)
+                a, b = re.findall(r"^[AB]: (\w+)", names, re.M)
+                candidate = candidates[key]
+            mode = modes[key]
+            if mode == "general":
+                return "better: general\nname: wait_ticks\nwhat: waits a number of ticks"
+            if mode == "split":
+                return "better: B" if b == candidate else "better: same"
+            pick = (a == candidate) == (mode == "new")
+            return "**better:** %s" % ("A" if pick else "B")
+        if question.startswith("The group of"):
+            prefix = re.search(r"named this part .*, with the prefix (\w+):", question).group(1)
+            return candidates["group " + prefix]
+        name = re.search(r"The function (\w+)", question).group(1)
+        return "name: %s\nwhat: does it" % candidates[name]
+    return answer
+
+
+def test_a_challenged_name_changes_only_when_its_candidate_wins_both_orders(gizmo, monkeypatch, capsys):
+    """--task review (dread.namereview.review), scripted: the misread group (its device's registers)
+    gets a new name in both orders, and its functions, challenged in the same round as renamed, follow
+    it, their questions showing the new line; a candidate that wins one order and ties the other leaves
+    the old name (the margin); one alike to the old name confirms it; "general" in both orders gives the
+    more general name; a person's name is flagged, never changed. Changes are new rows of names.tsv
+    (the pass after the last, marked) and subsystems.tsv, each challenge a row of review.tsv."""
+    from dread import namereview
+    target, image, program, flow, now = reviewed_gizmo(gizmo, monkeypatch)
+    candidates = {now["uart_init"]: "uart_init", now["uart_putc"]: "uart_putc", now["uart_puts"]: "uart_puts",
+                  now["uart_getc"]: "uart_getc", now["gpio_set"]: "gpio_set_level", now["led_on"]: "led_turn_on",
+                  now["led_off"]: "led_switch", now["delay"]: "timer_delay_ticks", now["parse_kv"]: "cfg_parse_pair",
+                  "do_work": "beep_start",
+                  "group spi_": "name: serial port driver\nprefix: uart_\nwhat: drives the UART",
+                  "group cmd_": "name: commands\nprefix: cmd_\nwhat: parses commands",
+                  "group led_": "name: LEDs and beeper\nprefix: led_\nwhat: lights the LEDs",
+                  "group gpio_": "name: GPIO pins\nprefix: gpio_\nwhat: drives the pins"}
+    modes = dict({now[n]: "new" for n in ("uart_init", "uart_putc", "uart_puts", "uart_getc", "led_on")},
+                 **{now["gpio_set"]: "split", now["delay"]: "general", "do_work": "new", "group spi_": "new"})
+    seen, lines = [], []
+    totals = namereview.review(target, image, program, lambda: llm.Scripted(review_answers(candidates, modes, seen)),
+                               flow=flow, jobs=1, samples=3, out=lines.append)
+    assert dict(totals["groups"]) == {"changed": 1, "confirmed": 3}, totals
+    assert dict(totals["functions"]) == {"changed": 5, "kept": 1, "confirmed": 2, "general": 1, "flagged": 1}, totals
+    assert totals["rounds"] == 1, lines
+    rows = namereview.read_review(namereview.review_path(target, image))
+    outcome = {r["now"]: r["outcome"] for r in rows if r["kind"] == "function"}
+    assert outcome == {now["uart_init"]: "changed", now["uart_putc"]: "changed", now["uart_puts"]: "changed",
+                       now["uart_getc"]: "changed", now["led_on"]: "changed", now["led_off"]: "confirmed",
+                       now["gpio_set"]: "kept", now["delay"]: "general", now["parse_kv"]: "confirmed",
+                       "do_work": "flagged"}, outcome
+    by = {r["now"]: r for r in rows}
+    assert by[now["gpio_set"]]["votes"] == "new 1, same 1" and by[now["delay"]]["votes"] == "general 2"
+    assert by["do_work"]["candidate"] == "beep_start" and by["do_work"]["name"] == "do_work"
+    assert by[now["uart_puts"]]["reasons"].startswith("renamed 1.00: its group was renamed from SPI flash driver")
+    assert all(r["review"] == "1" and r["round"] == "1" for r in rows)
+    group = [r for r in rows if r["kind"] == "group" and r["outcome"] == "changed"][0]
+    assert (group["old"], group["name"], group["votes"]) == ("SPI flash driver (spi_)", "serial port driver (uart_)",
+                                                             "new 2")
+    names = pilot.last_rows(pilot.read_name_rows(pilot.names_path(target, image)))
+    led = names[program.by_name[now["led_on"]].entry]
+    assert (led["proposed"], led["pass"], led["confidence"]) == ("led_turn_on", "2", "1.00")
+    assert led["shown"].endswith(namereview.REVIEWED) and names[program.by_name[now["delay"]].entry]["proposed"] == \
+        "wait_ticks"
+    assert names[program.by_name[now["gpio_set"]].entry]["proposed"] == "led_pin_write"
+    assert "do_work" in open(image.table("functions")).read() and program.by_name["do_work"].entry not in names
+    subsystems = pilot.read_subsystems(pilot.subsystems_path(target, image))
+    assert subsystems[group["group"]]["prefix"] == "uart_"
+    decisions = [q for q in seen if "\n\nThe two names:\n" in q and "The function %s," % now["led_on"] in q]
+    assert len(decisions) == 2 and "\nA: led_switch: " in decisions[0] and "\nA: led_turn_on: " in decisions[1]
+    puts = [q for q in seen if "The function %s," % now["uart_puts"] in q and "The two names" not in q]
+    assert puts and all("named that part serial port driver, with the prefix uart_" in q for q in puts)
+    assert "Tools that compare names with the image found reasons" in puts[0]
+    confirmed = [q for q in seen if "The two names" in q and "The function %s," % now["led_off"] in q]
+    assert confirmed == []                      # (alike to the old name: no decision asked)
+    assert os.path.exists(os.path.join(target.build, "pilot", image.name, "review", now["led_on"] + ".md"))
+    seen.clear()                                # (a review again: nothing with the same name and reasons)
+    again = namereview.review(target, image, program, lambda: llm.Scripted(review_answers(candidates, modes, seen)),
+                              flow=flow, jobs=1, samples=3, out=lines.append)
+    assert again["rounds"] == 0 and seen == [] and len(namereview.read_review(namereview.review_path(
+        target, image))) == len(rows)
+    loaded = []
+
+    def load(name=None, path=None):
+        loaded.append(name)
+        return llm.Scripted(review_answers(candidates, modes, seen))
+    monkeypatch.setattr(llm, "load", load)
+    capsys.readouterr()
+    assert pilot.main(["--target", target.root, "--task", "review", "--provider", "p", "--decider", "d",
+                       "--samples", "3"]) == 0
+    assert "dread pilot --task review: 0 rounds; groups: none; functions: none" in capsys.readouterr().out
+    assert loaded[:2] == ["p", "d"] and seen == []
+
+
+def test_a_decision_takes_both_orders_and_a_margin():
+    """decide(): the old name and the candidate asked as A and B and then as B and A; a verdict that
+    cannot be read is asked again; the change needs the margin over the old name's and "same"'s votes
+    together; parse_decision reads "better:" lines, "general" only with its name."""
+    from dread import namereview
+    old, new = ("led_switch", "toggles"), ("led_turn_on", "lights it")
+
+    def decider(first, second):
+        answers = [first, second]
+        return llm.Scripted(lambda messages: answers.pop(0))
+    assert namereview.decide(decider("better: B", "better: A"), "code", old, new)[:2] == (
+        "new", {"old": 0, "new": 2, "same": 0, "general": 0, "none": 0})
+    assert namereview.decide(decider("better: B", "better: same"), "code", old, new)[0] == "old"
+    assert namereview.decide(decider("better: B", "better: same"), "code", old, new, margin=0)[0] == "new"
+    assert namereview.decide(decider("better: A", "better: A"), "code", old, new)[0] == "old"
+    answers = ["no idea", "better: B", "better: A"]
+    outcome, votes, _, log = namereview.decide(llm.Scripted(lambda m: answers.pop(0)), "code", old, new)
+    assert outcome == "new" and votes["none"] == 0 and any("asked again" in part for part in log)
+    general = "better: general\nname: led_set\nwhat: sets an LED"
+    outcome, votes, chosen, _ = namereview.decide(decider(general, general), "code", old, new)
+    assert (outcome, chosen) == ("general", ("led_set", "sets an LED"))
+    assert namereview.parse_decision("**Better**: `b`") == ("b", None)
+    assert namereview.parse_decision("better: general") == (None, None)
+    assert namereview.parse_decision("better: general\nname: x_\nprefix: x\nwhat: y", group=True) == (
+        "general", ("x_", "x_", "y"))
+    assert namereview.parse_decision("I prefer A") == (None, None)
+    assert namereview.alike("TaskDelay", "task_delay") and namereview.alike("queue_send_back", "queue_back_send")
+    assert not namereview.alike("task_list_insert", "port_list_insert")     # (another part: decided, not confirmed)

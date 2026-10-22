@@ -83,6 +83,25 @@ and asked again it guessed yet another; with the line they were named after part
 (2026-10-22, docs/decisions.md). The line says the device alone: a sentence on what the program does
 as well made the model name groups after the parts that sentence mentioned.
 
+--task review (dread.namereview, since 2026-10-23: the user's no-confidence vote on existing names)
+takes up the names the image has where code finds reasons against them (triggers: a vote that agreed
+little or split, another function of the same name, a vague name, one outside its group's prefix or
+named after one of the several parts that call it, a source file's path among its texts that neither
+its name nor its group's matches; for a group, what lies at its edges: its vote, the source files its
+texts name, the described devices it uses or names): the names of names.tsv, and those people gave in
+the tables, which it flags for a person but never changes. A challenged name gets a candidate (the
+naming question with its name and the reasons, --samples times, voted); the candidate replaces it only
+when a pairwise question, asked in both orders with neither name marked as the old one, prefers it
+(or a more general name, "general") by --margin votes over the old name and "same" (default 2: both
+orders). Groups go first, and a renamed group's functions are challenged after it in the same round.
+Every challenge is a line of BUILD/pilot/IMAGE/review.tsv with its reasons and votes; a change is a
+new row of names.tsv (its pass the last one's plus the round, shown marked ", review") or of
+subsystems.tsv. At most --rounds rounds (default 2); a name changes once a review, and is challenged
+again (in that review or a later one) only for a reason its last challenge lacked or under another
+name. --decider PROVIDER decides (default the naming provider), --threshold S is the score of reasons
+from which a name is challenged, --limit N the challenges a round at most, --dry-run prints the
+triggers' ranking and asks nothing.
+
 --task readable names the variables of the readable table's functions (dread readable), after what
 they share with the rest of the image: the globals they use, then the structures their variables
 point to (where dread readable --check made a readable_types plan); --task globals asks for those
@@ -109,11 +128,12 @@ stated, while Haiku 5.5 answered the same question.
 
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
                 [--no-mutate] [--no-integration] [--dry-run]
-                [--task write|input|name|readable|globals|subsystems|device] [--no-device] [--jobs N]
+                [--task write|input|name|readable|globals|subsystems|device|review] [--no-device] [--jobs N]
                 [--refine] [--behaviour]
                 [--[no-]subsystems] [--samples K] [--temperature T] [--gate C] [--passes N] [--ablate]
                 [--score TRUTH [--judge PROVIDER] [--grounded PROVIDER [--source DIR] [--names-only]]
-                               [--upto-pass N] [--against NAMES_TSV]] [NAME...]
+                               [--upto-pass N] [--against NAMES_TSV]]
+                [--decider PROVIDER] [--margin M] [--rounds N] [--threshold S] [NAME...]
 """
 import argparse
 import collections
@@ -1500,11 +1520,12 @@ def parse_name(answer):
     return proposed.group(1), what.group(1)
 
 
-def ask_name(provider, program, name, user, tries=2, temperature=None):
+def ask_name(provider, program, name, user, tries=2, temperature=None, own=None):
     """(proposed, what, log, why) of asking for one function's name: a name that cannot be used
     (name_problem) or an answer without the two lines goes back with the reason, up to tries
     answers; proposed is None when none came. temperature: the question's sampling temperature
-    (llm.Provider), None for the provider's own."""
+    (llm.Provider), None for the provider's own. own: a name the answer may give although the
+    tables have it (the function's own, which a review asks to give again if it fits)."""
     messages = [{"role": "user", "content": user}]
     log = ["# %s, asked %s\n\n## Question\n\n%s" % (name, provider.label(), user)]
     why = "no answer"
@@ -1519,7 +1540,8 @@ def ask_name(provider, program, name, user, tries=2, temperature=None):
         if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
             return None, None, log, "the provider declined"
         parsed = parse_name(answer)
-        why = "no two lines name: and what:" if parsed is None else name_problem(program, parsed[0])
+        why = "no two lines name: and what:" if parsed is None else \
+            None if own is not None and parsed[0] == own else name_problem(program, parsed[0])
         if why is None:
             return parsed[0], parsed[1], log, None
         messages += [{"role": "assistant", "content": answer},
@@ -2923,6 +2945,44 @@ def subsystems_task(target, image, program, flow, args, provider):
     return 0
 
 
+def review_task(target, image, program, flow, args, provider, device):
+    """dread pilot --task review: dread.namereview's review of the names the image has (names.tsv's
+    proposals, the tables' names people gave), --samples candidate questions a challenge, decided by
+    --decider (default --provider) with --margin, at most --rounds rounds, --limit challenges a round;
+    --dry-run prints the triggers' ranking and asks nothing."""
+    from dread import namereview
+    names = shown(target, args.names) if args.names else None
+    if not args.dry_run and args.decider:
+        try:
+            llm.load(args.decider)
+        except llm.ProviderError as e:
+            print("dread pilot: %s" % e, file=sys.stderr)
+            return 1
+    first = [provider]
+
+    def make_provider():                    # (the first thread takes the provider already loaded)
+        return first.pop() if first else llm.load(args.provider)
+    make_decider = (lambda: llm.load(args.decider)) if args.decider else None
+    started = time.time()
+    totals = namereview.review(
+        target, image, program, make_provider, make_decider, flow, names=names, jobs=args.jobs,
+        samples=args.samples, margin=namereview.MARGIN if args.margin is None else args.margin,
+        rounds=namereview.ROUNDS if args.rounds is None else args.rounds, limit=args.limit,
+        threshold=namereview.THRESHOLD if args.threshold is None else args.threshold, device=device,
+        tries=min(args.tries, 3), dry_run=args.dry_run)
+    if args.dry_run:
+        return 0
+    counts = lambda c: ", ".join("%s %d" % (k, c[k]) for k in namereview.OUTCOMES if c.get(k)) or "none"
+    spent = totals["spent"]
+    print("dread pilot --task review: %d round%s; groups: %s; functions: %s (%s, %.0f s); %s" % (
+        totals["rounds"], "" if totals["rounds"] == 1 else "s", counts(totals["groups"]), counts(totals["functions"]),
+        namereview.review_path(target, image), time.time() - started, "; ".join(
+            "%s %d answers, %d tokens in, %d out%s" % (k, sp["answers"], sp["input"], sp["output"],
+                                                       " ($%.2f)" % sp["cost"] if sp["cost"] is not None else "")
+            for k, sp in spent.items() if sp["answers"])))
+    return 0
+
+
 def print_usage(month=None):
     """The usage ledger's figures for a month, per provider (dread.llm.usage_summary)."""
     import time
@@ -3003,12 +3063,24 @@ def main(argv=None):
                         help="with --score and --judge: judge pairwise, where they differ, which of this build's "
                              "proposals and another run's names.tsv is closer to the true name (instead of the "
                              "absolute verdicts)")
-    parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals", "subsystems", "device"),
+    parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals", "subsystems", "device",
+                                           "review"),
                         default="write",
                         help="write C (default), find inputs for unrun instructions, propose names, name the "
                              "variables of readable C (dread readable), name only what the functions share: "
-                             "their globals and structures, name the groups dread groups finds, or say what "
-                             "kind of device the image is for, from its texts")
+                             "their globals and structures, name the groups dread groups finds, say what "
+                             "kind of device the image is for, from its texts, or review the existing names "
+                             "(dread.namereview: a no-confidence vote where code finds reasons)")
+    parser.add_argument("--decider", metavar="PROVIDER",
+                        help="--task review: the provider that decides between an old name and its candidate "
+                             "(default: --provider)")
+    parser.add_argument("--margin", type=int, default=None, metavar="M",
+                        help="--task review: the votes a candidate needs beyond those for the old name and "
+                             "'same' together (default %d: both orders)" % 2)
+    parser.add_argument("--rounds", type=int, default=None, metavar="N",
+                        help="--task review: rounds at most (default 2)")
+    parser.add_argument("--threshold", type=float, default=None, metavar="S",
+                        help="--task review: the score of reasons from which a name is challenged (default 1.0)")
     parser.add_argument("--no-device", action="store_true",
                         help="--task name, readable, globals and subsystems: the questions do not say what the image "
                              "is for (by default they begin with the target's [llm] device, or with what --task "
@@ -3066,11 +3138,13 @@ def main(argv=None):
             return device_task(target, image, program, provider, args.samples, args.dry_run)
         device = "" if args.no_device else known_device(target, image)
         if not device and not args.no_device and not args.dry_run and args.task in (
-                "name", "readable", "globals", "subsystems"):
+                "name", "readable", "globals", "subsystems", "review"):
             print("dread pilot: the questions do not say what the image is for (dread pilot --task device reads it "
                   "from its texts; [llm] device in dread.toml states it)", file=sys.stderr)
         if args.task == "subsystems":
             return subsystems_task(target, image, program, flow, args, provider)
+        if args.task == "review":
+            return review_task(target, image, program, flow, args, provider, device)
         if args.task in ("readable", "globals"):
             from dread import build, lift, readable
             # readable: the functions of the readable table, whose C is built; globals: every function,

@@ -259,10 +259,10 @@ the header line (readers go by it):
 | `address`, `now` | the function's entry and its name in the image (`FUN_...`) |
 | `proposed`, `what` | the proposed name and the model's sentence about the function |
 | `provider` | who answered (`haiku (claude-haiku-5-5)`) |
-| `shown` | the form of the code the question showed: `readable`, `readable, unchecked`, `listing`; behind it `, behaviour` when the question showed the function's runs (`--behaviour`), `, subsystem` when it showed its group's name and prefix (`--subsystems`, since 2026-10-22) and `, refined` for a `--refine` answer (readers look for the marks among the comma-separated parts) |
+| `shown` | the form of the code the question showed: `readable`, `readable, unchecked`, `listing`; behind it `, behaviour` when the question showed the function's runs (`--behaviour`), `, subsystem` when it showed its group's name and prefix (`--subsystems`, since 2026-10-22), `, refined` for a `--refine` answer and `, review` for a name a review put there (`--task review`, since 2026-10-23; readers look for the marks among the comma-separated parts) |
 | `confidence` | `--samples K`: the agreement of the vote (answers alike to the kept name, `dread.naming.similarity` 0.5 or more, over K: `0.60`); empty for a single question |
 | `samples` | `--samples K`: the K answers in the order asked, `-` for a question without one |
-| `pass` | the pass that made it: 1 the first (callees first); 2, 3 ... `--passes` (callers first on even passes); 2 for `--refine` |
+| `pass` | the pass that made it: 1 the first (callees first); 2, 3 ... `--passes` (callers first on even passes); 2 for `--refine`; for a review's change the last pass before the review plus its round (so `--upto-pass` with the last naming pass gives the names before it) |
 | `question` | a digest of the question's text: a later pass asks again only when it changed |
 | `names_shown` | how many other functions' proposals the question showed (0: none) |
 | `hidden`, `depends` | `--ablate`: the vote of the same questions with no other proposal shown, and whether it disagrees with the proposal (`yes`, `no`); with `names_shown` 0 the two questions were the same, so `yes` is the votes' own noise |
@@ -309,13 +309,40 @@ and its first function's address when asked), `functions` (how many), `members` 
 order asked, `-` for a question without an answer; empty for a single question), `question` (a digest
 of the question's text). A group of a later grouping with other functions has another key: its old
 line stays and is not used. `dread groups --json` and `dread gui`'s whole program take a group's name from
-it (since 2026-10-22).
+it (since 2026-10-22). A review (`--task review`) that renames a group appends a line for its key
+(`question` then the digest of the group's question without the review's note; review.tsv says why).
 
 `dread pilot --score TRUTH` writes `names-subsystems.tsv` beside them when the image has both:
 `group`, `functions`, `name`, `prefix`, `file` (the source file most of its functions come from, by
 the truth's debug information; empty without), `from_file` (how many come from it), `proposals` (its
 functions with a proposal), `use_prefix` (how many of those begin with its prefix), `judged` (with
 `--judge`: whether the name and prefix name that file's part, `same`, `close`, `different`).
+
+### `BUILD/pilot/IMAGE/review.tsv`
+
+Written by `dread pilot --task review` (dread/namereview.py, since 2026-10-23): one line per challenge
+of a name, appended as the challenges of a round end, in the order of their scores (groups first). A
+change it decides is also a line of names.tsv (a function's) or of subsystems.tsv (a group's), which
+every reader takes; this table says why. Columns, by the header line:
+
+| column | meaning |
+|---|---|
+| `review`, `round` | the review's number (1 more than the last in the file) and the round in it |
+| `kind` | `function` or `group` |
+| `address`, `now` | the function's entry and its name in the tables (`FUN_...`, or a person's name), or the group's first function and `group N` (its number in groups.tsv) |
+| `group` | the members key of the function's group, or of the group (groups.tsv, subsystems.tsv) |
+| `source` | `proposal` (names.tsv's, or a group's name), `person` (a name in the tables: never changed) |
+| `score`, `reasons` | the reasons' summed weight, and the reasons, `kind weight: sentence` joined by `; ` (dread.namereview WEIGHTS) |
+| `old`, `old_what` | the name before (a group's as `name (prefix)`) and its sentence |
+| `candidate`, `candidate_what` | the candidate the vote over the samples kept (for a person's name that lost: the name the decision preferred), empty when no answer gave one |
+| `agreement` | the candidate's vote: `3 of 5` |
+| `votes` | the decision's votes, `new 2`, `new 1, same 1`, `old 1, general 1` (`none`: an answer without a verdict); empty when no decision was asked |
+| `outcome` | `confirmed` (the candidate has the old name's words: no decision), `kept` (the decision did not reach the margin), `changed` (the candidate), `general` (a more general name both orders gave), `flagged` (a person's name the decision went against: left for a person), `no candidate` |
+| `name`, `what` | the name and sentence after the challenge |
+| `provider`, `decider` | who gave the candidates and who decided |
+| `reason_keys` | digests of the reasons' sentences: a later challenge of the same name needs a reason not among them |
+
+The conversations are in `review/NAME.md` beside it (`review/group-N.md` for a group), appended.
 
 ### `BUILD/pilot/IMAGE/device.tsv`
 

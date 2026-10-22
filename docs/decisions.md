@@ -9,6 +9,99 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## A no-confidence vote on existing names: triggers by code, a candidate, a blind pairwise decision with a margin (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The user, 2026-10-22: "Could we also have a mechanism for a no-confidence vote on
+  existing names? Reverse engineering is like putting together a puzzle. With more and more pieces put
+  in the right place, the whole picture emerges. But smaller sub pictures could look right in one
+  context but different in the other." The item's design (docs/todo.md) asked for triggers computed
+  by code, sub-pictures tested at their edges, a re-decision with hysteresis (a pairwise comparison
+  with a margin, "more general" one of its outcomes), every change logged, rounds capped, and names
+  people gave flagged, never replaced. Which triggers, what does a challenge ask, which margin, which
+  decider, how many rounds?
+- **Options, measured** on FreeRTOS GCC -Os (mps2, 366 functions made FUN_address) with three stored
+  naming runs of the defaults (Haiku 5.5: votes of five, a second pass, the groups named first), every
+  name judged against the source by Sonnet 5.5 (dread.namejudge; 996 names with a source: wrong 93, 9
+  %, partly 237, right 666):
+  - Triggers: the rate of names judged wrong, and wrong or partly, among those a signal marks: a vote
+    below 1.0 22 % and 56 % (207 names), its answers in three readings or more 33 % and 65 % (75),
+    another function of the same name 17 % and 58 % (130), a name without its group's prefix 24 % and
+    44 % (25), a vague name 0 % and 60 % (15: vague names are partly right). Left out: no direct
+    caller (8 % and 51 %) and a small function (17 % and 48 %), which make a name harder, not wrong;
+    a name that changed between the passes, and one whose neighbours' names changed after it was given
+    (the puzzle's pieces around it moved: 8 % and 29 %), no better than all names; helpers that several
+    parts call were wrong less often than all names (12 %, 17 %), so they are a trigger only when the
+    name puts them into one of those parts. A source file's path among a function's texts never
+    contradicted its name or its group's name in the three runs (no false alarm). The score of the
+    reasons ranks wrong names above right ones with an area under the ROC curve of 0.76 (0.68 for
+    wrong or partly); challenged from 1.0, 204 of the 996 names (20 %): 48 % of the wrong ones, 32 %
+    of the partly right, 12 % of the right.
+  - What a challenge asks: (a) the candidate replaces the old name when they differ, no decision; (b)
+    a pairwise decision in one order; (c) both orders, neither name marked as the old one, the
+    candidate needing a margin. In the first trial a candidate confirmed the old name when alike by the
+    vote's measure (half the words): it confirmed all five planted too-specific names whose candidates
+    moved them back to their part (task_list_insert against port_list_insert); a confirmation needs the
+    same words since.
+  - The decider: Haiku 5.5 (the namer) or Sonnet 5.5.
+- **Choice.** dread pilot --task review (dread/namereview.py): the triggers above with weights
+  (WEIGHTS: the vote 2.0 times 1 - its confidence, a split 0.5, the same name 1.0, vague 1.0, a file
+  that does not match 1.0, the prefix 0.6, a shared helper 0.6; for groups the vote, files, a described
+  device most of whose users the group holds without naming it 1.0, a described device it names but
+  does not touch 0.6, its functions not taking its prefix 0.6; a renamed group's functions 1.0),
+  challenged from a score of 1.0; a candidate from the naming question with the old name and the
+  reasons, five questions, voted; (c) with a margin of 2 (one question in each order: both must prefer
+  the candidate, or both "general"); groups first, a renamed group's functions after it in the same
+  round; at most two rounds; a name changes once a review and is challenged again only for a reason
+  its last challenge lacked, also across reviews; people's names flagged; the naming provider decides
+  unless --decider names another.
+- **Why.** Planted errors, on a copy of one run (68 names): three groups misread (the stream buffer
+  as a UART driver, the event groups as binary semaphores, the C library's stream layer as a USB CDC
+  port), their functions named again by the namer with the wrong group line, votes of five in two
+  passes, as a real misreading spreads (it spread to part of them: the code's assertion paths held many
+  names to the stream buffer); three pairs of a group's functions with their whole proposals swapped;
+  five names made vague, five shared list helpers named after one part that calls them; all rewritten
+  in place, so no trigger sees when they were made. The judge found 25 of the 68 worse than the
+  original names (with a source; the misread C library has none). The review (Haiku deciding, 391 s,
+  749 answers, $0.36) challenged 21 of the 25, changed 20, 16 judged better than the planted name, none
+  worse, 15 right afterwards: the misread groups' 9 (9 challenged, 8 changed, 6 better; both groups
+  whose texts name their source files renamed back in both orders, the C library's not challenged:
+  no text, no described device), the swaps 2 of 6 (the heap's pair, through its vote and in round 2
+  the same name; the others gave no reason), the vague 5 of 5 (4 better), the too specific 5 of 5 (4
+  better); 4 planted names that were not worse were changed (2 better), and 19 names not planted (6
+  better, 1 worse, 12 the same verdict). Against the planted names 24:1 by functions (p 2e-6), 11:0
+  by groups (p 0.001). Without planting (the three runs as stored, 4.5-6 minutes and $0.21-0.27 of
+  Haiku each): 231 challenges of functions and 14 of groups, of the names judged wrong 48 % challenged and
+  18 % changed, of the partly right 32 % and 9 %, of the right 12 % and 2 %; 58 names changed with a
+  source, 23 judged better, 6 worse, 29 the same verdict; by functions 6:2, 11:1, 6:3 (pooled 23:6, p
+  0.002), by groups 3:1, 7:1, 5:3 (pooled 15:5, p 0.04). Two runs of the same settings differ by
+  24:40 and 37:21 by functions and 8:12 and 14:5 by groups ("Two naming runs compared by groups",
+  below), so one run's gain alone is within that noise and the three together are not. The
+  decisions: 56 of 84 went to the candidate in both orders, 14 to the old name, 8 split by position
+  (the model leans towards a side: both orders cancel it). Sonnet deciding (Haiku proposing): on the
+  planted copy 19 errors changed, 15 better, none worse, 5 better and 3 worse among the names not
+  planted (23:3, by groups 10:2); on the three runs 22 better, 2 worse (by groups 6:0, 6:0, 4:2;
+  pooled 16:2, p 0.001); for $0.48-0.92 a review against $0.21-0.36, and the judge is Sonnet too (a
+  shared taste would count as a gain). Over all four copies 45 better and 5 worse with Sonnet, 47 and
+  7 with Haiku: alike within the noise, so the default stays the naming provider and --decider is
+  there to choose. Spent on the measurement: $4.20 of Sonnet judging, $1.83 of Sonnet deciding, $2.64
+  of Haiku.
+- **Not established.** A misreading the tables do not show (receive for peek, two siblings' names
+  swapped, a group that points to no source file and uses no described device) is not challenged:
+  the triggers rank, they do not find every wrong name, and half of the wrong names had no reason
+  against them. The planted kinds were chosen as real runs go wrong, but the triggers were made for
+  them; on firmware without assertion paths the file trigger does not fire. Names people gave: the
+  flagging is tested on gizmo only (FreeRTOS's stripped build has none); not tried on the private
+  firmware, whose names are mostly people's. One measurement each: the review's own spread between two
+  runs is not measured (one decision, task_is_suspended against task_is_valid_for_resume, went both
+  ways in two trials).
+- **Undo.** Leave --task review unused; a review's changes are the names.tsv rows marked `, review`
+  and the subsystems.tsv rows it appended (review.tsv lists them), and `--upto-pass` with the last
+  naming pass scores the names before it.
+- **Status.** In the code (dread/namereview.py; dread/pilot.py --task review, review_task, ask_name's
+  own; docs/formats.md review.tsv).
+
 ## Readable C's frames: overlapping accesses in anonymous unions, a region without fields as bytes (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20; the item in

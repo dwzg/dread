@@ -782,7 +782,7 @@ its sources.
   together (resolution per size, a refinement pass that merges a split file's parts by their
   neighbours), measured on both sources and all 38 builds; on the private firmware, the groups from
   the listing against those from the readable C, and the time.
-- [ ] **A no-confidence vote on existing names** (the user's idea, 2026-10-22: reverse engineering as
+- [x] **A no-confidence vote on existing names** (the user's idea, 2026-10-22: reverse engineering as
   a puzzle, where a sub-picture can look right in one context and wrong in another). Not a periodic
   re-vote by the same model: consistency is not correctness (a misread driver was named after the
   misreading almost throughout, and a vote by fit with the neighbours would have voted out its few
@@ -803,6 +803,41 @@ its sources.
   2026-10-22). The misread driver that motivated it was not misread by the votes on the private
   firmware (Function names, 2026-10-22); what is left for the vote: names people gave, and proposals
   of low agreement.
+  Done 2026-10-23: `dread pilot --task review` (dread/namereview.py, docs/decisions.md, review.tsv in
+  docs/formats.md). (1) Triggers by code, each a reason with a weight: for a function the vote's
+  agreement and a split of its answers, another function of the same name, a vague name, a name
+  without its group's prefix, a shared helper named after one of the parts that call it, a source
+  file's path among its texts that neither its name nor its group's matches; for a group, at its edges:
+  its vote, the files its texts name, the described devices ([models]) it holds without naming them or
+  names without touching them, its functions not taking its prefix. Measured on three runs judged
+  against the source (996 names; wrong 9 %, wrong or partly 33 %): marked names wrong 17-33 %, wrong
+  or partly 44-65 %; the score's area under the ROC curve 0.76; challenged from 1.0, 20 % of the
+  names, 48 % of the wrong ones, 12 % of the right. No direct caller, a small function, a name changed
+  between the passes and neighbours renamed after it (the puzzle's pieces around it moved) were
+  measured and left out. (2) A challenge asks the naming question again with the name, its sentence
+  and the reasons (five questions, voted); a candidate with the old name's words confirms it, else a
+  pairwise question decides, both orders, neither name marked as the old one, "same" and "general" (a
+  more general name) among the answers, the candidate needing a margin of 2 (both orders); groups
+  first, a renamed group's functions after it in the same round. (3) Every challenge a line of
+  review.tsv, a change a row of names.tsv (marked `, review`) or subsystems.tsv; at most two rounds; a
+  name changes once a review and is challenged again only for a new reason, also across reviews;
+  people's names flagged, never changed. Planted errors in a copy of one run (three groups misread and
+  their functions named again by the namer under the wrong reading, three swapped pairs, five names
+  made vague, five shared helpers named after one caller's part; 25 of them judged worse than the
+  original names): 21 challenged, 20 changed, 16 judged better, none worse, 15 right afterwards; the
+  two misread groups whose texts name their files renamed back, the third (no text, no device) not
+  found; the swaps found only where a vote or a twin gave a reason (2 of 6); 19 names not planted
+  changed, 6 better, 1 worse; 24:1 by functions, 11:0 by groups; $0.36 of Haiku, 6.5 minutes. Without
+  planting (the three runs as stored): 58 names changed with a source, 23 better, 6 worse; by groups
+  3:1, 7:1, 5:3, pooled 15:5 (p 0.04; two runs of the same settings differ by 8:12 and 14:5); $0.21-
+  0.27 a review. Sonnet deciding: 22 better, 2 worse on the three runs (pooled by groups 16:2), no
+  better on the planted copy, two to three times the cost, and the judge is Sonnet too: an option
+  (--decider), not the default. Left: what the tables do not show stays unchallenged (half of the
+  wrong names had no reason against them: a misreading of the code, swapped siblings, a misread group
+  without texts or described devices); a trigger from the code itself that tells siblings apart (a
+  random audit of names without a reason would at least count the misses) not tried; the private
+  firmware (its people's names flagged, its misread driver) not tried; the review's spread between two
+  runs of itself not measured (one decision went both ways in two trials).
 - [x] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
   Done 2026-10-22: `dread bench measure RECIPE [BUILD...] --steps readable`, one of the default steps,
@@ -2426,11 +2461,12 @@ tool, the page shows its records; the only changes are the command line's own.
       pair, 0.55 % from the exact forces; at 10,000 nodes 16 ms.
     Not measured: a browser with its GPU, and an image of thousands of real functions; the layout is
     the same however long the frames take, but how it reads at that size is not established.
-- [ ] v3, next: colours from name confidence rather than name status, and the pilot's no-confidence
-  vote's suspects marked once it exists; calls through pointers from the system run's record (who called
-  whom), so that a task's or a callback's caller shows; the system run's timeline (device logs of both
-  images side by side); in the whole program, a search that lights functions, and the groups' edges
-  from shared memory down to the functions once a group is open (now only between closed groups).
+- [ ] v3, next: colours from name confidence rather than name status, and the pilot's no-confidence vote's
+  suspects marked (review.tsv's challenges and flagged names, since 2026-10-23); calls through
+  pointers from the system run's record (who called whom), so that a task's or a callback's caller
+  shows; the system run's timeline (device logs of both images side by side); in the whole program, a
+  search that lights functions, and the groups' edges from shared memory down to the functions once a
+  group is open (now only between closed groups).
 
 ## A realistic benchmark: FreeRTOS (asked for by the user, 2026-10-19; before the rest of MSP430)
 
