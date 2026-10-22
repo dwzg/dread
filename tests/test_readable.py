@@ -148,11 +148,19 @@ def test_the_clean_up_passes_the_gate_and_is_shorter(tmp_path):
 @needs_gcc
 def test_the_command_prints_readable_c_and_the_shapes(capsys):
     """dread readable NAME and --shapes run (a commit took the --shapes option out and kept its use:
-    every call but --check failed, and no test called the command)."""
+    every call but --check failed, and no test called the command); --shapes --score counts the kinds
+    the parameters point to per source structure (gizmo's ring_put and ring_get analysed alone: no
+    caller hands one ring to both, so one source structure is two kinds)."""
     assert readable.main(["--target", gizmo_dir("m3"), "fmt_dec"]) in (0, None)
     assert "fmt_dec" in capsys.readouterr().out
     assert readable.main(["--target", gizmo_dir("m3"), "--shapes", "fmt_dec"]) in (0, None)
     assert "dread readable --shapes:" in capsys.readouterr().out
+    pytest.importorskip("elftools")             # (--score: gizmo's ring, our kinds per source structure)
+    elf = os.path.join(gizmo_dir("m3"), "original", "gizmo.elf")
+    assert readable.main(["--target", gizmo_dir("m3"), "--shapes", "--score", elf, "ring_put", "ring_get"]) in (0, None)
+    out = capsys.readouterr().out
+    assert ("dread readable --shapes --score: 1 source structures in 2 kinds that parameters point to (1 beyond "
+            "one each); 0 kinds paired with several source structures") in out, out
 
 
 def test_the_trees_made_in_a_pool_are_those_made_in_one_process(monkeypatch):

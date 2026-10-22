@@ -3,7 +3,10 @@
 a structure is no member; a list's link points back to its own kind; a structure held inside another
 is a member of it (p->f_18.f_10, &p->f_4), unless it overlaps another or two kinds claim its place;
 the source's layouts come from debug information, a structure a file only declares looked up by
-name."""
+name. What one pointer field holds is one kind, unless it points back to the structure that holds it
+in a structure two kinds hold (an owner: a void *); what is one value follows the code (a stack
+argument read through its address, a use the callee ignores, an asm's registers, a register found 0,
+parameters that end as one value)."""
 import shutil
 import subprocess
 
@@ -319,6 +322,19 @@ def test_a_field_that_points_to_a_structure_is_declared_a_pointer_to_it():
     assert "r1->f_4 = (volatile struct s_1 *)(r2 + 0u);" in out, out
 
 
+def test_a_pointer_field_copied_into_another_needs_no_cast():
+    """One item's link stored into another's: both fields point to the item's structure, so the copy
+    is written without casts (it was (volatile struct s_1 *)(u32)r0->f_4)."""
+    text = LINK + ("u32 copy(u32 r0, u32 r1)\n{\n    *(volatile u32 *)(r1 + 4) = *(volatile u32 *)(r0 + 4);\n"
+                   "    touch(r0);\n    return touch(r1);\n}\n")
+    p = plan_of(text)
+    assert p.pointers == {"s_1": {4: "s_1", 8: "s_1"}}, p.pointers
+    tree = cparse.parse(HEAD + text)
+    shapes.apply_types(tree, tree.function("copy"), p)
+    out = cparse.unparse(tree, notes=False)
+    assert "    r1->f_4 = r0->f_4;\n" in out, out
+
+
 @pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_pointer_fields_compile(tmp_path):
     """Two functions typed in one file define each structure once: C17 forbids a second definition
@@ -446,3 +462,221 @@ def test_a_held_structure_ends_where_its_holder_s_fields_reach():
     assert p.embeds == {queue: {16: lst, 36: lst}}, p.embeds
     assert p.structs[lst] == [(0, "u32"), (4, "u32"), (8, "u32"), (12, "u32"), (16, "u32")] and p.size(lst) == 20
     assert p.pointers[lst] == {4: item, 12: item, 16: item}, p.pointers
+
+
+def test_a_stack_argument_read_through_its_address_is_the_parameter():
+    """The lifters read a stack argument through its address (r4 = *(volatile u32 *)(u32)&s0, FreeRTOS's
+    prvInitialiseNewTask's task block on ARM): what is read there is the parameter, so its template
+    carries what the callee does through it."""
+    s = analysed("u32 init(u32 r0, u32 r1, u32 r2, u32 r3, u32 s0)\n{\n    u32 r4;\n"
+                 "    r4 = *(volatile u32 *)(u32)&s0;\n    *(volatile u32 *)(r4 + 44) = r0;\n"
+                 "    *(volatile u32 *)(r4 + 16) = r4;\n    return 0;\n}\n"
+                 "u32 make(u32 r0)\n{\n    *(volatile u32 *)(r0 + 4) = 0u;\n    return init(1, 2, 3, 4, r0);\n}\n")
+    assert fields(s, "init", 4) == {(16, 4), (44, 4)}
+    assert fields(s, "make") == {(4, 4), (16, 4), (44, 4)}
+
+
+SHARED_TAIL = ("u32 ignore(u32 r0)\n{\n    return 0;\n}\n"
+               "u32 f(u32 r0, u32 r1)\n{\n    u32 r2;\n    if (r1 == 0) goto L;\n"
+               "    r2 = *(volatile u32 *)(r0 + 20);\n    *(volatile u32 *)(r2 + 4) = 1u;\n    goto M;\n"
+               "L: ;\n    r2 = *(volatile u32 *)(r0 + 44);\nM: ;\n    return ignore(r2);\n}\n")
+
+
+def test_a_use_the_callee_ignores_makes_no_two_values_one():
+    """clang -O2's shared tail return vPortExitCritical(r0) is reached with a task's list container
+    in r0 on one path and its priority on another: the priority took the container's pointer. A use
+    for a parameter the callee does nothing with joins no definitions."""
+    s = analysed(SHARED_TAIL)
+    root, off = s.loc(s.points[s.find(("param", "f", 0))])
+    container, priority = s.fields[root][off + 20], s.fields[root][off + 44]
+    assert s.find(container.content) in s.points
+    assert s.find(priority.content) not in s.points
+
+
+def test_an_asm_s_registers_are_values_of_their_own():
+    """RISC-V's ecall: the lifter's asm reads and writes a0 to a7 through register variables, and as
+    one node of the flow graph it joined every value those registers held on the way to it (a list's
+    count, stored back, took its container's pointer: RISC-V's list count typed as a pointer)."""
+    s = analysed("u32 g(u32 a0, u32 a1)\n{\n    u32 a4, a5;\n    a5 = *(volatile u32 *)(a0 + 20);\n"
+                 "    a4 = *(volatile u32 *)(a0 + 20);\n    if (a1 == 0) goto L;\n    a4 = *(volatile u32 *)a5;\n"
+                 "    a4 = a4 + 1u;\n    *(volatile u32 *)a5 = a4;\nL: ;\n    {\n"
+                 "        register u32 x4 __asm__(\"a4\") = a4;\n"
+                 "        __asm__ volatile (\"ecall\" : \"+r\"(x4) : : \"memory\");\n        a4 = x4;\n    }\n"
+                 "    return a4;\n}\n")
+    root, off = s.loc(s.points[s.find(("param", "g", 0))])
+    lst = s.loc(s.points[s.find(s.fields[root][off + 20].content)])
+    count = s.fields[lst[0]][lst[1]]
+    assert s.find(count.content) not in s.points
+
+
+def test_a_register_a_branch_found_zero_stores_null():
+    """GCC stores NULL with the register it has just found 0 (if (r7 != 0) goto L; *(r0 + 8) = r7):
+    FreeRTOS's mutex holder at 8 had become one value with pcHead at 0, which it had tested."""
+    s = analysed("u32 h(u32 r0)\n{\n    u32 r3, r7;\n    r7 = *(volatile u32 *)r0;\n    if (r7 != 0) goto L;\n"
+                 "    *(volatile u32 *)(r0 + 8) = r7;\nL: ;\n    r3 = *(volatile u32 *)(r0 + 8);\n"
+                 "    return *(volatile u32 *)(r3 + 44);\n}\n")
+    root, off = s.loc(s.points[s.find(("param", "h", 0))])
+    assert s.find(s.fields[root][off].content) != s.find(s.fields[root][off + 8].content)
+    assert zero_names("if (r7 != 0) goto L;") == (set(), {"r7"}) and zero_names("if (!r7) return 0;") == ({"r7"}, set())
+
+
+def test_a_value_a_branch_found_zero_reaches_no_use_past_it():
+    """FreeRTOS's prvSearchForNameWithinSingleList returns a list's count where the count is 0 and the
+    task block it found elsewhere, from one return: the count, 0 there, is not one value with the
+    task block (the list's count was a pointer to a task block)."""
+    s = analysed("u32 search(u32 r0, u32 r1)\n{\n    u32 r0_1, r3;\n    r0_1 = *(volatile u32 *)r0;\n"
+                 "    if (r0_1 == 0) goto L;\n    r3 = *(volatile u32 *)(r0 + 12);\n    r0_1 = *(volatile u32 *)(r3 + 12);\n"
+                 "    *(volatile u32 *)(r0_1 + 44) = r1;\nL: ;\n    return r0_1;\n}\n")
+    root, off = s.loc(s.points[s.find(("param", "search", 0))])
+    assert s.find(s.fields[root][off].content) not in s.points
+    assert s.find(s.fields[root][off + 12].content) in s.points
+
+
+def zero_names(stmt):
+    tree = cparse.parse(HEAD + "u32 z(u32 r7)\n{\n    %s\nL: ;\n    return 0;\n}\n" % stmt)
+    return shapes.zero_tests(tree.function("z").body.body[0].cond)
+
+
+EITHER = ("u32 init(u32 r0, u32 r1, u32 r2, u32 r3)\n{\n    u32 r6;\n    r6 = r2;\n    if (r1 == 0) r6 = r3;\n"
+          "    *(volatile u32 *)(r3 + 60) = r0;\n    *(volatile u32 *)(r3 + 64) = r1;\n    *(volatile u32 *)r3 = r6;\n"
+          "    *(volatile u32 *)(r3 + 4) = r6;\n    return r3;\n}\n"
+          "u32 make(u32 r0)\n{\n    *(volatile u32 *)(r0 + 56) = 0u;\n    return init(1, 4, r0 + 80u, r0);\n}\n"
+          "u32 make_static(u32 r0, u32 r1)\n{\n    *(volatile u8 *)r1 = 0;\n    return init(1, 4, r1, r0);\n}\n")
+
+
+def test_parameters_that_end_as_one_value_pass_on_only_what_the_function_uses_as_a_pointer():
+    """FreeRTOS's pcHead is the queue itself for a semaphore, else the storage given beside it (a
+    static queue's) or behind it: the storage parameter and the queue are one value. Only the queue,
+    which the function dereferences, passes its template on (the storage behind a dynamic queue got
+    the queue's fields again at 80), and the value is no pointer to one structure (the static queue's
+    pcHead and pcWriteTo were typed as pointers to the queue)."""
+    tree = cparse.parse(HEAD + EITHER)
+    trees = [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)]
+    s = shapes.analyse(trees)
+    assert 2 not in s.summaries["init"]["params"] and 3 in s.summaries["init"]["params"]
+    assert not [off for off, _ in fields(s, "make") if off >= 80], fields(s, "make")
+    assert fields(s, "make_static", 1) == {(0, 1)}
+    p = shapes.plan(s, trees)
+    queue = p.typed["init"]["r3"]
+    assert p.typed["make"]["r0"] == queue and not p.pointers.get(queue), p.pointers
+
+
+LISTS = ("u32 insert(u32 r0, u32 r1)\n{\n    *(volatile u32 *)(r1 + 16) = r0;\n"
+         "    *(volatile u32 *)(r1 + 4) = *(volatile u32 *)(r0 + 4);\n    *(volatile u32 *)(r0 + 4) = r1;\n"
+         "    *(volatile u32 *)r0 = *(volatile u32 *)r0 + 1u;\n    return 0;\n}\n"
+         "u32 remove(u32 r0)\n{\n    u32 r2;\n    r2 = *(volatile u32 *)(r0 + 16);\n"
+         "    if (*(volatile u32 *)(r2 + 4) == r0) *(volatile u32 *)(r2 + 4) = *(volatile u32 *)(r0 + 8);\n"
+         "    *(volatile u32 *)(r0 + 16) = 0u;\n    *(volatile u32 *)r2 = *(volatile u32 *)r2 - 1u;\n"
+         "    return *(volatile u32 *)r2;\n}\n"
+         "u32 use(u32 r0, u32 r1)\n{\n    insert(r0, r1);\n    return remove(r1);\n}\n")
+
+
+def test_what_one_pointer_field_holds_is_one_kind():
+    """An item's container points to the list that holds it: the list remove reaches through it is the
+    list insert takes (one structure, not one of its own), and the field is a pointer to it."""
+    p = plan_of(LISTS)
+    lst, item = p.typed["insert"]["r0"], p.typed["insert"]["r1"]
+    assert lst != item and p.typed["remove"]["r2"] == lst and p.typed["remove"]["r0"] == item, p.typed
+    assert p.pointers.get(item, {}).get(16) == lst, p.pointers
+
+
+OWNERS = ("u32 item_init(u32 r0)\n{\n    *(volatile u32 *)(r0 + 16) = 0u;\n    *(volatile u32 *)(r0 + 4) = r0;\n"
+          "    return 0;\n}\n"
+          "u32 task_init(u32 r0)\n{\n    item_init(r0 + 4u);\n    *(volatile u32 *)(r0 + 16) = r0;\n"
+          "    *(volatile u32 *)(r0 + 44) = 5u;\n    *(volatile u8 *)(r0 + 48) = 1;\n    return 0;\n}\n"
+          "u32 alarm_init(u32 r0)\n{\n    item_init(r0 + 4u);\n    *(volatile u32 *)(r0 + 16) = r0;\n"
+          "    *(volatile u8 *)(r0 + 44) = 1;\n    *(volatile u32 *)(r0 + 24) = 7u;\n    return 0;\n}\n"
+          "u32 wake(u32 r0)\n{\n    u32 r4;\n    r4 = *(volatile u32 *)(r0 + 12);\n    *(volatile u32 *)(r0 + 16) = 0u;\n"
+          "    return *(volatile u32 *)(r4 + 44);\n}\n"
+          "u32 run(u32 r0)\n{\n    item_init(r0);\n    return wake(r0);\n}\n")
+
+
+def test_a_field_that_points_into_a_structure_s_held_one_points_to_the_held_structure():
+    """A list's index pointing to the item a task block holds at 4 (the block's own word at 0 in
+    front of it) points to an item: what another function reaches through the index joins the item's
+    kind. (Memory with fields in front of its base, a task block reached at its event item with
+    nothing pointing to its start, says nothing.)"""
+    p = plan_of(OWNERS.split("u32 alarm_init(")[0],
+                "u32 point(u32 r0, u32 r1)\n{\n    *(volatile u32 *)r1 = 0u;\n    item_init(r1 + 4u);\n"
+                "    *(volatile u32 *)(r0 + 4) = r1 + 4u;\n    *(volatile u32 *)r0 = 1u;\n    return 0;\n}\n"
+                "u32 walk(u32 r0)\n{\n    u32 r2;\n    r2 = *(volatile u32 *)(r0 + 4);\n"
+                "    *(volatile u32 *)(r2 + 16) = 0u;\n    return *(volatile u32 *)r0 + *(volatile u32 *)(r2 + 4);\n}\n"
+                "u32 both(u32 r0, u32 r1)\n{\n    point(r0, r1);\n    return walk(r0);\n}\n")
+    assert p.typed["walk"]["r2"] == p.typed["item_init"]["r0"], p.typed
+
+
+def test_an_owner_that_points_back_to_its_holder_holds_several_kinds():
+    """An item's owner points back to the structure that holds the item, a task block or a timer (a
+    void * in FreeRTOS): the field stays an integer, and the task blocks and timers stay two kinds.
+    What a function reaches through it joins the one kind its own accesses fit: a word at 44 is the
+    task block's (the timer has a byte there); a function that reaches only what both have joins
+    neither."""
+    p = plan_of(OWNERS)
+    task, timer, item = p.typed["task_init"]["r0"], p.typed["alarm_init"]["r0"], p.typed["item_init"]["r0"]
+    assert len({task, timer, item}) == 3, p.typed
+    assert 12 not in p.pointers.get(item, {}), p.pointers
+    assert p.typed["wake"]["r4"] == task, p.typed
+    both = OWNERS.replace("return *(volatile u32 *)(r4 + 44);", "return *(volatile u32 *)(r4 + 8);")
+    p = plan_of(both)
+    assert p.typed.get("wake", {}).get("r4") not in (p.typed["task_init"]["r0"], p.typed["alarm_init"]["r0"]), p.typed
+
+
+def test_a_template_carries_what_its_memory_holds():
+    """A callee that hands memory it reaches through a field to a function taking an item (FreeRTOS:
+    a task block reached through an item's owner, its event item handed to uxListRemove) says the
+    caller's copy holds an item there too: the caller's memory holds the item's structure."""
+    tree = cparse.parse(HEAD + OWNERS + "u32 setup(u32 r0)\n{\n    u32 r4;\n    r4 = *(volatile u32 *)(r0 + 8);\n"
+                        "    item_init(r4 + 4u);\n    *(volatile u32 *)(r4 + 32) = 1u;\n    return 0;\n}\n"
+                        "u32 outer(u32 r0)\n{\n    u32 r1;\n    setup(r0);\n    r1 = *(volatile u32 *)(r0 + 8);\n"
+                        "    return *(volatile u32 *)(r1 + 32);\n}\n")
+    trees = [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)]
+    s = shapes.analyse(trees)
+    shapes.kinds(s, trees)
+    root, off = s.loc(s.points[s.find(("param", "outer", 0))])
+    inner = s.loc(s.points[s.find(s.fields[root][off + 8].content)])
+    item = s.kind_root[s.loc(s.points[s.find(("param", "item_init", 0))])[0]]
+    assert s.kind_embeds.get((s.kind_root[inner[0]], 4 - s.kind_base.get(inner[0], 0) + inner[1])) == item, \
+        s.kind_embeds
+
+
+def test_our_structures_per_source_structure_through_pointer_fields_and_members():
+    """The plan's structures paired with the source's: typed parameters' pairs, and from them the
+    structures their pointer fields point to and those they hold; counted per source structure (one
+    that is two of ours is fragmentation) and per structure of ours (one that is two source
+    structures: of one size, as FreeRTOS's mirror types; of two sizes, a wrong join)."""
+    p = shapes.Plan()
+    p.structs = {"s_1": [(0, "u32")], "s_2": [(0, "u32"), (16, "u32")], "s_3": [(0, "u32"), (4, "u32")],
+                 "s_4": [(0, "u32"), (8, "u32")]}
+    p.embeds = {"s_1": {4: "s_2"}}
+    p.pointers = {"s_2": {16: "s_3"}}
+    structs = {"Task": {"size": 48, "pointers": {}, "held": {4: "Item"}},
+               "Item": {"size": 20, "pointers": {16: "List"}, "held": {}},
+               "List": {"size": 20, "pointers": {}, "held": {}},
+               "Mirror": {"size": 20, "pointers": {}, "held": {}},
+               "Timer": {"size": 40, "pointers": {}, "held": {}}}
+    pairs = shapes.pair_structures(p, {("s_1", "Task"), ("s_4", "Item")}, structs)
+    assert pairs == {("s_1", "Task"), ("s_2", "Item"), ("s_3", "List"), ("s_4", "Item")}, pairs
+    assert shapes.count_pairs(pairs, structs) == {"source": 3, "ours": 4, "extra": 1, "several": 0, "sizes": 0}
+    more = pairs | {("s_3", "Mirror"), ("s_1", "Timer")}
+    assert shapes.count_pairs(more, structs) == {"source": 5, "ours": 4, "extra": 1, "several": 2, "sizes": 1}
+    assert shapes.held_offsets(p, "s_1") == [4] and shapes.held_structures(p, "s_1") == [(4, "s_2")]
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_source_s_structures_and_what_they_point_to_and_hold(tmp_path):
+    """source_structures: each structure a parameter points to, the structures its pointer leaves point
+    to and those it holds (at any depth, by name), and each function's parameters' structures."""
+    pytest.importorskip("elftools")
+    (tmp_path / "a.c").write_text(
+        "struct List;\nstruct Item { int value; struct Item *next; struct List *container; };\n"
+        "struct List { int count; struct Item *index; struct Item end; };\n"
+        "struct Task { int top; struct Item state; struct Item event; int prio; };\n"
+        "int use(struct Task *t, struct List *l, int k) { return t->prio + l->count + k; }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O1", "-g", "-nostdlib", "-e", "use",
+                    "-o", elf, str(tmp_path / "a.c")], check=True)
+    structs, params = shapes.source_structures(elf)
+    assert structs["Task"]["held"] == {4: "Item", 16: "Item"} and structs["Task"]["size"] == 32, structs
+    assert structs["Item"]["pointers"] == {4: "Item", 8: "List"}, structs
+    assert structs["List"]["pointers"] == {4: "Item", 12: "Item", 16: "List"} and structs["List"]["held"] == {8: "Item"}
+    assert list(params.values()) == [{0: "Task", 1: "List"}], params

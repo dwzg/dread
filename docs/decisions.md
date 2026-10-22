@@ -9,6 +9,69 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C's structures: kinds joined through what pointer fields hold, a void * by evidence (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** dread.shapes' kinds stayed fragmented: a list reached through an item's container
+  was a kind of its own, and a task block reached through an item's owner held nothing. Joining kinds
+  through pointer fields would also join what a void * holds: FreeRTOS's pvOwner holds task blocks
+  for some lists and timers for others. Which rule, decided by code, joins what one pointer field
+  holds and only that?
+- **Options, measured** on four FreeRTOS builds (pointer fields against the source's pointers to a
+  structure, the plan's fields of typed parameters, members, structures; docs/todo.md, Types):
+  (1) every field's targets one kind, unification of kinds: joins task blocks and timers through the
+  owner (on RISC-V GCC -Os the timer's six fields are its held item's, all within the task block's
+  layout). (2) A field's targets one kind where their layouts fit together: fit alone tells neither a
+  timer from a task block there nor a list from an item (five words each). (3) As (2), and a field
+  holds several kinds where it points back to the structure that holds it in a structure two kinds
+  hold, or where two of its targets are kinds one function takes as different parameters; there a
+  target joins the one kind it may hold whose layout holds all its fields, where exactly one does,
+  and the field is no pointer. (4) As (3), fields also read through puns (a list's end marker at 8,
+  walked as an item by one pointer): it joined lists with items until (3)'s parameter rule kept them
+  apart, and then found fewer right pointer fields (clang -O2 39 -> 35, RISC-V 27 -> 23); puns used
+  only to type a field that points to a list's end marker as an item pointer changed nothing on the
+  four builds (the unification never meets an item there with the end marker: vListInsert's walk
+  reads every item as the end marker itself), so a field that also points to a list's end marker
+  stays an integer (an item's next; on GCC -Os and -O0 the list's links too). (5) As (3),
+  two kinds parameters make in one field, neither's layout within the other's, held as several: no
+  difference on the four builds.
+- **Choice: (3).** A field's targets are read at structures' bases, through the structures their
+  kinds hold (a task block's field at 0x14 is its item's container at 0x10); memory with fields in
+  front of its base lies inside a larger structure and says nothing (a task block reached at its
+  event item, which had made the items' kind the task block's). The owner is several
+  on GCC -Os though only the task blocks' own stores lift there: items are held by task blocks and by
+  timers, and a field that points back to its holder holds whichever holds it. Pointer fields that
+  are the source's pointers to a structure: GCC -Os 9 of 10 -> 18 of 21, clang -O2 9 of 13 -> 39 of
+  46, RISC-V 4 of 8 -> 27 of 27, GCC -O0 6 of 7 -> 12 of 16 (the wrong ones: newlib's _cookie,
+  StaticQueue_t's dummies, void * in the source, that hold the queue's lists' items and the mutex
+  holder in fact; on GCC -Os and -O0 the owner of a second family of items, which no slot joins to
+  the first; GCC -O0's pxStack, an array read at four constant offsets); the source's pointers to a
+  structure left integers 30 -> 21, 52 -> 16, 39 -> 13, 39 -> 30. (5) is left out (nothing measured
+  it), the parameter rule kept: it is what keeps lists and items apart when a field holds both, and
+  it also keeps one place two kinds are held at from joining them (no difference on the four builds).
+- **Values first, each traced.** What made fields point where the source does not: a use the
+  callee does nothing with joined the definitions that reached it (clang -O2's shared tail return
+  vPortExitCritical(r0): a task block's priority took its list container's pointer); RISC-V's ecall,
+  whose asm reads a0 to a7, did the same (a list's count took its container's); GCC stores NULL with
+  a register it has just found 0 (the mutex holder took pcHead's value), and returns a register a
+  branch found 0 from the return that hands back a pointer elsewhere (GCC 9 -Os: a list's count took
+  a task block's pointer; definitions now do not reach past an edge that says their register is 0);
+  a stack argument read through its address was nobody's value (prvInitialiseNewTask's task block on
+  ARM); and parameters that end as one value, the static queue's storage and the queue through
+  pcHead, passed one template
+  to both (the storage took the queue's fields; at GCC -O0 a dynamic queue's storage behind it took
+  them again). Keeping such parameters two values would take points-to sets instead of unification;
+  the rule taken passes on the templates of the parameters the function uses as a pointer itself, and
+  the value points to no one structure. Templates also carry what their memory holds (the calls that
+  handed it at an offset), so memory copied from a callee holds the callee's items too.
+- **Undo.** dread/shapes.py: same_slots() not called in kinds() joins nothing through fields (and
+  makes no void_slots); Collector.taken returning None merges at every use; known_zero returning {},
+  g.reaching() for reaching_past_zero in Collector.webs and address_taken returning set() take the
+  others back; the groups in analyse() pass every template again; templates' fourth part, what their
+  memory holds, empty takes that back.
+- **Status.** Done (dread/shapes.py; tests/test_shapes.py; docs/todo.md, Types).
+
 ## Lifted C's frames: the words only the saves and dead restores touch are left out (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20; the item in
@@ -338,7 +401,6 @@ docs/todo.md, Compiler diversity).
      600 nodes, Barnes-Hut above. A group's links beyond the 400 heaviest are hairlines: in software
      raster the thick links between 221 groups had taken the frame rate from 56 to 15 fps.
 - **Status.** In the code (branch gui-wobble).
-
 
 ## Readable C's structures: what one holds inside another as members (2026-10-22)
 

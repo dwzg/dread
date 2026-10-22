@@ -23,6 +23,22 @@ objects that meet at different offsets (one inside the other, or a pun: FreeRTOS
 its end marker as if it were an item) are kept apart (shifted=False), not merged into one with
 fields of both.
 
+What is one value follows the code (Collector): a variable is as many values as it has webs of
+definitions, and only a use whose value the analysis may take joins the definitions that reach it.
+An argument for a parameter the callee does nothing with, the result of a function no caller reads,
+and an asm's register operands join nothing (clang -O2's shared tail return vPortExitCritical(r0)
+made a task block's priority one value with its list container, RISC-V's ecall, whose asm reads a0
+to a7, a list's count one with its container: both pointer fields that were not). A register a
+branch has just found 0 holds no pointer there (known_zero: GCC stores NULL with it, and FreeRTOS's
+mutex holder had become one value with the pcHead it tested), and its earlier values reach no use
+past that branch (reaching_past_zero: a list's count returned where it is 0, from the return that
+hands back a found task block elsewhere). A parameter the C reads through its
+address (the lifters' stack arguments, *(volatile u32 *)(u32)&s2) is the parameter. Parameters that
+end as one value, an either-or of the arguments stored in one place (FreeRTOS's pcHead: the queue
+itself for a semaphore, else the storage given beside it), pass on only the templates of those the
+function uses as a pointer itself (dereferences, or hands to a callee that takes one), and the value
+points to no one structure (interior): the storage had taken the queue's fields.
+
 Measured against the source's structures (score: a parameter's fields against the debug
 information's members, by offset and size; a structure a file only declares is looked up by name):
 on FreeRTOS GCC -Os, 618 of 622 fields found are the source's (99 %), 32 % of its members found
@@ -48,7 +64,31 @@ only such addresses a pointer to the held structure: r5 = &r4->f_4), and every a
 volatile access it was. A place two kinds claim that could not be made one, or a held structure the
 plan does not declare, leaves the holder's fields flat. Measured on four FreeRTOS builds against the
 source (score_plan; docs/todo.md, Types): of the members declared in typed parameters' structures,
-every one lies where the source's structure holds a structure.
+every one lies where the source's structure holds a structure. A template carries what the memory it
+describes holds (the calls that handed it at an offset, hold), so a task block reached through an
+item's owner in a callee that hands its event item to uxListRemove holds an item in the caller too.
+
+Kinds are also joined through what pointer fields hold (kinds(): pointer_slots, same_slots). The
+word fields of the objects, read through the structures their kinds hold (a task block's field at
+0x14 is its item's container at 0x10), are slots, and what one slot points to at structures' bases
+is one kind: the list an item's container points to is the list kind wherever it was reached (a list
+reached through an item's container had been a kind of its own, and a task block reached through an
+item's owner held nothing). Memory with fields in front of its base lies inside a larger structure
+and says nothing (a task block reached at its event item, 0x18 into it). A slot holds
+several kinds, and joins none of them, where the evidence says so (several): their layouts do not
+fit together; it points back to the structure that holds it in a structure two kinds hold (FreeRTOS's
+pvOwner: the task block or the timer that holds the item, a void *; on GCC -Os the code that stores a
+timer there does not lift, and the two holders are the evidence); or two of them are kinds one
+function takes as different parameters (a list and the item vListInsert takes are five words each).
+In such a slot what it holds joins the one kind it may hold, a kind a parameter makes there or a
+structure that holds it, whose layout holds all of its fields, where exactly one does (an owner a
+function uses as a task block: a word at 44 is a task block's, a timer has a byte there), and the plan
+declares the field no pointer (void_slots, also at the holders' offsets of a held structure's slot).
+Reading slots through puns too (a list's end marker at 8, walked as an item) was measured and left:
+it joined lists with items, and with them kept apart found fewer pointer fields (docs/decisions.md).
+Two kinds one function takes as different parameters are joined neither through a slot nor as what
+one place holds. How many of ours each source structure is: score_kinds (dread readable --score for
+the plan's structures, with --shapes for the kinds the parameters point to).
 """
 import re
 
@@ -72,12 +112,15 @@ class Shapes:
         self.kind_embeds = {}           # (kind, offset from its base) -> the kind held there (kinds())
         self.offsets = []               # (location, location): one memory, met late (settle's v = w + k)
         self.calls = []                 # (the argument's location, the callee's parameter's): kinds (kinds())
+        self.held = {}                  # object root -> [(offset, the callee's parameter's location)] (hold)
         self.frames = set()             # objects that are a function's stack frame (reached from sp0)
         self.var_webs = {}              # (function, variable) -> its values' keys, one per web
         self.shifted = False            # whether objects that meet at different offsets are merged
         self.share = False              # whether templates refer to memory reachable from fixed addresses
         self.embedded = set()           # (root, offset, root, offset) of those kept apart
         self.interior = set()           # roots of values that met their own object at another offset
+        self.param_used = {}            # (function, parameter index) -> whether it uses it as a pointer
+        self.void_slots = set()         # (kind, offset) of pointer slots that hold several kinds (kinds())
 
     # --- type variables
     def tv(self, key):
@@ -200,6 +243,8 @@ class Shapes:
         # rb's offset x is ra's offset x + (oa - ob)
         shift = oa - ob
         self.obj_parent[rb] = (ra, shift)
+        for off, inner in self.held.pop(rb, ()):
+            self.held.setdefault(ra, []).append((off + shift, inner))
         out = []
         for off, f in self.fields.pop(rb).items():
             g = self.fields[ra].get(off + shift)
@@ -246,8 +291,10 @@ class Shapes:
 
     def template(self, location, shared, depth=4, path=()):
         """What the memory at location looks like, to copy onto another: ("copy", {offset: (types,
-        child)}) relative to location, ("shared", root, offset) for memory reachable from fixed
-        addresses, ("back", k, delta) for a pointer to the k-th structure up the path."""
+        child, interior)} relative to location, (root, offset) of location, ((offset, the location of
+        a callee's parameter whose template's root a call handed the memory there), ...): what it
+        holds), ("shared", root, offset) for memory reachable from fixed addresses, ("back", k,
+        delta) for a pointer to the k-th structure up the path."""
         root, off0 = self.loc(location)
         if root in shared and self.share:
             return ("shared", root, off0)
@@ -263,10 +310,20 @@ class Shapes:
             if t in self.points:
                 child = self.template(self.points[t], shared, depth - 1, path + ((root, off0),))
             out[off - off0] = (frozenset(f.types), child, t in self.interior)
-        return ("copy", out, (root, off0))
+        held = tuple(sorted({(off - off0, inner) for off, inner in self.held.get(root, ()) if off > off0}))
+        return ("copy", out, (root, off0), held)
+
+    def hold(self, location, inner):
+        """Records that a call handed the memory at location for the parameter whose template's root
+        is inner (calls, and held: what an object holds at an offset, which its templates carry)."""
+        self.calls.append((location, inner))
+        root, off = self.loc(location)
+        self.held.setdefault(root, []).append((off, inner))
 
     def instantiate(self, tmpl, location, stack=()):
-        """Copy a template onto the memory at location (an object of the caller)."""
+        """Copy a template onto the memory at location (an object of the caller), with what it holds
+        at its offsets (a task block reached through an item's owner in a callee that hands its
+        event item to uxListRemove holds an item at 0x18 in the caller too)."""
         if tmpl is None:
             return
         if tmpl[0] == "shared":
@@ -284,6 +341,8 @@ class Shapes:
                     self.instantiate(child, self.pointer(f.content), stack)
                 if interior:
                     self.interior.add(self.find(f.content))
+            for rel, inner in tmpl[3]:
+                self.hold((location[0], location[1] + rel), inner)
 
 
 
@@ -338,6 +397,12 @@ class Collector:
         self.s, self.fn, self.macros = shapes, fn, macros   # macros: {name: (address, type)}
         self.summaries, self.together = summaries or {}, set(together)
         self.unread = unread            # functions whose result no caller reads (analyse)
+        self.opaque = register_variables(fn)    # (an asm's register operands: what they hold is unknown)
+        self.args = None                # the object of the parameters whose address the C takes (run)
+        self.arg_offset = {}            # such a parameter -> its offset in it
+        self.derefs = set()             # values used as an address here (or handed to a callee for one)
+        self.copies = []                # (value, the variable's value it is copied into): v = w, v = w + k
+        self.zero_at = {}               # node -> the variables known to hold 0 there (webs: known_zero)
 
     def key(self, name, write=False, entry=False):
         """The value of variable name here: one per web of its definitions (webs), so that a variable
@@ -358,7 +423,12 @@ class Collector:
     def webs(self):
         """Each definition's web and each use's (definitions that reach a common use are one web, as
         dread.tidy webs), over the body's flow graph with its conditional blocks spread out; the
-        statements' nodes (a statement inside one without a node of its own takes its parent's)."""
+        statements' nodes (a statement inside one without a node of its own takes its parent's).
+        Only a use whose value the analysis takes joins the definitions that reach it (taken): a
+        register several values pass through on their way to a use that ignores them stays as many
+        values (clang -O2's shared tail return vPortExitCritical(r0), reached with a task's list
+        container in r0 on one path and its priority on another, made the priority a pointer to the
+        list; RISC-V's ecall, whose asm reads a0 to a7, made a list's count one with its container)."""
         from dread.cflow import Graph
         from dread.tidy import flat_view
         self.node, self.node_of = None, {}
@@ -366,7 +436,7 @@ class Collector:
         try:
             view = flat_view(self.fn)
             g = Graph(view)
-            reach = g.reaching()
+            reach = reaching_past_zero(g)
         except C.ParseError:
             return
         for n in g.nodes:
@@ -382,15 +452,18 @@ class Collector:
             return x
         from dread.tidy import simple
         for n in g.nodes:
+            used = self.taken(n.stmt)
             for v in n.reads:
                 defs = sorted(reach[n.index].get(v) or ())
-                for d in defs[1:]:
-                    a, b = find((v, defs[0])), find((v, d))
-                    if a != b:
-                        parent[b] = a
+                if used is None or v in used:
+                    for d in defs[1:]:
+                        a, b = find((v, defs[0])), find((v, d))
+                        if a != b:
+                            parent[b] = a
                 # (a statement with others in it, a loop or a block, that reads and writes v: its node
-                # cannot say which read sees its own write, so they are one web; a simple one reads first)
-                if defs and v in n.writes and not simple(n.stmt):
+                # cannot say which read sees its own write, so they are one web; a simple one reads first;
+                # an asm's own registers are values of their own)
+                if defs and v in n.writes and not simple(n.stmt) and (used is None or v in used):
                     a, b = find((v, defs[0])), find((v, n.index))
                     if a != b:
                         parent[b] = a
@@ -402,13 +475,132 @@ class Collector:
                 if defs:
                     self.use_web[(v, n.index)] = find((v, defs[0]))[1]
         self.entry_web = {v: find((v, -1))[1] for v in g.scope}
+        self.zero_at = known_zero(g)
+
+    def taken(self, st):
+        """The variables statement st reads (its own expressions and those of the statements in it)
+        where the analysis may take their value: every read but an argument for a parameter the
+        callee does nothing with (its summary has no template there), what a function returns that
+        no caller reads, and an asm's registers (an asm, or a block of register variables around
+        one, reads none: its registers are values of their own, also where the structure stage put
+        it inside an if, RISC-V's ecall); None when st holds a statement it does not know (every
+        read counts)."""
+        out = set()
+        return out if self._taken_stmt(st, out) else None
+
+    def _taken_stmt(self, st, out):
+        from dread.naming import _inner
+        if isinstance(st, C.Asm) or (isinstance(st, C.Block) and any(
+                isinstance(x, C.Decl) and any(d.asm for d in x.items) for x in st.body)):
+            return True
+        if isinstance(st, C.ExprStmt):
+            self._taken(st.e, True, out)
+        elif isinstance(st, C.Return):
+            if st.e is not None:
+                self._taken(st.e, self.fn.name not in self.unread, out)
+        elif isinstance(st, (C.If, C.While, C.DoWhile)):
+            self._taken(st.cond, True, out)
+        elif isinstance(st, C.Switch):
+            self._taken(st.e, True, out)
+        elif isinstance(st, C.For):
+            for x in (st.init if not isinstance(st.init, C.Decl) else None, st.cond, st.step):
+                if x is not None:
+                    self._taken(x, True, out)
+        elif isinstance(st, C.Decl):
+            for d in st.items:
+                if d.init is not None:
+                    self._taken(d.init, d.name not in self.opaque, out)
+                for x in d.dims:
+                    if x is not None:
+                        self._taken(x, True, out)
+        elif not isinstance(st, (C.Block, C.Goto, C.Label, C.Case, C.Break, C.Continue)):
+            return False
+        return all(self._taken_stmt(inner, out) for inner in _inner(st))
+
+    def _taken(self, e, used, out):
+        """Adds to out the variables e reads whose value the analysis may take; used: False where e's
+        value goes nowhere (an argument the callee ignores, an unread result): the reads that only
+        pass it on (casts, an offset added, a conditional's arms) do not count; those that compute
+        something else from it (an address, an operand) do."""
+        if isinstance(e, C.Name):
+            if used and e.id not in self.macros and e.id not in self.opaque:
+                out.add(e.id)
+            return
+        if isinstance(e, C.Cast):
+            self._taken(e.e, used, out)
+        elif isinstance(e, C.Binary) and e.op in ("+", "-") and isinstance(e.r, C.Num):
+            self._taken(e.l, used, out)
+        elif isinstance(e, C.Cond):
+            self._taken(e.c, True, out)
+            self._taken(e.t, used, out)
+            self._taken(e.f, used, out)
+        elif isinstance(e, C.Comma):
+            for i, x in enumerate(e.items):
+                self._taken(x, used or i < len(e.items) - 1, out)
+        elif isinstance(e, C.Call):
+            name = e.f.id if isinstance(e.f, C.Name) else None
+            if name is None:
+                self._taken(e.f, True, out)
+            for i, a in enumerate(e.args):
+                tmpl = self.summaries[name]["params"].get(i) if name in self.summaries else None
+                ignored = name in self.summaries and (tmpl is None or reaches_below(tmpl))
+                self._taken(a, not ignored, out)
+        else:
+            from dread.cflow import walk_expr      # (anything else: every read counts)
+            out.update(x.id for x in walk_expr(e) if isinstance(x, C.Name))
 
     def run(self):
         self.webs()
         for i, (_, pname) in enumerate(self.fn.params):
             self.s.unify(self.key(pname, entry=True), ("param", self.fn.name, i))
+        # A parameter the C reads through its address (the lifters' stack arguments: r4 = *(volatile
+        # u32 *)(u32)&s2, or a_1 = (u32)&s0 and a_1 + 4 for the next one) is a word of an argument
+        # area at 4 bytes a parameter: what is read there is the parameter (FreeRTOS's
+        # prvInitialiseNewTask takes its task block on the stack on ARM, and its template was empty).
+        addressed = address_taken(self.fn)
+        if addressed:
+            self.args = self.s.new_object()
+            self.s.frames.add(self.args)
+            for i, (_, pname) in enumerate(self.fn.params):
+                if pname in addressed:
+                    self.arg_offset[pname] = 4 * i
+                    self.s.unify(self.s.field((self.args, 4 * i)).content, ("param", self.fn.name, i))
         for st in self.fn.body.body:
             self.stmt(st)
+        # Which parameters the function uses as a pointer itself: their value, or one it is copied
+        # into, is an address here or goes to a callee that takes a pointer (analyse: a parameter
+        # that is one value with another only by being stored or chosen with it passes nothing on).
+        used, changed = set(self.derefs), True
+        while changed:
+            changed = False
+            for src, dst in self.copies:
+                if dst in used and src not in used:
+                    used.add(src)
+                    changed = True
+        self.node = None
+        for i, (_, pname) in enumerate(self.fn.params):
+            self.s.param_used[(self.fn.name, i)] = self.key(pname, entry=True) in used
+
+    def source(self, e):
+        """The value of the variable e is (through casts to an integer and offsets added), or of the
+        parameter it reads from the argument area (*(volatile u32 *)(u32)&s0); None for another."""
+        while isinstance(e, C.Cast) or (isinstance(e, C.Binary) and e.op in ("+", "-") and isinstance(e.r, C.Num)):
+            e = e.e if isinstance(e, C.Cast) else e.l
+        if isinstance(e, C.Name) and e.id not in self.macros and e.id not in self.opaque:
+            return self.key(e.id)
+        acc = _access(e)
+        if acc is not None and acc[1] == 0:
+            x = acc[0].e if isinstance(acc[0], C.Cast) else acc[0]
+            if isinstance(x, C.Unary) and x.op == "&" and isinstance(x.e, C.Name) and x.e.id in self.arg_offset:
+                return self.key(x.e.id, entry=True)
+        return None
+
+    def copied(self, e, target):
+        """Records that e's value, a variable's or a parameter's (source), is copied into target's
+        (run follows a use as a pointer back through it)."""
+        src = self.source(e)
+        if src is not None:
+            self.copies.append((src, target))
 
     def stmt(self, st):
         outer = self.node
@@ -436,8 +628,9 @@ class Collector:
             for d in st.items:
                 if d.init is not None:
                     v = self.value(d.init)
-                    if v is not None:
+                    if v is not None and d.name not in self.opaque:
                         self.s.unify(self.key(d.name, write=True), v)
+                        self.copied(d.init, self.key(d.name, write=True))
         from dread.naming import _inner
         for inner in _inner(st):
             self.stmt(inner)
@@ -448,12 +641,18 @@ class Collector:
         to a dozen functions, which made every structure given NULL one kind)."""
         if isinstance(e, C.Num) and isinstance(e.value, int):
             return (self.s.global_object(e.value), 0) if e.value >= SMALLEST_ADDRESS else None
+        x = e.e if isinstance(e, C.Cast) and " ".join(e.type.split()) in ("u32", "s32") else e
+        if isinstance(x, C.Unary) and x.op == "&" and isinstance(x.e, C.Name) and x.e.id in self.arg_offset:
+            return (self.args, self.arg_offset[x.e.id])     # (a parameter's word in the argument area)
         if isinstance(e, C.Binary) and e.op in ("+", "-") and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
             base = self.address(e.l)
             if base is None:
                 return None
             k = signed32(e.r.value if e.op == "+" else -e.r.value)
             return (base[0], base[1] + k)
+        src = self.source(e)
+        if src is not None:
+            self.derefs.add(src)
         v = self.value(e)
         if v is None:
             return None
@@ -470,6 +669,8 @@ class Collector:
             if e.id in self.macros:
                 address, ctype = self.macros[e.id]
                 return s.field((s.global_object(address), 0), ctype).content
+            if e.id in self.opaque or e.id in self.zero_at.get(self.node, ()):
+                return None                 # (a register a branch has just found 0 stores NULL)
             return self.key(e.id)
         if isinstance(e, C.Num):
             return None
@@ -484,6 +685,8 @@ class Collector:
             v = self.value(e.value)
             if isinstance(e.target, C.Name) and e.target.id not in self.macros:
                 t = self.key(e.target.id, write=True)
+                if e.op == "=":
+                    self.copied(e.value, t)
             else:
                 t = self.value(e.target)
             if e.op == "=" and t is not None and v is not None:
@@ -505,7 +708,7 @@ class Collector:
                     if location is not None:
                         s.instantiate(tmpl, location)
                         if structure(tmpl):
-                            s.calls.append((location, tmpl[2]))
+                            s.hold(location, tmpl[2])
                 t = ("result", self.fn.name, id(e))
                 if summary.get("ret") is not None and not reaches_below(summary["ret"]):
                     # (its fields, but no kind: a function the source declares void hands back what
@@ -519,6 +722,9 @@ class Collector:
                     continue
                 if v is not None:
                     s.unify(v, ("param", name, i))
+                    src = self.source(a)                    # (its own component: taken for a pointer)
+                    if src is not None:
+                        self.derefs.add(src)
                 elif isinstance(a, C.Num) and isinstance(a.value, int) and a.value >= 0x1000:
                     s.pending.append(("const-arg", ("param", name, i), a.value, 0))
             return ("ret", name) if name in self.together else ("result", self.fn.name, id(e))
@@ -561,6 +767,144 @@ class Collector:
                 out = self.value(x)
             return out
         return None
+
+
+def _statements(fn):
+    from dread.naming import _inner
+    work = list(fn.body.body)
+    while work:
+        st = work.pop()
+        yield st
+        work += _inner(st)
+
+
+def zero_tests(cond):
+    """(the variables cond being true says are 0, those its being false says are 0): v == 0, !v,
+    v != 0, v, through casts and && (true) or || (false)."""
+    def name(e):
+        while isinstance(e, C.Cast):
+            e = e.e
+        return e.id if isinstance(e, C.Name) else None
+
+    def zero(e):
+        return isinstance(e, C.Num) and e.value == 0
+    if isinstance(cond, C.Cast):
+        return zero_tests(cond.e)
+    if isinstance(cond, C.Binary) and cond.op in ("==", "!="):
+        v = name(cond.l) if zero(cond.r) else name(cond.r) if zero(cond.l) else None
+        if v is None:
+            return set(), set()
+        return ({v}, set()) if cond.op == "==" else (set(), {v})
+    if isinstance(cond, C.Unary) and cond.op == "!":
+        t, f = zero_tests(cond.e)
+        return f, t
+    if isinstance(cond, C.Binary) and cond.op == "&&":
+        return zero_tests(cond.l)[0] | zero_tests(cond.r)[0], set()
+    if isinstance(cond, C.Binary) and cond.op == "||":
+        return set(), zero_tests(cond.l)[1] | zero_tests(cond.r)[1]
+    v = name(cond)
+    return (set(), {v}) if v is not None else (set(), set())
+
+
+def known_zero(g):
+    """{node index: the variables known to hold 0 when it runs} of a dread.cflow Graph, for the
+    nodes of simple statements (they read before they write): a conditional jump or return on v == 0
+    or v != 0 says so on the edge it takes (if (r7 != 0) goto L; ... *(r0 + 8) = r7: GCC stores NULL
+    with the register it has just found 0, which made FreeRTOS's mutex holder one value with pcHead),
+    a write forgets it, and where paths meet what all of them know holds."""
+    from dread.tidy import simple
+    count = len(g.nodes)
+    known = {0: set()} if count else {}
+    work = [0] if count else []
+    while work:
+        i = work.pop()
+        n = g.nodes[i]
+        after = known[i] - n.writes
+        tests = None
+        if isinstance(n.stmt, C.If) and n.stmt.orelse is None and isinstance(n.stmt.then, (C.Goto, C.Return)):
+            tests = zero_tests(n.stmt.cond)
+            jump = g.labels.get(n.stmt.then.label) if isinstance(n.stmt.then, C.Goto) else None
+        for t in n.succ:
+            if t >= count:
+                continue
+            fact = after
+            if tests is not None and jump != i + 1:
+                fact = after | (tests[0] if t == jump else tests[1] if t == i + 1 else set())
+            new = fact if t not in known else known[t] & fact
+            if t not in known or new != known[t]:
+                known[t] = new
+                work.append(t)
+    return {i: known[i] for i in known if known[i] and simple(g.nodes[i].stmt)}
+
+
+def reaching_past_zero(g):
+    """As dread.cflow Graph.reaching, but a definition does not reach along a conditional jump's
+    edge that says its variable is 0 there (if (v != 0) goto L: the fall-through; if (v == 0) goto
+    L: the jump): the register holds 0 past it, no value, and joins none it meets later (FreeRTOS's
+    prvSearchForNameWithinSingleList returns a list's count where it is 0 and a found task block
+    elsewhere from one return: the count had become a pointer to a task block)."""
+    from dread.cflow import Reaching
+    nodes = g.nodes
+    defs = [(-1, v) for v in sorted(g.scope)]
+    for n in nodes:
+        defs += [(n.index, v) for v in sorted(n.writes)]
+    by_var = {}
+    for k, (_, v) in enumerate(defs):
+        by_var[v] = by_var.get(v, 0) | (1 << k)
+    entry = sum(1 << k for k, (i, _) in enumerate(defs) if i == -1)
+    gen, kill = [0] * len(nodes), [0] * len(nodes)
+    for k, (i, v) in enumerate(defs):
+        if i >= 0:
+            gen[i] |= 1 << k
+    for n in nodes:
+        for v in n.kills:
+            kill[n.index] |= by_var.get(v, 0) & ~gen[n.index]
+    cut = {}                                # (node, successor) -> the definitions an edge stops
+    for n in nodes:
+        st = n.stmt
+        if isinstance(st, C.If) and st.orelse is None and isinstance(st.then, (C.Goto, C.Return)):
+            true, false = zero_tests(st.cond)
+            jump = g.labels.get(st.then.label) if isinstance(st.then, C.Goto) else None
+            if jump == n.index + 1:
+                continue
+            if jump is not None and true:
+                cut[(n.index, jump)] = sum(by_var.get(v, 0) for v in true)
+            if false:
+                cut[(n.index, n.index + 1)] = sum(by_var.get(v, 0) for v in false)
+    ins, outs = [0] * len(nodes), [None] * len(nodes)
+    changed = True
+    while changed:
+        changed = False
+        for n in nodes:
+            inn = entry if n.index == 0 else 0
+            for p in n.pred:
+                if outs[p] is not None:
+                    inn |= outs[p] & ~cut.get((p, n.index), 0)
+            out = gen[n.index] | (inn & ~kill[n.index])
+            if inn != ins[n.index] or out != outs[n.index]:
+                ins[n.index], outs[n.index] = inn, out
+                changed = True
+    return [Reaching(bits, defs, by_var) for bits in ins]
+
+
+def register_variables(fn):
+    """The names of the function's register variables (register u32 x0 __asm__("a0") = a0: an asm's
+    operands, as the lifters write RISC-V's ecall)."""
+    return {d.name for st in _statements(fn) if isinstance(st, C.Decl) for d in st.items if d.asm}
+
+
+def address_taken(fn):
+    """The function's parameters whose address its C takes (&s0: the lifters' stack arguments)."""
+    from dread.cflow import walk_expr
+    from dread.naming import _exprs
+    params = {p for _, p in fn.params}
+    out = set()
+    for st in _statements(fn):
+        for e in _exprs(st):
+            for x in walk_expr(e):
+                if isinstance(x, C.Unary) and x.op == "&" and isinstance(x.e, C.Name) and x.e.id in params:
+                    out.add(x.e.id)
+    return out
 
 
 def structure(tmpl):
@@ -695,7 +1039,20 @@ def analyse(trees, depth=4, share=False, unread=frozenset()):
         for name in comp:
             fn = by_name[name][1]
             summary = {"params": {}, "ret": None}
+            # Parameters that end as one value: an either-or of the arguments stored in one place
+            # (FreeRTOS's pcHead: the queue itself for a semaphore, else the storage given beside it).
+            # Only those the function uses as a pointer pass the template on (the storage got the
+            # queue's fields, and at GCC -O0 the dynamic queue's storage behind it the queue's again),
+            # and the value points to no one structure (interior: no pointer field).
+            groups, passed = {}, set(range(len(fn.params)))
             for i in range(len(fn.params)):
+                groups.setdefault(s.find(("param", name, i)), []).append(i)
+            for r, group in groups.items():
+                used = [i for i in group if s.param_used.get((name, i))]
+                if len(group) > 1 and used and len(used) < len(group):
+                    s.interior.add(r)
+                    passed -= set(group) - set(used)
+            for i in sorted(passed):
                 r = s.find(("param", name, i))
                 if r in s.points:
                     summary["params"][i] = s.template(s.points[r], shared, depth)
@@ -931,14 +1288,9 @@ def score_pointers(program, p, elf_path):
     return out
 
 
-def held_offsets(p, name, depth=0):
+def held_offsets(p, name):
     """The offsets in a structure of the structures it holds, theirs included."""
-    out = []
-    for d, inner in sorted(p.embeds.get(name, {}).items()):
-        out.append(d)
-        if depth < 8:
-            out += [d + x for x in held_offsets(p, inner, depth + 1)]
-    return out
+    return [d for d, _ in held_structures(p, name)]
 
 
 def score_plan(program, p, elf_path):
@@ -961,6 +1313,155 @@ def score_plan(program, p, elf_path):
         out["right"] += len(mine & leaves)
         out["held"] += len(held)
         out["held_right"] += sum(1 for d in held if d in theirs)
+    return out
+
+
+def source_structures(elf_path):
+    """({structure: {"size": bytes, "pointers": {offset: the structure a leaf there points to},
+    "held": {offset: a structure held there}}}, {function entry: {parameter index: structure}}) from
+    the ELF's debug information: the structures parameters point to and those they reach through
+    pointers and members, by name (the tag, else the typedef, else ?@ the DIE's offset)."""
+    from elftools.elf.elffile import ELFFile
+    out, params, complete = {}, {}, {}
+
+    def strip(die):
+        while die is not None and die.tag in ("DW_TAG_typedef", "DW_TAG_const_type", "DW_TAG_volatile_type"):
+            if "DW_AT_type" not in die.attributes:
+                return None
+            die = die.get_DIE_from_attribute("DW_AT_type")
+        if die is not None and "DW_AT_declaration" in die.attributes and "DW_AT_name" in die.attributes:
+            die = complete.get((die.tag, die.attributes["DW_AT_name"].value), die)
+        return die
+
+    def describe(die, depth=0):
+        die = strip(die)
+        if die is None or die.tag not in ("DW_TAG_structure_type", "DW_TAG_union_type"):
+            return None
+        n = die.attributes.get("DW_AT_name")
+        name = n.value.decode(errors="replace") if n else "?@%x" % die.offset
+        if name in out or depth > 8:
+            return name
+        entry = out[name] = {"size": die.attributes["DW_AT_byte_size"].value
+                             if "DW_AT_byte_size" in die.attributes else None, "pointers": {}, "held": {}}
+
+        def walk(d, base, top):
+            d = strip(d)
+            if d is None:
+                return
+            if d.tag in ("DW_TAG_structure_type", "DW_TAG_union_type"):
+                if not top:
+                    entry["held"].setdefault(base, describe(d, depth + 1))
+                for m in d.iter_children():
+                    if m.tag == "DW_TAG_member" and "DW_AT_type" in m.attributes:
+                        loc = m.attributes.get("DW_AT_data_member_location")
+                        walk(m.get_DIE_from_attribute("DW_AT_type"),
+                             base + (loc.value if loc is not None and isinstance(loc.value, int) else 0), False)
+            elif d.tag == "DW_TAG_pointer_type" and "DW_AT_type" in d.attributes:
+                t = describe(d.get_DIE_from_attribute("DW_AT_type"), depth + 1)
+                if t is not None:
+                    entry["pointers"][base] = t
+        walk(die, 0, True)
+        return name
+
+    with open(elf_path, "rb") as f:
+        dwarf = ELFFile(f).get_dwarf_info()
+        for cu in dwarf.iter_CUs():
+            for die in cu.iter_DIEs():
+                if die.tag in ("DW_TAG_structure_type", "DW_TAG_union_type") and "DW_AT_name" in die.attributes \
+                        and "DW_AT_declaration" not in die.attributes:
+                    complete.setdefault((die.tag, die.attributes["DW_AT_name"].value), die)
+        for cu in dwarf.iter_CUs():
+            for die in cu.iter_DIEs():
+                if die.tag != "DW_TAG_subprogram" or "DW_AT_low_pc" not in die.attributes:
+                    continue
+                entry = die.attributes["DW_AT_low_pc"].value & ~1
+                k = 0
+                for p in die.iter_children():
+                    if p.tag != "DW_TAG_formal_parameter":
+                        continue
+                    t = strip(p.get_DIE_from_attribute("DW_AT_type")) if "DW_AT_type" in p.attributes else None
+                    if t is not None and t.tag == "DW_TAG_pointer_type" and "DW_AT_type" in t.attributes:
+                        name = describe(t.get_DIE_from_attribute("DW_AT_type"))
+                        if name is not None:
+                            params.setdefault(entry, {})[k] = name
+                    k += 1
+    return out, params
+
+
+def held_structures(p, name, depth=0):
+    """[(offset, structure)] of the structures a structure holds, theirs at their offsets in it."""
+    out = []
+    for d, inner in sorted(p.embeds.get(name, {}).items()):
+        out.append((d, inner))
+        if depth < 8:
+            out += [(d + x, i) for x, i in held_structures(p, inner, depth + 1)]
+    return out
+
+
+def pair_structures(p, direct, structs):
+    """{(our structure, source structure)}: the pairs direct (typed parameters' structures with their
+    parameters' source structures), and, from every pair found, the structures its pointer fields
+    point to with the source's structures there, and those it holds with the source's held there
+    (structs: source_structures' first part)."""
+    pairs, work = set(direct), list(direct)
+    while work:
+        k, name = work.pop()
+        info = structs.get(name)
+        if info is None:
+            continue
+        found = [(k2, info["pointers"][off]) for off, k2 in p.leaf_pointers(k).items() if off in info["pointers"]]
+        found += [(inner, info["held"][d]) for d, inner in held_structures(p, k) if info["held"].get(d)]
+        for pair in found:
+            if pair not in pairs:
+                pairs.add(pair)
+                work.append(pair)
+    return pairs
+
+
+def count_pairs(pairs, structs):
+    """{"source": source structures paired, "ours": ours paired, "extra": ours beyond one per source
+    structure (one source structure is several of ours), "several": ours paired with more than one
+    source structure, "sizes": of them those paired with source structures of different sizes (one of
+    ours that is two of the source's)} of the pairs {(ours, source structure)}."""
+    by_source, by_ours = {}, {}
+    for k, name in pairs:
+        by_source.setdefault(name, set()).add(k)
+        by_ours.setdefault(k, set()).add(name)
+    several = [names for names in by_ours.values() if len(names) > 1]
+    return {"source": len(by_source), "ours": len(by_ours),
+            "extra": sum(len(ks) - 1 for ks in by_source.values()), "several": len(several),
+            "sizes": sum(1 for names in several if len({(structs.get(n) or {}).get("size") for n in names}) > 1)}
+
+
+def score_kinds(program, p, elf_path, s=None, trees=None):
+    """How many of ours each source structure is (debug information): the plan's structures paired
+    with the source's through typed parameters, then through pointer fields and members
+    (pair_structures), counted (count_pairs) under "structures"; with the analysis (s, its kinds()
+    done, and its trees) the kinds the parameters point to at their bases, paired with the
+    parameters' source structures, under "kinds". One of ours paired with two source structures of
+    one size can be right: FreeRTOS's StaticQueue_t (xSTATIC_QUEUE) is the queue's memory by design."""
+    structs, params = source_structures(elf_path)
+    regs = list(program.target.abi.arg_regs)
+    direct = set()
+    for f, variables_ in p.typed.items():
+        fn = program.by_name.get(f)
+        sp = params.get(fn.entry, {}) if fn is not None else {}
+        for v, k in variables_.items():
+            if v in regs and regs.index(v) in sp and k in p.structs:
+                direct.add((k, sp[regs.index(v)]))
+    out = {"structures": count_pairs(pair_structures(p, direct, structs), structs)}
+    if s is not None:
+        pairs = set()
+        for _, fn, _ in trees:
+            f = program.by_name.get(fn.name)
+            sp = params.get(f.entry, {}) if f is not None else {}
+            for i in sorted(sp):
+                r = s.find(("param", fn.name, i))
+                if i < len(fn.params) and r in s.points:
+                    o, off = s.loc(s.points[r])
+                    if o in s.kind_root and off == s.kind_base.get(o, 0):
+                        pairs.add((s.kind_root[o], sp[i]))
+        out["kinds"] = count_pairs(pairs, structs)
     return out
 
 
@@ -1036,6 +1537,86 @@ def pointer_candidates(fn):
     return u32 & bases
 
 
+def fit(a, b):
+    """Whether two layouts ({offset: size}) can be one structure: the same size where both have a
+    field, and no field of one across a field of the other (a queue's byte cRxLock at 68 is not a
+    task block's word uxMutexesHeld there)."""
+    for off, size in a.items():
+        if off in b:
+            if b[off] != size:
+                return False
+        elif any(o < off < o + z for o, z in b.items()) or any(off < o < off + size for o in b):
+            return False
+    return True
+
+
+def within(a, b):
+    """Whether layout a's every field is a field of layout b, of the same size."""
+    return all(b.get(off) == size for off, size in a.items())
+
+
+def pointer_slots(s, find, base, shape, roots, frames):
+    """({(kind, offset from its base): (the kinds the field points to at their bases, the kinds whose
+    objects point from it to themselves)}, {kind: the kinds that hold it}) of the word fields of the
+    objects roots, read through the structures their kinds hold (s.embeds: a task block's field at
+    0x14 is its item's at 0x10). find: an object's kind; base: objects' bases; shape: kinds' layouts
+    ({offset: size})."""
+    held, holding = {}, {}                  # (kind, offset) -> the kinds held there at their bases
+    for ra, oa, rb, ob in s.embeds:
+        if ob == base.get(rb, 0) and oa - base.get(ra, 0) > 0 and find(ra) != find(rb):
+            held.setdefault(find(ra), {}).setdefault(oa - base.get(ra, 0), set()).add(find(rb))
+            holding.setdefault(find(rb), set()).add(find(ra))
+
+    def extent(k):
+        return max((o + z for o, z in shape.get(k, {}).items()), default=0)
+
+    def canonical(k, rel, depth=0):
+        """The kind and offset of a place, inside the structure held there (one kind, no clash)."""
+        for d, inners in sorted(held.get(k, {}).items()):
+            if len(inners) == 1 and depth < EMBED_DEPTH:
+                inner = next(iter(inners))
+                if d <= rel < d + extent(inner):
+                    return canonical(inner, rel - d, depth + 1)
+        return k, rel
+    out = {}
+    for o in roots:
+        k, b = find(o), base.get(o, 0)
+        for off, f in s.fields[o].items():
+            t = s.find(f.content)
+            if off < b or t not in s.points or t in s.interior:
+                continue
+            o2, off2 = s.loc(s.points[t])
+            if o2 in frames or any(x < base.get(o2, 0) for x in s.fields[o2]):
+                continue                    # (memory with fields in front of its base: inside a larger
+                                            # structure, as a task block reached at its event item, 0x18
+                                            # into it; a place inside one with a base is read through)
+            target, rel2 = canonical(find(o2), off2 - base.get(o2, 0))
+            if rel2 != 0:
+                continue                    # (inside one, not at a structure's base: a list's end marker)
+            slot = canonical(k, off - b)
+            entry = out.setdefault(slot, (set(), set()))
+            entry[0].add(target)
+            if o2 == o and off2 == b and slot[0] != k:
+                entry[1].add(k)             # (an owner: a field of what it holds points back to it)
+    return out, holding
+
+
+def several(targets, holders, holding, shape):
+    """Whether a pointer slot holds several kinds of structure (a void *, a union): the targets'
+    layouts do not fit together; it points back to the structure that holds it (holders) in a
+    structure that two kinds hold (holding: FreeRTOS's pvOwner of an item, the task block that holds
+    it or the timer; on GCC -Os only the task blocks' own stores are code DREAD lifts, so the two
+    holders are the evidence)."""
+    if holders and len(holding | holders) > 1:
+        return True
+    acc = {}
+    for t in targets:
+        if not fit(acc, shape.get(t, {})):
+            return True
+        acc.update(shape.get(t, {}))
+    return False
+
+
 def kinds(s, trees):
     """{kind root: Kind} of the analysed functions' memory, worked out on the final objects: an
     object's base is the lowest offset the functions' variables point to in it; a call's argument and the
@@ -1074,17 +1655,8 @@ def kinds(s, trees):
         return out
 
     def fits(x, y):
-        """Whether two layouts can be one structure: the same size where both have a field, and no
-        field of one across a field of the other (a queue's byte cRxLock at 68 is not a task block's
-        word uxMutexesHeld there)."""
-        a, b = shape.get(x, {}), shape.get(y, {})
-        for off, size in a.items():
-            if off in b:
-                if b[off] != size:
-                    return False
-            elif any(o < off < o + z for o, z in b.items()) or any(off < o < off + size for o in b):
-                return False
-        return True
+        """Whether two kinds' layouts can be one structure (fit)."""
+        return fit(shape.get(x, {}), shape.get(y, {}))
 
     def union(x, y):
         x, y = find(x), find(y)
@@ -1132,12 +1704,12 @@ def kinds(s, trees):
         return -sum(1 for off, size in a.items() if b.get(off) == size)
     for ra, rb in sorted(links, key=lambda l: (strength(l), l)):
         union(ra, rb)
-    # What sits at one offset of one kind is one kind: every list function's item, given as a task
-    # block's xStateListItem at 4, is the same structure.
-    changed = True
-    while changed:
-        changed = False
-        place = {}
+
+    def same_places():
+        """What sits at one offset of one kind is one kind: every list function's item, given as a
+        task block's xStateListItem at 4, is the same structure; not two kinds one function takes
+        as different parameters (a list and an item: apart)."""
+        joined, place, far = False, {}, apart()
         for ra, oa, rb, ob in sorted(s.embeds):
             if ob != base.get(rb, 0):
                 continue
@@ -1145,8 +1717,67 @@ def kinds(s, trees):
             inner = find(rb)
             if key not in place:
                 place[key] = inner
-            elif find(place[key]) != inner and union(place[key], inner):
-                changed = True
+            elif find(place[key]) != inner and tuple(sorted((find(place[key]), inner))) not in far \
+                    and union(place[key], inner):
+                joined = True
+        return joined
+    # The objects parameters point to at their bases: kinds with an identity of their own (anchored),
+    # and per function those it takes as different parameters (a list and the item vListInsert takes
+    # have the same layout, five words, yet are two structures).
+    anchored, takes = set(), []
+    for _, fn, _ in trees:
+        objs = set()
+        for i in range(len(fn.params)):
+            r = s.find(("param", fn.name, i))
+            if r in s.points:
+                o, off = s.loc(s.points[r])
+                if o not in frames and off == base.get(o, 0):
+                    objs.add(o)
+        anchored |= objs
+        if len(objs) > 1:
+            takes.append(sorted(objs))
+    roots = sorted(o for o, (p, _) in s.obj_parent.items() if p == o and o not in frames)
+    voids = set()                           # (kind, offset) of the slots that hold several kinds
+
+    def apart():
+        """{(kind, kind)} (sorted pairs) of the kinds one function takes as two of its parameters."""
+        out = set()
+        for objs in takes:
+            ks_ = sorted({find(o) for o in objs})
+            out.update((a, b) for i, a in enumerate(ks_) for b in ks_[i + 1:])
+        return out
+
+    def same_slots():
+        """What one pointer slot holds is one kind (pointer_slots), where nothing says it holds
+        several (several); else what it holds joins the one kind it may hold whose layout holds all
+        its fields, where exactly one does: the kinds parameters make there, and for a field that
+        points back to the structure holding its own, those that hold it (an owner the function
+        uses as a task block, its own accesses a task block's, not a timer's)."""
+        joined, anchor, far = False, {find(o) for o in anchored}, apart()
+        slots, holding = pointer_slots(s, find, base, shape, roots, frames)
+        for (k, rel), (targets, holders) in sorted(slots.items()):
+            ts = sorted({find(t) for t in targets})
+            own = [t for t in ts if t in anchor]
+            holders = {find(h) for h in holders}
+            if not several(ts, holders, holding.get(k, set()), shape) and not any(
+                    (a, b) in far for i, a in enumerate(ts) for b in ts[i + 1:]):
+                for t in ts[1:]:
+                    joined = union(ts[0], t) or joined
+                continue
+            voids.add((k, rel))
+            choices = sorted(set(own) | (holding.get(k, set()) if holders else set()))
+            for t in ts:
+                if t in choices:
+                    continue
+                c = [a for a in choices if within(shape.get(t, {}), shape.get(a, {}))]
+                if len(c) == 1:
+                    joined = union(c[0], t) or joined
+        return joined
+    changed = True
+    while changed:
+        changed = same_places()
+        changed = same_slots() or changed
+    s.void_slots = {(find(k), rel) for k, rel in voids}
     out = {}
     for o, (p, _) in s.obj_parent.items():
         if p != o:
@@ -1178,6 +1809,14 @@ def kinds(s, trees):
             clash.add((outer, rel))
     for key in clash:
         del s.kind_embeds[key]
+    # (a slot of a held structure is also its holders' field there, where the plan leaves it flat)
+    work = list(s.void_slots)
+    while work:
+        k, f = work.pop()
+        for (outer, d), inner in s.kind_embeds.items():
+            if inner == k and (outer, d + f) not in s.void_slots:
+                s.void_slots.add((outer, d + f))
+                work.append((outer, d + f))
     return out
 
 
@@ -1421,6 +2060,10 @@ def plan(s, trees, digests=None, least=2):
     # of that structure loaded from or stored into the field halved what was found and kept the share
     # the source declares so, 48 %: the wrong ones come from kinds made one, a heap block and the
     # queue allocated in it.)
+    # A slot that holds several kinds (kinds(): an item's owner, a task block or a timer) is no
+    # pointer, whatever the objects of its own kind point to (only task blocks, where the code that
+    # stores timers there does not lift).
+    voids = s.void_slots
     found = {}
     for o, root in s.kind_root.items():
         name = names_of.get(root)
@@ -1430,7 +2073,7 @@ def plan(s, trees, digests=None, least=2):
         rows = dict(out.structs[name])
         for off, f in s.fields.get(o, {}).items():
             t = s.find(f.content)
-            if rows.get(off - b) != "u32" or t not in s.points:
+            if rows.get(off - b) != "u32" or t not in s.points or (root, off - b) in voids:
                 continue
             # (a value that also points into its own object at another offset points to no one base)
             to = None if t in s.interior else names_of.get(target(s.points[t]))
@@ -1660,9 +2303,11 @@ def apply_types(tree, fn, p, made_for=None, names=None):
                     v, t = e.value, m[1][1]
                     if (isinstance(v, C.Name) and typed.get(v.id) == t) or (isinstance(v, C.Num) and v.value == 0):
                         return C.Assign("=", m[0], C.Name(v.id) if isinstance(v, C.Name) else v)
-                    hv = held(v)
+                    hv, mv = held(v), member(v)
                     if hv is not None and hv[0] == t:
                         return C.Assign("=", m[0], hv[1])
+                    if mv is not None and mv[1] == ("ptr", t):  # (a field that points to it too)
+                        return C.Assign("=", m[0], mv[0])
                     return C.Assign("=", m[0], C.Cast(ptype[t], value(v)))
                 return C.Assign(e.op, m[0], value(e.value))
             return None

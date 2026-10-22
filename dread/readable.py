@@ -619,6 +619,11 @@ def main(argv=None):
                   "source's (%.0f %%); %.0f %% of the source's members found" % (
                       total[3], total[0], total[1], 100.0 * total[1] / max(total[0], 1),
                       100.0 * total[1] / max(total[2], 1)))
+            shapes.kinds(s, trees)
+            sk = shapes.score_kinds(program, shapes.Plan(), args.score, s, trees)["kinds"]
+            print("dread readable --shapes --score: %d source structures in %d kinds that parameters point to (%d "
+                  "beyond one each); %d kinds paired with several source structures (%d of different sizes)" % (
+                      sk["source"], sk["ours"], sk["extra"], sk["several"], sk["sizes"]))
         return 0
     if args.score:
         from dread.program import Program
@@ -654,6 +659,11 @@ def main(argv=None):
                   "where the source holds one" % (
                       sp["structures"], sp["fields"], sp["right"], 100.0 * sp["right"] / max(sp["fields"], 1),
                       sp["held"], sp["held_right"]))
+            sk = shapes.score_kinds(Program(target, image), context.plan, args.score)["structures"]
+            print("dread readable --score: %d source structures in %d structures (typed parameters', those their "
+                  "pointer fields point to and they hold; %d beyond one each); %d paired with several source "
+                  "structures (%d of different sizes)" % (sk["source"], sk["ours"], sk["extra"], sk["several"],
+                                                          sk["sizes"]))
         rows, totals = naming.score_globals(image, args.score)
         for r in rows:
             where = ("%s+%d" % (r["symbol"], r["offset"]) if r["offset"] else r["symbol"]) if r["symbol"] else "?"

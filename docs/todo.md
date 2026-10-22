@@ -290,7 +290,8 @@ its sources.
   one lost. Fields against the source: clang -O2 490 of 532 (92 %) -> 459 of 462 (99 %), the members
   found 28 % -> 26 %. Left, not traced: newlib's _cookie (three builds; right in fact, it holds its
   own FILE), a static queue's pcHead and pcWriteTo, a task block's field at 0x2c on clang, and on
-  RISC-V a task block's fields at 0x10 and 0x24 and a list's count, typed as pointers.
+  RISC-V a task block's fields at 0x10 and 0x24 and a list's count, typed as pointers (all but the
+  _cookie traced and taken out 2026-10-22: kinds through pointer fields, below).
   A field that points to an item or to a list's end marker (a list's links) points to no one base and
   stays u32: 32 of GCC -Os's source pointers to a structure. A structure needs a field wider than a byte
   (gizmo's string walks made structures of two u8 fields). Names: the pilot asks for the structures'
@@ -338,9 +339,95 @@ its sources.
   block's accesses through its held item): the readable C that changes is that of the functions
   reaching lists and items inside queues, task blocks and event groups. Left: kinds stay fragmented
   (a task block reached through an item's owner, a queue whose lists go only to functions that touch
-  one field of them, holds nothing); a list's end marker at 8, a 12-byte mini item used as a 20-byte
-  item, is no member (the pun still types a pointer to it as an item pointer, as the source's pxIndex
-  is); the pilot's names for held members (xStateListItem) not measured yet.
+  one field of them, holds nothing: taken up below); a list's end marker at 8, a 12-byte mini item
+  used as a 20-byte item, is no member (the pun still types a pointer to it as an item pointer, as
+  the source's pxIndex is); the pilot's names for held members (xStateListItem) not measured yet.
+  Kinds joined through what pointer fields hold since 2026-10-22 (dread.shapes kinds: pointer_slots,
+  same_slots, several; docs/decisions.md). A kind's word fields, read through the structures it holds
+  (a task block's field at 0x14 is its item's container at 0x10), are slots, and what one slot points
+  to at structures' bases is one kind: the lists an item's container points to are the list kind,
+  wherever they were reached. A slot holds several kinds, joins none and is no pointer field
+  (void_slots) where the evidence says so: the layouts there do not fit together; it points back to
+  the structure that holds it in a structure two kinds hold (an item's owner: task blocks and timers
+  hold items; on GCC -Os only the task blocks' stores lift); or two of its targets are kinds one
+  function takes as different parameters (a list and an item, five words each). There what it holds
+  joins the one kind it may hold whose layout holds all its fields, where exactly one does (an owner
+  a function uses as a task block). Memory with fields in front of its base is inside a larger
+  structure and says nothing (a task block reached at its event item had made the items' kind the
+  task block's). Templates carry what their memory holds (the calls that handed it at an
+  offset), so memory copied from a callee holds its items too. Before the joins, the values that made
+  fields point where the source does not, each traced: a use the callee ignores joined the
+  definitions that reach it (clang -O2's shared tail return vPortExitCritical(r0): the task block's
+  priority at 0x2c a pointer to its list container), and so did RISC-V's ecall, whose asm reads a0 to
+  a7 (a list's count a pointer to the list, also as a queue's 0x10 and 0x24); now only uses whose
+  value the analysis may take join definitions, an asm's registers are values of their own. GCC
+  stores NULL with a register it has just found 0 (known_zero; the mutex holder at 8 had become one
+  value with pcHead, which made the queue's pcHead and pcWriteTo hold tasks), and a register a
+  branch found 0 reaches no use past it (reaching_past_zero: GCC 9 -Os's prvSearchForNameWithinSingleList
+  returns the list's count where it is 0 and a found task block elsewhere, from one return, and every
+  list's count was a pointer to a task block). A stack argument read
+  through its address is the parameter (prvInitialiseNewTask's task block on ARM: its template was
+  empty). Parameters that end as one value (pcHead: the queue itself or the storage given beside it)
+  pass on the templates only of those the function uses as a pointer, and the value points to no one
+  structure (the static queue's pcHead and pcWriteTo were pointers to the queue, its storage took the
+  queue's fields, and at GCC -O0 a dynamic queue's storage behind it took them again).
+  Against the source (main before -> after; dread readable --score's pairing and dread readable
+  --shapes --score): pointer fields of typed parameters' structures that are the source's pointers to
+  a structure GCC -Os 9 of 10 -> 18 of 21, clang -O2 9 of 13 -> 39 of 46, RISC-V GCC -Os 4 of 8 -> 27
+  of 27, GCC -O0 6 of 7 -> 12 of 16; the source's pointers to a structure left integers 30 -> 21, 52
+  -> 16, 39 -> 13, 39 -> 30. Wrong: newlib's _cookie; StaticQueue_t's dummies, void * in the source,
+  holding the queue's lists' items and the mutex holder in fact (clang 6, GCC -Os and -O0 1); a second
+  family of items, which no slot joins to the first, whose owner points to task blocks only (GCC -Os,
+  -O0); GCC -O0's pxStack, an array its overflow check reads at four constant offsets. The plan's
+  fields of typed parameters 152 of 155 -> 159 of 161, 210 of 213 -> 219 of 221, 118 of 121 -> 113 of
+  116 (one structure fewer to pair: two parameters' lists are one now), 146 of 149 -> 163 of 167;
+  members declared 7 -> 12, 13 -> 26, 11 -> 18, 10 -> 14 (every one where the source holds a
+  structure); structures 55 -> 52, 62 -> 51, 34 -> 28, 49 -> 46. The analysis's fields (dread
+  readable --shapes --score) 658 of 662 -> 668 of 673, 449 of 452 -> 479 of 483, 430 of 451, 679 of
+  683 -> 780 of 787. Structures per source structure (typed parameters' structures, and those their
+  pointer fields and members reach, paired with the source's): 13 source structures in 18 -> 19 (the
+  pointer fields reach more of them), 11 in 24 -> 22, 7 in 13 -> 12, 11 in 21 -> 12 in 20; kinds
+  per source structure (the kinds the parameters point to in the plan's analysis, before the
+  structure stage) 46 for 13 -> 47 for 15, 55 for 13 -> 55 for 15, 31 for 9 -> 30 for 9, 56 for 14 ->
+  54 for 17; one of ours with two source structures only for the
+  source's mirror types (xSTATIC_QUEUE and QueueDefinition, of one size). Readable C (dread.cmetrics):
+  members 690 -> 730, 661 -> 701, 428 -> 446, 705 -> 723; raw accesses 327 -> 287, 369 -> 332, 196 ->
+  181, 327 -> 312; typed variables 222 -> 250, 208 -> 232, 157 -> 166, 244 -> 255; casts 1304 ->
+  1345, 1116 -> 1102, 700 -> 721, 1060 -> 1082 (a pointer field met as a number: an argument, which
+  the lifted dialect declares u32, or a variable that stays an integer; a pointer field copied into
+  another of its structure is written without casts since, which took 8, 2, 0 and 18 off). The gate
+  accepts the same functions on the eight builds (gizmo a32 35, m3 36, m4 44, rv32 31; FreeRTOS GCC
+  -Os 316, clang -O2 275, RISC-V GCC -Os 251, GCC -O0 353), name by name. The analysis and the plan
+  take 0.6 s on GCC -Os as before. Six builds besides the gate's, the plan of all their lifted
+  functions: pointer fields that are the source's pointers to a structure, GCC -O2 10 of 19 -> 31 of
+  42, clang -Os 11 of 19 -> 16 of 24, RISC-V clang -Os 5 of 8 -> 35 of 35, Cortex-M4F GCC -Os 10 of 12
+  -> 18 of 21, RISC-V GCC -O2 5 of 7 -> 13 of 14, GCC 9 -Os 6 of 6 -> 20 of 24; left integers 33 -> 9,
+  37 -> 19, 54 -> 16, 35 -> 21, 20 -> 12, 34 -> 20; members 8 -> 19, 8 -> 10, 7 -> 18, 8 -> 12, 7 -> 11, 8
+  -> 15; structures 44 -> 42, 60 -> 50, 47 -> 44, 60 -> 52, 24 -> 22, 62 -> 55 (and clang 14 -Os 8 of 15
+  -> 15 of 26, RISC-V clang 19 -Os 10 of 14 -> 19 of 22, GCC 14 -O2 8 of 13 -> 26 of 40, left integers 57
+  -> 43, 47 -> 32, 28 -> 7). Wrong there besides the kinds above: fields that point into arrays (a
+  queue's storage through pcHead, pcWriteTo and pcReadFrom, a task block's pxStack, a stream buffer's
+  buffer): the joins make one field's arrays one kind, which becomes a structure (offsets read at
+  constants in an array look like fields) and the field a pointer to it; and _reent's
+  __sglue._next, a struct _glue * that points to the FILE structure (__sfp keeps a FILE and a glue in
+  one register: the pairing counts that FILE with _glue, score_pointers counts the field right);
+  most of main's others are gone (GCC -O2's task block fields at 0x2c, 0x40 and 0x44 and its queue's
+  pcHead and pcWriteTo, RISC-V GCC -O2's list count). Left: the parameters' kinds stay fragmented
+  where no analysed code hands one object to two of the functions (clang's six stream buffer kinds:
+  their callers do not lift; timers, whose functions touch one field each, link nothing: memset's
+  rule); lists and items
+  in two families on GCC -Os and -O0 (vListInsert walks a list from its end marker, and unification
+  reads every item reached so as the end marker itself, so the code that inserts links nothing; the
+  puns that would join them joined lists with items); the measurement counts StaticQueue_t's dummies
+  and _cookie wrong. The counts of structures per source structure are dread readable --score's
+  since (shapes.score_kinds: typed parameters' structures, and those their pointer fields point to
+  and they hold; --shapes --score: the kinds the parameters point to). On the C after the structure
+  stage, which only dread readable --shapes reads, RISC-V GCC -Os pairs the item's kind with
+  vTaskPlaceOnUnorderedEventList's list, both 20 bytes, besides the list's with the queue's, which
+  main pairs too (the plan, made before the structure stage, pairs neither): there an if that holds
+  an asm block is one node of the flow graph, every value of a5 in it one (vTaskPrioritySet), which
+  made a task block's item value a pointer to a task block, so uxTaskResetEventItemValue's result one
+  that holds items, and the event group that met it held an item and its list at 4; not taken further.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
   Thought 2026-10-21: plain accesses let GCC merge and hoist loads, and a loop that waits for a flag
