@@ -462,12 +462,16 @@ its sources.
   against 366 on this build ($1.05 against $0.12); measured on one build the model knows, not
   confirmed on firmware it does not (the private real-life test). Spent on the measurement: about
   $3.50 of Haiku, $1.30 of Sonnet.
-  Next: on the private firmware, the defaults (votes of five and a second pass: does the confidence
-  catch the misread driver?), the runs of the cases (`--behaviour`) where the code says less (its
-  drivers, and leaves that touch only unnamed globals: its misses) against its notes with text ends,
-  and the globals between the passes; then subsystems as a step of their own (functions grouped by
-  calls and addresses, a prefix proposed a group with its evidence: texts, devices) to catch a
-  misread driver before its callers inherit it.
+  On the private firmware (2026-10-22, every function nameless, its people's names as the truth):
+  the defaults were clearly closer to the true names than the earlier run with --refine in the
+  pairwise judging (both orders, a sign test far below 0.001), the absolute verdicts a little better,
+  and the driver the single-question runs had misread was not misread again: most of its functions
+  got names of the driver, none the misreading's: the votes fixed it instead of flagging it. The
+  confidence was calibrated there too, less steeply than on FreeRTOS.
+  Next: the runs of the cases (`--behaviour`) where the code says less (its drivers, and leaves that
+  touch only unnamed globals: its misses) against its notes with text ends, and the globals between
+  the passes; then subsystems as a step of their own (functions grouped by calls and addresses, a
+  prefix proposed a group with its evidence: texts, devices).
 - [ ] **A no-confidence vote on existing names** (the user's idea, 2026-10-22: reverse engineering as
   a puzzle, where a sub-picture can look right in one context and wrong in another). Not a periodic
   re-vote by the same model: consistency is not correctness (a misread driver was named after the
@@ -485,7 +489,9 @@ its sources.
   capped; (4) names people gave are flagged for review with the reasons, never replaced. Measured on
   the stripped FreeRTOS build and on a run where a whole driver was misread: does it find that group
   by itself, and fix it without breaking right names? Builds on the votes' confidence (Function names,
-  2026-10-22).
+  2026-10-22). The misread driver that motivated it was not misread by the votes on the private
+  firmware (Function names, 2026-10-22); what is left for the vote: names people gave, and proposals
+  of low agreement.
 - [x] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
   Done 2026-10-22: `dread bench measure RECIPE [BUILD...] --steps readable`, one of the default steps,
