@@ -182,9 +182,12 @@ stack as the core does), `clint` (RISC-V's core-local interruptor: mtime from th
 mtimecmp and msip, the machine timer and software interrupts under mstatus.MIE and mie; ecall traps
 to mtvec, mret runs in the emulator). A model names the registers whose reads are plain (`plain`, as
 `dread.models` describes it: no side effect, a value only a call into the models changes); the
-system run then does repeated reads of them without asking the model (in C on Unicorn). A model of
-the target's own names none unless it sets `plain`, so it is asked at every read. Example, a serial
-port:
+system run then does repeated reads of them without asking the model (in C on Unicorn). Likewise
+the registers whose writes are idempotent (`idempotent`: a write made again with the same size and
+value, with nothing called in the models between, changes nothing and calls nothing of the run but
+interrupts_changed); the system run then does such repeats without calling the model. A model of
+the target's own names none unless it sets `plain` and `idempotent`, so it is asked at every read
+and write. Example, a serial port:
 
 ```toml
 [models.uart]

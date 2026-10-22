@@ -1,13 +1,29 @@
 """The hot emulator hooks in C (fasthooks.c): coverage, load tracing, store tracking and the Thumb IT
 repair without a Python call per event; and the system run's (dread.sysrun): its block hook
-(SysHooks: the blocks that only move the clock or only count) and its device accesses (add_io: the
-reads of plain registers, from the value the model gave last, which System asks for again after
-every call into the models; every other access goes to Python).
+(SysHooks: the blocks that only move the clock or only count) and its device accesses (add_io).
+
+The device accesses the C hook does alone: the reads of plain registers, from the value the model
+gave last, which System asks for again after every call into the models (dread.models: `plain`);
+the writes to registers no model owns (memory); and the writes that repeat the last write System
+did, the same register, size and value, to a register its model calls idempotent (dread.models:
+`idempotent`), while nothing has called into the models since (the state's models_epoch, which
+every such call moves on). Such a repeat changes nothing in the models, so it moves only the clock
+and the log, as System._io would: no plain value is asked again, no next event scheduled, and no
+interrupt question raised. That question (System._check_interrupts) depends on what the
+controllers want, which the repeat left as it was, and on the core's masks, which the block hook
+compares with the last answer at every block as before; so it gets the answer it got before the
+repeat. Measured on the old code, which asked it behind every write: on FreeRTOS's Cortex-M GCC -O0
+image (every lifted function rebuilt, a run to the limit) 451,278 questions were asked behind
+repeating writes alone, each with the masks of the question before, and every one answered as that
+one had; on clang -Os and GCC -O2 the 3 and 8 asked with other masks (a mask had dropped) were
+answered otherwise, and the block hook still asks those. Every other access goes to Python
+(System._io_from_c).
 
 The system run's state is SysState here and sys_t in C: a field added to one is added to the other
 (the sizes are compared when the library loads). What the C side keeps for System, the log entries
-of the reads it did (SysRead) and the registers it reads alone (SysPlain), it owns and frees with
-the state; System takes the entries into its log before it adds to the log or looks at it.
+it made (SysEntry: reads with their counted repeats, and writes) and the registers whose accesses
+it may do alone (SysReg), it owns and frees with the state; System takes the entries into its log
+before it adds to the log or looks at it (System._take_log, through sys_entries).
 
 The C file is compiled on first use with the system's C compiler (cc, or $CC) into
 ~/.cache/dread (keyed by the source's hash) and loaded with ctypes. When that fails, or with
@@ -16,6 +32,7 @@ DREAD_FASTHOOKS=0, library() returns None and dread.emu keeps its Python hooks; 
 import ctypes
 import hashlib
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -187,22 +204,36 @@ SYS_REGS = 64                       # registers the loop search of a stretch can
 BLOCK_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_void_p)
 IO_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int, ctypes.c_int64,
                          ctypes.c_void_p)
-UNKNOWN, VALUE, MEMORY, NO_MODEL = range(4)     # SysPlain.kind
+UNKNOWN, VALUE, MEMORY, NO_MODEL, REPEAT = range(5)     # SysReg.kind (reads) and wkind (writes)
 
 
-class SysRead(ctypes.Structure):
-    """A device log entry of reads the C hook did (sysread_t): model is an index into the run's
-    models, -1 for none."""
+class SysEntry(ctypes.Structure):
+    """A device log entry the C hook made (sysentry_t): a read with the count of its repeats, or a
+    write; model is an index into the run's models, -1 for none."""
     _fields_ = [("address", ctypes.c_uint64), ("value", ctypes.c_uint64), ("count", ctypes.c_uint64),
-                ("model", ctypes.c_int32), ("size", ctypes.c_int32)]
+                ("model", ctypes.c_int32), ("size", ctypes.c_int32), ("write", ctypes.c_int32)]
 
 
-class SysPlain(ctypes.Structure):
-    """A register whose reads the C hook does (sysplain_t): VALUE and MEMORY hold while epoch is
-    the state's plain_epoch, NO_MODEL always; UNKNOWN asks Python."""
-    _fields_ = [("address", ctypes.c_uint64), ("value", ctypes.c_uint64), ("epoch", ctypes.c_int64),
+# SysEntry's bytes, for reading many at once (struct.iter_unpack: half the time of the fields from
+# eight entries on, more the more there are; below, the copy costs more than it saves)
+SYS_ENTRY = struct.Struct("=QQQiii%dx" % (ctypes.sizeof(SysEntry) - 36))
+
+
+def sys_entries(state):
+    """The log entries the C hook made (state.log_n of them), as (address, value, count, model,
+    size, write) tuples."""
+    return SYS_ENTRY.iter_unpack(ctypes.string_at(state.log, state.log_n * SYS_ENTRY.size))
+
+
+class SysReg(ctypes.Structure):
+    """A register whose accesses the C hook may do alone (sysreg_t). Reads (kind): VALUE and MEMORY
+    hold while epoch is the state's models_epoch, NO_MODEL always; UNKNOWN asks Python. Writes
+    (wkind): REPEAT, a write of `written` again, holds while wepoch is models_epoch, NO_MODEL always;
+    UNKNOWN asks Python."""
+    _fields_ = [("address", ctypes.c_uint64), ("value", ctypes.c_uint64), ("written", ctypes.c_uint64),
+                ("epoch", ctypes.c_int64), ("wepoch", ctypes.c_int64),
                 ("size", ctypes.c_int32), ("model", ctypes.c_int32), ("kind", ctypes.c_int32),
-                ("used", ctypes.c_int32)]
+                ("wkind", ctypes.c_int32), ("used", ctypes.c_int32)]
 
 
 class SysState(ctypes.Structure):
@@ -229,11 +260,11 @@ class SysState(ctypes.Structure):
                 ("tail_address", ctypes.c_uint64), ("tail_value", ctypes.c_uint64),
                 ("tail_extra", ctypes.c_uint64),
                 ("last_new", ctypes.c_int64), ("last_access", ctypes.c_int64),
-                ("reads", ctypes.POINTER(SysRead)), ("reads_n", ctypes.c_uint64), ("reads_cap", ctypes.c_uint64),
-                ("plain_index", Set), ("plain", ctypes.POINTER(SysPlain)), ("plain_n", ctypes.c_uint64),
-                ("plain_cap", ctypes.c_uint64), ("plain_epoch", ctypes.c_int64),
-                ("plain_used", ctypes.POINTER(ctypes.c_uint64)), ("plain_used_n", ctypes.c_uint64),
-                ("io_fast", ctypes.c_int64)]
+                ("log", ctypes.POINTER(SysEntry)), ("log_n", ctypes.c_uint64), ("log_cap", ctypes.c_uint64),
+                ("io_index", Set), ("io_regs", ctypes.POINTER(SysReg)), ("io_regs_n", ctypes.c_uint64),
+                ("io_regs_cap", ctypes.c_uint64), ("models_epoch", ctypes.c_int64),
+                ("io_used", ctypes.POINTER(ctypes.c_uint64)), ("io_used_n", ctypes.c_uint64),
+                ("io_fast", ctypes.c_int64), ("writes_fast", ctypes.c_int64)]
 
 
 class SysHooks:
@@ -252,8 +283,8 @@ class SysHooks:
         lib.dread_sys_entered.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dread_sys_entered.restype = ctypes.c_size_t
         lib.dread_sys_entry.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
-        lib.dread_sys_plain.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int32, ctypes.c_int32]
-        lib.dread_sys_plain.restype = ctypes.c_int64
+        lib.dread_sys_reg.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int32, ctypes.c_int32]
+        lib.dread_sys_reg.restype = ctypes.c_int64
         lib.dread_sys_free.argtypes = [ctypes.c_void_p]
         self.state = s = SysState()
         s.next_event = NO_EVENT
@@ -279,10 +310,10 @@ class SysHooks:
             raise OSError("uc_hook_add failed (%d)" % status)
 
     def add_io(self, ranges, python, access, settle=None):
-        """The device accesses of [(lo, hi), ...] through the C hook (dread_sysio): the reads it can
-        do alone (plain_entry), every other access to `python`, a callable(access type, address,
-        size, value), which System._io_from_c serves. settle: (status register, IT mask) when every
-        access must clear a stale IT state (dread.arch.arm.settle_it), else None."""
+        """The device accesses of [(lo, hi), ...] through the C hook (dread_sysio): the reads and
+        writes it can do alone (reg_entry), every other access to `python`, a callable(access type,
+        address, size, value), which System._io_from_c serves. settle: (status register, IT mask)
+        when every access must clear a stale IT state (dread.arch.arm.settle_it), else None."""
         from unicorn import UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE
         s = self.state
         self.io_callback = IO_CB(lambda uc, kind, address, size, value, user: python(kind, address, size, value))
@@ -296,10 +327,11 @@ class SysHooks:
         for lo, hi in ranges:
             self._hook(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self.lib.dread_sysio, lo, hi - 1)
 
-    def plain_entry(self, address, size, model):
-        """The index of the C hook's entry for reads of (address, size), made (UNKNOWN) when there
-        is none; model: its index in the run's models, -1 for none. -1: no memory for it."""
-        return self.lib.dread_sys_plain(ctypes.byref(self.state), address, size, model)
+    def reg_entry(self, address, size, model):
+        """The index of the C hook's entry for accesses of (address, size), made (UNKNOWN both ways)
+        when there is none; model: its index in the run's models, -1 for none. -1: no memory for
+        it."""
+        return self.lib.dread_sys_reg(ctypes.byref(self.state), address, size, model)
 
     def set_state_registers(self, registers):
         """The registers the loop search of a stretch compares (more than SYS_REGS: Python compares)."""

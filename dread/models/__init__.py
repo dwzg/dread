@@ -18,6 +18,14 @@ from), not with the clock or the core. The system run then does repeated reads o
 calling read() (on Unicorn in C, dread.fasthooks) and asks read() again after every such call; an
 access counts as plain when it lies wholly inside one range. The default is none, so a model of
 the target's own is asked at every read until it says otherwise.
+
+Likewise the registers whose writes are idempotent (`idempotent`): a write there, made again with
+the same size and value with no other call into the models between, at any later clock, changes
+nothing: the model's state stays as the first write left it, and the repeat calls nothing of the
+run but interrupts_changed (no note, no interrupt line, no stop). The system run then does such
+repeats without calling write() (on Unicorn in C), and without schedule() or interrupts_changed,
+since nothing they depend on changed. A write whose effect depends on the clock (one that starts a
+count from now) or that sends something is not idempotent. The default is none.
 """
 import importlib.util
 import os
@@ -32,6 +40,7 @@ class Model:
         self.system, self.name, self.config = system, name, dict(config)
         self.ranges = []                    # [(lo, hi)] of the registers this model answers
         self.plain = []                     # [(lo, hi)] of those whose reads are plain (above)
+        self.idempotent = []                # [(lo, hi)] of those whose writes are idempotent (above)
 
     def number(self, key, default=None):
         value = self.config.get(key, default)
@@ -67,7 +76,8 @@ class Model:
 
 def without(ranges, holes):
     """`ranges` [(lo, hi)] less the address ranges `holes` [(lo, hi)]: for a model's plain ranges,
-    its registers less those with a side effect or a value that moves with the clock."""
+    its registers less those with a side effect or a value that moves with the clock (and for its
+    idempotent ranges, less those whose writes are not)."""
     out = []
     for lo, hi in ranges:
         parts = [(lo, hi)]

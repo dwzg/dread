@@ -647,9 +647,10 @@ def test_the_c_hooks_device_reads_give_the_python_hooks_outcome(target, monkeypa
 
 
 def test_a_model_without_plain_registers_is_asked_at_every_read(monkeypatch):
-    """Only the registers a model names plain (dread.models.Model.plain) are read in C, and the
-    default is none: a model of the target's own is asked at every read, as before. gizmo with its
-    models' tables emptied: no read in C, the same outcome."""
+    """Only the registers a model names plain (dread.models.Model.plain) are read in C, and only
+    those it names idempotent are written in C (Model.idempotent); the default is none: a model of
+    the target's own is asked at every access, as before. gizmo with its models' tables emptied: no
+    access in C, the same outcome."""
     from conftest import gizmo_dir
     from dread import fasthooks, models
     from dread.target import Target
@@ -667,7 +668,7 @@ def test_a_model_without_plain_registers_is_asked_at_every_read(monkeypatch):
 
     def no_plain(*args):
         m = create(*args)
-        m.plain = []
+        m.plain, m.idempotent = [], []
         return m
     monkeypatch.setattr(models, "create", no_plain)
     b, none = run()
@@ -726,6 +727,64 @@ __attribute__((section(".vectors"), used)) void (*const vectors[16])(void) = {
 '''
 
 
+A32_TARGET = """
+[target]
+name = "program-a32"
+
+[arch]
+name = "arm"
+isa = "a32"
+profile = "a"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x0, size = 0x100000, kind = "rom"},
+    {name = "ram", base = 0x40000000, size = 0x10000},
+    {name = "scratch", base = 0x40100000, size = 0x20000},
+]
+io = [[0x80000000, 0x80010000]]
+stack = {top = 0x40010000, size = 0x2000}
+sentinel = 0x0fff0000
+scratch = {base = 0x40100000, size = 0x20000}
+"""
+
+
+def _program_target(tmp_path, source, tables, profile="m"):
+    """A target in tmp_path of a program of the test's own, `source` built for a Cortex-M3 (profile
+    "m": flash at 0x08000000, its vector table first, its entry `reset`) or an ARM7-style core in ARM
+    state (profile "a": flash at 0x20000, its exception vectors first and its entry there, RAM at
+    0x40000000, peripherals from 0x80000000); `tables`: its models and scenarios."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.target import Target
+    flash, ram, entry = (0x08000000, 0x20000000, "reset") if profile == "m" else (0x20000, 0x40000000, "0x20000")
+    flags = ["-mcpu=cortex-m3", "-mthumb"] if profile == "m" else ["-march=armv4t", "-marm"]
+    (tmp_path / "t.c").write_text(source)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x%x, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x%x, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) } > FLASH\n"
+                                   " .bss : { *(.bss*) *(COMMON) } > RAM }\n" % (flash, ram))
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc"] + flags + ["-O2", "-nostdlib", "-ffunction-sections", "-T",
+                                                    str(tmp_path / "t.ld"), "-e", entry, "-o", elf,
+                                                    str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text((TARGET if profile == "m" else A32_TARGET) + '''
+[image.main]
+original = "original/t.bin"
+base = 0x%x
+entry = %s
+vectors = 0x%x
+
+[compiler]
+cross = "arm-none-eabi-"
+''' % (flash, '"reset"' if profile == "m" else entry, flash) + tables)
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    return Target.load(str(tmp_path))
+
+
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_reads_in_c_follow_the_models(tmp_path, monkeypatch):
     """The C hook's reads (dread_sysio) against the Python hooks on a program that tries them: a poll
@@ -740,31 +799,10 @@ def test_reads_in_c_follow_the_models(tmp_path, monkeypatch):
     outcome both ways, with poll shared and rebuilt, with the run's chunks and QUIET as they are and
     with chunks of 13 blocks (the quiet rule is asked at every chunk's end: there it sees a clock of
     the alternating reads or of the computation's blocks gone wrong); most reads done in C."""
-    import subprocess
-    from test_bench import TARGET
-    from dread import elfimport, fasthooks
-    from dread.target import Target
+    from dread import fasthooks
     if fasthooks.library() is None:
         pytest.skip("the C hooks did not build (or DREAD_FASTHOOKS=0)")
-    (tmp_path / "t.c").write_text(READS)
-    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
-                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
-                                   "SECTIONS { .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) } > FLASH\n"
-                                   " .bss : { *(.bss*) *(COMMON) } > RAM }\n")
-    elf = str(tmp_path / "t.elf")
-    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
-                    "-T", str(tmp_path / "t.ld"), "-e", "reset", "-o", elf, str(tmp_path / "t.c")], check=True)
-    (tmp_path / "original").mkdir()
-    (tmp_path / "dread.toml").write_text(TARGET + '''
-[image.main]
-original = "original/t.bin"
-base = 0x08000000
-entry = "reset"
-vectors = 0x08000000
-
-[compiler]
-cross = "arm-none-eabi-"
-
+    t = _program_target(tmp_path, READS, '''
 [models.uart]
 kind = "uart"
 base = 0x40004000
@@ -786,9 +824,6 @@ systick_rate = 1
 input = [[1_000, "uart", "a"], [40_000, "uart", "b"]]
 limit = 2_000_000
 ''')
-    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
-                           "--write-startup", elf]) == 0
-    t = Target.load(str(tmp_path))
     image = t.image()
     scenario = t.scenarios["reads"]
 
@@ -816,6 +851,360 @@ limit = 2_000_000
     assert in_c > reads // 2, (in_c, reads)
 
 
+WRITES = r"""
+#define ICSR (*(volatile unsigned *)0xE000ED04)
+#define SHPR3 (*(volatile unsigned *)0xE000ED20)
+#define ISER0 (*(volatile unsigned *)0xE000E100)
+#define SYST_CSR (*(volatile unsigned *)0xE000E010)
+#define SYST_RVR (*(volatile unsigned *)0xE000E014)
+#define SYST_CVR (*(volatile unsigned *)0xE000E018)
+#define UART_DATA (*(volatile unsigned *)0x40004000)
+#define UART_STAT (*(volatile unsigned *)0x40004004)
+#define T_LOAD (*(volatile unsigned *)0x40000004)
+#define T_CTRL (*(volatile unsigned *)0x40000008)
+#define T_STAT (*(volatile unsigned *)0x4000000c)
+#define SPARE (*(volatile unsigned *)0x40002000)
+#define PENDSVSET (1u << 28)
+#define PENDSVCLR (1u << 27)
+volatile unsigned pendsvs, ticks, timers;
+__attribute__((used)) volatile unsigned stretched;
+static inline void basepri(unsigned v) { __asm volatile ("msr basepri, %0" :: "r" (v) : "memory"); }
+void pendsv(void) { pendsvs++; }
+void systick(void) { ticks++; }
+void timer_irq(void) { timers++; T_STAT = 1; }
+__attribute__((noinline)) void yields(void) {
+    unsigned n;
+    for (n = 0; n < 200; n++) {                 /* portYIELD in critical sections: PendSV set again */
+        basepri(0x80);                          /* and again while it is pending, masked, with ICSR */
+        ICSR = PENDSVSET;                       /* read between */
+        (void)ICSR; (void)ICSR; (void)ICSR;
+        if (n % 50 == 49)
+            basepri(0);                         /* taken: the next write pends it anew */
+    }
+    basepri(0x80);
+    for (n = 0; n < 3000; n++)                  /* writes alone while it waits, masked: no spin */
+        ICSR = PENDSVSET;
+    basepri(0);
+}
+__attribute__((noinline)) unsigned flips(void) {
+    unsigned n, seen = 0;
+    __asm volatile ("cpsid i" ::: "memory");
+    for (n = 0; n < 100; n++) {                 /* writes that change what ICSR reads, each repeated */
+        ICSR = PENDSVSET;
+        ICSR = PENDSVSET;
+        seen += ICSR >> 28 & 1;
+        ICSR = PENDSVCLR;
+        ICSR = PENDSVCLR;
+        seen += ICSR >> 28 & 1;
+    }
+    __asm volatile ("cpsie i" ::: "memory");
+    return seen;
+}
+__attribute__((noinline)) void restarts(void) {
+    unsigned n;
+    for (n = 0; n < 50; n++)
+        SYST_RVR = 1000;
+    SYST_CVR = 0;
+    SYST_CSR = 7;                               /* counts from now, its interrupt at the reload */
+    for (n = 0; n < 300; n++)
+        SYST_CVR = 0;                           /* each write starts the count anew: not idempotent */
+    for (n = 0; n < 300; n++)
+        SYST_CSR = 7;                           /* so does each of these */
+    UART_DATA = '0' + ticks;                    /* no tick yet */
+    for (n = 0; n < 300; n++)
+        SYST_RVR = 1000;                        /* ticks come due among repeated writes */
+    SYST_CSR = 0;
+    UART_DATA = '0' + ticks;
+}
+__attribute__((noinline)) void lines(void) {
+    unsigned n;
+    for (n = 0; n < 50; n++)
+        T_LOAD = 400;
+    __asm volatile ("cpsid i" ::: "memory");
+    T_CTRL = 3;                                 /* run, interrupt: the line rises in 400 units */
+    for (n = 0; n < 100; n++)
+        ISER0 = 1u << 3;                        /* the first enables it; the line rises meanwhile */
+    __asm volatile ("cpsie i" ::: "memory");    /* taken */
+    T_CTRL = 0;
+}
+__attribute__((noinline)) unsigned spare(void) {
+    unsigned n, sum = 0;
+    for (n = 0; n < 100; n++) {                 /* a register no model owns: memory (bit 31 set */
+        SPARE = n << 25;                        /* from 64 on) */
+        SPARE = n << 25;
+        sum += SPARE >> 25;
+    }
+    for (n = 0; n < 2; n++)                     /* narrow stores of a wider register */
+        __asm volatile ("strb %1, [%0]\n    strh %1, [%0]" :: "r" (&SPARE), "r" (0x87654321u) : "memory");
+    return sum + SPARE;
+}
+__attribute__((noinline)) void stretch(void) {  /* a loop that only writes, its registers alike at */
+    __asm volatile (                            /* every round: a stretch, which each write ends */
+        "    ldr r0, =0xE000ED04\n"
+        "    mov r1, #0x08000000\n"
+        "    ldr r2, =stretched\n"
+        "    movw r12, #3000\n"
+        "    mov r3, #0\n"
+        "1:  str r1, [r0]\n"
+        "    ldr r3, [r2]\n"
+        "    adds r3, r3, #1\n"
+        "    str r3, [r2]\n"
+        "    cmp r3, r12\n"
+        "    mov r3, #0\n"
+        "    bne 1b\n"
+        ::: "r0", "r1", "r2", "r3", "r12", "cc", "memory");
+}
+__attribute__((noreturn)) void reset(void) {
+    unsigned n;
+    SHPR3 = 0xFFu << 16;                        /* PendSV the lowest priority */
+    yields();
+    UART_DATA = '0' + pendsvs;
+    UART_DATA = '0' + flips() / 25;
+    restarts();
+    lines();
+    UART_DATA = '0' + timers;
+    UART_DATA = 'a' + spare() % 26;
+    UART_DATA = 'x';                            /* the same byte twice: sent twice */
+    UART_DATA = 'x';
+    for (n = 0; n < 20000; n++)                 /* writes, nothing scheduled, longer than QUIET: */
+        UART_STAT = 0;                          /* each a new log entry, not quiet */
+    stretch();
+    for (n = 0; n < 50; n++)
+        UART_STAT = 0;
+    for (;;)                                    /* no access: waits */
+        ;
+}
+__attribute__((section(".vectors"), used)) void (*const vectors[20])(void) = {
+    (void (*)(void))0x20004000, reset, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, pendsv, systick, 0, 0, 0, timer_irq };
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_writes_in_c_follow_the_models(tmp_path, monkeypatch):
+    """The C hook's writes (dread_sysio: a write repeated with nothing called in the models since, to
+    a register its model calls idempotent, and a write no model owns) against the Python hooks on a
+    program that tries them: PendSV set again and again while it is pending, masked by BASEPRI, with
+    ICSR read between (FreeRTOS's portYIELD; a read behind a write in C is a new entry), taken when
+    the mask drops, after which the same write pends it anew; writes alone while it waits masked,
+    longer than SPIN (the spin rule sees each one); set and clear in turn, each repeated, ICSR read
+    between; SysTick's CVR written again and again (not idempotent: each write starts the count
+    anew, so no tick comes), then RVR (idempotent) while ticks come due; a timer's line enabled with
+    ISER again and again while it rises, masked; a register no model owns, written and read back; the
+    same byte sent twice; writes longer than QUIET with nothing scheduled (each a new entry: not
+    quiet); a loop outside shared code that only writes, its registers alike each round (each write
+    ends the stretch: no wait); the run ends as "waits", its last access a write in C. The same
+    outcome both ways, with yields and stretch shared and rebuilt, with the run's chunks and QUIET as
+    they are, with chunks of 13 blocks, and with chunks of 5,000 and a QUIET of 20,000 (the quiet
+    rule then looks at a chunk's end inside the long writes, thousands of writes in C after the
+    chunk's first, which is done in Python); most writes done in C. With the UART's data register declared idempotent, wrongly: the run repeats no
+    write whose model noted something (the first 'x' was sent through note), so the second 'x' is
+    sent as well. With no model declaring anything: only the writes no model owns are done in C."""
+    from dread import fasthooks, models
+    if fasthooks.library() is None:
+        pytest.skip("the C hooks did not build (or DREAD_FASTHOOKS=0)")
+    t = _program_target(tmp_path, WRITES, """
+[models.uart]
+kind = "uart"
+base = 0x40004000
+
+[models.timer]
+kind = "timer"
+base = 0x40000000
+count = 0x0
+load = 0x4
+ctrl = 0x8
+stat = 0xc
+rate = 1
+irq = 3
+
+[models.nvic]
+kind = "nvic"
+systick_rate = 1
+
+[scenarios.writes]
+limit = 3_000_000
+""")
+    image = t.image()
+    scenario = t.scenarios["writes"]
+    monkeypatch.setattr(sysrun, "SPIN", 20_000)
+    settings = ((sysrun.CHUNK, sysrun.QUIET), (13, 50_000), (5_000, 20_000))
+
+    def outcomes():
+        out, in_c = {}, 0
+        for chunk, quiet in settings:
+            monkeypatch.setattr(sysrun, "CHUNK", chunk)
+            monkeypatch.setattr(sysrun, "QUIET", quiet)
+            for built in ((), ("yields", "stretch")):
+                system = sysrun.System(t, image, image.payload(), scenario=scenario, built=built)
+                o = system.run(scenario["limit"])
+                out[chunk, built] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+                in_c += system.st.writes_fast if system.fast is not None else 0
+        return out, in_c
+    with_c, in_c = outcomes()
+    create = models.create
+
+    def data_idempotent(*args):
+        m = create(*args)
+        if m.kind == "uart":
+            m.idempotent = list(m.ranges)
+        return m
+    monkeypatch.setattr(models, "create", data_idempotent)
+    wrong, _ = outcomes()
+
+    def nothing_declared(*args):
+        m = create(*args)
+        m.plain, m.idempotent = [], []
+        return m
+    monkeypatch.setattr(models, "create", nothing_declared)
+    undeclared, memory_writes = outcomes()
+    monkeypatch.setattr(models, "create", create)
+    monkeypatch.setattr(fasthooks, "_LIB", [None])
+    without, _ = outcomes()
+    assert with_c == without and wrong == without and undeclared == without
+    for (chunk, built), (how, clock, log, reports, _, _) in with_c.items():
+        assert how.startswith("waits: no device access for"), (how, reports)
+        assert reports["uart"]["sent"] == ("1" if built else "5") + "4041zxx", reports
+    writes = sum(1 for o in with_c.values() for e in o[2] if e[0] == "write")
+    unowned = sum(1 for o in with_c.values() for e in o[2] if e[0] == "write" and e[1] == "-")
+    assert in_c > writes * 3 // 4 and 0 < memory_writes < unowned, (in_c, writes, memory_writes, unowned)
+
+
+WRITES_A32 = r"""
+#define UART_DATA (*(volatile unsigned *)0x80000000)
+#define UART_SPARE (*(volatile unsigned *)0x80000008)
+#define T_LOAD (*(volatile unsigned *)0x80001004)
+#define T_CTRL (*(volatile unsigned *)0x80001008)
+#define T_STAT (*(volatile unsigned *)0x8000100c)
+#define INTC_ENABLE (*(volatile unsigned *)0x80002004)
+#define INTC_ACK (*(volatile unsigned *)0x80002008)
+#define GPIO_IN (*(volatile unsigned *)0x80003000)
+#define GPIO_OUT (*(volatile unsigned *)0x80003004)
+__asm__(
+"    .section .vectors, \"ax\"\n"
+"    .global _start\n"
+"_start:\n"
+"    b reset\n"
+"    b .\n"
+"    b .\n"
+"    b .\n"
+"    b .\n"
+"    b .\n"
+"    b irq_entry\n"
+"    b .\n"
+"    .text\n"
+"reset:\n"
+"    msr cpsr_c, #0xD2\n"                       /* IRQ mode, masked: its stack */
+"    ldr sp, =0x4000f800\n"
+"    msr cpsr_c, #0xD3\n"                       /* supervisor mode, masked */
+"    ldr sp, =0x40010000\n"
+"    bl main\n"
+"irq_entry:\n"
+"    sub lr, lr, #4\n"
+"    stmfd sp!, {r0-r3, r12, lr}\n"
+"    bl irq\n"
+"    ldmfd sp!, {r0-r3, r12, pc}^\n");
+volatile unsigned irqs;
+void irq(void) {
+    irqs++;
+    T_STAT = 1;                                 /* the line falls */
+    INTC_ACK = 1;                               /* acknowledged, and again */
+    INTC_ACK = 1;
+}
+__attribute__((noinline)) void enables(void) {
+    unsigned n;
+    T_LOAD = 300;
+    T_CTRL = 3;                                 /* run, interrupt: the line rises every 300 units */
+    for (n = 0; n < 200; n++)
+        INTC_ENABLE = 1;                        /* the first enables it; the line rises, masked */
+    __asm volatile ("msr cpsr_c, #0x53" ::: "memory");     /* unmasked: taken (rebuilt: behind */
+    for (n = 0; n < 100; n++)                   /* the first block of shared code) */
+        INTC_ENABLE = 1;                        /* and it comes again among these */
+    T_CTRL = 0;
+}
+__attribute__((noinline)) unsigned pins(void) {
+    unsigned n, sum = 0;
+    for (n = 0; n < 100; n++)
+        GPIO_IN = 5;                            /* the input register leaves a write alone */
+    for (n = 0; n < 100; n++) {
+        UART_SPARE = n;                         /* a register the UART leaves to memory */
+        UART_SPARE = n;
+        sum += UART_SPARE + GPIO_IN;
+    }
+    GPIO_OUT = 1;                               /* noted each time */
+    GPIO_OUT = 1;
+    return sum;
+}
+int main(void) {
+    enables();
+    UART_DATA = '0' + irqs;
+    UART_DATA = 'a' + pins() % 26;
+    for (;;)
+        ;
+}
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_writes_in_c_follow_the_models_on_the_a_profile(tmp_path, monkeypatch):
+    """The C hook's writes against the Python hooks on an ARM-state program with the A profile's
+    models: the interrupt controller's enable written again and again while the timer's line rises,
+    the core's IRQ masked (the C hook raises no interrupt question behind a repeat; the block hook
+    asks again when CPSR's I bit drops), then unmasked, the line rising again among the repeats; its
+    acknowledge written twice in the handler; gpio's input register, which leaves a write alone, and
+    its output, noted at every write; a register the UART leaves to memory, written and read back.
+    The same outcome both ways, with enables shared and rebuilt, with the run's chunks and with
+    chunks of 13 blocks; most writes done in C."""
+    from dread import fasthooks
+    if fasthooks.library() is None:
+        pytest.skip("the C hooks did not build (or DREAD_FASTHOOKS=0)")
+    t = _program_target(tmp_path, WRITES_A32, """
+[models.uart]
+kind = "uart"
+base = 0x80000000
+
+[models.timer]
+kind = "timer"
+base = 0x80001000
+rate = 1
+irq = 0
+
+[models.intc]
+kind = "intc"
+base = 0x80002000
+
+[models.gpio]
+kind = "gpio"
+base = 0x80003000
+
+[scenarios.writes]
+limit = 1_000_000
+""", profile="a")
+    image = t.image()
+    scenario = t.scenarios["writes"]
+    chunks = (sysrun.CHUNK, 13)
+
+    def outcomes():
+        out, in_c = {}, 0
+        for chunk in chunks:
+            monkeypatch.setattr(sysrun, "CHUNK", chunk)
+            for built in ((), ("enables",)):
+                system = sysrun.System(t, image, image.payload(), scenario=scenario, built=built)
+                o = system.run(scenario["limit"])
+                out[chunk, built] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+                in_c += system.st.writes_fast if system.fast is not None else 0
+        return out, in_c
+    with_c, in_c = outcomes()
+    monkeypatch.setattr(fasthooks, "_LIB", [None])
+    without, _ = outcomes()
+    assert with_c == without
+    for (chunk, built), (how, clock, log, reports, _, _) in with_c.items():
+        assert how.startswith("waits") and reports["uart"]["sent"][1:] == "k", (how, reports)
+        assert reports["interrupts"][0] == (1 if built else 11), reports
+        assert [e for e in log if e[0] == "gpio"] == [("gpio", "pins", 1)] * 2, log[-8:]
+    writes = sum(1 for o in with_c.values() for e in o[2] if e[0] == "write")
+    assert in_c > writes * 3 // 4, (in_c, writes)
+
+
 def test_a_new_block_behind_reads_in_c_keeps_its_clock():
     """The clock of the last new log entry or block (System.last_new, for the quiet rule) comes from
     the C hook's reads when they made an entry, and from a new block or an access done here, in the
@@ -833,7 +1222,7 @@ def test_a_new_block_behind_reads_in_c_keeps_its_clock():
     system.last_new, st.clock, st.chunk = 100, 500, 10
     st.io_done, st.last_new = 1, 300            # a read in C made an entry at clock 300, not taken yet
     system._on_block(system.uc, image.base, 2, None)    # a block not seen before, of shared code
-    system._take_reads()
+    system._take_log()
     assert system.last_new == 500
 
 

@@ -62,10 +62,18 @@ no side effect, a value only a call into the models changes), and every register
 memory. It answers from the value the model gave at the last read done here (_plain) and keeps the
 clock, the log with its counted repeats and the stop rules' clocks as _io does; after anything that
 may change a model (a write, a read with a side effect, the events and exceptions between chunks)
-the registers it read get their models' values again (_refresh_plain). Every other access goes to
-_io. (FreeRTOS's Cortex-M clang -Os with every lifted function rebuilt: the pair of runs to the
-limit 82 s -> 30 s, three reads of ICSR in four accesses done in C; the writes, PendSV set again
-and again while it is pending, are most of what is left in Python.)
+the registers it read get their models' values again (_refresh_plain). (FreeRTOS's Cortex-M clang
+-Os with every lifted function rebuilt: the pair of runs to the limit 82 s -> 30 s, three reads of
+ICSR in four accesses done in C.) The C hook does the writes that change nothing as well: a write to
+a register no model owns, and one that repeats the last write done in _io (the same register, size
+and value) to a register its model calls idempotent (dread.models, `idempotent`), while nothing has
+called into the models since (_note_write). It moves the clock and makes the log entry, nothing
+else: no schedule(), no _refresh_plain and no interrupts_changed, so no interrupt question behind
+it either (its answer depends on the controllers, which the repeat left as they were, and on the
+core's masks, which the block hook compares as before: dread.fasthooks). Every other access goes to
+_io. (The same builds: portYIELD's PENDSVSET, written again and again while PendSV is pending, is
+nearly all of their writes; the pair of runs to the limit took half the time on clang -Os and a
+third on GCC -O2 and -O0, where each write also raised that question behind the next shared block.)
 
 Scenarios are tables of the target's [scenarios] section:
 
@@ -96,7 +104,7 @@ from dread import models as dmodels
 from dread import target as tgt
 from dread.build import recon_dir
 from dread.emu import Layout, core_reader
-from dread.fasthooks import MEMORY, NO_MODEL, VALUE
+from dread.fasthooks import MEMORY, NO_MODEL, REPEAT, VALUE, sys_entries
 from dread.program import Program
 
 CHUNK = 50_000           # blocks per emu_start (stop rules are checked between chunks); a chunk ends
@@ -137,6 +145,11 @@ class _State:
         self.stretch_from, self.loop_max, self.anchor_next = FROZEN, LOOP_MAX, FROZEN
         self.waited = self.anchor = self.resume = self.waiting = 0
         self.io_done = self.last_access = 0     # (the C hook's reads: none here)
+
+
+def _inside(address, size, ranges):
+    """Whether the access (address, size) lies wholly inside one of [(lo, hi), ...]."""
+    return any(lo <= address and address + size <= hi for lo, hi in ranges)
 
 
 def _field(name, kind=int):
@@ -212,6 +225,9 @@ class System:
             if c.kind == "load":
                 uc.mem_write(c.run, c.data)
         self.scenario = dict(scenario or {})
+        self.effects = 0                    # the models' calls of note, interrupt_level and request_stop
+                                            # (_io notes a write as one the C hook may repeat when its
+                                            # model made none of them)
         names = list(self.scenario["models"]) if "models" in self.scenario else sorted(target.models)
         self.models = [dmodels.create(self, n, target.models[n], target.root) for n in names]
         self.by_name = {m.name: m for m in self.models}
@@ -264,13 +280,14 @@ class System:
             for lo, hi in self.layout.io:
                 uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._on_io, begin=lo, end=hi - 1)
         else:
-            # The device accesses through the C hook (dread_sysio): the reads of plain registers it
-            # can do alone (_plain), every other access to _io; it repairs the IT state behind both.
+            # The device accesses through the C hook (dread_sysio): the reads of plain registers and
+            # the writes it can do alone (_plain, _note_write), every other access to _io; it repairs
+            # the IT state behind both.
             arch = self.arch
             self.fast.add_io(self.layout.io, self._io_from_c, ACCESS,
                              settle=(arch.status_reg(), arch.IT_MASK) if self.layout.settle_it else None)
-        self._plain_at = {}                 # (address, size) -> the C hook's entry for its reads, -1: none
-        self._plain_info, self._plain_views, self._plain_base = [], [], None   # per entry (_new_plain)
+        self._reg_at = {}                   # (address, size) -> the C hook's entry for its accesses, -1: none
+        self._reg_info, self._reg_views, self._reg_base = [], [], None     # per entry (_new_reg)
         self.fault = None
         uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._on_unmapped)
         # An exception the core raises itself: svc (taken through a controller with pend(), the M
@@ -396,6 +413,7 @@ class System:
 
     def note(self, model, what, value):
         """A model reports something (a byte sent): part of the device log."""
+        self.effects += 1
         self._log((model, what, value))
         self.last_new = self.progress = self.clock
         until = self.scenario.get("until") or {}
@@ -405,12 +423,14 @@ class System:
                 self.request_stop("until: %s sent %r" % (model, str(until[model])))
 
     def request_stop(self, how):
+        self.effects += 1
         if self.stop is None:
             self.stop = how
         self.uc.emu_stop()
 
     def interrupt_level(self, number, level):
         """A model's interrupt line, handed to the interrupt controller models."""
+        self.effects += 1
         self.levels[number] = level
         for c in self.controllers:
             c.line(number, level)
@@ -482,8 +502,8 @@ class System:
         if fresh or size > known:
             self.blocks[addr] = size
         if fresh:
-            if st.io_done:                  # (the reads the C hook did came first)
-                self._take_reads()
+            if st.io_done:                  # (the accesses the C hook did came first)
+                self._take_log()
             self.last_new = self.clock
         entry = self.entries.get(addr)
         if entry is not None:
@@ -560,19 +580,23 @@ class System:
 
     def _io(self, uc, access, addr, size, value):
         st = self.st
-        if st.io_done:                      # the reads the C hook did came first
-            self._take_reads()
+        if st.io_done:                      # the accesses the C hook did came first
+            self._take_log()
         model, mask = self._owner(addr), (1 << 8 * size) - 1
         who = model.name if model else "-"
         st.clock += ACCESS
         st.frozen = 0                       # the clock moved: a stretch outside shared code ends
         self.last_access = st.progress = st.clock
+        quiet = False                       # a write whose model noted nothing, moved no line, stopped nothing
         if access == UC_MEM_WRITE:
-            self._log(("write", who, addr, size, value & mask))
+            value &= mask
+            self._log(("write", who, addr, size, value))
             self.last_new = self.clock
+            effects = self.effects
             if model is not None:
-                model.write(addr, size, value & mask)
+                model.write(addr, size, value)
                 self.schedule()             # a write may set when the model acts next (a timer's compare)
+            quiet = self.effects == effects
             changed = model is not None
         else:
             answer = None
@@ -592,23 +616,29 @@ class System:
             changed = self.fast is not None and not self._plain(model, addr, size, answer, got)
         if st.clock >= st.next_event or st.clock >= st.limit:
             st.due = 1                      # (not emu_stop here: see self.due)
-        if changed and self.fast is not None:
-            self._refresh_plain()           # a write to a model, or a read that may have changed one
+        if self.fast is not None:
+            if changed:
+                self._refresh_plain()       # a write to a model, or a read that may have changed one
+            if quiet:
+                self._note_write(model, addr, size, value)
 
-    # ---- the C hook's reads (dread.fasthooks, dread_sysio) ----
+    # ---- the C hook's accesses (dread.fasthooks, dread_sysio) ----
     #
     # A read of a plain register (a model's `plain` ranges: no side effect, a value only a call into
     # the models changes; or a register no model owns, which is memory) is done in C from the value
-    # read here last, and every other access comes to _io, as above. The C hook keeps the entries it
-    # makes until _take_reads puts them into the log, which comes first whenever this side adds to
-    # the log or uses it; st.tail_* is the log's last entry, for counting repeats as _io does.
+    # read here last. A write to a register no model owns is done in C, and so is a write that repeats
+    # the last one done here, to a register its model calls idempotent (`idempotent` ranges: made
+    # again with nothing called in the models between, it changes nothing), while nothing has called
+    # into the models since. Every other access comes to _io, as above. The C hook keeps the entries
+    # it makes until _take_log puts them into the log, which comes first whenever this side adds
+    # to the log or uses it; st.tail_* is the log's last entry, for counting repeats as _io does.
 
     def _log(self, entry, read=None):
-        """Append to the device log, behind the reads the C hook did. read: (model, address, size,
+        """Append to the device log, behind the accesses the C hook did. read: (model, address, size,
         value) of a read's entry, whose repeats the C hook then counts into it."""
         st = self.st
         if st.io_done:
-            self._take_reads()
+            self._take_log()
         self.log.append(entry)
         if self.fast is not None:
             if read is None:
@@ -618,83 +648,114 @@ class System:
                 st.tail_read, st.tail_model, st.tail_address, st.tail_size, st.tail_value = (
                     1, self.model_index[model] if model is not None else -1, address, size, value)
 
-    def _take_reads(self):
-        """The reads the C hook did since the last call, into the log, and the clock of the last new
-        entry among them into last_new (which may hold a clock beyond the state's: see System.clock)."""
+    def _take_log(self):
+        """The log entries the C hook made since the last call, into the log, and the clock of the
+        last new entry among them into last_new (which may hold a clock beyond the state's: see
+        System.clock)."""
         st, log = self.st, self.log
         st.io_done = 0
         if st.tail_extra:                   # repeats of the log's last entry
             last = log[-1]
             log[-1] = last[:5] + (last[5] + st.tail_extra,)
             st.tail_extra = 0
-        n = st.reads_n
-        if n:
-            names, reads = self.model_names, st.reads
+        n = st.log_n
+        if n >= 8:                          # many: their bytes at once (sys_entries), half the time
+            names = self.model_names
+            log.extend(("write", names[model], address, size, value) if write else
+                       ("read", names[model], address, size, value, count)
+                       for address, value, count, model, size, write in sys_entries(st))
+        elif n:                             # a few: field by field, which costs less to start
+            names, entries = self.model_names, st.log
             for i in range(n):
-                r = reads[i]
-                log.append(("read", names[r.model], r.address, r.size, r.value, r.count))
-            st.reads_n = 0
+                r = entries[i]
+                if r.write:
+                    log.append(("write", names[r.model], r.address, r.size, r.value))
+                else:
+                    log.append(("read", names[r.model], r.address, r.size, r.value, r.count))
+        st.log_n = 0
         if st.last_new >= 0:
             self.last_new, st.last_new = st.last_new, -1
 
     def _plain(self, model, addr, size, answer, got):
         """After a read in _io: whether the register is plain; then the C hook does its reads from
         now on, until the next _refresh_plain (answer: what the model answered, None for memory)."""
-        at = self._plain_at.get((addr, size))
+        at = self._reg_at.get((addr, size))
         if at is None:
-            at = self._new_plain(model, addr, size)
-        if at < 0:
+            at = self._new_reg(model, addr, size)
+        if at < 0 or not self._reg_info[at][4]:
             return False
         st = self.st
-        e = self._plain_views[at]
+        e = self._reg_views[at]
         if model is None:
             e.kind = NO_MODEL
         elif answer is None:
             e.kind = MEMORY
         else:
             e.kind, e.value = VALUE, got
-        e.epoch = st.plain_epoch
+        e.epoch = st.models_epoch
         if not e.used:
             e.used = 1
-            st.plain_used[st.plain_used_n] = at
-            st.plain_used_n += 1
+            st.io_used[st.io_used_n] = at
+            st.io_used_n += 1
         return True
 
-    def _new_plain(self, model, addr, size):
-        """The C hook's entry for the reads of (addr, size) when they are plain, else -1."""
+    def _note_write(self, model, addr, size, value):
+        """After a write in _io whose model noted nothing, moved no interrupt line and asked for no
+        stop: when no model owns the register, the C hook does its writes from now on; when its
+        model calls it idempotent, the C hook does this write again (the same size and value) until
+        the next call into the models (the next _refresh_plain). Such a repeat changes nothing in the
+        models, so the C hook only moves the clock and makes the log entry: no schedule(), no
+        _refresh_plain, and no interrupts_changed, whose question (the controllers' wishes, the
+        core's masks) has the answer it had (dread.fasthooks)."""
+        at = self._reg_at.get((addr, size))
+        if at is None:
+            at = self._new_reg(model, addr, size)
+        if at < 0 or not self._reg_info[at][5]:
+            return
+        e = self._reg_views[at]
+        if model is None:
+            e.wkind = NO_MODEL
+        else:
+            e.wkind, e.written, e.wepoch = REPEAT, value, self.st.models_epoch
+
+    def _new_reg(self, model, addr, size):
+        """The C hook's entry for the accesses of (addr, size) when it may do its reads (plain) or
+        repeat its writes (idempotent) alone, else -1."""
         at = -1
-        if 1 <= size <= 8 and (model is None or any(lo <= addr and addr + size <= hi
-                                                   for lo, hi in getattr(model, "plain", ()))):
-            at = self.fast.plain_entry(addr, size, self.model_index[model] if model is not None else -1)
+        if 1 <= size <= 8:
+            plain = model is None or _inside(addr, size, getattr(model, "plain", ()))
+            same = model is None or _inside(addr, size, getattr(model, "idempotent", ()))
+            if plain or same:
+                at = self.fast.reg_entry(addr, size, self.model_index[model] if model is not None else -1)
             if at >= 0:                     # (entries are made in order, each once)
-                self._plain_info.append((model, addr, size, (1 << 8 * size) - 1))
-                plain = self.st.plain
-                base = ctypes.cast(plain, ctypes.c_void_p).value
-                if base != self._plain_base:    # the C side moved its entries: new views of them
-                    self._plain_base = base
-                    self._plain_views = [plain[i] for i in range(len(self._plain_info))]
+                self._reg_info.append((model, addr, size, (1 << 8 * size) - 1, plain, same))
+                regs = self.st.io_regs
+                base = ctypes.cast(regs, ctypes.c_void_p).value
+                if base != self._reg_base:  # the C side moved its entries: new views of them
+                    self._reg_base = base
+                    self._reg_views = [regs[i] for i in range(len(self._reg_info))]
                 else:
-                    self._plain_views.append(plain[at])
-        self._plain_at[addr, size] = at
+                    self._reg_views.append(regs[at])
+        self._reg_at[addr, size] = at
         return at
 
     def _refresh_plain(self):
         """After a call into the models that may have changed them (a write, a read with a side
-        effect, the events and exceptions between chunks): the C hook's values no longer hold. The
-        registers it read since the last refresh get their models' values again; the others are
-        asked here at their next read."""
+        effect, the events and exceptions between chunks): the C hook's values no longer hold, nor
+        its notes of writes to repeat (models_epoch moves on). The registers it read since the last
+        refresh get their models' values again; the others are asked here at their next read."""
         st = self.st
-        epoch = st.plain_epoch + 1
-        st.plain_epoch = epoch
-        n = st.plain_used_n
+        epoch = st.models_epoch + 1
+        st.models_epoch = epoch
+        n = st.io_used_n
         if not n:
             return
-        used, views, info = st.plain_used, self._plain_views, self._plain_info
+        used, views, info = st.io_used, self._reg_views, self._reg_info
         for i in range(n):
             at = used[i]
             e = views[at]
             e.used = 0
-            model, address, size, mask = info[at]
+            model, address, size, mask, _, _ = info[at]
             if model is None:
                 continue
             answer = model.read(address, size)
@@ -703,7 +764,7 @@ class System:
             else:
                 e.kind, e.value = VALUE, answer & mask
             e.epoch = epoch
-        st.plain_used_n = 0
+        st.io_used_n = 0
 
     def _on_intr(self, uc, intno, user):
         kind = getattr(self.arch, "system_exception", lambda n: None)(intno)
@@ -763,8 +824,8 @@ class System:
                 uc.emu_start(pc, self.layout.sentinel)
             except UcError as e:
                 error = e
-            if self.st.io_done:                 # the reads the C hook did, into the log
-                self._take_reads()
+            if self.st.io_done:                 # the log entries the C hook made, into the log
+                self._take_log()
             if self.callback_error is not None:
                 raise self.callback_error
             back = arch.exception_return(uc, word)

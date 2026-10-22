@@ -34,7 +34,9 @@ is active (CONTROL.FPCA), with EXC_RETURN's bit 4 clear; the hardware's lazy sta
 eagerly (the same registers; the reserved words' memory differs when a handler never uses the FPU).
 
 Every read but CSR's (COUNTFLAG clears) and CVR's (the clock) is plain (dread.models): FreeRTOS's
-Cortex-M port reads ICSR in every critical section.
+Cortex-M port reads ICSR in every critical section. Every write but CSR's and CVR's (both may start
+SysTick's count from the current clock) is idempotent: FreeRTOS's portYIELD sets PENDSVSET again and
+again while PendSV is pending.
 
 Assumed: the model raises no NMI or fault exceptions of its own (an svc that cannot be taken would
 escalate to HardFault; the system run stops with a fault instead), tail-chaining is a return
@@ -65,6 +67,7 @@ class Nvic(Model):
         self.prio_mask = (0xFF << (8 - bits)) & 0xFF
         self.ranges = [(SYST, SYST + 0x10), (NVIC, IPR + self.lines), (ICSR, AIRCR + 4), (SHPR, SHPR + 12)]
         self.plain = without(self.ranges, [(SYST, SYST + 4), (SYST + 8, SYST + 12)])
+        self.idempotent = without(self.ranges, [(SYST, SYST + 4), (SYST + 8, SYST + 12)])
         self.enabled = self.pending = self.levels = 0       # bit n: line n
         self.system_pending = set()                         # pending exceptions below 16
         self.active = []                                    # active exceptions, the latest last

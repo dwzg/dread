@@ -17,8 +17,9 @@ Interrupts, as the core numbers them (mcause): the machine timer interrupt (7) i
 mtime >= mtimecmp, the machine software interrupt (3) while msip's bit 0 is set; the software one
 first when both are (the privileged spec's order). The system run takes one when mstatus.MIE and the
 interrupt's bit in mie are set (may_take, with the layer's cpu_masks); both are levels, so a handler
-ends one by writing mtimecmp or msip. Every read but mtime's (the clock) is plain (dread.models).
-Assumed: one hart runs.
+ends one by writing mtimecmp or msip. Every read but mtime's (the clock) is plain (dread.models); no
+write is idempotent (each arms the timer against mtime, which moves with the clock). Assumed: one
+hart runs.
 """
 from dread.models import Model, without
 

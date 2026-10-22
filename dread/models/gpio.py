@@ -9,9 +9,10 @@
 
 A scenario sets the inputs ([[clock, "gpio", 5]]: pins 0 and 2 high from then on); every store to
 the output register is noted in the device log with the value. Every read is plain
-(dread.models). Assumed: no direction or pull registers, outputs not read back from the pins.
+(dread.models), and every write but the output register's (noted) is idempotent. Assumed: no
+direction or pull registers, outputs not read back from the pins.
 """
-from dread.models import Model
+from dread.models import Model, without
 
 
 class Gpio(Model):
@@ -23,6 +24,7 @@ class Gpio(Model):
         self.input_at, self.output_at = base + self.number("input", 0), base + self.number("output", 4)
         self.ranges = [(base, base + self.number("size", 0x10))]
         self.plain = list(self.ranges)
+        self.idempotent = without(self.ranges, [(self.output_at, self.output_at + 1)])
         self.pins_in, self.pins_out = 0, 0
 
     def read(self, address, size):

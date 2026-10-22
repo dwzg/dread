@@ -14,7 +14,8 @@
 A store to the data register sends its low byte: the bytes sent are the model's report, the text a
 scenario can wait for. A load takes the next byte of the receive queue (0 when it is empty). Reads
 of other registers in the range are plain memory. Every read but the data register's is plain
-(dread.models). Assumed: no transmit delay, no overrun, no other status bits.
+(dread.models), and every write but the data register's (it sends) is idempotent. Assumed: no
+transmit delay, no overrun, no other status bits.
 """
 from dread.models import Model, without
 
@@ -31,6 +32,7 @@ class Uart(Model):
         self.irq = self.config.get("irq")
         self.ranges = [(self.base, self.base + self.number("size", 0x10))]
         self.plain = without(self.ranges, [(self.data_at, self.data_at + 1)])     # a read takes a byte
+        self.idempotent = without(self.ranges, [(self.data_at, self.data_at + 1)])    # a write sends one
         self.sent, self.queue = bytearray(), bytearray()
 
     def read(self, address, size):

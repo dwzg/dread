@@ -19,8 +19,9 @@
 Time is the system run's shared clock, so the timer expires at corresponding places in the original
 and the rebuilt image. The interrupt line is a level: high while the status bit is set and the
 interrupt is enabled. Every read but the count's (which moves with the clock) is plain
-(dread.models). Assumed: counting starts when run is set, from the load value; writing the load
-register while running takes effect at the next reload; no prescaler.
+(dread.models), and every write but those of the control and the status register (which set the
+interrupt line) is idempotent. Assumed: counting starts when run is set, from the load value;
+writing the load register while running takes effect at the next reload; no prescaler.
 """
 from dread.models import Model, without
 
@@ -38,6 +39,7 @@ class Timer(Model):
         self.periodic = bool(self.config.get("periodic", True))
         self.ranges = [(base, base + self.number("size", 0x10))]
         self.plain = without(self.ranges, [(self.at["count"], self.at["count"] + 1)])
+        self.idempotent = without(self.ranges, [(self.at[k], self.at[k] + 1) for k in ("ctrl", "stat")])
         self.load_value, self.ctrl, self.expired = 0, 0, False
         self.started = self.deadline = None
 

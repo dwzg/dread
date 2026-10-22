@@ -1925,16 +1925,56 @@ The long runs set the pace of everything after them. Measure first, then cut.
   collected). Of the reads of the clang -Os run 99.96 % are done in C. Left: the writes, now 53 % of that run (938,000 calls of 8.7 us), 66 % of GCC
   -O2's; on -O0 the writes and the interrupt question each one raises behind the next shared block
   (28 % and 37 %). Next item.
-- [ ] **The system run's repeated writes that change nothing, in C.** What is left of the M3 runs
-  above: portYIELD's PENDSVSET while PendSV is pending, 940,000 to 1.25 million writes a run. A
-  design (not tried): a model names registers whose write, repeated with the same value with no call
-  into the models between, changes nothing and calls nothing of the run but interrupts_changed (as
-  often as the first did); the run notes such a write when it did it in Python (only
-  interrupts_changed called during it), and the C hook does its repeats while the plain values hold
-  (the log entry, the clock, `due`, and interrupts_changed's flags and epoch moved to the state).
-  Writes that alternate between two registers would not gain (each refreshes the other's note).
-  Whether the interrupt question behind each such write can be skipped (nothing it depends on
-  changed) is a question of its own: it would cut -O0's share, but changes when the run asks.
+- [x] **The system run's repeated writes that change nothing, in C** (2026-10-22). Profiled first
+  (the original's run of each pair, the Python callbacks timed): on FreeRTOS's Cortex-M clang -Os
+  with every lifted function rebuilt the writes took 58 % of the run (936,716 in Python, 9.9 us
+  each: the callback, the owner, the log, NVIC.write, schedule() and _refresh_plain's ICSR), on GCC
+  -O2 70 % (1.25 million); on GCC -O0 the 453,324 writes took 31 % and the blocks handed to Python
+  behind them another 36 % (455,682, nearly all for the interrupt question each write raised behind
+  the next shared block). Nearly every one is portYIELD's PENDSVSET, the write before it again,
+  PendSV pending all along. A model names its idempotent registers now (dread.models, `idempotent`:
+  a write made again with the same size and value, nothing called in the models between, at any
+  later clock, changes nothing and calls nothing of the run but interrupts_changed): the NVIC all
+  but SysTick's CSR and CVR (both may start the count from the clock), the UART all but its data
+  register, the timer all but control and status (they move the line), gpio all but its output, intc
+  all; the CLINT none (a write arms the timer against mtime, which moves with the clock); a model of
+  the target's own none. When _io did a write whose model noted nothing, moved no line and asked for
+  no stop (System.effects), it notes it (_note_write), and dread_sysio does the same write again
+  alone until the next call into the models (models_epoch, which _refresh_plain moves on), and every
+  write to a register no model owns: the clock, the log entry, the stop rules' clocks and `due` as
+  _io keeps them, nothing else (no schedule(), no refresh, no interrupts_changed). Writes that
+  alternate between two registers stay in Python (each is a call into the models the other's note
+  depends on). The separate question, answered: the interrupt question behind such a write is not
+  asked again. It depends on what the controllers want, which the repeat leaves as it was, and on
+  the core's masks, which the block hook compares with the last answer's at every block as before.
+  Measured on the old code, which asked it behind every write: GCC -O0 asked it 451,278 times behind
+  repeating writes alone, each time with the masks of the question before, and every answer was that
+  question's; on clang -Os and GCC -O2 the 3 and 8 asked with other masks (BASEPRI lifted) were
+  answered "taken", and the block hook still asks those. The C hook's log entries hold writes too
+  (SysEntry); System takes eight or more at once through struct (half the time of reading them field
+  by field). Measured, the pair of runs on copies of the bench builds' whole images of measure-39,
+  the old and the new code in turn, one at a time (other agents' work busy on up to 11 of 32 threads
+  meanwhile; the faster of four rounds): clang -Os 25.0 -> 11.5 s, clang 18 -Os 25.5 -> 11.3 s, M4F
+  clang -Os 24.8 -> 11.3 s, GCC -O2 28.5 -> 8.9 s, GCC 14 -O2 28.3 -> 9.2 s, GCC -O0 31.8 -> 9.5 s;
+  the short runs (alternating, seven rounds, CPU seconds, medians): GCC -Os 0.58 -> 0.58, clang -O2
+  0.10 -> 0.10, RISC-V GCC -Os 2.03 -> 2.03, gizmo's 40 system runs 0.201 -> 0.205 (2 %: the note of
+  each quiet write done in Python, and an entry for each register written). Of clang -Os's 936,716
+  writes 934,299 are done in C (a chunk's start moves the epoch, so each chunk's first is done in
+  Python). Every outcome the same as before: the digests of all 18 runs of the nine builds (how,
+  clock, device log, reports, functions entered and their order) and of gizmo's 40 (every build with
+  a system run and every scenario, all of it shared and all of it outside shared code). Tests:
+  programs of the tests' own against the Python hooks, on a Cortex-M3 (PendSV set again and again
+  while pending and masked, ICSR read between, taken when BASEPRI drops and pended anew; writes
+  alone longer than SPIN; set and clear in turn; SysTick's CVR and CSR, which restart the count,
+  written again and again, and RVR while ticks come due; ISER while the timer's line rises; a
+  register no model owns, narrow stores too; the same byte sent twice; writes longer than QUIET with
+  nothing scheduled; a loop outside shared code that only writes; the UART's data register declared
+  idempotent, wrongly; no model declaring anything) and on an ARM7-style core (the intc's enable and
+  acknowledge with the IRQ masked by CPSR, gpio's input and output, a register the UART leaves to
+  memory). A mutation check by hand of the path, 19 mutants: 18 fail a test; the survivor, the C
+  side's mask of the written value, is equivalent on Unicorn (it hands the hook the stored bytes
+  only). Left in these runs: the emulator with the C hooks (about 90 % of clang -Os's run of 5.5 s)
+  and taking the C hook's entries into the log (6 %).
 ## Phase 7: reading aids, plugin, documentation
 
 - [x] Reading aids: `dread flat` (a function's listing with targets and literals by name, texts,
