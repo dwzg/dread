@@ -417,6 +417,65 @@ def words(name):
     return {p.lower() for p in parts if len(p) > 2}
 
 
+def same_word(a, b):
+    """Whether two words of names count as one: alike, or the shorter, of three letters or more, begins
+    the longer (init and initialise, buf and buffer, task and tasks; also read and ready: a guess)."""
+    if a == b:
+        return True
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return len(short) >= 3 and long_.startswith(short)
+
+
+def similarity(a, b):
+    """How alike two names are, from 0 to 1: their words (words()) paired one to one, alike words
+    first, then words that begin one another (same_word), the pairs over the words of both (Jaccard):
+    task_delay and vTaskDelay 1.0, list_insert_end and list_insert_tail 0.5, queue_send and
+    queue_receive 0.33. Names alike but for case and separators are 1.0 (strcmp and str_cmp); names
+    without such words (every piece shorter than three letters) 0 else. A measure of words, not of
+    meaning: uart_putc and serial_write_char are 0, rx_byte and tx_byte 1."""
+    if re.sub(r"[^a-z0-9]", "", (a or "").lower()) == re.sub(r"[^a-z0-9]", "", (b or "").lower()):
+        return 1.0
+    wa, wb = words(a), words(b)
+    if not wa or not wb:
+        return 0.0
+    pairs = wa & wb
+    rest = sorted(wb - pairs)
+    matched = len(pairs)
+    for w in sorted(wa - pairs):
+        for v in rest:
+            if same_word(w, v):
+                rest.remove(v)
+                matched += 1
+                break
+    return matched / (len(wa) + len(wb) - matched)
+
+
+AGREE = 0.5         # two names agree when their similarity() is at least this (a vote's groups)
+
+
+def vote(samples, keep=None, agree=AGREE):
+    """The name a vote over samples settles on (self-consistency): (name, agreement, index), or None
+    when no sample has a name. samples are proposed names in the order asked, None for a question
+    that got none; keep, a name proposed before (by an earlier pass), runs as a candidate too.
+    A candidate's agreement is the number of samples whose similarity() to it is at least agree
+    (a sample agrees with itself); the candidate most samples agree with wins, a tie going to keep,
+    then to the larger sum of similarities, then to the name proposed most often (case aside), then
+    to the earlier sample. index is the winning sample's (None for keep). agreement over the number
+    of samples asked is the vote's confidence."""
+    names = [s for s in samples if s]
+    if not names:
+        return None
+    candidates = ([(keep, None)] if keep else []) + [(s, i) for i, s in enumerate(samples) if s]
+    best = None
+    for name, index in candidates:
+        sims = [similarity(name, s) for s in names]
+        rank = (sum(1 for x in sims if x >= agree), index is None, round(sum(sims), 9),
+                sum(1 for s in names if s.lower() == name.lower()), -(index or 0))
+        if best is None or rank > best[0]:
+            best = (rank, name, index)
+    return best[1], best[0][0], best[2]
+
+
 def function_truth(path):
     """{entry address: name} of true function names: an ELF's function symbols, or a functions table
     (TSV with a header, address and name its first two columns, as config/functions.tsv); unnamed

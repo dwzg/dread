@@ -9,6 +9,53 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Function names: five questions a function and a second pass, callers first; no gate (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** `dread pilot --task name` asked each function once, in one pass, callees first. Its
+  names vary from run to run (two runs on FreeRTOS name 55 % of the functions alike), and a wrong
+  early name spreads, shown to later questions as if it were certain. Three ideas that use randomness
+  and iteration: votes over several questions (self-consistency), later questions showing only names
+  a vote is sure of with repeated passes, and ablation (asking again without the neighbours' names
+  to flag names that depend on them). Which help, and which become the default? And how are two runs
+  compared, when the judge's absolute verdicts move by several points?
+- **Options, measured** on FreeRTOS GCC -Os (mps2, 366 functions made FUN_address), Haiku 5.5
+  naming, Sonnet 5.5 judging pairwise (`--against`: where two runs' names differ, which is closer to
+  the true name, asked in both orders; wins, losses, ties against one question in one pass; a sign
+  test): (a) as before: a second run 120, 95, 72 (p 0.10: the measure's spread); (b) votes of five
+  (`--samples 5`): 130, 60, 84 (p 4e-7); (c) votes of five, shown to later questions only at
+  confidence 0.8 or more, four passes (`--gate 0.8 --passes 4`): 158, 53, 82 (p 3e-13); (d) votes of
+  five and a second pass callers first, every name shown (`--samples 5 --passes 2`): 163, 47, 78 (p
+  3e-16). The gate alone gains nothing (its first pass against (b): 80, 81, 79; (d) against (c) after
+  two passes: 95, 69, 80); the second pass gains (66, 14, 23 gated, 81, 26, 23 ungated); passes 3 and
+  4 do not (25, 25, 24 and 22, 12, 9); (c) after four passes ties (d) (84, 85, 73) for half again
+  the answers. (e) Ablation (`--ablate`): the flag marks names that depend on the names shown (64 %
+  of them against 32 % for the same question asked twice), not wrong ones: the vote with the names
+  beats the vote without 164, 26, 55.
+- **Choice: (d) the default** (NAME_SAMPLES 5, NAME_PASSES 2 in dread/pilot.py); `--gate` and
+  `--ablate` stay options, off; runs are compared with the pairwise judge, the absolute verdicts kept
+  beside it. `--against` replaces `--versus` (merged the same day), which showed each pair once, the
+  order chosen by the address: that judge preferred the second place (about 55 to 45; two identical
+  controls came out 151 to 117), which asking both orders cancels (two identical controls 120 to 95,
+  p 0.10).
+- **Why.** (d) is the best measured and the cheapest of the best: 3,195 answers on this build ($1.05
+  against $0.12 for one question in one pass), (c) 4,721 ($1.59) for no more. The vote's confidence is
+  calibrated (judged different 88 % at 0.2, 58 % at 0.4, 42 % at 0.6, 26 % at 0.8, 15 % at 1.0), so a
+  reader of names.tsv knows which names to trust, and votes are steadier than single answers (two
+  votes alike for 68 % of the functions whose question shows no name, two answers for 47 %). The gate
+  hides names that help more than they mislead: a name of 0.6 is wrong 42 % of the time but carries
+  the subsystem. The absolute judge drifts with its batch (13 of 126 functions two runs named alike
+  were judged otherwise in the two judgings, 11 harsher in one), so it cannot tell runs apart by a few
+  points; the pairwise judge puts both names on one line.
+- **Undo.** NAME_SAMPLES = 1 and NAME_PASSES = 1 in dread/pilot.py, or `--samples 1 --passes 1` for
+  one run (a K of 1 writes no confidence, so `--gate` then hides every name: refused).
+- **Status.** Done (dread/pilot.py, dread/naming.py similarity and vote, docs/formats.md names.tsv).
+  Measured on one build the model knows (it recognises FreeRTOS once it has context), and on the
+  code before the notes showed a long text's end (the entry below; every variant alike); not
+  confirmed on firmware it does not know, where a misread driver spread on 2026-10-22: next on the
+  private real-life test (docs/todo.md, Function names), and with `--behaviour`.
+
 ## Function names: a long text's end in the notes; the runs of the cases an option (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

@@ -348,9 +348,6 @@ its sources.
   default of --task name (docs/decisions.md): first they hurt, between the passes they cost $0.01
   and gain little. Not measured: a partly named image, whose named functions would tell the
   globals' questions more.
-  Next: subsystems as a step of their own (functions grouped by calls and addresses, a prefix
-  proposed a group with its evidence: texts, devices) to catch a misread driver before its callers
-  inherit it; the globals between the passes on the private firmware.
   Runs of the cases (2026-10-22, `--behaviour`, dread.behaviour; docs/decisions.md): a question can
   also show what the function did in up to three runs of its cases on the original image: the
   arguments (a text one points to where the run reads it as text), the result, the functions it calls
@@ -374,13 +371,52 @@ its sources.
   1.045 and 1.038, -0.009 +- 0.020, for 37 % more input tokens (522,000 against 383,000 a pass, $0.14
   against $0.12); newlib's functions and the demo's application lost a little, device registers and
   read bytes gained a little, both within the noise. Two passes of one setup differ by up to 0.05
-  (-0.021, +0.004, -0.051): one pass against another cannot show less than that. `--versus NAMES_TSV` (with
-  --score and --judge) has the judge say, for each function two passes named otherwise, which name
-  comes closer, the two in an order the address decides: it prefers the second place (about 55 to
-  45), and two identical controls came out 151 to 117 (the notes with text ends against the old
-  control 171 to 99; the runs on top against the notes alone 118 to 130). So the runs stay an option.
-  Next: try them where the code says less, the private firmware's drivers and leaves that touch only
-  unnamed globals (its misses), against its notes with text ends.
+  (-0.021, +0.004, -0.051): one pass against another cannot show less than that. A pairwise judge of
+  that day, `--versus` (for each function two passes named otherwise, which name comes closer, each
+  pair shown once, in an order the address decides; replaced since by `--against`, which asks both
+  orders: below), preferred the second place (about 55 to 45), and two identical controls came out
+  151 to 117 with it (the notes with text ends against the old control 171 to 99; the runs on top
+  against the notes alone 118 to 130). So the runs stay an option.
+  Votes, a confidence gate, passes and ablation (2026-10-22, docs/decisions.md; measured on the code
+  before the notes showed a text's end, every variant alike): `--samples K` asks each function K
+  times (Haiku 5.5 and Sonnet 5.5 refuse any temperature but their default 1.0, which samples; the
+  later questions list the callers in an order of their own, the runs of `--behaviour` as they are)
+  and keeps the name most answers agree with (dread.naming.vote: words paired, init with initialise),
+  the agreement its confidence; `--gate C` shows later questions only names of confidence C or more;
+  `--passes N` asks again, callers first and callees first in turn, what its question changed for,
+  until no shown name changes; `--ablate` asks each function also with no other name shown and flags
+  a name that differs then; names.tsv got columns for all of it (docs/formats.md). `--score` with
+  `--judge` gives the verdicts per confidence and per flag; `--against OTHER` has the judge say
+  instead, where two runs' names differ, which is closer to the true name, asked in both orders, with
+  a sign test (in place of `--versus`, above). Measured on the FreeRTOS build, each variant on a copy
+  of its own, pairwise against one question in one pass (wins, losses, ties): a second such run 120,
+  95, 72 (p 0.10: the measure's own spread; the two runs' names alike for 55 % of the functions, the
+  same string for 22 %); votes of five 130, 60, 84 (p 4e-7; against the second run 109, 64, 94);
+  votes of five with gate 0.8 and four passes 158, 53, 82 (p 3e-13); votes of five and one more pass
+  callers first, ungated, 163, 47, 78 (p 3e-16). The gate gains nothing: its first pass against
+  ungated votes 80, 81, 79; ungated against gated after two passes 95, 69, 80; the gain is the second
+  pass (66, 14, 23 gated; 81, 26, 23 ungated), passes 3 and 4 none to speak of (25, 25, 24; 22, 12,
+  9), and four gated passes tie with two ungated (84, 85, 73), without a fixed point (pass 4 still
+  changed 46 shown names). The confidence is calibrated: of votes of five, judged different 88 % at
+  0.2 (8 functions), 58 % at 0.4 (43), 42 % at 0.6 (67), 26 % at 0.8 (80), 15 % at 1.0 (168). Votes
+  are steadier: where no name is shown, two answers agree for 47 %, two votes for 68 % (50 of 74).
+  Ablation: hiding the names shown changed the vote for 186 of 292 functions (64 %), the same
+  question asked twice for 24 of 74 (32 %); but the flagged names are not the wrong ones (different
+  27 % against 19 %, and within a confidence no worse: at 1.0 10 % against 16 %): the names shown
+  make them better, the vote with them beating the vote without 164, 26, 55. The judge's absolute
+  verdicts move with what else is in a batch: 13 of 126 functions that two runs named alike got other
+  verdicts in the two runs' judgings, 11 of them harsher in one, so absolute totals of two runs
+  differ by several points for nothing (gated pass 1 against the votes: different 38 % against 29 %,
+  pairwise even); runs are compared pairwise. Defaults now `--samples 5 --passes 2`: 3,195 answers
+  against 366 on this build ($1.05 against $0.12); measured on one build the model knows, not
+  confirmed on firmware it does not (the private real-life test). Spent on the measurement: about
+  $3.50 of Haiku, $1.30 of Sonnet.
+  Next: on the private firmware, the defaults (votes of five and a second pass: does the confidence
+  catch the misread driver?), the runs of the cases (`--behaviour`) where the code says less (its
+  drivers, and leaves that touch only unnamed globals: its misses) against its notes with text ends,
+  and the globals between the passes; then subsystems as a step of their own (functions grouped by
+  calls and addresses, a prefix proposed a group with its evidence: texts, devices) to catch a
+  misread driver before its callers inherit it.
 - [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
 

@@ -36,11 +36,19 @@ constants that point to text followed by the text) or, where no C can be made, i
 callees first, --jobs at a time, each showing the proposals made so far for the functions it calls
 and its callers; a run started again goes on where the last one stopped. --score TRUTH compares the
 proposals with true names (an ELF's symbols, or the functions table of a copy that has them), --judge
-PROVIDER adds a model's verdict per pair, and --versus NAMES_TSV the judge's choice, for each
-function another run named otherwise, of the name closer to the true one. --refine asks again,
-callers first, for every function with a proposal: its question shows its callers' names and its
-first one. --behaviour shows in each question what the function did in runs of its cases
-(dread.behaviour: its calls, device accesses, writes and results on a few generated inputs).
+PROVIDER adds a model's verdict per pair, and --against NAMES_TSV (another run's names.tsv) instead
+the judge's choice, for each function the two runs named otherwise, of the name closer to the true
+one, asked in both orders. --refine asks again, callers first, for every function with a proposal:
+its question shows its callers' names and its first one. --behaviour shows in each question what the
+function did in runs of its cases (dread.behaviour: its calls, device accesses, writes and results on
+a few generated inputs). --samples K asks each function K times and keeps the name most answers agree
+with (dread.naming.vote), the agreement its confidence; --gate C shows a question only the proposals
+of confidence C or more; --passes N asks again, callers first and callees first in turn, what a
+changed question would show otherwise, until nothing shown changes; --ablate asks each function also
+with no other proposal shown and flags a name that differs then. By default each function is asked
+five times and a second pass runs (--samples 5 --passes 2: measured on FreeRTOS, docs/decisions.md
+2026-10-22; about nine times the answers of one question in one pass). --score with --judge also
+gives the verdicts per confidence (the calibration) and per ablation flag.
 
 --task readable names the variables of the readable table's functions (dread readable), after what
 they share with the rest of the image: the globals they use, then the structures their variables
@@ -60,8 +68,8 @@ stated, while Haiku 5.5 answered the same question.
 
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
                 [--no-mutate] [--no-integration] [--dry-run] [--task write|input|name|readable|globals]
-                [--jobs N] [--refine] [--behaviour] [--score TRUTH [--judge PROVIDER] [--versus NAMES_TSV]]
-                [NAME...]
+                [--jobs N] [--refine] [--behaviour] [--samples K] [--temperature T] [--gate C] [--passes N]
+                [--ablate] [--score TRUTH [--judge PROVIDER] [--upto-pass N] [--against NAMES_TSV]] [NAME...]
 """
 import argparse
 import contextlib
@@ -1169,12 +1177,14 @@ class Namer:
             return text, "readable" if fn.name in self.readable else "readable, unchecked"
         return "\n".join(flat.listing(self.program, fn, self.flow, callers=self.callers)), "listing"
 
-    def question(self, fn, shown_as=None):
+    def question(self, fn, shown_as=None, shuffle=None):
         """(text, form) of the question for a function's name: its code (code()) with each constant
         followed by what it points to (dread.constants pointed_note: text, a function, a table of
         texts and functions), other functions by their names in shown_as ({name: name shown}: the
         run's proposals) where it has one, and its callers; with behaviour, what it did in runs of its
-        cases (runs_of), the form then ending in BEHAVIOUR."""
+        cases (runs_of), the form then ending in BEHAVIOUR; shuffle, a seed: the callers in an order of
+        their own (random.Random(shuffle), the same for the same seed), for a vote's samples (the runs
+        shown as they are)."""
         from dread.constants import pointed_note
         program = self.program
         text, form = self.code(fn)
@@ -1198,10 +1208,13 @@ class Namer:
         else:
             user = "The function %s, as C made from its machine code:\n\n```c\n%s\n```" % (fn.name, text)
             callers = []
-            for caller, _ in self.callers.get(fn.name, []):
+            for caller in self.caller_names(fn):
                 shown = (shown_as or {}).get(caller, caller)
-                if shown not in callers and may_show(self.target, caller):
+                if shown not in callers:
                     callers.append(shown)
+            if shuffle is not None:
+                import random
+                random.Random(shuffle).shuffle(callers)
             if callers:
                 more = " and %d more" % (len(callers) - 12) if len(callers) > 12 else ""
                 user += "\n\nIt is called by: %s%s." % (", ".join(callers[:12]), more)
@@ -1209,6 +1222,27 @@ class Namer:
             user += "\n\n" + named(runs)
             form += BEHAVIOUR
         return user, form
+
+    def caller_names(self, fn):
+        """The functions that call fn directly that an LLM may be shown, each once, in call order."""
+        out = []
+        for caller, _ in self.callers.get(fn.name, []):
+            if caller not in out and may_show(self.target, caller):
+                out.append(caller)
+        return out
+
+    def names_shown(self, fn, shown_as):
+        """The other functions whose names in shown_as fn's question shows: those its code and its runs
+        (with behaviour) mention and, below readable C, its callers (a code cut at NAME_CHARS may show
+        fewer)."""
+        if not shown_as:
+            return set()
+        text, form = self.code(fn)
+        text += "\n" + (self.runs_of(fn) or "")
+        found = {w for w in IDENT_WORD.findall(text) if w in shown_as and w != fn.name}
+        if form != "listing":
+            found |= {c for c in self.caller_names(fn) if c in shown_as}
+        return found
 
 
 def name_problem(program, proposed):
@@ -1233,17 +1267,19 @@ def parse_name(answer):
     return proposed.group(1), what.group(1)
 
 
-def ask_name(provider, program, name, user, tries=2):
+def ask_name(provider, program, name, user, tries=2, temperature=None):
     """(proposed, what, log, why) of asking for one function's name: a name that cannot be used
     (name_problem) or an answer without the two lines goes back with the reason, up to tries
-    answers; proposed is None when none came."""
+    answers; proposed is None when none came. temperature: the question's sampling temperature
+    (llm.Provider), None for the provider's own."""
     messages = [{"role": "user", "content": user}]
     log = ["# %s, asked %s\n\n## Question\n\n%s" % (name, provider.label(), user)]
     why = "no answer"
     for _ in range(tries):
         provider.last = {}
         try:
-            answer = provider.ask(NAME_SYSTEM, messages)
+            answer = provider.ask(NAME_SYSTEM, messages) if temperature is None else \
+                provider.ask(NAME_SYSTEM, messages, temperature=temperature)
         except Exception as e:
             return None, None, log, "the provider: %s" % e
         log.append("## Answer\n\n%s" % answer)
@@ -1264,46 +1300,104 @@ def names_path(target, image):
     return os.path.join(target.build, "pilot", image.name, "names.tsv")
 
 
-def read_proposals(target, image, refined=None, path=None):
-    """{address: (proposed, what)} of the image's names.tsv (or of the names.tsv at path: another
-    run's), the last proposal of each address; refined, a set: gets the addresses whose last proposal
-    came from a second pass (--refine)."""
-    out = {}
-    path = path or names_path(target, image)
-    if os.path.exists(path):
-        for line in open(path).read().splitlines()[1:]:
-            parts = line.split("\t")
-            if len(parts) >= 4:
-                try:
-                    address = int(parts[0], 16)
-                except ValueError:
-                    continue
-                out[address] = (parts[2], parts[3])
-                if refined is not None:
-                    if len(parts) > 5 and parts[5].endswith(REFINED):
-                        refined.add(address)
-                    else:
-                        refined.discard(address)
-    return out
-
-
-REFINED = ", refined"       # names.tsv's shown column of a second pass's proposal
+# names.tsv's columns (docs/formats.md); a file of 2026-10-22 or older has the first six
+NAMES_COLUMNS = ("address", "now", "proposed", "what", "provider", "shown", "confidence", "samples", "pass",
+                 "question", "names_shown", "hidden", "depends")
+REFINED = ", refined"       # names.tsv's shown column of a second pass's proposal (--refine) ...
 BEHAVIOUR = ", behaviour"   # ... and of a question that showed the function's runs (--behaviour)
+
+
+def marked(shown, mark):
+    """Whether names.tsv's shown column has a mark (REFINED, BEHAVIOUR), wherever it stands among
+    them ("readable, behaviour, refined")."""
+    return mark.strip(", ") in [part.strip() for part in (shown or "").split(",")]
 REFINE_NOTE = ("A first reading of this function's code alone, before its callers had names, named it "
                "{name}: {what} Its callers have names now. Keep that name if they confirm it, or give a better one.")
 
 
-def keep_proposal(target, image, fn, proposed, what, provider, form):
-    """A line of the image's names.tsv: address, now, proposed, what, provider, shown (the form of
-    the code the question showed)."""
+def read_name_rows(path, upto_pass=None):
+    """The rows of a names.tsv, in file order, as {column: text} by its header's columns, with "entry"
+    the address as a number: an older file's missing columns read as empty and its pass as 1 (2 for
+    a row --refine wrote); rows without an address or a proposal are left out. upto_pass: only the
+    rows of passes up to it (the proposals as they were after that pass)."""
+    rows = []
+    if not os.path.exists(path):
+        return rows
+    with open(path) as f:
+        lines = f.read().splitlines()
+    header = lines[0].split("\t") if lines else []
+    for line in lines[1:]:
+        row = dict(zip(header, line.split("\t")))
+        for k in NAMES_COLUMNS:
+            row.setdefault(k, "")
+        try:
+            row["entry"] = int(row["address"], 16)
+        except ValueError:
+            continue
+        if not row["proposed"]:
+            continue
+        if not row["pass"].isdigit():
+            row["pass"] = "2" if marked(row["shown"], REFINED) else "1"
+        if upto_pass is None or int(row["pass"]) <= upto_pass:
+            rows.append(row)
+    return rows
+
+
+def last_rows(rows):
+    """{entry: row} of the last row of each address."""
+    return {r["entry"]: r for r in rows}
+
+
+def confidence(row):
+    """A names.tsv row's confidence as a number (a vote's agreement over its questions), or None (one
+    question's proposal, an older file)."""
+    try:
+        return float(row.get("confidence") or "")
+    except ValueError:
+        return None
+
+
+def read_proposals(target, image, refined=None, upto_pass=None, path=None):
+    """{address: (proposed, what)} of the image's names.tsv (or of the names.tsv at path: another
+    run's), the last proposal of each address (of the passes up to upto_pass); refined, a set: gets
+    the addresses whose last proposal came from a second pass (--refine)."""
+    out = {}
+    for row in read_name_rows(path or names_path(target, image), upto_pass):
+        out[row["entry"]] = (row["proposed"], row["what"])
+        if refined is not None:
+            if marked(row["shown"], REFINED):
+                refined.add(row["entry"])
+            else:
+                refined.discard(row["entry"])
+    return out
+
+
+def keep_proposal(target, image, fn, proposed, what, provider, form, more=None):
+    """A line of the image's names.tsv (NAMES_COLUMNS): address, now, proposed, what, provider,
+    shown (the form of the code the question showed), and more's columns (a vote's confidence and
+    samples, the pass, the question's digest, ...), empty where not given. A file with an older
+    header gets the new one first; its rows stay as they are (their missing columns read as empty)."""
     path = names_path(target, image)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    new = not os.path.exists(path)
+    header = "\t".join(NAMES_COLUMNS) + "\n"
+    if os.path.exists(path):
+        with open(path) as f:
+            first = f.readline()
+        if first != header:
+            with open(path) as f:
+                rest = f.readlines()[1:]
+            with open(path, "w") as f:
+                f.write(header + "".join(rest))
+    else:
+        with open(path, "w") as f:
+            f.write(header)
+    values = dict(more or {})
+    values.update({"address": "0x%x" % fn.entry, "now": fn.name, "proposed": proposed,
+                   "what": " ".join(what.split()), "provider": provider.label(), "shown": form})
+    row = {k: str(values.get(k, "")) for k in NAMES_COLUMNS}
     with open(path, "a") as f:
-        if new:
-            f.write("address\tnow\tproposed\twhat\tprovider\tshown\n")
-        f.write("0x%x\t%s\t%s\t%s\t%s\t%s\n" % (fn.entry, fn.name, proposed, what.replace("\t", " "),
-                                                provider.label(), form))
+        f.write("\t".join(row[k] for k in NAMES_COLUMNS) + "\n")
+    return row
 
 
 def propose_name(target, image, program, provider, name, flow=None, out=print, namer=None, shown_as=None,
@@ -1390,15 +1484,53 @@ def callees_first(program, names):
     return rounds
 
 
+NAME_SAMPLES = 5    # --task name's default questions per function (--samples) and passes (--passes): measured
+NAME_PASSES = 2     # on FreeRTOS against one question in one pass (docs/decisions.md, 2026-10-22)
+
+
+def question_key(text):
+    """A digest of a question's text (names.tsv's question column): a later pass asks a function again
+    only when its question changed."""
+    import hashlib
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
+
+
 def name_functions(target, image, program, make_provider, names, flow=None, jobs=4, tries=2, out=print,
-                   refine=False, behaviour=False):
+                   refine=False, behaviour=False, samples=1, temperature=None, gate=None, passes=1,
+                   ablate=False):
     """Proposals for the functions of names, callees first: a function is asked as soon as every
     function it calls among names has its answer (call_components; functions that call each other in
     a circle together), jobs questions at a time with a provider each (make_provider() makes one), each
     question showing the proposals made so far for the other functions in place of their names. A
     function names.tsv has a proposal for already is not asked again, its proposal shown. Returns
-    (proposed, asked, spent: summed over the providers). (Rounds with a barrier each ran at a fifth of
-    the speed once the rounds got small: each waited for its slowest answer.)
+    (proposed, asked, spent: summed over the providers), proposals and functions asked counted over
+    the passes. (Rounds with a barrier each ran at a fifth of the speed once the rounds got small:
+    each waited for its slowest answer.)
+
+    samples: each function asked so many times (self-consistency), the first question as it stands,
+    the others with its callers in an order of their own (Namer.question's shuffle; the variation
+    is the provider's sampling: Anthropic's models sample at their default temperature 1.0, which is
+    the only one Haiku 5.5 and Sonnet 5.5 accept; temperature, for every question, where a provider
+    takes one). The names go to dread.naming.vote: the name most samples agree with is kept, its
+    agreement over samples its confidence (names.tsv's confidence, and its samples column).
+
+    gate: a question shows only proposals whose confidence is at least gate (the others stay FUN_);
+    a proposal without one (a single question's, an older file's) is not shown. passes: after the
+    first pass (callees first, the functions without a proposal), passes 2, 3 ... (callers first on
+    even passes, callees first on odd ones) ask a function again when its question changed since its
+    last proposal (names.tsv's question column: a digest), its question showing no proposal of its
+    own; its last proposal runs in the vote as a candidate that wins ties (a name stays while this
+    pass's samples agree with it as much as with any of theirs). The passes end when a pass changes
+    no name a question shows (none would ask anything), or at passes. A line per pass says what it
+    asked and changed; every proposal is kept with its pass. A run started again goes through its
+    passes again, each asking only what has no proposal or changed.
+
+    ablate: each function is asked samples times more with no other function's proposal shown (its
+    callers and callees by their own names); the vote of those is names.tsv's hidden column, and
+    depends says whether it disagrees with the proposal (dread.naming.similarity below AGREE): a name
+    that depends on the names shown. Where a question shows no proposal (names_shown 0) both
+    questions are the same: their disagreement measures the votes' own noise. A function is asked so
+    once; later passes compare with its hidden name.
 
     refine: a second pass, callers first: every function with a first proposal is asked again once
     its callers have their second answers, its question showing its callers' names and its first name
@@ -1408,17 +1540,25 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
     made for all of them before the first question)."""
     import concurrent.futures
     import threading
+    from dread import naming
     namer = Namer(target, image, program, flow, behaviour)
-    refined = set()
-    known = read_proposals(target, image, refined)
-    shown_as = {program.by_entry[a].name: p for a, (p, _) in known.items() if a in program.by_entry}
+    samples = max(1, int(samples))
+    state = last_rows(read_name_rows(names_path(target, image)))     # {entry: the last row}
+    refined = {e for e, r in state.items() if marked(r["shown"], REFINED)}
 
-    def wanted(name):
-        entry = program.by_name[name].entry
-        return entry in known and entry not in refined if refine else entry not in known
-    todo = [n for n in names if wanted(n)]
+    def shown_name(row):
+        """The name a question shows for the function of this row: its proposal, unless a gate hides
+        it."""
+        if row is None or (gate and (confidence(row) is None or confidence(row) < gate)):
+            return None
+        return row["proposed"]
+    shown_as = {}
+    for e, row in state.items():
+        if e in program.by_entry and shown_name(row) is not None:
+            shown_as[program.by_entry[e].name] = shown_name(row)
+    todo = [n for n in names if refine or passes > 1 or program.by_name[n].entry not in state]
     started = time.time()
-    namer.prepare(todo)                     # (before any thread)
+    namer.prepare(todo)                     # (before any thread: the samples' questions only put names in)
     if behaviour and todo:
         out("dread pilot: runs of their cases for %d of %d functions (dread.behaviour, %.0f s)" % (
             len([n for n in todo if namer.runs.get(n)]), len(todo), time.time() - started))
@@ -1427,12 +1567,8 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
     for c, cs in enumerate(callees):
         for d in cs:
             callers[d].append(c)
-    if refine:                              # (callers first: a component waits for its callers)
-        callees, callers = callers, callees
-    waiting = [len(cs) for cs in callees]
-    left = [0] * len(comps)
-    ready = [c for c in range(len(comps)) if not waiting[c]]
     local, providers, lock = threading.local(), [], threading.Lock()
+    run = {"proposed": 0, "asked": 0, "declined": 0, "failed": 0, "stopped": False}
 
     def provider():
         if getattr(local, "provider", None) is None:
@@ -1442,72 +1578,172 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
         return local.provider
 
     def one(item):
-        name, user, form = item
+        name, kind, k, user = item
         p = provider()
-        proposed, what, log, why = ask_name(p, program, name, user, tries)
-        return name, form, proposed, what, log, why, p, (getattr(p, "last", {}) or {}).get("finish")
+        proposed, what, log, why = ask_name(p, program, name, user, tries, temperature)
+        return name, kind, k, proposed, what, log, why, p, (getattr(p, "last", {}) or {}).get("finish")
 
-    def finished(c):                        # (its callers may be ready now)
-        for d in callers[c]:
-            waiting[d] -= 1
-            if not waiting[d]:
-                ready.append(d)
+    def settle(name, job, number, kind):
+        """Vote over a function's answers, keep the proposal, update what questions show; returns
+        whether the name its callers' and callees' questions show changed (None: no proposal)."""
+        fn = job["fn"]
+        results = job["results"]
+        log = []
+        for (qkind, k) in sorted(results, key=lambda q: (q[0] != "shown", q[1])):
+            if len(results) > 1:
+                log.append("# Question %d of %d%s" % (k + 1, samples, ", no other function's proposal shown"
+                                                      if qkind == "hidden" else ""))
+            log += results[(qkind, k)][2]
+        write_log(target, image, name, log)
+        shown = [results.get(("shown", k)) for k in range(samples)]
+        got = [r[0] if r else None for r in shown]
+        old = state.get(fn.entry)
+        voted = naming.vote(got, old["proposed"] if old is not None and kind == "again" else None)
+        if voted is None:
+            out("%-24s no proposal: %s" % (name, next((r[3] for r in shown if r), "no answer")))
+            return None
+        proposed, agreement, index = voted
+        if index is None:                   # (the name stays: the sentence of the sample most like it)
+            index = max((k for k in range(samples) if got[k]), key=lambda k: (naming.similarity(proposed, got[k]), -k))
+        what, p = shown[index][1], shown[index][4]
+        more = {"pass": str(number), "question": job["key"], "names_shown": str(len(job["names"]))}
+        if samples > 1:
+            more["confidence"] = "%.2f" % (agreement / samples)
+            more["samples"] = " ".join(g or "-" for g in got)
+        hidden = None
+        if any(q[0] == "hidden" for q in results):
+            voted = naming.vote([results[("hidden", k)][0] if ("hidden", k) in results else None
+                                 for k in range(samples)])
+            hidden = voted[0] if voted else None
+        elif old is not None and old.get("hidden"):
+            hidden = old["hidden"]
+        if hidden:
+            more["hidden"] = hidden
+            more["depends"] = "no" if naming.similarity(proposed, hidden) >= naming.AGREE else "yes"
+        row = keep_proposal(target, image, fn, proposed, what, p, job["form"], more)
+        row["entry"] = fn.entry
+        state[fn.entry] = row
+        if kind == "refine":
+            refined.add(fn.entry)
+        before, now = shown_as.get(name), shown_name(row)
+        if now is None:
+            shown_as.pop(name, None)
+        else:
+            shown_as[name] = now
+        notes = [job["form"]]
+        if samples > 1:
+            notes.append("%d of %d agree" % (agreement, samples))
+        if more.get("depends") == "yes":
+            notes.append("alone: %s" % hidden)
+        out("%-24s proposed %s (%s): %s" % (name, proposed, ", ".join(notes), what))
+        return before != now
 
-    proposed = asked = declined_row = failed_row = 0
-    stopped = False
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-        running = {}
-        while (ready and not stopped) or running:
-            while ready and not stopped:
-                c = ready.pop(0)
-                todo = [n for n in comps[c] if wanted(n)]
-                left[c] = len(todo)
-                if not todo:
-                    finished(c)
-                for n in todo:
-                    fn = program.by_name[n]
-                    user, form = namer.question(fn, shown_as)
-                    if refine:
-                        first, what = known[fn.entry]
-                        user += "\n\n" + REFINE_NOTE.format(name=first, what=what)
-                        form += REFINED
-                    running[pool.submit(one, (n, user, form))] = c
-            if not running:
-                break
-            done, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
-            for future in done:
-                c = running.pop(future)
-                name, form, got, what, log, why, p, finish = future.result()
-                asked += 1
-                write_log(target, image, name, log)
-                left[c] -= 1
-                if got is None:
-                    out("%-24s no proposal: %s" % (name, why))
-                    declined_row = declined_row + 1 if finish in llm.Provider.REFUSED else 0
-                    failed_row = failed_row + 1 if why.startswith("the provider:") else 0
-                else:
-                    declined_row = failed_row = 0
-                    fn = program.by_name[name]
-                    keep_proposal(target, image, fn, got, what, p, form)
-                    known[fn.entry] = (got, what)
-                    if refine:
-                        refined.add(fn.entry)
-                    shown_as[name] = got
-                    proposed += 1
-                    out("%-24s proposed %s (%s): %s" % (name, got, form, what))
-                if not left[c]:
-                    finished(c)
-                if not stopped and declined_row >= DECLINED_IN_A_ROW:
-                    out("dread pilot: the provider declined %d questions in a row; no more are asked" %
-                        declined_row)
-                    stopped = True
-                if not stopped and failed_row >= FAILED_IN_A_ROW:
-                    out("dread pilot: the provider failed %d questions in a row; no more are asked (the run "
-                        "goes on where it stopped when started again)" % failed_row)
-                    stopped = True
-            if stopped:                     # (the questions not begun yet are not asked)
-                for future in [f for f in running if f.cancel()]:
-                    running.pop(future)
+    def wanted(kind, row, key):
+        """Whether a pass asks about a function with this last row and this question now: the first
+        pass what has no proposal, --refine what has one not refined yet, a later pass what has none or
+        whose question changed since."""
+        if kind == "first":
+            return row is None
+        if kind == "refine":
+            return row is not None and row["entry"] not in refined
+        return row is None or row["question"] != key
+
+    def one_pass(number, kind):
+        """kind: "first" (callees first, the functions without a proposal), "again" (callers first on
+        even passes: the functions whose question changed), "refine". Returns (proposed, asked,
+        changed): changed, the functions whose shown name changed."""
+        down = kind == "refine" or (kind == "again" and number % 2 == 0)       # (callers first)
+        deps, then = (callers, callees) if down else (callees, callers)
+        waiting = [len(d) for d in deps]
+        left = [0] * len(comps)
+        ready = [c for c in range(len(comps)) if not waiting[c]]
+        jobs_of, counts = {}, {"proposed": 0, "asked": 0, "changed": 0}
+
+        def finished(c):                    # (the components that wait for it may be ready now)
+            for d in then[c]:
+                waiting[d] -= 1
+                if not waiting[d]:
+                    ready.append(d)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+            running = {}
+            while (ready and not run["stopped"]) or running:
+                while ready and not run["stopped"]:
+                    c = ready.pop(0)
+                    todo = []
+                    for n in comps[c]:
+                        fn = program.by_name[n]
+                        user, form = namer.question(fn, shown_as)
+                        key = question_key(user)
+                        if wanted(kind, state.get(fn.entry), key):
+                            todo.append((n, fn, user, form, key))
+                    left[c] = len(todo)
+                    if not todo:
+                        finished(c)
+                    for n, fn, user, form, key in todo:
+                        note = ""
+                        if kind == "refine":
+                            note = "\n\n" + REFINE_NOTE.format(name=state[fn.entry]["proposed"],
+                                                               what=state[fn.entry]["what"])
+                            form += REFINED
+                        seed = ["%x:%d" % (fn.entry, k) if k else None for k in range(samples)]
+                        questions = [("shown", 0, user + note)] + [
+                            ("shown", k, namer.question(fn, shown_as, shuffle=seed[k])[0] + note)
+                            for k in range(1, samples)]
+                        if ablate and not (state.get(fn.entry) or {}).get("hidden"):
+                            questions += [("hidden", k, namer.question(fn, None, shuffle=seed[k])[0] + note)
+                                          for k in range(samples)]
+                        jobs_of[n] = {"fn": fn, "form": form, "key": key, "component": c, "results": {},
+                                      "questions": len(questions), "names": namer.names_shown(fn, shown_as)}
+                        for q in questions:
+                            running[pool.submit(one, (n,) + q)] = n
+                if not running:
+                    break
+                done, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    n = running.pop(future)
+                    _, qkind, k, got, what, log, why, p, finish = future.result()
+                    job = jobs_of[n]
+                    job["results"][(qkind, k)] = (got, what, log, why, p)
+                    if got is None:
+                        run["declined"] = run["declined"] + 1 if finish in llm.Provider.REFUSED else 0
+                        run["failed"] = run["failed"] + 1 if why.startswith("the provider:") else 0
+                    else:
+                        run["declined"] = run["failed"] = 0
+                    if len(job["results"]) == job["questions"]:
+                        counts["asked"] += 1
+                        changed = settle(n, job, number, kind)
+                        if changed is not None:
+                            counts["proposed"] += 1
+                            counts["changed"] += changed
+                        left[job["component"]] -= 1
+                        if not left[job["component"]]:
+                            finished(job["component"])
+                    if not run["stopped"] and run["declined"] >= DECLINED_IN_A_ROW:
+                        out("dread pilot: the provider declined %d questions in a row; no more are asked" %
+                            run["declined"])
+                        run["stopped"] = True
+                    if not run["stopped"] and run["failed"] >= FAILED_IN_A_ROW:
+                        out("dread pilot: the provider failed %d questions in a row; no more are asked (the run "
+                            "goes on where it stopped when started again)" % run["failed"])
+                        run["stopped"] = True
+                if run["stopped"]:              # (the questions not begun yet are not asked)
+                    for future in [f for f in running if f.cancel()]:
+                        running.pop(future)
+        return counts["proposed"], counts["asked"], counts["changed"]
+
+    order = [("refine", 2)] if refine else [("first", 1)] + [("again", k) for k in range(2, passes + 1)]
+    for kind, number in order:
+        made, asked, changed = one_pass(number, kind)
+        run["proposed"] += made
+        run["asked"] += asked
+        if len(order) > 1:
+            out("dread pilot --task name: pass %d (%s first): asked %d, proposed %d, shown names changed %d; "
+                "proposals shown %d%s" % (number, "callers" if kind != "first" and number % 2 == 0 else "callees",
+                                          asked, made, changed, len(shown_as),
+                                          " (confidence %.2f or more)" % gate if gate else ""))
+        if run["stopped"] or (kind == "again" and not changed):
+            break                           # (no question would change: nothing more to ask)
     spent = {"answers": 0, "input": 0, "output": 0, "cost": None}
     for p in providers:
         sp = p.spent()
@@ -1515,7 +1751,7 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
             spent[key] += sp[key]
         if sp.get("cost") is not None:
             spent["cost"] = (spent["cost"] or 0.0) + sp["cost"]
-    return proposed, asked, spent
+    return run["proposed"], run["asked"], spent
 
 
 JUDGE_SYSTEM = """You compare names of functions of a program. In each numbered pair the first name
@@ -1531,12 +1767,22 @@ maps every pair's number to its word:
 VERDICTS = ("same", "close", "different")
 
 
+def judged_json(answer):
+    """The object of an answer's ```json block, or {}."""
+    import json
+    m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
+    try:
+        data = json.loads(m.group(1)) if m else {}
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
 def judge_names(provider, pairs, batch=50, out=print):
     """{key: "same", "close" or "different"} of pairs ([(key, true name, proposed name)]) as a
     provider judges them, batch pairs a question; a pair without a usable verdict is left out. A
     language model's judgement, a second measure beside the word scores (synonyms and abbreviations:
     buf_len against buffer_length shares no word)."""
-    import json
     out_map = {}
     for start in range(0, len(pairs), batch):
         part = pairs[start:start + batch]
@@ -1546,93 +1792,105 @@ def judge_names(provider, pairs, batch=50, out=print):
         except Exception as e:
             out("dread pilot --judge: no verdicts for pairs %d-%d: %s" % (start + 1, start + len(part), e))
             continue
-        m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
-        try:
-            data = json.loads(m.group(1)) if m else {}
-        except ValueError:
-            data = {}
+        data = judged_json(answer)
         for k, (key, _, _) in enumerate(part):
-            v = str(data.get(str(k + 1), "")).strip().lower() if isinstance(data, dict) else ""
+            v = str(data.get(str(k + 1), "")).strip().lower()
             if v in VERDICTS:
                 out_map[key] = v
     return out_map
 
 
-PAIR_SYSTEM = """You compare proposed names of functions of a program with the names people gave them,
-who read the code knowing the whole program. Each numbered line holds the people's name, then two
-proposals, A and B. Say which proposal comes closer to what the people's name says: "A", "B", or
-"equal" (both as close, or both as far). Answer with one ```json block that maps every line's number
-to its word:
+PAIR_SYSTEM = """You compare names proposed for functions of a program with their true names. On each
+numbered line the first name is the true one, given by people who read the code knowing the whole
+program; A and B were proposed from one function's code. Say for each line which proposal names the
+function of the true name more closely: "A", "B", or "tie" when they are equally close (both right, in
+other words or abbreviations too, or both as far off). Answer with one ```json block that maps every
+line's number to its word:
 
 ```json
-{"1": "A", "2": "equal", "3": "B"}
+{"1": "A", "2": "tie", "3": "B"}
 ```"""
-PAIR_WORDS = ("A", "B", "equal")
-
-
-def swapped(address):
-    """Whether a pair is shown the other way round (B first): half of them, by a digest of the
-    address, so that a judge's preference for a place cancels out and the same pairs are shown alike
-    each time."""
-    import hashlib
-    return hashlib.sha1(b"%x" % address).digest()[0] & 1 == 1
+PAIR_SIDE = {"a": 1, "b": -1, "tie": 0}
 
 
 def judge_pairs(provider, items, batch=40, out=print):
-    """{key: "mine", "theirs" or "equal"} of items ([(key, true name, mine, theirs)]) as a provider
-    judges which proposal comes closer to the true name, batch lines a question, the two proposals
-    in an order swapped() decides by the key (an address); an item without a usable verdict is left
-    out."""
-    import json
-    verdicts = {}
-    for start in range(0, len(items), batch):
-        part = items[start:start + batch]
-        lines = []
-        for k, (key, t, mine, theirs) in enumerate(part):
-            a, b = (theirs, mine) if swapped(key) else (mine, theirs)
-            lines.append("%d. %s | A: %s | B: %s" % (k + 1, t, a, b))
-        try:
-            answer = provider.ask(PAIR_SYSTEM, [{"role": "user", "content": "\n".join(lines)}])
-        except Exception as e:
-            out("dread pilot --versus: no verdicts for pairs %d-%d: %s" % (start + 1, start + len(part), e))
-            continue
-        m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
-        try:
-            data = json.loads(m.group(1)) if m else {}
-        except ValueError:
-            data = {}
-        for k, (key, _, _, _) in enumerate(part):
-            v = str(data.get(str(k + 1), "")).strip() if isinstance(data, dict) else ""
-            v = {"a": "A", "b": "B", "equal": "equal"}.get(v.lower())
-            if v is None:
+    """{key: "a", "b" or "tie"} of items ([(key, true name, name a, name b)]) as a provider judges
+    which of two proposals is closer to the true name, batch lines a question. Every line is asked
+    twice, a and b shown first in turn (a model leans towards a position): a side wins when the two
+    verdicts add up to it (both, or one and a tie), else it is a tie; a line without both verdicts is
+    left out."""
+    def ask(lines):
+        got = {}
+        for start in range(0, len(lines), batch):
+            part = lines[start:start + batch]
+            user = "\n".join("%d. %s | A: %s | B: %s" % (k + 1, t, x, y) for k, (_, t, x, y) in enumerate(part))
+            try:
+                answer = provider.ask(PAIR_SYSTEM, [{"role": "user", "content": user}])
+            except Exception as e:
+                out("dread pilot --against: no verdicts for lines %d-%d: %s" % (start + 1, start + len(part), e))
                 continue
-            if v == "equal":
-                verdicts[key] = "equal"
-            else:
-                verdicts[key] = "mine" if (v == "A") != swapped(key) else "theirs"
-    return verdicts
+            data = judged_json(answer)
+            for k, (key, _, _, _) in enumerate(part):
+                v = str(data.get(str(k + 1), "")).strip().lower()
+                if v in PAIR_SIDE:
+                    got[key] = v
+        return got
+    first = ask(items)
+    second = ask([(key, t, b, a) for key, t, a, b in items])
+    out_map = {}
+    for key, _, _, _ in items:
+        if key in first and key in second:
+            s = PAIR_SIDE[first[key]] - PAIR_SIDE[second[key]]
+            out_map[key] = "a" if s > 0 else "b" if s < 0 else "tie"
+    return out_map
 
 
-def score_names(target, image, truth_path, out=print, judge=None, versus=None):
-    """The image's proposals (names.tsv) against true names (dread.naming.function_truth): prints a
-    line a function into BUILD/pilot/IMAGE/names-score.tsv and the totals; judge, a provider: its
-    verdicts as well (judge_names). versus, the names.tsv of another run on the same image (another
-    prompt, another model): with judge, each function the two runs named differently is judged once
-    more, the two proposals side by side (judge_pairs), into BUILD/pilot/IMAGE/names-versus.tsv."""
+def sign_test(wins, losses):
+    """The two-sided sign test's p-value of wins against losses (ties left out): how often a split as
+    uneven comes up when either side is as likely to win."""
+    import math
+    n = wins + losses
+    if not n:
+        return 1.0
+    return min(1.0, 2 * sum(math.comb(n, i) for i in range(min(wins, losses) + 1)) / 2 ** n)
+
+
+def breakdown(rows, verdicts):
+    """{"n", "same", "close", "different", "judged", "shared_word", "overlap"} of scored rows (dread.naming
+    score_functions') with their verdicts."""
+    n = len(rows)
+    out = {"n": n, "judged": sum(1 for r in rows if r["address"] in verdicts),
+           "shared_word": sum(r["overlap"] > 0 for r in rows), "overlap": sum(r["overlap"] for r in rows) / n if n else 0}
+    for v in VERDICTS:
+        out[v] = sum(1 for r in rows if verdicts.get(r["address"]) == v)
+    return out
+
+
+def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None):
+    """The image's proposals (names.tsv; upto_pass: as they were after that pass) against true names
+    (dread.naming.function_truth): prints a line a function into BUILD/pilot/IMAGE/names-score.tsv
+    (names-score-passN.tsv) and the totals; judge, a provider: its verdicts as well (judge_names).
+    Proposals with a confidence (--samples) get a line per confidence (the calibration: how often
+    names so sure are right); proposals with an ablation (--ablate) a line per class: the name
+    depends on the names shown or not, and, where the question showed none, the votes' own noise."""
     from dread import naming
-    proposals = {a: p for a, (p, _) in read_proposals(target, image).items()}
-    truth = naming.function_truth(truth_path)
-    rows, t = naming.score_functions(proposals, truth)
-    verdicts = judge_names(judge, [(r["address"], r["true"], r["proposed"]) for r in rows], out=out) \
-        if judge is not None and rows else {}
-    path = os.path.join(target.build, "pilot", image.name, "names-score.tsv")
+    rows = last_rows(read_name_rows(names_path(target, image), upto_pass))
+    true = naming.function_truth(truth_path)
+    scored, t = naming.score_functions({a: r["proposed"] for a, r in rows.items()}, true)
+    verdicts = judge_names(judge, [(r["address"], r["true"], r["proposed"]) for r in scored], out=out) \
+        if judge is not None and scored else {}
+    suffix = "-pass%d" % upto_pass if upto_pass is not None else ""
+    path = os.path.join(target.build, "pilot", image.name, "names-score%s.tsv" % suffix)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
-        f.write("address\ttrue\tproposed\texact\tsame_words\toverlap\tsame_prefix\tjudged\n")
-        for r in rows:
-            f.write("0x%x\t%s\t%s\t%d\t%d\t%.2f\t%s\t%s\n" % (
+        f.write("address\ttrue\tproposed\texact\tsame_words\toverlap\tsame_prefix\tjudged\tconfidence\tdepends\t"
+                "names_shown\n")
+        for r in scored:
+            row = rows[r["address"]]
+            f.write("0x%x\t%s\t%s\t%d\t%d\t%.2f\t%s\t%s\t%s\t%s\t%s\n" % (
                 r["address"], r["true"], r["proposed"], r["exact"], r["same_words"], r["overlap"],
-                "" if r["prefix"] is None else int(r["prefix"]), verdicts.get(r["address"], "")))
+                "" if r["prefix"] is None else int(r["prefix"]), verdicts.get(r["address"], ""),
+                row["confidence"], row["depends"], row["names_shown"]))
     for v in VERDICTS:
         t["judged_" + v] = sum(1 for x in verdicts.values() if x == v)
     t["judged"] = len(verdicts)
@@ -1651,22 +1909,63 @@ def score_names(target, image, truth_path, out=print, judge=None, versus=None):
         out("dread pilot --score: judged by %s, %d of %d: the same %s, close %s, different %s" % (
             judge.label(), t["judged"], n, pc("judged_same", t["judged"]), pc("judged_close", t["judged"]),
             pc("judged_different", t["judged"])))
-    if versus is not None and judge is not None:
-        theirs = {a: p for a, (p, _) in read_proposals(target, image, path=versus).items()}
-        items = [(a, truth[a], proposals[a], theirs[a]) for a in sorted(set(proposals) & set(theirs) & set(truth))
-                 if proposals[a].lower() != theirs[a].lower()]
-        verdicts = judge_pairs(judge, items, out=out)
-        path = os.path.join(target.build, "pilot", image.name, "names-versus.tsv")
-        with open(path, "w") as f:
-            f.write("address\ttrue\tproposed\tother\tcloser\n")
-            for a, true_name, mine, other in items:
-                f.write("0x%x\t%s\t%s\t%s\t%s\n" % (a, true_name, mine, other, verdicts.get(a, "")))
-        for v in ("mine", "theirs", "equal"):
-            t["versus_" + v] = sum(1 for x in verdicts.values() if x == v)
-        t["versus"] = len(items)
-        out("dread pilot --score --versus: %d functions named otherwise in %s; judged by %s: this run's closer "
-            "%d, the other's %d, equal %d (%s)" % (len(items), versus, judge.label(), t["versus_mine"],
-                                                   t["versus_theirs"], t["versus_equal"], path))
+
+    def line(label, part):
+        b = breakdown(part, verdicts)
+        judged = ""
+        if b["judged"]:
+            judged = ", judged the same %d (%.0f %%), close %d (%.0f %%), different %d (%.0f %%)" % tuple(
+                x for v in VERDICTS for x in (b[v], 100.0 * b[v] / b["judged"]))
+        out("dread pilot --score: %s: %d%s; a word shared %.0f %%, mean overlap %.2f" % (
+            label, b["n"], judged, 100.0 * b["shared_word"] / b["n"], b["overlap"]))
+        return b
+    sure = sorted({confidence(rows[r["address"]]) for r in scored} - {None})
+    t["calibration"] = {}
+    for c in sure:
+        t["calibration"][c] = line("confidence %.2f" % c, [r for r in scored if confidence(rows[r["address"]]) == c])
+    t["ablation"] = {}
+    for label, depends, alone in (("names shown, the name depends on them", "yes", False),
+                                  ("names shown, the name stands alone", "no", False),
+                                  ("no name shown, the votes differ (noise)", "yes", True),
+                                  ("no name shown, the votes agree", "no", True)):
+        part = [r for r in scored if rows[r["address"]]["depends"] == depends
+                and (rows[r["address"]]["names_shown"] in ("", "0")) == alone]
+        if part:
+            t["ablation"][(depends, alone)] = line(label, part)
+    return t
+
+
+def compare_names(target, image, truth_path, against, judge, out=print, upto_pass=None):
+    """This image's proposals (names.tsv; upto_pass: as they were after that pass) against another
+    run's (against, a names.tsv of the same image), judged pairwise: every function with a true name
+    whose two proposals differ (case aside) goes to judge_pairs, which says which one is closer to the
+    true name; wins, losses and ties with the sign test's p (sign_test), a line a function into
+    BUILD/pilot/IMAGE/names-pairwise.tsv (names-pairwise-passN.tsv). Asks no absolute verdicts:
+    names-score.tsv stays as the last --score wrote it."""
+    from dread import naming
+    rows = last_rows(read_name_rows(names_path(target, image), upto_pass))
+    other = last_rows(read_name_rows(against))
+    true = naming.function_truth(truth_path)
+    both = sorted(set(rows) & set(other) & set(true))
+    items = [(a, true[a], rows[a]["proposed"], other[a]["proposed"]) for a in both
+             if rows[a]["proposed"].lower() != other[a]["proposed"].lower()]
+    pairs = judge_pairs(judge, items, out=out)
+    wins = sum(1 for v in pairs.values() if v == "a")
+    losses = sum(1 for v in pairs.values() if v == "b")
+    ties = sum(1 for v in pairs.values() if v == "tie")
+    t = {"both": len(both), "differ": len(items), "judged": len(pairs), "wins": wins, "losses": losses, "ties": ties,
+         "p": sign_test(wins, losses)}
+    suffix = "-pass%d" % upto_pass if upto_pass is not None else ""
+    path = os.path.join(target.build, "pilot", image.name, "names-pairwise%s.tsv" % suffix)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("address\ttrue\tthis\tother\tcloser\n")
+        for a, tn, x, y in items:
+            f.write("0x%x\t%s\t%s\t%s\t%s\n" % (a, tn, x, y, {"a": "this", "b": "other", "tie": "tie"}.get(
+                pairs.get(a), "")))
+    out("dread pilot --score --against %s: %d of %d proposals with a true name differ; judged by %s in both "
+        "orders, %d: this run's closer %d, the other's closer %d, ties %d (sign test p = %.3g; %s)" % (
+            against, len(items), len(both), judge.label(), len(pairs), wins, losses, ties, t["p"], path))
     return t
 
 
@@ -1713,9 +2012,27 @@ def main(argv=None):
                              "(dread.behaviour: cached cases, or a short search for a function without)")
     parser.add_argument("--judge", metavar="PROVIDER",
                         help="with --score: a provider also judges each pair the same, close or different")
-    parser.add_argument("--versus", metavar="NAMES_TSV",
-                        help="with --score and --judge: the names.tsv of another run on this image; the judge "
-                             "also says, for each function the two named otherwise, which comes closer")
+    parser.add_argument("--samples", type=int, default=NAME_SAMPLES, metavar="K",
+                        help="--task name: ask each function K times and keep the name most answers agree with, "
+                             "with the agreement as its confidence (default %d)" % NAME_SAMPLES)
+    parser.add_argument("--temperature", type=float,
+                        help="--task name: the sampling temperature of every question, where the provider takes "
+                             "one (Anthropic's Haiku 5.5 and Sonnet 5.5 refuse any but their default 1.0)")
+    parser.add_argument("--gate", type=float, metavar="C",
+                        help="--task name with --samples: questions show only proposals of confidence C or more")
+    parser.add_argument("--passes", type=int, metavar="N",
+                        help="--task name: after the first pass, ask again (callers first, then callees first, "
+                             "...) the functions whose question changed, until no shown name changes or N passes "
+                             "(default %d; 1 with --refine)" % NAME_PASSES)
+    parser.add_argument("--ablate", action="store_true",
+                        help="--task name: ask each function also with no other proposal shown, and flag a name "
+                             "that differs then (names.tsv's hidden and depends)")
+    parser.add_argument("--upto-pass", type=int, metavar="N",
+                        help="with --score: the proposals as they were after pass N")
+    parser.add_argument("--against", metavar="NAMES_TSV",
+                        help="with --score and --judge: judge pairwise, where they differ, which of this build's "
+                             "proposals and another run's names.tsv is closer to the true name (instead of the "
+                             "absolute verdicts)")
     parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals"), default="write",
                         help="write C (default), find inputs for unrun instructions, propose names, name the "
                              "variables of readable C (dread readable), or name only what the functions share: "
@@ -1743,7 +2060,21 @@ def main(argv=None):
             except llm.ProviderError as e:
                 print("dread pilot: %s" % e, file=sys.stderr)
                 return 1
-        return 0 if score_names(target, image, args.score, judge=judge, versus=args.versus)["functions"] else 1
+        if args.against:
+            if judge is None:
+                print("dread pilot: --against needs --judge (a provider that judges the pairs)", file=sys.stderr)
+                return 1
+            return 0 if compare_names(target, image, args.score, args.against, judge,
+                                      upto_pass=args.upto_pass)["both"] else 1
+        return 0 if score_names(target, image, args.score, judge=judge, upto_pass=args.upto_pass)["functions"] else 1
+    if args.task == "name" and args.gate and args.samples < 2:
+        print("dread pilot: --gate needs --samples 2 or more (one question's proposal has no confidence)",
+              file=sys.stderr)
+        return 1
+    if args.task == "name" and args.refine and (args.passes or 1) > 1:
+        print("dread pilot: --refine is a second pass of its own; give it or --passes", file=sys.stderr)
+        return 1
+    passes = max(1, args.passes or (1 if args.refine else NAME_PASSES))
     if args.task != "write":
         provider = None
         if not args.dry_run:                # (a dry run asks nothing, so it needs no provider)
@@ -1812,11 +2143,14 @@ def main(argv=None):
                 return 0
             made, asked, spent = name_functions(target, image, program, lambda: llm.load(args.provider), names,
                                                 flow, jobs=args.jobs, tries=min(args.tries, 3), refine=args.refine,
-                                                behaviour=args.behaviour)
+                                                behaviour=args.behaviour, samples=args.samples,
+                                                temperature=args.temperature, gate=args.gate, passes=passes,
+                                                ablate=args.ablate)
             cost = " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""
-            print("dread pilot --task name: %d of %d asked functions got a proposal (%s); %d answers, %d tokens "
-                  "in, %d out%s" % (made, asked, names_path(target, image), spent["answers"], spent["input"],
-                                    spent["output"], cost))
+            print("dread pilot --task name: %d of %d asked functions got a proposal%s (%s); %d answers, %d tokens "
+                  "in, %d out%s" % (made, asked, ", over the passes" if passes > 1 else "",
+                                    names_path(target, image), spent["answers"], spent["input"], spent["output"],
+                                    cost))
             return 0
         missed = missed_instructions(target, image, args.names or [fn.name for fn in program.functions])
         for name, addresses in lift_missed(target, image, program).items():      # what the lifter left

@@ -241,18 +241,39 @@ Written beside the rebuilt image by a complete `dread test`: `function`, `cases`
 (the instructions of the original no case ran, as hex addresses separated by spaces; empty when
 the cases run all of it).
 
-### `BUILD/pilot/IMAGE/names.tsv`, `names-score.tsv`, `names-versus.tsv`
+### `BUILD/pilot/IMAGE/names.tsv`, `names-score.tsv`, `names-pairwise.tsv`
 
-Written by `dread pilot --task name`: one line per proposal, `address` (hex), `now` (the function's
-name when asked), `proposed`, `what` (the model's sentence), `provider`, `shown` (what the question
-showed: `readable`, `readable, unchecked` or `listing`, followed by `, behaviour` when it showed the
-function's runs (`--behaviour`) and `, refined` for a second pass's). A function asked again gets a
-new line; the last one counts. With `--score TRUTH`, `names-score.tsv`: `address`, `true`,
-`proposed`, `exact`, `same_words`, `overlap`, `same_prefix` (empty where a name has no prefix),
-`judged` (`same`, `close`, `different` with `--judge`, else empty). With `--versus OTHER` as well,
-`names-versus.tsv`: `address`, `true`, `proposed`, `other` (the other run's), `closer` (`mine`,
-`theirs`, `equal`, or empty without a verdict) for the functions the two runs named otherwise.
-Older names.tsv files have no `, behaviour` in `shown`; they read alike.
+Written by `dread pilot --task name`: one line per proposal for a function's name, appended as the
+answers come (the last line of an address is its proposal; every earlier one stays). Columns, by
+the header line (readers go by it):
+
+| column | meaning |
+|---|---|
+| `address`, `now` | the function's entry and its name in the image (`FUN_...`) |
+| `proposed`, `what` | the proposed name and the model's sentence about the function |
+| `provider` | who answered (`haiku (claude-haiku-5-5)`) |
+| `shown` | the form of the code the question showed: `readable`, `readable, unchecked`, `listing`; behind it `, behaviour` when the question showed the function's runs (`--behaviour`) and `, refined` for a `--refine` answer (readers look for the marks among the comma-separated parts) |
+| `confidence` | `--samples K`: the agreement of the vote (answers alike to the kept name, `dread.naming.similarity` 0.5 or more, over K: `0.60`); empty for a single question |
+| `samples` | `--samples K`: the K answers in the order asked, `-` for a question without one |
+| `pass` | the pass that made it: 1 the first (callees first); 2, 3 ... `--passes` (callers first on even passes); 2 for `--refine` |
+| `question` | a digest of the question's text: a later pass asks again only when it changed |
+| `names_shown` | how many other functions' proposals the question showed (0: none) |
+| `hidden`, `depends` | `--ablate`: the vote of the same questions with no other proposal shown, and whether it disagrees with the proposal (`yes`, `no`); with `names_shown` 0 the two questions were the same, so `yes` is the votes' own noise |
+
+A file written before 2026-10-22 has the first six columns: its proposals have no confidence (a
+`--gate` hides them), their pass is 1, or 2 where `shown` has `, refined`; one older still has no
+`, behaviour` in `shown`, and reads alike. A new proposal gives such a file the new header and leaves
+its lines as they were.
+
+`dread pilot --score` writes `names-score.tsv` beside it (`names-score-passN.tsv` with
+`--upto-pass N`): `address`, `true`, `proposed`, `exact`, `same_words`, `overlap`, `same_prefix`
+(empty where a name has no prefix), `judged` (the judge's `same`, `close`, `different` with
+`--judge`, else empty), and the proposal's `confidence`, `depends`, `names_shown`. `--score TRUTH --judge P --against OTHER` (another run's names.tsv) writes instead
+`names-pairwise.tsv` (`names-pairwise-passN.tsv`), one line per function whose two proposals differ:
+`address`, `true`, `this` (this run's), `other`, `closer` (`this`, `other`, `tie`; empty when the
+judge gave no two verdicts). Before it, on 2026-10-22, `--versus OTHER` wrote `names-versus.tsv`:
+`address`, `true`, `proposed`, `other`, `closer` (`mine`, `theirs`, `equal`), each pair judged in one
+order, chosen by the address; replaced by `--against`, nothing reads it.
 
 ### `BUILD/lift-check/IMAGE/verdicts.tsv`
 

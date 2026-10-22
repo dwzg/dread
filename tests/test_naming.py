@@ -241,3 +241,22 @@ def test_the_pilot_names_structures_from_their_uses(tmp_path):
     entry = naming.load(image, "structs")["get:r0"]
     assert entry["name"] == "Item" and entry["anchors"] == ["get:r0", "put:r1"], entry
     assert naming.struct_names(plan_with(3), naming.load(image, "structs")) == {"s_3": ("Item", {4: "next"})}
+
+
+def test_names_alike_by_their_words_and_a_vote_over_them():
+    """naming.similarity pairs words (a short word that begins a longer one counts: init and
+    initialise); naming.vote keeps the name most samples agree with, a name kept from before winning
+    ties, and says how many agree."""
+    assert naming.similarity("task_delay", "vTaskDelay") == 1.0
+    assert naming.similarity("init_list", "initialise_list") == 1.0
+    assert naming.similarity("list_insert_end", "list_insert_tail") == 0.5
+    assert naming.similarity("queue_send", "queue_receive") < naming.AGREE
+    assert naming.similarity("f1", "F1") == 1.0 and naming.similarity("f1", "f2") == 0.0
+    assert naming.similarity("strcmp", "str_cmp") == 1.0 and naming.similarity("ListInit", "list_init") == 1.0
+    assert naming.similarity("uart_putc", "serial_write_char") == 0.0     # (words, not meaning)
+    assert naming.vote(["queue_send", "queue_send_item", "queue_receive", None, "msg_queue_send"]) == (
+        "queue_send", 3, 0)
+    assert naming.vote([None, None]) is None
+    assert naming.vote(["list_append", "list_insert_end"], keep="list_insert_tail") == ("list_insert_tail", 1, None)
+    assert naming.vote(["uart_send", "uart_send_byte"], keep="gpio_toggle") == ("uart_send", 2, 0)
+    assert naming.vote(["a_b", "c_d", "c_d"]) == ("c_d", 2, 1)            # (names of short pieces: alike or not)

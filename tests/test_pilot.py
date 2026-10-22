@@ -142,6 +142,7 @@ def test_provider_wire_formats(monkeypatch):
         assert local.ask("be brief", [{"role": "user", "content": "hello"}]) == "openai says hi"
         path, headers, body = Fake.seen[-1]
         assert body["messages"][0] == {"role": "system", "content": "be brief"} and body["model"] == "m"
+        assert body["temperature"] == 0.2                       # (the configuration's, by default)
         assert local.last == {"finish": "stop", "tokens": 12, "reasoning": 3, "input": None}
         github = llm.OpenAICompatible("gh", {"url": url + "/inference/", "path": "/chat/completions", "model": "o/m",
                                              "headers": {"x-github-api-version": "2022-11-28"}})
@@ -151,11 +152,16 @@ def test_provider_wire_formats(monkeypatch):
         assert {k.lower(): v for k, v in headers.items()}["x-github-api-version"] == "2022-11-28"
         with pytest.raises(llm.ProviderError, match="environment"):
             llm.OpenAICompatible("gh", {"url": url, "headers": {"Authorization": "Bearer x"}}).ask("s", [])
+        local.ask("be brief", [{"role": "user", "content": "hello"}], temperature=0.9)
+        assert Fake.seen[-1][2]["temperature"] == 0.9            # (a question's own, for a vote's samples)
         monkeypatch.setenv("TEST_KEY", "secret")
         remote = llm.Anthropic("claude", {"url": url, "model": "c", "key_env": "TEST_KEY"})
         assert remote.ask("be brief", [{"role": "user", "content": "hello"}]) == "anthropic says hi"
         path, headers, body = Fake.seen[-1]
         assert path == "/v1/messages" and body["system"] == "be brief"
+        assert "temperature" not in body                        # (Haiku 5.5 and Sonnet 5.5 refuse all but 1.0)
+        remote.ask("be brief", [{"role": "user", "content": "hello"}], temperature=1.0)
+        assert Fake.seen[-1][2]["temperature"] == 1.0
         assert remote.last == {"finish": "max_tokens", "tokens": 34, "reasoning": 4, "input": 57}
         assert {k.lower(): v for k, v in headers.items()}["x-api-key"] == "secret"
     finally:
@@ -232,7 +238,8 @@ def test_names_are_asked_callees_first_with_the_proposals_so_far(gizmo):
     assert [n for n, _ in seen] == ["gpio_set", "led_on", "led_on"]     # (led_on is a name taken: asked again)
     assert "pin_write(" in seen[1][1] and "gpio_set(" not in seen[1][1]
     rows = [r.split("\t") for r in open(pilot.names_path(target, image)).read().splitlines()]
-    assert rows[0] == ["address", "now", "proposed", "what", "provider", "shown"]
+    assert rows[0] == list(pilot.NAMES_COLUMNS)         # (the first six as before 2026-10-22, more behind them)
+    assert rows[0][:6] == ["address", "now", "proposed", "what", "provider", "shown"]
     assert [r[1:3] for r in rows[1:]] == [["gpio_set", "pin_write"], ["led_on", "led_switch_on"]]
     seen.clear()
     made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(answer),
@@ -610,31 +617,222 @@ def test_a_naming_run_with_behaviour_shows_the_runs_with_the_proposals_so_far(gi
     assert any("runs of their cases for 2 of 2 functions" in line for line in lines)
 
 
-def test_two_runs_compared_function_by_function(gizmo, tmp_path):
-    """--versus: the functions two runs named otherwise go to the judge side by side, in an order the
-    address decides (a judge's liking for a place cancels out); its words come back as this run's,
-    the other's or equal."""
+def gizmo_elf(target):
+    return os.path.join(os.path.dirname(target.root), "m3", "original", "gizmo.elf")
+
+
+def scripted_names(answers, seen):
+    """A provider's answers for name questions: the n-th question about a function gets answers[its
+    name][n] (in the order asked: the tests ask one question at a time)."""
+    def answer(messages):
+        question = messages[0]["content"]
+        name = re.search(r"The function (\w+)", question).group(1)
+        seen.append((name, question))
+        return "name: %s\nwhat: does it" % answers[name][sum(1 for n, _ in seen if n == name) - 1]
+    return answer
+
+
+def test_a_vote_keeps_the_name_most_answers_agree_with(gizmo):
+    """--samples 3: each function is asked three times, the later questions with its callers in an order
+    of their own; the name most answers agree with is kept, the agreement its confidence, and
+    names.tsv keeps every answer."""
     target, image, program, flow = gizmo
-    mine = {"gpio_set": "gpio_write", "led_on": "led_enable", "delay": "busy_wait"}
-    theirs = {"gpio_set": "pin_thing", "led_on": "led_on_now", "delay": "busy_wait"}
-    for name, proposed in mine.items():
-        pilot.keep_proposal(target, image, program.by_name[name], proposed, "does it", llm.Scripted([]), "readable")
-    other = tmp_path / "names.tsv"
-    other.write_text("address\tnow\tproposed\twhat\tprovider\tshown\n" + "".join(
-        "0x%x\t%s\t%s\tdoes it\tscripted\treadable\n" % (program.by_name[n].entry, n, p) for n, p in theirs.items()))
-    gpio, led = program.by_name["gpio_set"].entry, program.by_name["led_on"].entry
-    first, second = sorted([gpio, led])
-    # the judge says A for the first line, B for the second: A is the first proposal shown
-    judge = llm.Scripted(['```json\n{"1": "close", "2": "different", "3": "same"}\n```',
-                          '```json\n{"1": "A", "2": "B"}\n```'])
+    seen, lines = [], []
+    answers = {"gpio_set": ["pin_write", "gpio_pin_write", "uart_send"], "led_on": ["led_switch_on"] * 3}
+    made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(scripted_names(answers, seen)),
+                                          ["led_on", "gpio_set"], flow, jobs=1, out=lines.append, samples=3)
+    assert (made, asked) == (2, 2) and [n for n, _ in seen] == ["gpio_set"] * 3 + ["led_on"] * 3
+    asked_gpio = [q.split("It is called by: ") for n, q in seen if n == "gpio_set"]
+    assert len({code for code, _ in asked_gpio}) == 1                       # (the code as it was)
+    assert len({callers for _, callers in asked_gpio}) == 3                 # (the callers in three orders)
+    assert len({tuple(sorted(callers.rstrip(".").split(", "))) for _, callers in asked_gpio}) == 1
+    rows = {r["now"]: r for r in pilot.read_name_rows(pilot.names_path(target, image))}
+    assert (rows["gpio_set"]["proposed"], rows["gpio_set"]["confidence"]) == ("pin_write", "0.67")
+    assert rows["gpio_set"]["samples"] == "pin_write gpio_pin_write uart_send"
+    assert (rows["led_on"]["confidence"], rows["led_on"]["names_shown"], rows["led_on"]["pass"]) == ("1.00", "1", "1")
+    assert rows["gpio_set"]["names_shown"] == "0" and "pin_write(" in seen[3][1]
+    assert any("2 of 3 agree" in line for line in lines), lines
+
+
+def test_a_gate_shows_sure_names_only_and_later_passes_ask_what_changed(gizmo):
+    """--samples 3 --gate 0.6 --passes 5: gpio_set's first vote is unsure (one of three), so led_on's
+    question shows gpio_set; pass 2 (callers first) asks gpio_set again, its question now showing
+    led_on's sure name, and its first name stays in a tie, sure now; pass 3 asks led_on again, which
+    now sees it; nothing a question shows changes then, and no pass 4 runs."""
+    target, image, program, flow = gizmo
+    seen, lines = [], []
+    answers = {"gpio_set": ["pin_write", "uart_send", "clock_begin", "pin_write", "pin_write", "gpio_write"],
+               "led_on": ["led_switch_on"] * 6}
+    made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(scripted_names(answers, seen)),
+                                          ["led_on", "gpio_set"], flow, jobs=1, out=lines.append, samples=3,
+                                          gate=0.6, passes=5)
+    assert [n for n, _ in seen] == ["gpio_set"] * 3 + ["led_on"] * 3 + ["gpio_set"] * 3 + ["led_on"] * 3
+    assert "gpio_set(" in seen[3][1] and "pin_write" not in seen[3][1]     # (unsure: not shown)
+    assert "led_switch_on" in seen[6][1] and "pin_write" not in seen[6][1]  # (a function's own name: never)
+    assert "pin_write(" in seen[9][1]
+    rows = pilot.read_name_rows(pilot.names_path(target, image))
+    assert [(r["now"], r["pass"], r["proposed"], r["confidence"]) for r in rows] == [
+        ("gpio_set", "1", "pin_write", "0.33"), ("led_on", "1", "led_switch_on", "1.00"),
+        ("gpio_set", "2", "pin_write", "0.67"), ("led_on", "3", "led_switch_on", "1.00")]
+    passes = [line for line in lines if " pass " in line]
+    assert len(passes) == 3, lines
+    assert "pass 2 (callers first): asked 1, proposed 1, shown names changed 1" in passes[1]
+    assert "pass 3 (callees first): asked 1, proposed 1, shown names changed 0" in passes[2]
+    assert (made, asked) == (4, 4)
+    assert pilot.read_proposals(target, image, upto_pass=2)[program.by_name["led_on"].entry][0] == "led_switch_on"
+
+
+def test_ablation_asks_again_with_no_other_name_shown(gizmo):
+    """--ablate: each function is asked also with no proposal shown; led_on, whose question showed
+    gpio_set's proposal, answers otherwise without it (depends); gpio_set's question showed none, so
+    it was asked the same question twice (the votes' own noise); --score gives the verdicts of each."""
+    target, image, program, flow = gizmo
+    seen = []
+
+    def answer(messages):
+        question = messages[0]["content"]
+        name = re.search(r"The function (\w+)", question).group(1)
+        seen.append((name, question))
+        proposed = "pin_write" if name == "gpio_set" else "led_switch_on" if "pin_write(" in question else "gpio_enable"
+        return "name: %s\nwhat: does it" % proposed
+    pilot.name_functions(target, image, program, lambda: llm.Scripted(answer), ["led_on", "gpio_set"], flow,
+                         jobs=1, out=lambda *a: None, ablate=True)
+    assert [n for n, _ in seen] == ["gpio_set", "gpio_set", "led_on", "led_on"]
+    assert seen[0][1] == seen[1][1] and "pin_write(" in seen[2][1] and "gpio_set(" in seen[3][1]
+    rows = {r["now"]: r for r in pilot.read_name_rows(pilot.names_path(target, image))}
+    assert [rows["led_on"][k] for k in ("proposed", "hidden", "depends", "names_shown")] == [
+        "led_switch_on", "gpio_enable", "yes", "1"]
+    assert [rows["gpio_set"][k] for k in ("hidden", "depends", "names_shown")] == ["pin_write", "no", "0"]
     lines = []
-    truth = os.path.join(os.path.dirname(target.root), "m3", "original", "gizmo.elf")
-    totals = pilot.score_names(target, image, truth, out=lines.append, judge=judge, versus=str(other))
-    shown = judge.asked[1][1][0]["content"].splitlines()
-    assert len(shown) == 2 and "busy_wait" not in "".join(shown)
-    expect = {first: "theirs" if pilot.swapped(first) else "mine", second: "mine" if pilot.swapped(second) else "theirs"}
-    assert totals["versus"] == 2 and totals["versus_mine"] == list(expect.values()).count("mine")
-    rows = [r.split("\t") for r in open(os.path.join(target.build, "pilot", image.name,
-                                                      "names-versus.tsv")).read().splitlines()[1:]]
-    assert {int(r[0], 16): r[4] for r in rows} == expect
-    assert "named otherwise" in lines[-1]
+    totals = pilot.score_names(target, image, gizmo_elf(target), out=lines.append,
+                               judge=llm.Scripted(['```json\n{"1": "different", "2": "different"}\n```']))
+    assert totals["ablation"][("yes", False)]["different"] == 1 and totals["ablation"][("no", True)]["n"] == 1
+    assert any("names shown, the name depends on them: 1, judged the same 0 (0 %)" in line for line in lines), lines
+
+
+def test_an_older_names_file_is_read_and_extended(gizmo):
+    """A names.tsv of six columns (before votes) reads as proposals without a confidence, a refined
+    row as pass 2; a new proposal gives the file the new header and keeps the old rows."""
+    target, image, program, flow = gizmo
+    path = pilot.names_path(target, image)
+    os.makedirs(os.path.dirname(path))
+    led, gpio = program.by_name["led_on"], program.by_name["gpio_set"]
+    with open(path, "w") as f:
+        f.write("address\tnow\tproposed\twhat\tprovider\tshown\n")
+        f.write("0x%x\tled_on\tled_up\tlights it\thaiku (m)\treadable\n" % led.entry)
+        f.write("0x%x\tled_on\tled_light\tlights it\thaiku (m)\treadable, refined\n" % led.entry)
+    refined = set()
+    assert pilot.read_proposals(target, image, refined) == {led.entry: ("led_light", "lights it")}
+    assert refined == {led.entry}
+    rows = pilot.read_name_rows(path)
+    assert [r["pass"] for r in rows] == ["1", "2"] and pilot.confidence(rows[0]) is None
+    assert pilot.read_proposals(target, image, upto_pass=1) == {led.entry: ("led_up", "lights it")}
+    pilot.keep_proposal(target, image, gpio, "pin_write", "drives\ta pin", llm.Scripted([]), "readable",
+                        {"confidence": "0.80", "pass": "1"})
+    text = open(path).read().splitlines()
+    assert text[0].split("\t") == list(pilot.NAMES_COLUMNS) and len(text) == 4
+    assert text[1].endswith("\treadable") and len(text[1].split("\t")) == 6     # (the old rows as they were)
+    rows = pilot.last_rows(pilot.read_name_rows(path))
+    assert pilot.confidence(rows[gpio.entry]) == 0.8 and rows[gpio.entry]["what"] == "drives a pin"
+
+
+def test_scores_by_confidence_and_two_runs_judged_pairwise(gizmo, tmp_path):
+    """--score with confidences gives the verdicts of each confidence (the calibration); --against
+    asks the judge, where this run's proposal and another run's differ, which is closer to the true
+    name, in both orders (A and B swapped): a side wins when the two verdicts add up to it."""
+    target, image, program, flow = gizmo
+    fns = [program.by_name[n] for n in ("led_on", "uart_putc", "gpio_set", "delay")]
+    mine = ["led_turn_on", "uart_send_char", "gpio_write", "wait_ticks"]
+    theirs = ["led_turn_on", "serial_out", "pin_toggle", "sleep"]
+    for fn, name, sure in zip(fns, mine, ("1.00", "0.40", "1.00", "0.40")):
+        pilot.keep_proposal(target, image, fn, name, "x", llm.Scripted([]), "readable", {"confidence": sure})
+    other = tmp_path / "other.tsv"
+    other.write_text("address\tnow\tproposed\twhat\tprovider\tshown\n" + "".join(
+        "0x%x\t%s\t%s\tx\tp\treadable\n" % (fn.entry, fn.name, name) for fn, name in zip(fns, theirs)))
+    order = [fn.name for fn in sorted(fns[1:], key=lambda f: f.entry)]       # (the lines go by address)
+    first = {"uart_putc": "A", "gpio_set": "A", "delay": "B"}               # (A: this run's)
+    second = {"uart_putc": "B", "gpio_set": "A", "delay": "A"}              # (A: the other's)
+    judge = llm.Scripted([
+        '```json\n{"1": "same", "2": "close", "3": "different", "4": "different"}\n```',
+        "```json\n%s\n```" % json.dumps({str(k + 1): first[n] for k, n in enumerate(order)}),
+        "```json\n%s\n```" % json.dumps({str(k + 1): second[n] for k, n in enumerate(order)})])
+    lines = []
+    totals = pilot.score_names(target, image, gizmo_elf(target), out=lines.append, judge=judge)
+    assert sorted(totals["calibration"]) == [0.4, 1.0]
+    assert totals["calibration"][0.4]["n"] == 2 and totals["calibration"][1.0]["n"] == 2
+    assert any(line.startswith("dread pilot --score: confidence 0.40: 2, judged") for line in lines), lines
+    scores = open(os.path.join(target.build, "pilot", image.name, "names-score.tsv")).read()
+    assert pilot.compare_names(target, image, gizmo_elf(target), str(other), judge, out=lines.append) == {
+        "both": 4, "differ": 3, "judged": 3, "wins": 1, "losses": 1, "ties": 1, "p": 1.0}
+    assert open(os.path.join(target.build, "pilot", image.name, "names-score.tsv")).read() == scores
+    swapped = judge.asked[2][1][0]["content"]
+    assert "| A: serial_out | B: uart_send_char" in swapped and "| A: uart_send_char" in judge.asked[1][1][0]["content"]
+    table = open(os.path.join(target.build, "pilot", image.name, "names-pairwise.tsv")).read()
+    assert "\tuart_send_char\tserial_out\tthis\n" in table and "\twait_ticks\tsleep\tother\n" in table
+    assert "\tgpio_write\tpin_toggle\ttie\n" in table and "led_turn_on" not in table
+    assert pilot.sign_test(10, 0) == 2 / 1024 and pilot.sign_test(0, 0) == 1.0 and pilot.sign_test(3, 3) == 1.0
+
+
+def test_the_naming_options_that_need_others(gizmo):
+    """--gate needs --samples (one question's proposal has no confidence); --refine and --passes are
+    two kinds of later pass; --against needs a judge. Each is refused before any provider is asked."""
+    target, image, program, flow = gizmo
+    assert pilot.main(["--target", target.root, "--task", "name", "--gate", "0.6", "--samples", "1"]) == 1
+    assert pilot.main(["--target", target.root, "--task", "name", "--refine", "--passes", "3"]) == 1
+    assert pilot.main(["--target", target.root, "--task", "name", "--score", gizmo_elf(target),
+                       "--against", "x.tsv"]) == 1
+
+
+def test_the_naming_defaults_are_five_questions_and_two_passes(gizmo, tmp_path, monkeypatch):
+    """dread pilot --task name asks each function five times and runs a second pass, callers first
+    (measured on FreeRTOS, docs/decisions.md 2026-10-22); --refine is a second pass of its own."""
+    target, image, program, flow = gizmo
+    config = tmp_path / "llm.toml"
+    config.write_text('[providers.x]\nkind = "openai"\nmodel = "m"\n')
+    monkeypatch.setenv("DREAD_LLM", str(config))
+    got = {}
+
+    def fake(*args, **options):
+        got.update(options)
+        return 0, 0, {"answers": 0, "input": 0, "output": 0, "cost": None}
+    monkeypatch.setattr(pilot, "name_functions", fake)
+    assert pilot.main(["--target", target.root, "--task", "name"]) == 0
+    assert (got["samples"], got["passes"], got["gate"], got["ablate"]) == (5, 2, None, False)
+    assert pilot.main(["--target", target.root, "--task", "name", "--refine", "--samples", "1"]) == 0
+    assert (got["samples"], got["passes"], got["refine"]) == (1, 1, True)
+
+
+def test_votes_with_behaviour_show_the_same_runs_in_every_question(gizmo):
+    """--behaviour with --samples 3: the runs are made once, before the questions, and each of a
+    function's questions shows them alike (a vote's samples put only the callers in another order);
+    names.tsv's shown column has the behaviour mark, and after --refine the refined one beside it,
+    which is still read as refined."""
+    target, image, program, flow = gizmo
+    uart = target.models["uart"]
+    buf = target.memory.scratch_base + 0x1000
+    os.makedirs(image.extra_cases, exist_ok=True)
+    with open(os.path.join(image.extra_cases, "uart_puts.json"), "w") as f:
+        json.dump({"cases": [{"args": [buf, 0, 0, 0], "mem": [[buf, 4, int.from_bytes(b"hi!\0", "little")],
+                                                               [uart["base"] + uart["status"], 4, uart["tx_ready"]]]}]}, f)
+    cache = os.path.join(target.build, "autocases", image.name, "uart_puts.json")
+    if os.path.exists(cache):
+        os.remove(cache)
+    seen, lines = [], []
+    answers = {"uart_putc": ["serial_write_char"] * 4, "uart_puts": ["serial_write_text"] * 4}
+    made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(scripted_names(answers, seen)),
+                                          ["uart_puts", "uart_putc"], flow, jobs=1, out=lines.append, behaviour=True,
+                                          samples=3)
+    assert (made, asked) == (2, 2) and sum("runs of their cases" in line for line in lines) == 1, lines
+    puts = [q for n, q in seen if n == "uart_puts"]
+    runs = [q.split("It is called by: ")[1].split("\n\n", 1)[1] for q in puts]
+    assert len(runs) == 3 and len(set(runs)) == 1 and 'serial_write_char(x) (3 times), x = "hi!"' in runs[0]
+    rows = pilot.read_name_rows(pilot.names_path(target, image))
+    assert all(r["shown"].endswith(pilot.BEHAVIOUR) and r["confidence"] == "1.00" for r in rows)
+    pilot.name_functions(target, image, program, lambda: llm.Scripted(scripted_names(answers, seen)),
+                         ["uart_puts", "uart_putc"], flow, jobs=1, out=lambda *a: None, behaviour=True, refine=True)
+    refined = set()
+    pilot.read_proposals(target, image, refined)
+    rows = pilot.last_rows(pilot.read_name_rows(pilot.names_path(target, image)))
+    assert refined == set(rows) and all(r["shown"].endswith(pilot.BEHAVIOUR + pilot.REFINED) and r["pass"] == "2"
+                                        for r in rows.values())
+    assert pilot.marked("readable, refined, behaviour", pilot.REFINED) and not pilot.marked("readable", pilot.REFINED)

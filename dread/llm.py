@@ -77,10 +77,14 @@ class ProviderError(Exception):
 
 
 class Provider:
-    """ask(system, messages) -> text; messages are [{"role": "user"|"assistant", "content": str}].
-    After each answer, last says how it ended: {"finish": the provider's reason ("stop", "length",
-    "end_turn", "max_tokens", ...), "tokens": tokens written or None, "reasoning": characters of
-    reasoning the provider returned apart from the answer}."""
+    """ask(system, messages, temperature=None) -> text; messages are [{"role": "user"|"assistant",
+    "content": str}]; temperature, when given, the sampling temperature of this question in place of
+    the configuration's (an OpenAI-compatible server takes it; Anthropic's API is sent it, and Haiku
+    5.5 and Sonnet 5.5 answer any other value than their default 1.0 with HTTP 400, "`temperature` is
+    deprecated for this model", tried 2026-10-22; a command provider cannot pass it on). After each
+    answer, last says how it ended: {"finish": the provider's reason ("stop", "length", "end_turn",
+    "max_tokens", ...), "tokens": tokens written or None, "reasoning": characters of reasoning the
+    provider returned apart from the answer}."""
 
     kind = None
     CUT = ("length", "max_tokens")          # finish reasons that mean: out of room
@@ -127,7 +131,7 @@ class Provider:
                            out["output"] * float(self.config["price_out"])) / 1e6
         return out
 
-    def ask(self, system, messages):
+    def ask(self, system, messages, temperature=None):
         raise NotImplementedError
 
     RETRY = (429, 500, 502, 503, 504, 529)  # rate limits and overloads: asked again after a wait
@@ -162,7 +166,7 @@ class Provider:
 class OpenAICompatible(Provider):
     kind = "openai"
 
-    def ask(self, system, messages):
+    def ask(self, system, messages, temperature=None):
         url = self.config.get("url", "http://127.0.0.1:8080").rstrip("/") + self.config.get("path",
                                                                                        "/v1/chat/completions")
         headers = dict(self.config.get("headers", {}))
@@ -173,7 +177,7 @@ class OpenAICompatible(Provider):
             headers["authorization"] = "Bearer " + os.environ[key_env]
         body = {"model": self.model, "messages": [{"role": "system", "content": system}] + list(messages),
                 "max_tokens": int(self.config.get("max_tokens", 32000)),
-                "temperature": float(self.config.get("temperature", 0.2))}
+                "temperature": float(self.config.get("temperature", 0.2) if temperature is None else temperature)}
         reply = self._post(url, body, headers)
         try:
             choice = reply["choices"][0]
@@ -191,13 +195,15 @@ class OpenAICompatible(Provider):
 class Anthropic(Provider):
     kind = "anthropic"
 
-    def ask(self, system, messages):
+    def ask(self, system, messages, temperature=None):
         key = os.environ.get(self.config.get("key_env", "ANTHROPIC_API_KEY"), "")
         if not key:
             raise ProviderError("%s: no key in $%s" % (self.name, self.config.get("key_env", "ANTHROPIC_API_KEY")))
         url = self.config.get("url", "https://api.anthropic.com").rstrip("/") + "/v1/messages"
         body = {"model": self.model, "max_tokens": int(self.config.get("max_tokens", 16000)), "system": system,
                 "messages": list(messages)}
+        if temperature is not None:         # (only when asked for: see Provider)
+            body["temperature"] = float(temperature)
         reply = self._post(url, body, {"x-api-key": key, "anthropic-version": "2023-06-01"})
         try:
             usage = reply.get("usage") or {}
@@ -231,7 +237,7 @@ class Command(Provider):
     ARG_MAX = 128 * 1024 - 1            # Linux's limit for one argument (MAX_ARG_STRLEN)
     DROP_ENV = ("DREAD_*KEY*", "*_API_KEY")
 
-    def ask(self, system, messages):
+    def ask(self, system, messages, temperature=None):
         import fnmatch
         import shutil
         import subprocess
@@ -284,10 +290,11 @@ class Scripted(Provider):
 
     def __init__(self, answers, name="scripted"):
         super().__init__(name, {"model": "scripted"})
-        self.answers, self.asked = answers, []
+        self.answers, self.asked, self.temperatures = answers, [], []
 
-    def ask(self, system, messages):
+    def ask(self, system, messages, temperature=None):
         self.asked.append((system, list(messages)))
+        self.temperatures.append(temperature)
         if callable(self.answers):
             answer = self.answers(messages)
         elif not self.answers:
