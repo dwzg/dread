@@ -7,7 +7,8 @@ with DREAD's include directory (dread.h), the src directory and [compiler] inclu
 path. Objects go to BUILD/recon/IMAGE/obj; a source is compiled again when it, or any header in
 those directories, is newer than its object, and every source when the compiler or the flags are
 not those the objects were made with (.flags in the object directory). Lifted C is compiled with
-[compiler] lifted_cflags after the flags (default -Os). Then links them over the image:
+[compiler] generated_std (default -std=gnu11) and lifted_cflags (default -Os) after the flags. Then
+links them over the image:
 BUILD/recon/IMAGE/payload.bin, with report.tsv, placement.json, recon.ld and recon.elf beside it.
 
 Functions in the image's lifted table (config/lifted.txt, written by `dread lift --check`) are
@@ -268,7 +269,7 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
             by_system = system_names(image.table("lifted"))
             loops = [n for n in loops if n not in by_system]
         objects += compile_all(target, image, os.path.join(workdir, "lifted"), os.path.join(workdir, "obj-lifted"),
-                               quiet=quiet, flags=target.compiler.lifted_cflags)
+                               quiet=quiet, flags=target.compiler.generated_cflags())
         with open(record, "w") as f:
             f.write("".join(n + "\n" for n in made))
         with open(os.path.join(workdir, "lifted.json"), "w") as f:

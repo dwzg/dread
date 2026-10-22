@@ -36,7 +36,7 @@ def test_lifted_c_printed_again_is_the_same_code(target, tmp_path):
         again = cparse.unparse(tree)
         assert cparse.parse(again) == tree
         (printed / (name + ".c")).write_text(again)
-    flags = target.compiler.lifted_cflags
+    flags = target.compiler.generated_cflags()
     a = build.compile_all(target, image, str(tmp_path / "lifted"), str(tmp_path / "obj-a"), quiet=True, flags=flags)
     b = build.compile_all(target, image, str(printed), str(tmp_path / "obj-b"), quiet=True, flags=flags)
     assert len(a) == len(b) == len(made)

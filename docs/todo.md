@@ -977,11 +977,11 @@ undone). Other decisions are taken by the recommended option and written down in
   gizmo function that reads a line through `uart_getc` is covered by recorded cases on both builds.
 
 ## CI
-- [ ] **The C standard of generated C** (found 2026-10-22): DREAD compiles lifted and readable C with
+- [x] **The C standard of generated C** (found 2026-10-22): DREAD compiled lifted and readable C with
   the toolchain's default standard, and GCC 15 and later default to C23 while CI's GCC 10 and 13 (and
   a user's older toolchain) default to C17: a second identical definition of a structure, which C23
-  allows, passed here and failed in CI. Decide whether to pin -std=gnu17 for the C DREAD generates
-  (gcc and clang kinds; a target's own sources keep its flags), measured by the suite and the gates.
+  allows, passed here and failed in CI. Pinned to gnu11 ([compiler] generated_std, in front of
+  lifted_cflags; docs/decisions.md): GCC 4.7 and clang 3.1 on know it, C17 adds nothing it needs.
 
 - [x] **GitHub Actions** (the user agreed, 2026-10-18): the suite on every push, Python 3.11 and 3.13,
   the distribution's arm-none-eabi-gcc. A failure there that does not happen locally is looked at

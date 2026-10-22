@@ -54,7 +54,8 @@ SCHEMA = {
              "extensions": str},
     "memory": {"regions": list, "io": list, "stack": dict, "sentinel": int, "scratch": dict},
     "abi": {"args": int, "callee_saved": list, "result": list, "float": str, "stack_args": dict},
-    "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "lifted_cflags": list, "cxxflags": list,
+    "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "lifted_cflags": list, "generated_std": str,
+                 "cxxflags": list,
                  "ldflags": list,
                  "include": list, "idioms": str, "tools": dict, "profile": str},
     "paths": {"build": str, "src": str},
@@ -228,6 +229,13 @@ class Compiler:
              is DREAD's translation, not the original's code; at -O0 every register of the original
              lives in the frame, slow, large and deep (FreeRTOS's GCC -O0 build: six functions more at
              -Os, -O2: four; none lost on four builds). [] compiles it with cflags alone
+    generated_std  the C standard DREAD's own C (lifted and readable) is compiled to, in front of
+             lifted_cflags (default gnu11; "" none): the toolchains' defaults differ, gnu90 for GCC
+             4.9, gnu17 from GCC 5 to 14 and clang, gnu23 from GCC 15 on, and C23 accepted what C17
+             refuses (a structure defined twice passed here and failed in CI, 2026-10-22). gnu11 is
+             what GCC 4.7 and clang 3.1 on know (gnu17 needs GCC 8, which an older host toolchain
+             lacks), and C17 changes nothing C11 accepts; GNU's, for the extensions the lifters write.
+             A later -std in lifted_cflags overrides it
     cxxflags the flags for C++ sources in src (.cpp, .cc, .cxx): default cflags and CXX_FLAGS (no
              exceptions, no RTTI, no guards around local statics, no atexit registration: what the
              overlay can place is code and read-only data, not unwind tables, typeinfo objects or
@@ -243,6 +251,11 @@ class Compiler:
     """
 
     KINDS = ("gcc", "clang")
+
+    def generated_cflags(self):
+        """The flags DREAD's own C is compiled with after cflags: the pinned standard
+        (generated_std), then lifted_cflags."""
+        return (["-std=" + self.generated_std] if self.generated_std else []) + self.lifted_cflags
     CXX_FLAGS = ["-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics", "-fno-use-cxa-atexit"]
 
     def __init__(self, data, target):
@@ -258,6 +271,7 @@ class Compiler:
         self.layer_required = list(getattr(getattr(target, "arch", None), "required_cflags", ()))
         layer = list(getattr(getattr(target, "arch", None), "lifted_cflags", {}).get(self.kind, ()))
         self.lifted_cflags = list(data.get("lifted_cflags", ["-Os"] + layer))
+        self.generated_std = data.get("generated_std", "gnu11")
         self.cxxflags = list(data.get("cxxflags", self.cflags + self.CXX_FLAGS))
         self.include = [target.path(p) for p in data.get("include", [])]
         self.idioms = data.get("idioms")

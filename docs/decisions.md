@@ -9,6 +9,29 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The C standard of DREAD's own C: gnu11 (2026-10-22)
+
+**Asked by the user** ("What pinned C standard would you recommend?"), **decided by recommendation**
+(the user's standing delegation of 2026-10-20).
+
+- **Question.** DREAD compiled lifted and readable C with the toolchain's default standard: gnu90 for
+  GCC before 5, gnu17 from GCC 5 to 14 and for clang, gnu23 from GCC 15 on (the host's toolchain
+  compiles it: the benchmark's builds of old compilers, GCC 4.9.3 among them, are the originals'; their
+  lifted C is compiled with the host's GCC). A second identical definition of a structure, which C23 allows, passed the suite here (GCC 16)
+  and failed in CI (GCC 10 and 13). Which standard should the C DREAD generates be compiled to?
+- **Options.** (a) gnu11: GCC 4.7 and clang 3.1 on; (b) gnu17: the same language as C11 with defect
+  fixes, but GCC 8 and clang 6 on (a user's older host toolchain may lack it); (c) gnu23: only the newest
+  toolchains, and it changes meaning (bool, true and nullptr keywords, () as (void), tag
+  redefinition); (d) gnu99: older still, without C11's identical typedef redefinition and anonymous
+  members; (e) strict c11: turns off GNU extensions the lifters write (asm, attributes, builtins).
+- **Choice: (a) gnu11**, for the C DREAD generates only (lifted and readable C; the C a names check
+  compiles), with gcc and clang alike: [compiler] generated_std, default "gnu11", in front of
+  lifted_cflags, which may override it with a later -std; "" pins nothing. A target's own sources
+  keep its flags.
+- **Undo.** generated_std = "" in a target, or the default in dread.target.Compiler.
+- **Status.** Done; checked with the suite, gizmo's lift checks and the eight readable gates (see the
+  commit).
+
 ## Globals for function names: a step of their own, not a default (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
@@ -391,4 +414,3 @@ recommendations here."), on a recommendation.
   readable C of every function is made first in a pool of workers (dread.readable views: 3,541
   analysis trees in 113 s instead of 670 s on one core), each worker costing up to the parent's size
   in memory (1 GB a worker measured), so pools are now capped by the memory available.
-

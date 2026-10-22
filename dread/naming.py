@@ -349,7 +349,7 @@ def same_code(target, image, before, after, work):
             f.write(text)
         try:
             objs.append(build.compile_all(target, image, src, os.path.join(work, label + "-obj"), quiet=True,
-                                          flags=target.compiler.lifted_cflags)[0])
+                                          flags=target.compiler.generated_cflags())[0])
         except Exception:
             return False
 

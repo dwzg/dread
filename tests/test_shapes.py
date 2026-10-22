@@ -158,7 +158,7 @@ def test_the_rewritten_functions_compile_and_keep_their_null_checks(tmp_path):
     (src / "caller.c").write_text(cparse.unparse(tree, notes=False))
     assert "-fno-delete-null-pointer-checks" in build.file_flags(target, str(src / "caller.c"))
     assert build.compile_all(target, image, str(src), str(tmp_path / "obj"), quiet=True,
-                             flags=target.compiler.lifted_cflags)
+                             flags=target.compiler.generated_cflags())
 
 
 def plan_of(*texts):
@@ -264,8 +264,8 @@ def test_a_field_that_points_to_a_structure_is_declared_a_pointer_to_it():
 @pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_pointer_fields_compile(tmp_path):
     """Two functions typed in one file define each structure once: C17 forbids a second definition
-    (GCC 15 and later default to C23, which allows an identical one, and CI's GCC 10 and 13 failed),
-    so the file is compiled as gnu17."""
+    (GCC 15 and later default to C23, which allows an identical one, and CI's GCC 10 and 13 failed);
+    DREAD compiles its C to gnu11 ([compiler] generated_std), which forbids it everywhere."""
     from conftest import gizmo_dir
     from dread import build
     from dread.target import Target
@@ -281,4 +281,4 @@ def test_pointer_fields_compile(tmp_path):
     assert text.count("struct s_1\n{") == 1 and text.count("struct s_1;") == 1, text
     (src / "linked.c").write_text(text)
     assert build.compile_all(target, image, str(src), str(tmp_path / "obj"), quiet=True,
-                             flags=target.compiler.lifted_cflags + ["-std=gnu17"])
+                             flags=target.compiler.generated_cflags())

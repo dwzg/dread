@@ -143,7 +143,9 @@ def last_level(stamp_file):
 def test_lifted_c_is_compiled_for_size(tmp_path):
     """Lifted C gets [compiler] lifted_cflags after cflags (default -Os), hand-written C cflags alone:
     at -O0 a lifted function keeps every register of the original in its frame (FreeRTOS's GCC -O0
-    build: six functions more at -Os, none lost); lifted_cflags = [] leaves cflags alone."""
+    build: six functions more at -Os, none lost); lifted_cflags = [] leaves cflags alone. In front of
+    them the pinned standard of DREAD's own C (generated_std, default gnu11), for every toolchain
+    alike; "" drops it."""
     shutil.copytree(GIZMO, tmp_path / "gizmo", ignore=shutil.ignore_patterns("build"))
     copy = tmp_path / "gizmo" / os.path.relpath(gizmo_dir("m3"), GIZMO)
     target = Target.load(str(copy))
@@ -153,9 +155,14 @@ def test_lifted_c_is_compiled_for_size(tmp_path):
     build.build(target, target.image(), out=str(out), quiet=True)
     assert last_level(out / "obj-lifted" / ".flags") == "-Os"
     assert last_level(out / "obj" / ".flags") == "-O0"
+    lifted_flags = (out / "obj-lifted" / ".flags").read_text().split("\n")
+    assert "-std=gnu11" in lifted_flags and "-std=gnu11" not in (out / "obj" / ".flags").read_text()
     toml = copy / "dread.toml"
     toml.write_text(toml.read_text().replace("[compiler]\n", "[compiler]\nlifted_cflags = []\n", 1))
     assert Target.load(str(copy)).compiler.lifted_cflags == []
+    assert Target.load(str(copy)).compiler.generated_cflags() == ["-std=gnu11"]     # (the standard stays)
+    toml.write_text(toml.read_text().replace("[compiler]\n", '[compiler]\ngenerated_std = ""\n', 1))
+    assert Target.load(str(copy)).compiler.generated_cflags() == []
 
 
 NAMES = ["script_run", "read_line", "apply_config", "fmt_dec", "timer_irq", "parse_kv"]
