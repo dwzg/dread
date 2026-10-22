@@ -9,6 +9,31 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C's structure: a jump repeats a few statements; shared blocks after an if without a join (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Readable C may repeat code where that saves a goto: a copy does what the jump and
+  the code it went to did. How much should a jump repeat, and where should a block go that several
+  ways reach: into the first arm that reaches it (the other ways jumping in), or after the if that
+  dominates it (Ramsey's merge nodes, "Beyond Relooper", ICFP 2022)?
+- **Options.** Repeat: (a) a lone return only, as before; (b) up to TAIL statements of a way without
+  a branch that ends in a return or a statement that never ends, at the follow, at the loop's head
+  or at the block after it. Shared blocks: (c) in the first arm, as before; (d) after every if that
+  dominates them; (e) after an if only where its ways never meet (each ends in a return or goes
+  round a loop).
+- **Choice: (b) with TAIL = 4, and (e).** Measured with the rest of the change on four FreeRTOS builds
+  (GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; 1,231 lifted functions): TAIL 1, 3, 4, 5, 6 left 195,
+  116, 107, 105 and 104 gotos, the readable lines 36,180, 36,320, 36,334, 36,340 and 36,344; (c),
+  (e), (d) left 111, 107 and 226. After every if, the shared blocks stand in a row behind it, and
+  every way that skips one jumps over it; where the ways never meet, nothing has to skip them. A
+  branch whose ways meet at a block that only returns, taken as one that never meets, was worse
+  (measured before the repeats were general: 291 against 271).
+- **Undo.** structure.TAIL = 1 repeats only ways without a statement (a lone return);
+  Emitter(merges=False) leaves shared blocks in the first arm.
+- **Status.** Done (dread/structure.py). Not tried: repeating a small region that branches (the
+  assert of a shared error block), or conditions merged across a lattice of shared blocks.
+
 ## Function names: five questions a function and a second pass, callers first; no gate (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

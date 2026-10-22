@@ -3,27 +3,38 @@ loops (dread.cparse trees, after dread.tidy).
 
 The body is cut into basic blocks (a label starts one; a goto, a conditional goto or return, a return,
 a switch or a loop that never ends closes one), their graph gets dominators and post-dominators,
-and the blocks are emitted again from the entry:
+and the blocks are emitted again from the entry. Where code never reaches a return (a task's loop
+that never ends), the jumps back to the head of each cycle that nothing leaves count as ends for the
+post-dominators (endless_ends): without them no branch there had a join.
 
 - a loop (a header that dominates a block jumping back to it) is `for (;;) { ... }`, with `continue`
   for the jumps back and `break` for the jumps to the block after it (the target most of its exits
   go to), and refined afterwards: a test at its top that leaves it makes it a `while`, one at its end
   that goes back makes it a `do ... while`;
 - a conditional jump is `if (...) { ... } else { ... }`, both arms emitted up to the branch's
-  immediate post-dominator, where they meet;
-- a block that consists of a return only is emitted again wherever a jump goes to it (a return is
-  not worth a goto);
+  immediate post-dominator, where they meet; where they never meet (each way ends in a return or
+  goes round a loop), the blocks the branch dominates that several ways reach follow the if, in
+  reverse postorder (Ramsey's merge nodes), instead of going into the first arm that reaches them;
+- a region never emits a block that a region around it emits later (its follow, the blocks after an
+  if): a jump to one is a goto, unless falling off the region's end gets there;
+- a block that consists of a return only, or a few statements and a return without a branch on the
+  way (TAIL, the return counted), is emitted again wherever a jump goes to it: a goto is not worth it;
 - a switch whose cases only jump or return (the lifters' jump tables: switch (index) { case 0: goto
   L_x; ... default: return r0; }) is a branch of many ways: its cases grouped by target, in the order
   of their blocks, each group's statements up to where the ways meet (the switch's immediate
   post-dominator, left with break) or falling into the next group's where the code goes there.
   Inside it, break leaves the switch and continue still goes to the loop around it.
 
-Correct whatever is decided: every block is emitted once, under its label, and every transfer of
-control is a fall-through to the block that really follows, a break or continue of the loop it
-leaves, or a goto (C lets a goto enter a block). What could not be structured stays a goto, and the
-labels no goto names are dropped at the end. The gate (dread readable --check) checks the result as
-it checks everything else.
+Correct whatever is decided: every block is emitted once, under its label (a short way to a return
+also repeated, without one, where jumps go to it), and every transfer of control is a fall-through
+to the block that really follows, a break or continue of the loop it leaves, or a goto (C lets a goto
+enter a block). What could not be structured stays a goto; statements nothing reaches (after a jump,
+before the next label) and the labels no goto names are dropped at the end. The gate (dread readable
+--check) checks the result as it checks everything else.
+
+Measured on the 39 FreeRTOS builds of the bench (docs/todo.md, Structure): what gotos are left are
+mostly blocks several ways share whose code branches before it returns (conditions a compiler
+threaded into a lattice), then loops with exits to several places; irreducible flow is rare.
 """
 import copy
 
@@ -230,6 +241,71 @@ def dominates(idom, a, b):
         b = idom[b]
 
 
+def components(nodes, succ):
+    """{node: component number} of the strongly connected components of the nodes (Tarjan's, without
+    recursion), edges to nodes outside them ignored."""
+    nodes = list(nodes)
+    inside = set(nodes)
+    index, low, comp, on, stack, count = {}, {}, {}, set(), [], 0
+    for root in nodes:
+        if root in index:
+            continue
+        index[root] = low[root] = len(index)
+        stack.append(root)
+        on.add(root)
+        work = [(root, iter([s for s in succ(root) if s in inside]))]
+        while work:
+            v, it = work[-1]
+            for w in it:
+                if w not in index:
+                    index[w] = low[w] = len(index)
+                    stack.append(w)
+                    on.add(w)
+                    work.append((w, iter([s for s in succ(w) if s in inside])))
+                    break
+                if w in on:
+                    low[v] = min(low[v], index[w])
+            else:
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[v])
+                if low[v] == index[v]:
+                    while True:
+                        w = stack.pop()
+                        on.discard(w)
+                        comp[w] = count
+                        if w == v:
+                            break
+                    count += 1
+    return comp
+
+
+def endless_ends(blocks, order):
+    """The blocks that get an edge to the virtual exit for the post-dominators where code never reaches
+    one (a task's loop that never ends: without it every block there lacks a post-dominator, and no
+    branch in it has a join): in each cycle that nothing leaves, the blocks that jump back to its
+    first block in reverse postorder (a natural loop's header) from inside it. An iteration then ends
+    where it goes round, and the branches of the body meet as they would in a loop body that is run
+    once (with the header itself as the end, a branch in the header had no join)."""
+    reach, stack = set(), [b.index for b in blocks if not b.succ]
+    reach.update(stack)
+    while stack:
+        for p in blocks[stack.pop()].pred:
+            if p not in reach:
+                reach.add(p)
+                stack.append(p)
+    stuck = [b for b in order if b not in reach]    # (their successors are stuck too)
+    if not stuck:
+        return set()
+    comp = components(stuck, lambda b: blocks[b].succ)
+    first, leaves = {}, set()
+    for b in stuck:
+        first.setdefault(comp[b], b)
+        if any(comp[s] != comp[b] for s in blocks[b].succ):
+            leaves.add(comp[b])
+    return {p for c, h in first.items() if c not in leaves for p in blocks[h].pred if comp.get(p) == c}
+
+
 class Shape:
     """The facts the emitter needs: dominators, immediate post-dominators, loops."""
 
@@ -238,15 +314,18 @@ class Shape:
         n = len(blocks)
         self.idom = dominators(range(n), 0, lambda b: blocks[b].succ, lambda b: blocks[b].pred)
         exit_ = n                           # a virtual exit after every block that leaves the function
+        ends = endless_ends(blocks, reverse_postorder(blocks))     # (and after cycles nothing leaves)
 
         def rsucc(b):
             if b == exit_:
-                return [x.index for x in blocks if not x.succ]
+                return [x.index for x in blocks if not x.succ] + sorted(ends)
             return blocks[b].pred
 
         def rpred(b):
             if b == exit_:
                 return []
+            if b in ends:
+                return blocks[b].succ + [exit_]
             return blocks[b].succ if blocks[b].succ else [exit_]
         self.ipdom = dominators(range(n + 1), exit_, rsucc, rpred)
         self.exit = exit_
@@ -269,17 +348,29 @@ class Shape:
         j = self.ipdom.get(b)
         return None if j is None or j == self.exit else j
 
-    def loop_exit(self, header):
-        """The block after a loop: the target outside it that most of its exits go to."""
+    def exits(self, header):
+        """{block outside the loop at header: how many of its exits go there}."""
         body = self.loops[header]
         counts = {}
         for x in body:
             for s in self.blocks[x].succ:
                 if s not in body:
                     counts[s] = counts.get(s, 0) + 1
-        if not counts:
-            return None
-        return min(counts, key=lambda s: (-counts[s], s))
+        return counts
+
+    def common_post_dominator(self, a, b):
+        """The nearest block every way from a and from b to the end passes, or None."""
+        chain = set()
+        while True:
+            chain.add(a)
+            if self.ipdom.get(a, a) == a:
+                break
+            a = self.ipdom[a]
+        while b not in chain:
+            if self.ipdom.get(b, b) == b:
+                return None
+            b = self.ipdom[b]
+        return b
 
 
 def collapse(blocks):
@@ -320,11 +411,23 @@ def collapse(blocks):
 
 
 class Emitter:
-    def __init__(self, blocks, labels):
+    """Emits the blocks again as statements (see the module's docstring). merges: whether the blocks a
+    branch dominates that several ways reach are emitted after its if, in reverse postorder, instead
+    of in the first arm that reaches them (Ramsey's merge nodes, "Beyond Relooper", ICFP 2022):
+    "nojoin" where the branch's ways never meet (the default), True after every branch, False never.
+    After every branch cost more gotos than it saved on the bench (docs/decisions.md)."""
+
+    def __init__(self, blocks, labels, merges="nojoin"):
         self.blocks, self.labels = blocks, labels
         self.shape = Shape(blocks)
         self.emitted = set()
         self.wanted = set()                 # labels a goto names
+        self.merges = merges
+        self.children = {}                  # the dominator tree: block -> the blocks it immediately dominates
+        for b, d in sorted(self.shape.idom.items()):
+            if b != d:
+                self.children.setdefault(d, []).append(b)
+        self.rpo = {b: k for k, b in enumerate(reverse_postorder(blocks))}
         for blk in blocks:                  # every block a label from the start: a jump decided after
             if not blk.labels:              # its target was emitted must find it there (pruned at the end)
                 blk.labels.append("block_%d" % blk.index)
@@ -336,10 +439,80 @@ class Emitter:
         blk = self.blocks[b]
         return blk.term[0] == "return" and all(isinstance(s, C.Note) for s in blk.stmts)
 
-    def jump(self, target, loops, addr=None):
+    def tail(self, b):
+        """The statements from block b to the return (or the statement that never ends) its blocks fall
+        or jump to without a branch (a conditional return is a statement), when they are at most TAIL
+        (the return counted) and plain; else None. Repeated where a jump goes to b, they do what the
+        jump and the code there do."""
+        out, seen, count = [], set(), 0
+        while b not in seen:
+            seen.add(b)
+            blk = self.blocks[b]
+            for s in blk.stmts:
+                if isinstance(s, (C.Decl, C.Label, C.Case)):
+                    return None
+                if not isinstance(s, C.Note):
+                    count += 1
+            out += blk.stmts
+            t = blk.term
+            if t[0] == "return":
+                return out + [t[1]] if count + 1 <= TAIL else None
+            if t[0] == "stop":
+                return out if count <= TAIL else None
+            if t[0] == "cond" and isinstance(t[2], C.Return) and blk.succ:
+                out.append(t[3])
+                count += 1
+            elif t[0] not in ("fall", "goto") or not blk.succ:
+                return None                 # (a branch, a switch, the function's end)
+            if count >= TAIL:
+                return None
+            b = blk.succ[0]
+        return None                         # (a cycle)
+
+    def repeat(self, b, loops, follow):
+        """The statements of the blocks from b on, when a few (TAIL, a return, break or continue counted)
+        without a branch lead to a return or a statement that never ends, to follow (where the code at
+        the jump falls off to), to the innermost loop's header or to the block after the innermost loop
+        or switch; else None. Repeated where a jump goes to b, they do what the jump and the code there
+        do."""
+        out, seen, count = [], set(), 0
+        loop = innermost_loop(loops)
+        while True:
+            if b == follow:
+                return out
+            if loop is not None and b == loop[0]:
+                return out + [C.Continue()] if count + 1 <= TAIL else None
+            if loops and b == loops[-1][1]:
+                return out + [C.Break()] if count + 1 <= TAIL else None
+            if b in seen or (seen and b in self.shape.loops):
+                return None                 # (a cycle, or into a loop on the way)
+            seen.add(b)
+            blk = self.blocks[b]
+            for s in blk.stmts:
+                if isinstance(s, (C.Decl, C.Label, C.Case)):
+                    return None
+                if not isinstance(s, C.Note):
+                    count += 1
+            out += blk.stmts
+            t = blk.term
+            if t[0] == "return":
+                return out + [t[1]] if count + 1 <= TAIL else None
+            if t[0] == "stop":
+                return out if count <= TAIL else None
+            if t[0] == "cond" and isinstance(t[2], C.Return) and blk.succ:
+                out.append(t[3])
+                count += 1
+            elif t[0] not in ("fall", "goto") or not blk.succ:
+                return None                 # (a branch, a switch, the function's end)
+            if count > TAIL:
+                return None
+            b = blk.succ[0]
+
+    def jump(self, target, loops, addr=None, follow=None):
         """The statements that send control to block target from inside the given loops and switches
         (innermost last: (header, exit), a switch's header None: break leaves the innermost of either,
-        continue goes to the innermost loop's header)."""
+        continue goes to the innermost loop's header), at the end of code that falls off to follow; a
+        short way on (repeat) repeated."""
         if target is None:
             return []
         loop = innermost_loop(loops)
@@ -349,12 +522,16 @@ class Emitter:
             return [C.Break(addr)]
         if self.returns_only(target):
             return [copy.deepcopy(self.blocks[target].term[1])]
+        again = self.repeat(target, loops, follow)
+        if again is not None:
+            return copy.deepcopy(again)
         self.wanted.add(self.label_of(target))
         return [C.Goto(self.label_of(target), addr)]
 
-    def region(self, b, follow, loops):
+    def region(self, b, follow, loops, stops=frozenset()):
         """Statements for the blocks from b on until control reaches follow (which the caller emits
-        next: falling off the end of the list goes there)."""
+        next: falling off the end of the list goes there). stops: blocks a region around this one emits
+        later (its follow, the blocks after an if); a jump to one is a goto, a break or a continue."""
         out = []
         while True:
             if b is None or b == follow:
@@ -366,73 +543,116 @@ class Emitter:
             if loops and b == loops[-1][1]:
                 out.append(C.Break())
                 return out
-            if b in self.emitted:
-                out += self.jump(b, loops)
+            if b in self.emitted or b in stops:
+                out += self.jump(b, loops, follow=follow)
                 return out
             shape = self.shape
             if b in shape.loops and not any(h == b for h, _ in loops):
-                exit_ = shape.loop_exit(b)
-                body = self.region_loop(b, exit_, loops)
+                exit_ = self.loop_exit(b)
+                body = self.region_loop(b, exit_, loops, _with(stops, follow))
                 out.append(C.For(None, None, None, C.Block(body)))
                 if exit_ is None:
                     return out
                 b = exit_
                 continue
             self.emitted.add(b)
-            blk = self.blocks[b]
-            for name in blk.labels:
-                out.append(C.Label(name))
-            out += blk.stmts
-            t = blk.term
-            kind = t[0]
-            if kind in ("return", "stop"):
-                if kind == "return":
-                    out.append(t[1])
-                return out
-            if kind in ("fall", "goto"):
-                nxt = blk.succ[0] if blk.succ else None
-                if nxt is None:
-                    return out
-                b = nxt                     # (the loop's top decides: emitted, follow, loop's ends)
-                continue
-            if kind == "switch":
-                stmt, j = self.switch(b, loops)
-                out.append(stmt)
-                if j is None:
-                    return out
-                b = j
-                continue
-            # a conditional jump or return
-            cond, then, stmt = t[1], t[2], t[3]
-            if isinstance(then, C.Return):
-                out.append(stmt)
-                b = blk.succ[0] if blk.succ else None
-                continue
-            taken, fall = blk.succ[0], (blk.succ[1] if len(blk.succ) > 1 else None)
-            j = shape.join(b)
-            loop = innermost_loop(loops)
-            if j is not None and loop is not None and j not in shape.loops.get(loop[0], ()):
-                j = None                    # (they meet outside the loop: each arm leaves it on its own)
-            arm_t = self.region(taken, j, loops)
-            arm_f = self.region(fall, j, loops)
-            out.append(make_if(cond, arm_t, arm_f, stmt.addr))
-            if j is None:
-                return out
-            b = j
+            code, b = self.block(b, follow, loops, stops)
+            out += code
+            if b is None:
+                return out              # (the loop's top decides the next: emitted, follow, loop's ends)
 
-    def switch(self, b, loops):
+    def loop_exit(self, header):
+        """The block after the loop at header (left with break): of the targets its exits go to (those
+        that only return aside: a jump there is a return repeated), the nearest block the ways from all
+        of them pass (their code, emitted where they leave, ends in a break), unless that only returns
+        too; else the one most of its exits go to."""
+        counts = self.shape.exits(header)
+        if not counts:
+            return None
+        real = [t for t in sorted(counts) if not self.free(t)] or sorted(counts)
+        meet = real[0]
+        for t in real[1:]:
+            meet = self.shape.common_post_dominator(meet, t)
+            if meet is None:
+                break
+        if meet is not None and meet != self.shape.exit and meet not in self.shape.loops[header] and \
+                not self.free(meet):
+            return meet
+        return min(real, key=lambda s: (-counts[s], s))
+
+    def free(self, b):
+        """Whether a jump to block b costs no goto: it only returns, or is a short way to a return."""
+        return self.returns_only(b) or self.tail(b) is not None
+
+    def join(self, b, loops):
+        """Where the ways out of block b meet (its immediate post-dominator), None when that is outside
+        the innermost loop (each way then leaves it on its own)."""
+        j = self.shape.join(b)
+        loop = innermost_loop(loops)
+        if j is not None and loop is not None and j not in self.shape.loops.get(loop[0], ()):
+            return None
+        return j
+
+    def merge_blocks(self, b, j, follow, loops, stops):
+        """The blocks b immediately dominates that several ways reach (but its join, the follow and what
+        a region around emits), in reverse postorder: emitted after b's if, where their ways meet."""
+        if not self.merges or (self.merges == "nojoin" and j is not None):
+            return []
+        ends = {f[0] for f in loops} | {f[1] for f in loops}
+        idom = self.shape.idom
+        out = []
+        for m in self.children.get(b, ()):
+            if m in (j, follow) or m in stops or m in ends or m in self.emitted:
+                continue
+            ways = {p for p in self.blocks[m].pred if p in idom and not dominates(idom, m, p)}
+            if len(ways) >= 2:
+                out.append(m)
+        return sorted(out, key=lambda m: self.rpo[m])
+
+    def block(self, b, follow, loops, stops):
+        """(statements, the block control goes to after them or None) for block b emitted here: its
+        labels and statements, then its way out: a branch as if/else (the arms up to where they meet,
+        the blocks after it that several ways reach following it), a switch, a jump or a return. None:
+        the statements end every way, or fall off to the follow."""
+        blk = self.blocks[b]
+        out = [C.Label(name) for name in blk.labels] + list(blk.stmts)
+        t = blk.term
+        kind = t[0]
+        if kind in ("return", "stop"):
+            if kind == "return":
+                out.append(t[1])
+            return out, None
+        if kind in ("fall", "goto"):
+            return out, (blk.succ[0] if blk.succ else None)
+        if kind == "switch":
+            stmt, j = self.switch(b, follow, loops, stops)
+            out.append(stmt)
+            return out, j
+        cond, then, stmt = t[1], t[2], t[3]
+        if isinstance(then, C.Return):
+            out.append(stmt)
+            return out, (blk.succ[0] if blk.succ else None)
+        taken, fall = blk.succ[0], (blk.succ[1] if len(blk.succ) > 1 else None)
+        j = self.join(b, loops)
+        merges = self.merge_blocks(b, j, follow, loops, stops)
+        seq = merges + [j if j is not None else follow]     # (what comes after the if, in order)
+        later = _with(_with(stops, follow), j)
+        arms = [self.region(x, seq[0], loops, later | set(merges)) for x in (taken, fall)]
+        out.append(make_if(cond, arms[0], arms[1], stmt.addr))
+        for k, m in enumerate(merges):
+            out += self.region(m, seq[k + 1], loops, later | set(merges[k + 1:]))
+        return out, j
+
+    def switch(self, b, follow, loops, stops):
         """(the switch that ends block b, the block after it or None): its cases grouped by target in
         the order of the targets' blocks, each group's statements up to the next group's target (into
         which it falls) or up to where all ways meet (left with break); the cases that return last,
         after a break where the group before them would fall into them."""
         blk = self.blocks[b]
         sw, cases = blk.term[1], blk.term[2]
-        shape = self.shape
-        j = shape.join(b)
-        loop = innermost_loop(loops)
-        if j is not None and loop is not None and j not in shape.loops.get(loop[0], ()):
-            j = None                        # (they meet outside the loop: each case leaves it on its own)
-        frames = loops + [(None, j)]
+        j = self.join(b, loops)
+        after = j if j is not None else follow
+        frames = loops + [(None, after)]
         groups, returns = {}, []
         for values, target, ret in cases:
             if target is None:
@@ -440,11 +660,12 @@ class Emitter:
             else:
                 groups.setdefault(target, []).extend(values)
         order = sorted(groups)
+        later = _with(_with(stops, follow), j)
         body = []
         for k, target in enumerate(order):
             body += [C.Case(v) for v in groups[target]]
-            nxt = order[k + 1] if k + 1 < len(order) else j
-            stmts = self.region(target, nxt, frames)
+            nxt = order[k + 1] if k + 1 < len(order) else after
+            stmts = self.region(target, nxt, frames, later)
             if k + 1 == len(order) and returns and not ends(stmts):
                 stmts.append(C.Break())     # (not into the cases that return)
             body += stmts
@@ -452,42 +673,21 @@ class Emitter:
             body += [C.Case(v) for v in values] + [copy.deepcopy(ret)]
         return C.Switch(sw.e, C.Block(body), sw.addr), j
 
-    def region_loop(self, header, exit_, loops):
+    def region_loop(self, header, exit_, loops, stops=frozenset()):
+        """The body of the loop at header (its exit_ the block after it, left with break)."""
         inner = loops + [(header, exit_)]
         self.emitted.add(header)
-        blk = self.blocks[header]
-        out = [C.Label(name) for name in blk.labels] + list(blk.stmts)
-        t = blk.term
-        kind = t[0]
-        if kind in ("return", "stop"):
-            if kind == "return":
-                out.append(t[1])
-            return out
-        if kind in ("fall", "goto"):
-            nxt = blk.succ[0] if blk.succ else None
-            out += self.region(nxt, None, inner) if nxt is not None else []
-            return out
-        if kind == "switch":
-            stmt, j = self.switch(header, inner)
-            out.append(stmt)
-            if j is not None:
-                out += self.region(j, None, inner)
-            return out
-        cond, then, stmt = t[1], t[2], t[3]
-        if isinstance(then, C.Return):
-            out.append(stmt)
-            out += self.region(blk.succ[0] if blk.succ else None, None, inner)
-            return out
-        taken, fall = blk.succ[0], (blk.succ[1] if len(blk.succ) > 1 else None)
-        j = self.shape.join(header)
-        if j is not None and j not in self.shape.loops[header]:
-            j = None
-        arm_t = self.region(taken, j, inner)
-        arm_f = self.region(fall, j, inner)
-        out.append(make_if(cond, arm_t, arm_f, stmt.addr))
-        if j is not None:
-            out += self.region(j, None, inner)
-        return out
+        code, nxt = self.block(header, None, inner, stops)
+        return code + (self.region(nxt, None, inner, stops) if nxt is not None else [])
+
+
+def _with(stops, b):
+    return stops | {b} if b is not None else stops
+
+
+TAIL = 4            # statements (a return, break or continue counted) a jump repeats instead of a goto
+                    # (Emitter.repeat; at 1 only ways without a statement, as a lone return was before
+                    # 2026-10-22; docs/decisions.md)
 
 
 def innermost_loop(frames):
@@ -649,6 +849,40 @@ def _continues_inside(stmts):
     return False
 
 
+def drop_dead(stmts):
+    """Statements after one that control never falls out of go, up to the next label or case: nothing
+    reaches them (an if whose arms both jump, then the jump to where the if would have gone on). One
+    that holds a label stays: a goto may enter it."""
+    out, dead = [], False
+    for s in stmts:
+        if isinstance(s, (C.Label, C.Case)) or _labels_in(s):
+            dead = False
+        if dead:
+            continue
+        if isinstance(s, C.If):
+            s.then = C.Block(drop_dead(_list(s.then)))
+            if s.orelse is not None:
+                s.orelse = C.Block(drop_dead(_list(s.orelse)))
+        elif isinstance(s, (C.For, C.While, C.DoWhile, C.Switch)):
+            s.body = C.Block(drop_dead(_list(s.body)))
+        out.append(s)
+        dead = ends([s])
+    return out
+
+
+def _labels_in(s):
+    """Whether a statement holds a label (a goto's target) inside it."""
+    if isinstance(s, C.Label):
+        return True
+    if isinstance(s, C.If):
+        return _labels_in(s.then) or (s.orelse is not None and _labels_in(s.orelse))
+    if isinstance(s, (C.For, C.While, C.DoWhile, C.Switch)):
+        return _labels_in(s.body)
+    if isinstance(s, C.Block):
+        return any(_labels_in(x) for x in s.body)
+    return False
+
+
 def prune_labels(stmts, wanted):
     """Labels no goto names go; goto L directly before L: goes."""
     def walk(xs):
@@ -705,8 +939,14 @@ def structure(fn, run=None):
     missing = [b for b in range(len(blocks)) if b not in em.emitted and b in em.shape.idom]
     if missing:                             # (reachable but not emitted: leave the function as it is)
         return fn
-    out = flatten_else(out)
-    out = prune_labels(out, gotos_in(out))     # (before the loops are refined: a label first in a loop
-    out = refine_loops(out)                    # body hides its test)
+    out, wanted = flatten_else(out), None
+    while True:                             # (code a pruned label led to can be dead in turn; before the
+        out = drop_dead(out)                # loops are refined: a label first in a loop body hides its test)
+        named = gotos_in(out)
+        out = prune_labels(out, named)
+        if named == wanted:
+            break
+        wanted = named
+    out = refine_loops(out)
     fn.body.body[:] = head + out
     return fn

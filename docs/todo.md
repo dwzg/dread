@@ -102,7 +102,38 @@ its sources.
   gotos 12,950 -> 12,228 (FreeRTOS has few switches); on a private firmware's readable C, which has
   many switches, the gotos fell by more than half. The gate accepts the same functions as before on
   nine builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; the
-  private firmware). Not yet: a loop with exits to several places beyond the one taken for its break.
+  private firmware).
+  The gotos left, by cause (2026-10-22; each goto by the block it leaves and the one it goes to, on
+  the emitter's own facts: dominators, post-dominators, natural loops, strongly connected components;
+  12,228 over the 39 builds): 8,267 (68 %) in code that never reaches a return, the tasks' endless
+  loops, where no block had a post-dominator and so no branch a join; 2,978 (24 %) to a block several
+  ways share that the first arm reaching it had taken (1,043 of them to at most three statements and
+  a return); 495 (4 %) to such a block placed where its ways meet; 438 (4 %) in loops (exits to more
+  places than the one taken for break, the block after a loop placed elsewhere, a break or continue
+  of an outer loop); 50 (0.4 %) irreducible flow. Changed the same day: the post-dominators count the
+  jumps back to the head of each cycle that nothing leaves as its ends (structure.endless_ends); a
+  jump repeats a way without a branch of at most four statements (structure.TAIL, a return, break or
+  continue counted) that ends in a return or a statement that never ends, where the code at the jump
+  falls off to, at the loop's head or after it (Emitter.repeat; before, only a lone return); where a
+  branch's ways never meet, the blocks it dominates that several ways reach follow the if (Ramsey's
+  merge nodes; after every if they cost more gotos than they saved, docs/decisions.md); a region
+  never emits a block that a region around it emits later (stops), and an arm without a join ends at
+  the region's follow; a loop's follow is the nearest block the ways from all its exits pass (exits
+  that only return aside), else the target most exits go to; the statements nothing reaches go. On
+  the 39 builds gotos 12,226 -> 1,401 (a change of the clean-up had taken 2 of the 12,228), fewer in
+  every build (GCC -O2's keep the most, 50-80; GCC -Os 25-51, clang 22-37, GCC -O0 11, MSP430 13),
+  the readable lines 368,347 -> 340,305; the stage takes 0.07 s instead of 0.03 s for GCC -Os's 329
+  functions. What is left, by cause: 1,183 (84 %) to blocks several ways share whose code branches
+  before it returns (conditions a compiler threaded into a lattice), 64 (5 %) to longer ways without
+  a branch, 115 (8 %) in loops, 31 (2 %) irreducible flow, 8 to loops entered from several places.
+  tests/test_structure.py: besides the 800 random functions that return, 400 whose flow mostly never
+  returns (their fuel runs out into bail(), which leaves by longjmp, also from loops that never end;
+  called through setjmp), compiled before and after, the same results, every way of repeating used; a
+  shape for each change. The gate accepts the same functions as before on the eight builds (gizmo a32
+  35, m3 36, m4 44, rv32 31; FreeRTOS GCC -Os 316, clang -O2 275, RISC-V GCC -Os 251, GCC -O0 353).
+  Not yet: a small shared region that branches repeated (an error block with its assert), conditions
+  a compiler threaded into a lattice of shared blocks merged back (xTaskDelayUntil's; "No More
+  Gotos"' condition-based refinement).
 - [x] **Calls and parameters.** Parameters and a result as dread.regflow and dread callconv measured
   them. Done when the signatures are the measured conventions and the gate accepts as many as
   before. Done 2026-10-21 (dread.tidy trim_calls and params, readable.Context): a call passes the
