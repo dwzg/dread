@@ -557,13 +557,84 @@ may stay lifted.
 
 ## Compiler diversity (the user, 2026-10-20: first, on ARM/Cortex-M and RISC-V)
 
-- [ ] **The whole image of FreeRTOS RISC-V GCC -Os and Cortex-M clang -O2 differs with lifted C
+- [x] **The whole image of FreeRTOS RISC-V GCC -Os and Cortex-M clang -O2 differs with lifted C
   alone** (BUILD/lift-check/main/whole.txt of both, measure-38): the rebuilt run gets further before
   the limit than the original by the clock of code both share (RISC-V: 412 log entries against 158,
   the original printing nothing, the rebuilt "FreeRTOS Demo Start"), and whether a run agrees
   depends on how the clock falls (each half of the 258 readable functions agreed, all together not).
   Find where the clocks part (dread sysrun --log on both, the first block counted in one and not the
   other), so that the scenarios decide there for lifted and readable C alike.
+  Done 2026-10-22. Not the clock of shared code (it was the same in both runs at every entry up to
+  the first difference) but the run's rule for a wait outside it: FROZEN (2,000) blocks in a row
+  outside shared code with an event due were a wait, and the run moved the clock on to the event.
+  That counts blocks of the code the two images do not share. clang -O2: xTaskCreate's memset of a
+  new task's stack (lifted; the original's byte loop, two blocks a byte) crossed 2,000 blocks, the
+  run moved the clock 6,032 units on to timer1's event inside it and took the interrupt there; the
+  rebuilt memset (fewer blocks) went on (entry 254: vPortEnterCritical's ICSR read 4 times before
+  it in the original, 39 in the rebuilt image). RISC-V: prvQueueSetReceivingTask polls
+  xQueueSelectFromSet, all of it lifted; the rule fell at 0x8000ac2a, inside xQueueReceive's critical
+  section (mstatus.MIE clear), in the original and outside one in the rebuilt image, and the tick
+  was never asked for again (the CLINT schedules nothing more, and no shared block came): the
+  original ended "waits" at clock 861,822 having printed nothing, the rebuilt image 33 ticks later
+  at its own masked point. Now (dread.sysrun, System._stretch): code outside shared code runs in
+  stretches in which the clock stands still (a shared block, a device access or an exception ends
+  one); a stretch that ends by itself was a computation, however long; a wait is a loop, a block
+  entered again with the core's registers (general, sp, link, status, masks) as at an anchor
+  (Brent's search from FROZEN blocks on; LOOP_MAX = 200,000 blocks count as one: a busy task that
+  counts in a register); in a wait an interrupt is taken behind the first block the core takes it in
+  (a masked one behind the loop's unmask; one the loop keeps masked a whole round: on to the next
+  event, or the end). The C hook does the stretch's blocks that only count (sys_stretch). Measured on
+  the measure-38 images (the original against every lifted function rebuilt): RISC-V GCC -Os agrees
+  to the limit, 8,172 log entries each (before: entry 158, both runs ending early); clang -O2 agrees,
+  533 entries (before: entry 254); GCC -Os and -O0 on the M3 still agree (2,466 and 906,650 entries,
+  as before). The C hook's outcomes are the Python hook's byte for byte on all four. Two runs took:
+  RISC-V 1.3 s ending early, now 2.4 s to the limit (40 s with the stretches in Python), GCC -Os 11.2
+  -> 0.8 s, clang -O2 0.6 -> 0.2 s, -O0 273 -> 107 s. Of the waits of the RISC-V runs, 346 and 360
+  were loops, 14 of the original's LOOP_MAX (the coherence tester's busy loop, whose counter stays in
+  a5 in the original's code; the C's loop repeats its registers): both took the tick somewhere in it.
+  Gizmo's lift checks accept what they did, the whole image agreeing on every build (gizmo-mips's
+  check stops at 'Mips' object has no attribute 'new_uc' before and after: MIPS is paused). All 38
+  benchmark builds with a whole image of measure-38 or later, the same comparison with HEAD's rule
+  and with this one: 18 differed with lifted C alone, now 3, which differed before at the same entry
+  and for a reason of their own (the item after the next). Most that differed had ended early in
+  both images, in an assertion's spin; now the M3's clang -Os builds (12 to 19 and the host's, M4F
+  too) and GCC -O2 builds (12, 14 and the host's; 9, 10 and 13 still spin, alike) run to the limit
+  with 1.4 to 2.5 million log entries, and the RISC-V builds with about 8,150. dread readable
+  --check on copies of RISC-V GCC -Os and clang -O2: 252 of 259 and 275 of 286 readable, the whole
+  image agreeing on both (HEAD: the same functions, "the whole image differs with lifted C alone:
+  not decisive"). Left: clang -O2's runs still end early (next item); the M3 runs that now reach
+  the limit take 95 to 141 s a pair (about a second when they spun early), 80 % of it in the Python
+  peripheral hook (vPortEnterCritical reads ICSR on every critical section: with the kernel outside
+  the clock, 125,000 accesses a million units, nearly all of the clock): a C path for model reads
+  without side effects is the next performance item there.
+- [ ] **An interrupt held off by a mask that code outside shared code lifts waits for the next
+  shared block.** FreeRTOS clang -O2 with every lifted function rebuilt: both runs assert in
+  GenQTest.c line 683 at 93,560 units ("ASSERT!", then "spins"), where the original alone runs to
+  the limit. vTaskResume pends PendSV in its critical section (BASEPRI masks it), vPortExitCritical
+  (lifted) lowers BASEPRI, and the run takes PendSV only behind vAssertCalled's first block (the
+  first shared one): eTaskGetState already saw the high-priority task ready. The original's code
+  of the rewritten functions is outside the clock as the C is, so both images do it alike, and the
+  scenario decides only over its first 94,000 units. A rule tried on a copy (2026-10-22): an
+  interrupt asked for while the core masks it (noted where it is asked for, a device access, an
+  event, an exception's entry or return: the masks are the same in both images there) is taken
+  behind the first block in which the core takes it, outside shared code too. The instruction that
+  unmasks ends its translation block on Unicorn 2.1.4 (seen for msr basepri, cpsie, cpsid and isb on
+  the M3, cpsie and msr cpsr_c in ARM state, CSR writes on RISC-V; MSP430's own engine not checked),
+  so that is right behind it in both images. Both images agreed on all four builds, but the runs
+  changed: clang -O2 passed GenQTest and asserted in EventGroupsDemo.c line 304 at 1.6 million units
+  (2,371 log entries against 533), GCC -Os and -O0 on the M3 asserted in TimerDemo.c line 929 at 2.4
+  and 2.5 million (they ran to the limit before, -Os with 2,466 entries: after the 67th only the
+  1,200 ticks, PendSV taken three times in all; -O0 with 906,650), RISC-V unchanged. More
+  faithful interrupts expose the larger distortion: the kernel outside the clock takes no time, and
+  the demo's timing tests assert (lift.system_check's docstring). Not kept: which runs serve the
+  comparison better is a question of its own (a run that asserts early compares little; one that
+  idles to the limit compares little more).
+- [ ] **Three RISC-V builds' whole images differ with lifted C alone for reasons of their own**
+  (the only ones left of the benchmark's 38 once the wait rule was fixed, 2026-10-22; they differed
+  at the same entries before): the rebuilt clang -Os and clang 14 images print "Stack overflow in
+  SetB" (entries 355 and 359; a task's stack too small for the C's frames, which is what the whole
+  image is there to find), and GCC 10's asserts (line 1367) at entry 32 and then reads unmapped
+  memory (0xfffffb85) while it prints the file name. Not traced.
 
 Real firmware comes from many compilers, versions and options; DREAD was tested on one version of
 each. CI on Ubuntu 24.04's GCC 13, binutils 2.42 and clang 18 found two gaps of DREAD's own that

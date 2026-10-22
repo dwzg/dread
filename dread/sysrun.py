@@ -13,23 +13,32 @@ that are the same in both images (the original's code of the functions rewritten
 code with the branches left at moved functions' old entries, do not count), plus ACCESS units for
 every device access (the accesses must be the same in both anyway, and a rewritten function that
 polls a register still lets time pass). So a model that acts after N units acts at the corresponding
-place in both runs, however many instructions the C takes. A wait in code that is not shared (a
-rebuilt idle loop waiting for an interrupt: FROZEN blocks in a row with an event due, or a chunk in
-which the clock does not move at all) moves the clock to the next scheduled event, in both runs
-alike. Interrupts are taken behind a block of shared code, or, after such a wait, at once: the code
-it interrupts is not shared, so there is no common place to wait for. A controller with priorities
-(dread.models.nvic) decides with the core's masks whether one is taken (may_take), so a pending one
-waits while masked and comes behind the first shared block after the mask drops, or at once behind
-the return of the handler that held it off. svc raises its exception (Cortex-M: SVCall) at once. The device log, every
+place in both runs, however many instructions the C takes. Code that is not shared runs in stretches
+in which the clock stands still (System._stretch). A stretch that ends by itself (at shared code, a
+device access, an exception) was a computation, however many blocks it took: the two images' code
+for it differs, so nothing may depend on its length. One that does not end is a wait the clock
+cannot see (a rebuilt idle loop, a task polling memory, a busy task only an interrupt preempts):
+from FROZEN blocks on the run looks for a loop in it, a block entered again with the core's registers
+as at an earlier entry (System._loops; LOOP_MAX blocks count as one too), and then moves the clock
+to the next scheduled event, in both runs alike. Until 2026-10-22 FROZEN blocks in a row were a
+wait: the rule fell inside a long computation of one image's code and not the other's, and in a loop
+at a block where the core masked the interrupt, which was not asked for again (FreeRTOS on RISC-V
+GCC -Os and Cortex-M clang -O2 differed with lifted C alone). Interrupts are taken behind a block of
+shared code, or, in such a wait, behind the first block in which the core takes them (at once, or
+behind the instruction that unmasks them): the code it interrupts is not shared, so there is no
+common place to wait for. A controller with priorities (dread.models.nvic) decides with the core's
+masks whether one is taken (may_take), so a pending one waits while masked and comes behind the
+first shared block after the mask drops, or at once behind the return of the handler that held it
+off. svc raises its exception (Cortex-M: SVCall) at once. The device log, every
 peripheral access with its value in order plus what the models note (bytes sent), is what is
 compared; the functions entered are information (a rewritten function enters what it calls in its
 own way).
 
 A run ends at its limit (shared-clock units), when the scenario's end condition holds (text a model
 sent; checked at the store that completes it, so both runs stop at the same place), when the
-firmware waits with nothing scheduled (QUIET units without a new block or log entry, or a chunk
-without any clock: "polls" when it keeps reading one register, "waits" when it accesses no device at
-all), or at a fault. A read repeated without
+firmware waits with nothing scheduled (QUIET units without a new block or log entry, or a wait
+outside shared code with no interrupt it could take: "polls" when it keeps reading one register,
+"waits" when it accesses no device at all), or at a fault. A read repeated without
 anything between is one log entry with its count. A chunk (the emulator's run between such checks)
 is CHUNK blocks and ends where a block starts, before the block counts, so that its size changes
 nothing the clock counts.
@@ -38,9 +47,12 @@ The block hook is the run's hot path (a FreeRTOS run of 30 million clock units e
 blocks). On Unicorn a hook in C (dread.fasthooks, dread_sysblock) does the blocks that only move the
 clock: a known block of shared code with nothing due, a function entered again (counted there),
 and one behind which the masked interrupt's answer still holds (the registers it depends on read as
-when it was given: the layer's mask_registers). Every other block goes to System._on_block, which
-keeps the rules; both read and write one state (System.st). Elsewhere (DREAD's own engines)
-_on_block does every block.
+when it was given: the layer's mask_registers); and the known blocks of a stretch outside shared
+code that only count (sys_stretch: before FROZEN, not at the anchor or with other registers there,
+in a wait while the masked answer holds). Every other block goes to System._on_block, which keeps
+the rules; both read and write one state (System.st). Elsewhere (DREAD's own engines) _on_block
+does every block. (FreeRTOS's RISC-V GCC -Os image with every lifted function rebuilt: a run to the
+limit took 20 s with its stretches' blocks in Python, 1.2 s with them in C.)
 
 Scenarios are tables of the target's [scenarios] section:
 
@@ -79,7 +91,9 @@ CHUNK = 50_000           # blocks per emu_start (stop rules are checked between 
 # (FreeRTOS's main_full rebuilt: 106 units behind at the limit, two device accesses more in its log)
 ACCESS = 8               # shared-clock units a device access takes
 QUIET = 200_000          # shared-clock units without a new block or a device access: the firmware waits
-FROZEN = 2_000           # blocks in a row outside shared code with an event due: a wait the clock cannot see
+FROZEN = 2_000           # blocks in a row outside shared code without a device access (a stretch in which
+                         # the clock stands still) from which the run looks for a loop there (System._loops)
+LOOP_MAX = 200_000       # blocks of such a stretch after which it counts as a wait without a loop found
 SPIN = 1_000_000         # shared-clock units without progress while an interrupt waits, masked: the run spins
 LIMIT = 20_000_000       # default shared-clock limit
 
@@ -104,6 +118,9 @@ class _State:
         self.next_event, self.limit, self.spin = NO_EVENT, LIMIT, SPIN
         self.frozen = self.due = self.irq_check = self.observers = self.memo = 0
         self.chunk = CHUNK                  # blocks the current chunk may still enter
+        # the stretch outside shared code (System._stretch): see SysState
+        self.stretch_from, self.loop_max, self.anchor_next = FROZEN, LOOP_MAX, FROZEN
+        self.waited = self.anchor = self.resume = self.waiting = 0
 
 
 def _field(name, kind=int):
@@ -203,7 +220,13 @@ class System:
         self.progress = 0                   # the clock at the last device access, model note, interrupt taken
                                             # or new block of shared code: the same in both images
         self.spin_check = 0                 # the clock from which the spin rule looks again (_on_block)
-        self.frozen = 0                     # blocks in a row outside shared code
+        self.frozen = 0                     # blocks of the current stretch: in a row outside shared code,
+                                            # no device access between (_on_block)
+        self.jump = self.stuck = False      # what _stretch asks run() for: the next event; the end
+        self.state_regs = self._state_registers()
+        self.anchor_vals = [0] * len(self.state_regs)   # their values at the anchor (st.anchor + 1)
+        if self.fast is not None:
+            self.fast.set_state_registers(self.state_regs)
         # A stop asked for by a peripheral access, taken where the next block starts: stopped inside a
         # memory hook, Unicorn leaves pc on the accessing instruction (a store done, a load not), and
         # going on from pc would repeat the access (dread.engines)
@@ -259,6 +282,89 @@ class System:
     def is_shared(self, address):
         i = bisect.bisect_right(self.excluded_lo, address) - 1
         return not (i >= 0 and address < self.excluded[i][1])
+
+    # ---- waits outside shared code ----
+
+    def _state_registers(self):
+        """The core registers _loops compares: the layer's general registers, the stack pointer, the
+        link register, the status register and what the interrupt masks are read from."""
+        arch, layout = self.arch, self.layout
+        regs = [arch.reg_id(n) for n in arch.general_regs()] + [layout.sp]
+        if layout.lr is not None:
+            regs.append(layout.lr)
+        status = getattr(arch, "status_reg", None)
+        if status is not None:
+            regs.append(status())
+        masks = getattr(arch, "mask_registers", None)
+        if masks is not None:
+            regs += [r for priorities in (True, False) for r, _ in masks(priorities)]
+        return list(dict.fromkeys(regs))
+
+    def _loops(self, address, n):
+        """Whether the stretch outside shared code (n blocks so far) has come back to where it was: a
+        block entered again with the core's registers (_state_registers) as at an anchor, a block
+        entered earlier in the stretch. The anchor moves to the current block at FROZEN, 2 FROZEN,
+        4 FROZEN ... blocks (Brent's cycle search), so that it comes to lie inside a loop the stretch
+        ends in, and a loop of fewer blocks than the anchor's span is found within one round.
+        Memory is not compared: a loop that counts in memory alone (a busy task's counter) is found as
+        well, and so would be a computation whose progress lies in memory alone while every register
+        repeats (not seen; not confirmed that none exists). A stretch of LOOP_MAX blocks counts as a
+        loop all the same: a busy loop that counts in a register, or a computation too long to tell."""
+        if n >= LOOP_MAX or self._came_round(address):
+            return True
+        st = self.st
+        if n >= st.anchor_next:
+            read = self.regs.reg_read
+            self.anchor_vals = [read(r) for r in self.state_regs]
+            if self.fast is not None and st.nregs >= 0:     # (the C hook's copy)
+                st.anchor_vals[:len(self.anchor_vals)] = self.anchor_vals
+            st.anchor, st.anchor_next = address + 1, 2 * n
+        return False
+
+    def _came_round(self, address):
+        """Whether the block at `address` is entered with the anchor's registers (in C:
+        sys_at_anchor)."""
+        if self.st.anchor != address + 1:
+            return False
+        read = self.regs.reg_read
+        return all(read(r) == v for r, v in zip(self.state_regs, self.anchor_vals))
+
+    def _stretch(self, uc, address):
+        """A block outside shared code, where the clock stands still: st.frozen counts the blocks of
+        the stretch (since the clock last moved). A stretch that ends by itself (at shared code, a
+        device access, an exception) was a computation, however long: the two images' code for it
+        differ, so nothing in it may depend on how many blocks it takes. From FROZEN blocks on the
+        run looks for a loop (_loops); found, the stretch is a wait the clock cannot see (a rebuilt
+        idle loop, a task polling memory, a busy task only an interrupt preempts), and behind every
+        block from then on: an interrupt a controller asks for is taken when the core takes it
+        (behind the instruction that unmasks it, which ends its block); while one waits, masked, the
+        loop goes on until it comes round (or LOOP_MAX blocks) without unmasking it. Then, or with
+        none wanted, the run moves the clock on to the next event (run(): jump) and takes what it
+        brings; with nothing scheduled the firmware waits for good (stuck: the run ends)."""
+        st = self.st                        # (in C: sys_stretch does the blocks that only count)
+        if st.resume == address + 1 and st.frozen:
+            st.resume = 0                   # the block a stop came in front of, run now: no second
+            return                          # look (it would find the anchor's registers again)
+        st.frozen += 1
+        n = st.frozen
+        if n == 1:
+            st.waiting, st.anchor, st.resume, st.anchor_next = 0, 0, 0, FROZEN
+        if not st.waiting:
+            if n < FROZEN or not self._loops(address, n):
+                return
+            st.waiting, st.waited = 1, n
+        if st.irq_check:
+            self._check_interrupts(uc)
+            if self.deliver:
+                return
+            if st.irq_check and n - st.waited < LOOP_MAX and not (n > st.waited and self._came_round(address)):
+                return                      # one waits, masked: the loop may still unmask it
+        if st.next_event != NO_EVENT:
+            self.jump = True
+        else:
+            self.stuck = True
+        st.resume = address + 1
+        uc.emu_stop()
 
     # ---- for models ----
 
@@ -356,9 +462,7 @@ class System:
                 self.order.append(entry)
             self.entered[entry] += 1
         if not self.is_shared(addr):
-            st.frozen += 1                  # a wait in code built from C (a rebuilt idle loop): stop the
-            if st.frozen >= FROZEN and st.next_event != NO_EVENT:          # chunk, the run moves the
-                uc.emu_stop()                                               # clock on to the event
+            self._stretch(uc, addr)
         else:
             st.frozen = 0
             if fresh:
@@ -378,23 +482,29 @@ class System:
             if st.clock >= st.next_event or st.clock >= st.limit:
                 uc.emu_stop()
             if st.irq_check:
-                waiting = self.irq_waiting
-                if waiting is None or waiting[0] != self.irq_epoch or waiting[2] != self._masks(waiting[1]):
-                    wanted = self._wanted()
-                    st.memo = 0
-                    if wanted is None:
-                        st.irq_check, self.irq_waiting = 0, None
-                    else:
-                        masks = self._masks(wanted[0])
-                        if self._may_take(*wanted, masks=masks):
-                            self.deliver, self.irq_waiting = True, None
-                            uc.emu_stop()
-                        else:
-                            self.irq_waiting = (self.irq_epoch, wanted[0], masks)
-                            registers = getattr(self.arch, "mask_registers", None)
-                            if self.fast is not None and registers is not None:     # (the C hook's copy)
-                                self.fast.set_memo(registers(getattr(wanted[0], "may_take", None) is not None),
-                                                   self.regs.reg_read)
+                self._check_interrupts(uc)
+
+    def _check_interrupts(self, uc):
+        """Behind a block where an interrupt may be taken: stop the run for it (deliver) when a
+        controller asks for one and the core takes it now."""
+        st = self.st
+        waiting = self.irq_waiting
+        if waiting is None or waiting[0] != self.irq_epoch or waiting[2] != self._masks(waiting[1]):
+            wanted = self._wanted()
+            st.memo = 0
+            if wanted is None:
+                st.irq_check, self.irq_waiting = 0, None
+            else:
+                masks = self._masks(wanted[0])
+                if self._may_take(*wanted, masks=masks):
+                    self.deliver, self.irq_waiting = True, None
+                    uc.emu_stop()
+                else:
+                    self.irq_waiting = (self.irq_epoch, wanted[0], masks)
+                    registers = getattr(self.arch, "mask_registers", None)
+                    if self.fast is not None and registers is not None:     # (the C hook's copy)
+                        self.fast.set_memo(registers(getattr(wanted[0], "may_take", None) is not None),
+                                           self.regs.reg_read)
 
     def _owner(self, address):
         i = bisect.bisect_right(self.owned_lo, address) - 1
@@ -407,6 +517,7 @@ class System:
         who = model.name if model else "-"
         st = self.st
         st.clock += ACCESS
+        st.frozen = 0                       # the clock moved: a stretch outside shared code ends
         self.last_access = st.progress = st.clock
         if access == UC_MEM_WRITE:
             self.log.append(("write", who, addr, size, value & mask))
@@ -455,6 +566,7 @@ class System:
         uc, arch = self.uc, self.arch
         self.limit = limit
         self.st.observers, self.st.spin = 1 if self.observers else 0, SPIN
+        self.st.stretch_from, self.st.loop_max = FROZEN, LOOP_MAX
         self.pending_input = sorted((int(t), str(m), d) for t, m, d in self.scenario.get("input", ()))
 
         def word(address):
@@ -472,7 +584,7 @@ class System:
             controller, number = wanted
             controller.taken(number)
             self.interrupts[number] += 1
-            self.progress = self.clock
+            self.progress, self.frozen = self.clock, 0      # (a stretch outside shared code ends)
             self.log.append(("interrupt", controller.name, number))
             vectors = controller.vector_base() if hasattr(controller, "vector_base") else self.image.vectors
             cause = controller.core_cause(number) if hasattr(controller, "core_cause") else None
@@ -482,7 +594,7 @@ class System:
             return pc
         how = None
         while True:
-            self.new, clock_before = 0, self.clock
+            self.new = 0
             error = None
             try:
                 self.st.chunk = CHUNK
@@ -493,7 +605,7 @@ class System:
                 raise self.callback_error
             back = arch.exception_return(uc, word)
             if back is not None:                # the M profile's return from an exception, finished here
-                self.fault, pc = None, back
+                self.fault, pc, self.frozen = None, back, 0
                 for c in self.controllers:
                     c.returned()
                 for o in self.observers:
@@ -507,7 +619,7 @@ class System:
                 break
             pc = arch.resume_address(uc)
             if self.syscall and hasattr(arch, "enter_syscall"):    # a trap the layer takes alone (ecall)
-                self.syscall = False
+                self.syscall, self.frozen = False, 0
                 self.log.append(("syscall",))     # (not its address: code that moved is elsewhere)
                 self._entering(pc)
                 pc = arch.enter_syscall(uc, pc, word, write_word)
@@ -532,14 +644,13 @@ class System:
             if self.clock >= limit:
                 how = "limit: %d units of shared clock" % limit
                 break
-            frozen = self.clock == clock_before and self.next_event is not None
-            if frozen:
-                self.clock = self.next_event        # a wait outside shared code: on to the next event
+            jump, stuck, self.jump, self.stuck = self.jump, self.stuck, False, False
+            if jump:
+                self.clock = self.next_event        # a wait outside shared code (_stretch): on to the next event
             self.service()
-            if frozen:                              # and no shared block behind which to take its interrupt
-                self.frozen = 0
-                pc = take(pc)
-            if self.next_event is None and (self.clock == clock_before or self.clock - self.last_new >= QUIET):
+            if jump:                                # and no shared block behind which to take its interrupt:
+                pc = take(pc)                       # at once, or behind the first block the core takes it in
+            if self.next_event is None and (stuck or self.clock - self.last_new >= QUIET):
                 if self.log and self.log[-1][0] == "read" and self.clock - self.last_access < QUIET:
                     how = "polls: register 0x%x read %d times in a row, nothing scheduled, pc 0x%x" % (
                         self.log[-1][2], self.log[-1][5], pc & ~1)

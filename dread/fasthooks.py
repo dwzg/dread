@@ -173,6 +173,7 @@ class Hooks:
 
 
 NO_EVENT = (1 << 63) - 1            # SysState.next_event when nothing is scheduled
+SYS_REGS = 64                       # registers the loop search of a stretch can compare (SYS_REGS in C)
 
 BLOCK_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_void_p)
 
@@ -187,7 +188,11 @@ class SysState(ctypes.Structure):
                 ("memo_vals", ctypes.c_uint32 * 4),
                 ("known", Set), ("entry_set", Set), ("entered", Set),
                 ("excl_lo", ctypes.c_void_p), ("excl_hi", ctypes.c_void_p), ("excl_n", ctypes.c_uint64),
-                ("reg_read", ctypes.c_void_p), ("python", ctypes.c_void_p), ("fast", ctypes.c_int64)]
+                ("reg_read", ctypes.c_void_p), ("python", ctypes.c_void_p), ("fast", ctypes.c_int64),
+                ("stretch_from", ctypes.c_int64), ("loop_max", ctypes.c_int64), ("anchor_next", ctypes.c_int64),
+                ("waited", ctypes.c_int64), ("anchor", ctypes.c_uint64), ("resume", ctypes.c_uint64),
+                ("waiting", ctypes.c_int32), ("nregs", ctypes.c_int32),
+                ("regs", ctypes.c_int32 * SYS_REGS), ("anchor_vals", ctypes.c_uint32 * SYS_REGS)]
 
 
 class SysHooks:
@@ -218,6 +223,16 @@ class SysHooks:
                                         ctypes.cast(ctypes.byref(s), ctypes.c_void_p), 1, 0)
         if status:
             raise OSError("uc_hook_add failed (%d)" % status)
+
+    def set_state_registers(self, registers):
+        """The registers the loop search of a stretch compares (more than SYS_REGS: Python compares)."""
+        s = self.state
+        if len(registers) > SYS_REGS:
+            s.nregs = -1
+            return
+        for i, reg in enumerate(registers):
+            s.regs[i] = reg
+        s.nregs = len(registers)
 
     def set_excluded(self, ranges):
         """The code that is not shared, as sorted [(lo, hi), ...]."""

@@ -313,11 +313,15 @@ void dread_init(state_t *st)
  *
  * Nearly every block of a system run is a known block of shared code with nothing due: the clock
  * moves on by its size, and that is all (79 % of a FreeRTOS run's 3.4 million blocks; with the
- * entries of functions counted here and the masked interrupt's answer compared here, 99 %). This
- * hook does those and calls the Python hook (System._on_block) for every other block, which keeps
- * the rules in one place; the state both read and write is sys_t. */
+ * entries of functions counted here and the masked interrupt's answer compared here, 99 %). With
+ * most functions rebuilt, most blocks lie outside shared code instead, in stretches in which the
+ * clock stands still (System._stretch): the blocks of a stretch that decide nothing are done here
+ * too (sys_stretch). This hook calls the Python hook (System._on_block) for every other block, which
+ * keeps the rules in one place; the state both read and write is sys_t. */
 
 typedef void (*block_fn)(void *uc, uint64_t address, uint32_t size, void *user);
+
+#define SYS_REGS 64
 
 typedef struct {
     int64_t clock, progress, spin_check, next_event, limit, spin;  /* next_event INT64_MAX: none */
@@ -336,6 +340,15 @@ typedef struct {
     reg_rw_fn reg_read;
     block_fn python;
     int64_t fast;                   /* blocks this hook did alone */
+    /* the stretch outside shared code (System._stretch, _loops) */
+    int64_t stretch_from, loop_max; /* sysrun's FROZEN and LOOP_MAX */
+    int64_t anchor_next;            /* the stretch's block count at which the anchor moves on */
+    int64_t waited;                 /* the block count at which the stretch was found a wait */
+    uint64_t anchor, resume;        /* + 1: the anchor's block, the block a stop came in front of; 0: none */
+    int32_t waiting;                /* the stretch is a wait */
+    int32_t nregs;                  /* registers the loop search compares; -1: more than this hook holds */
+    int32_t regs[SYS_REGS];
+    uint32_t anchor_vals[SYS_REGS]; /* their values at the anchor */
 } sys_t;
 
 static int sys_shared(const sys_t *st, uint64_t address)
@@ -364,12 +377,59 @@ static int sys_masks_hold(void *uc, sys_t *st)
     return 1;
 }
 
+/* Whether the block at address is entered with the anchor's registers (System._came_round). */
+static int sys_at_anchor(void *uc, uint64_t address, sys_t *st)
+{
+    if (st->anchor != address + 1)
+        return 0;
+    for (int i = 0; i < st->nregs; i++) {
+        uint64_t v = 0;
+        st->reg_read(uc, st->regs[i], &v);
+        if ((uint32_t)v != st->anchor_vals[i])
+            return 0;
+    }
+    return 1;
+}
+
+/* A known block outside shared code: done here (1) when System._stretch would only count it, else
+ * left to it (0). Keep the two alike. */
+static int sys_stretch(void *uc, uint64_t address, sys_t *st)
+{
+    if (st->resume == address + 1 && st->frozen) {
+        st->resume = 0;             /* the block a stop came in front of, run now */
+    } else {
+        int64_t n = (int64_t)st->frozen + 1;
+        if (n == 1) {
+            st->waiting = 0;
+            st->anchor = st->resume = 0;
+            st->anchor_next = st->stretch_from;
+        }
+        if (!st->waiting) {
+            if (n >= st->stretch_from && (st->nregs < 0 || n >= st->loop_max || n >= st->anchor_next
+                                          || sys_at_anchor(uc, address, st)))
+                return 0;
+        } else if (!st->irq_check || !sys_masks_hold(uc, st) || st->nregs < 0 || n - st->waited >= st->loop_max
+                   || (n > st->waited && sys_at_anchor(uc, address, st))) {
+            return 0;
+        }
+        st->frozen = (int32_t)n;
+    }
+    if (set_get(&st->entry_set, address))
+        set_put(&st->entered, address, set_get(&st->entered, address) + 1, 0);
+    st->chunk--;
+    st->fast++;
+    return 1;
+}
+
 /* UC_HOOK_BLOCK */
 void dread_sysblock(void *uc, uint64_t address, uint32_t size, sys_t *st)
 {
     if (!st->observers && !st->due && st->chunk > 0) {
         uint32_t known = set_get(&st->known, address);
-        if (known && size < known && sys_shared(st, address)) {
+        int shared = known && size < known && sys_shared(st, address);
+        if (known && size < known && !shared && sys_stretch(uc, address, st))
+            return;
+        if (shared) {
             int64_t clock = st->clock + size;
             if ((clock - st->progress < st->spin || clock < st->spin_check)
                     && clock < st->next_event && clock < st->limit

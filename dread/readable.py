@@ -479,11 +479,11 @@ def check(target, image, names=None, out=print, jobs=None):
     baseline = whole([]) if found else None
     if baseline:
         # The image with lifted C alone differs already (the lift check reports it and keeps its
-        # functions: FreeRTOS on RISC-V GCC -Os and Cortex-M clang -O2, where the rebuilt runs get
-        # further before the limit than the original, by the clock of code both share). There the
-        # scenarios cannot tell readable C from lifted C: whether a run agrees depends on how the
-        # clock falls (the halves of RISC-V's 258 readable functions each agreed, all together not),
-        # so the function-level runs decide, as for lifted C
+        # functions). There the scenarios cannot tell readable C from lifted C, so the function-level
+        # runs decide, as for lifted C. (FreeRTOS on RISC-V GCC -Os and Cortex-M clang -O2 until
+        # 2026-10-22: the system run's wait rule counted blocks of code the images do not share and
+        # fell at other places in them, so whether a run agreed depended on how it fell: the halves
+        # of RISC-V's 258 readable functions each agreed, all together not; dread.sysrun.)
         out("the whole image differs with lifted C alone (%s): the scenarios decide nothing here" % baseline)
         whole_note = "differs with lifted C alone: not decisive"
         found = None

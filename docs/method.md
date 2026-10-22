@@ -104,8 +104,10 @@ register of its caller it reads, one it does not restore). The benchmark runs it
 
 Both images start from reset with models of the devices and run a scenario (input at points of time,
 an end condition). Time is a clock over the code both images share, so a device acts at the same
-place in both however many instructions the C takes; interrupts are taken behind shared code. The
-device logs must agree. This is the test for what no function-level case can call or end: main
+place in both however many instructions the C takes; interrupts are taken behind shared code. Where
+the firmware waits in code that is not shared (a loop that comes back to the same registers), the
+clock moves on to the next event and the interrupt comes where the core takes it. The device logs
+must agree. This is the test for what no function-level case can call or end: main
 loops, reset and interrupt handlers.
 
 ## 9. Lifting: everything that can be C, built from C
@@ -164,6 +166,12 @@ Each of these cost time once and is now a check or a rule in a tool:
 - A linker script symbol has no type: the ARM linker took Thumb functions for ARM code and put stubs
   into the callers' slots. Symbols for the original are defined with their instruction set.
 - A rebuilt idle loop is not shared code: the system run must still take its interrupts.
+- A rule that counts what the two images do not share decides at different places in them: the
+  system run took FROZEN blocks in a row outside shared code for a wait, which the original's memset
+  of a task's stack crossed and the C's did not, and which fell inside a critical section of one
+  image's polling loop and outside the other's (FreeRTOS on RISC-V and clang -O2, with lifted C
+  alone). A wait is a loop now, found by its registers: where in a loop the clock moves on does not
+  matter, as long as the interrupt comes where the core takes it.
 - Most of the generator's time went into Python bookkeeping per byte, not into the emulator: profile
   before moving code into C.
 - Cases that agree on every generated input can still accept a wrong translation when no input

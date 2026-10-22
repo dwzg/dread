@@ -9,6 +9,39 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## What the system run takes for a wait outside shared code: a loop found by its registers (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Code outside shared code (the C, and the original's code of what the C replaces)
+  does not move the shared clock, so a firmware that waits there for an interrupt would wait for
+  ever: the run has to move the clock on to the next event somewhere. Until now: after FROZEN
+  (2,000) blocks in a row there with an event due. That count is of code the two images do not
+  share, and it decided at different places in them (FreeRTOS RISC-V GCC -Os and Cortex-M clang -O2
+  with lifted C alone: docs/todo.md, Compiler diversity). What is a wait?
+- **Options.** (a) A larger FROZEN: the same rule, failing on longer computations. (b) A loop: a
+  block entered again with the core's registers (general, sp, link, status, the interrupt masks) as
+  at an anchor, searched from FROZEN blocks on (Brent: the anchor moves at FROZEN, 2 FROZEN, ...),
+  memory not compared, and LOOP_MAX (200,000) blocks counting as a wait all the same. (c) As (b) with
+  memory compared (a snapshot of RAM at a register match): a proof that the code repeats itself.
+- **Choice: (b).** A computation, however long, makes progress in some register (the copy's pointer,
+  the count), so it ends by itself in both images and nothing in it depends on how many blocks each
+  image's code takes; a wait polls, and its registers repeat within a round. (c) would take a busy
+  task that counts in memory (FreeRTOS's coherence testers: their counter is a global) for a
+  computation and run it to LOOP_MAX on every tick, and costs a RAM snapshot per candidate; such a
+  loop is a wait as far as the devices can see, which is all the run compares. What (b) gets wrong:
+  a computation whose progress lies in memory alone while every register repeats at some block would
+  count as a wait (not seen; not confirmed that none exists), and one of more than LOOP_MAX blocks
+  without a device access would too (then as FROZEN did, at a hundred times the length). The rule
+  decides when time passes and when a run ends, not what is compared: a mistake of it shows as a
+  difference between the images or as runs that end early (less compared), not as a comparison that
+  lets a difference pass.
+- **Undo.** dread/sysrun.py: System._loops (the search) and FROZEN, LOOP_MAX; the C hook's copy is
+  sys_stretch and sys_at_anchor in dread/fasthooks.c. tests/test_sysrun.py's
+  test_a_wait_outside_shared_code_is_a_loop_a_computation_is_not shows what the old rule did.
+- **Status.** Done; the four FreeRTOS builds measured agree with lifted C alone, gizmo's lift checks
+  unchanged.
+
 ## Readable C against its source: clang's tree of what the compiler preprocessed (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

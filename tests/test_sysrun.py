@@ -53,6 +53,10 @@ def test_stop_rules(target):
     image = target.image()
     waits = sysrun.run_image(target, image, image.payload(), {"models": ["uart"], "limit": 3_000_000})
     assert waits.how.startswith("waits"), waits.how          # after READY without a timer: nothing comes
+    # main outside shared code (as rebuilt): its idle loop is found a loop, and with nothing scheduled
+    # the run ends there, without waiting QUIET units of shared clock
+    idle = sysrun.run_image(target, image, image.payload(), {"models": ["uart"], "limit": 3_000_000}, built=["main"])
+    assert idle.how.startswith("waits") and idle.clock < waits.clock - sysrun.QUIET, (idle.how, idle.clock)
     polls = sysrun.run_image(target, image, image.payload(), {"models": [], "limit": 3_000_000})
     assert polls.how.startswith("polls"), polls.how          # no UART: uart_putc waits for "can send"
 
@@ -442,48 +446,191 @@ limit = 50_000_000
     assert run.clock < 3_000_000, run.clock
 
 
+WAITS = r'''
+#define UART (*(volatile unsigned *)0x40004000)
+#define T_LOAD (*(volatile unsigned *)0x40000004)
+#define T_CTRL (*(volatile unsigned *)0x40000008)
+#define T_STAT (*(volatile unsigned *)0x4000000c)
+#define NVIC_ISER (*(volatile unsigned *)0xE000E100)
+volatile unsigned ticks;
+volatile unsigned char buf[6000];
+void timer_handler(void) { T_STAT = 1; ticks++; }
+__attribute__((noinline)) void fill(volatile unsigned char *p, unsigned n) { while (n--) *p++ = 0x5a; }
+__attribute__((noinline)) void wait(void) {
+    for (;;) {
+        __asm volatile ("cpsid i" ::: "memory");
+        unsigned t = ticks;
+        for (volatile int i = 0; i < 40; i++) ;
+        __asm volatile ("cpsie i" ::: "memory");
+        if (t)
+            return;
+    }
+}
+__attribute__((noreturn)) void reset(void) {
+    NVIC_ISER = 1;
+    T_LOAD = 100;
+    T_CTRL = 3;
+    fill(buf, sizeof buf);
+    UART = '0' + ticks;
+    wait();
+    UART = '0' + ticks;
+    for (;;) ;
+}
+__attribute__((section(".vectors"), used)) void (*const vectors[17])(void) = {
+    (void (*)(void))0x20004000, reset, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, timer_handler };
+'''
+
+WAITS_C = r'''#include "dread.h"
+#define ticks (*(volatile unsigned *)TICKS)
+void fill(volatile unsigned char *p, unsigned n)
+{
+    volatile unsigned *w = (volatile unsigned *)p;
+    for (n /= 4; n; n--)
+        *w++ = 0x5a5a5a5a;
+}
+void wait(void)
+{
+    for (;;) {
+        __asm volatile ("cpsid i" ::: "memory");
+        unsigned t = ticks;
+        for (volatile int i = 40; i > 0; i--)
+            ;
+        __asm volatile ("cpsie i" ::: "memory");
+        if (t)
+            return;
+    }
+}
+'''
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_wait_outside_shared_code_is_a_loop_a_computation_is_not(tmp_path):
+    """fill and wait are rebuilt from C, so their code is outside the shared clock in both images. A
+    one-shot timer comes due 100 units after it starts, which the shared code before wait does not
+    reach: only a wait may move the clock on to it. fill (a computation: 6000 blocks of the
+    original's byte loop, 1500 of the C's word loop) is none; wait (polling with interrupts masked
+    for most of each round) is one, and its interrupt is taken behind the cpsie. Until 2026-10-22
+    FROZEN blocks in a row outside shared code were a wait: the original took the tick inside fill
+    ("11"), the rebuilt image moved the clock on in wait at a block where it masked the interrupt,
+    and never asked again ("0", then "waits"); FreeRTOS on RISC-V GCC -Os and Cortex-M clang -O2
+    differed so with lifted C alone."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(WAITS)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) } > FLASH\n"
+                                   " .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "reset", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '''
+[image.main]
+original = "original/t.bin"
+base = 0x08000000
+entry = "reset"
+vectors = 0x08000000
+limit = 0x08000400
+
+[compiler]
+cross = "arm-none-eabi-"
+cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]
+
+[models.uart]
+kind = "uart"
+base = 0x40004000
+
+[models.timer]
+kind = "timer"
+base = 0x40000000
+count = 0x0
+load = 0x4
+ctrl = 0x8
+stat = 0xc
+rate = 1
+irq = 0
+periodic = false
+
+[models.nvic]
+kind = "nvic"
+
+[scenarios.run]
+until = {uart = "01"}
+limit = 2_000_000
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    ticks = next(line.split()[1] for line in (tmp_path / "config" / "symbols.txt").read_text().splitlines()
+                 if line.endswith(" ticks"))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "c.c").write_text(WAITS_C.replace("TICKS", ticks))
+    t = Target.load(str(tmp_path))
+    payload = build.build(t, t.image(), src=str(tmp_path / "src"), out=str(tmp_path / "recon"), quiet=True)
+    a, b = both(t, payload, t.scenarios["run"])
+    assert a.how.startswith("until") and b.how.startswith("until"), (a.how, b.how)
+    assert a.reports["uart"]["sent"] == "01" and a.reports["interrupts"] == {16: 1}, a.reports
+    assert sysrun.compare(a, b) == [] and a.log == b.log
+
+
 def test_the_c_block_hook_gives_the_python_hooks_outcome(monkeypatch):
-    """On Unicorn the blocks that only move the clock are done in C (dread.fasthooks, dread_sysblock):
-    every outcome is the Python hook's (how, clock, device log, reports, functions entered and their
-    order), and the C hook did most of the blocks."""
+    """On Unicorn the blocks that only move the clock are done in C (dread.fasthooks, dread_sysblock),
+    and the blocks of a stretch outside shared code that decide nothing: every outcome is the Python
+    hook's (how, clock, device log, reports, functions entered and their order), and the C hook did
+    most of the blocks. The second round counts all of gizmo but the timer's interrupt path and
+    uart_putc as rebuilt (outside shared code), so that most blocks lie in stretches and every key
+    waits in main's idle loop outside it."""
     from conftest import gizmo_dir
     from dread import fasthooks
+    from dread.program import Program
     from dread.target import Target
     t = Target.load(gizmo_dir("m4"))
     image = t.image()
+    keep = ("Reset_Handler", "TIMER_IRQHandler", "timer_irq", "uart_putc")
+    rebuilt = [fn.name for fn in Program(t, image).functions if fn.name not in keep]
 
     def outcomes():
         out, fast = {}, 0
-        for name, scenario in sorted(t.scenarios.items()):
-            scenario = dict(scenario, _name=name)
-            system = sysrun.System(t, image, image.payload(), scenario=scenario)
-            o = system.run(int(scenario.get("limit", sysrun.LIMIT)))
-            out[name] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
-            fast += system.st.fast if system.fast is not None else 0
+        for built in ((), rebuilt):
+            for name, scenario in sorted(t.scenarios.items()):
+                scenario = dict(scenario, _name=name)
+                system = sysrun.System(t, image, image.payload(), scenario=scenario, built=built)
+                o = system.run(int(scenario.get("limit", sysrun.LIMIT)))
+                out[name, len(built)] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+                fast += system.st.fast if system.fast is not None else 0
         return out, fast
     with_c, done_in_c = outcomes()
     monkeypatch.setattr(fasthooks, "_LIB", [None])          # as without a C compiler
     without, none = outcomes()
     assert with_c == without
     assert none == 0 and done_in_c > 1000, done_in_c
+    assert all(o[0].startswith("until") for o in with_c.values()), [o[0] for o in with_c.values()]
 
 
 def test_the_chunk_size_changes_nothing(monkeypatch):
     """A chunk ends where a block starts, before the block counts: every outcome with chunks of a
     few blocks is that with one chunk. (Chunks ended by the engine's count of instructions once,
     inside blocks, whose rest the next chunk counted again, at points the two images do not share:
-    FreeRTOS's main_full rebuilt ran 106 clock units behind the original at the limit.)"""
+    FreeRTOS's main_full rebuilt ran 106 clock units behind the original at the limit.) Also with
+    most of gizmo outside shared code, where the waits are decided block by block (System._stretch)."""
     from conftest import gizmo_dir
+    from dread.program import Program
     from dread.target import Target
     t = Target.load(gizmo_dir("m4"))
     image = t.image()
+    keep = ("Reset_Handler", "TIMER_IRQHandler", "timer_irq", "uart_putc")
+    rebuilt = [fn.name for fn in Program(t, image).functions if fn.name not in keep]
 
     def outcomes():
         out = {}
-        for name, scenario in sorted(t.scenarios.items()):
-            scenario = dict(scenario, _name=name)
-            o = sysrun.System(t, image, image.payload(), scenario=scenario).run(int(scenario.get("limit", sysrun.LIMIT)))
-            out[name] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+        for built in ((), rebuilt):
+            for name, scenario in sorted(t.scenarios.items()):
+                scenario = dict(scenario, _name=name)
+                o = sysrun.System(t, image, image.payload(), scenario=scenario, built=built).run(
+                    int(scenario.get("limit", sysrun.LIMIT)))
+                out[name, len(built)] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
         return out
     monkeypatch.setattr(sysrun, "CHUNK", 13)
     small = outcomes()
