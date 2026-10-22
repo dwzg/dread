@@ -269,6 +269,27 @@ def test_a_slot_read_before_it_is_written_stays_and_the_others_become_variables(
     assert "s16" not in out, out                           # (nor the s16 the raw slot would have been)
 
 
+def test_an_index_added_to_a_frame_address_counts_from_where_its_constants_come_to():
+    """sp0 - 8 + r0 + 0xfffffff4u adds the index r0 to sp0 - 20 (frame_index: RISC-V's addi, add and a
+    load with a negative offset write such sums). The slot at sp0 - 16, stored and read, lies below
+    sp0 - 8, the only frame address written in the sum or handed to g, but above sp0 - 20, where the
+    index starts: it stays in the frame, where the byte read through the index may find it (it became a
+    variable before, and that read found what nobody had stored)."""
+    got = tidy.frame_index(expr("sp0 - 64 + 0x20u + s0_1 + 0xffffffecu"))
+    assert got[0] == -52 and [(s, cparse.expr_text(t)) for s, t in got[1]] == [(1, "s0_1")]
+    assert tidy.frame_index(expr("sp0 - 8 + 0x4u")) is None and tidy.frame_index(expr("r1 + 4 + r2")) is None
+    assert tidy.frame_index(expr("sp0 - (r3 + 0x10u)"))[0] == -16      # (the index subtracted: sign -1)
+    text = FRAME.replace("    *(volatile u32 *)(sp0 - 8) = r1;  /* 0: str r1, [sp, #8] */\n",
+                         "    *(volatile u32 *)(sp0 - 16) = r1;  /* 0: str r1, [sp] */\n")
+    text = text.replace("r0 = g(r0, r1, r2, r3);", "r0 = g(r0, sp0 - 8, r2, r3);")
+    text = text.replace("    r1 = *(volatile u32 *)(sp0 - 8);  /* 6: ldr r1, [sp, #8] */\n",
+                        "    r1 = *(volatile u32 *)(sp0 - 16) + (u32)*(volatile u8 *)(sp0 - 8 + r0 + 0xfffffff4u);"
+                        "  /* 6: (made up) */\n")
+    fn = cparse.parse(text.replace(" (void)sp0;", "")).function("h")
+    assert not tidy.frame_locals(fn)
+    assert "*(volatile u32 *)(sp0 - 16)" in cparse.unparse(fn, notes=False)
+
+
 def test_a_slot_does_not_take_the_name_of_a_type_the_function_uses():
     """The slot at sp0 - 8 would be s8, which is also a type; where the function uses that type (a
     signed byte load elsewhere), its slots take the next prefix."""

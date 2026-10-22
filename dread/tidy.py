@@ -731,10 +731,72 @@ def frame_offset(e):
     return None
 
 
+def frame_index(e):
+    """(offset, terms) of a sum that adds terms other than constants to the frame's base sp0 (once, added):
+    its constants gathered into the offset, a frame address the terms ([(sign, term)]) are added to.
+    sp0 - 64 + 0x20u + s0_1 + 0xffffffecu (RISC-V's addi a5, sp, 32; add a5, a5, s0; lbu a5, -20(a5))
+    is (-52, [(1, s0_1)]): an index added to sp0 - 52, which the code reached by way of sp0 - 32. The
+    offset is taken modulo 2**32, as a signed value. None when e is no such sum."""
+    if not (isinstance(e, C.Binary) and e.op in ("+", "-")):
+        return None
+    terms = []
+
+    def flat(x, sign):
+        if isinstance(x, C.Binary) and x.op in ("+", "-"):
+            flat(x.l, sign)
+            flat(x.r, sign if x.op == "+" else -sign)
+        else:
+            terms.append((sign, x))
+    flat(e, 1)
+    bases = [s for s, x in terms if isinstance(x, C.Name) and x.id == FRAME_BASE]
+    others = [(s, x) for s, x in terms if not (isinstance(x, C.Num) and isinstance(x.value, int))
+              and not (isinstance(x, C.Name) and x.id == FRAME_BASE)]
+    if bases != [1] or not others or any(FRAME_BASE in _reads_of(x) for _, x in others):
+        return None
+    k = sum(s * x.value for s, x in terms if isinstance(x, C.Num) and isinstance(x.value, int)) % (1 << 32)
+    return (k - (1 << 32) if k >= 1 << 31 else k), others
+
+
+def frame_sums(e, found, inside=False):
+    """Into found, the offsets below sp0 of the frame addresses that sums in e add an index to
+    (frame_index, each sum whole: not the parts of a longer one). The frame passes count them as
+    addresses that leave, beside the frame addresses written inside the sums, which they counted before
+    (sp0 - 32 of the sum above): so a region starts no higher than it did, and also where the compiler
+    reached a lower address by way of a higher one."""
+    if e is None:
+        return found
+    plus = isinstance(e, C.Binary) and e.op in ("+", "-")
+    if plus and not inside:
+        got = frame_index(e)
+        if got is not None and got[0] < 0:
+            found.add(got[0])
+    for c in _children(e) if not isinstance(e, C.Assign) else [e.target, e.value]:
+        frame_sums(c, found, plus)
+    return found
+
+
 # The prefixes of frame slots made variables (frame_locals), tried in order: s36 for sp0 - 36 unless a
 # name of the function has it already, as RISC-V's saved registers s4 and s8 and the VFP's single
 # registers do; then every slot of that function takes the next prefix (sl36).
 SLOT_PREFIXES = ("s", "sl", "slot")
+SLOT_SIZES = {"u8": 1, "s8": 1, "u16": 2, "s16": 2, "u32": 4, "s32": 4, "u64": 8, "s64": 8}
+
+
+def region_start(spans, low):
+    """Where the part of the frame that addresses handed out may reach starts: at the lowest of them
+    (low), moved down over every access that reaches into it from below, until none does. spans: the
+    (offset, size) of the frame's accesses at constant offsets. GCC -Os makes room for a 16-bit local
+    by pushing a word, and hands the local's address on (FreeRTOS's vPolledQueueProducer: the push
+    stores at sp0 - 28, the local is the word's upper half at sp0 - 26): the region then starts at the
+    push, which writes part of what the address reaches. frame_locals makes variables of the slots
+    wholly below it, dread.frames one object of the rest."""
+    moved = True
+    while moved:
+        moved = False
+        for off, size in spans:
+            if off < low < off + size:
+                low, moved = off, True
+    return low
 
 
 def _types_used(fn):
@@ -747,9 +809,11 @@ def _types_used(fn):
 def frame_locals(fn):
     """The frame's words as variables of their own: *(volatile u32 *)(sp0 - 36) becomes s36, where
     every slot is accessed with one type and no two overlap. When frame addresses leave the function
-    (sp0 - 64 passed to a call, a local's address), only the slots wholly below the lowest of them
-    (outgoing stack arguments, locals nobody else is given) become variables; from there up the frame
-    stays as it is, since what the address is handed to may reach anything above it. Nothing changes
+    (sp0 - 64 passed to a call, a local's address, one an index is added to: frame_sums), only the
+    slots wholly below the lowest of them (outgoing stack arguments, locals nobody else is given)
+    become variables, and below a word that reaches into what lies above it (region_start); from there
+    up the frame stays as it is, since what the address is handed to may reach anything above it
+    (dread.frames). Nothing changes
     when an address that leaves is not a constant offset below sp0. A slot accessed with one size but
     both signs (strb, then ldrsb) becomes a variable of the unsigned type, its signed reads cast:
     (s8)s9. A slot that may be read before it is written (what earlier frames left there, a word a
@@ -784,24 +848,24 @@ def frame_locals(fn):
 
     def visit_stmt(st):
         if isinstance(st, C.Decl):
-            for d in st.items:
-                if d.name != "sp0":
-                    visit(d.init)
+            exprs = [d.init for d in st.items if d.name != "sp0"]
         elif isinstance(st, C.Asm):
-            for o in st.outputs + st.inputs:
-                visit(o.e)
+            exprs = [o.e for o in st.outputs + st.inputs]
         else:
-            for e in _stmt_all_exprs(st):
-                visit(e)
+            exprs = _stmt_all_exprs(st)
+        for e in exprs:
+            visit(e)
+            frame_sums(e, escaped)          # (an index added to a frame address: it leaves too)
         for inner in _inner(st):
             visit_stmt(inner)
     for st in fn.body.body:
         visit_stmt(st)
     if escapes[0] or not accesses:
         return False
-    sizes = {"u8": 1, "s8": 1, "u16": 2, "s16": 2, "u32": 4, "s32": 4, "u64": 8, "s64": 8}
-    if escaped:                             # (only the slots wholly below what leaves)
-        low = min(escaped)
+    sizes = SLOT_SIZES
+    if escaped:                             # (only the slots wholly below what leaves: region_start)
+        low = region_start([(off, max(sizes[t] for t in types)) for off, types in accesses.items()
+                            if all(t in sizes for t in types)], min(escaped))
         accesses = {off: types for off, types in accesses.items()
                     if all(t in sizes for t in types) and off + max(sizes[t] for t in types) <= low}
         if not accesses:
@@ -1554,6 +1618,22 @@ def _mask_keeps(cond, mask, ctx):
     t = cexpr.num_type(mask.text, mask.value, ctx)
     return t[0] >= ctx.int_bits and all(cexpr.num_type(a.text, a.value, ctx) == t and a.value & mask.value == a.value
                                         for a in arms)
+
+
+def width(e, ctx):
+    """The bits of e's type where the tree shows them (type_of_expr, promoted to int's width; an
+    operator's from its operands' as C converts them), else None."""
+    t = type_of_expr(e, ctx)
+    if t is not None:
+        return max(t[0], ctx.int_bits)
+    if isinstance(e, C.Unary) and e.op in ("-", "~"):
+        return width(e.e, ctx)
+    if isinstance(e, C.Binary) and e.op in ("<<", ">>"):
+        return width(e.l, ctx)
+    if isinstance(e, C.Binary) and e.op in ("+", "-", "*", "&", "|", "^"):
+        a, b = width(e.l, ctx), width(e.r, ctx)
+        return None if a is None or b is None else max(a, b)
+    return None
 
 
 def peephole(e, ctx):

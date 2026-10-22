@@ -212,11 +212,48 @@ its sources.
   Done 2026-10-22: the gate has accepted as many functions as before on every build since the first
   version, and the frames now read as variables and structures on all four FreeRTOS builds; what is
   left is the next item.
-- [ ] **Frames: the rest.** A region with two types at one offset or an access below reaching in
+- [x] **Frames: the rest.** A region with two types at one offset or an access below reaching in
   (vPolledQueueConsumer and Producer store a word and read its upper half; RISC-V prvReceivingTask)
   as a union; a region nothing accesses but through its address (9 on GCC -Os, 11 on clang -O2: a
   structure of padding) as an array of bytes; the wrapped printf and sprintf, whose frame is the real
   stack, stay as they are.
+  Done 2026-10-23 (dread.frames; dread.tidy region_start, frame_index, frame_sums; docs/decisions.md):
+  the region starts at the lowest address that leaves, moved down over a word that reaches into it
+  from below (GCC -Os makes room for vPolledQueueProducer's 16-bit local by pushing a word and hands
+  the local's address on: the region starts at the push, and frame_locals makes variables only below
+  it); accesses whose bytes overlap share an anonymous union, a member each, one that starts later
+  behind bytes of its own, so that each keeps its plain name: `union { u32 f_0; struct { u8
+  pad_f_2[2]; u16 f_2; } __attribute__((packed)); } __attribute__((packed));` in vPolledQueueProducer's
+  stack28_t, its accesses stack28.f_0 = r1 (the push) and stack28.f_2 = (u16)(stack28.f_2 + 1), the
+  address (u32)&stack28.f_2; where several types share an offset their members say which they are
+  (RISC-V prvReceivingTask clears its buffer by words and reads its first byte: f_0_u32 and f_0_u8). A
+  region the function accesses at no constant offset is an array of bytes: on GCC -Os prvCoreATask
+  `volatile u8 stack40[40] __attribute__((aligned(8)));`, sprintf((u32)stack40, 0x891u), and clang
+  -O2 prvCoreBTasks's two strings sprintf((u32)&stack30[15], ...) and memset((u32)stack30, 0, 0xfu); an
+  index is added to the array's address ((u32)stack20 + r5), not written stack20[r5] (past the array
+  that is undefined in C, and GCC takes loop bounds from it). An index added to a frame address that
+  the code reached by way of another (RISC-V's addi a5, sp, 32; add a5, a5, s0; lbu a5, -20(a5): sp0 -
+  64 + 0x20u + s0_1 + 0xffffffecu) is written from the address its constants come to ((u32)&stack52 +
+  s0_1; gizmo's apply_config (u32)&stack64 + 16 + r3, its line buffer), and that address counts as one
+  that leaves, beside those written inside the sum, so a region starts no higher than before. Two
+  faults of frame_locals found on the way, shown by small C in the tests, neither on the benchmark
+  builds (no function's variables changed): a byte below the address that leaves but inside the word
+  that reaches in became a variable (its read found what the byte's store wrote, not the word's), and
+  so did a slot that an index may reach where the sum names a higher frame address than the one the
+  index starts from. Raw frame accesses left in readable C (`\(sp0 [-+] \d+` in the views of the
+  lifted functions, main at 01af32f -> after): GCC -Os 40 -> 33, clang -O2 17 -> 17, RISC-V GCC -Os
+  41 -> 20, GCC -O0 23 -> 23. Regions as unions: GCC -Os 2, RISC-V GCC -Os 1; as arrays of bytes: GCC
+  -Os 9, clang -O2 11, GCC -O0 1, gizmo a32, m3 and m4 2 each, rv32 1 (before: the unions' functions
+  raw, the arrays structures of padding). What stays raw: the wrapped printf and sprintf (the real
+  stack) and the slots nothing wrote that a call through a pointer is handed (newlib's __sflush_r and
+  _fwalk_sglue, prvReloadTimer, GCC -O0's prvProcessExpiredTimer), as it must be. Every access stays
+  one of its width at its place (the compiled union and array checked with GCC for ARMv4t, clang for
+  Cortex-M3 and GCC for RV32: str, strh, ldrh, ldrb where the members lie). The gate accepts the same
+  functions as before on the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2,
+  RISC-V GCC -Os, GCC -O0). Not yet: sums through 64 bits for a carry nobody reads, left where the
+  clean-up folded them into a call's argument before the values pass, which rewrites assignments and
+  returns only, saw them (clang -O2 prvReceivingTask's (u32)((u64)(u32)stack20 + r5 + 0)); lines with
+  `(u32)((u64)` in the readable files of the four builds: 73, 50, 2 and 38, not looked at one by one.
 - [ ] **Types.** The structures behind pointers, as C structures the readable C uses (p->f_58). Done
   when the gate accepts as many functions as before with them, and their fields against the
   source's (debug information) are measured on the bench.

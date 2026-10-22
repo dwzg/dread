@@ -9,6 +9,58 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C's frames: overlapping accesses in anonymous unions, a region without fields as bytes (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20; the item in
+docs/todo.md, Frames: the rest).
+
+- **Question.** dread.frames left a function raw where accesses in the region that frame addresses
+  reach overlap (two types at one offset; a word and its upper half, where GCC -Os pushes a word to
+  make room for a 16-bit local whose address it hands on, so that the push reaches into the region
+  from below), and wrote a region the function accesses at no constant offset as a structure of
+  padding. How are these written, and where does such a region start?
+- **Options.** For overlapping accesses: (a) an anonymous union (C11) for each run of overlapping
+  accesses, a member each, one that starts later wrapped in a packed structure behind bytes of its
+  own, members named f_<offset> as the plain fields are, f_<offset>_<type> where several types share
+  an offset; (b) named unions (stack28.u_0.w, stack28.u_0.h.f_2): every access longer, and the name
+  of a member changes when another access comes to overlap it; (c) one type per offset, the others
+  reached by casts ((s8)stack12.f_3, as frame_locals does for a slot read with both signs): a cast of
+  a wider member reads all of it, not the narrower access the original made, and reaches no part of
+  it at another offset; (d)
+  leave out the push's store as dead: in vPolledQueueConsumer the upper half it writes is read where
+  the receive did not overwrite it, so it is not dead. Where the region starts: (e) at the push that
+  reaches in, moved down until no access reaches in, frame_locals making variables only below that
+  (region_start); (f) at the lowest address that leaves, the reaching word split: no C access can
+  write a part of a word of the original's in one store. For a region without fields: (g) `volatile
+  u8 stackN[N]` aligned as the region's start, addresses (u32)stackN and (u32)&stackN[k], an index
+  added to the address; (h) as (g) with an index as stackN[i]: C makes an index past the array
+  undefined, and GCC derives loop bounds from such accesses (-faggressive-loop-optimizations), where
+  the lifted C's arithmetic on the address had no such case (clang -O2 prvReceivingTask's index into
+  its 20 bytes reaches 20 when its assertion returns); (i) an array of the element the accesses
+  through an index suggest: only bytes are indexed in the eight builds, and a wider element's index
+  would need a shift the original's address arithmetic does not have.
+- **Choice: (a), (e) and (g).** Each access stays one access of its width at its offset: packed
+  throughout, the object aligned as a whole, so the compiler knows each member's alignment from its
+  offset (checked on the compiled union and array with GCC for ARMv4t, which has no unaligned access,
+  clang for Cortex-M3 and GCC for RV32: str, strh, ldrh, ldrb where the members lie). (a) keeps every
+  access as short as a plain field's and its name as it would be without the overlap. (e) is what the
+  region means (what the addresses handed out may reach, and the push writes part of it) and fixes a
+  fault of frame_locals beside it: a slot below the address that leaves but inside the reaching word
+  became a variable, and its read found what its own store wrote, not the word's. With it, an index
+  added to a frame address counts from the address its constants come to (frame_index: RISC-V's addi,
+  add and a load with a negative offset reach sp0 - 52 by way of sp0 - 32) as well as from the frame
+  addresses written in the sum, which were counted before, so a region starts no higher than before;
+  the second fault of frame_locals found, a slot such an index may reach made a variable, goes with it.
+  Neither fault changed a function of the eight builds. dread.frames writes such a sum from the address
+  its constants come to ((u32)&stack52 + s0_1), only where every term is 32 bits wide or narrower (a sum
+  of unsigned 32-bit values, whatever its order).
+- **Undo.** dread/frames.py: Region.groups returning each access alone, and plan refusing two types
+  at one offset or an overlap, as before; region_start returning low unchanged (in dread.tidy, which
+  both use); Region.array returning False writes the structure of padding; frame_sums finding nothing
+  and the frame_index branch of frame_struct's rewrite out take the sums back.
+- **Status.** Done; the gate accepts the same functions as before on the eight builds (docs/todo.md,
+  Frames: the rest).
+
 ## Readable C's structures: kinds joined through what pointer fields hold, a void * by evidence (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

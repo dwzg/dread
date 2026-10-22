@@ -13,7 +13,8 @@ are left to the pilot (dread pilot).
 Stages so far: the clean-up (dread.tidy: what only the machine needed out, compares and their
 branches as comparisons), then the structure (dread.structure: gotos as if/else and loops). After
 them and the tables (_named), the part of the frame that addresses handed out reach becomes one local
-structure (dread.frames: stack36.f_4, (u32)&stack36.f_4).
+object (dread.frames: a structure, stack36.f_4, (u32)&stack36.f_4, with a union where accesses overlap;
+an array of bytes where none is at a constant offset, (u32)stack40).
 
 Where the image with lifted C alone already differs from the original in the scenarios (the system
 run's clock on some builds until 2026-10-22; a lifted table the lift check wrote since agrees), the
