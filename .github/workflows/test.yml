@@ -33,14 +33,17 @@ jobs:
         # The runner's mirror once sent the packages at 17 kB/s (2026-10-22: 53 MB in 53 minutes, and
         # the job's limit cancelled the tests in two of three jobs): each try is bounded, and a try that
         # fails or takes too long sends the next one to archive.ubuntu.com; stalled connections time out.
+        # The bound runs inside sudo: `timeout N sudo apt-get` never stops apt-get (sudo passes on no
+        # signal from its own process group), which on the same day let a try run on until the step's
+        # limit failed it.
         timeout-minutes: 35
         run: |
           pkgs="gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi gcc-riscv64-unknown-elf
                 binutils-riscv64-unknown-elf clang lld llvm"
-          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
+          apt="apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
           ok=
           for try in 1 2; do
-            if timeout 300 $apt update && timeout 600 $apt install -y --no-install-recommends $pkgs; then
+            if sudo timeout -k 30 300 $apt update && sudo timeout -k 30 600 $apt install -y --no-install-recommends $pkgs; then
               ok=1
               break
             fi
