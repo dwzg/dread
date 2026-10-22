@@ -86,3 +86,39 @@ def test_the_entry_in_the_target_file_follows(gizmo):
     again = Target.load(target.file)
     assert 'entry = "start_here"' in open(target.file).read()
     assert Program(again, again.image()).by_name["start_here"].entry == again.image().entry & ~1
+
+
+@needs_gcc
+def test_names_before_comments_and_the_readable_tables_follow(gizmo):
+    """A list table's name with a comment after it (the lift check's "# accepted by the system run")
+    and the readable C's tables (the readable list, the names' functions and structure anchors, the
+    structures plan's functions) follow a rename (found renaming a FreeRTOS build's functions to
+    FUN_address: the system run's entries kept their old names)."""
+    import json
+    from dread import shapes
+    target, image = gizmo
+    names = [n for n in open(image.table("lifted")).read().split() if n == "beep_on"]
+    with open(image.table("lifted"), "a") as f:
+        f.write("" if names else "beep_on\n")
+    text = open(image.table("lifted")).read().replace("beep_on\n", "beep_on  # accepted by the system run\n")
+    with open(image.table("lifted"), "w") as f:
+        f.write(text)
+    with open(image.table("readable"), "w") as f:
+        f.write("beep_on\nbeep_off\n")
+    with open(image.table("readable_names"), "w") as f:
+        json.dump({"version": 1, "functions": {"beep_on": {"digest": "d", "names": {"r0": "x"}, "what": "w", "by": "t"}},
+                   "structs": {"beep_on:r0": {"name": "beeper", "fields": {}, "anchors": ["beep_on:r0", "beep_off:r4"],
+                                              "by": "t"}},
+                   "globals": {"0x20000030 u32": {"name": "volume", "by": "t"}}}, f)
+    plan = shapes.Plan()
+    plan.structs, plan.typed, plan.digests = {"s_1": [(0, "u32")]}, {"beep_on": {"r0": "s_1"}}, {"beep_on": "d"}
+    shapes.store_plan(image, plan)
+    rename.rename(target, image, {"beep_on": "buzzer_start"})
+    assert "buzzer_start  # accepted by the system run\n" in open(image.table("lifted")).read()
+    assert open(image.table("readable")).read() == "buzzer_start\nbeep_off\n"
+    data = json.load(open(image.table("readable_names")))
+    assert list(data["functions"]) == ["buzzer_start"] and list(data["structs"]) == ["buzzer_start:r0"]
+    assert data["structs"]["buzzer_start:r0"]["anchors"] == ["buzzer_start:r0", "beep_off:r4"]
+    assert data["globals"] == {"0x20000030 u32": {"name": "volume", "by": "t"}}
+    after = shapes.load_plan(image)
+    assert after.typed == {"buzzer_start": {"r0": "s_1"}} and after.digests == {"buzzer_start": "d"}

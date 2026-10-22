@@ -3,7 +3,11 @@
 A function's name is in the image's function table and in symbols.txt (where a regenerated table
 takes its names from), and other files refer to it by name:
 - the target file: an image's entry (entry = "name") and [abi] stack_args' keys;
-- the lifted table, the argued survivors and kept registers (argued.tsv, kept.tsv);
+- the lifted and readable tables (a name before its comment too: "# accepted by the system run"),
+  the argued survivors and kept registers (argued.tsv, kept.tsv);
+- the readable C's tables of names and structures (readable_names.json: its functions' keys and its
+  structures' anchors FUNCTION:VARIABLE; readable_types.json: its functions' keys). Their digests are
+  of the C, which has the callees' names in it: a caller's entry waits for a new proposal or check;
 - the case files (auto("name"), case("name", ...), entry("name") and any other quoted name), and
   the files they read (a file of cases shared by several targets, say);
 - the C under src and every file it includes with #include "..." (identifiers);
@@ -127,8 +131,38 @@ def plan(target, image, pairs, outside=False):
         return "".join(out)
 
     def names(text):
-        return "".join(pairs[l.strip()] + "\n" if l.strip() in pairs and not l.startswith("#") else l
-                       for l in text.splitlines(True))
+        out = []
+        for line in text.splitlines(True):
+            name = line.split("#", 1)[0].strip()
+            if name in pairs:               # (a name with a comment after it too)
+                k = line.index(name)
+                line = line[:k] + pairs[name] + line[k + len(name):]
+            out.append(line)
+        return "".join(out)
+
+    def anchor(a):
+        f, sep, v = a.partition(":")
+        return pairs.get(f, f) + sep + v
+
+    def readable_names(text):
+        import json
+        data = json.loads(text)
+        if isinstance(data.get("functions"), dict):
+            data["functions"] = {pairs.get(k, k): v for k, v in data["functions"].items()}
+        if isinstance(data.get("structs"), dict):
+            data["structs"] = {anchor(k): dict(v, anchors=[anchor(a) for a in v.get("anchors", [])])
+                               if isinstance(v, dict) else v for k, v in data["structs"].items()}
+        return json.dumps(data, indent=1, sort_keys=True) + "\n" if json.loads(text) != data else text
+
+    def readable_types(text):
+        import json
+        from dread import shapes
+        p = shapes.Plan.from_json(json.loads(text))
+        if not set(p.typed) & set(pairs):
+            return text
+        p.typed = {pairs.get(f, f): v for f, v in p.typed.items()}
+        p.digests = {pairs.get(f, f): d for f, d in p.digests.items()}
+        return json.dumps(p.to_json(), indent=1) + "\n"
 
     keys = re.compile(r"\b(%s)(\s*=)" % "|".join(re.escape(o) for o in sorted(pairs, key=len, reverse=True)))
 
@@ -151,6 +185,9 @@ def plan(target, image, pairs, outside=False):
         edit(img.table("functions"), column(1))
         edit(img.table("symbols"), symbols)
         edit(img.table("lifted"), names)
+        edit(img.table("readable"), names)
+        edit(img.table("readable_names"), readable_names)
+        edit(img.table("readable_types"), readable_types)
         for path in case_files(target, img):
             edit(path, lambda t: quoted.sub(lambda m: m.group(1) + pairs[m.group(2)] + m.group(1), t))
         here = os.path.dirname(img.cases)
