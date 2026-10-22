@@ -1378,12 +1378,15 @@ def apply_types(tree, fn, p, made_for=None, names=None):
                                                                           for n in sorted(moved[k])]))
     at = next((i + 1 for i, item in enumerate(tree.items)       # (after the #include: before the file's
                if isinstance(item, C.Raw) and item.text.startswith("#include")), tree.items.index(fn))    # declarations)
-    for k in sorted(fields, reverse=True):
-        tree.items.insert(at, C.Raw(struct_text(cname(k), p.structs[k], names.get(k, (k, {}))[1],
-                                                {off: cname(t) for off, t in ptrs[k].items()})))
-    referred = sorted({t for ps in ptrs.values() for t in ps.values()})
-    if referred:                            # (a field may point to a structure defined after it, or not here)
-        tree.items.insert(at, C.Raw("\n".join("struct %s;" % cname(t) for t in referred)))
+    present = {item.text for item in tree.items if isinstance(item, C.Raw)}     # (a file whose other function
+    for k in sorted(fields, reverse=True):                                      # has them already: C17 forbids
+        text = struct_text(cname(k), p.structs[k], names.get(k, (k, {}))[1],    # a second definition)
+                           {off: cname(t) for off, t in ptrs[k].items()})
+        if text not in present:
+            tree.items.insert(at, C.Raw(text))
+    for t in sorted({t for ps in ptrs.values() for t in ps.values()}, reverse=True):
+        if "struct %s;" % cname(t) not in present:      # (a field may point to a structure defined after it)
+            tree.items.insert(at, C.Raw("struct %s;" % cname(t)))
     from dread.build import NULL_CHECKS     # (a pointer it dereferences may be 0 and still be compared with 0:
     tree.items.insert(0, C.Raw(NULL_CHECKS))    # dread.build compiles it so)
     return sorted(fields)
