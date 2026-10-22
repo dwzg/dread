@@ -156,7 +156,8 @@ def test_the_command_prints_readable_c_and_the_shapes(capsys):
 
 
 def test_the_trees_made_in_a_pool_are_those_made_in_one_process(monkeypatch):
-    """readable_trees, analysis_trees and views give the same in worker processes as in this one."""
+    """readable_trees, analysis_trees, views and question_trees give the same in worker processes as in
+    this one."""
     from dread import lift, regflow, readable
     from dread.program import Program
     from dread.target import Target
@@ -175,8 +176,11 @@ def test_the_trees_made_in_a_pool_are_those_made_in_one_process(monkeypatch):
                                                                                        names, digests=d1, jobs=jobs)],
                       [readable.print_file(t, f, stages=[]) for t, f, _ in readable.analysis_trees(
                           program, context, lifter, names, digests=d2, jobs=jobs)],
-                      d1, d2, readable.views(program, context, lifter, names, jobs=jobs))
+                      d1, d2, readable.views(program, context, lifter, names, jobs=jobs),
+                      {n: got if isinstance(got, str) else got[2:]     # (digest, file, code)
+                       for n, got in readable.question_trees(program, context, lifter, names, jobs=jobs).items()})
     assert made[1] == made[3] and len(made[1][0]) > 40 and len(made[1][4]) > 40
+    assert sum(not isinstance(got, str) for got in made[1][5].values()) > 40
 
 
 def test_a_pool_takes_no_more_workers_than_the_memory_holds(monkeypatch):

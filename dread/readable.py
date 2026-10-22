@@ -242,6 +242,26 @@ def _view_one(name):
     return view(name, text, context=_G["context"]) if text is not None else None
 
 
+def _question_one(name):
+    from dread import lift, shapes
+    fn_p = _G["program"].by_name.get(name)
+    if fn_p is None:
+        return "no function of that name"
+    try:
+        text = _G["lifter"].lift(fn_p).text
+    except lift.Refused as e:
+        return str(e)
+    context = _G["context"]
+    made = readable_tree(name, text, context=context)
+    if made is None:
+        return "its lifted C is not the dialect"
+    tree, fn = made
+    digest = naming.digest(fn)
+    naming.apply_globals(tree, fn, context.globals, context.memory)
+    shapes.apply_types(tree, fn, context.plan, digest, names=context.struct_names())
+    return tree, fn, digest, print_file(tree, fn), cparse.unparse(fn, notes=False, style="readable")
+
+
 def _figures_one(name):
     from dread import cmetrics
     text = _lifted_text(name)
@@ -306,6 +326,19 @@ def views(program, context, lifter, names, jobs=None):
     warm(lifter)
     texts = in_pool(_view_one, list(names), jobs, program=program, context=context, lifter=lifter)
     return {n: t for n, t in zip(names, texts) if t is not None}
+
+
+def question_trees(program, context, lifter, names, jobs=None):
+    """{name: (tree, function, digest, file, code), or why there is none (a text)}: what a question for
+    the names of a function's variables needs (dread pilot --task readable), made in a pool (in_pool)
+    before any question is asked. The tree is the readable C after the stages, digest what a proposal
+    is made for (dread.naming digest, before the names), then the context's globals and structures
+    applied (its tables as they are now); file: the whole file as it compiles without the variables'
+    names (print_file), code: the function as the question shows it. context must not be None."""
+    warm(lifter)
+    context.struct_names()                  # (once, before the pool forks: the workers share it)
+    names = list(names)
+    return dict(zip(names, in_pool(_question_one, names, jobs, program=program, context=context, lifter=lifter)))
 
 
 def print_file(tree, fn, stages=None):

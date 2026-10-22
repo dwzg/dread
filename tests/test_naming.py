@@ -188,6 +188,143 @@ def test_the_pilot_names_the_globals_before_the_variables(tmp_path):
     assert "#define UART_DATA (*(volatile u32 *)0x40011000u)" in out and "UART_DATA = c_r0;" in out, out
 
 
+def gizmo_copy(path):
+    """(target, image, program, context, lifter) of a fresh copy of gizmo's m3 build at path."""
+    from conftest import GIZMO
+    from dread import lift, readable, regflow
+    from dread.program import Program
+    from dread.target import Target
+    shutil.copytree(GIZMO, path, ignore=shutil.ignore_patterns("build"))
+    target = Target.load(str(path / "m3"))
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    return target, image, program, readable.Context(target, image, program, flow), lift.make_lifter(program, flow)
+
+
+ASKED = ["strlen", "clamp", "checksum", "memcpy", "fmt_hex", "ring_put"]
+
+
+def played(jobs, first="strlen", declined="checksum", corrected="fmt_hex"):
+    """The model, played for the threads of name_variables: each variable named after its function;
+    with more than one job the first function's answer waits until jobs - 1 others have been answered
+    (so the answers end out of order), one function's answer is declined, another's first answer gives
+    a variable a taken name (u32) and its second is right. Returns (answer, the functions in the order
+    they were answered)."""
+    import json
+    import re
+    import threading
+    lock, others, order = threading.Lock(), threading.Event(), []
+
+    def answer(messages):
+        name = re.match(r"The function (\w+) ", messages[0]["content"]).group(1)
+        if name == first and jobs > 1:
+            assert others.wait(60), "the other functions were not asked beside the first"
+        if name == declined:
+            text = {"text": "", "finish": "refusal"}
+        else:
+            found = sorted(set(re.findall(r"\b(r\d+(?:_\d+)?)\b", messages[0]["content"])))
+            wrong = name == corrected and len(messages) == 1
+            text = '```json\n{"what": "%s does its thing", "names": %s}\n```' % (name, json.dumps(
+                {v: "u32" if wrong and i == 0 else "%s_%s" % (name, v) for i, v in enumerate(found)}))
+        with lock:
+            order.append(name)
+            if len(set(order) - {first}) >= jobs - 1:
+                others.set()
+        return text
+    return answer, order
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_pilot_names_functions_jobs_at_a_time(tmp_path, monkeypatch):
+    """dread pilot --task readable with --jobs (name_variables): the questions made first (with four
+    jobs in a pool of worker processes, POOL_MIN lowered: forked before any thread starts; with one in
+    this process), then asked four at a time, their answers ending out of order (the first function's
+    after three others'), one declined (no entry, the run goes on), one corrected after the tools'
+    words; the readable_names table ends byte for byte as one question after another (--jobs 1) leaves
+    it, and each function's C has its names."""
+    from dread import llm, pilot, readable
+    tables, lines = {}, {}
+    for jobs in (1, 4):
+        monkeypatch.setattr(readable, "POOL_MIN", 2 if jobs > 1 else 10 ** 6)
+        target, image, program, context, lifter = gizmo_copy(tmp_path / ("jobs%d" % jobs))
+        answer, order = played(jobs)
+        made = []
+
+        def provider():
+            made.append(llm.Scripted(answer))
+            return made[-1]
+        lines[jobs] = []
+        named, asked, _ = pilot.name_variables(target, image, program, provider, ASKED, context, lifter, jobs=jobs,
+                                               tries=2, out=lines[jobs].append)
+        assert (named, asked) == (5, 6), lines[jobs]
+        assert 1 <= len(made) <= jobs and order.count("fmt_hex") == 2, (made, order)
+        assert order.index("strlen") >= 3 if jobs > 1 else order.index("strlen") == 0, order   # (four: after others)
+        assert any(line.startswith("checksum") and "no names: the provider declined" in line for line in lines[jobs])
+        with open(image.table("readable_names")) as f:
+            tables[jobs] = f.read()
+        table = naming.load(image)
+        assert sorted(table) == sorted(set(ASKED) - {"checksum"}), sorted(table)
+        folder = os.path.join(target.build, "pilot", image.name)
+        assert "u32 is taken" in open(os.path.join(folder, "fmt_hex.readable.md")).read()
+        assert os.path.exists(os.path.join(folder, "checksum.readable.md"))
+        out = readable.transform("fmt_hex", lifter.lift(program.by_name["fmt_hex"]).text,
+                                 context=readable.Context(target, image, program))
+        assert "fmt_hex_r0" in out and "/* fmt_hex: fmt_hex does its thing" in out, out
+    assert tables[1] == tables[4]
+    assert sorted(line for line in lines[1] if not line.startswith("dread pilot")) == sorted(
+        line for line in lines[4] if not line.startswith("dread pilot"))
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_readable_task_asks_jobs_at_a_time_from_the_command_line(tmp_path, monkeypatch, capsys):
+    """dread pilot --task readable --jobs 2 NAME...: the globals' question first (uart_putc's device
+    registers, answered with no names), then the functions' variables, two at a time, each thread with
+    a provider of its own; the summary says how many were named and asked, how many at a time."""
+    from dread import llm, pilot
+    target, image, program, context, lifter = gizmo_copy(tmp_path / "gizmo")
+    answer, _ = played(1, declined=None, corrected=None)
+    made = []
+
+    def load(name=None, path=None):
+        made.append(llm.Scripted(lambda messages: answer(messages) if messages[0]["content"].startswith(
+            "The function ") else '```json\n{}\n```'))
+        return made[-1]
+    monkeypatch.setattr(llm, "load", load)
+    asked = ["uart_putc", "strlen", "clamp"]
+    assert pilot.main(["--target", target.root, "--task", "readable", "--jobs", "2"] + asked) == 0
+    out = capsys.readouterr().out
+    assert "3 of 3 functions named, 3 asked, 2 at a time" in out, out
+    assert sorted(naming.load(image)) == sorted(asked) and 2 <= len(made) <= 3, out
+    assert [system for system, _ in made[0].asked] == [pilot.GLOBALS_SYSTEM], made[0].asked
+    assert all(p.asked and {system for system, _ in p.asked} == {pilot.READABLE_SYSTEM} for p in made[1:])
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_pilot_stops_asking_a_provider_that_keeps_declining_or_failing(tmp_path, monkeypatch):
+    """name_variables asks no more after DECLINED_IN_A_ROW answers declined in a row, nor after
+    FAILED_IN_A_ROW questions the provider failed in a row; the questions asked by then end; a run
+    started again asks what has no names, and says which are named already."""
+    from dread import llm, pilot
+    monkeypatch.setattr(pilot, "FAILED_IN_A_ROW", 3)
+    target, image, program, context, lifter = gizmo_copy(tmp_path / "gizmo")
+    for jobs, answer, said in ((1, lambda messages: {"text": "", "finish": "refusal"}, "declined 3 questions in a row"),
+                               (2, lambda messages: 1 / 0, "failed 3 questions in a row")):
+        lines = []
+        named, asked, _ = pilot.name_variables(target, image, program, lambda: llm.Scripted(answer), ASKED,
+                                               context, lifter, jobs=jobs, out=lines.append)
+        assert named == 0 and 3 <= asked <= 3 + jobs - 1 and any(said in line for line in lines), lines
+        assert not os.path.exists(image.table("readable_names"))
+    answer, _ = played(1)
+    pilot.name_variables(target, image, program, lambda: llm.Scripted(answer), ASKED[:2], context, lifter, jobs=2,
+                         out=lambda *_: None)
+    lines = []
+    context.names = naming.load(image)
+    named, asked, _ = pilot.name_variables(target, image, program, lambda: llm.Scripted(answer), ASKED[:3], context,
+                                           lifter, jobs=2, out=lines.append)
+    assert (named, asked) == (2, 1) and "%-24s named already" % "strlen" in lines, lines
+
+
 def plan_with(number):
     from dread import shapes
     p = shapes.Plan()

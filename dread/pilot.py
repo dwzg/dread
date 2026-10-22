@@ -67,10 +67,18 @@ they share with the rest of the image: the globals they use, then the structures
 point to (where dread readable --check made a readable_types plan); --task globals asks for those
 alone, for every function's readable C, checked or not, as the questions for function names show it,
 which then show the names. Kept in the image's readable_names table; a run started again asks only
-what has no name yet. After a --task name run, the globals' questions show the functions by their
-proposals (names.tsv). On a build whose functions are all FUN_ (FreeRTOS, 2026-10-22: docs/todo.md),
-globals named before the first pass made the function names worse, between it and --refine slightly
-better.
+what has no name yet. The variables are asked --jobs functions at a time (name_variables; one after
+another until 2026-10-22, slow on a large image): every question is made first, before any thread
+starts (the readable C in a pool of worker processes, dread.readable question_trees; the callers in
+one walk over the code), then a pool of threads asks, each with a provider of its own, and checks
+each answer as before; the main thread alone writes the table, the conversations and the lines, as
+the answers end. No question depends on another's answer (each shows its function's own C, the
+globals and structures named before, and its callers by their names), so the table ends as one
+question after another leaves it (FreeRTOS GCC -Os, 316 functions, Haiku 5.5: 149 s with --jobs 16,
+1,325 s with --jobs 1, the names as good: docs/todo.md). After a --task name run, the globals'
+questions show the functions by their proposals (names.tsv). On a build whose functions are all FUN_
+(FreeRTOS, 2026-10-22: docs/todo.md), globals named before the first pass made the function names
+worse, between it and --refine slightly better.
 
 A provider that declines DECLINED_IN_A_ROW questions in a row (stop reason "refusal" or
 "content_filter") is asked no more in that run: its classifiers decline the same kind of question
@@ -831,52 +839,72 @@ def callers_of(program, name):
     return sorted(fn.name for fn in program.functions if fn.name != name and name in direct_callees(program, fn))
 
 
-def name_readable(target, image, program, provider, name, context, lifter, tries=2, out=print):
-    """Ask for the names of a function's variables in its readable C (dread readable), put them in with
-    dread.naming and keep them in the image's readable_names table when the C still compiles to the
-    same code; tell the model what was wrong and ask again up to tries answers. Returns the table
-    entry, or None. The conversation goes to BUILD/pilot/IMAGE/NAME.readable.md."""
+def direct_callers(program):
+    """{name: callers_of(program, name)} for every function called, in one walk over the image's code
+    (callers_of for each of thousands of functions walks all of it each time)."""
+    from dread.lift import direct_callees
+    out = {}
+    for fn in program.functions:
+        for callee in direct_callees(program, fn):
+            if callee != fn.name:
+                out.setdefault(callee, set()).add(fn.name)
+    return {name: sorted(callers) for name, callers in out.items()}
+
+
+def readable_jobs(target, program, context, lifter, names, callers, out=print):
+    """The questions for the variables of names, prepared before any is asked: the readable C, its
+    digest and both texts made by dread.readable question_trees (in a pool of workers for many
+    functions), the callers each question names (callers: {name: [callers]}, direct_callers). Returns
+    ([job], {name: entry} of the functions the readable_names table names already for this C: its
+    digest); a function without readable C, or named already, gets its line here, in the order of
+    names. A job: {"name", "tree", "fn", "digest", "file": the C without the variables' names, as it
+    compiles, "user": the question}."""
+    from dread import readable
+    made = readable.question_trees(program, context, lifter, names)
+    jobs, known = [], {}
+    for name in names:
+        got = made[name]
+        if isinstance(got, str):
+            out("%-24s no readable C: %s" % (name, got))
+            continue
+        tree, fn, digest, text, code = got
+        entry = context.names.get(name)
+        if entry and entry.get("digest") == digest:
+            out("%-24s named already" % name)
+            known[name] = entry
+            continue
+        user = "The function %s (readable C):\n\n```c\n%s\n```" % (name, code)
+        shown_callers = [c for c in callers.get(name, []) if may_show(target, c)][:12]
+        if shown_callers:
+            user += "\n\nIt is called by: %s." % ", ".join(shown_callers)
+        jobs.append({"name": name, "tree": tree, "fn": fn, "digest": digest, "file": text, "user": user})
+    return jobs, known
+
+
+def ask_readable(target, image, provider, job, tries, work):
+    """One function's conversation (job: readable_jobs'): ask for its variables' names, check each
+    answer (C identifiers nothing else of its file uses, naming.problems; the C with the names compiles
+    to the same code, naming.same_code in the directory work), tell the model what was wrong and ask
+    again, up to tries answers. Writes nothing but work, so that threads can run it side by side, each
+    with a provider and a directory of its own (keep_readable writes the rest). Returns (entry or None,
+    why not, the conversation's log, how the last answer ended: the provider's finish or None)."""
     import copy
-    from dread import cparse, lift, naming, readable
-    fn_p = program.by_name[name]
-    try:
-        text = lifter.lift(fn_p).text
-    except lift.Refused as e:
-        out("%-24s no readable C: %s" % (name, e))
-        return None
-    made = readable.readable_tree(name, text, context=context)
-    if made is None:
-        out("%-24s no readable C: its lifted C is not the dialect" % name)
-        return None
-    tree, fn = made
-    digest = naming.digest(fn)
-    known = context.names.get(name) if context is not None else None
-    if known and known.get("digest") == digest:
-        out("%-24s named already" % name)
-        return known
-    naming.apply_globals(tree, fn, context.globals if context is not None else None,
-                         context.memory if context is not None else None)
-    if context is not None:                 # (the structures, named where the table names them)
-        from dread import shapes
-        shapes.apply_types(tree, fn, context.plan, digest, names=context.struct_names())
-    unnamed = readable.print_file(tree, fn)
-    callers = [c for c in callers_of(program, name) if may_show(target, c)][:12]
-    user = "The function %s (readable C):\n\n```c\n%s\n```" % (name, cparse.unparse(fn, notes=False, style="readable"))
-    if callers:
-        user += "\n\nIt is called by: %s." % ", ".join(callers)
-    messages = [{"role": "user", "content": user}]
-    log = ["# %s, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (name, provider.label(), READABLE_SYSTEM, user)]
-    folder = os.path.join(target.build, "pilot", image.name)
-    os.makedirs(folder, exist_ok=True)
-    entry, why = None, "no answer"
+    from dread import naming, readable
+    name, tree, fn = job["name"], job["tree"], job["fn"]
+    messages = [{"role": "user", "content": job["user"]}]
+    log = ["# %s, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (name, provider.label(), READABLE_SYSTEM,
+                                                                        job["user"])]
+    entry, why, finish = None, "no answer", None
+    provider.last = {}                      # (a provider error leaves no finish: not a refusal)
     for _ in range(tries):
         try:
             answer = provider.ask(READABLE_SYSTEM, messages)
         except Exception as e:
             why = "the provider: %s" % e
             break
+        finish = (getattr(provider, "last", {}) or {}).get("finish")
         log.append("## Answer\n\n%s" % answer)
-        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+        if finish in llm.Provider.REFUSED:
             why = "the provider declined"
             break
         parsed = parse_names(answer)
@@ -889,10 +917,8 @@ def name_readable(target, image, program, provider, name, context, lifter, tries
                 tree2 = copy.deepcopy(tree)
                 fn2 = tree2.function(name)
                 naming.rename(fn2, names)
-                if naming.same_code(target, image, unnamed, readable.print_file(tree2, fn2),
-                                    os.path.join(folder, "naming")):
-                    entry = {"digest": digest, "names": names, "what": what, "by": provider.label()}
-                    naming.store(image, name, entry)
+                if naming.same_code(target, image, job["file"], readable.print_file(tree2, fn2), work):
+                    entry = {"digest": job["digest"], "names": names, "what": what, "by": provider.label()}
                     break
                 problems = ["with these names the C compiles to other code"]
         why = "; ".join(problems)
@@ -900,6 +926,16 @@ def name_readable(target, image, program, provider, name, context, lifter, tries
                      {"role": "user", "content": "These names cannot be used: %s. Answer again with the whole "
                                                   "```json block." % why}]
         log.append("## Back to the model\n\n%s" % messages[-1]["content"])
+    return entry, why, log, finish
+
+
+def keep_readable(image, folder, name, entry, why, log, out=print):
+    """What a function's conversation ends with, written by one thread alone: the conversation in
+    folder/NAME.readable.md, the entry in the readable_names table, the function's line. Returns the
+    entry."""
+    from dread import naming
+    if entry is not None:
+        naming.store(image, name, entry)
     with open(os.path.join(folder, name + ".readable.md"), "w") as f:
         f.write("\n\n".join(log) + "\n")
     if entry is None:
@@ -907,6 +943,98 @@ def name_readable(target, image, program, provider, name, context, lifter, tries
         return None
     out("%-24s %d names: %s" % (name, len(entry["names"]), entry["what"][:120]))
     return entry
+
+
+def name_readable(target, image, program, provider, name, context, lifter, tries=2, out=print):
+    """Ask for the names of a function's variables in its readable C (dread readable), put them in with
+    dread.naming and keep them in the image's readable_names table when the C still compiles to the
+    same code; tell the model what was wrong and ask again up to tries answers. Returns the table
+    entry, or None. The conversation goes to BUILD/pilot/IMAGE/NAME.readable.md. One function, in
+    this thread; name_variables asks many at a time."""
+    from dread import readable
+    context = context if context is not None else readable.Context()
+    jobs, known = readable_jobs(target, program, context, lifter, [name], {name: callers_of(program, name)}, out)
+    if not jobs:
+        return known.get(name)
+    folder = os.path.join(target.build, "pilot", image.name)
+    os.makedirs(folder, exist_ok=True)
+    entry, why, log, _ = ask_readable(target, image, provider, jobs[0], tries, os.path.join(folder, "naming"))
+    return keep_readable(image, folder, name, entry, why, log, out)
+
+
+def summed(spents):
+    """What several providers spent together ([Provider.spent()]): answers, tokens in and out, the
+    costs of those that have prices (None where none has)."""
+    spent = {"answers": 0, "input": 0, "output": 0, "cost": None}
+    for sp in spents:
+        for key in ("answers", "input", "output"):
+            spent[key] += sp[key]
+        if sp.get("cost") is not None:
+            spent["cost"] = (spent["cost"] or 0.0) + sp["cost"]
+    return spent
+
+
+def name_variables(target, image, program, make_provider, names, context, lifter, jobs=4, tries=2, out=print):
+    """The variables of names named as name_readable names one function's, jobs functions at a time
+    (--task readable). First, before any thread starts, every question is prepared (readable_jobs:
+    the readable C in a pool of worker processes, which fork, the callers in one walk over the code);
+    then a pool of jobs threads asks, each thread with a provider of its own (make_provider() makes
+    one) and its own directory for the same-code check, at most jobs functions at a time, the next
+    one asked as soon as one ends; the main thread alone writes the table, the conversations and the
+    lines, in the order the answers end. The questions do not depend on each other's answers (a
+    function's question shows its own C, the globals and structures named before, and its callers by
+    their names), so the table ends as one question after another leaves it. After DECLINED_IN_A_ROW
+    declined or FAILED_IN_A_ROW failed (the provider's errors) in a row nothing more is asked (those
+    asked by then end). Returns (functions named, those named already counted; asked; spent: summed
+    over the providers made)."""
+    import concurrent.futures
+    import threading
+    started = time.time()
+    todo, known = readable_jobs(target, program, context, lifter, names, direct_callers(program), out)
+    out("dread pilot --task readable: %d functions to ask, %d named already, %d without readable C (prepared "
+        "in %.0f s)" % (len(todo), len(known), len(names) - len(todo) - len(known), time.time() - started))
+    folder = os.path.join(target.build, "pilot", image.name)
+    os.makedirs(folder, exist_ok=True)
+    local, providers, lock = threading.local(), [], threading.Lock()
+
+    def one(job):
+        if getattr(local, "provider", None) is None:
+            with lock:
+                local.slot = len(providers)
+                local.provider = make_provider()
+                providers.append(local.provider)
+        p = local.provider
+        got = ask_readable(target, image, p, job, tries, os.path.join(folder, "naming", str(local.slot)))
+        return (job["name"], p.label()) + got
+
+    named, asked, declined, failed, stopped = len(known), 0, 0, 0, False
+    jobs = max(1, jobs)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        running, k = set(), 0
+        while running or (k < len(todo) and not stopped):
+            while k < len(todo) and len(running) < jobs and not stopped:
+                running.add(pool.submit(one, todo[k]))
+                k += 1
+            done, running = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                name, label, entry, why, log, finish = future.result()
+                asked += 1
+                named += keep_readable(image, folder, name, entry, why, log, out) is not None
+                if entry is None:
+                    declined = declined + 1 if finish in llm.Provider.REFUSED else 0
+                    failed = failed + 1 if why.startswith("the provider:") else 0
+                else:
+                    declined = failed = 0
+                if not stopped and declined >= DECLINED_IN_A_ROW:
+                    out("dread pilot: %s declined %d questions in a row; the rest are not asked of it (its "
+                        "classifiers decline the same kind of question again; another provider may answer: "
+                        "--provider)" % (label, declined))
+                    stopped = True
+                if not stopped and failed >= FAILED_IN_A_ROW:
+                    out("dread pilot: the provider failed %d questions in a row; no more are asked (the run "
+                        "goes on where it stopped when started again)" % failed)
+                    stopped = True
+    return named, asked, summed(p.spent() for p in providers)
 
 
 def number(value):
@@ -2172,14 +2300,7 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                                           " (confidence %.2f or more)" % gate if gate else ""))
         if run["stopped"] or (kind == "again" and not changed):
             break                           # (no question would change: nothing more to ask)
-    spent = {"answers": 0, "input": 0, "output": 0, "cost": None}
-    for p in providers:
-        sp = p.spent()
-        for key in ("answers", "input", "output"):
-            spent[key] += sp[key]
-        if sp.get("cost") is not None:
-            spent["cost"] = (spent["cost"] or 0.0) + sp["cost"]
-    return run["proposed"], run["asked"], spent
+    return run["proposed"], run["asked"], summed(p.spent() for p in providers)
 
 
 JUDGE_SYSTEM = """You compare names of functions of a program. In each numbered pair the first name
@@ -2433,13 +2554,7 @@ def subsystems_task(target, image, program, flow, args, provider):
         return local.provider
     named = name_subsystems(target, image, program, one_provider, found, namer, touched, args.samples, args.jobs,
                             min(args.tries, 3), args.temperature, shown_as)
-    spent = {"answers": 0, "input": 0, "output": 0, "cost": None}
-    for p in providers:
-        sp = p.spent()
-        for key in ("answers", "input", "output"):
-            spent[key] += sp[key]
-        if sp.get("cost") is not None:
-            spent["cost"] = (spent["cost"] or 0.0) + sp["cost"]
+    spent = summed(p.spent() for p in providers)
     print("dread pilot --task subsystems: %d functions in %d groups, %d of them in named groups (%s); %d answers, "
           "%d tokens in, %d out%s" % (len(program.functions), len(found), len(named), subsystems_path(target, image),
                                       spent["answers"], spent["input"], spent["output"],
@@ -2479,7 +2594,8 @@ def main(argv=None):
                              "about them (input, name)")
     parser.add_argument("--usage", nargs="?", const="", metavar="YYYY-MM",
                         help="print the tokens (and costs, where llm.toml gives prices) of a month's answers; ask nothing")
-    parser.add_argument("--jobs", type=int, default=4, help="--task name: questions asked at a time (default 4)")
+    parser.add_argument("--jobs", type=int, default=4,
+                        help="--task name, readable and subsystems: questions asked at a time (default 4)")
     parser.add_argument("--score", metavar="TRUTH",
                         help="--task name: compare the proposals (names.tsv) with true names (an ELF's symbols, "
                              "or a functions table of a copy that has them) and ask nothing")
@@ -2586,6 +2702,7 @@ def main(argv=None):
             lifter = lift.make_lifter(program, flow)
             proposals = {program.by_entry[a].name: p for a, (p, _) in read_proposals(target, image).items()
                          if a in program.by_entry} if args.task == "globals" else None
+            begun = time.time()
             made = name_shared(target, image, program, provider, context, lifter, names, everything,
                                shown_as=proposals)
             if args.task == "globals":
@@ -2596,16 +2713,15 @@ def main(argv=None):
                           spent["input"], spent["output"],
                           " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""))
                 return 0
-            asking, named = Asking(provider), 0
-            for name in names:
-                if not asking.go_on():
-                    break
-                named += name_readable(target, image, program, provider, name, context, lifter,
-                                       tries=args.tries) is not None
-                asking.asked()
-            spent = provider.spent()
-            print("dread pilot --task readable: %d of %d functions named; %d answers, %d tokens in, %d out" % (
-                named, len(names), spent["answers"], spent["input"], spent["output"]))
+            started = time.time()
+            named, asked, spent = name_variables(target, image, program, lambda: llm.load(args.provider), names,
+                                                 context, lifter, jobs=args.jobs, tries=args.tries)
+            spent = summed([provider.spent(), spent])     # (the globals' and structures' answers too)
+            print("dread pilot --task readable: %d of %d functions named, %d asked, %d at a time (%.0f s; the globals "
+                  "and structures before them %.0f s); %d answers, %d tokens in, %d out%s" % (
+                      named, len(names), asked, max(1, args.jobs), time.time() - started, started - begun,
+                      spent["answers"], spent["input"], spent["output"],
+                      " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""))
             return 0
         if args.task == "name":
             from dread.samecode import UNNAMED

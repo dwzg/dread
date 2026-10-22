@@ -366,7 +366,25 @@ its sources.
   register ICSR got portNVIC_INT_CTRL_REG, FreeRTOS's own name for it. 32 answers, 30,324 tokens
   in and 30,632 out, about $0.02. Collecting the globals' uses runs the stages over every readable
   function (49 s for GCC -Os's 316 on one core; in a pool of workers since 2026-10-22, a large
-  private firmware's in a sixth of the time, dread.readable in_pool). Next: types: the
+  private firmware's in a sixth of the time, dread.readable in_pool). The variables' questions went
+  one after another, each made in its turn (the stages, and its callers found by a walk over the
+  whole image's code, once per function), slow on a large private firmware; since 2026-10-22
+  `--task readable` asks them --jobs at a time (default 4, as --task name; name_variables): all of
+  them made first, before any thread starts (dread.readable question_trees in the pool, the callers
+  in one walk), then a thread a question, each with a provider and a directory for the same-code
+  check of its own, the main thread the table's only writer, so the table ends as one question after
+  another leaves it (a test plays it with answers out of order). Measured on the GCC -Os build with
+  Haiku 5.5, each run on a copy of its own: the variables of the 316 functions took 1,412 s one after
+  another with the code before (4.5 s a function), 1,325 s with --jobs 1, 149 s with --jobs 16 (8 s of
+  it making the questions; about three answers a second, then one function the tools sent back once
+  alone for half a minute). The names as good: parameters 211 of 374 as the source (56 %) before,
+  216 of 378 (57 %) with --jobs 1, 215 of 377 (57 %) with --jobs 16; sharing a word 74 %, 75 %, 76 %;
+  local names among the source's 115 of 1,064, 106 of 1,075, 121 of 1,071; $0.16-0.17 a run, the
+  globals' and structures' questions included. Those go first, one batch after another (176-193 s
+  here, now more than the variables with --jobs 16), and struct_uses makes every function's typed C
+  in this process (23 s here); left to do: the batches at a time too (their questions do not depend
+  on each other's answers either; the names taken would be checked in their order) and struct_uses
+  in the pool. Next: types: the
   structures behind pointers derived by code (accesses at constant offsets through the same
   pointer, unified across functions), with volatile in the pointer's declaration so that a field
   reads p->f, their names and fields' names proposed the same way.
