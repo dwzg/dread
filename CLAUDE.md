@@ -98,6 +98,12 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   for byte (a shell loop by hand twice compared nothing); `--cover` compares the instructions the
   cases cover instead, for a change meant to change them (then measure whole builds from scratch:
   a handful of functions moves with the search's path, 2026-10-20).
+- **A generator change tried in variants**: every variant under one VERSION reuses the cases the
+  first one cached (the key holds VERSION, not the code): remove the caches the variants made
+  (BUILD/autocases of the worktree's examples and of any target tried) before the next variant and
+  before `bin/take-caches`, or compare with `bin/ab-cases`. Never `git stash` in a worktree a
+  background run uses: a lift check that imported the generator after the stash ran the old code,
+  and the measurement showed nothing (2026-10-22).
 - **A lifter change** (what it lifts, refuses or keeps across calls), **or a generator change that
   changes cases**: run `dread lift --check` on every gizmo build before the suite and commit the
   regenerated `config/lifted.txt` with the change; a table that loses a function is a regression to
