@@ -411,6 +411,5 @@ recommendations here."), on a recommendation.
 - **Undo.** `--task name` reads the listing again where `Namer.code` returns it; the order is
   `callees_first` in main(); `--judge` is not given.
 - **Status.** Done. Measured on the private firmware (docs/todo.md, the pilot on the draft). The
-  readable C of every function is made first in a pool of workers (dread.readable views: 3,541
-  analysis trees in 113 s instead of 670 s on one core), each worker costing up to the parent's size
-  in memory (1 GB a worker measured), so pools are now capped by the memory available.
+  readable C of every function is made first in a pool of workers (dread.readable views: in a
+  sixth of the time on one core), each worker costing up to the parent's size in memory, so pools are now capped by the memory available.

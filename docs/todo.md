@@ -93,11 +93,10 @@ its sources.
   the cases that return last; inside it break leaves the switch and continue still goes to the loop
   (tests/test_structure.py: 400 random functions with switches, compiled before and after, the same
   results on random arguments, every switch structured). On the 39 builds' 11,359 lifted functions
-  gotos 12,950 -> 12,228 (FreeRTOS has few switches); on a private firmware's readable C (an old
-  compiler's jump tables, its menus' state machines) 1,818 -> 766: its 29 functions with a switch
-  held 1,078 of them, now 25. The gate accepts the same functions as before on nine builds (gizmo
-  a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; the private firmware's
-  3,536). Not yet: a loop with exits to several places beyond the one taken for its break.
+  gotos 12,950 -> 12,228 (FreeRTOS has few switches); on a private firmware's readable C, which has
+  many switches, the gotos fell by more than half. The gate accepts the same functions as before on
+  nine builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; the
+  private firmware). Not yet: a loop with exits to several places beyond the one taken for its break.
 - [x] **Calls and parameters.** Parameters and a result as dread.regflow and dread callconv measured
   them. Done when the signatures are the measured conventions and the gate accepts as many as
   before. Done 2026-10-21 (dread.tidy trim_calls and params, readable.Context): a call passes the
@@ -136,7 +135,7 @@ its sources.
   xQueueGenericSend's stack), since 2026-10-22: the slots wholly below the lowest address that
   leaves become variables too (outgoing stack arguments, locals nobody is given); from there up the
   frame stays as it is, since what the address is handed to may reach anything above it. Raw frame
-  accesses left in readable C: FreeRTOS GCC -Os 771 -> 642, a private firmware's 3,147 -> 2,878; the
+  accesses left in readable C: FreeRTOS GCC -Os 771 -> 642, fewer on a private firmware too; the
   gate as before on the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V
   GCC -Os, GCC -O0; the private firmware's waits for its cases made anew by generator 34). Open: that region as a local structure (fields at the offsets
   the function uses, the address handed out its own or a field's: &stack40.f_8). One object for the
@@ -251,8 +250,8 @@ its sources.
   sharing a word; one is a member (xSuspendedTaskList's pxIndex, named xTickCount), the device
   register ICSR got portNVIC_INT_CTRL_REG, FreeRTOS's own name for it. 32 answers, 30,324 tokens
   in and 30,632 out, about $0.02. Collecting the globals' uses runs the stages over every readable
-  function (49 s for GCC -Os's 316 on one core; in a pool of workers since 2026-10-22: 3,541
-  functions of a large firmware in 113 s instead of 670 s, dread.readable in_pool). Next: types: the
+  function (49 s for GCC -Os's 316 on one core; in a pool of workers since 2026-10-22, a large
+  private firmware's in a sixth of the time, dread.readable in_pool). Next: types: the
   structures behind pointers derived by code (accesses at constant offsets through the same
   pointer, unified across functions), with volatile in the pointer's declaration so that a field
   reads p->f, their names and fields' names proposed the same way.
@@ -276,15 +275,13 @@ its sources.
   words 102 (28 %), overlap 0.31; judged the same 113 (31 %), close 142 (39 %), different 111 (30 %);
   $0.12. The judge's own noise: the first pass judged again gave 95, 155, 116, the same verdict for
   331 of 366 (90 %): totals move by up to 5 points. The model knows FreeRTOS, and callers' names help
-  it recognise the code. A stripped private firmware (DREAD's real-life test: 4,586 functions, 1,903
-  named by the people who reconstruct it): the first run judged the same 9 %, close 35 %, different
-  56 % (a word shared 29 %; $1.39, 29 minutes); with what a constant points to, 15 %, 41 %, 44 % (a
-  word shared 44 %; $1.40): the gain is the functions that show one localized message, a quarter of
-  the named ones, whose texts sat behind a table of pointers; with --refine 16 %, 41 %, 44 % (a word
-  shared 47 %, the same prefix 760 against 653; $1.55): more consistent, not more right. Names built
-  of an address fell from 222 to 126, but a driver whose first leaf was misread (a card driver taken
-  for a radio) carried the misreading to most of its functions on both passes, where another run had
-  named it right: a proposal shown to the callers spreads its errors too, and runs differ by subsystem.
+  it recognise the code. A stripped private firmware (DREAD's real-life test, its true names those that
+  the people who reconstruct it gave; its figures stay in its own notes): judged the same far less
+  often than FreeRTOS; what a constant points to helped most where texts sit behind tables of
+  pointers; --refine made the names more consistent, not more right, and fewer of them built of an
+  address. A driver whose first leaf was misread carried the misreading to most of its functions on
+  both passes, where another run had named it right: a proposal shown to the callers spreads its
+  errors too, and runs differ by subsystem.
   What misses: a project's conventions (its subsystem prefixes, its RTOS's service names), drivers
   whose device registers have no names, leaves that touch only unnamed globals.
   Globals, measured 2026-10-22 on the same stripped GCC -Os build with Haiku 5.5, each score judged
@@ -942,20 +939,20 @@ undone). Other decisions are taken by the recommended option and written down in
 ## Phase 4: cases, mutation, coverage (rest)
 
 - [x] **Code only a dropped case reached** (found 2026-10-22 on a private firmware, DREAD's real-life
-  test: its uncovered functions took a median 140 s to generate against 0.6 s for those accepted, 71 %
-  of them met callees stubbed for hanging). A case that should end at a call (stops, a loop case)
+  test: its uncovered functions took far longer to generate than those accepted, and most of them
+  met callees stubbed for hanging). A case that should end at a call (stops, a loop case)
   and ends otherwise (spinning on a register, at the limit) counts while the search runs, and must:
   it moves the compare-guided stage's frontier (gizmo-rv32cpp's main: where a run waits on memory,
   that stage finds the callee effect that ends the wait; not counting such runs lost four of its
   instructions). But drop_bad_ends drops it from the result, and what only it had reached was left
-  uncovered: on the firmware a call that draws on the display, reached 65 times, its one kept run
-  meant to end at a glyph call and spinning in a fill before it. Generator 34: when the surviving
+  uncovered: on the private firmware, a call whose one kept run was meant to end at a call deeper in
+  and spun on a device register before it. Generator 34: when the surviving
   cases cover less than the search counted, the compare-guided stage runs once more from what they
   cover, every case a source, counting only runs whose case survives, and a run there that comes
-  back cut or spinning in a callee is tried again ending at that call too (repair_lost). On 60 of the
-  firmware's 550 uncovered functions: 2 accepted, 5 more miss fewer instructions, none more (1,867
-  missed instructions -> 1,800); the gizmo builds lose nothing (msp430's main is accepted by loop
-  cases again instead of by the system run). The rest of the 550: other causes, not traced (a dead
+  back cut or spinning in a callee is tried again ending at that call too (repair_lost). On a sample of the
+  private firmware's uncovered functions a few were accepted and some more miss fewer instructions,
+  none more; the gizmo builds lose nothing (msp430's main is accepted by loop cases again instead of
+  by the system run). The rest: other causes, not traced (a dead
   branch the compiler kept, such as a negative test of a value loaded unsigned; code behind an RTOS
   call that switches tasks and never comes back in the emulator).
 
@@ -1443,9 +1440,9 @@ tool, the page shows its records; the only changes are the command line's own.
   function, refused outside the target's directory, compiled and loaded after the change and undone
   when anything still uses the old name) and notes (annotations.txt). The tools now keep what the
   page reads: `dread lift --check` writes verdicts.tsv, `dread test` the missed instructions.
-  Measured on a large private image (4586 functions): loading 0.14 s, the background analyses 19 s,
-  a median function 0.024 s (2.6 s before the GUI reused one lifter fed with the never-returning
-  functions it already has), the largest (5854 instructions) 1.5 s.
+  Measured on a large private image: loading 0.14 s, the background analyses 19 s, a median function
+  0.024 s (2.6 s before the GUI reused one lifter fed with the never-returning functions it already
+  has), the largest 1.5 s.
 - [ ] (Later: after MSP430) v2: a failing case's differences (the test run keeps them per function),
   pilot review (conversations, argued survivors and name proposals, accepted or rejected from the
   page through `dread rename` and argued.tsv).

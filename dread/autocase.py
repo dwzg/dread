@@ -142,9 +142,9 @@ VERSION = 34       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # gives each argument and learned pointer 0 once, from the first inputs, ending at
                   # the callees runs hung in (NULL_BASES); 34: when the cases that survive drop_bad_ends
                   # cover less than the search counted (a run that should have ended at a call and
-                  # spun on a register counted, and no other input was sought: a private firmware's
-                  # display code), the compare-guided stage runs once more from what they cover,
-                  # counting only runs whose case survives (repair_lost)
+                  # spun on a register counted, and no other input was sought), the compare-guided
+                  # stage runs once more from what they cover, counting only runs whose case survives
+                  # (repair_lost)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -1838,13 +1838,13 @@ class Generator:
         while the search runs: they move the compare-guided stage's frontier on (where a run waits on
         memory, that stage finds the callee effect that ends the wait: gizmo-rv32cpp's main). But
         when the cases that survive cover less than that, the code only the dropped ones reached was
-        left uncovered and no other input sought for it (a private firmware's: a call that draws on
-        the display behind a byte compared with 1; the one run the search kept should have ended at
-        a call deeper in and spun on a fill engine's register before it). Then covered becomes what
+        left uncovered and no other input sought for it (found on a private firmware: a call behind a
+        byte compared with 1, whose one run the search kept should have ended at a call deeper in and
+        spun on a device register before it). Then covered becomes what
         the surviving cases cover and the compare-guided stage runs once more, every case of the
         corpus a source, counting only runs whose case survives; a run there that hangs in a callee is
-        tried again ending at that call too, also when its case ends at other calls already (the
-        display code's run should have ended at a glyph call and hung in a fill before it)."""
+        tried again ending at that call too, also when its case ends at other calls already (that
+        run should have ended at the call deeper in and hung before it)."""
         if not any(self.checked_at_end(c) for c in corpus):
             return
         good = set()

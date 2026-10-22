@@ -12,7 +12,12 @@ changing a table, case or report format.
    register maps or other facts of such a target. That also holds for comments, docstrings, tests,
    examples and commit messages. Examples use gizmo (`examples/gizmo`), which is our own code. A
    proprietary target's facts live in that target's repository, in its `dread.toml`, its tables and
-   its plugins. Open-source projects are not covered (the user, 2026-10-19: "Relax the rule to only
+   its plugins. What DREAD measured on one is such a fact too: its counts (functions, names, gotos,
+   instructions), scores, times and costs, and what its code does (a driver, a display routine, a
+   menu), stay in its notes; DREAD's docs say in words what a change did there ("on a private
+   firmware the gotos fell by more than half"), and a test for what it found is our own code with
+   neutral names (on 2026-10-22 such figures and descriptions were found in docs, docstrings and a
+   test, and taken out). Open-source projects are not covered (the user, 2026-10-19: "Relax the rule to only
    include proprietary stuff"): their names, addresses and figures may appear in code, docs, tests
    and commit messages. Those used as benchmarks (FreeRTOS first) are still built outside, by `dread
    bench`: the repository keeps their recipes (a pinned download, the build configurations, the

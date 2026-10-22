@@ -168,8 +168,8 @@ _G = {}             # what the workers share with the process that forked them (
 def in_pool(work, names, jobs=None, **shared):
     """[work(name)] for each of names, in order, work a function of this module that reads shared from
     _G: in forked worker processes (dread.util.polite.workers(), or jobs), or in this process for
-    fewer than POOL_MIN names or one worker. On the 3,541 functions of a large firmware, making the
-    analysis trees took 12 minutes on one core."""
+    fewer than POOL_MIN names or one worker. On a large firmware, making the analysis trees took
+    minutes on one core."""
     import multiprocessing
     from dread.util.polite import die_with_parent, polite, resident, workers
     _G.clear()
@@ -234,8 +234,8 @@ def _view_one(name):
 
 def warm(lifter):
     """Fill the lifter's tables for the whole program here, before a pool forks: the workers share
-    them instead of each making its own (dread.noreturn's, 5 of the 12 seconds a large firmware's first
-    lift took)."""
+    them instead of each making its own (dread.noreturn's: on a large firmware, much of its first
+    lift)."""
     if hasattr(lifter, "never_returns"):
         lifter.never_returns("")
 

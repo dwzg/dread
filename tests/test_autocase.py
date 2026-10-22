@@ -870,22 +870,22 @@ def test_a_case_that_touches_saved_registers_stands_for_nothing(tmp_path):
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_code_only_a_dropped_case_reached_is_sought_again(tmp_path, monkeypatch):
     """A case that should end at a call (a callee runs hung in) and spins on a device register before
-    it (a fill engine's status) is dropped from the result (drop_bad_ends), but its run counted
-    while the search ran, and no other input was sought for what only it had reached: on a private
-    firmware a call that draws on the display stayed uncovered. The repair (repair_lost) seeks it
-    again from what the surviving cases cover. The test hands the repair that situation: the good
-    cases that reach draw's call taken out, such a spinning case put in, the call counted as covered."""
+    it (a peripheral's status) is dropped from the result (drop_bad_ends), but its run counted
+    while the search ran, and no other input was sought for what only it had reached, which stayed
+    uncovered. The repair (repair_lost) seeks it again from what the surviving cases cover. The test
+    hands the repair that situation: the good cases that reach work's call taken out, such a
+    spinning case put in, the call counted as covered."""
     import subprocess
     from test_bench import TARGET
     from dread import autocase, elfimport
     (tmp_path / "t.c").write_text(NOIPA_DEF +
                                   "volatile unsigned char state;\nvolatile int go;\n"
-                                  "#define FILL (*(volatile unsigned *)0x40000100u)\n"
-                                  "NOIPA void glyph(void) { while (!go) ; }\n"
-                                  "NOIPA void fill(void) { while (FILL != 0x5a5a1234u) ; }\n"
-                                  "NOIPA int draw(int n) { fill(); glyph(); return n + 1; }\n"
-                                  "int f(int x) { if (x == 7) glyph(); if (state == 0) return 1;\n"
-                                  "    if (state == 1) return draw(0xff); return 2; }\n")
+                                  "#define READY (*(volatile unsigned *)0x40000100u)\n"
+                                  "NOIPA void finish(void) { while (!go) ; }\n"
+                                  "NOIPA void wait_ready(void) { while (READY != 0x5a5a1234u) ; }\n"
+                                  "NOIPA int work(int n) { wait_ready(); finish(); return n + 1; }\n"
+                                  "int f(int x) { if (x == 7) finish(); if (state == 0) return 1;\n"
+                                  "    if (state == 1) return work(0xff); return 2; }\n")
     (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
                                    " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
                                    "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) } > RAM }\n")
@@ -900,13 +900,13 @@ def test_code_only_a_dropped_case_reached_is_sought_again(tmp_path, monkeypatch)
     t = Target.load(str(tmp_path))
     g = Generator(t, t.image())
     p = g.program
-    fn, draw, glyph = p.by_name["f"], p.by_name["draw"], p.by_name["glyph"]
+    fn, work, finish = p.by_name["f"], p.by_name["work"], p.by_name["finish"]
     call = next(a for a in sorted(fn.insns) if p.arch.flow(p.insn(a))[0] in ("call", "jump")
-                and p.arch.flow(p.insn(a))[1] is not None and p.arch.flow(p.insn(a))[1] & ~1 == draw.entry)
+                and p.arch.flow(p.insn(a))[1] is not None and p.arch.flow(p.insn(a))[1] & ~1 == work.entry)
     state = next(s.value for s in __import__("dread.elf", fromlist=["Elf"]).Elf(elf).symbols if s.name == "state")
     spinning = {"args": [1, 0, 0, 0], "mem": [[state, 1, 1], [0x40000100, 4, 0]], "returns": [], "calls": [],
-                "frame": 0, "hang": True, "limit": 200_000, "stops": [glyph.entry]}
-    assert not g.survives(fn.entry, spinning)               # (it spins in fill before it gets to glyph)
+                "frame": 0, "hang": True, "limit": 200_000, "stops": [finish.entry]}
+    assert not g.survives(fn.entry, spinning)               # (it spins in wait_ready before it gets to finish)
     seen = {}
     real = autocase.Generator.repair_lost
 
