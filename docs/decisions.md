@@ -9,6 +9,70 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Lifted C's frames: the words only the saves and dead restores touch are left out (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20; the item in
+docs/todo.md, Compiler diversity).
+
+- **Question.** The lifted C kept the original's frame as a local array, the words the prologue
+  saves the caller's registers into among them, and the C compiler saves the registers its own code
+  uses beside it: on FreeRTOS's RISC-V builds most lifted frames grew by exactly those saves (clang
+  -Os: 173 of the 241 lifted functions, 4,768 bytes), a task's stack overflowed with two of them in
+  C, and the lift check keeps such functions out since the whole image is searched (lift.culprits).
+  Which words may the C leave out, and how is that kept from changing what the C does?
+- **Options.** (a) Keep every word, as before. (b) Leave out the words at the frame's top (right
+  below the entry's stack pointer) that only whole-word stores and whole-word loads touch, each
+  load's register read by nothing behind it (or made without memory: the return address as the
+  builtin), where no address of the frame may reach them; the translation skips those stores and
+  loads, and the array ends that far below sp0. (c) As (b), also where a frame address goes to a
+  callee: a callee reaches past what it was given only through a fault of the original (a length
+  past a local), and the cases already refuse an input that makes code touch saved registers
+  (saves_touched; most of what still grows after (b) would shrink). (d) Have the C compiler reuse
+  the original's slots: no compiler offers it.
+- **Choice: (b).** It takes away the cause where the analysis can show that nothing needs the
+  words, and stays where it cannot. Why it is safe:
+  1. Nothing the C computes needs a word left out: every load of it is a restore into a register
+     that no path reads before writing it again (restore_dead: a return reads the result registers,
+     a call its arguments and what its callee reads of its caller's registers, a jump through a
+     register the arguments, a tail call the arguments; a pop that returns loads only the result),
+     or the return address the C takes from the builtin. So its stores are dead as well, and the C
+     without them and without the loads computes the same.
+  2. Nothing else reaches it: every register that may hold a frame address is followed forward on
+     every path (sp, copies, arithmetic, writeback; a load writes what memory holds, and a frame
+     address would have been stored first, which is refused); an access through one must lie where
+     the states know (one frame address on every path, no index), and none may be stored, handed
+     to a call, returned or read by an instruction that runs as itself in inline assembly
+     (frame_uses: else FrameReach, and every word stays). A call's stack arguments and the lowest
+     frame words a call through a pointer is handed are reads of their own: such words stay.
+  3. The words left out are a run from the top: the array stays one block, its start as aligned as
+     before (sp0 = the array's start + the original's frame rounded as before), so every word kept
+     lies where it lay relative to sp0 and to the alignment. A wrapped function's frame is the real
+     stack and keeps everything.
+  4. No comparison changes (rule 6): the cases compare the result, the registers handed back, the
+     kept scratch registers, every write outside the stack (and the room for stack arguments above
+     the stack top), stub calls and device accesses; the stack below the caller's stack pointer is
+     not compared anywhere (C lays out its frames otherwise), and the checks that look at it run the
+     original alone (stale stack data read, a stack address taken for a value, saved registers
+     touched by code other than a push, pop, save or restore: a case where that happens is refused
+     with the words kept or left out alike). The system run compares device logs and model reports,
+     as before.
+  5. Not covered: code that reaches the frame through an address it makes itself (a callee writing
+     past its own frame, a pointer computed from the stack's top) writes there into what is now the
+     C compiler's own data instead of a word nobody read. Not seen on the benchmark; the cases and
+     the whole image decide, as for anything else C does otherwise.
+- **Undo.** Make Lifter.saves_out return 0: every lifter then writes the same C as before for every
+  function (the frame declarations, pushes, pops, saves and restores are as they were whenever
+  nothing is left out).
+- **Status.** Done (dread.lift: saves_out, frame_uses, restore_dead, c_uses; each lifter's
+  frame_effects and results; tests on ARM, RISC-V and MSP430). On copies of six benchmark builds
+  the frames larger in C fell from 173 to 56 of 241 (RISC-V clang -Os), 171 to 57 (clang 14), 191
+  to 51 of 259 (RISC-V GCC -Os), 225 to 163 of 330 (M3 GCC -Os), 127 to 98 of 320 (M3 clang -Os) and
+  275 to 185 of 358 (M3 GCC -O0); the lift check accepts the same functions on four and two more on
+  the clang RISC-V builds (the two the stack search dropped), every whole image agreeing; the
+  readable gate accepts the same functions on its eight builds (docs/todo.md, the item). Option (c)
+  would shrink most of what still grows (on clang -Os 45 of the 56 frames keep their saves for an
+  address handed on); it is not taken without an argument that a callee cannot reach them.
+
 ## The groups' evidence from the listing, not the readable C (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

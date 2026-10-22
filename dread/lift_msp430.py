@@ -3,7 +3,10 @@
 Registers r4-r15 are u16 variables. The stack pointer's depth below the entry's is known statically
 at every instruction (dread.lift's states: push and pop, sub #N, sp and add #N, sp, @sp+, a call's
 return address, which the callee's return takes off again), so sp as an operand is the C expression
-of that address in a frame array, and an access through it lands there. The flags are four variables
+of that address in a frame array, and an access through it lands there; the array leaves out the
+words at the frame's top that only pushes and pops nobody reads behind touch (dread.lift's saves_out:
+those pushes and pops translate to nothing; GCC's shared epilogues pop in code of their own, which
+the C does not translate anyway). The flags are four variables
 c, z, n and v, computed as the engine (dread.engines.msp430) and TI's guide say: add, addc, sub, subc
 and cmp set all four; and, bit and sxt set C to not Z and clear V; xor sets V when both operands are
 negative; rrc and rra shift into C and clear V; dadd sets C, Z and N and leaves V. The conditional
@@ -370,6 +373,77 @@ class Msp430Lifter(lift.Lifter):
 
     # ---- what kind of function ----
 
+    # ---- the frame's top (dread.lift's saves_out) ----
+
+    def results(self, fn, handler=None):
+        return () if handler else RESULTS[self._width(fn.name)]
+
+    def frame_effects(self, fn, insn, depth, values, results, own):
+        """dread.lift.FrameEffects of an MSP430 instruction: its operands through a register (sp
+        among them; a word mov of a register or a constant into memory is the whole-word store, push
+        of one too, a word mov from memory into a register, pop among them, the whole-word load;
+        anything else that touches memory reads it for a value or writes it as part of more), the
+        return address a call pushes, the frame words a call passes as stack arguments (_call,
+        _icall), calls (r12-r15 and what the callee reads its caller leaves), returns (GCC's shared
+        epilogues among them: they pop in code of their own, which the C does not translate) and
+        jumps through a register; an instruction on sr runs on the real register (opaque)."""
+        f = insn.fields
+        reads, writes = self.arch.reg_effects(insn)
+        fx = lift.FrameEffects(reads, writes)
+        kind, target, falls = self.arch.flow(insn)
+        size = 1 if f.byte else 2
+        plain_src = f.src is not None and f.src.mode in ("reg", "imm") and not (f.src.mode == "reg" and f.src.reg < 4)
+        if f.op == "push":
+            fx.accesses.append(("sp", None, -2, size, "store" if plain_src and not f.byte else "other", None, False))
+        elif kind in ("call", "icall"):
+            fx.accesses.append(("sp", None, -2, 2, "store", None, False))     # the return address
+        for o, source in ((f.src, True), (f.dst, False)):
+            if o is None or o.mode not in ("idx", "ind", "inc") or o.reg in (0, 2, 3):
+                continue
+            disp = o.value if o.mode == "idx" else 0
+            whole = f.op == "mov" and not f.byte
+            if source:
+                into = whole and f.dst is not None and f.dst.mode == "reg" and f.dst.reg >= 4
+                fx.accesses.append((NAMES[o.reg], None, disp, size, "load" if into else "other",
+                                    NAMES[f.dst.reg] if into else None, False))
+            else:
+                fx.accesses.append((NAMES[o.reg], None, disp, size, "store" if whole and plain_src else "other",
+                                    None, False))
+        if f.src is not None and f.src.mode == "reg" and (f.op == "push" or (
+                f.dst is not None and f.dst.mode in ("idx", "ind", "inc"))):
+            fx.stored.add(NAMES[f.src.reg])     # (a register's value into memory)
+        if f.src is not None and f.src.mode in ("idx", "ind", "inc") and f.dst is not None and f.dst.mode == "reg":
+            fx.loaded.add(NAMES[f.dst.reg])     # (what memory holds into a register)
+        callee = None
+        if kind == "call":
+            callee = self.prog.by_entry.get(target)
+        elif kind == "icall":
+            callee = self._known_callee(insn, (depth, values))
+        elif kind == "jump" and not falls and target is not None and target not in own and self.epilogue(insn) is None:
+            callee = self.prog.by_entry.get(target)
+        if kind in ("call", "icall"):
+            fx.hands |= set(ARGS) | (set(self.leaves(callee)) if callee is not None else (set(reads) - {"sp"}))
+            n = (self.stack_args(callee) or 0) if callee is not None else min(depth // 2, lift.INDIRECT_STACK_WORDS)
+            fx.words += [(2 * k, 2) for k in range(n) if 2 * k < depth]   # (_call, _icall)
+            fx.writes |= set(self.after_call(insn))
+            fx.loaded |= set(self.after_call(insn)) - {"flags"}
+        elif kind == "return" or self.ret_jump(insn, values):
+            fx.hands |= set(results)
+        elif callee is not None:
+            fx.hands |= set(ARGS) | set(self.leaves(callee))         # a tail call
+        elif kind == "ijump":
+            fx.hands |= (set(ARGS) | set(reads)) - {"sp"}
+        fx.opaque = any(o is not None and o.mode == "reg" and o.reg == 2 for o in (f.src, f.dst))
+        return fx
+
+    def _operand_slot(self, o):
+        """How far below the entry's stack pointer a memory operand accesses the frame (through sp or a
+        register whose frame address the states know), else None."""
+        if o is None or o.mode not in ("idx", "ind", "inc") or o.reg in (0, 2, 3):
+            return None
+        base = self._frame(o, *self.ctx["states"][self.insn_now.address])
+        return base[1] - (o.value if o.mode == "idx" else 0) if base is not None else None
+
     def lift(self, fn):
         if self.stack_args(fn) and self.handler_kind(fn):
             raise Refused("an interrupt handler that reads or writes the return address the interrupt saved or "
@@ -665,6 +739,8 @@ class Msp430Lifter(lift.Lifter):
         if op == "call":
             return self._call_insn(insn)
         if op == "push":
+            if self._left_out(depth[a] + 2):
+                return None                 # a save into a word left out (saves_out)
             pre = []
             v = self._source(f.src, f.byte, pre)
             store = "*(volatile %s *)(%s) = %s;" % ("u8" if f.byte else "u16", self._slot(depth[a] + 2),
@@ -735,6 +811,9 @@ class Msp430Lifter(lift.Lifter):
     def _double(self, insn, f):
         op, byte, d = f.op, f.byte, f.dst
         mask = 0xFF if byte else 0xFFFF
+        if op == "mov" and not byte and (d.mode == "reg" and self._left_out(self._operand_slot(f.src)) or
+                                         f.src.mode in ("reg", "imm") and self._left_out(self._operand_slot(d))):
+            return None                     # a save or a restore nothing reads, of a word left out (saves_out)
         pre = []
         s = self._source(f.src, byte, pre)
         if d.mode == "reg" and d.reg == 1:
@@ -951,9 +1030,13 @@ class Msp430Lifter(lift.Lifter):
         lines.append("    u16 %s;" % ", ".join(init))
         lines.append("    u16 c = 0, z = 0, n = 0, v = 0, s0 = 0, d0 = 0, e0 = 0, a0 = 0;")
         lines += self.fixed_lines()
-        frame = (ctx["frame"] + 7) & ~7
-        lines.append("    u8 frame[%d] __attribute__((aligned(2)));" % max(8, frame))
-        lines.append("    u16 sp0 = (u16)&frame[%d];" % max(8, frame))
+        frame = (ctx["frame"] + 7) & ~7     # the frame below the saves left out (saves_out), sp0 its top
+        if ctx["out"]:
+            lines.append("    u8 frame[%d] __attribute__((aligned(2)));" % max(1, frame - ctx["out"]))
+            lines.append("    u16 sp0 = (u16)&frame[%d] + %d;" % (frame - ctx["out"], ctx["out"]))
+        else:
+            lines.append("    u8 frame[%d] __attribute__((aligned(2)));" % max(8, frame))
+            lines.append("    u16 sp0 = (u16)&frame[%d];" % max(8, frame))
         lines.append("    %s (void)c; (void)z; (void)n; (void)v; (void)s0; (void)d0; (void)e0; (void)a0; (void)sp0;"
                      % " ".join("(void)%s;" % r for r in regs))
         lines += body

@@ -114,7 +114,9 @@ loops, reset and interrupt handlers.
 
 `dread lift` translates a function to C one instruction at a time: registers as variables, flags
 computed exactly, memory accesses volatile and in order, the stack as a local array whose layout
-mirrors the original's. `dread lift --check` builds every function that lifts and keeps it only
+mirrors the original's, without the words at its top that only the prologue's saves and restores
+nobody reads touch (the C compiler saves its own registers; where an address of the frame may reach
+them, they stay). `dread lift --check` builds every function that lifts and keeps it only
 when its cases agree and run all of it (the system run decides for the functions that never return
 and for exception handlers). `dread liftfuzz` checks the translation itself on random instruction
 sequences, because cases that cover a function need not tell a wrong translation apart.

@@ -8,7 +8,13 @@ The function's own stack is a local array: the stack pointer's depth below its v
 is known statically at every instruction (refused otherwise), so [sp, #k] is a word of that array,
 or, above the entry, a stack argument, which is a parameter. The analysis also follows addresses in
 the frame through registers (a frame pointer: mov r7, sp ... mov sp, r7, and accesses through it)
-and the return address through pushes and pops (Thumb-1's pop {r3}; bx r3 is a return). Literal loads and adr are constants read
+and the return address through pushes and pops (Thumb-1's pop {r3}; bx r3 is a return). The array
+leaves out the words at the frame's top that only saves and restores nobody reads behind them touch
+(Lifter.saves_out: the prologue's saves of the registers the caller left, the epilogue's restores,
+the pad pushed to keep the stack aligned): the C compiler saves the registers its own code uses, and
+with them kept the C's frame held both. Nothing leaves them out when an address of the frame may
+reach them (it goes to a call, into memory, back to the caller, or an access through one lands
+where the analysis does not know). Literal loads and adr are constants read
 from the image at lift time. A call passes the four argument registers and as many stack words as
 the callee reads above its entry (from the caller's outgoing area, or its own stack arguments for a
 tail call); the result is r0, or r0 and r1 for a callee whose callers read r1 (dread.regflow). A
@@ -127,6 +133,15 @@ BOUND_IN = frozenset(("r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11"))
 HANDED = BOUND_IN | {"r12"}
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
+# The loads and stores with one memory operand, by the bytes they access (Lifter.frame_effects)
+LOAD_SIZES = {A.ARM_INS_LDR: 4, A.ARM_INS_LDRB: 1, A.ARM_INS_LDRH: 2, A.ARM_INS_LDRSB: 1, A.ARM_INS_LDRSH: 2,
+              A.ARM_INS_LDRD: 8, A.ARM_INS_LDREX: 4, A.ARM_INS_LDREXB: 1, A.ARM_INS_LDREXH: 2, A.ARM_INS_LDREXD: 8}
+STORE_SIZES = {A.ARM_INS_STR: 4, A.ARM_INS_STRB: 1, A.ARM_INS_STRH: 2, A.ARM_INS_STRD: 8, A.ARM_INS_STREX: 4,
+               A.ARM_INS_STREXB: 1, A.ARM_INS_STREXH: 2, A.ARM_INS_STREXD: 8}
+EXCLUSIVE_STORES = {A.ARM_INS_STREX, A.ARM_INS_STREXB, A.ARM_INS_STREXH, A.ARM_INS_STREXD}
+# stm and its kinds: (before, up), as Lifter.LDMS has them for ldm
+STMS = {A.ARM_INS_STM: (False, True), A.ARM_INS_STMIB: (True, True), A.ARM_INS_STMDA: (False, False),
+        A.ARM_INS_STMDB: (True, False)}
 INDIRECT_STACK_WORDS = 4  # frame words a call through a register passes on as stack arguments
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -142,6 +157,36 @@ class StackSwitch(Refused):
     next task's from its TCB). Lifter.states(switch=True) ends the path there."""
 
 
+class FrameReach(Exception):
+    """An address of the function's frame may reach what Lifter.frame_uses cannot account for: it is
+    handed to a call, stored, returned or given to an instruction the analysis does not follow, or an
+    access through it lands where the states do not know (an index, a register that holds one of
+    several frame addresses). The frame then keeps every word (Lifter.saves_out)."""
+
+
+class FrameEffects:
+    """What one instruction does that Lifter.frame_uses follows (each lifter's frame_effects):
+    accesses: [(base, index, displacement, size, kind, register, nofetch)], the memory it reads or
+    writes at base + displacement (+ index; base and index register names, sp among them; size None
+    for an access the layer does not size, which may not touch the frame); kind: "store" for a
+    store the C can leave out (a value into memory, nothing else), "load" for a load into register
+    that the C can leave out where nothing reads the register behind it, "other" for the rest (it
+    reads memory for a value, or writes it as part of something else); nofetch: a load the C
+    makes without reading memory (the return address, as the builtin); reads and writes: the
+    registers it reads and writes; stored: those whose values it writes to memory; loaded: those it
+    writes with what it loads or a call returns (no frame address: one would have been stored
+    first); hands: those it hands to code the analysis does not see (a call's arguments, a return's
+    result, a jump through a register); opaque: whether it acts on the core with what it reads
+    (inline assembly), so that a frame address read there leaves; words: frame words it reads
+    beside them [(displacement from sp, size)] (a call's stack arguments)."""
+
+    __slots__ = ("accesses", "reads", "writes", "stored", "loaded", "hands", "opaque", "words")
+
+    def __init__(self, reads=(), writes=()):
+        self.accesses, self.reads, self.writes = [], set(reads), set(writes)
+        self.stored, self.loaded, self.hands, self.opaque, self.words = set(), set(), set(), False, []
+
+
 def dict_origins(pairs, reg):
     """The caller's registers a register's value is a copy of, from (register, origin) pairs."""
     got = {o for r, o in pairs if r == reg}
@@ -150,12 +195,15 @@ def dict_origins(pairs, reg):
 
 class Lifted:
     """The result for one function; unreached: its instructions no path from the entry reaches
-    (padding behind an ARMv4T veneer's bx pc, say), which no case can run."""
+    (padding behind an ARMv4T veneer's bx pc, say), which no case can run. frame: the bytes of the
+    original's frame (its deepest stack pointer below the entry's, rounded up); saves_out: the bytes
+    at its top the C's frame array leaves out (Lifter.saves_out)."""
 
-    def __init__(self, name, text, callees, frame, stack_params, unreached=(), body=None):
+    def __init__(self, name, text, callees, frame, stack_params, unreached=(), body=None, saves_out=0):
         self.name, self.text, self.callees, self.frame, self.stack_params = name, text, callees, frame, stack_params
         self.unreached = list(unreached)
         self.body = body            # with shared code (Lifter.shared_code): every instruction the C holds
+        self.saves_out = saves_out
 
 
 class Body:
@@ -914,6 +962,264 @@ class Lifter:
         found = self.entry_states(fn)[1]
         return sorted(set().union(*found.values()) - set(self.ARGS)) if found else []
 
+    # ---- the frame's top: the saves the C leaves out ----
+
+    def saves_out(self, fn, states, handler=None):
+        """The bytes at the top of fn's frame, right below the entry's stack pointer, that the C's frame
+        array leaves out (render: sp0 lies that far above the array's end): the longest run of words
+        from there down that only whole-word stores and whole-word loads touch, each load's register
+        dead behind it (restore_dead) or made without reading memory (the return address, as the
+        builtin). Those are the prologue's saves and the epilogue's restores, and the pad words pushed
+        to keep the stack aligned: the C translates neither, and the C compiler saves the registers
+        its own code uses. With them kept, the C's frame held the original's saves beside its own
+        (FreeRTOS's RISC-V clang builds: most frames grew by exactly the saves). 0 when an address of
+        the frame may reach what the analysis does not see (frame_uses, FrameReach: one is handed to a
+        call, stored or returned, an access lands where the states do not know), whatever it would
+        reach; the frame of a wrapped function is the real stack and keeps everything (lift)."""
+        w = self.arch.word
+        top = max((st[0] for st in states.values()), default=0)
+        if top < w:
+            return 0
+        results = self.results(fn, handler)
+        fp = self.uses_fpu([self.prog.insn(a) for a in fn.insns])
+        try:
+            uses = self.frame_uses(fn, states, results, fp)
+        except FrameReach:
+            return 0
+        index = {a: i for i, a in enumerate(fn.insns)}
+        kept = set()                        # words (by the depth of their lowest byte) the C keeps
+        for a, k, size, kind, reg, nofetch in uses:
+            if size == w and k % w == 0 and (kind == "store" or kind == "load" and (nofetch or (
+                    reg is not None and self.restore_dead(fn, states, index, a, reg, results, fp)))):
+                continue
+            word = ((k - size) // w + 1) * w    # every word the access covers a byte of
+            while word < k + w:
+                kept.add(word)
+                word += w
+        out, frame = 0, (top + 7) & ~7     # (the frame as _lift rounds it: below the deepest, words no access
+        while out + w <= frame and out + w not in kept:     # reaches)
+            out += w
+        return out
+
+    def results(self, fn, handler=None):
+        """The registers fn's C returns (none for an exception handler)."""
+        if handler:
+            return ()
+        return ("r0", "r1") if self._wide(fn.name) else ("r0",)
+
+    @staticmethod
+    def _frame_address(value):
+        return isinstance(value, tuple) and len(value) == 2 and value[0] == "sp"
+
+    def frame_uses(self, fn, states, results, fp=False):
+        """[(address, k, size, kind, register, nofetch)]: every access of fn to its own frame that a path
+        reaches (frame_effects), k the depth of its lowest byte below the entry's stack pointer, and
+        the frame words a call reads as its callee's stack arguments. The registers that may hold an
+        address of the frame are followed forward, whatever the paths (sp, and every register a
+        computation from one of them writes; a load writes what memory holds, and a frame address
+        there would have been stored first): an access through one must lie where the states know
+        (sp, or a register whose frame address every path agrees on, without an index), and none may
+        be stored, handed on (a call's arguments, a return's result, a jump's register) or read by an
+        instruction that runs as itself in inline assembly. Otherwise FrameReach: the frame address
+        may reach any word, the saves too."""
+        prog, arch = self.prog, self.arch
+        index = {a: i for i, a in enumerate(fn.insns)}
+        own, start = set(fn.insns), fn.insns[0]
+        mirror = set(FPU_MIRRORED) if fp else set()
+        taint, work, found = {start: frozenset()}, [start], {}
+        while work:
+            a = work.pop()
+            insn = prog.insn(a)
+            if a not in states or insn is None:
+                continue
+            depth, values = states[a]
+            hot = set(taint[a]) | {r for r, v in values.items() if isinstance(r, str) and self._frame_address(v)}
+            hot.add("sp")
+            fx = self.frame_effects(fn, insn, depth, values, results, own)
+            if fx.hands:
+                fx.hands |= mirror
+            got = []
+            for base, idx, disp, size, kind, reg, nofetch in fx.accesses:
+                if base not in hot and idx not in hot:
+                    continue
+                v = ("sp", depth) if base == "sp" else values.get(base)
+                if idx is not None or size is None or not self._frame_address(v):
+                    raise FrameReach("0x%x (%s %s) reaches the frame where the states do not know" % (
+                        a, insn.mnemonic, insn.op_str))
+                got.append((a, v[1] - disp, size, kind, reg, nofetch))
+            got += [(a, depth - disp, size, "other", None, False) for disp, size in fx.words]
+            found[a] = got
+            for what, regs in (("stores", fx.stored), ("hands on", fx.hands)):
+                if regs & hot:
+                    raise FrameReach("0x%x %s a frame address (%s)" % (a, what, ", ".join(sorted(regs & hot))))
+            if fx.opaque and fx.reads & hot:
+                raise FrameReach("0x%x runs as itself with a frame address" % a)
+            plain = {r for r in fx.writes if r not in ("sp", "pc", "flags")}
+            made = plain - fx.loaded if fx.reads & hot else set()
+            held = hot - {"sp"}
+            after = frozenset((held - plain if arch.predicate(insn) is None else held) | made)
+            for b in self.successors(fn, index, a, insn, strict=False, values=values):
+                if b not in states:
+                    continue
+                if b not in taint:
+                    taint[b] = after
+                    work.append(b)
+                elif not after <= taint[b]:
+                    taint[b] = taint[b] | after
+                    work.append(b)
+        return [u for a in sorted(found) for u in found[a]]
+
+    def restore_dead(self, fn, states, index, a, reg, results, fp=False):
+        """Whether what the load at `a` writes into reg is dead in the C: no path behind it reads reg
+        before writing it again (c_uses). A load that returns (pop {r4, pc}) leaves it live only as a
+        result."""
+        insn = self.prog.insn(a)
+        mirror = set(FPU_MIRRORED) if fp else set()
+        if self.arch.flow(insn)[0] == "return" or self.ret_jump(insn, states[a][1]):
+            return reg not in set(results) | mirror
+        own = set(fn.insns)
+        seen = set()
+        work = list(self.successors(fn, index, a, insn, strict=False, values=states[a][1]))
+        while work:
+            b = work.pop()
+            if b in seen or b not in states:
+                continue
+            seen.add(b)
+            i = self.prog.insn(b)
+            reads, kills, ends = self.c_uses(fn, i, states[b][1], results, mirror, own)
+            if reg in reads:
+                return False
+            if ends or reg in kills:
+                continue
+            work += self.successors(fn, index, b, i, strict=False, values=states[b][1])
+        return True
+
+    def c_uses(self, fn, insn, values, results, mirror, own):
+        """(reads, kills, ends) of an instruction as restore_dead follows a register: a return reads the
+        result registers (and s0-s15 with the FPU: mirror) and ends the path; a call reads the
+        arguments, what its callee reads that its caller leaves, and the mirror, and writes what a
+        call leaves written; a jump to another function's entry, or a fall into one, is a tail call
+        that reads them; a conditional instruction kills nothing."""
+        arch = self.arch
+        kind, target, falls = arch.flow(insn)
+        reads, writes = arch.reg_effects(insn)
+        reads = set(reads)
+        kills = set(writes) if arch.predicate(insn) is None else set()
+        if kind == "return" or self.ret_jump(insn, values):
+            return set(results) | mirror, set(), True
+        callee = self.prog.by_entry.get(target & ~1) if isinstance(target, int) else None
+        if kind in ("call", "icall"):
+            reads |= set(self.ARGS) | mirror | (set(self.leaves(callee)) if callee is not None else set())
+            if arch.predicate(insn) is None:
+                kills |= set(self.after_call(insn))
+            return reads, kills, self.dead_end(insn) is not None
+        if kind == "jump" and callee is not None and (target & ~1) not in own:
+            return reads | set(self.ARGS) | mirror | set(self.leaves(callee)), set(), not falls
+        if kind == "ijump":
+            reads |= set(self.ARGS) | mirror        # a switch, or a tail call through a register
+        if insn.address + insn.size not in own and self.falls_into(fn, insn) is not None:
+            reads |= set(self.ARGS) | mirror        # the tail call it falls into
+        return reads, kills, False
+
+    def frame_effects(self, fn, insn, depth, values, results, own):
+        """FrameEffects of an ARM instruction (frame_uses): the words of push and pop, of ldm and stm
+        (the return address an ldm or a pop loads as the builtin where _pop and _frame_ldm do), of
+        single loads and stores (ldr of a word into one register: the return address as the builtin
+        where _load gives it so), of the FPU's loads and stores, and a call's stack arguments and the
+        frame words a call through a register is handed (_icall). Instructions of SYSTEM run as
+        themselves (opaque)."""
+        arch = self.arch
+        ops, i = insn.operands, insn.id
+        name = lambda r: arch._name(insn.reg_name(r))
+        reads, writes = arch.reg_effects(insn)
+        fx = FrameEffects(reads, writes)
+        kind, target, falls = arch.flow(insn)
+        stack = arch.stack_kind(insn)
+        if stack in ("push", "pop"):
+            size = arch.stack_bytes(insn)
+            for k, (r, _) in enumerate(self.stack_words(insn)):
+                if r is None:
+                    continue                # a word it leaves alone (str lr, [sp, #-8]!)
+                if stack == "push":
+                    fx.accesses.append(("sp", None, 4 * k - size, 4, "store", None if r == "pc" else r, False))
+                    if r != "pc":
+                        fx.stored.add(r)
+                else:
+                    fx.accesses.append(("sp", None, 4 * k, 4, "load", r, values.get(depth - 4 * k) == self.RET))
+                    fx.loaded.add(r)
+        elif i in self.LDMS or i in STMS:
+            load = i in self.LDMS
+            before, up = (self.LDMS if load else STMS)[i]
+            base = name(ops[0].reg)
+            regs = [name(o.reg) for o in ops[1:]]
+            n = len(regs)
+            start = {(False, True): 0, (True, True): 4, (False, False): -4 * n + 4, (True, False): -4 * n}[(before, up)]
+            builtin = load and (kind == "return" or "sp" in regs)       # (_frame_ldm)
+            v = ("sp", depth) if base == "sp" else values.get(base)
+            for k, r in enumerate(regs):
+                ret = builtin and self._frame_address(v) and values.get(v[1] - start - 4 * k) == self.RET
+                fx.accesses.append((base, None, start + 4 * k, 4, "load" if load else "store", r, ret))
+            (fx.loaded if load else fx.stored).update(regs)
+        else:
+            at = next((k for k, o in enumerate(ops) if o.type == A.ARM_OP_MEM), None)
+            if at is not None:
+                o, m = ops[at], ops[at].mem
+                base = name(m.base) if m.base else None
+                idx = name(m.index) if m.index else None
+                post = next((x for x in ops[at + 1:] if x.type in (A.ARM_OP_IMM, A.ARM_OP_REG)), None)
+                disp = 0 if post is not None else (-abs(m.disp) if o.subtracted and m.disp > 0 else m.disp)
+                regs = [name(x.reg) for x in ops[:at] if x.type == A.ARM_OP_REG]
+                lanes = ["s" + v[1:] for x in ops[:at] for v in (self.fp_lanes(x, insn) or [])]
+                plain = post is None and not insn.writeback and len(regs) == 1 and regs[0] != "pc"
+                if i in LOAD_SIZES:
+                    one = plain and i == A.ARM_INS_LDR
+                    made = self.made_value(insn, depth, values) if one else None
+                    fx.accesses.append((base, idx, disp, LOAD_SIZES[i], "load" if one else "other",
+                                        regs[0] if one else None, bool(made) and made[1] == self.RET))
+                    fx.loaded.update(regs)
+                elif i in STORE_SIZES:
+                    one = plain and i == A.ARM_INS_STR
+                    fx.accesses.append((base, idx, disp, STORE_SIZES[i], "store" if one else "other",
+                                        regs[0] if one else None, False))
+                    fx.stored.update(regs[1:] if i in EXCLUSIVE_STORES else regs)   # (strex: the status first)
+                elif i in (A.ARM_INS_VLDR, A.ARM_INS_VSTR):
+                    store = i == A.ARM_INS_VSTR
+                    fx.accesses.append((base, idx, disp, 4 * len(lanes), "other", None, False))
+                    (fx.stored if store else fx.loaded).update(lanes)
+                elif i not in (A.ARM_INS_PLD, A.ARM_INS_PLDW, A.ARM_INS_PLI):    # (a hint accesses nothing)
+                    fx.accesses.append((base, idx, disp, None, "other", None, False))
+            elif i in VFP_MEMORY:           # vldm, vstm (vpush and vpop are pushes and pops)
+                base = name(ops[0].reg)
+                lanes = ["s" + v[1:] for x in ops[1:] for v in (self.fp_lanes(x, insn) or [])]
+                store = i in (A.ARM_INS_VSTMIA, A.ARM_INS_VSTMDB)
+                down = i in (A.ARM_INS_VLDMDB, A.ARM_INS_VSTMDB)
+                for k in range(len(lanes)):
+                    fx.accesses.append((base, None, 4 * k - (4 * len(lanes) if down else 0), 4, "other", None, False))
+                (fx.stored if store else fx.loaded).update(lanes)
+        callee = self.prog.by_entry.get(target & ~1) if isinstance(target, int) else None
+        if kind == "call":
+            fx.hands |= set(self.ARGS) | (set(self.leaves(callee)) if callee is not None else set())
+            for k in range((self.stack_args(callee) or 0) if callee is not None else 0):
+                if 4 * k < depth:
+                    fx.words.append((4 * k, 4))     # its stack argument k, from the frame (_call)
+        elif kind == "icall":
+            fx.hands |= (set(self.ARGS) | set(reads)) - {"sp", "pc"}
+            if i != A.ARM_INS_SVC:
+                fx.words += [(4 * k, 4) for k in range(min(depth // 4, INDIRECT_STACK_WORDS))]    # (_icall)
+        elif kind == "return" or self.ret_jump(insn, values):
+            fx.hands |= set(results)
+        elif kind == "jump" and callee is not None and (target & ~1) not in own:
+            fx.hands |= set(self.ARGS) | set(self.leaves(callee))        # a tail call
+        elif kind == "ijump":
+            fx.hands |= (set(self.ARGS) | set(reads)) - {"sp", "pc"}
+        if insn.address + insn.size not in own and self.falls_into(fn, insn) is not None:
+            fx.hands |= set(self.ARGS)
+        if kind in ("call", "icall"):
+            fx.writes |= set(self.after_call(insn))
+            fx.loaded |= set(self.after_call(insn))
+        fx.opaque = i in SYSTEM or i in (A.ARM_INS_VMRS, A.ARM_INS_VMSR)
+        return fx
+
     # ---- the translation ----
 
     def compiled_isa(self):
@@ -1002,15 +1308,16 @@ class Lifter:
         if stack_params > MAX_STACK_ARGS:
             raise Refused("it takes %d stack words" % stack_params)
         frame = (max(depth.values()) + 7) & ~7
+        wrapped = getattr(self, "_wrapping", False)
+        out = 0 if wrapped else self.saves_out(fn, states, handler)     # (a wrapped frame is the real stack)
         targets = set()
         for insn in insns:
             kind, target, _ = arch.flow(insn)
             if kind == "jump" and target is not None and (target & ~1) in depth:
                 targets.add(target & ~1)
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
-                    "bound": set(), "handed": handed, "save_area": self.save_area(fn, insns),
-                    "wrapped": getattr(self, "_wrapping", False),
-                    "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns),
+                    "bound": set(), "handed": handed, "save_area": self.save_area(fn, insns), "wrapped": wrapped,
+                    "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns), "out": out,
                     "stack_params": stack_params, "switch": {}, "switch_targets": set()}
         self._switches(fn)
         body, own = [], set(fn.insns)
@@ -1032,7 +1339,7 @@ class Lifter:
         got = Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]) + sorted(self.ctx["bound"]),
                      frame, stack_params,
                      [a for a in fn.insns if a not in depth and a not in stubs],
-                     list(fn.insns) if isinstance(fn, Body) else None)
+                     list(fn.insns) if isinstance(fn, Body) else None, out)
         got.handed = sorted(self.ctx["handed"], key=lambda r: int(r[1:]))
         return got
 
@@ -1221,9 +1528,10 @@ class Lifter:
         if ctx.get("flags_in"):             # read before written (mrs r0, cpsr first): the caller's flags
             lines.append('    { u32 t; __asm__ volatile ("mrs %0, apsr" : "=r"(t)); n = t >> 31; z = t >> 30 & 1; '
                          'c = t >> 29 & 1; v = t >> 28 & 1; }')
-        if not ctx.get("wrapped"):
-            lines.append("    u32 frame[%d] __attribute__((aligned(8)));" % max(2, ctx["frame"] // 4))
-            lines.append("    u32 sp0 = (u32)&frame[%d];" % (ctx["frame"] // 4))
+        if not ctx.get("wrapped"):          # the frame below the saves left out (saves_out), sp0 its top
+            n = (ctx["frame"] - ctx["out"]) // 4
+            lines.append("    u32 frame[%d] __attribute__((aligned(8)));" % max(1 if ctx["out"] else 2, n))
+            lines.append("    u32 sp0 = (u32)&frame[%d]%s;" % (n, " + %d" % ctx["out"] if ctx["out"] else ""))
         if ctx["switch"]:
             lines.append("    u32 index = 0;")
         lines.append("    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)lr; (void)sp0;")
@@ -1268,6 +1576,28 @@ class Lifter:
         if written:
             raise Refused("its callers read %s, which it sets (%s); C returns r0 and r1 only" % (
                 written[0], flow.why(fn.name, written[0])))
+
+    def _left_out(self, k):
+        """Whether the frame word k bytes below the entry's stack pointer lies in the top that the C's
+        frame array leaves out (saves_out); False for None (not a frame word the states know)."""
+        return k is not None and 0 < k <= self.ctx.get("out", 0)
+
+    def _single_slot(self, insn):
+        """How far below the entry's stack pointer a load or store with one memory operand accesses
+        the frame (through sp, or a register whose frame address the states know; no index, no
+        writeback), else None."""
+        ops = insn.operands
+        at = next((k for k, o in enumerate(ops) if o.type == A.ARM_OP_MEM), None)
+        if at is None or ops[at].mem.index or insn.writeback or \
+                any(x.type in (A.ARM_OP_IMM, A.ARM_OP_REG) for x in ops[at + 1:]):
+            return None
+        o, m = ops[at], ops[at].mem
+        depth, values = self.ctx["states"][insn.address]
+        base = self.arch._name(insn.reg_name(m.base))
+        v = ("sp", depth) if base == "sp" else values.get(base)
+        if not self._frame_address(v):
+            return None
+        return v[1] - (-abs(m.disp) if o.subtracted and m.disp > 0 else m.disp)
 
     # operands
 
@@ -1951,15 +2281,15 @@ class Lifter:
     def _push(self, insn):
         """The pushed registers into the frame, except those still holding what the caller left
         (the saved callee-saved registers, s16-s31 too, and lr: nothing reads them back but the
-        pop)."""
+        pop) and those in the words the frame array leaves out (saves_out)."""
         words = self.stack_words(insn)
         d = self.ctx["depth"][insn.address] + self.arch.stack_bytes(insn)
         undef = self.ctx["undef"].get(insn.address, frozenset())
         values = self.values()
         out = []
         for k, (r, var) in enumerate(words):
-            if r is None:
-                continue                    # a word the push leaves alone
+            if r is None or self._left_out(d - 4 * k):
+                continue                    # a word the push leaves alone, or one the C has no room for
             if r == "pc":                   # an APCS frame: the address of the push, plus 8
                 out.append("*(volatile u32 *)(sp0 - %d) = 0x%xu;" % (d - 4 * k, insn.address + 8))
             elif r not in undef and values.get(r) != self.RET:     # a pop of the return address
@@ -1983,7 +2313,7 @@ class Lifter:
                 raise Refused("0x%x loads %s" % (insn.address, r))
             if st[1].get(key) == self.RET:
                 out.append("%s = (u32)__builtin_return_address(0);" % r)
-            else:
+            elif not self._left_out(key):   # (left out: nothing reads what it restores, saves_out)
                 out.append("%s = *(volatile u32 *)(sp0 - %d);" % (r, key))
         return " ".join(out)
 
@@ -2004,7 +2334,8 @@ class Lifter:
         return self.arch.flow(nxt)[0] == "return"
 
     def _pop(self, insn, returning=False):
-        """The popped registers from the frame; when returning, only those that carry the result."""
+        """The popped registers from the frame; when returning, only those that carry the result; none
+        from the words the frame array leaves out (saves_out: nothing reads what they restore)."""
         d = self.ctx["depth"][insn.address]
         keep = ({"r0", "r1"} if self._wide(self.ctx["fn"].name) else {"r0"}) if returning else None
         values = self.values()
@@ -2014,7 +2345,7 @@ class Lifter:
                 continue
             if values.get(d - 4 * k) == self.RET:   # Thumb-1: pop {r0}; bx r0 leaves the address in r0
                 out.append("%s = (u32)__builtin_return_address(0);" % var)
-            else:
+            elif not self._left_out(d - 4 * k):
                 out.append("%s = *(volatile u32 *)(sp0 - %d);" % (var, d - 4 * k))
         return " ".join(out)
 
@@ -2418,6 +2749,8 @@ class Lifter:
         made = self.made_value(insn, st[0], st[1]) if ctype == "u32" else None
         if made is not None and made[1] == self.RET:    # the saved return address (not stored: see _push)
             return "%s = (u32)__builtin_return_address(0);" % d
+        if ctype == "u32" and self._left_out(self._single_slot(insn)):
+            return None                     # a restore nothing reads, from a word left out (saves_out)
         addr, newbase, base = self._mem(insn)
         if newbase is None:
             return "%s = (u32)*(volatile %s *)(%s);" % (d, ctype, addr)
@@ -2429,6 +2762,8 @@ class Lifter:
         # the stack pointer as the value: the address of the frame's bottom, as mov rX, sp gives it
         # (C++ keeps &local_object for a call through a vtable that way: str sp, [sp, #k])
         s = self.reg(ops[0].reg, sp=True)
+        if ctype == "u32" and self._left_out(self._single_slot(insn)):
+            return None                     # a save into a word left out (saves_out)
         addr, newbase, base = self._mem(insn)
         if newbase is None:
             return "*(volatile %s *)(%s) = (%s)%s;" % (ctype, addr, ctype, s)
@@ -2491,12 +2826,18 @@ class Lifter:
         if insn.writeback and base in regs:
             if load or regs[0] != base:
                 raise Refused("0x%x: a block transfer with its own base written back" % insn.address)
+        depth, values = self.ctx["states"][insn.address]
+        v = ("sp", depth) if base == "sp" else values.get(base)
         out = ["{ u32 a = %s + (%d);" % (b, start)]
         for k, r in enumerate(regs):
+            if self._frame_address(v) and self._left_out(v[1] - start - 4 * k):
+                continue                    # a word left out (saves_out): nothing reads it
             if load:
                 out.append("%s = *(volatile u32 *)(a + %d);" % (r, 4 * k))
             else:
                 out.append("*(volatile u32 *)(a + %d) = %s;" % (4 * k, r))
+        if len(out) == 1 and not insn.writeback:
+            return None                     # every word left out
         if insn.writeback:
             out.append("%s = %s %s %d;" % (base, b, "+" if up else "-", 4 * n))
         return " ".join(out) + " }"

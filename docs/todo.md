@@ -970,7 +970,7 @@ may stay lifted.
   from its end; clang 14 241 (243, the same two out), 8,165 entries each (8,166 against 443), 19 runs
   and 28 s, SetB's stack 132 bytes from its end (148 in the original: other lifted functions' frames,
   within it). Frame growth itself: the next item.
-- [ ] **Lifted C's frames grow by the C compiler's own register saves.** The lifted C keeps the
+- [x] **Lifted C's frames grow by the C compiler's own register saves.** The lifted C keeps the
   original's frame as an array, its save slots included, and the C compiler saves the registers the
   C uses beside it: on FreeRTOS RISC-V clang -Os 172 of the 242 lifted functions have a larger frame
   in C (median 32 bytes), and on clang 14 131 of the 171 that grew grew by exactly the original's
@@ -981,6 +981,47 @@ may stay lifted.
   real frame): then the C's frame is the original's locals plus the compiler's saves and spills.
   Changes the frame model of every lifter and what readable C's frame stages (dread.tidy's
   frame_locals, dread.frames) read; measure the frames before and after on the benchmark.
+  Done 2026-10-22 (docs/decisions.md): the frame array leaves out the run of words at its top that
+  only whole-word stores and whole-word loads touch whose register nothing reads behind them
+  (dread.lift's saves_out: the prologue's saves, the epilogue's restores, a pad pushed to keep the
+  stack aligned; the return address, which the C takes from the builtin, counts as read by
+  nothing). Their stores and loads translate to nothing, and sp0 lies that far above the array's
+  end (`u32 frame[3] __attribute__((aligned(8))); u32 sp0 = (u32)&frame[3] + 12;`), so every word
+  kept lies where it lay and as aligned. A load's register is dead when no path behind it reads it
+  before writing it (restore_dead: a return reads the result, a call its arguments and what its
+  callee reads of its caller's registers; a pop that returns loads only the result). Where an
+  address of the frame may reach the words, every word stays (FrameReach): the registers that may
+  hold one are followed forward on every path, an access through one must lie where the states know
+  (no index, one address on every path), and none may be stored, handed to a call, returned or read
+  by inline assembly; the frame words a call is handed (stack arguments, a call through a pointer's
+  lowest words) are reads of their own. Each lifter says what an instruction does to memory
+  (frame_effects: ARM, RISC-V and the MSP430). The C of a function that leaves nothing out is the
+  same as before. Measured on copies of six benchmark builds, each lift check run before and after
+  (the before-run's accepted functions; the C's frames by -fstack-usage of the lifted C compiled as
+  the lift check compiles it, the original's by its deepest stack pointer below the entry's):
+  RISC-V clang -Os 173 of 241 frames larger in C (4,768 bytes more; the C's frames 9,632 bytes
+  against the original's 4,864), now 56 (1,728; 6,560), 2,880 bytes of saves left out in 128
+  functions; clang 14 171 -> 57 (4,704 -> 1,760 bytes; 9,696 -> 6,592 against 4,992); RISC-V GCC
+  -Os 191 -> 51 (4,432 -> 1,376; 10,512 -> 7,216 against 6,080); M3 GCC -Os 225 of 330 -> 163
+  (4,828 -> 2,612; 11,000 -> 8,672 against 6,252); M3 clang -Os 127 of 320 -> 98 (2,968 -> 1,696;
+  7,792 -> 6,512 against 4,952); M3 GCC -O0 (frame pointers) 275 of 358 -> 185 (4,184 -> 2,328;
+  12,928 -> 10,592 against 8,788). The lift check: clang -Os and clang 14 accept 243 (241 before:
+  prvTestMasterTask and xEventGroupSetBits, which the stack search dropped for SetB's overflow, stay,
+  their C's frames 256 -> 192 and 64 -> 32 bytes on clang -Os, 224 -> 160 and 80 -> 48 on clang
+  14), the other four the same functions as before (259, 330, 320, 358); every whole image agrees,
+  none with a function dropped for it. Gizmo's builds accept what they did. The readable gate
+  accepts the same functions on its eight builds; raw frame accesses in the readable C of the
+  lifted functions stay as they were (FreeRTOS GCC -Os 43, clang -O2 22, RISC-V GCC -Os 44, GCC -O0
+  25 occurrences of `(sp0 - k`): its passes had removed the dead saves already. What changed there:
+  a frame array that stays is smaller (`u32 frame[4]; u32 sp0 = (u32)&frame[4] + 16;`), RISC-V's
+  slots need the second prefix less often (sl36: a save's slot at sp0 - 8 would have been s8, a
+  register's name), and the saves and restores are comment lines. Lifting every function takes as long
+  as before (RISC-V clang -Os 3.1 -> 3.2 s, M3 GCC -O0 15.3 -> 13.0 s). Left: the frames whose
+  address goes to a callee keep their saves (on clang -Os 45 of the 56 functions still larger,
+  1,552 of their 1,728 bytes; M3 GCC -Os 63 of 163, 1,540 of 2,612 bytes): a callee reaches past
+  what it was given only through a fault of the original, but that is not shown, so they stay
+  (docs/decisions.md, option (c)). The rest is the C compiler's own register pressure (lifted C
+  keeps more values live than the original: M3 GCC -Os 100 functions, 1,072 bytes).
 
 Real firmware comes from many compilers, versions and options; DREAD was tested on one version of
 each. CI on Ubuntu 24.04's GCC 13, binutils 2.42 and clang 18 found two gaps of DREAD's own that

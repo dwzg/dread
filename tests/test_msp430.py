@@ -353,6 +353,70 @@ def test_msp430_stack_argument_rules(tmp_path):
     assert "the status register the interrupt saved" in refused["wakes_up"]
 
 
+FRAME_SAVES_CODE = """
+.text
+.macro fn name
+.global \\name
+.type \\name, @function
+\\name:
+.endm
+fn one
+    add #1, r12
+    ret
+fn bump
+    add #1, 0(r12)
+    ret
+fn saves
+    push r10
+    push r9
+    mov r12, r10
+    call #one
+    add r10, r12
+    pop r9
+    pop r10
+    ret
+fn hands
+    push r10
+    sub #2, r1
+    mov r12, 0(r1)
+    mov r1, r12
+    call #bump
+    mov 0(r1), r12
+    add #2, r1
+    pop r10
+    ret
+fn peeks
+    push r10
+    push r12
+    call #one
+    add 0(r1), r12
+    pop r13
+    pop r10
+    ret
+"""
+
+
+@needs_ti_gcc
+def test_msp430_saves_only_pushes_and_pops_touch_are_left_out(tmp_path):
+    """saves pushes r10 and r9 that only its pops take back: the C's frame array leaves their words
+    out (dread.lift's saves_out) and translates neither the pushes nor the pops. hands gives a callee
+    the address of a local, which may reach the saves: its frame keeps every word. peeks pushes its
+    argument beside a save and reads it back: that word stays, the save above it goes. All three
+    agree with the original on their cases."""
+    from dread import lift
+    target, image, program = msp430_asm_target(tmp_path, FRAME_SAVES_CODE, "saves")
+    lifter = lift.make_lifter(program)
+    saves, hands, peeks = (lifter.lift(program.by_name[n]) for n in ("saves", "hands", "peeks"))
+    assert (saves.frame, saves.saves_out) == (8, 8), (saves.frame, saves.saves_out)
+    assert "u16 sp0 = (u16)&frame[0] + 8;" in saves.text and "(sp0 - " not in saves.text, saves.text
+    assert (hands.frame, hands.saves_out) == (8, 0) and "u16 sp0 = (u16)&frame[8];" in hands.text
+    assert (peeks.frame, peeks.saves_out) == (8, 2), (peeks.frame, peeks.saves_out)
+    assert "*(volatile u16 *)((u16)(sp0 - 4)) = r12;" in peeks.text and "(sp0 - 2)" not in peeks.text, peeks.text
+    lines = []
+    assert sorted(lift.check(target, image, ["saves", "hands", "peeks"], out=lines.append, jobs=1, system=False)) == \
+        ["hands", "peeks", "saves"], "\n".join(lines)
+
+
 @needs_ti_gcc
 def test_gizmo_msp430_lifted_c_calls_nothing_of_libgcc(tmp_path):
     """The lifted C compiles, and no object calls what its original does not (GCC would shift in
@@ -459,11 +523,15 @@ def test_a_stack_argument_read_from_the_wrong_place_shows(tmp_path, monkeypatch)
     the stack top. The check that moves the stack left that cell behind until 2026-10-21, so every
     case changed with the stack moved and those that differed were refused, not failed; dropped as
     uncovered then, and accepted once the firm-up had found an input with the word 0, where the wrong
-    place reads the same. The room for stack arguments moves with the stack since.)"""
+    place reads the same. The room for stack arguments moves with the stack since.) The frame keeps
+    every word here: udivmodsi4's holds nothing but its pushes, which the C leaves out since
+    2026-10-22 (Lifter.saves_out), and the wrong place would lie outside the C's frame, where the C
+    compiler keeps what it likes."""
     from dread import lift, lift_msp430
     target, image = msp430_copy(tmp_path)
     slot = lift_msp430.Msp430Lifter._slot
     monkeypatch.setattr(lift_msp430.Msp430Lifter, "_slot", lambda self, s: slot(self, s if s > -2 else 2))
+    monkeypatch.setattr(lift_msp430.Msp430Lifter, "saves_out", lambda self, fn, states, handler=None: 0)
     lines = []
     accepted = lift.check(target, image, ["udivmodsi4", "__mspabi_remul"], out=lines.append, jobs=4)
     assert "udivmodsi4" not in accepted, lines

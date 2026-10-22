@@ -31,7 +31,9 @@ own types). A typedef, as the MSP430 lifter's dread_w32: what dread.cparse reads
 declaration it does not), so readable C stays C of the lifters' dialect.
 
 Only where the frame is the lifters' local array (u32 frame[N] with sp0 = (u32)&frame[N]; not a
-wrapped function's real stack, whose callees may reach the stack arguments above sp0), every use of
+wrapped function's real stack, whose callees may reach the stack arguments above sp0, nor an array
+whose top the lifter left out, sp0 = (u32)&frame[N] + S: it does so only where no frame address
+leaves, dread.lift's saves_out), every use of
 sp0 is an access at a constant offset below it or such an address, an address leaves, and the
 region's accesses lie inside it with one type per offset and no two overlapping (nor one below it
 reaching in). Otherwise the function stays as it was. What lies below the region stays as dread.tidy

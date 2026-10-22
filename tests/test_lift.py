@@ -1437,8 +1437,14 @@ STACK_RV_C = NOIPA_DEF + r"""
 extern unsigned stack_lo[], stack_hi[];
 NOIPA void put(int c) { while (!(LSR & 0x20)) ; THR = c; }
 NOIPA int leaf(int x) { return x * 3 + 1; }
+NOIPA void bump(int *p) { *p += 1; }
+#ifdef HANDED
+NOIPA int mid(int x) { int a = leaf(x); bump(&a); int b = leaf(a + x); return a * b + x; }
+NOIPA int top(int x) { int a = mid(x); bump(&a); return a + mid(a + x) + x; }
+#else
 NOIPA int mid(int x) { int a = leaf(x); int b = leaf(a + x); return a * b + x; }
 NOIPA int top(int x) { int a = mid(x); return a + mid(a + x) + x; }
+#endif
 __attribute__((noreturn)) void cmain(void)
 {
     unsigned *p = stack_lo, *sp;
@@ -1502,12 +1508,13 @@ limit = 200_000
 '''
 
 
-def stack_depth_target(folder):
-    """STACK_RV_C built with the RISC-V GCC here into folder, its tables imported: the target."""
+def stack_depth_target(folder, handed=False):
+    """STACK_RV_C built with the RISC-V GCC here into folder, its tables imported: the target. handed:
+    mid and top hand the address of a local to bump."""
     from dread import elfimport
     folder = str(folder)
     with open(os.path.join(folder, "t.c"), "w") as f:
-        f.write(STACK_RV_C)
+        f.write(("#define HANDED\n" if handed else "") + STACK_RV_C)
     with open(os.path.join(folder, "t.ld"), "w") as f:
         f.write(STACK_RV_LD)
     elf = os.path.join(folder, "t.elf")
@@ -1524,13 +1531,14 @@ def stack_depth_target(folder):
 
 @needs_riscv_gcc
 def test_functions_whose_c_makes_the_whole_image_differ_are_dropped(tmp_path):
-    """The program prints how deep its stack went. top and mid have frames, and their C's frames are
-    larger (the C compiler saves its own registers beside the original's frame), so with either built
-    from lifted C the depth printed differs, while each one's cases agree (they never see the depth):
-    a task's stack too small for the C's frames, which only the whole image shows. The lift check
-    finds them by halving and keeps them out; leaf, whose C has no frame either, stays, and the whole
-    image agrees. Before, the lift check kept all three and reported the difference."""
-    t = stack_depth_target(tmp_path)
+    """The program prints how deep its stack went. top and mid have frames and hand the address of a
+    local to bump, so their C's frames keep the original's saves (Lifter.saves_out) and are larger
+    (the C compiler saves its own registers beside them): with either built from lifted C the depth
+    printed differs, while each one's cases agree (they never see the depth), a task's stack too
+    small for the C's frames, which only the whole image shows. The lift check finds them by halving
+    and keeps them out; leaf, whose C has no frame either, stays, and the whole image agrees. Before,
+    the lift check kept all three and reported the difference."""
+    t = stack_depth_target(tmp_path, handed=True)
     lines = []
     assert lift.check(t, t.image(), ["leaf", "mid", "top"], out=lines.append, jobs=2) == ["leaf"], "\n".join(lines)
     text = "\n".join(lines)
@@ -1541,6 +1549,240 @@ def test_functions_whose_c_makes_the_whole_image_differ_are_dropped(tmp_path):
     assert verdicts["top"]["verdict"] == verdicts["mid"]["verdict"] == "dropped"
     assert verdicts["leaf"]["verdict"] == "accepted"
     assert build.read_names(t.image().table("lifted")) == ["leaf"]
+
+
+@needs_riscv_gcc
+def test_frames_that_only_save_registers_do_not_grow(tmp_path):
+    """The same program with mid and top keeping their values in registers alone: their frames hold
+    nothing but the saves of ra and the s registers, which only the prologue and the epilogue touch.
+    The C leaves those words out of its frame array (Lifter.saves_out) and the C compiler saves the
+    registers its own code uses, so the C's frames are no larger than the original's and the depth
+    printed agrees: all three are accepted. Before, the C held the original's saves beside its own,
+    and mid and top were dropped for the whole image as in the test above."""
+    t = stack_depth_target(tmp_path)
+    program = Program(t, t.image())
+    lifter = lift.make_lifter(program, regflow.load(t, t.image(), program))
+    for name in ("mid", "top"):
+        got = lifter.lift(program.by_name[name])
+        assert got.frame and got.saves_out == got.frame, (name, got.frame, got.saves_out)
+        assert "(sp0 - " not in got.text, got.text           # no save and no restore in the C
+    lines = []
+    assert lift.check(t, t.image(), ["leaf", "mid", "top"], out=lines.append, jobs=2) == ["leaf", "mid", "top"], \
+        "\n".join(lines)
+    assert lines[-1].endswith("the whole image agrees), into %s" % os.path.relpath(t.image().table("lifted"))), lines[-1]
+
+
+FRAME_SAVES_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global g, bump, keeps, hands, peeks
+    .type g, %function
+    .thumb_func
+g:      adds    r0, r0, #1
+        bx      lr
+    .size g, . - g
+    .type bump, %function
+    .thumb_func
+bump:   ldr     r1, [r0]
+        adds    r1, r1, #1
+        str     r1, [r0]
+        bx      lr
+    .size bump, . - bump
+    .type keeps, %function
+    .thumb_func
+keeps:  push    {r4, r5, lr}    @ the saves: only the pop takes them back, or returns through lr
+        sub     sp, #12
+        mov     r4, r0
+        str     r0, [sp, #8]    @ a local right below the saves, read back behind the call
+        bl      g
+        ldr     r1, [sp, #8]
+        adds    r0, r0, r1
+        adds    r0, r0, r4
+        add     sp, #12
+        pop     {r4, r5, pc}
+    .size keeps, . - keeps
+    .type hands, %function
+    .thumb_func
+hands:  push    {r4, lr}
+        sub     sp, #8
+        str     r0, [sp]
+        mov     r0, sp          @ a local's address goes to a callee, which may reach the saves
+        bl      bump
+        ldr     r0, [sp]
+        add     sp, #8
+        pop     {r4, pc}
+    .size hands, . - hands
+    .type peeks, %function
+    .thumb_func
+peeks:  push    {r0, r4, lr}    @ its argument kept with the saves
+        sub     sp, #4
+        bl      g
+        ldr     r1, [sp, #4]    @ and read back after the prologue: its word stays
+        adds    r0, r0, r1
+        add     sp, #4
+        pop     {r1, r4, pc}
+    .size peeks, . - peeks
+"""
+
+
+def frame_saves_target(tmp_path):
+    """FRAME_SAVES_S assembled for the Cortex-M3, its tables imported: the target."""
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.s").write_text(FRAME_SAVES_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "keeps", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    return Target.load(str(tmp_path))
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_saves_only_the_prologue_and_the_epilogue_touch_are_left_out(tmp_path):
+    """keeps saves r4, r5 and lr that only its pop takes back (or returns through) and keeps a local
+    below them: the C's frame array holds the local alone, sp0 the saves' bytes above its end, the
+    push and the pop translate to nothing for them, and the compiled C's frame is no larger than the
+    original's (its locals and what the C compiler saves of its own). hands gives a callee the address
+    of a local, which may reach any word above it: its frame keeps everything. peeks pushes its
+    argument with the saves and reads it back after the prologue: that word stays, the saves above
+    it go. All three agree with the original on their cases."""
+    t = frame_saves_target(tmp_path)
+    image = t.image()
+    program = Program(t, image)
+    lifter = lift.make_lifter(program, regflow.load(t, image, program))
+    keeps, hands, peeks = (lifter.lift(program.by_name[n]) for n in ("keeps", "hands", "peeks"))
+    assert (keeps.frame, keeps.saves_out) == (24, 12), (keeps.frame, keeps.saves_out)
+    assert "u32 frame[3] __attribute__((aligned(8)));" in keeps.text and "u32 sp0 = (u32)&frame[3] + 12;" in keeps.text
+    assert not re.search(r"\(sp0 - (4|8|12)\)", keeps.text), keeps.text          # no save, no restore
+    assert "(sp0 - 16)" in keeps.text                                            # the local
+    assert (hands.frame, hands.saves_out) == (16, 0), (hands.frame, hands.saves_out)
+    assert "u32 sp0 = (u32)&frame[4];" in hands.text
+    with pytest.raises(lift.FrameReach, match="hands on a frame address"):
+        lifter.frame_uses(lifter.shared_code(program.by_name["hands"]) or program.by_name["hands"],
+                          lifter.states(program.by_name["hands"]), ("r0",))
+    assert (peeks.frame, peeks.saves_out) == (16, 8), (peeks.frame, peeks.saves_out)
+    assert "*(volatile u32 *)(sp0 - 12) = r0;" in peeks.text and "r1 = (u32)*(volatile u32 *)((sp0 - 12));" in \
+        peeks.text, peeks.text
+    lifter.saves_out = lambda *args: 0                  # the frame as it was: every word kept
+    whole = lifter.lift(program.by_name["keeps"])
+    del lifter.saves_out
+
+    def stack_used(texts, where):
+        src = tmp_path / where
+        src.mkdir()
+        for got in texts:
+            (src / (got.name + ".c")).write_text(got.text)
+        obj = tmp_path / (where + "-obj")
+        build.compile_all(t, image, str(src), str(obj), flags=t.compiler.generated_cflags() + ["-fstack-usage"])
+        used = {}
+        for su in obj.glob("*.su"):
+            for line in su.read_text().splitlines():
+                name, size = line.split("\t")[:2]
+                used[name.rsplit(":", 1)[-1]] = int(size)
+        return used
+    used, before = stack_used((keeps, hands, peeks), "lifted"), stack_used((whole,), "whole")
+    assert used["keeps"] <= 24 < before["keeps"], (used, before)  # (the original's frame: 24 bytes)
+    lines = []
+    assert sorted(lift.check(t, image, ["keeps", "hands", "peeks"], out=lines.append, jobs=1, system=False)) == \
+        ["hands", "keeps", "peeks"], "\n".join(lines)
+
+
+FRAME_SAVES_RV_S = """
+    .text
+    .globl g, bump, keeps, hands, peeks
+    .type g, @function
+g:      addi    a0, a0, 1
+        ret
+    .size g, . - g
+    .type bump, @function
+bump:   lw      a1, 0(a0)
+        addi    a1, a1, 1
+        sw      a1, 0(a0)
+        ret
+    .size bump, . - bump
+    .type keeps, @function
+keeps:  addi    sp, sp, -16
+        sw      ra, 12(sp)      # the saves: only the epilogue takes them back
+        sw      s0, 8(sp)
+        sw      a0, 4(sp)       # a local below them, read back behind the call
+        mv      s0, a0
+        call    g
+        lw      a1, 4(sp)
+        add     a0, a0, a1
+        add     a0, a0, s0
+        lw      ra, 12(sp)
+        lw      s0, 8(sp)
+        addi    sp, sp, 16
+        ret
+    .size keeps, . - keeps
+    .type hands, @function
+hands:  addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      a0, 8(sp)
+        addi    a0, sp, 8       # a local's address goes to a callee, which may reach the save
+        call    bump
+        lw      a0, 8(sp)
+        lw      ra, 12(sp)
+        addi    sp, sp, 16
+        ret
+    .size hands, . - hands
+    .type peeks, @function
+peeks:  addi    sp, sp, -16
+        sw      ra, 12(sp)
+        sw      s0, 8(sp)
+        sw      a0, 4(sp)       # its argument kept beside the saves
+        mv      s0, a0
+        call    g
+        lw      a1, 4(sp)       # and read back after the prologue: its word stays
+        add     a0, a0, a1
+        add     a0, a0, s0
+        lw      ra, 12(sp)
+        lw      s0, 8(sp)
+        addi    sp, sp, 16
+        ret
+    .size peeks, . - peeks
+"""
+
+
+@needs_riscv_gcc
+def test_riscv_saves_only_the_prologue_and_the_epilogue_touch_are_left_out(tmp_path):
+    """The RISC-V lifter as the ARM one in the test above: keeps's saves of ra and s0 go and the C has
+    neither the sw nor the lw of them (its frame array holds the local alone); hands gives a callee a
+    local's address and keeps every word; peeks reads its argument back from the word below the
+    saves, which stays while the saves above it go. All three agree with the original."""
+    from dread import elfimport
+    (tmp_path / "t.s").write_text(FRAME_SAVES_RV_S)
+    (tmp_path / "t.ld").write_text(STACK_RV_LD)
+    elf = str(tmp_path / "t.elf")
+    subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-nostdlib", "-T", str(tmp_path / "t.ld"),
+                    "-e", "keeps", "-o", elf, str(tmp_path / "t.s")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(riscv_toml(STACK_RV_TOML))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    image = t.image()
+    program = Program(t, image)
+    lifter = lift.make_lifter(program, regflow.load(t, image, program))
+    keeps, hands, peeks = (lifter.lift(program.by_name[n]) for n in ("keeps", "hands", "peeks"))
+    assert (keeps.frame, keeps.saves_out) == (16, 8), (keeps.frame, keeps.saves_out)
+    assert "u32 sp0 = (u32)&frame[2] + 8;" in keeps.text and not re.search(r"\(sp0 - (4|8)\)", keeps.text), keeps.text
+    assert "*(volatile u32 *)((sp0 - 12)) = a0;" in keeps.text
+    assert (hands.frame, hands.saves_out) == (16, 0) and "u32 sp0 = (u32)&frame[4];" in hands.text
+    assert (peeks.frame, peeks.saves_out) == (16, 8), (peeks.frame, peeks.saves_out)
+    assert "a1 = *(volatile u32 *)((sp0 - 12));" in peeks.text, peeks.text
+    lines = []
+    assert sorted(lift.check(t, image, ["keeps", "hands", "peeks"], out=lines.append, jobs=1, system=False)) == \
+        ["hands", "keeps", "peeks"], "\n".join(lines)
 
 
 DECIDER_SOLVE_S = """

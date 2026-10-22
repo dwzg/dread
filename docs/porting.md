@@ -91,7 +91,10 @@ needed on it):
   architecture subclasses `dread.lift.Lifter` in a module of its own (`dread.lift_riscv`): the
   control flow, the stack pointer's depth (states, with its step, new_depth, made_value and
   stored_slot), the registers read before written (entry_states, with saving_store for saves by
-  single stores), the acceptance, the system run and the switches are shared; the translation of
+  single stores), the words at the frame's top the C leaves out (saves_out, with frame_uses and
+  restore_dead; the layer's lifter says what each instruction does to memory in `frame_effects` and
+  which registers its C returns in `results`, and its translation skips the stores and loads of
+  those words), the acceptance, the system run and the switches are shared; the translation of
   each instruction, the rendering and the kinds of handlers are its own. `make_lifter` picks it.
   `dread.liftfuzz` takes a generator per ISA (`RiscVGenerator` beside the ARM `Generator`).
   `dread.lift_msp430` needed one more hook, `entry_values` (what lies in the frame at the entry: the

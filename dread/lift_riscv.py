@@ -4,7 +4,10 @@ Registers are u32 variables with their ABI names (zero reads as 0, a write to it
 and stores are volatile accesses in the original order; branches are gotos. The stack pointer's depth
 is known statically at every instruction (dread.lift's states), so an access at sp, or at a register
 that holds a frame address, is one into the frame array; a store of a register into the frame before
-anything wrote it is a save (the C keeps the caller's registers itself). A call passes a0-a7 and
+anything wrote it is a save (the C keeps the caller's registers itself), and the words at the frame's
+top that only such saves and the epilogue's lw nobody reads behind touch are not in the array at all
+(dread.lift's saves_out: sw and lw of them translate to nothing; clang's frames on FreeRTOS grew by
+exactly those words before). A call passes a0-a7 and
 takes a0 (a0 and a1 when the callers read a 64-bit result); the other scratch registers are 0 behind
 it (a function that reads one there is refused, as the callee's value is not known). auipc and the
 auipc/lui pairs become the constants they make at the original's address. The M extension's division
@@ -209,6 +212,58 @@ class RiscVLifter(lift.Lifter):
         self._stack_args[fn.name] = top
         return top
 
+    # ---- the frame's top (dread.lift's saves_out) ----
+
+    def results(self, fn, handler=None):
+        if handler:
+            return ()
+        return ("a0", "a1") if self._wide(fn.name) else ("a0",)
+
+    def frame_effects(self, fn, insn, depth, values, results, own):
+        """dread.lift.FrameEffects of a RISC-V instruction: loads and stores (lw of a word into a
+        register is the whole-word load, sw the whole-word store), calls (a0-a7, and what the callee
+        reads its caller leaves), returns, tail calls and jumps through a register; CSR instructions
+        run as themselves (opaque)."""
+        f = fields(insn)
+        reads, writes = self.arch.reg_effects(insn)
+        fx = lift.FrameEffects(reads, writes)
+        kind, target, falls = self.arch.flow(insn)
+        if f.width is not None and f.rs1 is not None:
+            base = NAMES[f.rs1]
+            if f.op in LOADS:
+                reg = NAMES[f.rd] if f.rd else None
+                fx.accesses.append((base, None, f.imm, f.width, "load" if f.op == "lw" and reg else "other", reg,
+                                    False))
+                fx.loaded |= {reg} if reg else set()
+            elif f.op in STORES:
+                fx.accesses.append((base, None, f.imm, f.width, "store", None, False))
+                fx.stored |= {NAMES[f.rs2]} if f.rs2 else set()
+            else:
+                fx.accesses.append((base, None, f.imm, None, "other", None, False))
+        callee = self.prog.by_entry.get(target) if isinstance(target, int) else None
+        if kind == "call":
+            fx.hands |= set(ARGS) | (set(self.leaves(callee)) if callee is not None else set())
+        elif kind == "icall":
+            fx.hands |= (set(ARGS) | set(reads)) - {"sp"}
+        elif kind == "return" or self.ret_jump(insn, values):
+            fx.hands |= set(results)
+        elif kind == "jump" and callee is not None and target not in own:
+            fx.hands |= set(ARGS) | set(self.leaves(callee))         # a tail call
+        elif kind == "ijump":
+            fx.hands |= (set(ARGS) | set(reads)) - {"sp"}
+        if kind in ("call", "icall"):
+            fx.writes |= set(self.after_call(insn))
+            fx.loaded |= set(self.after_call(insn))
+        fx.opaque = f.op in CSRS
+        return fx
+
+    def _slot(self, f):
+        """How far below the entry's stack pointer a load or store accesses the frame (through sp or a
+        register whose frame address the states know), else None."""
+        depth, values = self.ctx["states"][self.insn_now.address]
+        v = ("sp", depth) if f.rs1 == 2 else values.get(NAMES[f.rs1])
+        return v[1] - f.imm if self._frame_address(v) else None
+
     # ---- what kind of function ----
 
     def lift(self, fn):
@@ -380,8 +435,12 @@ class RiscVLifter(lift.Lifter):
         if op in LOADS:
             if f.rd == 2:
                 raise Refused("0x%x loads the stack pointer" % a)
+            if op == "lw" and self._left_out(self._slot(f)):
+                return None                 # a restore nothing reads, from a word left out (saves_out)
             return self.assign(f, LOADS[op] % self.address(f))
         if op in STORES:
+            if op == "sw" and self._left_out(self._slot(f)):
+                return None                 # a save into a word left out (saves_out)
             ctype = STORES[op]
             value = self.reg(f.rs2)
             return "*(volatile %s *)(%s) = %s;" % (ctype, self.address(f), value if ctype == "u32" else
@@ -551,10 +610,11 @@ class RiscVLifter(lift.Lifter):
                     "%s = p%d" % (r, ARGS.index(r)) if r in ARGS else "%s = 0" % cname(r) for r in regs]
         lines.append("    u32 %s;" % ", ".join(init))
         lines += self.fixed_lines(cname)
-        if not ctx.get("wrapped"):
+        if not ctx.get("wrapped"):          # the frame below the saves left out (saves_out), sp0 its top
             frame = (ctx["frame"] + 15) & ~15
-            lines.append("    u32 frame[%d] __attribute__((aligned(16)));" % max(4, frame // 4))
-            lines.append("    u32 sp0 = (u32)&frame[%d];" % (frame // 4))
+            n = (frame - ctx["out"]) // 4 if ctx["out"] < ctx["frame"] else 0     # (below: no access)
+            lines.append("    u32 frame[%d] __attribute__((aligned(16)));" % max(1 if ctx["out"] else 4, n))
+            lines.append("    u32 sp0 = (u32)&frame[%d]%s;" % (n, " + %d" % ctx["out"] if ctx["out"] else ""))
         if ctx["switch"]:
             lines.append("    u32 index = 0;")
         lines.append("    %s (void)sp0;" % " ".join("(void)%s;" % cname(r) for r in regs))
