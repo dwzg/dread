@@ -509,3 +509,33 @@ def test_a_naming_run_stops_asking_a_provider_that_keeps_declining(gizmo):
                                           jobs=1, out=lines.append)
     assert made == 0 and asked == len(seen) and 3 <= asked <= 4
     assert any("declined 3 questions in a row" in line for line in lines)
+
+
+def test_a_second_pass_goes_callers_first_with_the_first_names(gizmo):
+    """--refine: led_on, which calls gpio_set, is asked again first; gpio_set's question then shows
+    led_on's second name and its own first one; the answers are kept marked refined, and a second
+    refining run asks nothing."""
+    target, image, program, flow = gizmo
+    first = {"gpio_set": "pin_write", "led_on": "led_switch_on"}
+    second = {"gpio_set": "led_pin_write", "led_on": "status_led_on"}
+    seen = []
+
+    def answer(messages):
+        question = messages[0]["content"]
+        name = re.search(r"The function (\w+)", question).group(1)
+        seen.append((name, question))
+        table = second if "A first reading" in question else first
+        return "name: %s\nwhat: does it" % table[name]
+    pilot.name_functions(target, image, program, lambda: llm.Scripted(answer), ["led_on", "gpio_set"], flow,
+                         out=lambda *a: None)
+    seen.clear()
+    made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(answer),
+                                          ["led_on", "gpio_set"], flow, out=lambda *a: None, refine=True)
+    assert (made, asked) == (2, 2) and [n for n, _ in seen] == ["led_on", "gpio_set"]
+    assert "named it pin_write: does it" in seen[1][1] and "status_led_on" in seen[1][1]
+    refined = set()
+    proposals = pilot.read_proposals(target, image, refined)
+    assert {p for p, _ in proposals.values()} == set(second.values()) and len(refined) == 2
+    seen.clear()
+    assert pilot.name_functions(target, image, program, lambda: llm.Scripted(answer), ["led_on", "gpio_set"],
+                                flow, out=lambda *a: None, refine=True)[:2] == (0, 0)

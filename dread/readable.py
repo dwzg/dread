@@ -311,13 +311,18 @@ def _transform(name, text, stages, context=None):
 
 
 def view(name, text, context=None):
-    """The function alone as a reader sees it (the questions of dread pilot): its readable C with the
-    tables applied, or its lifted C when it keeps fixed registers; None when it is not the dialect."""
+    """The function as a reader sees it (the questions of dread pilot): its readable C with the tables
+    applied, or its lifted C when it keeps fixed registers, after the file's other functions as the
+    lifter wrote them (a variadic function's body behind its naked entry, which alone named FreeRTOS's
+    printf a trampoline); None when it is not the dialect."""
     made = _named(name, text, None, context)
     if made is None:
         return None
     tree, fn, stages = made
-    return cparse.unparse(fn, notes=False, style="readable" if stages is None or stages else "lifted")
+    others = [cparse.unparse(f, notes=False, style="lifted") for f in tree.items
+              if isinstance(f, cparse.Function) and f is not fn]
+    return "\n\n".join(others + [cparse.unparse(fn, notes=False, style="readable" if stages is None or stages
+                                                 else "lifted")])
 
 
 def chooser(names, context=None):

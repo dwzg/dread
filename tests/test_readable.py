@@ -189,3 +189,29 @@ def test_a_pool_takes_no_more_workers_than_the_memory_holds(monkeypatch):
     monkeypatch.setattr(polite, "available_memory", lambda: None)      # (not known: threads decide)
     assert polite.workers(memory_each=4 << 30) == many
     assert polite.resident() is None or polite.resident() > 1 << 20
+
+
+WRAPPED = """/* f at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 g(u32, u32, u32, u32);
+__attribute__((noinline, used)) u32 f_dread_body(u32 a0, u32 a1, u32 a2, u32 a3, u32 sp0)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0, lr = (u32)__builtin_return_address(0);
+    (void)r12; (void)lr; (void)sp0;
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* 4: bl g */
+    return r0;  /* 8: pop {pc} */
+}
+
+__attribute__((naked)) void f(void)
+{
+    __asm__ volatile ("mov r12, sp\\n\\tsub sp, sp, #16\\n\\tpush {r12, lr}\\n\\tbl f_dread_body\\n\\tpop {r12, lr}\\n\\tadd sp, sp, #16\\n\\tbx lr");
+}
+"""
+
+
+def test_the_view_of_a_function_with_a_body_shows_the_body():
+    """A variadic function lifted as a naked entry and its body: the view a question shows has both
+    (the entry alone named FreeRTOS's printf a trampoline)."""
+    text = readable.view("f", WRAPPED)
+    assert text is not None and "f_dread_body(u32 a0" in text and "g(r0, r1, r2, r3)" in text, text
+    assert text.index("f_dread_body(u32") < text.index("void f(void)")

@@ -36,6 +36,8 @@ constants that point to text followed by the text) or, where no C can be made, i
 callees first, --jobs at a time, each showing the proposals made so far for the functions it calls
 and its callers; a run started again goes on where the last one stopped. --score TRUTH compares the
 proposals with true names (an ELF's symbols, or the functions table of a copy that has them).
+--refine asks again, callers first, for every function with a proposal: its question shows its
+callers' names and its first one.
 
 A provider that declines DECLINED_IN_A_ROW questions in a row (stop reason "refusal" or
 "content_filter") is asked no more in that run: its classifiers decline the same kind of question
@@ -1187,8 +1189,9 @@ def names_path(target, image):
     return os.path.join(target.build, "pilot", image.name, "names.tsv")
 
 
-def read_proposals(target, image):
-    """{address: (proposed, what)} of the image's names.tsv, the last proposal of each address."""
+def read_proposals(target, image, refined=None):
+    """{address: (proposed, what)} of the image's names.tsv, the last proposal of each address;
+    refined, a set: gets the addresses whose last proposal came from a second pass (--refine)."""
     out = {}
     path = names_path(target, image)
     if os.path.exists(path):
@@ -1196,10 +1199,21 @@ def read_proposals(target, image):
             parts = line.split("\t")
             if len(parts) >= 4:
                 try:
-                    out[int(parts[0], 16)] = (parts[2], parts[3])
+                    address = int(parts[0], 16)
                 except ValueError:
                     continue
+                out[address] = (parts[2], parts[3])
+                if refined is not None:
+                    if len(parts) > 5 and parts[5].endswith(REFINED):
+                        refined.add(address)
+                    else:
+                        refined.discard(address)
     return out
+
+
+REFINED = ", refined"       # names.tsv's shown column of a second pass's proposal
+REFINE_NOTE = ("A first reading of this function's code alone, before its callers had names, named it "
+               "{name}: {what} Its callers have names now. Keep that name if they confirm it, or give a better one.")
 
 
 def keep_proposal(target, image, fn, proposed, what, provider, form):
@@ -1298,25 +1312,37 @@ def callees_first(program, names):
     return rounds
 
 
-def name_functions(target, image, program, make_provider, names, flow=None, jobs=4, tries=2, out=print):
+def name_functions(target, image, program, make_provider, names, flow=None, jobs=4, tries=2, out=print,
+                   refine=False):
     """Proposals for the functions of names, callees first: a function is asked as soon as every
     function it calls among names has its answer (call_components; functions that call each other in
     a circle together), jobs questions at a time with a provider each (make_provider() makes one), each
     question showing the proposals made so far for the other functions in place of their names. A
     function names.tsv has a proposal for already is not asked again, its proposal shown. Returns
     (proposed, asked, spent: summed over the providers). (Rounds with a barrier each ran at a fifth of
-    the speed once the rounds got small: each waited for its slowest answer.)"""
+    the speed once the rounds got small: each waited for its slowest answer.)
+
+    refine: a second pass, callers first: every function with a first proposal is asked again once
+    its callers have their second answers, its question showing its callers' names and its first name
+    (REFINE_NOTE); its answer is kept marked REFINED, and a run started again skips what is refined."""
     import concurrent.futures
     import threading
     namer = Namer(target, image, program, flow)
-    known = read_proposals(target, image)
+    refined = set()
+    known = read_proposals(target, image, refined)
     shown_as = {program.by_entry[a].name: p for a, (p, _) in known.items() if a in program.by_entry}
-    namer.prepare([n for n in names if program.by_name[n].entry not in known])     # (before any thread)
+
+    def wanted(name):
+        entry = program.by_name[name].entry
+        return entry in known and entry not in refined if refine else entry not in known
+    namer.prepare([n for n in names if wanted(n)])      # (before any thread)
     comp, comps, callees = call_components(program, list(names))
     callers = [[] for _ in comps]
     for c, cs in enumerate(callees):
         for d in cs:
             callers[d].append(c)
+    if refine:                              # (callers first: a component waits for its callers)
+        callees, callers = callers, callees
     waiting = [len(cs) for cs in callees]
     left = [0] * len(comps)
     ready = [c for c in range(len(comps)) if not waiting[c]]
@@ -1348,12 +1374,18 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
         while (ready and not stopped) or running:
             while ready and not stopped:
                 c = ready.pop(0)
-                todo = [n for n in comps[c] if program.by_name[n].entry not in known]
+                todo = [n for n in comps[c] if wanted(n)]
                 left[c] = len(todo)
                 if not todo:
                     finished(c)
                 for n in todo:
-                    running[pool.submit(one, (n,) + namer.question(program.by_name[n], shown_as))] = c
+                    fn = program.by_name[n]
+                    user, form = namer.question(fn, shown_as)
+                    if refine:
+                        first, what = known[fn.entry]
+                        user += "\n\n" + REFINE_NOTE.format(name=first, what=what)
+                        form += REFINED
+                    running[pool.submit(one, (n, user, form))] = c
             if not running:
                 break
             done, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -1372,6 +1404,8 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                     fn = program.by_name[name]
                     keep_proposal(target, image, fn, got, what, p, form)
                     known[fn.entry] = (got, what)
+                    if refine:
+                        refined.add(fn.entry)
                     shown_as[name] = got
                     proposed += 1
                     out("%-24s proposed %s (%s): %s" % (name, got, form, what))
@@ -1512,6 +1546,8 @@ def main(argv=None):
     parser.add_argument("--score", metavar="TRUTH",
                         help="--task name: compare the proposals (names.tsv) with true names (an ELF's symbols, "
                              "or a functions table of a copy that has them) and ask nothing")
+    parser.add_argument("--refine", action="store_true",
+                        help="--task name: a second pass, callers first, over the functions with a proposal")
     parser.add_argument("--judge", metavar="PROVIDER",
                         help="with --score: a provider also judges each pair the same, close or different")
     parser.add_argument("--task", choices=("write", "input", "name", "readable"), default="write",
@@ -1586,17 +1622,23 @@ def main(argv=None):
             from dread.samecode import UNNAMED
             names = shown(target, args.names) if args.names else [
                 fn.name for fn in program.functions if UNNAMED.match(fn.name) and may_show(target, fn.name)]
-            names = [n for r in callees_first(program, names) for n in r]
+            rounds = callees_first(program, names)
+            names = [n for r in (reversed(rounds) if args.refine else rounds) for n in r]
             names = names[:args.limit] if args.limit else names
             if args.dry_run:
-                known = read_proposals(target, image)
-                todo = [n for n in names if program.by_name[n].entry not in known]
+                refined = set()
+                known = read_proposals(target, image, refined)
+                entries = {n: program.by_name[n].entry for n in names}
+                todo = [n for n in names if (entries[n] in known and entries[n] not in refined if args.refine
+                                             else entries[n] not in known)]
                 print("\n".join(todo))
-                print("dread pilot --task name --dry-run: %d functions would be asked about, callees first (%d "
-                      "proposed already); nothing asked" % (len(todo), len(names) - len(todo)))
+                print("dread pilot --task name --dry-run: %d functions would be asked about, %s first (%d %s "
+                      "already); nothing asked" % (len(todo), "callers" if args.refine else "callees",
+                                                   len(names) - len(todo), "refined or without a first proposal"
+                                                   if args.refine else "proposed"))
                 return 0
             made, asked, spent = name_functions(target, image, program, lambda: llm.load(args.provider), names,
-                                                flow, jobs=args.jobs, tries=min(args.tries, 3))
+                                                flow, jobs=args.jobs, tries=min(args.tries, 3), refine=args.refine)
             cost = " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""
             print("dread pilot --task name: %d of %d asked functions got a proposal (%s); %d answers, %d tokens "
                   "in, %d out%s" % (made, asked, names_path(target, image), spent["answers"], spent["input"],
