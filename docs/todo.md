@@ -214,10 +214,25 @@ its sources.
   sharing a word; one is a member (xSuspendedTaskList's pxIndex, named xTickCount), the device
   register ICSR got portNVIC_INT_CTRL_REG, FreeRTOS's own name for it. 32 answers, 30,324 tokens
   in and 30,632 out, about $0.02. Collecting the globals' uses runs the stages over every readable
-  function (49 s for GCC -Os's 316 on one core: worth a pool when it grows). Next: types: the
+  function (49 s for GCC -Os's 316 on one core; in a pool of workers since 2026-10-22: 3,541
+  functions of a large firmware in 113 s instead of 670 s, dread.readable in_pool). Next: types: the
   structures behind pointers derived by code (accesses at constant offsets through the same
   pointer, unified across functions), with volatile in the pointer's declaration so that a field
   reads p->f, their names and fields' names proposed the same way.
+- [ ] **Function names.** `dread pilot --task name` (2026-10-22, docs/decisions.md): a question
+  shows a function's readable C (dread.readable view: the tables applied, a constant that points to
+  text followed by the text) or its listing where it does not lift; questions go callees first
+  (callees_first: rounds by the call graph's components), --jobs at a time, each showing the names
+  proposed so far for its callees and callers; names.tsv keeps every proposal with the form its
+  question showed, and a run started again goes on where the last one stopped. `--score TRUTH`
+  compares the proposals with true names (an ELF's function symbols, or the functions table of a copy
+  that has them): exact, the same words, shared words, the same prefix; `--judge PROVIDER` adds a
+  model's verdict per pair (same, close, different). The providers ask again after a rate limit or an
+  overload (HTTP 429, 529, 5xx). First measured on a stripped private firmware (DREAD's real-life test):
+  numbers below when the run is scored. Next: a second pass that shows the callers' proposals to the
+  leaves (a leaf that touches only unnamed globals gets a name made of an address), the globals named
+  first (the readable task's globals step), and a FreeRTOS build stripped of its names for a public
+  measurement.
 - [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
 

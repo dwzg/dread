@@ -344,3 +344,32 @@ recommendations here."), on a recommendation.
   entry reserves it and hands the body its stack pointer), so ARM state and Thumb-2 lift such
   functions again, rightly; RISC-V too since (the entry hands the stack pointer as the ninth
   argument); Thumb-1 keeps the refusal.
+
+## Function names: readable C, callees first, and a judge beside the word scores (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** `dread pilot --task name` asked for one FUN_ function's name at a time, smallest
+  first, from its listing, and kept the proposals unscored. On a stripped firmware of thousands of
+  functions (DREAD's real-life test, private), what should a question show, in which order, and how
+  is a name scored when the words of two good names differ (buf_len against buffer_length share
+  no word)?
+- **Options.** Input: (a) the listing, as before; (b) the readable C where the function lifts, the
+  listing where it does not; (c) readable C only where dread readable's gate accepted it. Order:
+  (1) smallest first, each alone; (2) callees first, each question showing the names proposed so far
+  for the functions it calls and its callers. Score: (i) word scores against true names only (exact,
+  the same words, shared words, prefix); (ii) a language model's verdict per pair beside them (same,
+  close, different), from another model than the one that named.
+- **Choice: (b), (2), (ii).** Readable C is what a person reads; the gate's verdict is about the
+  compiled code's behaviour, and for a name the reading counts, so unchecked readable C is shown too
+  and names.tsv's shown column says which form a question had. Callees first is how a person names a
+  program: a leaf's name then helps its callers; the system prompt says other names may be proposals.
+  The word scores stay the measure code decides; the judge is a second one, labelled as a model's
+  judgement, cheap (names only), and optional (`--judge`).
+- **Undo.** `--task name` reads the listing again where `Namer.code` returns it; the order is
+  `callees_first` in main(); `--judge` is not given.
+- **Status.** Done. Measured on the private firmware (docs/todo.md, the pilot on the draft). The
+  readable C of every function is made first in a pool of workers (dread.readable views: 3,541
+  analysis trees in 113 s instead of 670 s on one core), each worker costing up to the parent's size
+  in memory (1 GB a worker measured), so pools are now capped by the memory available.
+

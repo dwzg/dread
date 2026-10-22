@@ -19,6 +19,9 @@ naming a global later does not invalidate them.
 
 No tool can tell whether a name is right; the same code tells that it changed nothing else. How
 close the names come to the source's: score (the bench's builds with debug information).
+
+Functions' own names (dread pilot --task name) are proposals only, never applied: score_functions
+compares them with true names (an ELF's symbols, or the functions table of a copy that has them).
 """
 import hashlib
 import json
@@ -412,6 +415,60 @@ def words(name):
     pxNewListItem -> {new, list, item}; rx_buffer_len -> {buffer, len}."""
     parts = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name or "")
     return {p.lower() for p in parts if len(p) > 2}
+
+
+def function_truth(path):
+    """{entry address: name} of true function names: an ELF's function symbols, or a functions table
+    (TSV with a header, address and name its first two columns, as config/functions.tsv); unnamed
+    ones (FUN_1a2b) left out."""
+    from dread.samecode import UNNAMED
+    out = {}
+    with open(path, "rb") as f:
+        elf = f.read(4) == b"\x7fELF"
+    if elf:
+        from dread.elf import Elf, STT_FUNC
+        for s in Elf(path).symbols:
+            if s.kind == STT_FUNC and s.name and s.shndx:
+                out[s.value & ~1] = s.name
+    else:
+        for line in open(path).read().splitlines()[1:]:
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[0].strip():
+                try:
+                    out[int(parts[0], 0)] = parts[1].strip()
+                except ValueError:
+                    continue
+    return {a: n for a, n in out.items() if n and not UNNAMED.match(n)}
+
+
+def pieces(name):
+    """A name's pieces, lower case, short ones too: ui_drawKeys -> [ui, draw, keys]."""
+    return [p.lower() for p in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name or "")]
+
+
+def score_functions(proposed, true):
+    """Proposed function names ({address: name}) against true ones ({address: name}): (rows, totals)
+    over the addresses both have. A row: address, true, proposed, exact (case aside), same words (in
+    any order), overlap (shared words over the words of both, words as words(): pieces of three
+    letters or more), same prefix (both names of two pieces or more, the first alike: ui_, fs_)."""
+    rows = []
+    for a in sorted(set(proposed) & set(true)):
+        t, p = true[a], proposed[a]
+        tw, pw = words(t), words(p)
+        tp, pp = pieces(t), pieces(p)
+        rows.append({"address": a, "true": t, "proposed": p, "exact": t.lower() == p.lower(),
+                     "same_words": bool(tw) and tw == pw,
+                     "overlap": len(tw & pw) / len(tw | pw) if tw | pw else 0.0,
+                     "prefix": None if len(tp) < 2 or len(pp) < 2 else tp[0] == pp[0]})
+    n = len(rows)
+    prefixed = [r for r in rows if r["prefix"] is not None]
+    totals = {"functions": n, "exact": sum(r["exact"] for r in rows),
+              "same_words": sum(r["same_words"] for r in rows),
+              "shared_word": sum(r["overlap"] > 0 for r in rows),
+              "half_shared": sum(r["overlap"] >= 0.5 for r in rows),
+              "overlap": sum(r["overlap"] for r in rows) / n if n else 0.0,
+              "prefixed": len(prefixed), "same_prefix": sum(bool(r["prefix"]) for r in prefixed)}
+    return rows, totals
 
 
 def data_symbols(elf_path):

@@ -153,3 +153,39 @@ def test_the_command_prints_readable_c_and_the_shapes(capsys):
     assert "fmt_dec" in capsys.readouterr().out
     assert readable.main(["--target", gizmo_dir("m3"), "--shapes", "fmt_dec"]) in (0, None)
     assert "dread readable --shapes:" in capsys.readouterr().out
+
+
+def test_the_trees_made_in_a_pool_are_those_made_in_one_process(monkeypatch):
+    """readable_trees, analysis_trees and views give the same in worker processes as in this one."""
+    from dread import lift, regflow, readable
+    from dread.program import Program
+    from dread.target import Target
+    target = Target.load(gizmo_dir("m3"))
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+    names = [fn.name for fn in program.functions]
+    made = {}
+    for jobs in (1, 3):
+        monkeypatch.setattr(readable, "POOL_MIN", 1 if jobs > 1 else 10 ** 6)
+        d1, d2 = {}, {}
+        made[jobs] = ([readable.print_file(t, f) for t, f, _ in readable.readable_trees(program, context, lifter,
+                                                                                       names, digests=d1, jobs=jobs)],
+                      [readable.print_file(t, f, stages=[]) for t, f, _ in readable.analysis_trees(
+                          program, context, lifter, names, digests=d2, jobs=jobs)],
+                      d1, d2, readable.views(program, context, lifter, names, jobs=jobs))
+    assert made[1] == made[3] and len(made[1][0]) > 40 and len(made[1][4]) > 40
+
+
+def test_a_pool_takes_no_more_workers_than_the_memory_holds(monkeypatch):
+    from dread.util import polite
+    monkeypatch.delenv("DREAD_JOBS", raising=False)
+    monkeypatch.setattr(polite, "available_memory", lambda: 10 << 30)
+    many = polite.workers()
+    assert polite.workers(memory_each=4 << 30) == min(many, 2)
+    assert polite.workers(memory_each=64 << 30) == 1
+    monkeypatch.setattr(polite, "available_memory", lambda: None)      # (not known: threads decide)
+    assert polite.workers(memory_each=4 << 30) == many
+    assert polite.resident() is None or polite.resident() > 1 << 20

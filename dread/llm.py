@@ -52,7 +52,9 @@ organisation must allow models). Neither was tried here. `dread llm ask` tries a
 question; `dread llm providers` lists them.
 
 Requests go out with urllib (no SDK). Keys are read from the environment only; nothing here writes a
-key anywhere.
+key anywhere. A rate limit or an overload (HTTP 429, 529, 500, 502-504) is asked again up to retries
+times (default 4), after the server's retry-after or retry_wait seconds (default 5), three times
+longer each time.
 
 Every answer of a provider adds a line to a usage ledger (USAGE: time, provider, model, input and
 output tokens, how it ended; no text of the conversation, no key), so that what a month's runs spent
@@ -128,16 +130,33 @@ class Provider:
     def ask(self, system, messages):
         raise NotImplementedError
 
+    RETRY = (429, 500, 502, 503, 504, 529)  # rate limits and overloads: asked again after a wait
+
     def _post(self, url, body, headers):
+        """The reply to a request, as JSON. A rate limit or an overload (RETRY) is asked again up to
+        retries times (default 4), after the server's retry-after or retry_wait seconds (default 5),
+        three times longer each time: a run of thousands of questions meets them."""
+        import time
         data = json.dumps(body).encode()
-        request = urllib.request.Request(url, data=data, headers=dict({"content-type": "application/json"}, **headers))
-        try:
-            with urllib.request.urlopen(request, timeout=float(self.config.get("timeout", 1800))) as response:
-                return json.loads(response.read().decode())
-        except urllib.error.HTTPError as e:
-            raise ProviderError("%s: HTTP %d: %s" % (self.name, e.code, e.read().decode(errors="replace")[:300]))
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            raise ProviderError("%s: %s" % (self.name, e))
+        tries = int(self.config.get("retries", 4)) + 1
+        wait = float(self.config.get("retry_wait", 5))
+        for attempt in range(tries):
+            request = urllib.request.Request(url, data=data,
+                                             headers=dict({"content-type": "application/json"}, **headers))
+            try:
+                with urllib.request.urlopen(request, timeout=float(self.config.get("timeout", 1800))) as response:
+                    return json.loads(response.read().decode())
+            except urllib.error.HTTPError as e:
+                text = e.read().decode(errors="replace")[:300]
+                if e.code not in self.RETRY or attempt + 1 == tries:
+                    raise ProviderError("%s: HTTP %d: %s" % (self.name, e.code, text))
+                try:
+                    pause = min(float(e.headers.get("retry-after")), 300.0)
+                except (AttributeError, TypeError, ValueError):
+                    pause = wait * 3 ** attempt
+                time.sleep(pause)
+            except (urllib.error.URLError, OSError, ValueError) as e:
+                raise ProviderError("%s: %s" % (self.name, e))
 
 
 class OpenAICompatible(Provider):

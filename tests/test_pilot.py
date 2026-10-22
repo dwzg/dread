@@ -3,6 +3,7 @@ one goes back with the tools' own words and the corrected one is accepted, one t
 is removed again; and the providers' wire formats against a local server."""
 import json
 import os
+import re
 import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -182,6 +183,72 @@ def test_a_name_proposal_is_collected_not_applied(gizmo):
     assert pilot.propose_name(target, image, program, provider, "gpio_set", flow, out=lambda *a: None) is None
     rows = open(os.path.join(target.build, "pilot", image.name, "names.tsv")).read().splitlines()
     assert rows[-1].split("\t")[1:3] == ["gpio_set", "gpio_write_pin"] and "gpio_set" in program.by_name
+
+
+def test_a_name_question_shows_readable_c_with_texts_or_the_listing(gizmo):
+    """The question shows a function's readable C, a constant that points to text followed by the
+    text, other functions by the run's proposals; a function that does not lift, its listing."""
+    from dread import lift
+    target, image, program, flow = gizmo
+    namer = pilot.Namer(target, image, program, flow)
+    text, form = namer.question(program.by_name["apply_config"], {"parse_kv": "split_key_value"})
+    assert form.startswith("readable") and "```c" in text and '0x80007e4u /* "volume" */' in text
+    assert "split_key_value(" in text and "parse_kv(" not in text and "It is called by: " in text
+
+    def refuse(fn):
+        raise lift.Refused("not today")
+    namer.lifter.lift = refuse
+    text, form = namer.question(program.by_name["apply_config"])
+    assert form == "listing" and "machine code (no C could be made)" in text and '"volume"' in text
+
+
+def test_callees_first_puts_functions_that_call_each_other_in_one_round(monkeypatch):
+    import types
+    from dread import lift
+    calls = {"main": {"a", "b"}, "a": {"leaf"}, "b": {"c"}, "c": {"b", "leaf"}, "leaf": set()}
+    monkeypatch.setattr(lift, "direct_callees", lambda program, fn: calls[fn])
+    program = types.SimpleNamespace(by_name={n: n for n in calls})
+    assert pilot.callees_first(program, ["main", "a", "b", "c", "leaf"]) == [["leaf"], ["a", "b", "c"], ["main"]]
+    assert pilot.callees_first(program, ["main", "c"]) == [["main", "c"]]   # (main reaches c only through b)
+    assert pilot.callees_first(program, ["main", "b"]) == [["b"], ["main"]]
+
+
+def test_names_are_asked_callees_first_with_the_proposals_so_far(gizmo):
+    """name_functions: led_on calls gpio_set, so gpio_set is asked first and led_on's question shows its
+    proposal; a run started again asks only what has no proposal yet; --score compares with the ELF."""
+    target, image, program, flow = gizmo
+    seen = []
+
+    def answer(messages):
+        question = messages[0]["content"]
+        name = re.search(r"The function (\w+)", question).group(1)
+        seen.append((name, question))
+        return {"gpio_set": "name: pin_write\nwhat: drives an output pin",
+                "led_on": "name: led_on\nwhat: taken", "delay": "name: busy_wait\nwhat: spins"}[name] \
+            if len(messages) == 1 else "name: led_switch_on\nwhat: switches the LED on"
+    made, asked, spent = pilot.name_functions(target, image, program, lambda: llm.Scripted(answer),
+                                              ["led_on", "gpio_set"], flow, jobs=2, out=lambda *a: None)
+    assert (made, asked) == (2, 2)
+    assert [n for n, _ in seen] == ["gpio_set", "led_on", "led_on"]     # (led_on is a name taken: asked again)
+    assert "pin_write(" in seen[1][1] and "gpio_set(" not in seen[1][1]
+    rows = [r.split("\t") for r in open(pilot.names_path(target, image)).read().splitlines()]
+    assert rows[0] == ["address", "now", "proposed", "what", "provider", "shown"]
+    assert [r[1:3] for r in rows[1:]] == [["gpio_set", "pin_write"], ["led_on", "led_switch_on"]]
+    seen.clear()
+    made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(answer),
+                                          ["led_on", "gpio_set", "delay"], flow, out=lambda *a: None)
+    assert (made, asked) == (1, 1) and [n for n, _ in seen] == ["delay"]
+    lines = []
+    totals = pilot.score_names(target, image, os.path.join(os.path.dirname(target.root), "m3", "original",
+                                                           "gizmo.elf"), out=lines.append)
+    assert totals["functions"] == 3 and totals["exact"] == 0 and totals["same_words"] == 0
+    assert "3 proposals with a true name" in lines[0]
+    judge = llm.Scripted(['```json\n{"1": "same", "2": "Close", "3": "maybe"}\n```'])
+    lines.clear()
+    totals = pilot.score_names(target, image, os.path.join(os.path.dirname(target.root), "m3", "original",
+                                                           "gizmo.elf"), out=lines.append, judge=judge)
+    assert (totals["judged"], totals["judged_same"], totals["judged_close"]) == (2, 1, 1)
+    assert "| " in judge.asked[0][1][0]["content"] and "judged by scripted" in lines[-1]
 
 
 @pytest.mark.slow
@@ -380,3 +447,47 @@ def test_the_input_question_shows_the_callees_and_a_stopped_input_where_it_stopp
     log = open(os.path.join(target.build, "pilot", image.name, "uart_puts.inputs.md")).read()
     told = log.split("## The tools, after answer 1")[1]
     assert "does not finish" in told and "in uart_puts" in told and "r0=0xdead0000" in told, told
+
+
+class Busy(BaseHTTPRequestHandler):
+    """Overloaded twice (529, then 429 with retry-after), then an answer."""
+    calls = []
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["content-length"]))
+        Busy.calls.append(self.path)
+        if len(Busy.calls) <= 2:
+            data = b'{"type": "error", "error": {"type": "overloaded_error"}}'
+            self.send_response(529 if len(Busy.calls) == 1 else 429)
+            if len(Busy.calls) == 2:
+                self.send_header("retry-after", "0")
+        else:
+            data = json.dumps({"content": [{"type": "text", "text": "at last"}], "stop_reason": "end_turn",
+                               "usage": {"output_tokens": 2, "input_tokens": 3}}).encode()
+            self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_a_provider_asks_again_after_an_overload_or_a_rate_limit(monkeypatch):
+    server = HTTPServer(("127.0.0.1", 0), Busy)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:%d" % server.server_port
+    monkeypatch.setenv("TEST_KEY", "secret")
+    try:
+        Busy.calls.clear()
+        remote = llm.Anthropic("claude", {"url": url, "model": "c", "key_env": "TEST_KEY", "retry_wait": 0.01})
+        assert remote.ask("s", [{"role": "user", "content": "hello"}]) == "at last" and len(Busy.calls) == 3
+        Busy.calls.clear()
+        once = llm.Anthropic("claude", {"url": url, "model": "c", "key_env": "TEST_KEY", "retry_wait": 0.01,
+                                        "retries": 1})
+        with pytest.raises(llm.ProviderError, match="HTTP 429"):
+            once.ask("s", [{"role": "user", "content": "hello"}])
+        assert len(Busy.calls) == 2
+    finally:
+        server.shutdown()

@@ -31,7 +31,11 @@ first), for one input at a time (JSON: argument registers, memory, peripheral an
 decides, and an input that runs some of them becomes a written case; the run ends with what it ran
 and what it cost. --task name asks for a name and a
 sentence for FUN_ functions and collects the proposals in BUILD/pilot/IMAGE/names.tsv: no tool can
-check a name, so none is applied.
+check a name, so none is applied. Its questions show a function's readable C (dread readable's view,
+constants that point to text followed by the text) or, where no C can be made, its listing; they go
+callees first, --jobs at a time, each showing the proposals made so far for the functions it calls
+and its callers; a run started again goes on where the last one stopped. --score TRUTH compares the
+proposals with true names (an ELF's symbols, or the functions table of a copy that has them).
 
 A provider that declines DECLINED_IN_A_ROW questions in a row (stop reason "refusal" or
 "content_filter") is asked no more in that run: its classifiers decline the same kind of question
@@ -40,7 +44,8 @@ every --task input question on FreeRTOS (a listing with instructions to reach), 
 stated, while Haiku 5.5 answered the same question.
 
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
-                [--no-mutate] [--no-integration] [--dry-run] [--task write|input|name] [NAME...]
+                [--no-mutate] [--no-integration] [--dry-run] [--task write|input|name|readable]
+                [--jobs N] [--score TRUTH] [NAME...]
 """
 import argparse
 import contextlib
@@ -452,9 +457,14 @@ Numbers may be integers or hex strings ("0x20001000"). Memory not given reads as
 use the scratch area 0x{scratch:x} to 0x{end:x}. A pointer to code (a callback) must be the entry of a
 function, never an address inside one. Answer with one ```json block holding one input."""
 
-NAME_SYSTEM = """You name functions of a binary image from their code. A name says what the function
-does, in snake_case, with a prefix for its subsystem when one is clear (uart_, gpio_, timer_, cfg_).
-Answer with exactly two lines:
+NAME_SYSTEM = """You name functions of a binary image from their code. The code below is C made from
+the machine code by tools (variables named after the registers and stack slots that held them,
+memory at fixed addresses written g_ADDRESS, io_ADDRESS for device registers, rom_ADDRESS in the
+image), or the machine code itself where no C could be made. A function without a name is written
+FUN_ and its address; some names of other functions are proposals made from their code earlier, likely
+but not certain. A comment after a constant shows the text it points to. A name says what the function
+does, in snake_case, with a prefix for its subsystem when one is clear (uart_, gpio_, timer_, fs_,
+ui_); follow the style of the names you see. Answer with exactly two lines:
 
 name: <the name>
 what: <one sentence: what the function does>"""
@@ -870,6 +880,7 @@ def lift_missed(target, image, program):
 
 
 DECLINED_IN_A_ROW = 3       # questions a provider declined one after another before a run stops asking it
+FAILED_IN_A_ROW = 20        # questions that failed on the provider's side (after its own retries) in a row
 
 
 class Asking:
@@ -1048,37 +1059,376 @@ def find_inputs(target, image, program, provider, name, missed, tries=3, flow=No
     return sorted(still)
 
 
-def propose_name(target, image, program, provider, name, flow=None, out=print):
-    """Ask for a name and a sentence; a proposal goes to BUILD/pilot/IMAGE/names.tsv, never into the
-    tables (no tool can check a name). Returns (name, what) or None."""
-    from dread import flat
-    fn = program.by_name[name]
-    user = "The function %s:\n\n```\n%s\n```" % (name, "\n".join(
-        flat.listing(program, fn, flow, callers=flat.callers_of(program))))
-    try:
-        answer = provider.ask(NAME_SYSTEM, [{"role": "user", "content": user}])
-    except Exception as e:
-        out("%-24s no proposal: %s" % (name, e))
+NAME_CHARS = 24000         # the code a name question shows at most (the rest cut, and said so)
+HEX = re.compile(r"\b0x([0-9a-fA-F]+)u?\b")
+IDENT_WORD = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+class Namer:
+    """What the questions for function names need, made once for a run: the readable C's context and
+    lifter, the image's readable table, the callers of every function."""
+
+    def __init__(self, target, image, program, flow=None):
+        from dread import build, flat, lift, readable
+        self.target, self.image, self.program, self.flow = target, image, program, flow
+        self.context = readable.Context(target, image, program, flow)
+        self.lifter = lift.make_lifter(program, flow)
+        self.readable = set(build.read_names(image.table("readable")))
+        self.callers = flat.callers_of(program)
+        self.views, self.prepared = {}, set()
+
+    def prepare(self, names):
+        """Make the readable C of names in a pool of workers (dread.readable views), before any thread
+        asks: questions then only put names in."""
+        from dread import readable
+        self.views.update(readable.views(self.program, self.context, self.lifter, list(names)))
+        self.prepared |= set(names)
+
+    def code(self, fn):
+        """(text, form) of a function's code for a question: its readable C ("readable" when the
+        image's readable table has it, the gate having checked it; "readable, unchecked" else), or its
+        listing ("listing") when it does not lift or its C is not the dialect."""
+        from dread import flat, lift, readable
+        if fn.name in self.prepared:
+            text = self.views.get(fn.name)
+        else:
+            try:
+                text = readable.view(fn.name, self.lifter.lift(fn).text, context=self.context)
+            except lift.Refused:
+                text = None
+        if text is not None:
+            return text, "readable" if fn.name in self.readable else "readable, unchecked"
+        return "\n".join(flat.listing(self.program, fn, self.flow, callers=self.callers)), "listing"
+
+    def question(self, fn, shown_as=None):
+        """(text, form) of the question for a function's name: its code (code()) with each constant
+        that points to text in the image followed by that text, other functions by their names in
+        shown_as ({name: name shown}: the run's proposals) where it has one, and its callers."""
+        from dread.constants import string_at
+        program = self.program
+        text, form = self.code(fn)
+        if form != "listing":               # (the listing shows the texts already)
+            def note(m):
+                s = string_at(program, int(m.group(1), 16))
+                return m.group(0) + (' /* "%s" */' % s.replace("*/", "* /") if s else "")
+            text = HEX.sub(note, text)
+        if shown_as:
+            text = IDENT_WORD.sub(lambda m: shown_as.get(m.group(0), m.group(0)) if m.group(0) != fn.name
+                                  else m.group(0), text)
+        if len(text) > NAME_CHARS:
+            text = text[:NAME_CHARS] + "\n... (cut: %d more characters)" % (len(text) - NAME_CHARS)
+        if form == "listing":
+            user = "The function %s, its machine code (no C could be made):\n\n```\n%s\n```" % (fn.name, text)
+        else:
+            user = "The function %s, as C made from its machine code:\n\n```c\n%s\n```" % (fn.name, text)
+            callers = []
+            for caller, _ in self.callers.get(fn.name, []):
+                shown = (shown_as or {}).get(caller, caller)
+                if shown not in callers and may_show(self.target, caller):
+                    callers.append(shown)
+            if callers:
+                more = " and %d more" % (len(callers) - 12) if len(callers) > 12 else ""
+                user += "\n\nIt is called by: %s%s." % (", ".join(callers[:12]), more)
+        return user, form
+
+
+def name_problem(program, proposed):
+    """Why a proposed function name cannot be used, or None: a C identifier of at most 48
+    characters, not a name the image's functions have, not one of the unnamed form (FUN_1a2b)."""
+    from dread.samecode import UNNAMED
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,47}$", proposed or ""):
+        return "a name is a C identifier of at most 48 characters"
+    if proposed in program.by_name:
+        return "%s is the name of another function" % proposed
+    if UNNAMED.match(proposed):
+        return "%s has the form of a function without a name" % proposed
+    return None
+
+
+def parse_name(answer):
+    """(name, what) of an answer's two lines, or None."""
+    proposed = re.search(r"^\s*\**name\**\s*:\s*\**`?([A-Za-z_][A-Za-z0-9_]*)`?\**\s*$", answer or "", re.M | re.I)
+    what = re.search(r"^\s*\**what\**\s*:\s*(.+?)\s*$", answer or "", re.M | re.I)
+    if not proposed or not what:
         return None
-    if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
-        out("%-24s no proposal: the provider declined" % name)
-        return None
-    proposed = re.search(r"^\s*name\s*:\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*$", answer, re.M | re.I)
-    what = re.search(r"^\s*what\s*:\s*(.+?)\s*$", answer, re.M | re.I)
-    if not proposed or not what or len(proposed.group(1)) > 48 or proposed.group(1) in program.by_name:
-        out("%-24s no usable proposal" % name)
-        return None
-    folder = os.path.join(target.build, "pilot", image.name)
-    os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, "names.tsv")
+    return proposed.group(1), what.group(1)
+
+
+def ask_name(provider, program, name, user, tries=2):
+    """(proposed, what, log, why) of asking for one function's name: a name that cannot be used
+    (name_problem) or an answer without the two lines goes back with the reason, up to tries
+    answers; proposed is None when none came."""
+    messages = [{"role": "user", "content": user}]
+    log = ["# %s, asked %s\n\n## Question\n\n%s" % (name, provider.label(), user)]
+    why = "no answer"
+    for _ in range(tries):
+        provider.last = {}
+        try:
+            answer = provider.ask(NAME_SYSTEM, messages)
+        except Exception as e:
+            return None, None, log, "the provider: %s" % e
+        log.append("## Answer\n\n%s" % answer)
+        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+            return None, None, log, "the provider declined"
+        parsed = parse_name(answer)
+        why = "no two lines name: and what:" if parsed is None else name_problem(program, parsed[0])
+        if why is None:
+            return parsed[0], parsed[1], log, None
+        messages += [{"role": "assistant", "content": answer},
+                     {"role": "user", "content": "That name cannot be used: %s. Answer again with the two lines."
+                                                 % why}]
+        log.append("## Back to the model\n\n%s" % messages[-1]["content"])
+    return None, None, log, why
+
+
+def names_path(target, image):
+    return os.path.join(target.build, "pilot", image.name, "names.tsv")
+
+
+def read_proposals(target, image):
+    """{address: (proposed, what)} of the image's names.tsv, the last proposal of each address."""
+    out = {}
+    path = names_path(target, image)
+    if os.path.exists(path):
+        for line in open(path).read().splitlines()[1:]:
+            parts = line.split("\t")
+            if len(parts) >= 4:
+                try:
+                    out[int(parts[0], 16)] = (parts[2], parts[3])
+                except ValueError:
+                    continue
+    return out
+
+
+def keep_proposal(target, image, fn, proposed, what, provider, form):
+    """A line of the image's names.tsv: address, now, proposed, what, provider, shown (the form of
+    the code the question showed)."""
+    path = names_path(target, image)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     new = not os.path.exists(path)
     with open(path, "a") as f:
         if new:
-            f.write("address\tnow\tproposed\twhat\tprovider\n")
-        f.write("0x%x\t%s\t%s\t%s\t%s\n" % (fn.entry, name, proposed.group(1), what.group(1).replace("\t", " "),
-                                            provider.label()))
-    out("%-24s proposed %s: %s" % (name, proposed.group(1), what.group(1)))
-    return proposed.group(1), what.group(1)
+            f.write("address\tnow\tproposed\twhat\tprovider\tshown\n")
+        f.write("0x%x\t%s\t%s\t%s\t%s\t%s\n" % (fn.entry, fn.name, proposed, what.replace("\t", " "),
+                                                provider.label(), form))
+
+
+def propose_name(target, image, program, provider, name, flow=None, out=print, namer=None, shown_as=None,
+                 tries=2):
+    """Ask for one function's name and a sentence; a proposal goes to BUILD/pilot/IMAGE/names.tsv,
+    never into the tables (no tool can check a name), the conversation to
+    BUILD/pilot/IMAGE/names/NAME.md. Returns (name, what) or None."""
+    namer = namer or Namer(target, image, program, flow)
+    fn = program.by_name[name]
+    user, form = namer.question(fn, shown_as)
+    proposed, what, log, why = ask_name(provider, program, name, user, tries)
+    write_log(target, image, name, log)
+    if proposed is None:
+        out("%-24s no proposal: %s" % (name, why))
+        return None
+    keep_proposal(target, image, fn, proposed, what, provider, form)
+    out("%-24s proposed %s: %s" % (name, proposed, what))
+    return proposed, what
+
+
+def write_log(target, image, name, log):
+    folder = os.path.join(target.build, "pilot", image.name, "names")
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, name + ".md"), "w") as f:
+        f.write("\n\n".join(log) + "\n")
+
+
+def callees_first(program, names):
+    """The functions of names in rounds, as lists: a function's round comes after those of the
+    functions it calls among names (direct calls and tail calls), functions that call each other in a
+    circle sharing one round, so that a question can show what its callees were named."""
+    from dread.lift import direct_callees
+    nameset = set(names)
+    calls = {n: sorted(c for c in direct_callees(program, program.by_name[n]) if c in nameset and c != n)
+             for n in names}
+    index, low, on, stack, comp, comps = {}, {}, set(), [], {}, []
+    for root in names:                      # Tarjan's components, without recursion
+        if root in index:
+            continue
+        work = [(root, 0)]
+        while work:
+            v, i = work.pop()
+            if i == 0:
+                index[v] = low[v] = len(index)
+                stack.append(v)
+                on.add(v)
+            for k in range(i, len(calls[v])):
+                w = calls[v][k]
+                if w not in index:
+                    work += [(v, k + 1), (w, 0)]
+                    break
+                if w in on:
+                    low[v] = min(low[v], index[w])
+            else:
+                if low[v] == index[v]:
+                    members = []
+                    while True:
+                        w = stack.pop()
+                        on.discard(w)
+                        comp[w] = len(comps)
+                        members.append(w)
+                        if w == v:
+                            break
+                    comps.append(members)
+                if work:
+                    u = work[-1][0]
+                    low[u] = min(low[u], low[v])
+    level = {}
+    for c, members in enumerate(comps):     # (Tarjan finishes a component after those it reaches)
+        level[c] = 1 + max([level[comp[w]] for m in members for w in calls[m] if comp[w] != c] or [-1])
+    rounds = [[] for _ in range(1 + max(level.values(), default=-1))]
+    for n in names:
+        rounds[level[comp[n]]].append(n)
+    return rounds
+
+
+def name_functions(target, image, program, make_provider, names, flow=None, jobs=4, tries=2, out=print):
+    """Proposals for the functions of names, callees first (callees_first), jobs questions at a time
+    with a provider each (make_provider() makes one); each question shows the proposals made so far
+    for the other functions in place of their names. A function names.tsv has a proposal for already
+    is not asked again, its proposal shown. Returns (proposed, asked, spent: summed over the
+    providers)."""
+    import concurrent.futures
+    import threading
+    namer = Namer(target, image, program, flow)
+    known = read_proposals(target, image)
+    shown_as = {program.by_entry[a].name: p for a, (p, _) in known.items() if a in program.by_entry}
+    namer.prepare([n for n in names if program.by_name[n].entry not in known])     # (before any thread)
+    local, providers, lock = threading.local(), [], threading.Lock()
+
+    def provider():
+        if getattr(local, "provider", None) is None:
+            local.provider = make_provider()
+            with lock:
+                providers.append(local.provider)
+        return local.provider
+
+    def one(item):
+        name, user, form = item
+        p = provider()
+        proposed, what, log, why = ask_name(p, program, name, user, tries)
+        return name, form, proposed, what, log, why, p, (getattr(p, "last", {}) or {}).get("finish")
+
+    proposed = asked = declined_row = failed_row = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        for k, members in enumerate(callees_first(program, names)):
+            todo = [n for n in members if program.by_name[n].entry not in known]
+            if not todo:
+                continue
+            items = [(n,) + namer.question(program.by_name[n], shown_as) for n in todo]
+            for name, form, got, what, log, why, p, finish in pool.map(one, items):
+                asked += 1
+                write_log(target, image, name, log)
+                if got is None:
+                    out("%-24s no proposal: %s" % (name, why))
+                    declined_row = declined_row + 1 if finish in llm.Provider.REFUSED else 0
+                    failed_row = failed_row + 1 if why.startswith("the provider:") else 0
+                    continue
+                declined_row = failed_row = 0
+                fn = program.by_name[name]
+                keep_proposal(target, image, fn, got, what, p, form)
+                known[fn.entry] = (got, what)
+                shown_as[name] = got
+                proposed += 1
+                out("%-24s proposed %s (%s): %s" % (name, got, form, what))
+            if declined_row >= DECLINED_IN_A_ROW:
+                out("dread pilot: the provider declined %d questions in a row; no more are asked" % declined_row)
+                break
+            if failed_row >= FAILED_IN_A_ROW:
+                out("dread pilot: the provider failed %d questions in a row; no more are asked (the run "
+                    "goes on where it stopped when started again)" % failed_row)
+                break
+    spent = {"answers": 0, "input": 0, "output": 0, "cost": None}
+    for p in providers:
+        s = p.spent()
+        for key in ("answers", "input", "output"):
+            spent[key] += s[key]
+        if s.get("cost") is not None:
+            spent["cost"] = (spent["cost"] or 0.0) + s["cost"]
+    return proposed, asked, spent
+
+
+JUDGE_SYSTEM = """You compare names of functions of a program. In each numbered pair the first name
+was given by people who read the code knowing the whole program; the second was proposed from one
+function's code. Say for each pair whether the second names the same function as the first: "same"
+(the same purpose, in other words or abbreviations too), "close" (a related purpose: more general,
+more specific, or one part of what the first says), or "different". Answer with one ```json block that
+maps every pair's number to its word:
+
+```json
+{"1": "same", "2": "close", "3": "different"}
+```"""
+VERDICTS = ("same", "close", "different")
+
+
+def judge_names(provider, pairs, batch=50, out=print):
+    """{key: "same", "close" or "different"} of pairs ([(key, true name, proposed name)]) as a
+    provider judges them, batch pairs a question; a pair without a usable verdict is left out. A
+    language model's judgement, a second measure beside the word scores (synonyms and abbreviations:
+    buf_len against buffer_length shares no word)."""
+    import json
+    out_map = {}
+    for start in range(0, len(pairs), batch):
+        part = pairs[start:start + batch]
+        user = "\n".join("%d. %s | %s" % (k + 1, t, p) for k, (_, t, p) in enumerate(part))
+        try:
+            answer = provider.ask(JUDGE_SYSTEM, [{"role": "user", "content": user}])
+        except Exception as e:
+            out("dread pilot --judge: no verdicts for pairs %d-%d: %s" % (start + 1, start + len(part), e))
+            continue
+        m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
+        try:
+            data = json.loads(m.group(1)) if m else {}
+        except ValueError:
+            data = {}
+        for k, (key, _, _) in enumerate(part):
+            v = str(data.get(str(k + 1), "")).strip().lower() if isinstance(data, dict) else ""
+            if v in VERDICTS:
+                out_map[key] = v
+    return out_map
+
+
+def score_names(target, image, truth_path, out=print, judge=None):
+    """The image's proposals (names.tsv) against true names (dread.naming.function_truth): prints a
+    line a function into BUILD/pilot/IMAGE/names-score.tsv and the totals; judge, a provider: its
+    verdicts as well (judge_names)."""
+    from dread import naming
+    proposals = {a: p for a, (p, _) in read_proposals(target, image).items()}
+    rows, t = naming.score_functions(proposals, naming.function_truth(truth_path))
+    verdicts = judge_names(judge, [(r["address"], r["true"], r["proposed"]) for r in rows], out=out) \
+        if judge is not None and rows else {}
+    path = os.path.join(target.build, "pilot", image.name, "names-score.tsv")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("address\ttrue\tproposed\texact\tsame_words\toverlap\tsame_prefix\tjudged\n")
+        for r in rows:
+            f.write("0x%x\t%s\t%s\t%d\t%d\t%.2f\t%s\t%s\n" % (
+                r["address"], r["true"], r["proposed"], r["exact"], r["same_words"], r["overlap"],
+                "" if r["prefix"] is None else int(r["prefix"]), verdicts.get(r["address"], "")))
+    for v in VERDICTS:
+        t["judged_" + v] = sum(1 for x in verdicts.values() if x == v)
+    t["judged"] = len(verdicts)
+    n = t["functions"]
+    if not n:
+        out("dread pilot --score: no proposal at an address the true names have (%s)" % truth_path)
+        return t
+
+    def pc(k, of=n):
+        return "%d (%.0f %%)" % (t[k], 100.0 * t[k] / of) if of else "%d" % t[k]
+    out("dread pilot --score: %d proposals with a true name: exact %s, the same words %s, a word shared %s, "
+        "half the words or more %s, mean overlap %.2f; the same prefix %d of %d with prefixes (%s)" % (
+            n, pc("exact"), pc("same_words"), pc("shared_word"), pc("half_shared"), t["overlap"],
+            t["same_prefix"], t["prefixed"], path))
+    if judge is not None:
+        out("dread pilot --score: judged by %s, %d of %d: the same %s, close %s, different %s" % (
+            judge.label(), t["judged"], n, pc("judged_same", t["judged"]), pc("judged_close", t["judged"]),
+            pc("judged_different", t["judged"])))
+    return t
 
 
 def print_usage(month=None):
@@ -1113,6 +1463,12 @@ def main(argv=None):
                              "about them (input, name)")
     parser.add_argument("--usage", nargs="?", const="", metavar="YYYY-MM",
                         help="print the tokens (and costs, where llm.toml gives prices) of a month's answers; ask nothing")
+    parser.add_argument("--jobs", type=int, default=4, help="--task name: questions asked at a time (default 4)")
+    parser.add_argument("--score", metavar="TRUTH",
+                        help="--task name: compare the proposals (names.tsv) with true names (an ELF's symbols, "
+                             "or a functions table of a copy that has them) and ask nothing")
+    parser.add_argument("--judge", metavar="PROVIDER",
+                        help="with --score: a provider also judges each pair the same, close or different")
     parser.add_argument("--task", choices=("write", "input", "name", "readable"), default="write",
                         help="write C (default), find inputs for unrun instructions, propose names, or name the "
                              "variables of readable C (dread readable)")
@@ -1131,6 +1487,15 @@ def main(argv=None):
     from dread.program import Program
     program = Program(target, image)
     flow = regflow.load(target, image, program)
+    if args.task == "name" and args.score:
+        judge = None
+        if args.judge:
+            try:
+                judge = llm.load(args.judge)
+            except llm.ProviderError as e:
+                print("dread pilot: %s" % e, file=sys.stderr)
+                return 1
+        return 0 if score_names(target, image, args.score, judge=judge)["functions"] else 1
     if args.task != "write":
         provider = None
         if not args.dry_run:                # (a dry run asks nothing, so it needs no provider)
@@ -1174,19 +1539,23 @@ def main(argv=None):
             return 0
         if args.task == "name":
             from dread.samecode import UNNAMED
-            names = shown(target, args.names) if args.names else sorted(
-                (fn.name for fn in program.functions if UNNAMED.match(fn.name) and may_show(target, fn.name)),
-                key=lambda n: len(program.by_name[n].insns))[:args.limit]
+            names = shown(target, args.names) if args.names else [
+                fn.name for fn in program.functions if UNNAMED.match(fn.name) and may_show(target, fn.name)]
+            names = [n for r in callees_first(program, names) for n in r]
+            names = names[:args.limit] if args.limit else names
             if args.dry_run:
-                print("\n".join(names))
-                print("dread pilot --task name --dry-run: %d functions would be asked about; nothing asked" % len(names))
+                known = read_proposals(target, image)
+                todo = [n for n in names if program.by_name[n].entry not in known]
+                print("\n".join(todo))
+                print("dread pilot --task name --dry-run: %d functions would be asked about, callees first (%d "
+                      "proposed already); nothing asked" % (len(todo), len(names) - len(todo)))
                 return 0
-            asking = Asking(provider)
-            for name in names:
-                if not asking.go_on():
-                    break
-                propose_name(target, image, program, provider, name, flow)
-                asking.asked()
+            made, asked, spent = name_functions(target, image, program, lambda: llm.load(args.provider), names,
+                                                flow, jobs=args.jobs, tries=min(args.tries, 3))
+            cost = " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""
+            print("dread pilot --task name: %d of %d asked functions got a proposal (%s); %d answers, %d tokens "
+                  "in, %d out%s" % (made, asked, names_path(target, image), spent["answers"], spent["input"],
+                                    spent["output"], cost))
             return 0
         missed = missed_instructions(target, image, args.names or [fn.name for fn in program.functions])
         for name, addresses in lift_missed(target, image, program).items():      # what the lifter left

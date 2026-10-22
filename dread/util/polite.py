@@ -47,15 +47,43 @@ def polite():
         pass
 
 
-def workers():
+def workers(memory_each=None):
     """How many workers a pool should have: the hardware threads this process may use (after
-    polite(), those of the cores not left free), capped by $DREAD_JOBS."""
+    polite(), those of the cores not left free), capped by $DREAD_JOBS, and with memory_each (bytes a
+    worker may come to) by the memory available. A forked worker copies what it touches of its
+    parent: the readable C of a large firmware cost 1 GB a worker beside a parent of 2.5 GB, 32 GB
+    for 32 workers."""
     try:
         n = len(os.sched_getaffinity(0)) or 1
     except AttributeError:
         n = os.cpu_count() or 1
     cap = int(os.environ.get("DREAD_JOBS", 0) or 0)
-    return min(n, cap) if cap > 0 else n
+    n = min(n, cap) if cap > 0 else n
+    free = available_memory() if memory_each else None
+    if free is not None:
+        n = max(1, min(n, free // max(1, memory_each)))
+    return n
+
+
+def available_memory():
+    """Bytes of memory available for new work (Linux's MemAvailable), or None where not known."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def resident():
+    """This process's resident memory in bytes (Linux), or None."""
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
 
 
 def die_with_parent():

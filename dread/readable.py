@@ -161,61 +161,118 @@ def readable_tree(name, text, stages=None, context=None):
     return tree, fn
 
 
-def readable_trees(program, context, lifter, names, named=None, digests=None):
+POOL_MIN = 64       # functions from which the trees are made in a pool of worker processes
+_G = {}             # what the workers share with the process that forked them (copy-on-write)
+
+
+def in_pool(work, names, jobs=None, **shared):
+    """[work(name)] for each of names, in order, work a function of this module that reads shared from
+    _G: in forked worker processes (dread.util.polite.workers(), or jobs), or in this process for
+    fewer than POOL_MIN names or one worker. On the 3,541 functions of a large firmware, making the
+    analysis trees took 12 minutes on one core."""
+    import multiprocessing
+    from dread.util.polite import die_with_parent, polite, resident, workers
+    _G.clear()
+    _G.update(shared)
+    try:
+        if len(names) < POOL_MIN:
+            return [work(name) for name in names]
+        polite()                            # (a bulk run: the pilot's tasks had not lowered theirs)
+        n = min(len(names), jobs or workers(memory_each=resident()))     # (a worker may copy all of this one)
+        if n <= 1:
+            return [work(name) for name in names]
+        with multiprocessing.get_context("fork").Pool(n, initializer=die_with_parent) as pool:
+            return pool.map(work, list(names), chunksize=4)
+    finally:
+        _G.clear()
+
+
+def _lifted_text(name):
+    from dread import lift
+    fn_p = _G["program"].by_name.get(name)
+    if fn_p is None:
+        return None
+    try:
+        return _G["lifter"].lift(fn_p).text
+    except lift.Refused:
+        return None
+
+
+def _readable_one(name):
+    text = _lifted_text(name)
+    context = _G["context"]
+    made = readable_tree(name, text, context=context) if text is not None else None
+    if made is None:
+        return None
+    tree, fn = made
+    digest = naming.digest(fn)
+    chosen = naming.apply_globals(tree, fn, _G["named"], context.memory if context is not None else None)
+    return tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}, digest
+
+
+def _analysis_one(name):
+    import copy
+    text = _lifted_text(name)
+    context = _G["context"]
+    early = [st for st in STAGES if st[0] != "structure"]
+    made = readable_tree(name, text, stages=early, context=context) if text is not None else None
+    if made is None:
+        return None
+    tree, fn = made
+    full = copy.deepcopy(fn)
+    if not tidy.fixed_registers(tree):
+        structure.structure(full, Run(context))
+    digest = naming.digest(full)
+    chosen = naming.apply_globals(tree, fn, _G["named"], context.memory if context is not None else None)
+    return tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}, digest
+
+
+def _view_one(name):
+    text = _lifted_text(name)
+    return view(name, text, context=_G["context"]) if text is not None else None
+
+
+def warm(lifter):
+    """Fill the lifter's tables for the whole program here, before a pool forks: the workers share
+    them instead of each making its own (dread.noreturn's, 5 of the 12 seconds a large firmware's first
+    lift took)."""
+    if hasattr(lifter, "never_returns"):
+        lifter.never_returns("")
+
+
+def _trees(work, program, context, lifter, names, named, digests, jobs):
+    out = []
+    warm(lifter)
+    for made in in_pool(work, list(names), jobs, program=program, context=context, lifter=lifter, named=named):
+        if made is not None:
+            tree, fn, macros, digest = made
+            if digests is not None:
+                digests[fn.name] = digest
+            out.append((tree, fn, macros))
+    return out
+
+
+def readable_trees(program, context, lifter, names, named=None, digests=None, jobs=None):
     """[(tree, function, macros)] of the functions' readable C after the stages, their memory at
     fixed addresses written as names (dread.naming apply_globals: named, the table's globals part, or
     the default names); macros: {name: (address, type)}. Functions that do not lift or are not the
     dialect are left out. digests, a dict: filled with each function's digest before the names (what
-    the readable_names and readable_types tables are made for)."""
-    from dread import lift
-    out = []
-    for name in names:
-        fn_p = program.by_name.get(name)
-        if fn_p is None:
-            continue
-        try:
-            text = lifter.lift(fn_p).text
-        except lift.Refused:
-            continue
-        made = readable_tree(name, text, context=context)
-        if made is None:
-            continue
-        tree, fn = made
-        if digests is not None:
-            digests[name] = naming.digest(fn)
-        chosen = naming.apply_globals(tree, fn, named, context.memory if context is not None else None)
-        out.append((tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}))
-    return out
+    the readable_names and readable_types tables are made for). Made in a pool (in_pool)."""
+    return _trees(_readable_one, program, context, lifter, names, named, digests, jobs)
 
 
-def analysis_trees(program, context, lifter, names, named=None, digests=None):
+def analysis_trees(program, context, lifter, names, named=None, digests=None, jobs=None):
     """As readable_trees, but before the structure stage, for dread.shapes: every statement a node of
     the flow graph, so that it follows definitions, not names; digests: of the C after every stage,
     what the plan is made for (the structure stage moves statements, it renames nothing)."""
-    import copy
-    from dread import lift
-    early = [st for st in STAGES if st[0] != "structure"]
-    out = []
-    for name in names:
-        fn_p = program.by_name.get(name)
-        if fn_p is None:
-            continue
-        try:
-            text = lifter.lift(fn_p).text
-        except lift.Refused:
-            continue
-        made = readable_tree(name, text, stages=early, context=context)
-        if made is None:
-            continue
-        tree, fn = made
-        if digests is not None:
-            full = copy.deepcopy(fn)
-            if not tidy.fixed_registers(tree):
-                structure.structure(full, Run(context))
-            digests[name] = naming.digest(full)
-        chosen = naming.apply_globals(tree, fn, named, context.memory if context is not None else None)
-        out.append((tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}))
-    return out
+    return _trees(_analysis_one, program, context, lifter, names, named, digests, jobs)
+
+
+def views(program, context, lifter, names, jobs=None):
+    """{name: view()} of the functions that lift and are the dialect, made in a pool (in_pool)."""
+    warm(lifter)
+    texts = in_pool(_view_one, list(names), jobs, program=program, context=context, lifter=lifter)
+    return {n: t for n, t in zip(names, texts) if t is not None}
 
 
 def print_file(tree, fn, stages=None):
@@ -224,7 +281,10 @@ def print_file(tree, fn, stages=None):
                           else "lifted")
 
 
-def _transform(name, text, stages, context=None):
+def _named(name, text, stages, context=None):
+    """(tree, function, stages) of the readable C with the tables applied: the globals' names, the
+    structures, the variables' names (each only for the C it was made for); None when the lifted C is
+    not the dialect. stages: [] when the function keeps fixed registers (left as the lifter wrote it)."""
     made = readable_tree(name, text, stages, context)
     if made is None:
         return None
@@ -242,7 +302,22 @@ def _transform(name, text, stages, context=None):
             shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
         if entry:
             naming.apply(tree, fn, entry, made_for)     # (only for the C it was made for: its digest)
-    return print_file(tree, fn, stages)
+    return tree, fn, stages
+
+
+def _transform(name, text, stages, context=None):
+    made = _named(name, text, stages, context)
+    return print_file(*made) if made is not None else None
+
+
+def view(name, text, context=None):
+    """The function alone as a reader sees it (the questions of dread pilot): its readable C with the
+    tables applied, or its lifted C when it keeps fixed registers; None when it is not the dialect."""
+    made = _named(name, text, None, context)
+    if made is None:
+        return None
+    tree, fn, stages = made
+    return cparse.unparse(fn, notes=False, style="readable" if stages is None or stages else "lifted")
 
 
 def chooser(names, context=None):
