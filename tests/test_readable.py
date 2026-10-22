@@ -244,3 +244,22 @@ def test_a_call_saved_line_lets_the_stages_run_and_a_fixed_line_does_not():
     assert "u32 h(u32 r0, u32 r1)" in saved and "return r0 + r1;" in saved and "(void)" not in saved, saved
     fixed = readable.transform("h", build.FIXED + "r4 */\n" + body)
     assert fixed is not None and "(void)n" in fixed, fixed
+
+
+@needs_gcc
+def test_a_check_whose_build_fails_exits_1_and_keeps_the_tables(tmp_path):
+    """dread readable --check and dread lift --check on a build that fails (gizmo without the
+    rewritten directory its src/rewritten.c includes): exit 1 with the reason, the readable and
+    lifted tables as they were (until 2026-10-23 both exited 0 and a comparison of the tables read
+    "the same")."""
+    from dread import lift
+    target = gizmo_copy(tmp_path)
+    image = target.image()
+    shutil.rmtree(tmp_path / "gizmo" / "rewritten")
+    lifted_before = open(image.table("lifted")).read()
+    assert not os.path.exists(image.table("readable"))
+    assert readable.main(["--target", target.root, "--check"]) == 1
+    assert not os.path.exists(image.table("readable"))
+    some = build.read_names(image.table("lifted"))[:2]
+    assert lift.main(["--target", target.root, "--check"] + some) == 1
+    assert open(image.table("lifted")).read() == lifted_before

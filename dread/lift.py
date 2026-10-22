@@ -59,7 +59,9 @@ the difference is found by halving (culprits) and dropped, and the rest is run a
 image agrees (lift-check/IMAGE/whole.txt: the outcome, then what was dropped for it). Until
 2026-10-22 the difference was only reported, and the functions stayed. What stays is written to the
 image's lifted table (config/lifted.txt), which dread recon builds from then on (it lifts those
-functions again at every build: the C is not kept).
+functions again at every build: the C is not kept). A build that dropping functions cannot mend (the
+sources written by hand do not compile, a header is missing) ends the check with exit 1 and the
+table as it was (dread.build BuildFailed; until 2026-10-23 it exited 0, the old table in place).
 
     dread lift [--target DIR] [--image NAME] [--out DIR] [NAME...]
     dread lift --check [--target DIR] [--image NAME] [NAME...]
@@ -2964,8 +2966,12 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
     program = Program(target, image)
     lifter = make_lifter(program, regflow.load(target, image, program))
     work = os.path.join(target.build, "lift-check", image.name)
-    by_hand = build.defined_functions(build.compile_all(target, image, image.src, os.path.join(work, "obj"),
-                                                        quiet=True))
+    try:
+        by_hand = build.defined_functions(build.compile_all(target, image, image.src, os.path.join(work, "obj"),
+                                                            quiet=True))
+    except overlay.OverlayError as e:      # (the sources written by hand do not compile)
+        out("dread lift: the build failed: %s" % e)
+        raise build.BuildFailed(str(e))
     entered = set()                         # branched into past their entry: the overlay cannot replace them
     for fn in program.functions:
         for insn in program.instructions(fn):
@@ -3058,7 +3064,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                     accepted = [n for n in accepted if n not in drop]
                     continue
             out("dread lift: the build failed: %s" % e)
-            return []
+            raise build.BuildFailed(str(e))
         foreign = foreign_calls(program, work, accepted, lifter)
         if foreign:                         # the C calls what the original does not: drop, build again
             for name, symbols in sorted(foreign.items()):
@@ -3392,6 +3398,9 @@ def main(argv=None):
             check(target, image, args.names or None)
         except NoLifter as e:
             print("dread lift: %s" % e, file=sys.stderr)
+            return 1
+        except build.BuildFailed:
+            print("dread lift --check: the build failed (above); the lifted table is as it was", file=sys.stderr)
             return 1
         gone = sorted(before - set(args.names)) if args.names else []
         if gone:            # (checking one function by name once emptied a target's table unnoticed)

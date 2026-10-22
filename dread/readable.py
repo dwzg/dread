@@ -406,7 +406,9 @@ def chooser(names, context=None):
 
 def check(target, image, names=None, out=print, jobs=None):
     """The acceptance loop for readable C (see the module's docstring); returns the accepted names.
-    names: functions of the lifted table to try (default: all of it)."""
+    names: functions of the lifted table to try (default: all of it). A build that dropping functions
+    cannot mend raises dread.build BuildFailed, the readable table as it was (dread readable --check
+    exits 1; until 2026-10-23 it exited 0 with the old table in place)."""
     from dread import build, lift, overlay, regflow, runner
     from dread.program import Program
     program = Program(target, image)
@@ -482,7 +484,7 @@ def check(target, image, names=None, out=print, jobs=None):
                     accepted = [n for n in accepted if n not in gone]
                     continue
             out("dread readable: the build failed: %s" % e)
-            return []
+            raise build.BuildFailed(str(e))
         foreign = lift.foreign_calls(program, work, accepted, lifter)
         if foreign:
             for name, symbols in sorted(foreign.items()):
@@ -584,7 +586,13 @@ def main(argv=None):
     if args.check:
         from dread.util.polite import polite
         polite()
-        check(target, image, args.names or None)
+        from dread import build
+        try:
+            check(target, image, args.names or None)
+        except build.BuildFailed:
+            print("dread readable --check: the build failed (above); the readable table is as it was",
+                  file=sys.stderr)
+            return 1
         return 0
     if args.figures:
         import json

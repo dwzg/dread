@@ -34,6 +34,14 @@ REQUIRED = ["-ffunction-sections", "-fno-common", "-fno-reorder-functions"]
 # functions into .text.unlikely or .text.hot), where the overlay does not find a function's section
 
 
+class BuildFailed(Exception):
+    """A build an acceptance loop cannot mend by dropping functions (dread lift --check, dread readable
+    --check: a source that does not compile, a header that is missing): the loop writes no table and
+    the command exits 1. Until 2026-10-23 the loops returned nothing accepted and the commands exited
+    0 with the old table in place, so a comparison of the tables before and after read "the same"
+    (a gate copy without a directory its sources include)."""
+
+
 def recon_dir(target, image):
     return os.path.join(target.build, "recon", image.name)
 
