@@ -86,7 +86,7 @@ from dread.cases import confine_args
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 33       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 34       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -140,7 +140,11 @@ VERSION = 33       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # that hangs in a callee, or fails behind the stub of a callee runs hung in, is tried
                   # once more, ending at that call (the sweep's did so for hangs); and a null stage
                   # gives each argument and learned pointer 0 once, from the first inputs, ending at
-                  # the callees runs hung in (NULL_BASES)
+                  # the callees runs hung in (NULL_BASES); 34: when the cases that survive drop_bad_ends
+                  # cover less than the search counted (a run that should have ended at a call and
+                  # spun on a register counted, and no other input was sought: a private firmware's
+                  # display code), the compare-guided stage runs once more from what they cover,
+                  # counting only runs whose case survives (repair_lost)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -167,6 +171,8 @@ BOUNDS = frozenset(range(17)) | {0xFF, 0x100, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF
 LONG_SECONDS = 120          # the last-resort search gives up after this long without one input that finished
 KEPT_MAX = 6
 HUNG_STUBS = 4              # callees at most that get stubbed because runs hung in them
+SURVIVE_CHECKS = 64         # runs the repair checks against drop_bad_ends at most (Generator.repair_lost)
+MAX_STOPS = 4               # calls a case ends at at most (the repair adds to those it has)
 DECIDER_STUBS = 2           # callees at most that get stubbed because a stalled search left code behind their call
 DECIDER_RUNS = 200          # inputs per such callee (the last stage)
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
@@ -1507,6 +1513,9 @@ class Generator:
                 if got - covered:
                     covered |= got
                     corpus.append(case)
+        if corpus and not self.late():
+            self.repair_lost(name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, extras, reach,
+                             edge, hung)
         if len(corpus) + len(extras) < 4:
             raise GenerationError("%s: only %d of %d generated inputs ran to the end (%d faulted); write cases"
                                   % (name, len(corpus) + len(extras), budget, faults))
@@ -1800,22 +1809,57 @@ class Generator:
         """The cases without those that should end at a call (stops, loop cases) and end otherwise
         (ends_badly: no common place to compare them). The search keeps them while it runs (one that
         spins in a wait it cannot leave is where the compare-guided stage finds the callee effect
-        that ends the wait), the result does not."""
-        out = []
-        for case in cases:
-            if case.get("stops") or (case.get("hang") and case.get("stub_calls")):
-                m = self.machine()
-                m.plan = []
-                m.spin_limit = SPIN_READS
-                self.apply(m, case)
-                try:
-                    m.call(entry, *case["args"], max_instructions=case.get("limit", 200_000))
-                except EmuError:
-                    continue
-                if self.ends_badly(m):
-                    continue
-            out.append(case)
-        return out
+        that ends the wait), the result does not (what only they reached: repair_lost)."""
+        return [case for case in cases if self.survives(entry, case)]
+
+    @staticmethod
+    def checked_at_end(case):
+        """Whether drop_bad_ends runs the case again: one that should end at a call."""
+        return bool(case.get("stops") or (case.get("hang") and case.get("stub_calls")))
+
+    def survives(self, entry, case):
+        """Whether drop_bad_ends keeps the case: its own run, under its own limit and the spin cut and
+        without the search's stall cut and lower limits, ends at its call or by a return."""
+        if not self.checked_at_end(case):
+            return True
+        m = self.machine()
+        m.plan = []
+        m.spin_limit = SPIN_READS
+        self.apply(m, case)
+        try:
+            m.call(entry, *case["args"], max_instructions=case.get("limit", 200_000))
+        except EmuError:
+            return False
+        return not self.ends_badly(m)
+
+    def repair_lost(self, name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, extras,
+                    reach, edge, hung):
+        """What only runs of cases that drop_bad_ends drops reached, sought once more. Such runs count
+        while the search runs: they move the compare-guided stage's frontier on (where a run waits on
+        memory, that stage finds the callee effect that ends the wait: gizmo-rv32cpp's main). But
+        when the cases that survive cover less than that, the code only the dropped ones reached was
+        left uncovered and no other input sought for it (a private firmware's: a call that draws on
+        the display behind a byte compared with 1; the one run the search kept should have ended at
+        a call deeper in and spun on a fill engine's register before it). Then covered becomes what
+        the surviving cases cover and the compare-guided stage runs once more, every case of the
+        corpus a source, counting only runs whose case survives; a run there that hangs in a callee is
+        tried again ending at that call too, also when its case ends at other calls already (the
+        display code's run should have ended at a glyph call and hung in a fill before it)."""
+        if not any(self.checked_at_end(c) for c in corpus):
+            return
+        good = set()
+        for case in corpus + extras:
+            if self.survives(entry, case):
+                good |= self.coverage(entry, words, case, case.get("limit", limit))
+        if covered <= good:
+            return
+        covered.clear()
+        covered |= good
+        for i, case in enumerate(corpus):
+            if i not in reach:
+                reach[i] = set(self.attempt(entry, words, case, case.get("limit", limit))[0])
+        self._solve(name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, reach, edge, hung,
+                    strict=True)
 
     def settle_hangs(self, entry, cases):
         """A case is a "hang" case by its own run, not by the case it was made from: one that returns
@@ -1839,8 +1883,9 @@ class Generator:
         return cases
 
     def _solve(self, name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, reach, edge,
-               hung=()):
-        """The compare-guided stage (see the module's docstring); adds to corpus and covered."""
+               hung=(), strict=False):
+        """The compare-guided stage (see the module's docstring); adds to corpus and covered. strict
+        (repair_lost): a run whose case drop_bad_ends would drop covers nothing, a source only."""
         image, lay = self.image, self.layout
         words_set = set(words)
         solver = random.Random("%s/%d/solve" % (seed_name(entry), SEED))
@@ -1899,6 +1944,8 @@ class Generator:
                 if stop_retry(case, m):
                     return attempt(case, watch, record, steps)
                 return chase(case, m, watch, record, steps)
+            if strict and self.ends_badly(m) and stop_retry(case, m):     # (a case that ends at a call
+                return attempt(case, watch, record, steps)               # comes back cut or spinning)
             known.learn(m.reads)
             m.covered = m.covered_insns(words)
             return m, seen
@@ -1911,18 +1958,18 @@ class Generator:
             stubbed goes on into the null pointer: FreeRTOS's vTaskSetTimeOutState had 44 such runs
             and xQueueReceive 19, every one dropped, and their configASSERT paths stayed unrun (since
             generator 32 learns such a pointer at once, the random stage gives it null too rarely)."""
-            if case.get("stops") or self.loop:
-                return False
-            inside = self.program.function_at(m.reg("pc") & ~1) if m.timed_out else None
+            if (case.get("stops") and not strict) or self.loop or len(case.get("stops", ())) >= MAX_STOPS:
+                return False                # (the repair adds a stop to those it has: repair_lost)
+            inside = self.program.function_at(m.reg("pc") & ~1) if m.timed_out or (strict and m.spinning) else None
             if inside is not None and inside.entry != entry:
                 stop = inside.entry
             else:
                 called = [int(x.group(1), 16) for x in (re.match(r"call 0x([0-9a-f]+)", c[0]) for c in m.calls
                                                         if c and isinstance(c[0], str)) if x]
                 stop = next((t for t in called if t in hung), None)
-            if stop is None:
+            if stop is None or stop in case.get("stops", ()):
                 return False
-            case.update({"hang": True, "limit": limit, "stops": [stop]})
+            case.update({"hang": True, "limit": limit, "stops": sorted(set(case.get("stops", ())) | {stop})})
             return True
 
         def chase(case, m, watch, record, steps):
@@ -1987,8 +2034,18 @@ class Generator:
                 case[slot[0]][slot[1]] = v & 0xFFFFFFFF
             return case
 
+        checks, sourced = [SURVIVE_CHECKS], set()
+
         def keep(m, case):
             known.learn(m.reads)
+            if strict and m.covered - covered and self.checked_at_end(case) and self.ends_badly(m):
+                checks[0] -= 1
+                if checks[0] < 0 or not self.survives(entry, case):
+                    if m.covered - covered - sourced:   # (a source for the attempts after, not a case)
+                        sourced.update(m.covered)
+                        corpus.append(case)
+                        reach[len(corpus) - 1] = set(m.covered)
+                    return False
             if m.covered - covered:
                 covered.update(m.covered)
                 corpus.append(case)

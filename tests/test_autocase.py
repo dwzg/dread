@@ -864,3 +864,63 @@ def test_a_case_that_touches_saved_registers_stands_for_nothing(tmp_path):
     assert g.firm_up(fn.entry, fn.insns, [smash, calm, earlier]) == []     # (a sturdy case runs the store)
     kept = g.carried(fn.entry, fn.insns, [smash, calm], [earlier])
     assert [c["args"] for c in kept] == [[0x20100000, 2, 7]] and kept[0]["carried"], kept
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_code_only_a_dropped_case_reached_is_sought_again(tmp_path, monkeypatch):
+    """A case that should end at a call (a callee runs hung in) and spins on a device register before
+    it (a fill engine's status) is dropped from the result (drop_bad_ends), but its run counted
+    while the search ran, and no other input was sought for what only it had reached: on a private
+    firmware a call that draws on the display stayed uncovered. The repair (repair_lost) seeks it
+    again from what the surviving cases cover. The test hands the repair that situation: the good
+    cases that reach draw's call taken out, such a spinning case put in, the call counted as covered."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import autocase, elfimport
+    (tmp_path / "t.c").write_text(NOIPA_DEF +
+                                  "volatile unsigned char state;\nvolatile int go;\n"
+                                  "#define FILL (*(volatile unsigned *)0x40000100u)\n"
+                                  "NOIPA void glyph(void) { while (!go) ; }\n"
+                                  "NOIPA void fill(void) { while (FILL != 0x5a5a1234u) ; }\n"
+                                  "NOIPA int draw(int n) { fill(); glyph(); return n + 1; }\n"
+                                  "int f(int x) { if (x == 7) glyph(); if (state == 0) return 1;\n"
+                                  "    if (state == 1) return draw(0xff); return 2; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "f", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    g = Generator(t, t.image())
+    p = g.program
+    fn, draw, glyph = p.by_name["f"], p.by_name["draw"], p.by_name["glyph"]
+    call = next(a for a in sorted(fn.insns) if p.arch.flow(p.insn(a))[0] in ("call", "jump")
+                and p.arch.flow(p.insn(a))[1] is not None and p.arch.flow(p.insn(a))[1] & ~1 == draw.entry)
+    state = next(s.value for s in __import__("dread.elf", fromlist=["Elf"]).Elf(elf).symbols if s.name == "state")
+    spinning = {"args": [1, 0, 0, 0], "mem": [[state, 1, 1], [0x40000100, 4, 0]], "returns": [], "calls": [],
+                "frame": 0, "hang": True, "limit": 200_000, "stops": [glyph.entry]}
+    assert not g.survives(fn.entry, spinning)               # (it spins in fill before it gets to glyph)
+    seen = {}
+    real = autocase.Generator.repair_lost
+
+    def handed(self, name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, extras, reach,
+               edge, hung):
+        for cases in (corpus, extras):
+            cases[:] = [c for c in cases if call not in self.coverage(entry, words, c, c.get("limit", limit))]
+        reach.clear()
+        corpus.append(dict(spinning))
+        covered.add(call)
+        seen["handed"] = True
+        return real(self, name, entry, words, end, calls, limit, rng, pool, known, covered, corpus, extras, reach,
+                    edge, hung)
+    monkeypatch.setattr(autocase.Generator, "repair_lost", handed)
+    cases = g.generate("f", fn.entry, fn.insns)
+    got, words = covered(g, "f", cases)
+    assert seen and call in got, sorted(hex(a) for a in words - got)

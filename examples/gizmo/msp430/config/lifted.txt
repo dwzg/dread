@@ -64,7 +64,7 @@ irq_entry  # accepted by the system run
 keys_read
 led_off
 led_on
-main  # accepted by the system run
+main
 memcmp
 memcpy
 memset

@@ -880,6 +880,24 @@ undone). Other decisions are taken by the recommended option and written down in
 
 ## Phase 4: cases, mutation, coverage (rest)
 
+- [x] **Code only a dropped case reached** (found 2026-10-22 on a private firmware, DREAD's real-life
+  test: its uncovered functions took a median 140 s to generate against 0.6 s for those accepted, 71 %
+  of them met callees stubbed for hanging). A case that should end at a call (stops, a loop case)
+  and ends otherwise (spinning on a register, at the limit) counts while the search runs, and must:
+  it moves the compare-guided stage's frontier (gizmo-rv32cpp's main: where a run waits on memory,
+  that stage finds the callee effect that ends the wait; not counting such runs lost four of its
+  instructions). But drop_bad_ends drops it from the result, and what only it had reached was left
+  uncovered: on the firmware a call that draws on the display, reached 65 times, its one kept run
+  meant to end at a glyph call and spinning in a fill before it. Generator 34: when the surviving
+  cases cover less than the search counted, the compare-guided stage runs once more from what they
+  cover, every case a source, counting only runs whose case survives, and a run there that comes
+  back cut or spinning in a callee is tried again ending at that call too (repair_lost). On 60 of the
+  firmware's 550 uncovered functions: 2 accepted, 5 more miss fewer instructions, none more (1,867
+  missed instructions -> 1,800); the gizmo builds lose nothing (msp430's main is accepted by loop
+  cases again instead of by the system run). The rest of the 550: other causes, not traced (a dead
+  branch the compiler kept, such as a negative test of a value loaded unsigned; code behind an RTOS
+  call that switches tasks and never comes back in the emulator).
+
 - [x] **The memory map in the cases' cache key** (found 2026-10-21): the key holds the image, its
   startup copies and dread.regflow's results, not the target's [memory]: a target whose memory
   changes keeps the cases made under the old map (they still run alike; the generator would find
