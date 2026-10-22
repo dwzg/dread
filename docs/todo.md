@@ -351,6 +351,36 @@ its sources.
   Next: subsystems as a step of their own (functions grouped by calls and addresses, a prefix
   proposed a group with its evidence: texts, devices) to catch a misread driver before its callers
   inherit it; the globals between the passes on the private firmware.
+  Runs of the cases (2026-10-22, `--behaviour`, dread.behaviour; docs/decisions.md): a question can
+  also show what the function did in up to three runs of its cases on the original image: the
+  arguments (a text one points to where the run reads it as text), the result, the functions it calls
+  itself with their arguments, texts and results, its own device accesses and writes, named as the
+  readable C names memory (*(r0 + 36) behind an input's pointer), the bytes it reads from an input's
+  buffer, how it ended and its loop's rounds; patterns that repeat are folded ((read io_40011004 = 1;
+  io_40011000 = x) (3 times), x = "hi!"). The cases are the lift check's cached ones whatever their key
+  (inputs only, run anew), the kept and the written ones; a function without any gets a search of 5 s,
+  kept in BUILD/behaviour. The runs shown differ: most coverage first, then new coverage or another
+  ending, other callees, other device registers or another kind of result; 1,500 characters at most
+  (mean 820). FreeRTOS GCC -Os made nameless: 358 of 366 functions with runs, 50-60 s on 8 workers
+  from the lift check's cases, 134 s from nothing. Measured with Haiku naming and Sonnet judging each
+  pass twice, as the mean verdict rank per function (same 2, close 1, different 0): two controls 0.908
+  and 0.891 (judged the same 25-27 %), three passes with the runs 0.970, 1.031, 0.981 (28-32 %, the
+  same words 51-60 against 36-38): +0.098 +- 0.028, all of it in the 132 functions whose runs showed an
+  assertion's source path (+0.276 +- 0.056; the others -0.002 +- 0.028). The notes cut a text after
+  48 characters, so a path ended in ".../FreeRTOS/S..." before its file name; the runs showed its
+  end. Notes that show a long text's first third and its end (dread.constants string_at, now the
+  default: "...FreeRTOS/Source/tasks.c") gave more without running anything: 1.071 and 1.063 (the same
+  34-36 %, half the words or more 32-33 % against 20-25 %), +0.165 +- 0.028. The runs on top of them:
+  1.045 and 1.038, -0.009 +- 0.020, for 37 % more input tokens (522,000 against 383,000 a pass, $0.14
+  against $0.12); newlib's functions and the demo's application lost a little, device registers and
+  read bytes gained a little, both within the noise. Two passes of one setup differ by up to 0.05
+  (-0.021, +0.004, -0.051): one pass against another cannot show less than that. `--versus NAMES_TSV` (with
+  --score and --judge) has the judge say, for each function two passes named otherwise, which name
+  comes closer, the two in an order the address decides: it prefers the second place (about 55 to
+  45), and two identical controls came out 151 to 117 (the notes with text ends against the old
+  control 171 to 99; the runs on top against the notes alone 118 to 130). So the runs stay an option.
+  Next: try them where the code says less, the private firmware's drivers and leaves that touch only
+  unnamed globals (its misses), against its notes with text ends.
 - [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
 

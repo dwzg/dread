@@ -371,3 +371,31 @@ def test_a_constant_is_shown_with_the_text_function_or_table_it_points_to():
     assert pointed_note(program, 0x1100) == '-> {"HELLO", draw, 0x5, 0x0, ...}'
     assert pointed_note(program, 0x1380) is None                        # (no text, no function)
     assert pointed_note(program, 0x1102) is None and pointed_note(program, 0x40) is None
+
+
+def test_a_long_text_shows_its_start_and_its_end():
+    """dread.constants string_at: a text longer than the limit shows its first third and its end (a
+    path's file name: an assertion's __FILE__ names the source file it is in); one without an end
+    within TEXT_SCAN characters shows its start."""
+    import struct
+    from dread import constants
+    base, data = 0x1000, bytearray(0x400)
+    path = b"/home/someone/work/rtos/FreeRTOS/Source/portable/MemMang/heap_4.c"
+    data[0x100:0x100 + len(path) + 1] = path + b"\0"
+    data[0x200:0x200 + constants.TEXT_SCAN] = b"x" * constants.TEXT_SCAN
+    data[0x380:0x386] = b"short\0"
+
+    class Image:
+        def in_image(self, a, n=1):
+            return base <= a and a + n <= base + len(data)
+
+        def read(self, a, n):
+            return bytes(data[a - base:a - base + n])
+
+        def word(self, a):
+            return struct.unpack_from("<I", data, a - base)[0]
+    program = Image()
+    assert constants.string_at(program, 0x1100) == path[:16].decode() + "..." + path[-32:].decode()
+    assert constants.string_at(program, 0x1200) == "x" * 48 + "..."
+    assert constants.string_at(program, 0x1380) == "short"
+    assert constants.pointed_note(program, 0x1100).endswith('MemMang/heap_4.c"')

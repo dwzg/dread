@@ -178,7 +178,9 @@ that the old entry holds a branch to `address`; the test runner enters such a fu
 Generated cases (cached in `BUILD/autocases/IMAGE/NAME.json` as `{"key", "seed", "cases"}`), the
 image's `kept_cases/NAME.json` (cases that once showed a difference; `--keep-failing` adds to it) and
 `extra_cases/NAME.json` (cases written to reach what the generator does not) share one format,
-`{"cases": [CASE, ...]}`, with these fields:
+`{"cases": [CASE, ...]}`, with these fields. So do the cases of the short search dread.behaviour
+makes for a function without any (`BUILD/behaviour/IMAGE/NAME.json`, `{"key", "cases", "seconds"}`:
+the seconds the search was allowed; only for showing what a function does, never for tests):
 
 | Field | Meaning |
 |---|---|
@@ -238,6 +240,19 @@ caller reads it only on a path that cannot happen, or only bits the next callee 
 Written beside the rebuilt image by a complete `dread test`: `function`, `cases`, `failed`, `missed`
 (the instructions of the original no case ran, as hex addresses separated by spaces; empty when
 the cases run all of it).
+
+### `BUILD/pilot/IMAGE/names.tsv`, `names-score.tsv`, `names-versus.tsv`
+
+Written by `dread pilot --task name`: one line per proposal, `address` (hex), `now` (the function's
+name when asked), `proposed`, `what` (the model's sentence), `provider`, `shown` (what the question
+showed: `readable`, `readable, unchecked` or `listing`, followed by `, behaviour` when it showed the
+function's runs (`--behaviour`) and `, refined` for a second pass's). A function asked again gets a
+new line; the last one counts. With `--score TRUTH`, `names-score.tsv`: `address`, `true`,
+`proposed`, `exact`, `same_words`, `overlap`, `same_prefix` (empty where a name has no prefix),
+`judged` (`same`, `close`, `different` with `--judge`, else empty). With `--versus OTHER` as well,
+`names-versus.tsv`: `address`, `true`, `proposed`, `other` (the other run's), `closer` (`mine`,
+`theirs`, `equal`, or empty without a verdict) for the functions the two runs named otherwise.
+Older names.tsv files have no `, behaviour` in `shown`; they read alike.
 
 ### `BUILD/lift-check/IMAGE/verdicts.tsv`
 

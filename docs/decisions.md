@@ -9,6 +9,32 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Function names: a long text's end in the notes; the runs of the cases an option (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Should a naming question (`dread pilot --task name`) show, beside the function's
+  code, what the function did when it ran: dread.behaviour's runs of its cases on the original
+  image (its calls with their arguments and results, its device accesses and writes, the bytes it
+  read, how it ended)? By default?
+- **Options, measured** on FreeRTOS GCC -Os with every function renamed FUN_address, Haiku 5.5
+  naming, Sonnet 5.5 judging each pass twice; the mean verdict rank per function (same 2, close 1,
+  different 0) over all passes and judgings of an option: (a) as before, 0.900 (two passes); (b) with
+  the runs, 0.994 (three passes, +0.098 +- 0.028); (c) the notes after constants show a long text's
+  first third and its end instead of its first 48 characters, 1.067 (two passes, +0.165 +- 0.028);
+  (d) (c) with the runs, 1.042 (two passes; -0.009 +- 0.020 against (c)). All of (b)'s gain was in
+  the functions whose runs showed an assertion's source path, whose file name the notes had cut off;
+  two passes of one setup differ by up to 0.05.
+- **Choice: (c) by default; the runs stay an option (`--behaviour`).** (c) gives more than (b) at
+  no cost; on top of it the runs add nothing measurable on this build, for 37 % more input tokens
+  ($0.14 against $0.12 a pass) and a minute of emulation (two more without cached cases).
+- **Undo.** The notes: dread.constants string_at back to a text's first 48 characters and "..."
+  (its start-and-end form and TEXT_SCAN out). The runs are shown only with `--behaviour`; making
+  them the default is name_functions' and Namer's behaviour argument.
+- **Status.** Done (docs/todo.md, Function names). Not measured where the code says less than
+  FreeRTOS's (drivers whose device registers have no names: the private firmware's misses); the
+  runs are to be tried there next.
+
 ## The frame that addresses handed out reach: one volatile object of a typedef'd structure (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

@@ -574,3 +574,67 @@ def test_the_globals_alone_and_the_name_questions_show_them(gizmo, monkeypatch, 
     assert asked[1].startswith(pilot.PROPOSED_FUNCTIONS) and "    show_settings: " in asked[1], asked
     assert "print_status" not in asked[1] and "refused g_20000034=show_settings" in out, out
     assert naming.load(image, "globals")["0x20000038 u32"]["name"] == "mode"
+
+
+def test_a_naming_run_with_behaviour_shows_the_runs_with_the_proposals_so_far(gizmo):
+    """--behaviour: uart_puts's question shows what it did with a written input ("hi!"): uart_putc
+    called once for each character, by the name proposed for uart_putc; names.tsv says the questions
+    showed runs."""
+    target, image, program, flow = gizmo
+    uart = target.models["uart"]
+    buf = target.memory.scratch_base + 0x1000
+    os.makedirs(image.extra_cases, exist_ok=True)
+    with open(os.path.join(image.extra_cases, "uart_puts.json"), "w") as f:
+        json.dump({"cases": [{"args": [buf, 0, 0, 0], "mem": [[buf, 4, int.from_bytes(b"hi!\0", "little")],
+                                                               [uart["base"] + uart["status"], 4, uart["tx_ready"]]]}]}, f)
+    cache = os.path.join(target.build, "autocases", image.name, "uart_puts.json")
+    if os.path.exists(cache):
+        os.remove(cache)
+    seen = []
+
+    def answer(messages):
+        question = messages[0]["content"]
+        name = re.search(r"The function (\w+)", question).group(1)
+        seen.append((name, question))
+        return {"uart_putc": "name: serial_write_char\nwhat: sends one character",
+                "uart_puts": "name: serial_write_text\nwhat: sends a text"}[name]
+    lines = []
+    made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(answer),
+                                          ["uart_puts", "uart_putc"], flow, jobs=1, out=lines.append, behaviour=True)
+    assert (made, asked) == (2, 2) and [n for n, _ in seen] == ["uart_putc", "uart_puts"]
+    question = seen[1][1]
+    assert 'uart_puts(r0=0x%x "hi!") returned' % buf in question
+    assert 'serial_write_char(x) (3 times), x = "hi!"' in question and "uart_putc" not in question
+    rows = [r.split("\t") for r in open(pilot.names_path(target, image)).read().splitlines()[1:]]
+    assert len(rows) == 2 and all(r[5].endswith(pilot.BEHAVIOUR) for r in rows)
+    assert any("runs of their cases for 2 of 2 functions" in line for line in lines)
+
+
+def test_two_runs_compared_function_by_function(gizmo, tmp_path):
+    """--versus: the functions two runs named otherwise go to the judge side by side, in an order the
+    address decides (a judge's liking for a place cancels out); its words come back as this run's,
+    the other's or equal."""
+    target, image, program, flow = gizmo
+    mine = {"gpio_set": "gpio_write", "led_on": "led_enable", "delay": "busy_wait"}
+    theirs = {"gpio_set": "pin_thing", "led_on": "led_on_now", "delay": "busy_wait"}
+    for name, proposed in mine.items():
+        pilot.keep_proposal(target, image, program.by_name[name], proposed, "does it", llm.Scripted([]), "readable")
+    other = tmp_path / "names.tsv"
+    other.write_text("address\tnow\tproposed\twhat\tprovider\tshown\n" + "".join(
+        "0x%x\t%s\t%s\tdoes it\tscripted\treadable\n" % (program.by_name[n].entry, n, p) for n, p in theirs.items()))
+    gpio, led = program.by_name["gpio_set"].entry, program.by_name["led_on"].entry
+    first, second = sorted([gpio, led])
+    # the judge says A for the first line, B for the second: A is the first proposal shown
+    judge = llm.Scripted(['```json\n{"1": "close", "2": "different", "3": "same"}\n```',
+                          '```json\n{"1": "A", "2": "B"}\n```'])
+    lines = []
+    truth = os.path.join(os.path.dirname(target.root), "m3", "original", "gizmo.elf")
+    totals = pilot.score_names(target, image, truth, out=lines.append, judge=judge, versus=str(other))
+    shown = judge.asked[1][1][0]["content"].splitlines()
+    assert len(shown) == 2 and "busy_wait" not in "".join(shown)
+    expect = {first: "theirs" if pilot.swapped(first) else "mine", second: "mine" if pilot.swapped(second) else "theirs"}
+    assert totals["versus"] == 2 and totals["versus_mine"] == list(expect.values()).count("mine")
+    rows = [r.split("\t") for r in open(os.path.join(target.build, "pilot", image.name,
+                                                      "names-versus.tsv")).read().splitlines()[1:]]
+    assert {int(r[0], 16): r[4] for r in rows} == expect
+    assert "named otherwise" in lines[-1]

@@ -174,23 +174,39 @@ def _run(program, first, address, names):
     return {r: a[r] for r in names if a[r] == b[r]}
 
 
+TEXT_SCAN = 256         # characters string_at looks at for a text's end
+
+
 def string_at(program, address, limit=48):
-    """The printable NUL-terminated text at an address in the image, or None."""
+    """The printable NUL-terminated text at an address in the image, or None. A text longer than
+    limit shows its first third and its end ("/home/user/sr...rtos/Source/tasks.c"): a path has its
+    file name at the end (an assertion's __FILE__ names the source file); one without an end within
+    TEXT_SCAN characters shows its start."""
     if not program.in_image(address):
         return None
     out = bytearray()
     a = address
-    while program.in_image(a) and len(out) < limit:
+    while program.in_image(a) and len(out) < TEXT_SCAN:
         b = program.read(a, 1)[0]
         if b == 0:
             break
         if not (0x20 <= b < 0x7F or b in (9, 10, 13)):
+            if len(out) >= limit:           # (a long run of text ends in other bytes: its start)
+                break
             return None
         out.append(b)
         a += 1
     if len(out) < 2:
         return None
-    return out.decode("ascii").encode("unicode_escape").decode("ascii") + ("..." if len(out) >= limit else "")
+
+    def esc(part):
+        return bytes(part).decode("ascii").encode("unicode_escape").decode("ascii")
+    if len(out) <= limit:
+        return esc(out)
+    if not program.in_image(a) or len(out) >= TEXT_SCAN or program.read(a, 1)[0] != 0:
+        return esc(out[:limit]) + "..."
+    head = limit // 3
+    return esc(out[:head]) + "..." + esc(out[len(out) - (limit - head):])
 
 
 POINTED_WORDS = 4       # words of a table a constant points to that pointed_note shows at most

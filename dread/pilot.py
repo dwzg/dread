@@ -35,9 +35,12 @@ check a name, so none is applied. Its questions show a function's readable C (dr
 constants that point to text followed by the text) or, where no C can be made, its listing; they go
 callees first, --jobs at a time, each showing the proposals made so far for the functions it calls
 and its callers; a run started again goes on where the last one stopped. --score TRUTH compares the
-proposals with true names (an ELF's symbols, or the functions table of a copy that has them).
---refine asks again, callers first, for every function with a proposal: its question shows its
-callers' names and its first one.
+proposals with true names (an ELF's symbols, or the functions table of a copy that has them), --judge
+PROVIDER adds a model's verdict per pair, and --versus NAMES_TSV the judge's choice, for each
+function another run named otherwise, of the name closer to the true one. --refine asks again,
+callers first, for every function with a proposal: its question shows its callers' names and its
+first one. --behaviour shows in each question what the function did in runs of its cases
+(dread.behaviour: its calls, device accesses, writes and results on a few generated inputs).
 
 --task readable names the variables of the readable table's functions (dread readable), after what
 they share with the rest of the image: the globals they use, then the structures their variables
@@ -57,7 +60,8 @@ stated, while Haiku 5.5 answered the same question.
 
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
                 [--no-mutate] [--no-integration] [--dry-run] [--task write|input|name|readable|globals]
-                [--jobs N] [--score TRUTH] [NAME...]
+                [--jobs N] [--refine] [--behaviour] [--score TRUTH [--judge PROVIDER] [--versus NAMES_TSV]]
+                [NAME...]
 """
 import argparse
 import contextlib
@@ -1111,9 +1115,10 @@ IDENT_WORD = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 
 class Namer:
     """What the questions for function names need, made once for a run: the readable C's context and
-    lifter, the image's readable table, the callers of every function."""
+    lifter, the image's readable table, the callers of every function; with behaviour, what each
+    function did in runs of its cases (dread.behaviour)."""
 
-    def __init__(self, target, image, program, flow=None):
+    def __init__(self, target, image, program, flow=None, behaviour=False):
         from dread import build, flat, lift, readable
         self.target, self.image, self.program, self.flow = target, image, program, flow
         self.context = readable.Context(target, image, program, flow)
@@ -1121,13 +1126,32 @@ class Namer:
         self.readable = set(build.read_names(image.table("readable")))
         self.callers = flat.callers_of(program)
         self.views, self.prepared = {}, set()
+        self.behaviour, self.runs, self._generator = behaviour, {}, None
 
     def prepare(self, names):
-        """Make the readable C of names in a pool of workers (dread.readable views), before any thread
-        asks: questions then only put names in."""
+        """Make the readable C of names in a pool of workers (dread.readable views), and with behaviour
+        their runs (dread.behaviour sections), before any thread asks: questions then only put names
+        in."""
         from dread import readable
         self.views.update(readable.views(self.program, self.context, self.lifter, list(names)))
+        if self.behaviour:
+            from dread import behaviour
+            self.runs.update(behaviour.sections(self.target, self.image, self.program, self.flow, list(names),
+                                                called=set(self.callers)))
         self.prepared |= set(names)
+
+    def runs_of(self, fn):
+        """The behaviour section of a function (dread.behaviour), or None: without behaviour, or
+        without a case that runs."""
+        if not self.behaviour:
+            return None
+        if fn.name in self.prepared:
+            return self.runs.get(fn.name)
+        from dread import autocase, behaviour, naming
+        if self._generator is None:
+            self._generator = autocase.Generator(self.target, self.image, program=self.program)
+        return behaviour.section(self._generator, fn, self.flow, naming.load(self.image, "globals"),
+                                 has_callers=fn.name in self.callers)
 
     def code(self, fn):
         """(text, form) of a function's code for a question: its readable C ("readable" when the
@@ -1149,7 +1173,8 @@ class Namer:
         """(text, form) of the question for a function's name: its code (code()) with each constant
         followed by what it points to (dread.constants pointed_note: text, a function, a table of
         texts and functions), other functions by their names in shown_as ({name: name shown}: the
-        run's proposals) where it has one, and its callers."""
+        run's proposals) where it has one, and its callers; with behaviour, what it did in runs of its
+        cases (runs_of), the form then ending in BEHAVIOUR."""
         from dread.constants import pointed_note
         program = self.program
         text, form = self.code(fn)
@@ -1158,9 +1183,14 @@ class Namer:
                 s = pointed_note(program, int(m.group(1), 16))
                 return m.group(0) + (" /* %s */" % s.replace("*/", "* /") if s else "")
             text = HEX.sub(note, text)
-        if shown_as:
-            text = IDENT_WORD.sub(lambda m: shown_as.get(m.group(0), m.group(0)) if m.group(0) != fn.name
+        runs = self.runs_of(fn)
+
+        def named(text):
+            if not shown_as:
+                return text
+            return IDENT_WORD.sub(lambda m: shown_as.get(m.group(0), m.group(0)) if m.group(0) != fn.name
                                   else m.group(0), text)
+        text = named(text)
         if len(text) > NAME_CHARS:
             text = text[:NAME_CHARS] + "\n... (cut: %d more characters)" % (len(text) - NAME_CHARS)
         if form == "listing":
@@ -1175,6 +1205,9 @@ class Namer:
             if callers:
                 more = " and %d more" % (len(callers) - 12) if len(callers) > 12 else ""
                 user += "\n\nIt is called by: %s%s." % (", ".join(callers[:12]), more)
+        if runs:
+            user += "\n\n" + named(runs)
+            form += BEHAVIOUR
         return user, form
 
 
@@ -1231,11 +1264,12 @@ def names_path(target, image):
     return os.path.join(target.build, "pilot", image.name, "names.tsv")
 
 
-def read_proposals(target, image, refined=None):
-    """{address: (proposed, what)} of the image's names.tsv, the last proposal of each address;
-    refined, a set: gets the addresses whose last proposal came from a second pass (--refine)."""
+def read_proposals(target, image, refined=None, path=None):
+    """{address: (proposed, what)} of the image's names.tsv (or of the names.tsv at path: another
+    run's), the last proposal of each address; refined, a set: gets the addresses whose last proposal
+    came from a second pass (--refine)."""
     out = {}
-    path = names_path(target, image)
+    path = path or names_path(target, image)
     if os.path.exists(path):
         for line in open(path).read().splitlines()[1:]:
             parts = line.split("\t")
@@ -1254,6 +1288,7 @@ def read_proposals(target, image, refined=None):
 
 
 REFINED = ", refined"       # names.tsv's shown column of a second pass's proposal
+BEHAVIOUR = ", behaviour"   # ... and of a question that showed the function's runs (--behaviour)
 REFINE_NOTE = ("A first reading of this function's code alone, before its callers had names, named it "
                "{name}: {what} Its callers have names now. Keep that name if they confirm it, or give a better one.")
 
@@ -1272,11 +1307,12 @@ def keep_proposal(target, image, fn, proposed, what, provider, form):
 
 
 def propose_name(target, image, program, provider, name, flow=None, out=print, namer=None, shown_as=None,
-                 tries=2):
+                 tries=2, behaviour=False):
     """Ask for one function's name and a sentence; a proposal goes to BUILD/pilot/IMAGE/names.tsv,
     never into the tables (no tool can check a name), the conversation to
-    BUILD/pilot/IMAGE/names/NAME.md. Returns (name, what) or None."""
-    namer = namer or Namer(target, image, program, flow)
+    BUILD/pilot/IMAGE/names/NAME.md. Returns (name, what) or None. behaviour: the question shows
+    what the function did in runs of its cases (Namer)."""
+    namer = namer or Namer(target, image, program, flow, behaviour)
     fn = program.by_name[name]
     user, form = namer.question(fn, shown_as)
     proposed, what, log, why = ask_name(provider, program, name, user, tries)
@@ -1355,7 +1391,7 @@ def callees_first(program, names):
 
 
 def name_functions(target, image, program, make_provider, names, flow=None, jobs=4, tries=2, out=print,
-                   refine=False):
+                   refine=False, behaviour=False):
     """Proposals for the functions of names, callees first: a function is asked as soon as every
     function it calls among names has its answer (call_components; functions that call each other in
     a circle together), jobs questions at a time with a provider each (make_provider() makes one), each
@@ -1366,10 +1402,13 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
 
     refine: a second pass, callers first: every function with a first proposal is asked again once
     its callers have their second answers, its question showing its callers' names and its first name
-    (REFINE_NOTE); its answer is kept marked REFINED, and a run started again skips what is refined."""
+    (REFINE_NOTE); its answer is kept marked REFINED, and a run started again skips what is refined.
+
+    behaviour: each question also shows what the function did in runs of its cases (dread.behaviour,
+    made for all of them before the first question)."""
     import concurrent.futures
     import threading
-    namer = Namer(target, image, program, flow)
+    namer = Namer(target, image, program, flow, behaviour)
     refined = set()
     known = read_proposals(target, image, refined)
     shown_as = {program.by_entry[a].name: p for a, (p, _) in known.items() if a in program.by_entry}
@@ -1377,7 +1416,12 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
     def wanted(name):
         entry = program.by_name[name].entry
         return entry in known and entry not in refined if refine else entry not in known
-    namer.prepare([n for n in names if wanted(n)])      # (before any thread)
+    todo = [n for n in names if wanted(n)]
+    started = time.time()
+    namer.prepare(todo)                     # (before any thread)
+    if behaviour and todo:
+        out("dread pilot: runs of their cases for %d of %d functions (dread.behaviour, %.0f s)" % (
+            len([n for n in todo if namer.runs.get(n)]), len(todo), time.time() - started))
     comp, comps, callees = call_components(program, list(names))
     callers = [[] for _ in comps]
     for c, cs in enumerate(callees):
@@ -1514,13 +1558,71 @@ def judge_names(provider, pairs, batch=50, out=print):
     return out_map
 
 
-def score_names(target, image, truth_path, out=print, judge=None):
+PAIR_SYSTEM = """You compare proposed names of functions of a program with the names people gave them,
+who read the code knowing the whole program. Each numbered line holds the people's name, then two
+proposals, A and B. Say which proposal comes closer to what the people's name says: "A", "B", or
+"equal" (both as close, or both as far). Answer with one ```json block that maps every line's number
+to its word:
+
+```json
+{"1": "A", "2": "equal", "3": "B"}
+```"""
+PAIR_WORDS = ("A", "B", "equal")
+
+
+def swapped(address):
+    """Whether a pair is shown the other way round (B first): half of them, by a digest of the
+    address, so that a judge's preference for a place cancels out and the same pairs are shown alike
+    each time."""
+    import hashlib
+    return hashlib.sha1(b"%x" % address).digest()[0] & 1 == 1
+
+
+def judge_pairs(provider, items, batch=40, out=print):
+    """{key: "mine", "theirs" or "equal"} of items ([(key, true name, mine, theirs)]) as a provider
+    judges which proposal comes closer to the true name, batch lines a question, the two proposals
+    in an order swapped() decides by the key (an address); an item without a usable verdict is left
+    out."""
+    import json
+    verdicts = {}
+    for start in range(0, len(items), batch):
+        part = items[start:start + batch]
+        lines = []
+        for k, (key, t, mine, theirs) in enumerate(part):
+            a, b = (theirs, mine) if swapped(key) else (mine, theirs)
+            lines.append("%d. %s | A: %s | B: %s" % (k + 1, t, a, b))
+        try:
+            answer = provider.ask(PAIR_SYSTEM, [{"role": "user", "content": "\n".join(lines)}])
+        except Exception as e:
+            out("dread pilot --versus: no verdicts for pairs %d-%d: %s" % (start + 1, start + len(part), e))
+            continue
+        m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
+        try:
+            data = json.loads(m.group(1)) if m else {}
+        except ValueError:
+            data = {}
+        for k, (key, _, _, _) in enumerate(part):
+            v = str(data.get(str(k + 1), "")).strip() if isinstance(data, dict) else ""
+            v = {"a": "A", "b": "B", "equal": "equal"}.get(v.lower())
+            if v is None:
+                continue
+            if v == "equal":
+                verdicts[key] = "equal"
+            else:
+                verdicts[key] = "mine" if (v == "A") != swapped(key) else "theirs"
+    return verdicts
+
+
+def score_names(target, image, truth_path, out=print, judge=None, versus=None):
     """The image's proposals (names.tsv) against true names (dread.naming.function_truth): prints a
     line a function into BUILD/pilot/IMAGE/names-score.tsv and the totals; judge, a provider: its
-    verdicts as well (judge_names)."""
+    verdicts as well (judge_names). versus, the names.tsv of another run on the same image (another
+    prompt, another model): with judge, each function the two runs named differently is judged once
+    more, the two proposals side by side (judge_pairs), into BUILD/pilot/IMAGE/names-versus.tsv."""
     from dread import naming
     proposals = {a: p for a, (p, _) in read_proposals(target, image).items()}
-    rows, t = naming.score_functions(proposals, naming.function_truth(truth_path))
+    truth = naming.function_truth(truth_path)
+    rows, t = naming.score_functions(proposals, truth)
     verdicts = judge_names(judge, [(r["address"], r["true"], r["proposed"]) for r in rows], out=out) \
         if judge is not None and rows else {}
     path = os.path.join(target.build, "pilot", image.name, "names-score.tsv")
@@ -1549,6 +1651,22 @@ def score_names(target, image, truth_path, out=print, judge=None):
         out("dread pilot --score: judged by %s, %d of %d: the same %s, close %s, different %s" % (
             judge.label(), t["judged"], n, pc("judged_same", t["judged"]), pc("judged_close", t["judged"]),
             pc("judged_different", t["judged"])))
+    if versus is not None and judge is not None:
+        theirs = {a: p for a, (p, _) in read_proposals(target, image, path=versus).items()}
+        items = [(a, truth[a], proposals[a], theirs[a]) for a in sorted(set(proposals) & set(theirs) & set(truth))
+                 if proposals[a].lower() != theirs[a].lower()]
+        verdicts = judge_pairs(judge, items, out=out)
+        path = os.path.join(target.build, "pilot", image.name, "names-versus.tsv")
+        with open(path, "w") as f:
+            f.write("address\ttrue\tproposed\tother\tcloser\n")
+            for a, true_name, mine, other in items:
+                f.write("0x%x\t%s\t%s\t%s\t%s\n" % (a, true_name, mine, other, verdicts.get(a, "")))
+        for v in ("mine", "theirs", "equal"):
+            t["versus_" + v] = sum(1 for x in verdicts.values() if x == v)
+        t["versus"] = len(items)
+        out("dread pilot --score --versus: %d functions named otherwise in %s; judged by %s: this run's closer "
+            "%d, the other's %d, equal %d (%s)" % (len(items), versus, judge.label(), t["versus_mine"],
+                                                   t["versus_theirs"], t["versus_equal"], path))
     return t
 
 
@@ -1590,8 +1708,14 @@ def main(argv=None):
                              "or a functions table of a copy that has them) and ask nothing")
     parser.add_argument("--refine", action="store_true",
                         help="--task name: a second pass, callers first, over the functions with a proposal")
+    parser.add_argument("--behaviour", action="store_true",
+                        help="--task name: each question also shows what the function did in runs of its cases "
+                             "(dread.behaviour: cached cases, or a short search for a function without)")
     parser.add_argument("--judge", metavar="PROVIDER",
                         help="with --score: a provider also judges each pair the same, close or different")
+    parser.add_argument("--versus", metavar="NAMES_TSV",
+                        help="with --score and --judge: the names.tsv of another run on this image; the judge "
+                             "also says, for each function the two named otherwise, which comes closer")
     parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals"), default="write",
                         help="write C (default), find inputs for unrun instructions, propose names, name the "
                              "variables of readable C (dread readable), or name only what the functions share: "
@@ -1619,7 +1743,7 @@ def main(argv=None):
             except llm.ProviderError as e:
                 print("dread pilot: %s" % e, file=sys.stderr)
                 return 1
-        return 0 if score_names(target, image, args.score, judge=judge)["functions"] else 1
+        return 0 if score_names(target, image, args.score, judge=judge, versus=args.versus)["functions"] else 1
     if args.task != "write":
         provider = None
         if not args.dry_run:                # (a dry run asks nothing, so it needs no provider)
@@ -1687,7 +1811,8 @@ def main(argv=None):
                                                    if args.refine else "proposed"))
                 return 0
             made, asked, spent = name_functions(target, image, program, lambda: llm.load(args.provider), names,
-                                                flow, jobs=args.jobs, tries=min(args.tries, 3), refine=args.refine)
+                                                flow, jobs=args.jobs, tries=min(args.tries, 3), refine=args.refine,
+                                                behaviour=args.behaviour)
             cost = " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""
             print("dread pilot --task name: %d of %d asked functions got a proposal (%s); %d answers, %d tokens "
                   "in, %d out%s" % (made, asked, names_path(target, image), spent["answers"], spent["input"],
