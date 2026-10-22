@@ -135,11 +135,14 @@ def _split(e):
 def materialized(program, fn):
     """The addresses a function's machine code makes as compilers make addresses (the arch layer's
     literal and pc_address): the words of its literal pools, addresses computed from the pc (adr,
-    auipc or lui with addi), the fixed addresses it loads from. Immediates are not among them: a
-    count, an offset or a mask is made so, and in an image that starts at 0 it would point into it
-    (MSP430's #address is missed so)."""
+    auipc or lui with addi), the fixed addresses it loads from, and the constants pairs of
+    instructions make whole (the arch layer's wide_constants, where it has one: ARM's movw with
+    movt, clang's way of making an address). Immediates are not among them: a count, an offset or a
+    mask is made so, and in an image that starts at 0 it would point into it (MSP430's #address is
+    missed so)."""
     arch, out = program.arch, set()
-    for insn in program.instructions(fn):
+    insns = list(program.instructions(fn))
+    for insn in insns:
         if insn is None:
             continue
         isa = program.isa_at(insn.address)
@@ -151,6 +154,9 @@ def materialized(program, fn):
         at = arch.pc_address(insn, isa)
         if at is not None:
             out.add(at)
+    wide = getattr(arch, "wide_constants", None)
+    if wide is not None:
+        out.update(wide(insns))
     return out
 
 
@@ -357,7 +363,7 @@ def references(program, fn, text, why=None, context=None, made=None):
     return {"from": source, "why": why, "digest": digest, "refs": rows}
 
 
-FACTS_VERSION = 1       # what references() makes of the same C: bump when that changes
+FACTS_VERSION = 2       # what references() makes of the same C: bump when that changes (2: movw + movt)
 PIPELINE = ("dread.relations", "dread.readable", "dread.tidy", "dread.structure", "dread.cparse", "dread.cexpr",
             "dread.cflow", "dread.naming")     # the code that makes and reads readable C: in the key
 

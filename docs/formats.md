@@ -254,7 +254,7 @@ the header line (readers go by it):
 | `address`, `now` | the function's entry and its name in the image (`FUN_...`) |
 | `proposed`, `what` | the proposed name and the model's sentence about the function |
 | `provider` | who answered (`haiku (claude-haiku-5-5)`) |
-| `shown` | the form of the code the question showed: `readable`, `readable, unchecked`, `listing`; behind it `, behaviour` when the question showed the function's runs (`--behaviour`) and `, refined` for a `--refine` answer (readers look for the marks among the comma-separated parts) |
+| `shown` | the form of the code the question showed: `readable`, `readable, unchecked`, `listing`; behind it `, behaviour` when the question showed the function's runs (`--behaviour`), `, subsystem` when it showed its group's name and prefix (`--subsystems`, since 2026-10-22) and `, refined` for a `--refine` answer (readers look for the marks among the comma-separated parts) |
 | `confidence` | `--samples K`: the agreement of the vote (answers alike to the kept name, `dread.naming.similarity` 0.5 or more, over K: `0.60`); empty for a single question |
 | `samples` | `--samples K`: the K answers in the order asked, `-` for a question without one |
 | `pass` | the pass that made it: 1 the first (callees first); 2, 3 ... `--passes` (callers first on even passes); 2 for `--refine` |
@@ -277,6 +277,32 @@ judge gave no two verdicts). Before it, on 2026-10-22, `--versus OTHER` wrote `n
 `address`, `true`, `proposed`, `other`, `closer` (`mine`, `theirs`, `equal`), each pair judged in one
 order, chosen by the address; replaced by `--against`, nothing reads it.
 
+### `BUILD/pilot/IMAGE/groups.tsv`, `subsystems.tsv`, `names-subsystems.tsv`
+
+Written by `dread pilot --task subsystems` and by `--task name --subsystems` (since 2026-10-22): the
+groups `dread groups` finds from the code (dread/groups.py: no names used) and the names a model
+proposed for them.
+
+`groups.tsv` is the grouping the names were asked for, rewritten whole each time: `address`, `now`
+(the function's entry and name), `group` (its group's number in this grouping: groups are numbered
+by their first function's address), `members` (a digest of the group's functions' entries, the
+group's key).
+
+`subsystems.tsv` gets a line per group named, appended (the last line of a `members` key counts; a
+group with a line is not asked again: remove the file to ask anew): `group` and `first` (its number
+and its first function's address when asked), `functions` (how many), `members` (the key), `name`,
+`prefix` (snake_case, ending in `_`), `what` (the model's sentence), `provider`, `confidence` and
+`samples` (`--samples K`: the agreement of the vote over the prefixes, and the K prefixes in the
+order asked, `-` for a question without an answer; empty for a single question), `question` (a digest
+of the question's text). A group of a later grouping with other functions has another key: its old
+line stays and is not used.
+
+`dread pilot --score TRUTH` writes `names-subsystems.tsv` beside them when the image has both:
+`group`, `functions`, `name`, `prefix`, `file` (the source file most of its functions come from, by
+the truth's debug information; empty without), `from_file` (how many come from it), `proposals` (its
+functions with a proposal), `use_prefix` (how many of those begin with its prefix), `judged` (with
+`--judge`: whether the name and prefix name that file's part, `same`, `close`, `different`).
+
 ### `BUILD/lift-check/IMAGE/verdicts.tsv`
 
 Written by `dread lift --check`: one line per function it looked at, `function`, `verdict`
@@ -298,8 +324,10 @@ readable_types plan is made for) or null, "refs": [[address, type or null, index
 (indexed true, at the sum of the constants), with its access type and whether it reads or writes,
 or an address the code only names (type null, neither read nor written). The key is a digest of
 what the facts are made from: the function's lifted C (or why there is none), regflow's cache key,
-the code that makes and reads readable C, the memory map. A file whose key differs is made again;
-none is edited by hand, and a renamed function's old file is left (its key no longer matches).
+the code that makes and reads readable C, the memory map, and a version of what references() makes
+of them (2 since 2026-10-22: ARM's movw and movt make an address together, so clang's texts and
+callbacks are found). A file whose key differs is made again; none is edited by hand, and a renamed
+function's old file is left (its key no longer matches). `dread groups` reads them too.
 
 ## The relations graph (`dread relations --json`, `dread gui`'s `/api/graph`)
 

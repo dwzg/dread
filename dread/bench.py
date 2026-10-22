@@ -46,6 +46,8 @@ it measures what DREAD makes of the image, running its tools as they are run on 
 - whatcc: dread whatcc, which toolchain's libraries the image links by the bytes of their functions,
   against the toolchain that built it (its image, or the host's), and how many of the names it gives
   as certain are the functions' own;
+- groups: dread groups, the functions grouped by their code alone, against the source file of each
+  in the build's debug information: the adjusted Rand index, purity and completeness;
 - the seconds each step took.
 
 A build keeps a digest of what in the recipe made it (build.json, made_from): measuring a build
@@ -96,7 +98,7 @@ compiler gives (cc --version), which the report shows: a compiler's version deci
     dread bench toolchain NAME... [--rebuild] [--prune]
     dread bench fetch RECIPE
     dread bench build RECIPE [BUILD...]
-    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,readable,noreturn,callconv,whatcc]
+    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,readable,noreturn,callconv,whatcc,groups]
     dread bench report RECIPE
     dread bench all RECIPE [BUILD...] [--steps ...]
 """
@@ -110,7 +112,7 @@ import subprocess
 import sys
 import time
 
-STEPS = ("asm", "ghidra", "lift", "record", "readable", "noreturn", "callconv", "whatcc")
+STEPS = ("asm", "ghidra", "lift", "record", "readable", "noreturn", "callconv", "whatcc", "groups")
 RECORDABLE = ("UNCOVERED", "[case generation]")     # refusals that recorded inputs may lift
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -547,6 +549,8 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
                                  "seconds": round(seconds, 1)}
         else:
             metrics["whatcc"] = {"ran": False, "seconds": round(seconds, 1)}
+    if "groups" in steps:
+        metrics["groups"] = groups_step(target, image, program, where)
     if "lift" in steps and earlier is not None and "accepted" in metrics.get("lift", {}):
         now = set(metrics["lift"]["accepted"])
         metrics["lift"]["against_last"] = {"gained": sorted(now - set(earlier)), "lost": sorted(set(earlier) - now)}
@@ -562,6 +566,19 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
         out("%s: against the last measurement, gained %s; lost %s" % (
             name, ", ".join(against["gained"]) or "none", ", ".join(against["lost"]) or "none"))
     return metrics
+
+
+def groups_step(target, image, program, where):
+    """dread groups on the build, scored against the source files of its ELF's debug information
+    (dread.groups score_groups); {"ran": False, "why"} when it fails."""
+    from dread import groups
+    started = time.time()
+    try:
+        found = groups.find(target, image, program)
+        totals, _ = groups.score_groups(program, found, os.path.join(where, "firmware.elf"))
+    except Exception as e:                  # (a build whose analyses fail: said, not fatal to the rest)
+        return {"ran": False, "why": str(e), "seconds": round(time.time() - started, 1)}
+    return dict(totals, ran=True, seconds=round(time.time() - started, 1))
 
 
 def verdicts_of(target, image):
@@ -1129,6 +1146,18 @@ def report(recipe, bench=None, out=print):
             " | ".join(str(counts.get(c, 0)) for c in CATEGORIES), sum(refused.values()),
             "%d x %s" % (top[1], top[0][len("refused: "):]) if top else "-"))
     lines += readable_report(rows)
+    if any(m.get("groups", {}).get("ran") for m in rows):
+        lines += ["", "## Groups by code against the source files (dread groups)", "",
+                  "The functions grouped by their code alone (shared memory, texts and devices, addresses taken, "
+                  "neighbours in memory), against the source file of each in the build's debug information.", "",
+                  "| build | functions with a file | files | groups | adjusted Rand index | purity | completeness | "
+                  "seconds |", "|---|---|---|---|---|---|---|---|"]
+        for m in rows:
+            g = m.get("groups", {})
+            if g.get("ran"):
+                lines.append("| %s | %d | %d | %d | %.3f | %.3f | %.3f | %.0f |" % (
+                    m["build"], g["functions"], g["files"], g["groups"], g["ari"], g["purity"], g["completeness"],
+                    g["seconds"]))
     if any(m.get("whatcc", {}).get("ran") for m in rows):
         lines += ["", "## Library functions by their bytes (dread whatcc)", "",
                   "| build | built with | best (ties) | right | functions matched | named as certain | "

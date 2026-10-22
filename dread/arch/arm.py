@@ -322,6 +322,34 @@ class Arm:
             return (base + sign * ops[2].imm) & 0xFFFFFFFF
         return None
 
+    WIDE_SPAN = 8       # instructions a movt may follow its movw at most (wide_constants)
+
+    def wide_constants(self, insns):
+        """[value] of the 32-bit constants movw + movt pairs make, in order: movw rX, #lo, then movt rX,
+        #hi within WIDE_SPAN instructions and before anything else writes rX (clang and GCC for ARMv7
+        make an address so instead of loading it from a literal pool). A reading aid for what a
+        function's code points to (dread.relations materialized), not a value the lifter relies on:
+        a branch between the two is not looked at. insns: a function's instructions in address
+        order (None for a word that is not one)."""
+        pending, out = {}, []
+        for k, insn in enumerate(insns):
+            if insn is None:
+                continue
+            ops = insn.operands
+            if insn.id == csarm.ARM_INS_MOVT and len(ops) == 2 and ops[0].type == csarm.ARM_OP_REG \
+                    and ops[1].type == csarm.ARM_OP_IMM and ops[0].reg in pending:
+                at, low = pending.pop(ops[0].reg)
+                if k - at <= self.WIDE_SPAN:
+                    out.append(((ops[1].imm & 0xFFFF) << 16) | low)
+                continue
+            written = self.reg_effects(insn)[1]
+            for reg in [r for r in pending if self._name(insn.reg_name(r)) in written]:
+                del pending[reg]
+            if insn.mnemonic.split(".")[0] == "movw" and len(ops) == 2 and ops[0].type == csarm.ARM_OP_REG \
+                    and ops[1].type == csarm.ARM_OP_IMM:   # (capstone 5 gives movw the id of mov)
+                pending[ops[0].reg] = (k, ops[1].imm & 0xFFFF)
+        return out
+
     def target(self, insn):
         """The destination of a direct branch or call (b, bl, blx #imm, cbz, cbnz), or None for an
         indirect one or any other instruction."""

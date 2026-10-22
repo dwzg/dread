@@ -47,8 +47,20 @@ of confidence C or more; --passes N asks again, callers first and callees first 
 changed question would show otherwise, until nothing shown changes; --ablate asks each function also
 with no other proposal shown and flags a name that differs then. By default each function is asked
 five times and a second pass runs (--samples 5 --passes 2: measured on FreeRTOS, docs/decisions.md
-2026-10-22; about nine times the answers of one question in one pass). --score with --judge also
-gives the verdicts per confidence (the calibration) and per ablation flag.
+2026-10-22; about nine times the answers of one question in one pass), and the functions' groups are
+named first and shown in their questions (--subsystems, below; --no-subsystems turns it off). --score
+with --judge also gives the verdicts per confidence (the calibration) and per ablation flag.
+
+--task subsystems names the groups dread groups finds from the code alone (shared memory, texts and
+devices, addresses taken, neighbours in memory): one question a group (--samples times, the prefix
+most answers agree with kept) with its size, its functions' names where they have one, the texts they
+point to, the devices they use, its callers and callees outside it and its functions' code (cut to
+SUBSYSTEM_CHARS); a name, a prefix and a sentence, kept in BUILD/pilot/IMAGE/subsystems.tsv with the
+grouping in groups.tsv. --task name --subsystems (the default since 2026-10-22: on FreeRTOS its names
+were judged closer to the source's than those of the votes and passes alone, 153 to 51) does that
+first and shows each function's question its group's name, prefix and sentence; --score then also
+counts the proposals that begin with their group's prefix and sets each group beside its most common
+source file (names-subsystems.tsv).
 
 --task readable names the variables of the readable table's functions (dread readable), after what
 they share with the rest of the image: the globals they use, then the structures their variables
@@ -67,11 +79,13 @@ every --task input question on FreeRTOS (a listing with instructions to reach), 
 stated, while Haiku 5.5 answered the same question.
 
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
-                [--no-mutate] [--no-integration] [--dry-run] [--task write|input|name|readable|globals]
-                [--jobs N] [--refine] [--behaviour] [--samples K] [--temperature T] [--gate C] [--passes N]
-                [--ablate] [--score TRUTH [--judge PROVIDER] [--upto-pass N] [--against NAMES_TSV]] [NAME...]
+                [--no-mutate] [--no-integration] [--dry-run]
+                [--task write|input|name|readable|globals|subsystems] [--jobs N] [--refine] [--behaviour]
+                [--[no-]subsystems] [--samples K] [--temperature T] [--gate C] [--passes N] [--ablate]
+                [--score TRUTH [--judge PROVIDER] [--upto-pass N] [--against NAMES_TSV]] [NAME...]
 """
 import argparse
+import collections
 import contextlib
 import io
 import os
@@ -493,6 +507,29 @@ ui_); follow the style of the names you see. Answer with exactly two lines:
 
 name: <the name>
 what: <one sentence: what the function does>"""
+
+
+SUBSYSTEM_SYSTEM = """You name the parts of a binary image. Tools grouped its functions from their code
+alone: the memory, device registers and texts they share, the functions whose addresses one of them
+takes, and their places in the image (compilers keep a source file's functions next to each other).
+A group is most likely one source file or a few small neighbouring ones; the tools can be wrong at
+its edges. The code below is C made from the machine code by tools (variables named after the
+registers and stack slots that held them, memory at fixed addresses written g_ADDRESS, io_ADDRESS
+for device registers, rom_ADDRESS in the image), or the machine code itself where no C could be made.
+A function without a name is written FUN_ and its address; some names are proposals made from the
+code earlier, likely but not certain. A comment after a constant shows what it points to. From all of
+a group's evidence at once, say what part of the program it is: a short name ("uart driver", "file
+system", "task scheduler", "C library stdio"), the prefix its functions' names would share (snake_case,
+ending in an underscore: uart_, fs_, sched_, stdio_), and one sentence on what it does. Answer with
+exactly three lines:
+
+name: <the part's name>
+prefix: <the prefix>
+what: <one sentence: what the part does>"""
+
+SUBSYSTEM_LINE = ("Tools grouped the program's functions from their code alone (what they share: memory, texts, "
+                  "devices; neighbouring addresses), and a reading of all {size} functions of this one's group "
+                  "named that part {name}, with the prefix {prefix} for its functions' names: {what}")
 
 
 READABLE_SYSTEM = """You name the variables of one function of a binary image. Its C below was made
@@ -1133,20 +1170,28 @@ class Namer:
         self.lifter = lift.make_lifter(program, flow)
         self.readable = set(build.read_names(image.table("readable")))
         self.callers = flat.callers_of(program)
-        self.views, self.prepared = {}, set()
+        self.views, self.prepared, self.viewed = {}, set(), set()
         self.behaviour, self.runs, self._generator = behaviour, {}, None
+        self.subsystem = {}                 # {function name: (its group's size, its subsystems.tsv row)}
 
     def prepare(self, names):
         """Make the readable C of names in a pool of workers (dread.readable views), and with behaviour
         their runs (dread.behaviour sections), before any thread asks: questions then only put names
         in."""
-        from dread import readable
-        self.views.update(readable.views(self.program, self.context, self.lifter, list(names)))
+        self.prepare_code(names)
         if self.behaviour:
             from dread import behaviour
             self.runs.update(behaviour.sections(self.target, self.image, self.program, self.flow, list(names),
                                                 called=set(self.callers)))
         self.prepared |= set(names)
+
+    def prepare_code(self, names):
+        """Make the readable C of names in a pool of workers (prepare() without the runs: for the
+        questions about groups, which show code only)."""
+        from dread import readable
+        names = [n for n in names if n not in self.viewed]
+        self.views.update(readable.views(self.program, self.context, self.lifter, names))
+        self.viewed |= set(names)
 
     def runs_of(self, fn):
         """The behaviour section of a function (dread.behaviour), or None: without behaviour, or
@@ -1166,7 +1211,7 @@ class Namer:
         image's readable table has it, the gate having checked it; "readable, unchecked" else), or its
         listing ("listing") when it does not lift or its C is not the dialect."""
         from dread import flat, lift, readable
-        if fn.name in self.prepared:
+        if fn.name in self.viewed:
             text = self.views.get(fn.name)
         else:
             try:
@@ -1177,14 +1222,10 @@ class Namer:
             return text, "readable" if fn.name in self.readable else "readable, unchecked"
         return "\n".join(flat.listing(self.program, fn, self.flow, callers=self.callers)), "listing"
 
-    def question(self, fn, shown_as=None, shuffle=None):
-        """(text, form) of the question for a function's name: its code (code()) with each constant
+    def annotated(self, fn, shown_as=None):
+        """(text, form) of a function's code as the questions show it: code() with each constant
         followed by what it points to (dread.constants pointed_note: text, a function, a table of
-        texts and functions), other functions by their names in shown_as ({name: name shown}: the
-        run's proposals) where it has one, and its callers; with behaviour, what it did in runs of its
-        cases (runs_of), the form then ending in BEHAVIOUR; shuffle, a seed: the callers in an order of
-        their own (random.Random(shuffle), the same for the same seed), for a vote's samples (the runs
-        shown as they are)."""
+        texts and functions) and the other functions by their names in shown_as ({name: name shown})."""
         from dread.constants import pointed_note
         program = self.program
         text, form = self.code(fn)
@@ -1193,14 +1234,29 @@ class Namer:
                 s = pointed_note(program, int(m.group(1), 16))
                 return m.group(0) + (" /* %s */" % s.replace("*/", "* /") if s else "")
             text = HEX.sub(note, text)
+        return self.named(fn, text, shown_as), form
+
+    @staticmethod
+    def named(fn, text, shown_as):
+        """text with the other functions' names replaced by those of shown_as."""
+        if not shown_as:
+            return text
+        return IDENT_WORD.sub(lambda m: shown_as.get(m.group(0), m.group(0)) if m.group(0) != fn.name
+                              else m.group(0), text)
+
+    def question(self, fn, shown_as=None, shuffle=None):
+        """(text, form) of the question for a function's name: its code (annotated(): each constant
+        followed by what it points to, other functions by their names in shown_as, {name: name shown}:
+        the run's proposals) and its callers; with behaviour, what it did in runs of its cases (runs_of),
+        the form then ending in BEHAVIOUR; with its group named (subsystem, --subsystems), the group's
+        name, prefix and sentence (SUBSYSTEM_LINE), the form then ending in SUBSYSTEM; shuffle, a seed:
+        the callers in an order of their own (random.Random(shuffle), the same for the same seed), for
+        a vote's samples (the runs shown as they are)."""
+        text, form = self.annotated(fn, shown_as)
         runs = self.runs_of(fn)
 
         def named(text):
-            if not shown_as:
-                return text
-            return IDENT_WORD.sub(lambda m: shown_as.get(m.group(0), m.group(0)) if m.group(0) != fn.name
-                                  else m.group(0), text)
-        text = named(text)
+            return self.named(fn, text, shown_as)
         if len(text) > NAME_CHARS:
             text = text[:NAME_CHARS] + "\n... (cut: %d more characters)" % (len(text) - NAME_CHARS)
         if form == "listing":
@@ -1221,6 +1277,10 @@ class Namer:
         if runs:
             user += "\n\n" + named(runs)
             form += BEHAVIOUR
+        if fn.name in self.subsystem:
+            size, row = self.subsystem[fn.name]
+            user += "\n\n" + SUBSYSTEM_LINE.format(size=size, name=row["name"], prefix=row["prefix"], what=row["what"])
+            form += SUBSYSTEM
         return user, form
 
     def caller_names(self, fn):
@@ -1304,7 +1364,8 @@ def names_path(target, image):
 NAMES_COLUMNS = ("address", "now", "proposed", "what", "provider", "shown", "confidence", "samples", "pass",
                  "question", "names_shown", "hidden", "depends")
 REFINED = ", refined"       # names.tsv's shown column of a second pass's proposal (--refine) ...
-BEHAVIOUR = ", behaviour"   # ... and of a question that showed the function's runs (--behaviour)
+BEHAVIOUR = ", behaviour"   # ... of a question that showed the function's runs (--behaviour) ...
+SUBSYSTEM = ", subsystem"   # ... and of one that showed its group's name and prefix (--subsystems)
 
 
 def marked(shown, mark):
@@ -1484,8 +1545,352 @@ def callees_first(program, names):
     return rounds
 
 
+# ---- subsystems: the groups of dread.groups, named from all of their evidence at once
+
+SUBSYSTEM_COLUMNS = ("group", "first", "functions", "members", "name", "prefix", "what", "provider", "confidence",
+                     "samples", "question")
+GROUP_COLUMNS = ("address", "now", "group", "members")
+SUBSYSTEM_CHARS = 24000     # the code a group's question shows at most ...
+SUBSYSTEM_EACH = 1500       # ... and of each function at least this much while the whole fits
+SUBSYSTEM_TEXTS = 40        # the texts a group's question lists at most
+SUBSYSTEM_LISTED = 12       # the functions outside the group it lists as callers, and as callees
+SUBSYSTEM_SMALLEST = 2      # a group of fewer functions is not asked about: its one function says all
+
+
+def subsystems_path(target, image):
+    return os.path.join(target.build, "pilot", image.name, "subsystems.tsv")
+
+
+def groups_path(target, image):
+    return os.path.join(target.build, "pilot", image.name, "groups.tsv")
+
+
+def members_key(program, group):
+    """A digest of a group's functions (their entries): a subsystems.tsv row belongs to the group
+    whose functions are these, whatever its number in a later grouping."""
+    import hashlib
+    return hashlib.sha1(" ".join("%x" % e for e in sorted(program.by_name[n].entry for n in group)).encode()
+                        ).hexdigest()[:12]
+
+
+def read_table(path, columns):
+    """The rows of a TSV with a header line as {column: text}, the columns a file lacks empty."""
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        lines = f.read().splitlines()
+    header = lines[0].split("\t") if lines else []
+    rows = []
+    for line in lines[1:]:
+        row = dict(zip(header, line.split("\t")))
+        for k in columns:
+            row.setdefault(k, "")
+        rows.append(row)
+    return rows
+
+
+def read_subsystems(path):
+    """{members key: the last subsystems.tsv row of that group}."""
+    return {r["members"]: r for r in read_table(path, SUBSYSTEM_COLUMNS) if r["members"] and r["prefix"]}
+
+
+def write_groups(target, image, program, found):
+    """groups.tsv: each function's group of this grouping (found: dread.groups find), its number and
+    its members key."""
+    path = groups_path(target, image)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("\t".join(GROUP_COLUMNS) + "\n")
+        for k, group in enumerate(found):
+            key = members_key(program, group)
+            for n in group:
+                f.write("0x%x\t%s\t%d\t%s\n" % (program.by_name[n].entry, n, k, key))
+
+
+def function_subsystems(target, image):
+    """{entry address: (its group's size, its subsystems.tsv row)} of the image's groups.tsv and
+    subsystems.tsv: the part each function was found in and its name, where it has one."""
+    rows = read_subsystems(subsystems_path(target, image))
+    members = read_table(groups_path(target, image), GROUP_COLUMNS)
+    sizes = collections.Counter(r["members"] for r in members)
+    out = {}
+    for r in members:
+        if r["members"] in rows:
+            try:
+                out[int(r["address"], 16)] = (sizes[r["members"]], rows[r["members"]])
+            except ValueError:
+                continue
+    return out
+
+
+def keep_subsystem(target, image, values):
+    """A line of subsystems.tsv (SUBSYSTEM_COLUMNS) from values, empty where not given."""
+    path = subsystems_path(target, image)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write("\t".join(SUBSYSTEM_COLUMNS) + "\n")
+    row = {k: " ".join(str(values.get(k, "")).split()) for k in SUBSYSTEM_COLUMNS}
+    with open(path, "a") as f:
+        f.write("\t".join(row[k] for k in SUBSYSTEM_COLUMNS) + "\n")
+    return row
+
+
+def subsystem_question(namer, group, touched, shown_as=None):
+    """The question for a group's name (group: function names in address order; touched: dread.groups
+    evidence): its size and place, the names of its functions that have one (their own or shown_as's
+    proposal), the texts they point to (the most used first, SUBSYSTEM_TEXTS at most), the devices
+    whose registers they use, the functions outside the group that call them and that they call
+    (SUBSYSTEM_LISTED each), and their code (Namer.annotated), each cut to its share of SUBSYSTEM_CHARS
+    and at least SUBSYSTEM_EACH while the whole fits; the functions left out for room are named."""
+    from dread import constants, groups as grouping
+    from dread.samecode import UNNAMED
+    program, target = namer.program, namer.target
+    shown_as = shown_as or {}
+    members = [n for n in group if may_show(target, n)]
+    inside = set(group)
+    first, last = program.by_name[group[0]], program.by_name[group[-1]]
+    lines = ["The group of %d functions at 0x%x-0x%x (of %d functions in the image)." % (
+        len(group), first.entry, last.entry, len(program.functions))]
+    names = [shown_as.get(n, n) for n in members]
+    named = [x for x in names if not UNNAMED.match(x)]
+    if named:
+        lines.append("Its functions' names (some proposed from their code): %s." % ", ".join(named))
+    texts = collections.Counter()
+    devices = collections.Counter()
+    for n in members:
+        for kind, key in touched.get(n, ()):
+            if kind == "text":
+                texts[key] += 1
+            elif kind == "device":
+                devices[key] += 1
+    if texts:
+        shown = []
+        for address, _ in sorted(texts.items(), key=lambda kv: (-kv[1], kv[0]))[:SUBSYSTEM_TEXTS]:
+            text = constants.string_at(program, address, limit=64)
+            if text:
+                shown.append('"%s"' % text)
+        more = " and %d more" % (len(texts) - SUBSYSTEM_TEXTS) if len(texts) > SUBSYSTEM_TEXTS else ""
+        lines.append("Texts its functions point to: %s%s." % (", ".join(shown), more))
+    if devices:
+        lines.append("Device registers its functions use: %s." % ", ".join(
+            "0x%x-0x%x (%d functions)" % (b * grouping.DEVICE_BLOCK, (b + 1) * grouping.DEVICE_BLOCK - 1, k)
+            for b, k in sorted(devices.items())))
+    callers, callees = [], []
+    for n in members:
+        for caller, _ in namer.callers.get(n, []):
+            if caller not in inside and may_show(target, caller) and shown_as.get(caller, caller) not in callers:
+                callers.append(shown_as.get(caller, caller))
+    for callee, sites in sorted(namer.callers.items()):
+        if callee not in inside and may_show(target, callee) and any(c in inside for c, _ in sites):
+            callees.append(shown_as.get(callee, callee))
+    for label, found in (("Functions outside the group that call its functions", callers),
+                         ("Functions outside the group that its functions call", callees)):
+        if found:
+            more = " and %d more" % (len(found) - SUBSYSTEM_LISTED) if len(found) > SUBSYSTEM_LISTED else ""
+            lines.append("%s: %s%s." % (label, ", ".join(found[:SUBSYSTEM_LISTED]), more))
+    each = max(SUBSYSTEM_EACH, SUBSYSTEM_CHARS // max(1, len(members)))
+    parts, left, used = [], [], 0
+    for n in members:
+        text, form = namer.annotated(program.by_name[n], shown_as)
+        if len(text) > each:
+            text = text[:each] + "\n... (cut: %d more characters)" % (len(text) - each)
+        if used + len(text) > SUBSYSTEM_CHARS:
+            left.append(shown_as.get(n, n))
+            continue
+        used += len(text)
+        parts.append(("// %s: its machine code (no C could be made)\n" % n if form == "listing" else "") + text)
+    lines.append("Its functions, as C made from their machine code:\n\n```c\n%s\n```" % "\n\n".join(parts))
+    if left:
+        lines.append("Not shown for room: %s." % ", ".join(left))
+    return "\n\n".join(lines)
+
+
+def parse_subsystem(answer):
+    """(name, prefix, what) of an answer's three lines, or None; a prefix without its underscore gets
+    one."""
+    def line(key, pattern=r"(.+?)"):
+        m = re.search(r"^\s*\**%s\**\s*:\s*\**`?%s`?\**\s*$" % (key, pattern), answer or "", re.M | re.I)
+        return m.group(1).strip() if m else None
+    name, prefix, what = line("name"), line("prefix", r"([A-Za-z_][A-Za-z0-9_]*)"), line("what")
+    if not name or not prefix or not what:
+        return None
+    return name, prefix if prefix.endswith("_") else prefix + "_", what
+
+
+def subsystem_problem(prefix):
+    """Why a proposed prefix cannot be used, or None: an identifier's start of at most 24 characters."""
+    if not re.match(r"^[A-Za-z][A-Za-z0-9_]{0,22}_$", prefix or ""):
+        return "a prefix is a C identifier's start of at most 24 characters ending in an underscore"
+    return None
+
+
+def ask_subsystem(provider, user, tries=2, temperature=None):
+    """((name, prefix, what) or None, log, why) of asking for one group's name: an answer without the
+    three lines or with a prefix that cannot be used goes back with the reason, up to tries answers."""
+    messages = [{"role": "user", "content": user}]
+    log = ["## Question, asked %s\n\n%s" % (provider.label(), user)]
+    why = "no answer"
+    for _ in range(tries):
+        provider.last = {}
+        try:
+            answer = provider.ask(SUBSYSTEM_SYSTEM, messages) if temperature is None else \
+                provider.ask(SUBSYSTEM_SYSTEM, messages, temperature=temperature)
+        except Exception as e:
+            return None, log, "the provider: %s" % e
+        log.append("## Answer\n\n%s" % answer)
+        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+            return None, log, "the provider declined"
+        parsed = parse_subsystem(answer)
+        why = "no three lines name:, prefix: and what:" if parsed is None else subsystem_problem(parsed[1])
+        if why is None:
+            return parsed, log, None
+        messages += [{"role": "assistant", "content": answer},
+                     {"role": "user", "content": "That cannot be used: %s. Answer again with the three lines." % why}]
+        log.append("## Back to the model\n\n%s" % messages[-1]["content"])
+    return None, log, why
+
+
+def name_subsystems(target, image, program, provider, found, namer, touched, samples=1, jobs=4, tries=2,
+                    temperature=None, shown_as=None, out=print):
+    """Names for the groups of found (dread.groups find, numbered by their place) that subsystems.tsv
+    does not name yet (by their members key) and that have SUBSYSTEM_SMALLEST functions or more: each
+    asked samples times (subsystem_question, the same question each time: the provider's sampling
+    varies the answers), jobs at a time, provider() giving each thread its provider; the prefix most
+    answers agree with is kept (dread.naming vote), with the name and the sentence of the answer that
+    gave it, the agreement its confidence. groups.tsv gets the grouping, subsystems.tsv a line a
+    group, the conversations go to BUILD/pilot/IMAGE/subsystems/. Returns {function name: (its
+    group's size, its row)} of the named groups."""
+    import concurrent.futures
+    from dread import naming
+    write_groups(target, image, program, found)
+    known = read_subsystems(subsystems_path(target, image))
+    todo = []
+    for k, group in enumerate(found):
+        key = members_key(program, group)
+        if key not in known and len(group) >= SUBSYSTEM_SMALLEST and any(may_show(target, n) for n in group):
+            todo.append((k, group, key, subsystem_question(namer, group, touched, shown_as)))
+
+    def one(item):
+        k, sample, user = item
+        p = provider()
+        got, log, why = ask_subsystem(p, user, tries, temperature)
+        return k, sample, got, log, why, p
+    results = {}
+    if todo:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+            for k, sample, got, log, why, p in pool.map(one, [(k, j, user) for k, _, _, user in todo
+                                                              for j in range(max(1, samples))]):
+                results.setdefault(k, {})[sample] = (got, log, why, p)
+    folder = os.path.join(target.build, "pilot", image.name, "subsystems")
+    for k, group, key, user in todo:
+        got = [results[k][j] for j in range(max(1, samples))]
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "group-%d.md" % k), "w") as f:
+            f.write("# Group %d (%s)\n\n%s\n" % (k, key, "\n\n".join(
+                ("# Question %d of %d\n\n" % (j + 1, len(got)) if len(got) > 1 else "") + "\n\n".join(r[1])
+                for j, r in enumerate(got))))
+        voted = naming.vote([r[0][1] if r[0] else None for r in got])
+        if voted is None:
+            out("group %d (%d functions): no proposal: %s" % (k, len(group), next((r[2] for r in got if r[2]),
+                                                                                  "no answer")))
+            continue
+        prefix, agreement, index = voted
+        name, _, what = got[index][0]
+        values = {"group": k, "first": "0x%x" % program.by_name[group[0]].entry, "functions": len(group),
+                  "members": key, "name": name, "prefix": prefix, "what": what, "provider": got[index][3].label(),
+                  "question": question_key(user)}
+        if len(got) > 1:
+            values["confidence"] = "%.2f" % (agreement / len(got))
+            values["samples"] = " ".join(r[0][1] if r[0] else "-" for r in got)
+        known[key] = keep_subsystem(target, image, values)
+        out("group %d (%d functions): %s, prefix %s%s: %s" % (
+            k, len(group), name, prefix, " (%d of %d agree)" % (agreement, len(got)) if len(got) > 1 else "", what))
+    return {n: (len(group), known[members_key(program, group)]) for group in found
+            if members_key(program, group) in known for n in group}
+
+
+def uses_prefix(name, prefix):
+    """Whether a function's name begins with a group's prefix, piece by piece (dread.naming pieces:
+    queue_send and QueueSend with queue_, not queues_send)."""
+    from dread.naming import pieces
+    want = pieces(prefix)
+    return bool(want) and pieces(name)[:len(want)] == want
+
+
+SUBSYSTEM_JUDGE = """You compare names given to parts of a program with the source files they come from.
+On each numbered line, first the source file most of a part's functions come from (its path's end),
+then the name and the prefix proposed for the part from its code. Say for each line whether the
+proposal names what that file is: "same" (the same part of the program, in other words too), "close"
+(related: more general, more specific, or one side of it), or "different". Answer with one ```json
+block that maps every line's number to its word:
+
+```json
+{"1": "same", "2": "close", "3": "different"}
+```"""
+
+
+def score_subsystems(target, image, truth_path, rows, out=print, judge=None):
+    """The groups (groups.tsv, subsystems.tsv) against the run's proposals (rows: {entry: names.tsv
+    row}) and, where the truth is an ELF with debug information, against the source files: the share
+    of proposals in a named group that begin with its prefix (uses_prefix: the names' consistency),
+    and per group its most common file, the share of its functions from it, its name and prefix, and
+    with judge a verdict whether they name that file's part (SUBSYSTEM_JUDGE). A line a group into
+    BUILD/pilot/IMAGE/names-subsystems.tsv. Returns the totals ({} without a named group)."""
+    from dread import groups as grouping
+    parts = function_subsystems(target, image)
+    if not parts:
+        return {}
+    inside = [(e, parts[e][1]) for e in rows if e in parts]
+    using = sum(uses_prefix(rows[e]["proposed"], r["prefix"]) for e, r in inside)
+    t = {"proposals": len(inside), "use_prefix": using}
+    out("dread pilot --score: %d of %d proposals in a named group begin with its prefix (%.0f %%)" % (
+        using, len(inside), 100.0 * using / len(inside) if inside else 0))
+    files = {}
+    try:
+        files = grouping.source_files(truth_path)
+    except Exception:                       # (a functions table, or no debug information to read)
+        files = {}
+    groups = {}
+    for e, (size, row) in sorted(parts.items()):
+        groups.setdefault(row["members"], (row, []))[1].append(e)
+    lines = []
+    for key, (row, entries) in sorted(groups.items(), key=lambda kv: int(kv[1][0]["group"] or 0)):
+        c = collections.Counter(os.path.basename(files[e]) for e in entries if e in files)
+        top, n = c.most_common(1)[0] if c else ("", 0)
+        here = [e for e in entries if e in rows]
+        lines.append({"group": row["group"], "functions": len(entries), "file": top, "from_file": n,
+                      "name": row["name"], "prefix": row["prefix"],
+                      "use_prefix": sum(uses_prefix(rows[e]["proposed"], row["prefix"]) for e in here),
+                      "proposals": len(here)})
+    verdicts = {}
+    if judge is not None and files:
+        asked = [(k, line["file"], "%s (prefix %s)" % (line["name"], line["prefix"])) for k, line in enumerate(lines)
+                 if line["file"]]
+        verdicts = judge_names(judge, asked, out=out, system=SUBSYSTEM_JUDGE)
+    path = os.path.join(target.build, "pilot", image.name, "names-subsystems.tsv")
+    with open(path, "w") as f:
+        f.write("group\tfunctions\tname\tprefix\tfile\tfrom_file\tproposals\tuse_prefix\tjudged\n")
+        for k, line in enumerate(lines):
+            f.write("%s\t%d\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n" % (
+                line["group"], line["functions"], line["name"], line["prefix"], line["file"], line["from_file"],
+                line["proposals"], line["use_prefix"], verdicts.get(k, "")))
+    if files:
+        out("dread pilot --score: %d named groups, %d of their %d functions from their most common file (%s)" % (
+            len(lines), sum(x["from_file"] for x in lines), sum(x["functions"] for x in lines), path))
+    if verdicts:
+        counts = collections.Counter(verdicts.values())
+        out("dread pilot --score: the groups' names against their files, judged by %s: the same %d, close %d, "
+            "different %d" % (judge.label(), counts["same"], counts["close"], counts["different"]))
+        t.update({"judged_" + v: counts[v] for v in VERDICTS})
+    t["groups"] = lines
+    return t
+
+
 NAME_SAMPLES = 5    # --task name's default questions per function (--samples) and passes (--passes): measured
 NAME_PASSES = 2     # on FreeRTOS against one question in one pass (docs/decisions.md, 2026-10-22)
+NAME_SUBSYSTEMS = True  # --task name names the groups first and shows them (--subsystems): measured on FreeRTOS
+                        # against the two defaults above (docs/decisions.md, 2026-10-22)
 
 
 def question_key(text):
@@ -1497,7 +1902,7 @@ def question_key(text):
 
 def name_functions(target, image, program, make_provider, names, flow=None, jobs=4, tries=2, out=print,
                    refine=False, behaviour=False, samples=1, temperature=None, gate=None, passes=1,
-                   ablate=False):
+                   ablate=False, subsystems=False):
     """Proposals for the functions of names, callees first: a function is asked as soon as every
     function it calls among names has its answer (call_components; functions that call each other in
     a circle together), jobs questions at a time with a provider each (make_provider() makes one), each
@@ -1537,7 +1942,12 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
     (REFINE_NOTE); its answer is kept marked REFINED, and a run started again skips what is refined.
 
     behaviour: each question also shows what the function did in runs of its cases (dread.behaviour,
-    made for all of them before the first question)."""
+    made for all of them before the first question).
+
+    subsystems: before the first question the image's functions are grouped by their code (dread.groups)
+    and each group not named yet is asked for its name, prefix and sentence (name_subsystems, samples
+    questions each, the proposals so far shown), and each function's question then shows its group's
+    (SUBSYSTEM_LINE)."""
     import concurrent.futures
     import threading
     from dread import naming
@@ -1576,6 +1986,23 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
             with lock:
                 providers.append(local.provider)
         return local.provider
+
+    if subsystems:
+        from dread import groups as grouping
+        started = time.time()
+        try:
+            touched = grouping.evidence(target, image, program, flow)
+            found = grouping.find(target, image, program, flow, touched=touched)
+        except Exception as e:              # (the names do without: said, not fatal)
+            out("dread pilot: no subsystems, the grouping failed: %s: %s" % (type(e).__name__, e))
+            found = None
+        if found is not None:
+            namer.prepare_code([fn.name for fn in program.functions if may_show(target, fn.name)])     # (the
+            # groups' questions show every function's code)
+            out("dread pilot: %d functions in %d groups (dread.groups, %.0f s)" % (len(program.functions), len(found),
+                                                                                  time.time() - started))
+            namer.subsystem = name_subsystems(target, image, program, provider, found, namer, touched, samples, jobs,
+                                              tries, temperature, shown_as, out)
 
     def one(item):
         name, kind, k, user = item
@@ -1778,17 +2205,18 @@ def judged_json(answer):
     return data if isinstance(data, dict) else {}
 
 
-def judge_names(provider, pairs, batch=50, out=print):
+def judge_names(provider, pairs, batch=50, out=print, system=None):
     """{key: "same", "close" or "different"} of pairs ([(key, true name, proposed name)]) as a
     provider judges them, batch pairs a question; a pair without a usable verdict is left out. A
     language model's judgement, a second measure beside the word scores (synonyms and abbreviations:
-    buf_len against buffer_length shares no word)."""
+    buf_len against buffer_length shares no word). system: the judge's instructions (JUDGE_SYSTEM:
+    a true function name against a proposed one)."""
     out_map = {}
     for start in range(0, len(pairs), batch):
         part = pairs[start:start + batch]
         user = "\n".join("%d. %s | %s" % (k + 1, t, p) for k, (_, t, p) in enumerate(part))
         try:
-            answer = provider.ask(JUDGE_SYSTEM, [{"role": "user", "content": user}])
+            answer = provider.ask(system or JUDGE_SYSTEM, [{"role": "user", "content": user}])
         except Exception as e:
             out("dread pilot --judge: no verdicts for pairs %d-%d: %s" % (start + 1, start + len(part), e))
             continue
@@ -1923,6 +2351,7 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
     t["calibration"] = {}
     for c in sure:
         t["calibration"][c] = line("confidence %.2f" % c, [r for r in scored if confidence(rows[r["address"]]) == c])
+    t["subsystems"] = score_subsystems(target, image, truth_path, rows, out=out, judge=judge)
     t["ablation"] = {}
     for label, depends, alone in (("names shown, the name depends on them", "yes", False),
                                   ("names shown, the name stands alone", "no", False),
@@ -1967,6 +2396,54 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
         "orders, %d: this run's closer %d, the other's closer %d, ties %d (sign test p = %.3g; %s)" % (
             against, len(items), len(both), judge.label(), len(pairs), wins, losses, ties, t["p"], path))
     return t
+
+
+def subsystems_task(target, image, program, flow, args, provider):
+    """dread pilot --task subsystems: the image's groups (dread.groups find) named where subsystems.tsv
+    has no name for them yet (name_subsystems: --samples questions a group, --jobs at a time), each
+    question showing the functions by their proposals (names.tsv) where they have one; --dry-run prints
+    the questions instead."""
+    import threading
+    from dread import groups as grouping
+    namer = Namer(target, image, program, flow)
+    touched = grouping.evidence(target, image, program, flow)
+    found = grouping.find(target, image, program, flow, touched=touched)
+    namer.prepare_code([fn.name for fn in program.functions if may_show(target, fn.name)])
+    shown_as = {program.by_entry[a].name: p for a, (p, _) in read_proposals(target, image).items()
+                if a in program.by_entry}
+    if args.dry_run:
+        known = read_subsystems(subsystems_path(target, image))
+        asked = 0
+        for k, group in enumerate(found):
+            if members_key(program, group) in known or len(group) < SUBSYSTEM_SMALLEST:
+                continue
+            asked += 1
+            print("=" * 72 + "\ngroup %d\n" % k + "-" * 72 + "\n" + subsystem_question(namer, group, touched, shown_as))
+        print("dread pilot --task subsystems --dry-run: %d functions in %d groups, %d would be asked about; nothing "
+              "asked" % (len(program.functions), len(found), asked))
+        return 0
+    local, providers, lock = threading.local(), [], threading.Lock()
+
+    def one_provider():                     # (a provider a thread: as name_functions does)
+        if getattr(local, "provider", None) is None:
+            local.provider = provider if not providers else llm.load(args.provider)
+            with lock:
+                providers.append(local.provider)
+        return local.provider
+    named = name_subsystems(target, image, program, one_provider, found, namer, touched, args.samples, args.jobs,
+                            min(args.tries, 3), args.temperature, shown_as)
+    spent = {"answers": 0, "input": 0, "output": 0, "cost": None}
+    for p in providers:
+        sp = p.spent()
+        for key in ("answers", "input", "output"):
+            spent[key] += sp[key]
+        if sp.get("cost") is not None:
+            spent["cost"] = (spent["cost"] or 0.0) + sp["cost"]
+    print("dread pilot --task subsystems: %d functions in %d groups, %d of them in named groups (%s); %d answers, "
+          "%d tokens in, %d out%s" % (len(program.functions), len(found), len(named), subsystems_path(target, image),
+                                      spent["answers"], spent["input"], spent["output"],
+                                      " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""))
+    return 0
 
 
 def print_usage(month=None):
@@ -2024,6 +2501,10 @@ def main(argv=None):
                         help="--task name: after the first pass, ask again (callers first, then callees first, "
                              "...) the functions whose question changed, until no shown name changes or N passes "
                              "(default %d; 1 with --refine)" % NAME_PASSES)
+    parser.add_argument("--subsystems", action=argparse.BooleanOptionalAction, default=NAME_SUBSYSTEMS,
+                        help="--task name: group the functions by their code (dread groups), name each group from "
+                             "all of its evidence (as --task subsystems), and show each function's question its "
+                             "group's name and prefix (default: on; --no-subsystems: off)")
     parser.add_argument("--ablate", action="store_true",
                         help="--task name: ask each function also with no other proposal shown, and flag a name "
                              "that differs then (names.tsv's hidden and depends)")
@@ -2033,10 +2514,11 @@ def main(argv=None):
                         help="with --score and --judge: judge pairwise, where they differ, which of this build's "
                              "proposals and another run's names.tsv is closer to the true name (instead of the "
                              "absolute verdicts)")
-    parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals"), default="write",
+    parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals", "subsystems"),
+                        default="write",
                         help="write C (default), find inputs for unrun instructions, propose names, name the "
-                             "variables of readable C (dread readable), or name only what the functions share: "
-                             "their globals and structures")
+                             "variables of readable C (dread readable), name only what the functions share: "
+                             "their globals and structures, or name the groups dread groups finds")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):  # a line a function as it ends, also into a file (a run its
@@ -2083,6 +2565,8 @@ def main(argv=None):
             except llm.ProviderError as e:
                 print("dread pilot: %s" % e, file=sys.stderr)
                 return 1
+        if args.task == "subsystems":
+            return subsystems_task(target, image, program, flow, args, provider)
         if args.task in ("readable", "globals"):
             from dread import build, lift, readable
             # readable: the functions of the readable table, whose C is built; globals: every function,
@@ -2145,7 +2629,7 @@ def main(argv=None):
                                                 flow, jobs=args.jobs, tries=min(args.tries, 3), refine=args.refine,
                                                 behaviour=args.behaviour, samples=args.samples,
                                                 temperature=args.temperature, gate=args.gate, passes=passes,
-                                                ablate=args.ablate)
+                                                ablate=args.ablate, subsystems=args.subsystems)
             cost = " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""
             print("dread pilot --task name: %d of %d asked functions got a proposal%s (%s); %d answers, %d tokens "
                   "in, %d out%s" % (made, asked, ", over the passes" if passes > 1 else "",

@@ -468,10 +468,43 @@ its sources.
   and the driver the single-question runs had misread was not misread again: most of its functions
   got names of the driver, none the misreading's: the votes fixed it instead of flagging it. The
   confidence was calibrated there too, less steeply than on FreeRTOS.
-  Next: the runs of the cases (`--behaviour`) where the code says less (its drivers, and leaves that
-  touch only unnamed globals: its misses) against its notes with text ends, and the globals between
-  the passes; then subsystems as a step of their own (functions grouped by calls and addresses, a
-  prefix proposed a group with its evidence: texts, devices).
+  Subsystems (2026-10-22, dread/groups.py, docs/decisions.md): `dread groups` groups the functions by
+  their code alone, no name used: Louvain's modularity (resolution 2) on a graph of what two functions
+  share (a global at one address, a device's 4 KiB block, a text, a table: each pair of the k that
+  share one 1/(k-1)), a function's address the other makes (1) and neighbours in memory (0.5); calls
+  are left out (7-17 % of them stay inside a source file: they join layers, not files). Scored against
+  the source file of each function (DWARF) on four FreeRTOS builds (GCC -Os made nameless, clang -O2,
+  GCC -O0, RISC-V GCC -Os; a bench step now, `groups`): adjusted Rand index 0.805, 0.785, 0.844,
+  0.778, purity 0.755, 0.735, 0.798, 0.845, completeness 0.969, 0.973, 0.977, 0.894, 27-29 groups for
+  41-53 files; what mixes files is small neighbouring files of the demo and two files whose functions
+  of the same names the linker put side by side. `dread pilot --task subsystems` asks for each group's
+  name, prefix and sentence from all of its evidence at once (its functions' code cut to 24,000
+  characters, the texts they point to, the devices they use, its callers and callees outside it; votes
+  of five over the prefix), kept in subsystems.tsv beside names.tsv (docs/formats.md); `--task name
+  --subsystems` does that first and shows each function's question its group's line. On the GCC -Os
+  build Sonnet judged all 27 groups' names to name the file most of their functions come from (24 the
+  same, 3 close: the port with the lists, the queue with heap_4, newlib's system calls): task_ for
+  tasks.c, queue_ for queue.c, timer_ for timers.c, abort_delay_ for AbortDelay.c and so on. Measured
+  pairwise against the defaults until then (votes of five, a second pass), each on a copy of its own,
+  Haiku naming, Sonnet judging in both orders: 153, 51, 81 (p 5e-13), after the first pass 171, 46, 74
+  (p 4e-18). The names follow the prefix: 97 % begin with their group's (without the groups 37 %),
+  98 % share their source file's most common first word (68 %); judged the same 52 % against 38 %,
+  different 10 % against 20 %. Where a group mixes files, its prefix goes to the few that do not belong
+  (demo_strcmp, demo_put_char for the demo's printf beside main.c), and three exact names of the run
+  without groups (vTaskSwitchContext) lost to the prefix's snake_case, a fault of the judge (without
+  those 150, 54). The groups named from the first pass's names instead (shown in the second pass
+  only) gained less: against the defaults until then 102, 44, 32 (p 2e-6), against the groups named
+  from code 57, 127, 75; a first pass's misreading went into a group's name (newlib's stdio became a
+  stream layer over UART ports, fs_). Costs: without the groups $0.95 (3,195 answers), with them $1.14
+  (3,331: 136 answers for the 27 groups, about $0.10, the rest the longer questions); judging $0.41 of
+  Sonnet. The default since
+  2026-10-22 (NAME_SUBSYSTEMS; `--no-subsystems`); measured on one build the model knows, whose
+  assertion texts name its files, not confirmed on firmware it does not know.
+  Next: `--subsystems` on the private real-life test (its misread driver, groups whose texts say
+  less); a group's name asked again after the first pass with its functions' names (asked once from
+  code now: subsystems.tsv keeps it), not tried; the runs of the cases (`--behaviour`) where the code
+  says less (its drivers, and leaves that touch only unnamed globals: its misses) against its notes
+  with text ends, and the globals between the passes.
 - [ ] **A no-confidence vote on existing names** (the user's idea, 2026-10-22: reverse engineering as
   a puzzle, where a sub-picture can look right in one context and wrong in another). Not a periodic
   re-vote by the same model: consistency is not correctness (a misread driver was named after the
@@ -482,8 +515,9 @@ its sources.
   name one vote of five gave judged different 88 %, a unanimous one 15 %; the ablation flag, the name
   changing with the neighbours hidden, was measured and is no error signal), callers' summaries that
   describe its role differently; (2) sub-pictures tested at their edges: a group of functions (calls,
-  addresses, one prefix) against what lies outside it (callers outside the group, the texts and
-  registers it uses), since a wrong sub-picture is consistent inside; (3) re-decided with hysteresis:
+  addresses, one prefix; `dread groups` and the names in subsystems.tsv are such groups since
+  2026-10-22) against what lies outside it (callers outside the group, the texts and registers it
+  uses), since a wrong sub-picture is consistent inside; (3) re-decided with hysteresis:
   a challenged name changes only when a new one wins a pairwise comparison by a margin, "more general"
   one of the outcomes (a helper two subsystems share), every change logged with its reason, rounds
   capped; (4) names people gave are flagged for review with the reasons, never replaced. Measured on

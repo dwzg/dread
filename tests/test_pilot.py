@@ -784,8 +784,9 @@ def test_the_naming_options_that_need_others(gizmo):
 
 
 def test_the_naming_defaults_are_five_questions_and_two_passes(gizmo, tmp_path, monkeypatch):
-    """dread pilot --task name asks each function five times and runs a second pass, callers first
-    (measured on FreeRTOS, docs/decisions.md 2026-10-22); --refine is a second pass of its own."""
+    """dread pilot --task name asks each function five times, runs a second pass, callers first, and
+    names the functions' groups first to show them (measured on FreeRTOS, docs/decisions.md
+    2026-10-22); --refine is a second pass of its own; --no-subsystems leaves the groups out."""
     target, image, program, flow = gizmo
     config = tmp_path / "llm.toml"
     config.write_text('[providers.x]\nkind = "openai"\nmodel = "m"\n')
@@ -797,9 +798,9 @@ def test_the_naming_defaults_are_five_questions_and_two_passes(gizmo, tmp_path, 
         return 0, 0, {"answers": 0, "input": 0, "output": 0, "cost": None}
     monkeypatch.setattr(pilot, "name_functions", fake)
     assert pilot.main(["--target", target.root, "--task", "name"]) == 0
-    assert (got["samples"], got["passes"], got["gate"], got["ablate"]) == (5, 2, None, False)
-    assert pilot.main(["--target", target.root, "--task", "name", "--refine", "--samples", "1"]) == 0
-    assert (got["samples"], got["passes"], got["refine"]) == (1, 1, True)
+    assert (got["samples"], got["passes"], got["gate"], got["ablate"], got["subsystems"]) == (5, 2, None, False, True)
+    assert pilot.main(["--target", target.root, "--task", "name", "--refine", "--samples", "1", "--no-subsystems"]) == 0
+    assert (got["samples"], got["passes"], got["refine"], got["subsystems"]) == (1, 1, True, False)
 
 
 def test_votes_with_behaviour_show_the_same_runs_in_every_question(gizmo):
@@ -836,3 +837,122 @@ def test_votes_with_behaviour_show_the_same_runs_in_every_question(gizmo):
     assert refined == set(rows) and all(r["shown"].endswith(pilot.BEHAVIOUR + pilot.REFINED) and r["pass"] == "2"
                                         for r in rows.values())
     assert pilot.marked("readable, refined, behaviour", pilot.REFINED) and not pilot.marked("readable", pilot.REFINED)
+
+
+def scripted_parts(seen):
+    """A provider's answers for both kinds of question: a group's (dread.groups: the UART driver's for
+    the group whose code shows uart_putc, "misc_" for the others) and a function's (its name with "_x"
+    behind)."""
+    def answer(messages):
+        question = messages[0]["content"]
+        seen.append(question)
+        if question.startswith("The group of"):
+            if re.search(r"\buart_putc\(", question):
+                return "name: serial port driver\nprefix: uart\nwhat: drives the UART"
+            return "name: misc\nprefix: misc_\nwhat: the rest"
+        return "name: %s_x\nwhat: does it" % re.search(r"The function (\w+)", question).group(1)
+    return answer
+
+
+def test_groups_are_named_from_all_their_evidence(gizmo):
+    """--task subsystems (name_subsystems): a question a group with its size, its functions' names, the
+    texts they point to, the devices whose registers they use, its callers and callees outside it and
+    its code; an answer without the three lines goes back; the prefix most answers agree with is kept
+    (samples 3: uart, uart_ and serial_), the agreement its confidence; subsystems.tsv and groups.tsv
+    keep it; a run started again asks nothing."""
+    from dread import groups
+    target, image, program, flow = gizmo
+    touched = groups.evidence(target, image, program, flow)
+    found = groups.find(target, image, program, flow, touched=touched)
+    uart = groups.membership(found)["uart_putc"]
+    namer = pilot.Namer(target, image, program, flow)
+    seen = []
+    in_order = ["it drives the serial port", "name: serial port driver\nprefix: uart\nwhat: drives the UART",
+                "name: UART\nprefix: uart_\nwhat: the UART", "name: serial\nprefix: serial_\nwhat: serial"]
+
+    def answer(messages):                   # (one question at a time: the UART group's answers in order)
+        question = messages[0]["content"]
+        seen.append(question)
+        if "uart_putc" in question.split("Its functions, as C")[0]:
+            return in_order.pop(0)
+        return "name: misc\nprefix: misc_\nwhat: the rest"
+    provider = llm.Scripted(answer)
+    lines = []
+    named = pilot.name_subsystems(target, image, program, lambda: provider, found, namer, touched, samples=3, jobs=1,
+                                  out=lines.append)
+    asked = [q for q in seen if "uart_putc" in q.split("Its functions, as C")[0]]
+    question = asked[0]
+    base = target.models["uart"]["base"]
+    assert question.startswith("The group of %d functions at 0x" % len(found[uart]))
+    assert "Device registers its functions use: 0x%x-0x%x" % (base, base + groups.DEVICE_BLOCK - 1) in question
+    assert "```c\n" in question and "uart_putc(" in question and "Functions outside the group that call" in question
+    assert any('Texts its functions point to: "' in q for q in seen)
+    assert any(m["content"].startswith("That cannot be used: no three lines") for _, ms in provider.asked
+               for m in ms if m["role"] == "user")
+    rows = pilot.read_subsystems(pilot.subsystems_path(target, image))
+    row = rows[pilot.members_key(program, found[uart])]
+    assert (row["name"], row["prefix"], row["confidence"]) == ("serial port driver", "uart_", "0.67"), row
+    assert row["samples"] == "uart_ uart_ serial_" and row["group"] == str(uart)
+    assert named["uart_putc"] == (len(found[uart]), row) and set(named) == {n for g in found for n in g
+                                                                            if len(g) >= pilot.SUBSYSTEM_SMALLEST}
+    assert any("serial port driver, prefix uart_ (2 of 3 agree)" in line for line in lines), lines
+    table = pilot.read_table(pilot.groups_path(target, image), pilot.GROUP_COLUMNS)
+    assert len(table) == len(program.functions) and {r["group"] for r in table if r["now"] in UART_FUNCTIONS} == {str(uart)}
+    assert pilot.function_subsystems(target, image)[program.by_name["uart_putc"].entry] == (len(found[uart]), row)
+    seen.clear()
+    pilot.name_subsystems(target, image, program, lambda: provider, found, namer, touched, samples=3, out=lines.append)
+    assert seen == []
+    assert pilot.parse_subsystem("name: x\nprefix: `fs`\nwhat: y") == ("x", "fs_", "y")
+    assert pilot.subsystem_problem("a_very_long_prefix_of_words_") and not pilot.subsystem_problem("fs_")
+
+
+UART_FUNCTIONS = {"uart_init", "uart_putc", "uart_puts", "uart_getc"}
+
+
+def test_name_questions_show_their_group_and_the_score_counts_its_prefix(gizmo, tmp_path):
+    """--subsystems: the groups are named first (one question each), then each function's question shows
+    its group's name, prefix and sentence, its form marked; --score counts the proposals that begin with
+    their group's prefix and puts each group beside its most common source file (DWARF), judged."""
+    pytest.importorskip("elftools")
+    target, image, program, flow = gizmo
+    seen, lines = [], []
+    made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(scripted_parts(seen)),
+                                          ["uart_puts", "uart_putc"], flow, jobs=1, out=lines.append, subsystems=True)
+    assert (made, asked) == (2, 2)
+    groups_asked = [q for q in seen if q.startswith("The group of")]
+    functions_asked = [q for q in seen if q.startswith("The function")]
+    assert groups_asked and seen.index(functions_asked[0]) > seen.index(groups_asked[-1])
+    assert all("named that part serial port driver, with the prefix uart_ for its functions' names: drives the UART"
+               in q for q in functions_asked), functions_asked[0]
+    rows = pilot.read_name_rows(pilot.names_path(target, image))
+    assert all(pilot.marked(r["shown"], pilot.SUBSYSTEM) for r in rows)
+    pilot.keep_proposal(target, image, program.by_name["uart_putc"], "serial_send_char", "x", llm.Scripted([]),
+                        "readable")
+    judge = llm.Scripted(['```json\n{}\n```'] + ['```json\n{"1": "same", "2": "close", "3": "different"}\n```'] * 9)
+    lines.clear()
+    totals = pilot.score_names(target, image, gizmo_elf(target), out=lines.append, judge=judge)
+    parts = totals["subsystems"]
+    assert (parts["proposals"], parts["use_prefix"]) == (2, 1), parts
+    assert any("1 of 2 proposals in a named group begin with its prefix" in line for line in lines), lines
+    table = open(os.path.join(target.build, "pilot", image.name, "names-subsystems.tsv")).read()
+    assert "\tserial port driver\tuart_\thw.c\t" in table
+    assert any("the groups' names against their files, judged by scripted" in line for line in lines), lines
+    assert pilot.uses_prefix("uart_send_char", "uart_") and not pilot.uses_prefix("uarts_send", "uart_")
+    assert pilot.uses_prefix("UartSend", "uart_") and not pilot.uses_prefix("send", "uart_")
+
+
+def test_names_do_without_their_groups_when_the_grouping_fails(gizmo, monkeypatch):
+    """--subsystems is the default: a grouping that fails is said in a line, and the functions are
+    named as without it (no group questions, no group line, no subsystem mark)."""
+    from dread import groups
+
+    def broken(*args, **kw):
+        raise RuntimeError("no facts today")
+    monkeypatch.setattr(groups, "evidence", broken)
+    target, image, program, flow = gizmo
+    seen, lines = [], []
+    made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(scripted_parts(seen)),
+                                          ["uart_putc"], flow, jobs=1, out=lines.append, subsystems=True)
+    assert (made, asked) == (1, 1) and len(seen) == 1 and "named that part" not in seen[0]
+    assert any("no subsystems, the grouping failed: RuntimeError: no facts today" in line for line in lines), lines
+    assert not pilot.marked(pilot.read_name_rows(pilot.names_path(target, image))[0]["shown"], pilot.SUBSYSTEM)

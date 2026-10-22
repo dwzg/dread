@@ -9,6 +9,90 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Function names: each question shows its group's name and prefix, the default (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** With the functions grouped by their code (the entry below), should the questions for
+  function names show the subsystem their group was named, and from what should the group's name come?
+- **Options, measured** on FreeRTOS GCC -Os (mps2, 366 functions made FUN_address), Haiku 5.5 naming,
+  Sonnet 5.5 judging pairwise in both orders, each run on a copy of its own from the same code:
+  (a) the defaults until then (votes of five, a second pass callers first); (b) `--subsystems`: each
+  group named first from its code (one question a group, votes of five over the prefix; its
+  functions' code cut to 24,000 characters, its texts, devices, callers and callees outside it), every
+  function's question in both passes showing its group's name, prefix and sentence; (c) the groups named from
+  (a)'s first pass (its names in the groups' questions), shown in the second pass only. (b) against
+  (a): 153, 51, 81 (p 5e-13), after the first pass 171, 46, 74 (p 4e-18); (c) against (a) 102, 44, 32
+  (p 2e-6); (b) against (c) 127, 57, 75 (p 3e-7). Absolute verdicts: (b) the same 52 %, close 37 %,
+  different 10 %; (a) 38 %, 42 %, 20 %. The groups' names of (b) against the file most of their
+  functions come from: 24 the same, 3 close, none different.
+- **Choice: (b) the default** (NAME_SUBSYSTEMS in dread/pilot.py; `--no-subsystems` turns it off).
+- **Why.** The largest gain measured on this build since the votes, for 20 % more ($1.14 against
+  $0.95 a run): a function sees what its whole group shows (the assertion paths of the others, the
+  tasks its group creates), and the names of a subsystem agree (97 % begin with its prefix, against
+  37 % without; 98 % share their file's most common first word, against 68 %). (c) is cheaper but
+  carries the first pass's misreadings into the groups' names (newlib's stdio became a stream layer
+  over UART ports). The cost of consistency: a group that mixes files gives its prefix to the few
+  that do not belong (the demo's printf helpers and strcmp became demo_), and a wrong group name would
+  spread the same way; consistency is not correctness (docs/todo.md, the no-confidence vote).
+- **Undo.** NAME_SUBSYSTEMS = False, or `--no-subsystems` for one run; subsystems.tsv and groups.tsv
+  can be removed (a run with groups names them again).
+- **Status.** Done (dread/pilot.py name_subsystems, subsystem_question, Namer's SUBSYSTEM_LINE,
+  score_subsystems; docs/formats.md). Measured on one build the model knows, whose assertion texts
+  name the source files: not confirmed on firmware it does not know (next: the private real-life
+  test, docs/todo.md Function names).
+
+## Subsystems: functions grouped by what they share and where they lie, not by calls (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Function names need a step that sees a subsystem whole (docs/todo.md, Function
+  names): functions grouped by their code, the group named from all of its evidence at once. Which
+  evidence groups functions as their source files do, and by which method, without names (a
+  stripped image must group as its named build)?
+- **Options, measured** on four FreeRTOS builds (Cortex-M3 GCC -Os made nameless, clang -O2, GCC
+  -O0; RISC-V GCC -Os) against the compile unit of each function in the ELF's debug information.
+  Evidence per kind, the share of its weight that joins two functions of one file: calls 7-17 % (a
+  demo calls the kernel, the kernel the port; also the calls to a callee with a single caller, 12-45
+  %); neighbours in address order 79-87 %; globals both touch, at exactly one address, 90-97 %
+  (coarser, 16-256 byte blocks, joined files: the adjusted Rand index fell by 0.03-0.4); texts 79-100
+  % (an assertion's __FILE__ marks a file); a function's address the other makes (a task it creates)
+  92-100 % (clang's 4 of 9 before its movw + movt were joined, below); device blocks 23-27 % (the
+  core's NVIC, SysTick and SCB share one 4 KiB block). Methods:
+  Louvain's modularity (a small implementation, deterministic: address order, ties to the lower
+  community) on a graph of those edges, a thing k functions share giving each pair 1/(k-1); a final
+  pass of single moves after it (moved 1-3 functions, +0.00-0.004: left out). The adjusted Rand index
+  (1 the files exactly, 0 chance) per build (GCC -Os, clang -O2, GCC -O0, RISC-V): neighbours only
+  0.45, 0.38, 0.45, 0.43; shared things and addresses only 0.79, 0.83, 0.76, 0.38 (71-134 groups,
+  many single functions); both 0.81, 0.78, 0.84, 0.78; calls added with weight 0.3 0.70, 0.58, 0.57,
+  0.48, with 1 0.33, 0.30, 0.36, 0.24. Resolution 1 against 2: 0.77, 0.78, 0.87, 0.80 against 0.81,
+  0.78, 0.84, 0.78 (the same on average), purity 0.70-0.79 against 0.74-0.85, completeness 0.95-0.98
+  against 0.89-0.98; 3 split RISC-V's files (0.55). A grid over the weights of texts, globals, addresses
+  taken and neighbours and the resolution (486 settings) gave a mean over the builds of 0.82 at best
+  and 0.75 for the median setting: flat, so the weights stay 1, with neighbours 0.5. The evidence from the listing alone (literal pools and
+  pc-relative addresses) did as well on ARM but found few of RISC-V's globals (0.44 against 0.78);
+  from the readable C's accesses (dread.relations Facts) it finds them; clang's movw + movt made texts
+  and callbacks invisible to both until the ARM layer joined the pair (wide_constants: clang -O2 0.76
+  to 0.78).
+- **Choice:** Louvain at resolution 2 on shared globals, texts, tables and device blocks, addresses
+  taken (weight 1) and neighbours (0.5), no calls, things more than 64 functions touch left out, the
+  evidence from dread.relations Facts (dread/groups.py); movw + movt pairs among the addresses a
+  function makes (dread.relations materialized, the facts' version 2). No package installed: the
+  graphs are small (networkx would have added a dependency for one function of 80 lines).
+- **Why.** The combination is the best measured on all four builds (0.78-0.84, purity 0.74-0.85,
+  completeness 0.89-0.98: 27-29 groups for 41-53 files); resolution 2 gives the same index as 1 with
+  purer groups, and a group's name needs purity more than completeness (a file split in two gets two
+  names of the same part; two files in one group get a name that fits one of them). Calls are what
+  layers do to each other; they join subsystems, not files. On gizmo (five source files of 50
+  functions) resolution 1 is better (0.40-0.48 against 0.24-0.42: its files are few and large), so
+  the choice holds for builds of FreeRTOS's size, not confirmed elsewhere.
+- **Undo.** The constants of dread/groups.py (SHARED, TAKEN, ADJACENT, CALLS, RESOLUTION) or
+  `dread groups --resolution R`; FACTS_VERSION 1 and wide_constants out of materialized for the facts
+  as before.
+- **Status.** Done (dread/groups.py, `dread groups [--score ELF]`, the bench step `groups`, dread.arch
+  arm wide_constants, dread.relations materialized). Not measured on firmware whose files are not
+  laid out one after the other (link-time optimisation, sections sorted by name).
+
 ## Readable C's ifs: the arm that falls through first, early exits, code repeated only for staircases (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

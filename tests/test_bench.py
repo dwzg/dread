@@ -107,6 +107,23 @@ def test_the_whatcc_step_names_the_toolchain_that_linked_the_build(tmp_path, mon
         assert "| m3-Os | host | - | no | 0 |" in report
 
 
+@needs_gcc
+def test_the_groups_step_scores_the_grouping_against_the_source_files(tmp_path, monkeypatch):
+    """bench's groups step: dread groups on the build against the source file of each function in its
+    debug information (gizmo's five files); a section of the report."""
+    pytest.importorskip("elftools")
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    r = recipe(tmp_path)
+    bench.build(r, "m3-Os", out=lambda *a: None)
+    metrics = bench.measure(r, "m3-Os", steps=("groups",), out=lambda *a: None)
+    g = metrics["groups"]
+    assert g["ran"] and g["files"] == 5 and g["functions"] >= 40 and g["groups"] >= 2, g    # (another
+    # compiler lays the build out otherwise: tests/test_groups.py scores gizmo's checked-in builds)
+    report = open(bench.report(r, out=lambda *a: None)).read()
+    assert "## Groups by code against the source files (dread groups)" in report and "| m3-Os | %d | 5 |" % (
+        g["functions"]) in report
+
+
 def test_a_toolchain_runs_the_compiler_in_its_container(tmp_path, monkeypatch):
     """A build that names a toolchain compiles and links in that image's container, the source
     read-only and the build's directory writable at their own paths, without network; its image is

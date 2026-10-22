@@ -61,6 +61,21 @@ def test_pc_relative_addresses(address, code, isa, expected):
     assert arm.pc_address(insn, isa) == expected
 
 
+def test_movw_with_movt_makes_a_wide_constant():
+    """wide_constants: movw rX then movt rX make one 32-bit constant (clang's way of making an
+    address), also with another pair between them; another write to rX between the two ends it."""
+    arm = Arm(isa="t32", profile="m")
+
+    def insns(*codes):
+        return [arm.decode(bytes.fromhex(c), 0x1000 + 4 * k, "t32") for k, c in enumerate(codes)]
+    movw_r0, movt_r0 = "41f23420", "c5f27860"                # movw r0, #0x1234; movt r0, #0x5678
+    movw_r1, movt_r1 = "41f23421", "c5f27861"                # the same into r1
+    assert arm.wide_constants(insns(movw_r0, movt_r0)) == [0x56781234]
+    assert arm.wide_constants(insns(movw_r0, movw_r1, movt_r1, movt_r0)) == [0x56781234, 0x56781234]
+    assert arm.wide_constants(insns(movw_r0, "0120", movt_r0)) == []        # (movs r0, #1 between)
+    assert arm.wide_constants(insns("41f2a800", "c0f20000", movt_r0)) == [0x10a8]   # (movt #0; a lone movt)
+
+
 def test_thumb_lengths():
     arm = Arm(isa="t32", profile="m")
     assert arm.insn_length(bytes.fromhex("dff8"), "t32") == 4
