@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dread-re"
 version = "0.1.0"
-description = "Dennis' Reverse Engineering And Decompilation: rewrite firmware in C, proven by differential emulation"
+description = "DREAD Reverse-Engineers And Decompiles: rewrite firmware in C, proven by differential emulation"
 requires-python = ">=3.11"
 dependencies = ["unicorn==2.1.4", "capstone>=5,<6"]
 
