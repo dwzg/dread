@@ -16,12 +16,24 @@ the tools know and decided, and runs nothing heavy itself:
   by dread pilot, none yet); a click walks to another function. The functions come at once; the
   memory, texts and structures follow as a worker reads each function's C, nearest first (kept per
   function in BUILD/relations, so a second look costs a lift);
+- the whole program (dread groups --json, /api/program): each group of functions dread groups finds
+  one node, named by the pilot where it named that group, joined by the calls, taken addresses and
+  shared memory between their functions; a group opens into its functions in place, and a small
+  program shows all its functions at once. The groups are found on the first request, by dread groups
+  in a process of its own (its pool forks, which this threaded server must not), and kept in
+  BUILD/groups, so a second look reads them;
+- both graphs lay themselves out as the page draws them: a force simulation with velocities and
+  friction runs over the animation frames, so that nodes overshoot a little and settle, starts from
+  the last positions when the graph changes, keeps running while a node is dragged (its neighbours
+  follow; released, it settles again) and stops when the layout is at rest. With prefers-reduced-motion
+  the page shows the settled layout without the motion. The whole program is drawn on a canvas, its
+  repulsion approximated by Barnes-Hut beyond a few hundred nodes (dread/web/sim.js);
 - search by name, by address and by the text a function refers to;
 - two kinds of change, made as the command line makes them: rename (dread rename, checked and
   undone when the tree contradicts it) and annotate (annotations.txt).
 It reloads by itself when the tables or the tools' records change. The analyses that take a while on
 a large image (callers, regflow, never-returning functions, the text index, the relations' readable
-C) run in the background; the page fills them in when they are ready.
+C, the groups) run in the background; the page fills them in when they are ready.
 
 Safety: the server listens on 127.0.0.1 unless told otherwise, answers only requests addressed to
 that host name (no DNS rebinding), and a change needs the token of the page it served (no other web
@@ -35,6 +47,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -44,8 +57,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dread import target as tgt
 
 WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))      # (dread groups runs from here)
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-          "/app.css": ("app.css", "text/css; charset=utf-8")}
+          "/sim.js": ("sim.js", "text/javascript; charset=utf-8"), "/app.css": ("app.css", "text/css; charset=utf-8")}
 ORIGINS = ("hand", "pilot", "lifted", "refused", "dropped", "original")
 KEYWORDS = {"if", "while", "for", "switch", "return", "sizeof", "do", "else"}
 
@@ -190,6 +204,9 @@ class State:
         from dread.program import Program
         from dread.rename import c_files
         img, p = self.image, self.paths()
+        process = getattr(self, "grouping", None)
+        if process is not None and process.poll() is None:  # (it groups the tables as they were)
+            process.terminate()
         self.program = Program(self.target, img)
         self.generation += 1
         self.verdicts = {r["function"]: r for r in read_tsv(p["verdicts"])}
@@ -235,6 +252,10 @@ class State:
         self.relations = None                               # (call maps, Names) for the graph
         self.known = {}                                     # name -> its facts (dread.relations), made
         self.wanted, self.worker = [], None                 # what the facts worker makes next
+        self.grouped = None                                 # dread groups' record (load()), or why not
+        self.grouper, self.grouping, self.grouped_since = None, None, None     # its thread, process, start
+        self.grouped_from = None                            # "kept" (BUILD/groups) or "dread groups" (run now)
+        self.whole = None                                   # (its inputs' stamp, the program graph made)
         self.start(self.analyse, self.program, self.generation)
 
     def start(self, work, *args):
@@ -255,6 +276,9 @@ class State:
             self.generation += 1
             self.wanted = []
             threads = list(self.threads)
+            process = self.grouping
+        if process is not None and process.poll() is None:      # (dread groups: its thread waits for it)
+            process.terminate()
         deadline = time.time() + timeout
         for thread in threads:
             thread.join(max(0.0, deadline - time.time()))
@@ -472,11 +496,7 @@ class State:
         if "callers" not in self.analyses:
             return {"center": name, "depth": depth, "nodes": [], "edges": [], "pending": [], "waiting": "callers",
                     "status": self.status()}
-        if self.relations is None:
-            names = relations.Names(self.target, self.image, prog)
-            self.relations = (relations.call_maps(prog, self.ready("callers") or {}), names)
-        calls, names = self.relations
-        names.refresh()
+        calls, names = self.call_names()
         origin = self.origin
         out = relations.graph(prog, name, depth, calls, self.known, names,
                               extra=lambda n: {"origin": origin.get(n, "original")})
@@ -484,6 +504,83 @@ class State:
         out["pending"] = out.pop("missing")
         out["status"] = self.status()
         return out
+
+    def call_names(self):
+        """(dread.relations call maps, its Names read again where a table changed), once the callers are
+        found. Called with the lock held."""
+        from dread import relations
+        if self.relations is None:
+            names = relations.Names(self.target, self.image, self.program)
+            self.relations = (relations.call_maps(self.program, self.ready("callers") or {}), names)
+        calls, names = self.relations
+        names.refresh()
+        return calls, names
+
+    def program_graph(self):
+        """The whole program by groups (dread.groups program_graph, docs/formats.md), once the callers
+        are found and dread groups has found the groups ("waiting": what is not yet; the page asks
+        again). The groups are found on the first request (make_groups) and kept for this load; the
+        graph is made again when the names or the pilot's subsystem names change."""
+        from dread import groups, pilot
+        if "callers" not in self.analyses:
+            return {"waiting": "callers", "status": self.status()}
+        if self.grouped is None:
+            if self.grouper is None:
+                self.grouped_since = time.time()
+                self.grouper = self.start(self.make_groups, self.generation)
+            return {"waiting": "groups", "seconds": round(time.time() - self.grouped_since, 1),
+                    "status": self.status()}
+        if isinstance(self.grouped, Exception):
+            return {"error": "dread groups: %s" % self.grouped, "status": self.status()}
+        calls, names = self.call_names()
+        path = pilot.subsystems_path(self.target, self.image)
+        stamp = (names.stamp, mtime(path))
+        if self.whole is None or self.whole[0] != stamp:
+            origin = self.origin
+            made = groups.program_graph(self.program, self.grouped["groups"], self.grouped["touched"], calls, names,
+                                        pilot.read_subsystems(path), extra=lambda n: {"origin": origin.get(n, "original")})
+            self.whole = (stamp, made)
+        return dict(self.whole[1], groups_from=self.grouped_from, status=self.status())
+
+    def make_groups(self, generation):
+        """The groups thread: what dread groups kept for these tables, or dread groups run now in a
+        process of its own (its pool forks; this server has threads), once the register analysis is
+        done (the tool would make it again). close() and a new load end the process."""
+        from dread import groups
+        while True:
+            with self.lock:
+                if generation != self.generation:
+                    return
+                if "flow" in self.analyses:
+                    break
+            time.sleep(0.2)
+        try:
+            record, source = groups.kept(self.target, self.image), "kept"
+            if record is None:
+                source = "dread groups"
+                command = [sys.executable, "-m", "dread.cli", "groups", "--target", self.target.root,
+                           "--image", self.image.name, "--brief"]
+                with self.lock:
+                    if generation != self.generation:
+                        return
+                    self.grouping = process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL,
+                                                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                                               text=True)
+                _, err = process.communicate()
+                if generation != self.generation:
+                    return
+                if process.returncode:
+                    lines = [l for l in (err or "").splitlines() if l.strip()]
+                    raise RuntimeError(lines[-1] if lines else "it ended with %d" % process.returncode)
+                record = groups.kept(self.target, self.image)
+                if record is None:
+                    raise RuntimeError("it kept no groups for these tables (did they change meanwhile?)")
+        except Exception as e:                  # (the page says so)
+            record = e
+        with self.lock:
+            if generation == self.generation:
+                self.grouped, self.grouper, self.grouping = record, None, None
+                self.grouped_from = source if not isinstance(record, Exception) else None
 
     def want(self, names):
         """Facts for these functions next, in this order, instead of what was wanted before (the page
@@ -647,6 +744,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, state.search(query.get("q", "")))
                 if url.path == "/api/graph":
                     return self.reply(200, state.graph(query.get("name", ""), query.get("depth", "1")))
+                if url.path == "/api/program":
+                    return self.reply(200, state.program_graph())
                 if url.path == "/api/status":
                     return self.reply(200, state.status())
         except KeyError as e:

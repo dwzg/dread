@@ -1,6 +1,7 @@
-"""dread gui on a copy of gizmo: the page and its files, the answers of the API, the two kinds of change
-and the refusals (another host name, a change without the page's token); and the C reader that finds
-the definitions."""
+"""dread gui on a copy of gizmo: the page and its files, the answers of the API (the whole program by
+groups among them, found by dread groups in a process of its own), the two kinds of change and the
+refusals (another host name, a change without the page's token); and the C reader that finds the
+definitions."""
 import json
 import os
 import shutil
@@ -64,7 +65,7 @@ def test_the_page_its_files_and_nothing_else(server):
     assert status == 200 and headers["Content-Type"].startswith("text/html")
     assert ('content="%s"' % srv.token).encode() in body and b"{{TOKEN}}" not in body
     assert "script-src 'self'" in headers["Content-Security-Policy"]
-    for path, kind in (("/app.js", "text/javascript"), ("/app.css", "text/css")):
+    for path, kind in (("/app.js", "text/javascript"), ("/sim.js", "text/javascript"), ("/app.css", "text/css")):
         status, headers, _ = request(srv, path)
         assert status == 200 and headers["Content-Type"].startswith(kind)
     assert request(srv, "/../dread.toml")[0] == 404
@@ -159,8 +160,79 @@ def test_the_page_draws_the_relations(server):
     script = request(srv, "/app.js")[2].decode()
     assert "/api/graph" in script and "function relationsHTML" in script and "function layoutGraph" in script
     assert "#/r/" in script                                 # (a function's relations have an address of their own)
+    assert 'import { Sim } from "./sim.js"' in script and "requestAnimationFrame" in script
+    assert "prefers-reduced-motion" in script               # (without motion: the layout at rest at once)
+    assert "/api/program" in script and "function programHTML" in script and "#/p" in script
+    sim = request(srv, "/sim.js")[2].decode()
+    assert "export class Sim" in sim and "class Quadtree" in sim and "document" not in sim
     page = request(srv, "/")[2].decode()
-    assert "<kbd>r</kbd>" in page and "relations" in page
+    assert "<kbd>r</kbd>" in page and "relations" in page and "<kbd>p</kbd>" in page
+
+
+def program(srv, timeout=300):
+    """/api/program once dread groups has grouped the functions (in a process of its own)."""
+    deadline = time.time() + timeout
+    while True:
+        status, g = answer(srv, "/api/program")
+        assert status == 200 and "error" not in g, g
+        if "waiting" not in g:
+            return g
+        assert g["waiting"] in ("callers", "groups") and time.time() < deadline, g
+        time.sleep(0.2)
+
+
+@pytest.mark.slow
+def test_the_whole_program(server):
+    """/api/program: waits for the groups, which dread groups finds and keeps in BUILD/groups; then
+    every function once in its group, the groups labelled (the UART driver's by its prefix), the calls
+    between groups, a group's functions; a second state of the same tables reads the kept groups."""
+    srv, target = server
+    status, first = answer(srv, "/api/program")
+    assert status == 200 and first.get("waiting") == "groups", first
+    g = program(srv)
+    functions = {f["name"]: f for f in g["functions"]}
+    assert set(functions) == {fn.name for fn in srv.state.program.functions}
+    assert all(f["origin"] in gui.ORIGINS for f in g["functions"]) and functions["clamp"]["origin"] == "hand"
+    uart = functions["uart_putc"]["group"]
+    assert {n for n, f in functions.items() if f["group"] == uart} == {"uart_init", "uart_putc", "uart_puts", "uart_getc"}
+    assert g["groups"][uart]["label"] == "uart_" and g["groups"][uart]["functions"] == 4
+    assert sum(gr["functions"] for gr in g["groups"]) == len(functions) == g["counts"]["functions"]
+    assert g["between"] and all(e["a"] < e["b"] and (sum(e["calls"]) or sum(e["refers"]) or e["shared"])
+                                for e in g["between"])
+    index = {f["name"]: i for i, f in enumerate(g["functions"])}
+    assert [index["print_status"], index["uart_puts"], 2] in g["calls"] or \
+        any(c[:2] == [index["print_status"], index["uart_puts"]] for c in g["calls"])
+    from dread import groups
+    assert g["groups_from"] == "dread groups" and os.path.exists(groups.kept_path(target, target.image()))
+    state = gui.State(target, target.image())                       # (the next look reads them: no process)
+    try:
+        deadline = time.time() + 120
+        while True:
+            with state.lock:
+                again = state.program_graph()
+            if "waiting" not in again:
+                break
+            assert time.time() < deadline, again
+            time.sleep(0.1)
+        assert again["groups_from"] == "kept" and again["groups"] == g["groups"]
+    finally:
+        assert state.close()
+
+
+def test_closing_ends_the_grouping(server):
+    """A server closed while dread groups runs for it ends that process and its thread."""
+    srv, _ = server
+    status, first = answer(srv, "/api/program")
+    assert status == 200 and first.get("waiting") in ("callers", "groups")
+    deadline = time.time() + 30
+    while srv.state.grouping is None and srv.state.grouper is not None and time.time() < deadline:
+        time.sleep(0.05)
+    process = srv.state.grouping
+    started = time.time()
+    assert srv.state.close(timeout=60)
+    assert time.time() - started < 30
+    if process is not None:
+        assert process.poll() is not None
 
 
 def test_a_note_goes_into_the_annotations(server):

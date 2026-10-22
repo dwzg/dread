@@ -55,7 +55,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
 | Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order, the functions in groups found from their code alone, the subsystems a reader would see (`dread groups`: shared memory, texts and devices, neighbours in memory); renaming everywhere at once (`dread rename`) | done |
 | Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes | done |
-| Relations (`dread relations`, and in the browser): a function's callers, callees, memory, texts and structures as a graph, each piece marked by how sure its name is | first version |
+| Relations (`dread relations`, and in the browser): a function's callers, callees, memory, texts and structures as a graph, each piece marked by how sure its name is; the whole program as a graph of its groups (`dread groups --json`), a group opening into its functions; both laid out by a force simulation as they are drawn | first version |
 | Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
 | Method documentation and a porting guide | done |
 | Library functions by their bytes (`dread whatcc`): the C library, libgcc and libm of every toolchain image, the host's and archives of one's own matched against an image's functions, the linker's fields masked: which toolchain's libraries it links (ties said as such) and names for a firmware without symbols (calls checked, ambiguous names given as such); ARM (RISC-V's relaxed calls not yet) | done |
@@ -101,6 +101,7 @@ bin/dread whatcc --target ~/dread-bench/freertos/mps2-gcc7-Os   # whose C librar
 bin/dread flat --target examples/gizmo/m3 print_status        # one function to read: names, literals, arguments
 bin/dread callsites --target examples/gizmo/m3 --by 0 gpio_set # who calls it, with which constants
 bin/dread relations --target examples/gizmo/m3 print_status   # what it calls, reads, writes and prints
+bin/dread groups --target examples/gizmo/m3                   # its functions in groups: the subsystems a reader would see
 bin/dread callpair --target OTHER --other examples/gizmo/a32 --seed FUN_08000738=main   # names by call order
 bin/dread rename --target examples/gizmo/m3 beep_on=buzzer_on  # a new name everywhere, or nowhere
 bin/dread pilot --target examples/gizmo/m3 --limit 4          # a language model writes C, the tools decide
@@ -114,7 +115,7 @@ decided: where each function stands (written by hand, by the pilot, lifted, refu
 map of the image, the listing with the instructions the cases ran or missed, the C beside it,
 verdicts and cases, search by name, address and text. It changes nothing but names (through `dread
 rename`) and notes (annotations.txt); everything else is the tools' work. Keys: `/` search, `j` `k`
-lines, `Enter` follow, `n` rename, `;` note, `r` relations, `?` all of them.
+lines, `Enter` follow, `n` rename, `;` note, `r` relations, `p` the whole program, `?` all of them.
 
 A function's relations are the pieces of the puzzle around it, as a graph:
 - its callers above and callees below, to a depth of 1 to 3;
@@ -125,9 +126,19 @@ A function's relations are the pieces of the puzzle around it, as a graph:
 Each piece is coloured by how sure its name is: named, proposed by the pilot, or none yet. A click
 walks to another function; pointing at a piece lights what it joins.
 
+The whole program (`p`) is a graph of the groups `dread groups` finds from the code: each group a
+node, sized by its functions and named by the pilot where it named it, joined by the calls, taken
+addresses and shared memory between them. A click opens a group into its functions; a program of a
+few hundred functions shows all of them at once. Both graphs lay themselves out as they are drawn:
+nodes overshoot a little and settle, a change of the graph morphs from the picture before, and a
+dragged node pulls its neighbours along. With reduced motion asked for, the settled picture shows at
+once. Thousands of nodes stay in motion: the whole program is drawn on a canvas, its repulsion
+approximated by Barnes-Hut.
+
 ![The overview of gizmo in dread gui](docs/images/gui-overview.webp)
 ![A function with its listing, coverage and C](docs/images/gui-function.webp)
 ![The relations of a function: who writes the global that another one reads](docs/images/gui-relations.webp)
+![The whole program of a FreeRTOS build: its functions in the groups dread groups found, one function lit with its callers and callees](docs/images/gui-program.webp)
 
 ### With Claude Code
 

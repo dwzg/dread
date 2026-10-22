@@ -9,6 +9,41 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The graphs' motion and the whole program in dread gui (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The user asked for graphs that lay themselves out "in a nice wobbly way" and for a
+  graph of the whole program. That left several choices open:
+  - what a dragged node does when released;
+  - where the groups are made, and how they are kept;
+  - what a group is called where the pilot has not named it;
+  - what draws thousands of nodes.
+- **Options and choices.**
+  1. A released node: (a) settles again with the others, or (b) stays pinned where it was dropped.
+     **(a)**. The picture stays the balance of its forces, so where a node lies means something. A
+     pinned node would need a way to unpin it, and would bend the layout round a place chosen for no
+     reason the tools know. The function in the middle of the relations glides back to it. With
+     prefers-reduced-motion a dropped node stays where it is, since nothing else moves then. To undo:
+     in app.js's pointerup handlers, leave the node fixed (`sim.fix`) instead of freeing it.
+  2. The groups for the GUI: (a) made one function at a time in the server's facts thread, (b) by
+     `dread groups` in a process of its own, or (c) by a pool forked from the server. **(b)**. The tool
+     computes and the page shows, and its pool uses every core: FreeRTOS cold took 16 s, against an
+     estimated minute or more on one thread (0.1-0.5 s a function). (c) forks a process that has threads;
+     a thread's lock can hang the child, and the suite takes the warning for an error. The groups are
+     kept in BUILD/groups under a key over all of DREAD's code and the image's tables, so a second look
+     costs 0.09 s instead of 2.8 s. The key is conservative: any change of DREAD makes them anew, because
+     what the facts depend on is most of the package.
+  3. A group the pilot has not named: its most common name prefix, unless another group has the same
+     one, in which case `group N` (on FreeRTOS ten demo groups would all have said `prv`); a group of one
+     function, that function's name. Words inside names, weighed by how rare they are elsewhere, would
+     name more groups; that is not tried.
+  4. The relations stay SVG: at most 400 nodes, styled by CSS, with markers. The whole program is a
+     canvas, for thousands of nodes. One simulation serves both (dread/web/sim.js): every pair below
+     600 nodes, Barnes-Hut above. A group's links beyond the 400 heaviest are hairlines: in software
+     raster the thick links between 221 groups had taken the frame rate from 56 to 15 fps.
+- **Status.** In the code (branch gui-wobble).
+
 ## Readable C's structures: what one holds inside another as members (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

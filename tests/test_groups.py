@@ -1,6 +1,8 @@
 """dread groups: Louvain's communities on graphs made by hand, the scores against a true partition,
 and the groups of gizmo's builds: the same every time, every function in one, mostly one source file
-a group (DWARF), the same with every name taken away, and the command line."""
+a group (DWARF), the same with every name taken away, and the command line; the record kept in
+BUILD/groups and its key; the labels; the whole program as a graph of its groups (--json)."""
+import json
 import os
 import shutil
 
@@ -120,3 +122,81 @@ def test_the_groups_use_no_names(tmp_path):
         assert (target is named) != all(fn.name.startswith("FUN_") for fn in program.functions)
         by_entry.append([[program.by_name[n].entry for n in g] for g in groups.find(target, target.image(), program)])
     assert by_entry[0] == by_entry[1]
+
+
+def test_a_name_prefix_and_the_one_a_group_shares():
+    """prefix_of: up to the first underscore, else the first word after a Hungarian mark of one or two
+    letters; nothing for a tool's name or one word. common_prefix: the prefix most names have, when two
+    and a third of them have it."""
+    cases = {"uart_putc": "uart_", "SysTick_Handler": "SysTick_", "__sfp_lock_acquire": "sfp_", "xQueueSend": "Queue",
+             "vTaskDelay": "Task", "uxTaskGetNumberOfTasks": "Task", "prvIdleTask": "prv", "getChar": "get",
+             "main": None, "memcpy": None, "f0": None, "FUN_08000100": None, "sub_1234": None}
+    assert {n: groups.prefix_of(n) for n in cases} == cases
+    assert groups.common_prefix(["uart_init", "uart_putc", "uart_puts", "memcpy"]) == ("uart_", 3)
+    assert groups.common_prefix(["a_x", "b_y", "c_z"]) is None
+    assert groups.common_prefix(["io_a", "io_b"] + ["fn%d" % i for i in range(5)]) is None      # (2 of 7)
+    assert groups.common_prefix(["xQueueSend", "vQueueDelete", "prvUnlockQueue"]) == ("Queue", 2)
+
+
+@pytest.mark.slow
+def test_the_groups_are_kept_under_a_key(m3_copy, monkeypatch):
+    """load() finds the groups once and keeps them; a second load() reads them without reading a
+    function; another resolution, a changed table or --fresh finds them anew."""
+    target, program = m3_copy
+    image = target.image()
+    first = groups.load(target, image, program)
+    assert os.path.exists(groups.kept_path(target, image))
+    assert sorted(n for g in first["groups"] for n in g) == sorted(fn.name for fn in program.functions)
+
+    def no_facts(*args, **kw):
+        raise AssertionError("the facts were read again")
+    monkeypatch.setattr(groups, "evidence", no_facts)
+    again = groups.load(target, image, program)
+    assert again["groups"] == first["groups"] and again["touched"] == first["touched"]
+    assert groups.kept(target, image, resolution=1.0) is None
+    with pytest.raises(AssertionError, match="read again"):
+        groups.load(target, image, program, fresh=True)
+    with open(image.table("annotations"), "a") as f:
+        f.write("0x%x | a note changes a table\n" % program.functions[0].entry)
+    assert groups.kept(target, image) is None
+
+
+@pytest.mark.slow
+def test_the_whole_program_as_a_graph_of_its_groups(m3_copy, capsys):
+    """program_graph(): every function once with its group, each group's functions in address order;
+    the UART driver's group labelled by its prefix, and by the pilot's name once subsystems.tsv names
+    exactly its functions; the calls between groups add up to the calls between their functions; and
+    the command line prints the same graph (--json)."""
+    from dread import pilot
+    target, program = m3_copy
+    image = target.image()
+    record = groups.load(target, image, program)
+    found = record["groups"]
+    g = groups.program_graph(program, found, record["touched"])
+    names = [f["name"] for f in g["functions"]]
+    assert names == [fn.name for fn in sorted(program.functions, key=lambda f: f.entry)]
+    for k, group in enumerate(found):
+        assert [f["name"] for f in g["functions"] if f["group"] == k] == group
+        assert g["groups"][k]["functions"] == len(group) and g["groups"][k]["group"] == k
+    uart = groups.membership(found)["uart_putc"]
+    assert g["groups"][uart]["label"] == "uart_" and g["groups"][uart]["from"] == "prefix"
+    crossing = {}
+    for i, j, sites in g["calls"]:
+        a, b = g["functions"][i]["group"], g["functions"][j]["group"]
+        assert sites >= 1
+        if a != b:
+            key = (min(a, b), max(a, b))
+            crossing.setdefault(key, [0, 0])[0 if a < b else 1] += 1
+    assert {(e["a"], e["b"]): e["calls"] for e in g["between"] if sum(e["calls"])} == crossing
+    assert all(e["a"] < e["b"] for e in g["between"]) and crossing
+    assert g["counts"]["functions"] == len(names) and g["counts"]["groups"] == len(found)
+    pilot.keep_subsystem(target, image, {"group": uart, "members": pilot.members_key(program, found[uart]),
+                                         "name": "Serial port", "prefix": "uart_", "what": "the UART's driver"})
+    named = groups.program_graph(program, found, record["touched"],
+                                 subsystems=pilot.read_subsystems(pilot.subsystems_path(target, image)))
+    assert named["groups"][uart]["label"] == "Serial port" and named["groups"][uart]["from"] == "pilot"
+    assert named["groups"][uart]["what"] == "the UART's driver"
+    capsys.readouterr()
+    assert groups.main(["--target", target.root, "--json"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["groups"][uart]["label"] == "Serial port" and printed["counts"] == named["counts"]

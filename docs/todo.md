@@ -2088,11 +2088,50 @@ tool, the page shows its records; the only changes are the command line's own.
 
   Every label shows up to 60 nodes; beyond that, the 28 best-joined near pieces and the rest on hover
   or zoom. A hub with 40 callers gives an overview where the clusters show, not the names.
-- [ ] v3, next: an overview where a cluster of functions is one node (a subsystem: by call structure,
-  by the files of the ELF where a bench build has them to score it), opened by a click; colours from
-  name confidence rather than name status, and the pilot's no-confidence vote's suspects marked once
-  it exists; calls through pointers from the system run's record (who called whom), so that a task's
-  or a callback's caller shows; the system run's timeline (device logs of both images side by side).
+- [x] v3, second part (asked for by the user on 2026-10-22: "make the nodes of the graph position
+  themselves automatically in a nice wobbly way? Also is there a way to show the graph of the whole
+  application?"):
+  - Both graphs lay themselves out in front of the reader. dread/web/sim.js, a force simulation without
+    the DOM: velocities that friction damps (a node overshoots a little and settles), an energy that
+    decays to rest, every pair's repulsion up to 600 nodes and Barnes-Hut's quadtree beyond. It starts
+    from the last positions and velocities when the graph changes (depth, filters, the C read meanwhile,
+    a walk), so the picture morphs. A dragged node keeps the simulation running and its neighbours
+    follow; released, it settles again (not pinned: the picture stays the forces' balance;
+    docs/decisions.md). The function in the middle glides back to it. The camera follows the motion
+    until the reader zooms or pans. At rest no frame is asked for. With prefers-reduced-motion the layout
+    goes to its rest at once and a dragged node stays where it is dropped.
+  - The whole program (`#/p`, key `p`, the overview's Whole program, a function's Program button, which
+    lights it in its group). Each group of `dread groups` is a node, sized by its functions, its ring the
+    share named and proposed. It is labelled by the pilot's subsystem name where subsystems.tsv names
+    exactly its functions, else by the name prefix a third of its functions share (unless another group's
+    is the same: ten FreeRTOS demo groups all said `prv`), the name of its only function, or `group N`.
+    Groups are joined by the calls (arrows at the callee's end), taken addresses and shared memory and
+    texts between their functions. A click opens a group into its functions in place; its label closes
+    it. A program of at most 500 functions opens with all of them; a larger one with its groups. Drawn on
+    a canvas: the groups are kept apart as discs, an open group's functions pulled together, calls across
+    groups pulling 6 % as much as calls inside one. Beyond the 400 heaviest, a group's links are
+    hairlines. Labels are placed largest first, none over another.
+  - The tool computes, the page draws: `dread groups` keeps its groups and their evidence in
+    BUILD/groups/IMAGE.json under a key over DREAD's code and the image's tables (a second look 0.09 s
+    instead of 2.8 s on a FreeRTOS build), and `--json` prints the whole-program graph (docs/formats.md).
+    The GUI's `/api/program` runs `dread groups` on the first request in a process of its own, because
+    its pool forks and the server has threads, and reads the kept record after that.
+  - Measured in headless Chrome, which here has no GPU and rasterizes in software (a lower bound):
+    - relations: gizmo's print_status (24 nodes) moves for 3.6 s, 8 nodes overshoot by up to 38 px, 60 fps
+      at 0.3 ms of JS a frame; FreeRTOS's xQueueGenericSend at 153, 255 and 261 nodes 60 fps, 1.8-3.2 ms;
+    - the whole program of FreeRTOS GCC -Os (366 functions in 27 groups): all functions 60 fps at 0.8 ms,
+      at rest after 4 s; the groups found cold through the GUI in 22 s (clang -O2, 343 functions);
+    - a synthetic program of 5,000 functions in 221 groups with 14,027 calls: its groups 56 fps at 1.8 ms;
+      all 5,000 functions 21-23 fps at 14 ms of JS a frame, 9 of them the simulation, the rest of a frame
+      the software raster. sim.js alone at 5,000 nodes: Barnes-Hut 6.2 ms a tick against 64 ms for every
+      pair, 0.55 % from the exact forces; at 10,000 nodes 16 ms.
+    Not measured: a browser with its GPU, and an image of thousands of real functions; the layout is
+    the same however long the frames take, but how it reads at that size is not established.
+- [ ] v3, next: colours from name confidence rather than name status, and the pilot's no-confidence
+  vote's suspects marked once it exists; calls through pointers from the system run's record (who called
+  whom), so that a task's or a callback's caller shows; the system run's timeline (device logs of both
+  images side by side); in the whole program, a search that lights functions, and the groups' edges
+  from shared memory down to the functions once a group is open (now only between closed groups).
 
 ## A realistic benchmark: FreeRTOS (asked for by the user, 2026-10-19; before the rest of MSP430)
 

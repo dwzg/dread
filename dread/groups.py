@@ -41,10 +41,29 @@ sorted by section names), and whether a file is the subsystem a reader means (a 
 one-function files make one group, which is what a reader wants and what the score counts as
 impure).
 
+The groups and the evidence they were found from are kept in BUILD/groups/IMAGE.json (load(), since
+2026-10-22) under a key made without reading a function: every module of DREAD (what the facts
+depend on is most of the package, so any change makes them anew), regflow's key (the image's bytes,
+its functions, code ranges and startup), the target's description and the image's tables, the
+resolution and the weights. A second look costs the key (milliseconds) instead of every function's
+lift (2.8 s for a FreeRTOS build on 8 workers, 16 s with no facts kept); --fresh finds them anew.
+
+--json prints the whole program as a graph of its groups (program_graph(), docs/formats.md, "The
+whole-program graph"): each group with a label (the pilot's subsystem name for exactly these
+functions, else the name prefix a third of its functions share where no other group's is the same,
+the name of a group's only function, or "group N") and the naming status of its functions; between
+two groups the calls each way, the addresses of functions taken each way, and the things both touch
+(as the grouping counts them: none that more than MAX_SHARED functions touch); every function with
+its group, and the calls and taken addresses between functions. dread gui draws it (/api/program).
+
     dread groups [--target DIR] [--image NAME] [--resolution R] [--jobs N] [--score ELF] [--brief]
+                 [--json] [--fresh]
 """
 import argparse
 import collections
+import json
+import os
+import re
 import sys
 
 from dread import target as tgt
@@ -58,6 +77,8 @@ CALLS = 0.0
 RESOLUTION = 2.0
 LEVELS = 32             # Louvain's levels at most, and its sweeps over the nodes of one level
 SWEEPS = 100
+KEEP_VERSION = 1        # what load() keeps and how its key is made: bump when either changes
+PREFIX_SHARE = 1 / 3    # a group is labelled by a name prefix that at least this share of its functions has
 
 
 def _facts_one(name):
@@ -225,6 +246,210 @@ def membership(groups):
     return {n: k for k, g in enumerate(groups) for n in g}
 
 
+# ---- kept: the groups of an image, found once ----
+
+def kept_path(target, image):
+    return os.path.join(target.build, "groups", image.name + ".json")
+
+
+def cache_key(target, image, resolution=RESOLUTION, weights=None):
+    """A digest of what the groups are made from, made without reading a function (the module
+    docstring): every Python module of DREAD, regflow's key, the target's description, each table of
+    the image (absent ones too), the resolution and graph()'s weights. Conservative: an edit anywhere
+    in DREAD, or a note in annotations.txt, makes the groups anew."""
+    import hashlib
+    from dread import regflow
+    h = hashlib.sha1(b"dread groups %d\0" % KEEP_VERSION)
+    package = os.path.dirname(os.path.abspath(__file__))
+    for root, dirs, files in os.walk(package):
+        dirs[:] = sorted(d for d in dirs if not d.startswith((".", "__")))
+        for name in sorted(files):
+            if name.endswith(".py"):
+                path = os.path.join(root, name)
+                with open(path, "rb") as f:
+                    h.update(os.path.relpath(path, package).encode() + b"\0" + f.read() + b"\0")
+    h.update(regflow.cache_key(target, image).encode())
+    for key, path in [("dread.toml", target.file)] + sorted((k, image.table(k)) for k in image.tables):
+        h.update(key.encode() + b"\0")
+        try:
+            with open(path, "rb") as f:
+                h.update(f.read())
+        except OSError:
+            h.update(b"(none)")
+        h.update(b"\0")
+    h.update(json.dumps([float(resolution), weights or {}], sort_keys=True).encode())
+    return h.hexdigest()
+
+
+def kept(target, image, key=None, resolution=RESOLUTION, weights=None):
+    """The record load() kept for the image when its key is key (cache_key() of the resolution and the
+    weights when not given), else None: {"groups": find()'s groups, "touched": evidence(), "key",
+    "resolution"}."""
+    try:
+        with open(kept_path(target, image)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if key is None:
+        key = cache_key(target, image, resolution, weights)
+    if not isinstance(data, dict) or data.get("key") != key or data.get("version") != KEEP_VERSION:
+        return None
+    found, touched = data.get("groups"), data.get("touched")
+    if not isinstance(found, list) or not isinstance(touched, dict):
+        return None
+    return {"groups": [list(g) for g in found], "key": key, "resolution": data.get("resolution"),
+            "touched": {n: [tuple(t) for t in things] for n, things in touched.items()}}
+
+
+def load(target, image, program, flow=None, jobs=None, resolution=RESOLUTION, fresh=False, **weights):
+    """kept()'s record, or the groups found now (find(), with the evidence) and kept for the next time
+    (BUILD/groups/IMAGE.json, docs/formats.md); fresh: found now whatever is kept."""
+    key = cache_key(target, image, resolution, weights)
+    if not fresh:
+        got = kept(target, image, key)
+        if got is not None:
+            return got
+    touched = evidence(target, image, program, flow, jobs)
+    found = find(target, image, program, flow, jobs, touched=touched, resolution=resolution, **weights)
+    path = kept_path(target, image)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temp = "%s.%d.tmp" % (path, os.getpid())
+        with open(temp, "w") as f:
+            json.dump({"version": KEEP_VERSION, "key": key, "resolution": resolution, "groups": found,
+                       "touched": {n: [list(t) for t in touched[n]] for n in sorted(touched)}}, f, sort_keys=True)
+        os.replace(temp, path)
+    except OSError:                         # (a build directory that cannot be written: found each time)
+        pass
+    return {"groups": found, "touched": touched, "key": key, "resolution": resolution}
+
+
+# ---- labels ----
+
+_WORDS = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+
+
+def prefix_of(name):
+    """The first word of a function's name, by which a reader groups names: up to its first underscore,
+    with it (uart_putc: uart_, SysTick_Handler: SysTick_); in a name without one, its first capitalised
+    word after a lower-case mark of one or two letters, Hungarian notation's type (xQueueSend: Queue,
+    vTaskDelay: Task, prvIdleTask: prv; numbers are no words). None for a name a tool gave (FUN_...,
+    dread.samecode UNNAMED) and for a name of one word (main, memcpy, f0)."""
+    from dread.samecode import UNNAMED
+    if UNNAMED.match(name):
+        return None
+    core = name.strip("_")
+    if "_" in core:
+        return core.split("_", 1)[0] + "_"
+    words = [w for w in _WORDS.findall(core) if not w.isdigit()]
+    if len(words) > 2 and words[0].islower() and len(words[0]) <= 2:
+        words = words[1:]
+    return words[0] if len(words) > 1 else None
+
+
+def common_prefix(names, share=PREFIX_SHARE):
+    """(prefix, how many names have it) of the prefix (prefix_of) most of names have, when at least two
+    and at least share of them have it (ties: the longer, then the first in the alphabet); else None."""
+    counts = collections.Counter(p for p in map(prefix_of, names) if p)
+    if not counts:
+        return None
+    prefix, n = min(counts.items(), key=lambda kv: (-kv[1], -len(kv[0]), kv[0]))
+    return (prefix, n) if n >= 2 and n >= share * len(names) else None
+
+
+# ---- the whole program as a graph of its groups ----
+
+def program_graph(program, found, touched, calls=None, names=None, subsystems=None, extra=None,
+                  max_shared=MAX_SHARED):
+    """The whole program by groups (docs/formats.md, "The whole-program graph"): {"groups",
+    "between", "functions", "calls", "refers", "counts"}. found: find()'s groups; touched: evidence();
+    calls: dread.relations call_maps(program) (made here when None); names: a dread.relations Names
+    (each function's naming); subsystems: {members key: dread.pilot subsystems.tsv row}
+    (read_subsystems), a group's name where its key is there; extra: name -> more attributes of a
+    function (dread gui: its origin). Functions are numbered in address order; "calls" and "refers"
+    name them by their number."""
+    from dread import relations
+    from dread.pilot import members_key
+    _, down = calls if calls is not None else relations.call_maps(program)
+    names = names if names is not None else relations.Names(program.target, program.image, program)
+    order = sorted(program.functions, key=lambda f: f.entry)
+    index = {fn.name: i for i, fn in enumerate(order)}
+    by_entry = {fn.entry: i for i, fn in enumerate(order)}
+    member = membership(found)
+    functions, naming = [], [collections.Counter() for _ in found]
+    for fn in order:
+        status, proposal = names.function(fn)
+        node = {"name": fn.name, "entry": fn.entry, "size": program.end(fn) - fn.entry,
+                "group": member.get(fn.name), "naming": status}
+        if proposal:
+            node["proposed"] = proposal[0]
+        if extra is not None:
+            node.update(extra(fn.name))
+        functions.append(node)
+        if node["group"] is not None:
+            naming[node["group"]][status] += 1
+    edges = sorted({(index[a], index[b], len(sites)) for a, callees in down.items() if a in index
+                    for b, sites in callees.items() if b in index})
+    refers = sorted({(index[n], by_entry[key]) for n, things in touched.items() if n in index
+                     for kind, key in things if kind == "taken" and key in by_entry and by_entry[key] != index[n]})
+    pairs = {}
+
+    def pair(a, b):
+        key = (min(a, b), max(a, b))
+        if key not in pairs:
+            pairs[key] = {"a": key[0], "b": key[1], "calls": [0, 0], "refers": [0, 0], "shared": {}}
+        return pairs[key], 0 if a < b else 1
+    for kind, links in (("calls", edges), ("refers", refers)):
+        for link in links:
+            ga, gb = functions[link[0]]["group"], functions[link[1]]["group"]
+            if ga is not None and gb is not None and ga != gb:
+                rec, way = pair(ga, gb)
+                rec[kind][way] += 1
+    users = {}
+    for n, things in touched.items():
+        for kind, key in things:
+            if kind in SHARED and n in member:
+                users.setdefault((kind, key), set()).add(n)
+    for (kind, key), who in sorted(users.items()):
+        if len(who) > max_shared:
+            continue
+        gs = sorted({member[n] for n in who})
+        for x in range(len(gs)):
+            for y in range(x + 1, len(gs)):
+                rec, _ = pair(gs[x], gs[y])
+                rec["shared"][kind] = rec["shared"].get(kind, 0) + 1
+    groups = []
+    commons = [common_prefix(group) for group in found]
+    labels = collections.Counter(c[0] for c in commons if c)      # (a prefix of several groups tells none apart)
+    for k, group in enumerate(found):
+        key = members_key(program, group)
+        row = (subsystems or {}).get(key)
+        common = commons[k]
+        if row and row.get("name"):
+            label, source = row["name"], "pilot"
+        elif common and labels[common[0]] == 1:
+            label, source = common[0], "prefix"
+        elif len(group) == 1 and names.function(program.by_name[group[0]])[0] == "named":
+            label, source = group[0], "function"
+        else:
+            label, source = "group %d" % k, "number"
+        first, last = program.by_name[group[0]], program.by_name[group[-1]]
+        groups.append({"group": k, "label": label, "from": source, "members": key,
+                       "name": row["name"] if row and row.get("name") else None,
+                       "prefix": (row.get("prefix") or None) if row else (common[0] if common else None),
+                       "what": (row.get("what") or None) if row else None,
+                       "confidence": (row.get("confidence") or None) if row else None,
+                       "common": {"prefix": common[0], "functions": common[1]} if common else None,
+                       "functions": len(group), "bytes": sum(program.end(program.by_name[n]) - program.by_name[n].entry
+                                                             for n in group),
+                       "first": first.entry, "last": last.entry,
+                       "naming": {s: naming[k][s] for s in ("named", "proposed", "unnamed")}})
+    return {"groups": groups, "between": [pairs[k] for k in sorted(pairs)], "functions": functions,
+            "calls": [list(e) for e in edges], "refers": [list(r) for r in refers],
+            "counts": {"functions": len(functions), "groups": len(groups), "calls": len(edges), "refers": len(refers),
+                       "between": len(pairs)}}
+
+
 def source_files(elf_path):
     """{entry address: source file path} of the functions an ELF's debug information places in a
     compile unit (dread.cmetrics out_of_line); {} without debug information."""
@@ -290,17 +515,24 @@ def main(argv=None):
     parser.add_argument("--score", metavar="ELF",
                         help="compare the groups with the source files of the ELF's debug information")
     parser.add_argument("--brief", action="store_true", help="print the totals only")
+    parser.add_argument("--json", action="store_true",
+                        help="print the whole program as a graph of its groups (docs/formats.md)")
+    parser.add_argument("--fresh", action="store_true", help="find the groups anew, whatever is kept")
     args = parser.parse_args(argv)
     try:
         target, image = tgt.from_args(args)
     except tgt.TargetError as e:
         print("dread groups: %s" % e, file=sys.stderr)
         return 1
-    from dread import regflow
     from dread.program import Program
     program = Program(target, image)
-    flow = regflow.load(target, image, program)
-    groups = find(target, image, program, flow, args.jobs, resolution=args.resolution)
+    record = load(target, image, program, None, args.jobs, args.resolution, fresh=args.fresh)
+    groups = record["groups"]
+    if args.json:
+        from dread import pilot
+        subsystems = pilot.read_subsystems(pilot.subsystems_path(target, image))
+        print(json.dumps(program_graph(program, groups, record["touched"], subsystems=subsystems), sort_keys=True))
+        return 0
     try:
         totals, per = score_groups(program, groups, args.score) if args.score else (None, {})
     except ImportError:

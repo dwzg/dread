@@ -300,7 +300,8 @@ and its first function's address when asked), `functions` (how many), `members` 
 `samples` (`--samples K`: the agreement of the vote over the prefixes, and the K prefixes in the
 order asked, `-` for a question without an answer; empty for a single question), `question` (a digest
 of the question's text). A group of a later grouping with other functions has another key: its old
-line stays and is not used.
+line stays and is not used. `dread groups --json` and `dread gui`'s whole program take a group's name from
+it (since 2026-10-22).
 
 `dread pilot --score TRUTH` writes `names-subsystems.tsv` beside them when the image has both:
 `group`, `functions`, `name`, `prefix`, `file` (the source file most of its functions come from, by
@@ -363,6 +364,47 @@ whose facts its worker still makes), `status`, and an `origin` on each function 
 
 Nodes come in a fixed order (the functions by distance, side and address, then what each touches),
 so the same tables give the same record.
+
+### `BUILD/groups/IMAGE.json`
+
+Written by `dread groups` (since 2026-10-22; dread/groups.py load): the groups and the evidence they
+were found from, so that a second look reads them instead of every function's facts. `{"version": 1,
+"key", "resolution", "groups": [[function names in address order], ...] (numbered by their place,
+which is the order of their first functions' addresses), "touched": {name: [[kind, key], ...]}}`, the evidence
+`things()` gives a function: `global` (an address), `device` (the block's number: its address over
+DEVICE_BLOCK), `text` and `table` (an address), `taken` (another function's entry). The key is a
+digest of every Python module of DREAD, regflow's key, the target's dread.toml, each table of the
+image (absent ones too), the resolution and the weights: any change of these makes the groups anew;
+a file with another key or version is not used. `dread groups --fresh` finds them anew whatever is
+kept.
+
+## The whole-program graph (`dread groups --json`, `dread gui`'s `/api/program`)
+
+`{"groups": [...], "between": [...], "functions": [...], "calls": [...], "refers": [...], "counts":
+{"functions", "groups", "calls", "refers", "between"}}` (dread/groups.py program_graph, since
+2026-10-22). The GUI's answer has `groups_from` (`kept`: read from BUILD/groups; `dread groups`: found
+now) and `status`, and an `origin` on each function; while the groups are being found it is
+`{"waiting": "callers" or "groups", "seconds", "status"}`, and `{"error", "status"}` when dread groups
+failed.
+
+- A group: `group` (its number), `label` and `from` (what named it: `pilot`, the pilot's subsystem name
+  for exactly these functions, by their `members` key in subsystems.tsv; `prefix`, the name prefix at
+  least a third of its functions share when no other group's is the same; `function`, the name of its
+  only function; `number`, `group N`), `name`, `prefix`, `what` and `confidence` (the pilot's, else
+  null; `prefix` is the shared prefix where the pilot gave none), `common` (`{"prefix", "functions"}`
+  or null), `functions` (how many), `bytes`, `first` and `last` (entries), `members` (the key) and
+  `naming` (`{"named", "proposed", "unnamed"}`: how many of its functions each).
+- Between two groups `a` < `b`: `calls` (`[a to b, b to a]`: pairs of a caller and a callee),
+  `refers` (`[a to b, b to a]`: functions whose address the other group's code makes) and `shared`
+  (`{kind: how many}` of the things both groups touch, of the kinds the grouping shares, none that more
+  than MAX_SHARED functions touch). A pair with none of these is not listed.
+- A function: `name`, `entry`, `size`, `group`, `naming` (as the relations graph's) and `proposed` (the
+  pilot's name) where there is one.
+- `calls`: `[caller, callee, call sites]`, `refers`: `[function, function whose address it makes]`,
+  each function by its number in `functions` (address order).
+
+Everything is in a fixed order (groups by number, functions by address, pairs by their numbers), so
+the same tables give the same record.
 
 ### `BUILD/readable-check/IMAGE/verdicts.tsv`
 
