@@ -86,8 +86,18 @@ its sources.
   braces, else if; a loop with nothing in it as while (c);, and do {} while (c) as that, since both
   test c first). On the bench, the 11,061 lifted functions of the 39 builds: gotos 49,093 ->
   12,512 (25 %), lines to 67 % of the lifted C's (the braces count); the gate on the nine builds as
-  for the clean-up (every function it checks). Not yet: a switch (its function keeps its gotos), a
-  loop with exits to several places beyond the one taken for its break.
+  for the clean-up (every function it checks). A switch since 2026-10-22, where its cases only jump
+  or return (the lifters' jump tables; before, a function with one kept all its gotos): a branch of
+  many ways, its cases grouped by target in the order of their blocks, each group's statements up to
+  where the ways meet (left with break) or falling into the next group's where the code goes there,
+  the cases that return last; inside it break leaves the switch and continue still goes to the loop
+  (tests/test_structure.py: 400 random functions with switches, compiled before and after, the same
+  results on random arguments, every switch structured). On the 39 builds' 11,359 lifted functions
+  gotos 12,950 -> 12,228 (FreeRTOS has few switches); on a private firmware's readable C (an old
+  compiler's jump tables, its menus' state machines) 1,818 -> 766: its 29 functions with a switch
+  held 1,078 of them, now 25. The gate accepts the same functions as before on nine builds (gizmo
+  a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; the private firmware's
+  3,536). Not yet: a loop with exits to several places beyond the one taken for its break.
 - [x] **Calls and parameters.** Parameters and a result as dread.regflow and dread callconv measured
   them. Done when the signatures are the measured conventions and the gate accepts as many as
   before. Done 2026-10-21 (dread.tidy trim_calls and params, readable.Context): a call passes the

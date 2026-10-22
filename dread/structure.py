@@ -12,7 +12,12 @@ and the blocks are emitted again from the entry:
 - a conditional jump is `if (...) { ... } else { ... }`, both arms emitted up to the branch's
   immediate post-dominator, where they meet;
 - a block that consists of a return only is emitted again wherever a jump goes to it (a return is
-  not worth a goto).
+  not worth a goto);
+- a switch whose cases only jump or return (the lifters' jump tables: switch (index) { case 0: goto
+  L_x; ... default: return r0; }) is a branch of many ways: its cases grouped by target, in the order
+  of their blocks, each group's statements up to where the ways meet (the switch's immediate
+  post-dominator, left with break) or falling into the next group's where the code goes there.
+  Inside it, break leaves the switch and continue still goes to the loop around it.
 
 Correct whatever is decided: every block is emitted once, under its label, and every transfer of
 control is a fall-through to the block that really follows, a break or continue of the loop it
@@ -68,9 +73,27 @@ def _has_jump(s):
     return False
 
 
+def jump_switch(s):
+    """[(values, goto or return)] of a switch whose every case only jumps or returns (a lifter's jump
+    table), values its case values in order (None for default); None for any other switch."""
+    if not isinstance(s, C.Switch) or not isinstance(s.body, C.Block):
+        return None
+    groups, values = [], []
+    for x in s.body.body:
+        if isinstance(x, C.Case):
+            values.append(x.value)
+        elif isinstance(x, (C.Goto, C.Return)) and values:
+            groups.append((values, x))
+            values = []
+        elif not isinstance(x, C.Note):
+            return None
+    return groups if groups and not values else None
+
+
 def blocks_of(body):
     """(blocks, labels {name: block index}) of a statement list (declarations excluded), or None when it
-    holds something the cut does not handle (a switch, a goto nested in another statement)."""
+    holds something the cut does not handle (a switch other than a jump table, a goto nested in another
+    statement)."""
     blocks = [Block(0)]
     for s in body:
         cur = blocks[-1]
@@ -85,10 +108,14 @@ def blocks_of(body):
         if cur.term is not None:
             cur = Block(len(blocks))
             blocks.append(cur)
-        if isinstance(s, (C.Switch, C.Case)) or (not _is_branch(s) and not isinstance(s, (C.Goto, C.Return)) and
-                                                 _has_jump(s)):
+        groups = jump_switch(s) if isinstance(s, C.Switch) else None
+        if isinstance(s, C.Case) or (isinstance(s, C.Switch) and groups is None) or (
+                not isinstance(s, C.Switch) and not _is_branch(s) and not isinstance(s, (C.Goto, C.Return))
+                and _has_jump(s)):
             return None
-        if isinstance(s, C.Goto):
+        if groups is not None:
+            cur.term = ("switch", s, groups)
+        elif isinstance(s, C.Goto):
             cur.term = ("goto", s.label, s)
         elif _is_branch(s):
             cur.term = ("cond", s.cond, s.then, s)
@@ -121,6 +148,24 @@ def blocks_of(body):
                 b.succ = [labels[t[2].label]] + nxt
             else:
                 b.succ = nxt                # (a conditional return: the other way falls through)
+        elif t[0] == "switch":
+            cases = []                      # (values, target block or None, return or None)
+            for values, x in t[2]:
+                if isinstance(x, C.Goto):
+                    if x.label not in labels:
+                        return None
+                    cases.append((values, labels[x.label], None))
+                else:
+                    cases.append((values, None, x))
+            if not any(None in values for values, _, _ in cases):
+                if b.index + 1 >= n:        # (no default, and nothing after it: not handled)
+                    return None
+                cases.append(([None], b.index + 1, None))  # (no case taken: on after the switch)
+            b.term = ("switch", t[1], cases)
+            b.succ = []
+            for _, target, _ in cases:
+                if target is not None and target not in b.succ:
+                    b.succ.append(target)
         else:
             b.succ = []
     for b in blocks:
@@ -292,11 +337,13 @@ class Emitter:
         return blk.term[0] == "return" and all(isinstance(s, C.Note) for s in blk.stmts)
 
     def jump(self, target, loops, addr=None):
-        """The statements that send control to block target from inside the given loops (innermost
-        last: (header, exit))."""
+        """The statements that send control to block target from inside the given loops and switches
+        (innermost last: (header, exit), a switch's header None: break leaves the innermost of either,
+        continue goes to the innermost loop's header)."""
         if target is None:
             return []
-        if loops and target == loops[-1][0]:
+        loop = innermost_loop(loops)
+        if loop is not None and target == loop[0]:
             return [C.Continue(addr)]
         if loops and target == loops[-1][1]:
             return [C.Break(addr)]
@@ -312,7 +359,8 @@ class Emitter:
         while True:
             if b is None or b == follow:
                 return out
-            if loops and b == loops[-1][0] and b in self.emitted:
+            loop = innermost_loop(loops)
+            if loop is not None and b == loop[0] and b in self.emitted:
                 out.append(C.Continue())
                 return out
             if loops and b == loops[-1][1]:
@@ -347,6 +395,13 @@ class Emitter:
                     return out
                 b = nxt                     # (the loop's top decides: emitted, follow, loop's ends)
                 continue
+            if kind == "switch":
+                stmt, j = self.switch(b, loops)
+                out.append(stmt)
+                if j is None:
+                    return out
+                b = j
+                continue
             # a conditional jump or return
             cond, then, stmt = t[1], t[2], t[3]
             if isinstance(then, C.Return):
@@ -355,7 +410,8 @@ class Emitter:
                 continue
             taken, fall = blk.succ[0], (blk.succ[1] if len(blk.succ) > 1 else None)
             j = shape.join(b)
-            if j is not None and loops and j not in shape.loops.get(loops[-1][0], ()):
+            loop = innermost_loop(loops)
+            if j is not None and loop is not None and j not in shape.loops.get(loop[0], ()):
                 j = None                    # (they meet outside the loop: each arm leaves it on its own)
             arm_t = self.region(taken, j, loops)
             arm_f = self.region(fall, j, loops)
@@ -363,6 +419,38 @@ class Emitter:
             if j is None:
                 return out
             b = j
+
+    def switch(self, b, loops):
+        """(the switch that ends block b, the block after it or None): its cases grouped by target in
+        the order of the targets' blocks, each group's statements up to the next group's target (into
+        which it falls) or up to where all ways meet (left with break); the cases that return last,
+        after a break where the group before them would fall into them."""
+        blk = self.blocks[b]
+        sw, cases = blk.term[1], blk.term[2]
+        shape = self.shape
+        j = shape.join(b)
+        loop = innermost_loop(loops)
+        if j is not None and loop is not None and j not in shape.loops.get(loop[0], ()):
+            j = None                        # (they meet outside the loop: each case leaves it on its own)
+        frames = loops + [(None, j)]
+        groups, returns = {}, []
+        for values, target, ret in cases:
+            if target is None:
+                returns.append((values, ret))
+            else:
+                groups.setdefault(target, []).extend(values)
+        order = sorted(groups)
+        body = []
+        for k, target in enumerate(order):
+            body += [C.Case(v) for v in groups[target]]
+            nxt = order[k + 1] if k + 1 < len(order) else j
+            stmts = self.region(target, nxt, frames)
+            if k + 1 == len(order) and returns and not ends(stmts):
+                stmts.append(C.Break())     # (not into the cases that return)
+            body += stmts
+        for values, ret in returns:
+            body += [C.Case(v) for v in values] + [copy.deepcopy(ret)]
+        return C.Switch(sw.e, C.Block(body), sw.addr), j
 
     def region_loop(self, header, exit_, loops):
         inner = loops + [(header, exit_)]
@@ -379,6 +467,12 @@ class Emitter:
             nxt = blk.succ[0] if blk.succ else None
             out += self.region(nxt, None, inner) if nxt is not None else []
             return out
+        if kind == "switch":
+            stmt, j = self.switch(header, inner)
+            out.append(stmt)
+            if j is not None:
+                out += self.region(j, None, inner)
+            return out
         cond, then, stmt = t[1], t[2], t[3]
         if isinstance(then, C.Return):
             out.append(stmt)
@@ -394,6 +488,14 @@ class Emitter:
         if j is not None:
             out += self.region(j, None, inner)
         return out
+
+
+def innermost_loop(frames):
+    """The innermost loop (header, exit) of the frames, or None: a switch's frame has no header."""
+    for frame in reversed(frames):
+        if frame[0] is not None:
+            return frame
+    return None
 
 
 def negate(cond):
@@ -456,7 +558,7 @@ def flatten_else(stmts):
                     out.append(s)
                     out += rest
                     continue
-        elif isinstance(s, (C.For, C.While, C.DoWhile)):
+        elif isinstance(s, (C.For, C.While, C.DoWhile, C.Switch)):
             s.body = C.Block(flatten_else(_list(s.body)))
         out.append(s)
     return out
@@ -471,7 +573,7 @@ def refine_loops(stmts):
             s.then = C.Block(refine_loops(_list(s.then)))
             if s.orelse is not None:
                 s.orelse = C.Block(refine_loops(_list(s.orelse)))
-        elif isinstance(s, (C.While, C.DoWhile)):
+        elif isinstance(s, (C.While, C.DoWhile, C.Switch)):
             s.body = C.Block(refine_loops(_list(s.body)))
         elif isinstance(s, C.For) and s.init is None and s.cond is None and s.step is None:
             body = refine_loops(_list(s.body))
@@ -534,13 +636,15 @@ def _breaks_inside(stmts):
 
 
 def _continues_inside(stmts):
+    """A continue in the statements that goes to the loop they are in (one inside a switch does)."""
     for s in stmts:
         if isinstance(s, C.Continue):
             return True
         if isinstance(s, C.If):
             if _continues_inside(_list(s.then)) or (s.orelse is not None and _continues_inside(_list(s.orelse))):
                 return True
-        if isinstance(s, C.Block) and _continues_inside(s.body):
+        if isinstance(s, (C.Block, C.Switch)) and _continues_inside(_list(s.body) if isinstance(s, C.Switch)
+                                                                    else s.body):
             return True
     return False
 
@@ -556,7 +660,7 @@ def prune_labels(stmts, wanted):
                 s.then = C.Block(walk(_list(s.then)))
                 if s.orelse is not None:
                     s.orelse = C.Block(walk(_list(s.orelse)))
-            elif isinstance(s, (C.For, C.While, C.DoWhile)):
+            elif isinstance(s, (C.For, C.While, C.DoWhile, C.Switch)):
                 s.body = C.Block(walk(_list(s.body)))
             out.append(s)
         k = 0
@@ -576,7 +680,7 @@ def gotos_in(stmts):
             names.add(s.label)
         elif isinstance(s, C.If):
             names |= gotos_in(_list(s.then)) | (gotos_in(_list(s.orelse)) if s.orelse is not None else set())
-        elif isinstance(s, (C.For, C.While, C.DoWhile)):
+        elif isinstance(s, (C.For, C.While, C.DoWhile, C.Switch)):
             names |= gotos_in(_list(s.body))
         elif isinstance(s, C.Block):
             names |= gotos_in(s.body)
@@ -584,8 +688,8 @@ def gotos_in(stmts):
 
 
 def structure(fn, run=None):
-    """The function's body with its gotos as if/else and loops where they can be; unchanged when the
-    body holds what the cut does not handle (a switch: not yet)."""
+    """The function's body with its gotos as if/else, loops and switches where they can be; unchanged
+    when the body holds what the cut does not handle (a switch other than a jump table)."""
     body = fn.body.body
     k = 0
     while k < len(body) and isinstance(body[k], (C.Decl, C.Note)):
