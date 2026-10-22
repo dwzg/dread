@@ -137,10 +137,34 @@ its sources.
   frame stays as it is, since what the address is handed to may reach anything above it. Raw frame
   accesses left in readable C: FreeRTOS GCC -Os 771 -> 642, fewer on a private firmware too; the
   gate as before on the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V
-  GCC -Os, GCC -O0; the private firmware's waits for its cases made anew by generator 34). Open: that region as a local structure (fields at the offsets
-  the function uses, the address handed out its own or a field's: &stack40.f_8). One object for the
-  whole region keeps what the callee may reach; split at each address that leaves (one local each)
-  it reads better but trusts each callee to stay inside its object. MSP430 (paused):
+  GCC -Os, GCC -O0; the private firmware's waits for its cases made anew by generator 34). That
+  region as one local object since 2026-10-22 (dread.frames, applied after the structure stage and
+  the tables, as dread.shapes' structures are), on xQueueGenericSend `volatile stack36_t stack36;` of
+  `typedef struct { u32 f_0; u32 f_4; u32 f_8; u8 pad_c[24]; } __attribute__((packed, aligned(4))) stack36_t;`
+  above the function (a typedef: dread.cparse reads no structure in a declaration, and readable C
+  stays the dialect): a field at each offset the function accesses (offsets from the lowest address
+  that leaves), bytes between, up to sp0, aligned as the region's start is in the lifted C; the
+  accesses are members (stack36.f_0), the addresses handed out a field's or the object's
+  ((u32)&stack36.f_4, (u32)&stack36 + 4; with an index added, the object's). Only where every access
+  in the region has a constant offset and one type and none overlaps, and the frame is the lifters'
+  array (a wrapped function's is the real stack: printf, sprintf); else the function stays as it was
+  (GCC -Os vPolledQueueConsumer and Producer: a push's word below the region reaches into it). One
+  object for the whole region: split at each address that leaves it would read better but trust each
+  callee to stay inside its piece. Volatile, as the raw accesses were (docs/decisions.md). Regions:
+  FreeRTOS GCC -Os 76 functions, clang -O2 75, RISC-V GCC -Os 44, GCC -O0 264 (every frame: its frame
+  pointer leaves, r7 = (u32)&stack56, and the accesses through r7 stay as they were), gizmo 5 on each
+  build. Raw frame accesses left in readable C (`\(sp0 - \d+` in the views of the lifted functions):
+  FreeRTOS GCC -Os 633 -> 46 (the 642 above was an earlier state of the same copy), clang -O2 502 -> 23,
+  RISC-V GCC -Os 510 -> 93, GCC -O0 35 -> 27; the gate accepts the same functions as before on the
+  eight builds. What is left: the wrapped printf and sprintf, and frames no address leaves that
+  frame_locals declines: a call through a pointer hands the frame's words on as stack arguments, slots
+  nothing wrote (newlib's __sflush_r and _fwalk_sglue, prvReloadTimer), and on RISC-V a slot's name is
+  taken by a saved register (sp0 - 4 is s4, sp0 - 8 s8: prvSemaphoreTest,
+  prvAddCurrentTaskToDelayedList, 7 functions). Open: frame addresses that the lifter's ldrd, strd,
+  ldm and stm blocks keep in a variable (a_2 = sp0 - 40; *(volatile u32 *)a_2 = ...) count as leaving
+  (78 such in 35 functions on GCC -Os), and so does GCC -O0's frame pointer: propagated into their
+  accesses in dread.tidy, before frame_locals, most of those frames would be plain variables (it
+  changes the C the names and types tables were made for). MSP430 (paused):
   ulTaskGenericNotifyTake's readable C makes every case stack-dependent (refused, so it stays
   lifted), not traced; its critical sections are asm on the real stack beside the lifted frame.
 - [ ] **Types.** The structures behind pointers, as C structures the readable C uses (p->f_58). Done

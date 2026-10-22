@@ -9,6 +9,33 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The frame that addresses handed out reach: one volatile object of a typedef'd structure (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** dread.frames writes the part of a frame from the lowest address that leaves up to
+  sp0 as one local structure (one object for the whole region, not one per address that leaves:
+  that would trust each callee to stay inside its piece; docs/todo.md, Variables). How is it
+  declared: a plain object or a volatile one; its type inside the function or above it?
+- **Options.** (a) plain: reads like C written by hand, and a compiler may keep a member in a
+  register between calls; (b) volatile, as the raw accesses were. And (1) an anonymous structure in
+  the declaration, its fields on one line (what a view, the text dread pilot's questions show, would
+  have beside the object); (2) a typedef above the function, a field per line, the object declared
+  with its name (a view shows the object only, as for dread.shapes' structures).
+- **Choice: (b) and (2).** The builds compile with strict aliasing (-Os and -O2 without
+  -fno-strict-aliasing), and the function's own pointers into the region access it with their own
+  types (the lifter's ldrd and strd blocks: a_2 = (u32)&stack40.f_0; *(volatile u32 *)(a_2 + 4) = 0u;
+  a buffer walked with byte accesses): a compiler may carry a plain member across such an access of
+  another type. Volatile keeps every access one and in order, as the raw frame accesses were, at no
+  cost the lifted C did not have. (1) was tried first: dread.cparse reads no structure in a
+  declaration, and readable C is to stay C of the lifters' dialect (tests/test_readable.py parses it
+  again); it reads typedefs (the MSP430 lifter's dread_w32), so (2) keeps that. A field per line also
+  suits the largest region so far, 35 fields (FreeRTOS's prvTestMasterTask, GCC -Os).
+- **Undo.** dread/frames.py: without "volatile " in the object's declaration for (a); the typedef is
+  Region.typedef. The hook is one call in dread.readable._named.
+- **Status.** Done; the gate accepts the same functions as before on the eight builds (docs/todo.md,
+  Variables).
+
 ## The C standard of DREAD's own C: gnu11 (2026-10-22)
 
 **Asked by the user** ("What pinned C standard would you recommend?"), **decided by recommendation**

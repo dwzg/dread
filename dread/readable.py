@@ -11,7 +11,9 @@ readable table (config/readable.txt), and dread recon builds them from readable 
 are left to the pilot (dread pilot).
 
 Stages so far: the clean-up (dread.tidy: what only the machine needed out, compares and their
-branches as comparisons), then the structure (dread.structure: gotos as if/else and loops).
+branches as comparisons), then the structure (dread.structure: gotos as if/else and loops). After
+them and the tables (_named), the part of the frame that addresses handed out reach becomes one local
+structure (dread.frames: stack36.f_4, (u32)&stack36.f_4).
 
 Where the image with lifted C alone already differs from the original in the scenarios (the system
 run's clock on some builds), the scenarios decide nothing and the function-level runs decide alone;
@@ -283,8 +285,9 @@ def print_file(tree, fn, stages=None):
 
 def _named(name, text, stages, context=None):
     """(tree, function, stages) of the readable C with the tables applied: the globals' names, the
-    structures, the variables' names (each only for the C it was made for); None when the lifted C is
-    not the dialect. stages: [] when the function keeps fixed registers (left as the lifter wrote it)."""
+    structures, the variables' names (each only for the C it was made for), then the frame's region
+    that addresses handed out reach as one object (dread.frames); None when the lifted C is not the
+    dialect. stages: [] when the function keeps fixed registers (left as the lifter wrote it)."""
     made = readable_tree(name, text, stages, context)
     if made is None:
         return None
@@ -302,6 +305,8 @@ def _named(name, text, stages, context=None):
             shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
         if entry:
             naming.apply(tree, fn, entry, made_for)     # (only for the C it was made for: its digest)
+        from dread import frames            # (the frame that addresses handed out reach as one object:
+        frames.frame_struct(tree, fn)       # last, on the names the table gave)
     return tree, fn, stages
 
 
