@@ -184,8 +184,15 @@ its sources.
   structure with a pad of 4 GB: + 0xffffffffu is - 1, offsets are signed now). Open: a pointer to a
   field inside a structure (a task's xStateListItem at 4) stays an integer; a list reached through an
   item's pointer field is a kind of its own (joining kinds through pointer fields would join what a
-  void * field holds, an item's owner: tasks and timers); an address computed once and used for two
-  accesses (an ldrd's a_1 = r0 + 4) keeps the raw accesses; embedded structures as members. Fields
+  void * field holds, an item's owner: tasks and timers); embedded structures as members. An address
+  computed once from a variable (an ldrd's, ldm's or stm's base, a_1 = r0 + 4, the frame's a_1 = sp0
+  - 16 too) and read by a few statements on one straight path behind it, the variable unchanged on
+  the way, is written into each of them with its offsets folded since 2026-10-22 (dread.tidy
+  addresses): the accesses through it are members (r1 = r0->f_4; r2 = r0->f_8 where uxListRemove's
+  ldrd read through a_1), and frame accesses through it frame slots the frame passes make variables.
+  Such temporaries in readable C: FreeRTOS GCC -Os 173 -> 4, clang -O2 229 -> 4; raw frame accesses
+  on GCC -Os 642 -> 308 (functions with any 84 -> 57). The gate as before on the eight builds. Left:
+  the addresses of the lifter's stack-argument variables (a_1 = (u32)&s0). Fields
   typed as pointers since 2026-10-22 (the plan's pointers part): a word field that every object of
   its kind that points somewhere from it points to the base of one structure is declared volatile
   struct s_N * (forward declarations first); a load of it into a variable of that structure needs

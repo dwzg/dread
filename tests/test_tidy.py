@@ -321,3 +321,50 @@ def test_a_compare_against_minus_one_names_the_constant():
     tidy.tidy(fn)
     text = cparse.unparse(fn, notes=False)
     assert "if (r0 != 0xffffffffu) goto L_c;" in text, text
+
+
+LDRD = """/* f at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+u32 f(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0;
+    u32 n = 0, z = 0, c = 0, v = 0;
+    (void)n; (void)z; (void)c; (void)v; (void)r12;
+    { u32 a = r0 + 4u; r1 = *(volatile u32 *)a; r2 = *(volatile u32 *)(a + 4u); }  /* 0: ldrd r1, r2, [r0, #4] */
+    r0 = r1 + r2;  /* 4: adds r0, r1, r2 */
+    return r0;  /* 6: bx lr */
+}
+"""
+
+
+def test_an_address_computed_once_is_written_into_its_uses():
+    """The lifters' base of an ldrd (a_1 = r0 + 4) read by the two loads behind it, r0 unchanged:
+    the loads read through r0 with one constant offset each, which the types write as members. When
+    the first load writes the base (ldrd r0, r1, [r0, #4]), the second still reads the old one: the
+    variables split first, so the loaded value is a variable of its own."""
+    fn = cparse.parse(LDRD).function("f")
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "a_1" not in out and "(r0 + 4)" in out and "(r0 + 8)" in out, out
+    overwritten = LDRD.replace("r1 = *(volatile u32 *)a; r2 = *(volatile u32 *)(a + 4u);",
+                               "r0 = *(volatile u32 *)a; r1 = *(volatile u32 *)(a + 4u);").replace(
+        "r0 = r1 + r2;", "r0 = r0 + r1;")
+    fn = cparse.parse(overwritten).function("f")
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "(r0 + 8)" in out and "r0 = *(volatile u32 *)(r0 + 4)" not in out, out
+
+
+def test_a_frame_address_computed_once_leaves_frame_slots_the_frame_pass_sees():
+    """An stm into the frame through a base the lifter computed once (a_1 = sp0 - 16): written into
+    its uses, the stores are frame slots at constant offsets, and the frame pass makes them variables."""
+    text = FRAME.replace("    *(volatile u32 *)(sp0 - 8) = r1;  /* 0: str r1, [sp, #8] */\n",
+                         "    { u32 a = sp0 - 16u; *(volatile u32 *)a = r1; *(volatile u32 *)(a + 4u) = r2; }"
+                         "  /* 0: stm r3, {r1, r2} */\n")
+    text = text.replace("    r1 = *(volatile u32 *)(sp0 - 8);  /* 6: ldr r1, [sp, #8] */\n",
+                        "    r1 = *(volatile u32 *)(sp0 - 16) + *(volatile u32 *)(sp0 - 12);  /* 6: ldr */\n")
+    fn = cparse.parse(text).function("h")
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "a_1" not in out and "sp0" not in out and "frame" not in out, out
+

@@ -821,6 +821,85 @@ def spread(fn):
     return False
 
 
+def _offset_of_variable(e):
+    """Whether e is a variable plus or minus a constant (the frame's sp0 too: its accesses then are
+    frame slots the frame passes see)."""
+    if isinstance(e, C.Cast) and e.type == "u32":
+        e = e.e
+    if isinstance(e, C.Binary) and e.op in ("+", "-") and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
+        e = e.l
+        if isinstance(e, C.Cast) and e.type == "u32":
+            e = e.e
+        return isinstance(e, C.Name)
+    return False
+
+
+def _fold_offsets(e):
+    """e with (x + c1) + c2 written x + (c1 + c2) (minus as a negative constant) throughout, so that
+    an access through a substituted address has one constant offset from its variable."""
+    if isinstance(e, C.Binary):
+        left, right = _fold_offsets(e.l), _fold_offsets(e.r)
+        if e.op in ("+", "-") and isinstance(right, C.Num) and isinstance(right.value, int) and \
+                isinstance(left, C.Binary) and left.op in ("+", "-") and isinstance(left.r, C.Num) and \
+                isinstance(left.r.value, int):
+            k = (left.r.value if left.op == "+" else -left.r.value) + (right.value if e.op == "+" else -right.value)
+            if k == 0:
+                return left.l
+            return C.Binary("+" if k > 0 else "-", left.l, C.Num("%d" % abs(k)))
+        e.l, e.r = left, right
+        return e
+    for slot in type(e).__slots__:
+        v = getattr(e, slot, None)
+        if isinstance(v, C.Expr):
+            setattr(e, slot, _fold_offsets(v))
+        elif isinstance(v, list) and any(isinstance(x, C.Expr) for x in v):
+            setattr(e, slot, [_fold_offsets(x) if isinstance(x, C.Expr) else x for x in v])
+    return e
+
+
+def _reads_everywhere(s, name):
+    """The reads of name in statement s and every statement inside it."""
+    n = sum(reads_count(e, name) for e in _stmt_all_exprs(s) if e is not None)
+    return n + sum(_reads_everywhere(inner, name) for inner in _inner(s))
+
+
+def addresses(fn):
+    """An address computed once from a variable (the variable plus or minus a constant: the base the
+    lifters give an ldrd, ldm or stm, a_1 = r0 + 4) and read by a few statements on one straight path
+    behind it, nothing on the way writing that variable: written into each of them, so that an access
+    through it reads as one through the variable (r0 + 8 once the constants are folded), which the
+    types write as a member (r0->f_8)."""
+    g = Graph(fn)
+    reach = g.reaching()
+    readers = {}
+    for m in g.nodes:
+        for v in m.reads:
+            readers.setdefault(v, []).append(m)
+    for n in g.nodes:
+        s = n.stmt
+        if not is_assign(s) or s.e.target.id not in g.scope:
+            continue
+        v, value = s.e.target.id, s.e.value
+        if not _offset_of_variable(value) or reads_count(value, v):
+            continue
+        uses = [m for m in readers.get(v, ()) if n.index in (reach[m.index].get(v) or ())]
+        if not uses or len(uses) > 8 or any(reach[m.index].get(v) != {n.index} or m.index <= n.index
+                                             for m in uses):
+            continue
+        if any(_reads_everywhere(m.stmt, v) != reads_count_stmt(m.stmt, v) for m in uses):
+            continue                        # (a read the substitution would not reach: an arm's, an asm's)
+        last = max(m.index for m in uses)
+        if not _path_clear(g, n.index, last, _reads_of(value) | {v}, uses):
+            continue
+        for m in uses:
+            for get, put in stmt_exprs(m.stmt):
+                if reads_count(get(), v):
+                    put(_fold_offsets(substitute(get(), v, value)))
+        del fn.body.body[n.index]
+        return True
+    return False
+
+
 def _in_call_argument(s, v):
     """Whether statement s reads v as (part of) an argument of a call."""
     for get, _ in stmt_exprs(s):
@@ -1309,6 +1388,7 @@ PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("dead", d
           ("locals", frame_locals),
           ("propagate", propagate),
           ("selects", selects), ("merge", merge_ifs), ("fold", fold), ("spread", spread),
+          ("addresses", addresses),
           ("expressions", tidy_expressions),
           ("values", values),
           ("conditions", conditions), ("literals", literals),
