@@ -428,6 +428,17 @@ its sources.
   an asm block is one node of the flow graph, every value of a5 in it one (vTaskPrioritySet), which
   made a task block's item value a pointer to a task block, so uxTaskResetEventItemValue's result one
   that holds items, and the event group that met it held an item and its list at 4; not taken further.
+- [ ] **Structures of globals.** Static data reached at fixed addresses, one macro a field
+  (g_2000004c_u32, *(volatile u8 *)0x2000a0f1), grouped into the structures it was declared as:
+  `g_state.mode` for the fields one base and its offsets reach in several functions. Found on the
+  private real-life test (2026-10-23): its compiler keeps most data in static structures and reloads
+  every pointer from memory, so the structures behind pointers (Types) found few there, while most of
+  its readable C is accesses to such fields. Code decides it: the accesses through one base plus
+  constant offsets in each function, the bases several functions share, the extent up to the next base
+  or a table's symbol. The hard part: a section anchor (GCC reaches unrelated globals from one base:
+  gizmo's dispatch table and FreeRTOS's kernel variables) is not a structure; measured against
+  FreeRTOS's debug information (which globals are one structure, which are separate variables near
+  one another), and the gate keeps every access one volatile access of the same width and address.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
   Thought 2026-10-21: plain accesses let GCC merge and hoist loads, and a loop that waits for a flag
