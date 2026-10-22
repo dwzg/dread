@@ -541,7 +541,8 @@ its sources.
     prvLowPriorityMutexTask at 46 against 1 (124 statements with its three inlined functions).
   - Cortex-M IT blocks as one if per instruction (`if (z) r2 = 0; if (!z) r1 = g_..;`) and the flag
     as a carry expression (`z = (u32)((u64)r0 + (u32)~g_.. + 1) == 0`, for r0 == g_..): GCC -Os's
-    xAreStreamBufferTasksStillRunning, 65 statements against 15 (its two loops unrolled too).
+    xAreStreamBufferTasksStillRunning, 65 statements against 15 (its two loops unrolled too). One
+    if/else since 2026-10-22 (the next item).
   - Loops the compiler unrolled (clang -O2's vQueueAddToRegistry, 96 statements against 13) and
     callees it inlined (vInterruptMutexMasterTask, 169 against 8, 66 with its two inlined ones).
   - RISC-V's yield (ecall) with all eight argument registers bound in and out, 17 statements each:
@@ -549,6 +550,71 @@ its sources.
   This closes the clean-up's and the structure's "in the bench report" (statements against the
   lifted C's and the source's, gotos left per build). Not established: that the readable C reads
   well; only how it compares in size and nesting with what was compiled.
+- [x] **IT blocks as if/else.** Readable C of what a compiler made with IT blocks (Thumb-2's
+  conditional execution) as the if/else it was, its flags as comparisons. Done 2026-10-22 (dread.tidy,
+  docs/decisions.md). What was left on main with the structure rework in: the lifters write one
+  conditional block per instruction on the flags, and (1) merge_ifs joined two only when adjacent and
+  on the same condition: the IT instruction's own note between them (`/* 7164: ite eq */`) or a load
+  GCC scheduled between two IT blocks kept them apart, and a condition's negation (the block's else
+  part) never joined; (2) a flag several ifs read stayed a variable in its carry arithmetic, since the
+  conditions pass looked at branches' and selects' conditions only and spread takes no value that
+  reads memory; (3) dead and fold saw a conditional block as one statement: a register an arm set for
+  its store stayed, the store's address no constant, the registers a call zeroed live; (4) a
+  conditional compare (`cmp r0, r5; it ne; cmpne r4, r1`) stayed an instruction's block inside the
+  if, its unread flags with it; (5) no candidate paired a compare's operand that is neither a
+  variable nor a load (`adds r5, r2, #3; cmp r0, r5`: r0 against r2 + 3). Now: a run of conditional
+  blocks on one pure condition or its negation is one if/else while the arms write nothing the
+  condition reads (the notes in front; no label, goto, break or continue in the arms, no return in an
+  arm that takes more), and BETWEEN (1) statement without a call between two of them goes into both
+  arms (docs/decisions.md: 5840 statements on GCC -Os with none, 5756 with one, 5759 with two); dead
+  and fold work on the blocks spread out (flat_view, which now knows the list that holds each
+  statement), fold on the body first as before (on the spread-out blocks alone it no longer folded a
+  load over a conditional block: three clang -O2 functions grew); an arm left empty goes; flatten
+  spreads an instruction's block inside an arm and chains makes `z = A; if (!z) z = B;` the
+  `z = A || B` it computes; conditions rewrites every truth value (a flag's value, the operands of
+  && || !, a select's condition in a return, statements inside arms), with the compare's own operands
+  among the candidates (tidy.compared); values rewrites returns and statements in arms too (strcmp's
+  `return r2 - r3;`); `x = x` goes (also RISC-V's reloads of spilled registers); a mask that keeps a
+  select of constants whole goes. Found on the way: fold folded a value with an effect into the right
+  operand of && or || or an arm of ?:, where it runs on some paths only (chains made `z = r0 == r5 ||
+  r4 == r1`, and the load of r1, made before the compare on every path, went into the ||); a select
+  could take a folded load the same way before. It folds no effect there now (tidy._read_maybe). The
+  cases compare peripheral accesses in order but not loads of RAM, so the gate would not have seen
+  such a load skipped; it was found by reading the output.
+  Statements of the readable functions matched to their source (the same functions as on main;
+  sums, and per function readable / source, median (quartiles)):
+
+  | build | statements, main -> now (source; with inlined) | ratio main -> now | with inlined, main -> now |
+  |---|---|---|---|
+  | GCC -Os | 6315 -> 5756 (4049; 4971) | 1.29 (1.00-1.60) -> 1.22 (1.00-1.46) | 1.20 (1.00-1.45) -> 1.14 (1.00-1.33) |
+  | clang -O2 | 5852 -> 5611 (3087; 4445) | 1.33 (1.07-1.84) -> 1.30 (1.00-1.79) | 1.22 (1.00-1.50) -> 1.15 (1.00-1.43) |
+  | GCC -O0 | 4837 -> 4827 (3972; 4011) | 1.17 (1.00-1.36) -> 1.17 (1.00-1.36) | 1.14 (1.00-1.33) -> 1.14 (1.00-1.33) |
+  | RISC-V GCC -Os | 5204 -> 5191 (3294; 3793) | 1.25 (1.00-1.69) -> 1.25 (1.00-1.67) | 1.20 (0.91-1.55) -> 1.20 (0.91-1.55) |
+
+  On GCC -Os xAreStreamBufferTasksStillRunning 65 -> 28 (source 15), xAreMessageBufferAMPTasks-
+  StillRunning 19 -> 12 (5), xAreRecursiveMutexTasksStillRunning 37 -> 16 (13), vInterruptMutex-
+  MasterTask 157 -> 81 (8; 66 with what was inlined), prvHighestPriorityPeekTask 70 -> 30 (25); on
+  clang -O2, which branches more, the same three 31 -> 29, 17 -> 13, 14 -> 14, xQueueGiveFromISR
+  74 -> 54 (31). No function grew on any of the four builds; gotos as before, five GCC -Os
+  functions a level shallower (four of them straight-line now). The types stage finds fewer
+  structures (GCC -Os 55 in 96 functions
+  against 58 in 98): a constant address that sat in a register typed as a pointer is now the access's
+  own. The gate accepts the same functions as on main on the eight builds (gizmo a32 35, m3 36, m4
+  44, rv32 31; FreeRTOS GCC -Os 316, clang -O2 275, RISC-V GCC -Os 251, GCC -O0 353), in 78, 86, 36
+  and 270 s against main's 77, 72, 33 and 269 s (the cases cached; clang -O2's beside the test
+  suite). tests/test_tidy.py: each shape on lifted C (an IT block's if/else with its loads per
+  path, merging stopped by a write of the condition or a branch, the load between two IT blocks, a
+  conditional compare whose loads stay unconditional, a flag read twice, the mask), and 300 random
+  functions of IT-block-like code (compares, conditional blocks on every condition an IT block tests,
+  conditional compares, statements and calls between them, the calls logging their order and
+  arguments), cleaned up, compiled with the host's cc beside the originals and called with random
+  arguments: the same results and calls.
+  Left: a flag read across a call, or by a select and an if, stays a variable (z = r0 == r1; 13 such
+  assignments in 11 functions on GCC -Os, 9 in 8 on clang -O2); a select the selects pass made from
+  an IT block's two moves before merging sits beside the if (`r0_1 = z ? 0x0u : 0x1u;`); ternaries of
+  truth values are not yet the truth values they are (`r4_1 == r1_1 ? 0x0u : (!(r0 == r5 || r4 == r1)
+  ? 0x1u : 0x0u)`), and a negated || of equalities is written with De Morgan only where the structure
+  stage negates it (`if (!(r1 == 0 || r1_1 == 0))` beside `if (r1 != 0 && r1_2 != 0)`).
 
 Limits known up front: readable C compiles to other code, often larger than the original's slot, so
 more functions need freed space (the overlay's placement report says where); a function whose lifted

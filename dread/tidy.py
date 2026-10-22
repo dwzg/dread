@@ -13,8 +13,27 @@ the same.
 - propagate: a variable read where a constant or a copy of another variable is the only value that
   reaches it (and that variable is not written in between);
 - fold: a temporary written once and read once, right behind its write, into its reader; one whose
-  value has an effect only where the reader evaluates it before any effect of its own;
+  value has an effect only where the reader evaluates it before any effect of its own, and on every
+  path (not into the right of && or ||, nor an arm of ?:);
 - declarations nobody uses, and initial values nobody reads, go.
+
+Conditional execution (Thumb-2's IT blocks, ARM's conditional instructions) comes from the lifters as
+one conditional block per instruction on the flags (if (z) { r0 = 0; } if (!z) { r0 = *(r1); }),
+with the IT instruction's note between. What makes such code one if/else again:
+
+- merge (merge_ifs): a run of conditional blocks on one pure condition or its negation is one
+  if/else, as long as nothing in the arms writes what the condition reads; the notes go in front of
+  it, and up to BETWEEN statements without a call between two such blocks (a load GCC scheduled
+  between two IT blocks) go into both arms, where they ran on either path;
+- dead and fold see inside the arms (flat_view: the blocks spread out), so a register an arm sets
+  for its store alone goes, and the store takes the constant; an arm left empty goes (empty_arms);
+- flatten also spreads an instruction's block inside an arm (a conditional compare, cmpne), and
+  chains makes z = A; if (!z) z = B; the z = A || B it computes;
+- conditions rewrites every truth value, not only a branch's condition: a flag several statements
+  read keeps its variable but is a comparison (z = r0 == r3), the operands of && || ! where the whole
+  has no smaller form, a select's condition in a return; candidates include the lifters' compare
+  operands themselves (cmp r0, r5 after adds r5, r2, #3: r0 == r2 + 3); values also rewrites a
+  return's value and statements inside arms (strcmp's r2 - r3).
 
 Statements keep the instruction they came from (their addr); a statement folded into another takes
 its reader's. Functions whose lifted file asks for registers fixed or kept (dread.build's header
@@ -295,37 +314,50 @@ def rename_in(s, old, new):
 
 def flatten(fn):
     """An instruction's block into the body: its variables renamed to fresh ones declared at the top,
-    their initial values assignments where the declarations stood."""
-    body = fn.body.body
+    their initial values assignments where the declarations stood. Also such a block inside a
+    conditional block's arm (an IT block's conditional compare, cmpne r4, r1: if (!z) { { u32 x = r4,
+    y = r1; ... z = r == 0; ... } }), into that arm."""
     taken = all_names(fn)
     hoisted = []
-    out, changed = [], False
-    for s in body:
-        if not isinstance(s, C.Block) or any(isinstance(x, C.Decl) and any(d.asm or d.dims or d.ptr for d in x.items)
-                                             for x in s.body) or any(isinstance(x, (C.Label, C.Case)) for x in s.body):
-            out.append(s)
-            continue
-        inner = [C.Block(list(s.body))]
-        renames = []
-        for x in s.body:
-            if isinstance(x, C.Decl):
-                for d in x.items:
-                    renames.append((d.name, fresh(fn, d.name, taken), x.specs))
-        block = inner[0]
-        for old, new, specs in renames:
+    changed = False
+
+    def spread(stmts):
+        nonlocal changed
+        out = []
+        for s in stmts:
+            if isinstance(s, C.If):
+                for arm in (s.then, s.orelse):
+                    if isinstance(arm, C.Block):
+                        arm.body[:] = spread(arm.body)
+            if not isinstance(s, C.Block) or any(isinstance(x, C.Decl) and any(d.asm or d.dims or d.ptr for d in x.items)
+                                                 for x in s.body) or any(isinstance(x, (C.Label, C.Case)) for x in s.body):
+                out.append(s)
+                continue
+            inner = [C.Block(list(s.body))]
+            renames = []
+            for x in s.body:
+                if isinstance(x, C.Decl):
+                    for d in x.items:
+                        renames.append((d.name, fresh(fn, d.name, taken), x.specs))
+            block = inner[0]
+            for old, new, specs in renames:
+                for x in block.body:
+                    rename_in(x, old, new)
             for x in block.body:
-                rename_in(x, old, new)
-        for x in block.body:
-            if isinstance(x, C.Decl):
-                for d in x.items:
-                    hoisted.append(C.Decl(" ".join(w for w in x.specs.split() if w != "register"), [C.Declarator(d.name)]))
-                    if d.init is not None:
-                        out.append(C.ExprStmt(C.Assign("=", C.Name(d.name), d.init), s.addr))
-            else:
-                if x.addr is None:
-                    x.addr = s.addr
-                out.append(x)
-        changed = True
+                if isinstance(x, C.Decl):
+                    for d in x.items:
+                        hoisted.append(C.Decl(" ".join(w for w in x.specs.split() if w != "register"),
+                                              [C.Declarator(d.name)]))
+                        if d.init is not None:
+                            out.append(C.ExprStmt(C.Assign("=", C.Name(d.name), d.init), s.addr))
+                else:
+                    if x.addr is None:
+                        x.addr = s.addr
+                    out.append(x)
+            changed = True
+        return out
+    body = fn.body.body
+    out = spread(body)
     if hoisted:
         last = max((i for i, x in enumerate(out) if isinstance(x, C.Decl)), default=-1)
         out[last + 1:last + 1] = hoisted
@@ -334,38 +366,42 @@ def flatten(fn):
 
 
 def dead(fn):
-    """Assignments nobody reads (their effects kept), until none is left."""
+    """Assignments nobody reads (their effects kept), until none is left; those inside a conditional
+    block too (flat_view: an IT block's register nobody reads after it); and x = x, what a reload
+    of a spilled register or a value minus 0 simplified to."""
     changed = False
     while True:
-        g = Graph(fn)
+        view = flat_view(fn)
+        g = Graph(view)
         live = g.live()
-        body = fn.body.body
-        out, step = [], False
+        edits = []                          # (statement, what takes its place: None for nothing)
         for n in g.nodes:
             s = n.stmt
+            if id(s) not in view.homes:     # (the view's own gotos and labels)
+                continue
+            if is_assign(s) and isinstance(s.e.value, C.Name) and s.e.value.id == s.e.target.id:
+                edits.append((s, None))     # (x = x: what a value simplified to, r0 - 0)
+                continue
             if is_assign(s) and s.e.target.id not in live[n.index] and s.e.target.id in g.scope:
                 value = s.e.value
                 if not has_effects(value):
-                    step = True
+                    edits.append((s, None))
                     continue
                 if isinstance(value, C.Call):
-                    out.append(C.ExprStmt(value, s.addr))
-                    step = True
+                    edits.append((s, C.ExprStmt(value, s.addr)))
                     continue
                 if is_volatile_access(value) or (isinstance(value, C.Cast) and is_volatile_access(value.e)):
                     load = value.e if isinstance(value, C.Cast) else value
-                    if not frame_address(load.e.e):         # (a load of the function's own frame: no effect)
-                        out.append(C.ExprStmt(C.Cast("void", load), s.addr))
-                    step = True
+                    # (a load of the function's own frame: no effect)
+                    edits.append((s, None if frame_address(load.e.e) else C.ExprStmt(C.Cast("void", load), s.addr)))
                     continue
             if isinstance(s, C.ExprStmt) and isinstance(s.e, C.Cast) and s.e.type == "void" and \
                     is_volatile_access(s.e.e) and frame_address(s.e.e.e.e):
-                step = True
-                continue
-            out.append(s)
-        body[:] = out
-        if not step:
+                edits.append((s, None))
+        if not edits:
             return changed
+        for s, new in edits:
+            replace(view, s, new)
         changed = True
 
 
@@ -422,22 +458,32 @@ def reads_count_stmt(s, name):
 
 def selects(fn):
     """if (X) { v = A; } if (!X) { v = B; }  ->  v = X ? A : B;  (an IT block's pair of conditional
-    moves: X, A and B pure, v not one of X's variables)."""
+    moves: X, A and B pure, v not one of X's variables); if (X) { v = A; } else { v = B; } alike (the
+    pair merge_ifs made one if)."""
     from dread.structure import negate
     body = fn.body.body
     out, changed, k = [], False, 0
+
+    def one(x, arm):
+        if isinstance(x, C.If) and isinstance(arm, C.Block) and len(arm.body) == 1 and is_assign(arm.body[0]):
+            return x.cond, arm.body[0].e.target.id, arm.body[0].e.value
+        return None
+
+    def pure(a, b):
+        return a[1] == b[1] and not any(has_effects(e) for e in (a[0], a[2], b[2])) and a[1] not in _reads_of(a[0])
     while k < len(body):
         s = body[k]
         t = body[k + 1] if k + 1 < len(body) else None
-
-        def one(x):
-            if isinstance(x, C.If) and x.orelse is None and isinstance(x.then, C.Block) and len(x.then.body) == 1 \
-                    and is_assign(x.then.body[0]):
-                return x.cond, x.then.body[0].e.target.id, x.then.body[0].e.value
-            return None
-        a, b = one(s), one(t) if t is not None else None
-        if a and b and a[1] == b[1] and C.expr_text(negate(a[0])) == C.expr_text(b[0]) and \
-                not any(has_effects(e) for e in (a[0], a[2], b[2])) and a[1] not in _reads_of(a[0]):
+        if isinstance(s, C.If) and s.orelse is not None:
+            a, b = one(s, s.then), one(s, s.orelse)
+            if a and b and pure(a, b):
+                out.append(C.ExprStmt(C.Assign("=", C.Name(a[1]), C.Cond(a[0], a[2], b[2])), s.addr))
+                k += 1
+                changed = True
+                continue
+        a = one(s, s.then) if isinstance(s, C.If) and s.orelse is None else None
+        b = one(t, t.then) if isinstance(t, C.If) and t.orelse is None else None
+        if a and b and C.expr_text(negate(a[0])) == C.expr_text(b[0]) and pure(a, b):
             out.append(C.ExprStmt(C.Assign("=", C.Name(a[1]), C.Cond(a[0], a[2], b[2])), s.addr))
             k += 2
             changed = True
@@ -448,26 +494,152 @@ def selects(fn):
     return changed
 
 
+def empty_arms(fn):
+    """An if whose arms dead and fold emptied: one empty arm goes (an empty then makes the else the
+    then, its condition negated), and an if with neither goes when its condition is pure."""
+    from dread.structure import negate
+    changed = False
+
+    def visit(stmts):
+        nonlocal changed
+        out = []
+        for s in stmts:
+            if isinstance(s, C.If) and isinstance(s.then, C.Block) and (s.orelse is None or isinstance(s.orelse, C.Block)):
+                visit(s.then.body)
+                if s.orelse is not None:
+                    visit(s.orelse.body)
+                    if not s.orelse.body:
+                        s.orelse = None
+                        changed = True
+                if not s.then.body:
+                    if s.orelse is not None:
+                        s.cond, s.then, s.orelse = negate(s.cond), s.orelse, None
+                        changed = True
+                    elif not has_effects(s.cond):
+                        changed = True
+                        continue
+            out.append(s)
+        stmts[:] = out
+    visit(fn.body.body)
+    return changed
+
+
+def _arm(s):
+    """An if's arm as a list of statements (a block's own list; [] for no else)."""
+    if s is None:
+        return []
+    return s.body if isinstance(s, C.Block) else [s]
+
+
+def _written(stmts):
+    """The variables statements may write, those of statements nested in them too (an IT block's
+    conditional compare is a block of its own inside the if, and writes z), asm outputs included."""
+    written = set()
+    for x in stmts:
+        for st in _flat(x):
+            for e in _stmt_all_exprs(st):
+                written |= {y.target.id for y in walk_expr(e) if isinstance(y, C.Assign) and isinstance(y.target, C.Name)}
+                written |= {y.e.id for y in walk_expr(e) if (isinstance(y, C.Post) or (
+                    isinstance(y, C.Unary) and y.op in ("++", "--"))) and isinstance(y.e, C.Name)}
+            if isinstance(st, C.Asm):
+                written |= {o.e.id for o in st.outputs if isinstance(o.e, C.Name)}
+    return written
+
+
+def _has(stmts, kinds):
+    return any(isinstance(x, kinds) for a in stmts for x in _flat(a))
+
+
+# Statements between two conditional blocks on one condition that merge_ifs writes into both arms of
+# the merged if (GCC's itt ne; movne; movne; ldr r0, [r5]; it ne; strne: a load between two IT blocks).
+# One: two gained no statements on FreeRTOS GCC -Os and wrote more twice (docs/decisions.md).
+BETWEEN = 1
+
+
+def _between(x):
+    """Whether merge_ifs may write statement x into both arms: an expression statement without a call
+    (a load, a store, arithmetic)."""
+    return isinstance(x, C.ExprStmt) and not any(isinstance(y, C.Call) and not is_pure_call(y) for y in walk_expr(x.e))
+
+
 def merge_ifs(fn):
-    """if (X) a; if (X) b;  ->  if (X) { a; b; }  when a writes nothing X reads (X pure)."""
+    """A run of ifs on one condition or its negation as one if/else: an IT block's conditional
+    instructions, one if each (if (z) a; if (!z) b; if (!z) c; if (z) d;), become if (z) { a; d; }
+    else { b; c; }. On each path the statements that ran before still run, in their order: only where
+    the condition is pure (no effect, no memory read) and nothing in the arms merged so far writes
+    what it reads, so that it has its truth at every if of the run. Only conditional blocks (if (c)
+    { ... }): a branch (if (c) goto L; if (c) return x;) stays one for the structure stage; no arm has
+    a label (nothing jumps into the middle of one), a goto, break or continue (the structure stage
+    leaves a function alone where a statement hides a goto), and an arm that takes more statements
+    has no return (what is appended would run where it did not). Up to BETWEEN statements between two
+    such ifs (_between: no call) are written into both arms, where they ran on either path; they too
+    must not write what the condition reads. The instructions' own notes between them (/* 716c: ite
+    ne */) go in front of the merged if."""
+    import copy
+    from dread.structure import negate
     body = fn.body.body
     out, changed = [], False
     for s in body:
-        prev = out[-1] if out else None
-        if isinstance(s, C.If) and isinstance(prev, C.If) and s.orelse is None and prev.orelse is None and \
-                isinstance(s.then, C.Block) and isinstance(prev.then, C.Block) and \
-                C.expr_text(s.cond) == C.expr_text(prev.cond) and not has_effects(s.cond) and \
-                not any(isinstance(x, (C.Label, C.Case, C.Goto, C.Return, C.Break, C.Continue)) for x in prev.then.body):
-            written = set()
-            for x in prev.then.body:
-                for st in _flat(x):         # (nested ones too: an IT block's conditional compare is a
-                    for e in _stmt_all_exprs(st):       # block of its own inside the if, and writes z)
-                        written |= {y.target.id for y in walk_expr(e)
-                                    if isinstance(y, C.Assign) and isinstance(y.target, C.Name)}
-                    if isinstance(st, C.Asm):
-                        written |= {o.e.id for o in st.outputs if isinstance(o.e, C.Name)}
-            if not written & _reads_of(s.cond):
-                prev.then = C.Block(prev.then.body + s.then.body)
+        j, between = -1, []
+        if isinstance(s, C.If) and isinstance(s.then, C.Block) and not has_effects(s.cond) and \
+                not _reads_memory(s.cond):
+            j = len(out) - 1
+            while j >= 0 and not isinstance(out[j], C.If):
+                if isinstance(out[j], (C.Note, C.Empty)):
+                    j -= 1
+                elif _between(out[j]) and len(between) < BETWEEN:
+                    between.insert(0, out[j])
+                    j -= 1
+                else:
+                    j = -1
+        prev = out[j] if j >= 0 else None
+        if isinstance(prev, C.If) and isinstance(prev.then, C.Block) and not has_effects(prev.cond):
+            text = C.expr_text(s.cond)
+            same = text == C.expr_text(prev.cond)
+            opposite = not same and (text == C.expr_text(negate(prev.cond)) or
+                                     C.expr_text(negate(s.cond)) == C.expr_text(prev.cond))
+            pt, pe, st, se = _arm(prev.then), _arm(prev.orelse), _arm(s.then), _arm(s.orelse)
+            if opposite:
+                st, se = se, st
+            if (same or opposite) and not _has(pt + pe + st + se, (C.Label, C.Case, C.Goto, C.Break, C.Continue)) \
+                    and not ((st or between) and _has(pt, C.Return)) and not ((se or between) and _has(pe, C.Return)) \
+                    and not _written(pt + pe + between) & _reads_of(s.cond):
+                prev.then = C.Block(pt + between + st, prev.then.addr if isinstance(prev.then, C.Block) else None)
+                orelse = pe + [copy.deepcopy(x) for x in between] + se
+                prev.orelse = C.Block(orelse) if orelse else None
+                notes = [x for x in out[j + 1:] if isinstance(x, (C.Note, C.Empty))]
+                del out[j + 1:]
+                out[j:j] = notes
+                changed = True
+                continue
+        out.append(s)
+    body[:] = out
+    return changed
+
+
+def chains(fn):
+    """v = A; if (!v) { v = B; }  ->  v = A || B;  and  v = A; if (v) { v = B; }  ->  v = A && B;  with A
+    and B truth values (0 or 1) and B not reading v: B is evaluated exactly where it was. An IT block's
+    conditional compare (cmp r0, r5; it ne; cmpne r4, r1 leaves z = r0 == r5 || r4 == r1)."""
+    body = fn.body.body
+    out, changed = [], False
+    for s in body:
+        k = len(out)
+        while k and isinstance(out[k - 1], (C.Note, C.Empty)):
+            k -= 1
+        prev = out[k - 1] if k else None
+        if is_assign(prev) and truth_value(prev.e.value) and isinstance(s, C.If) and s.orelse is None and \
+                isinstance(s.then, C.Block) and len(s.then.body) == 1 and is_assign(s.then.body[0]) and \
+                s.then.body[0].e.target.id == prev.e.target.id and truth_value(s.then.body[0].e.value):
+            v, b = prev.e.target.id, s.then.body[0].e.value
+            negated = isinstance(s.cond, C.Unary) and s.cond.op == "!" and isinstance(s.cond.e, C.Name) and \
+                s.cond.e.id == v
+            plain = isinstance(s.cond, C.Name) and s.cond.id == v
+            if (negated or plain) and v not in _reads_of(b):
+                prev.e.value = C.Binary("||" if negated else "&&", prev.e.value, b)
+                notes = out[k:]
+                del out[k:]
+                out[k - 1:k - 1] = notes
                 changed = True
                 continue
         out.append(s)
@@ -756,6 +928,29 @@ def _effects_outside(e, name):
     return any(_effects_outside(c, name) for c in _children(e))
 
 
+def _maybe_evaluated(e, name, always=True):
+    """Whether expression e reads name where it may not be evaluated: in the right operand of && or ||,
+    in an arm of ?: (short-circuit evaluation)."""
+    if isinstance(e, C.Name):
+        return e.id == name and not always
+    if isinstance(e, C.Binary) and e.op in ("&&", "||"):
+        return _maybe_evaluated(e.l, name, always) or _maybe_evaluated(e.r, name, False)
+    if isinstance(e, C.Cond):
+        return _maybe_evaluated(e.c, name, always) or _maybe_evaluated(e.t, name, False) or \
+            _maybe_evaluated(e.f, name, False)
+    if isinstance(e, C.Assign):
+        return (not isinstance(e.target, C.Name) and _maybe_evaluated(e.target, name, always)) or \
+            _maybe_evaluated(e.value, name, always)
+    return any(_maybe_evaluated(c, name, always) for c in _children(e))
+
+
+def _read_maybe(s, name):
+    """Whether statement s reads name where it may not be evaluated (_maybe_evaluated): a value with an
+    effect folded there would happen on fewer paths (a load the original made before a conditional
+    compare, z = r0 == r5 || r4 == r1)."""
+    return any(_maybe_evaluated(get(), name) for get, _ in stmt_exprs(s))
+
+
 def _sequenced_after(s, name):
     """Whether, in statement s, every effect of s happens after its read of name is evaluated, so that
     an effect folded into that read keeps its place: a store whose value reads it (the store comes
@@ -785,13 +980,31 @@ def _sequenced_after(s, name):
     return not _effects_outside(e, name)
 
 
+def plain_view(fn):
+    """fn as flat_view's stand-in with nothing spread: the body's statements, each at home there."""
+    import types
+    return types.SimpleNamespace(name=fn.name, params=fn.params, head=fn.head, body=fn.body, pairs=[],
+                                 homes={id(s): fn.body.body for s in fn.body.body})
+
+
 def fold(fn):
     """A temporary written once and read once (or a pure one read several times by one condition),
-    on one straight path behind its write, into its reader. Folds that touch disjoint stretches of
-    the body are made together; the next round sees what they changed."""
+    on one straight path behind its write, into its reader: first on the body's statements (a path
+    passes over a conditional block as over one statement), then with the blocks spread out
+    (flat_view: an IT block's load and the store of what it loaded, in one arm of the merged if; a
+    condition whose arms read the variable only after writing it). Folds that touch disjoint
+    stretches of the body are made together; the next round sees what they changed."""
+    changed = False
+    for view_of in (plain_view, flat_view):
+        changed = _fold(fn, view_of) or changed
+    return changed
+
+
+def _fold(fn, view_of):
     changed = False
     while True:
-        g = Graph(fn)
+        view = view_of(fn)
+        g = Graph(view)
         reach = g.reaching()
         readers = {}
         for m in g.nodes:
@@ -800,7 +1013,7 @@ def fold(fn):
         taken, plans = set(), []
         for n in g.nodes:
             s = n.stmt
-            if not is_assign(s) or n.index + 1 >= len(g.nodes):
+            if not is_assign(s) or n.index + 1 >= len(g.nodes) or id(s) not in view.homes:
                 continue
             v = s.e.target.id
             if v not in g.scope:
@@ -821,8 +1034,8 @@ def fold(fn):
                 continue                        # (a condition may read a compare's result twice: bls)
             if reads_count(value, v):                   # (v = v + 4: the old v is gone with it)
                 continue
-            if has_effects(value) and not _sequenced_after(nxt.stmt, v):
-                continue
+            if has_effects(value) and (not _sequenced_after(nxt.stmt, v) or _read_maybe(nxt.stmt, v)):
+                continue                        # (an effect keeps its place, and happens on every path)
             if any(_writes_name(nxt.stmt, w) for w in _reads_of(value)) and not _reads_before_writes(nxt.stmt, v):
                 continue
             stretch = set(range(n.index, nxt.index + 1))
@@ -839,8 +1052,9 @@ def fold(fn):
                     put(substitute(get(), v, value))
             if reader.addr is None:
                 reader.addr = g.nodes[d].stmt.addr
-        gone = {d for d, _, _, _ in plans}
-        fn.body.body[:] = [x for i, x in enumerate(fn.body.body) if i not in gone]
+        write_back(view)                    # (a reader that is a stand-in's condition)
+        for d, _, _, _ in plans:
+            replace(view, g.nodes[d].stmt)
         changed = True
 
 
@@ -1163,6 +1377,20 @@ def subexpressions(e):
     return out
 
 
+def compared(e):
+    """[(x, y)] of the lifters' compares in e, (u64)x + (u32)~y + 1 (cmp x, y: x - y with its carry),
+    whatever x and y are (cmp r0, r5 after adds r5, r2, #3: r0 against r2 + 3, no leaf of e)."""
+    out = []
+    for x in walk_expr(e):
+        if isinstance(x, C.Binary) and x.op == "+" and isinstance(x.r, C.Num) and x.r.value == 1 and \
+                isinstance(x.l, C.Binary) and x.l.op == "+" and isinstance(x.l.l, C.Cast) and x.l.l.type == "u64" and \
+                isinstance(x.l.r, C.Cast) and x.l.r.type == "u32" and isinstance(x.l.r.e, C.Unary) and \
+                x.l.r.e.op == "~" and not any(isinstance(y, C.Cast) and y.type in ("u64", "s64")
+                                              for y in walk_expr(x.l.l.e)):
+            out.append((x.l.l.e, x.l.r.e.e))
+    return out
+
+
 def candidates(e, ctx, most=10):
     """Simple conditions to try for e, smallest first: two of its operands compared (equality, then
     unsigned, then signed order), an operand of it against one of its constants or 0, a mask test.
@@ -1196,7 +1424,8 @@ def candidates(e, ctx, most=10):
                     consts.append(C.Num("0x%xu" % d if d > 9 else "%du" % d))
     terms = [x for x in subs if not isinstance(x, C.Num)][:most]
     leaves = [x for x in terms if isinstance(x, C.Name) or (isinstance(x, C.Unary) and x.op == "*")]
-    pairs = [(a, b) for a in terms for b in consts] + [(a, b) for a in leaves for b in leaves if a is not b]
+    pairs = compared(e) + [(a, b) for a in terms for b in consts] + [(a, b) for a in leaves for b in leaves
+                                                                     if a is not b]
     out = []
 
     def bits_of(x):
@@ -1217,10 +1446,34 @@ def candidates(e, ctx, most=10):
     return out
 
 
+def with_arms(stmts):
+    """The statements, each followed by those in its arms where it is a conditional block (if (c) {
+    ... } else { ... }), at any depth."""
+    for s in stmts:
+        yield s
+        if isinstance(s, C.If):
+            for arm in (s.then, s.orelse):
+                if isinstance(arm, C.Block):
+                    yield from with_arms(arm.body)
+
+
+COMPARISONS = ("==", "!=", "<", "<=", ">", ">=", "&&", "||")
+
+
+def truth_value(e):
+    """Whether e is a comparison or a logical operation at its top: its value is 0 or 1, so a
+    comparison of the same truth has the same value."""
+    return (isinstance(e, C.Binary) and e.op in COMPARISONS) or (isinstance(e, C.Unary) and e.op == "!")
+
+
 def conditions(fn):
     """A branch's condition that the lifter computed from flags (a compare's subtraction with its
     carry and overflow) as the comparison it is, when the evaluator (dread.cexpr) finds one that
-    gives the same truth on boundary and random values of its operands."""
+    gives the same truth on boundary and random values of its operands. Also every truth value in a
+    statement: a flag's own value (z = (u32)((u64)r0 + (u32)~r3 + 1) == 0 as z = r0 == r3: a flag an
+    IT block's ifs read in turn, or one read across other statements, stays a variable), the operands
+    of && || ! where the whole has no smaller form (z = r0 == r5 || r4 == r1 from a conditional
+    compare), a select's condition wherever the select is (in a return's value)."""
     ctx = context(fn)
     changed = False
 
@@ -1234,16 +1487,41 @@ def conditions(fn):
             if same_loads(cond, cand) and check.stands_for(cand):
                 return cand
         return None
-    for s in fn.body.body:
+
+    def truths(e, cond=False):
+        """e with its truth values as small as proved: e itself where it is a condition (cond) or a
+        truth value; else, or when nothing smaller stands for it, its parts."""
+        if cond or truth_value(e):
+            cand = simpler(e)
+            if cand is not None:
+                return cand
+        if isinstance(e, C.Binary) and e.op in ("&&", "||"):
+            return C.Binary(e.op, truths(e.l, True), truths(e.r, True))
+        if isinstance(e, C.Unary) and e.op == "!":
+            return C.Unary("!", truths(e.e, True))
+        if isinstance(e, C.Cond):
+            return C.Cond(truths(e.c, True), truths(e.t), truths(e.f))
+        if isinstance(e, C.Binary):
+            return C.Binary(e.op, truths(e.l), truths(e.r))
+        if isinstance(e, C.Cast):
+            return C.Cast(e.type, truths(e.e))
+        if isinstance(e, C.Unary) and e.op not in ("*", "&"):
+            return C.Unary(e.op, truths(e.e))
+        return e
+    for s in with_arms(fn.body.body):
         if isinstance(s, C.If):                     # (a branch's, a conditional block's)
-            cand = simpler(s.cond)
-            if cand is not None:
-                s.cond = cand
-                changed = True
-        elif is_assign(s) and isinstance(s.e.value, C.Cond):     # (a select's)
-            cand = simpler(s.e.value.c)
-            if cand is not None:
-                s.e.value.c = cand
+            parts = [(lambda s=s: s.cond, lambda v, s=s: setattr(s, "cond", v), True)]
+        elif is_assign(s):                          # (a select's, a flag's: 0 or 1 either way)
+            parts = [(lambda s=s: s.e.value, lambda v, s=s: setattr(s.e, "value", v), False)]
+        elif isinstance(s, C.Return) and s.e is not None:
+            parts = [(lambda s=s: s.e, lambda v, s=s: setattr(s, "e", v), False)]
+        else:
+            continue
+        for get, put, cond in parts:
+            before = C.expr_text(get())
+            after = truths(get(), cond)
+            if C.expr_text(after) != before:
+                put(after)
                 changed = True
     return changed
 
@@ -1263,11 +1541,27 @@ def type_of_expr(e, ctx):
     return None
 
 
+def _mask_keeps(cond, mask, ctx):
+    """Whether (cond) & mask is cond: a select between constants of mask's type that the mask keeps
+    whole ((c ? 0x1u : 0x0u) & 0x1u, an IT block's moveq r0, #0; movne r0, #1 then and r0, #1)."""
+    if not (isinstance(cond, C.Cond) and isinstance(mask, C.Num) and isinstance(mask.value, int)):
+        return False
+    arms = (cond.t, cond.f)
+    if not all(isinstance(a, C.Num) and isinstance(a.value, int) and a.value >= 0 for a in arms):
+        return False
+    t = cexpr.num_type(mask.text, mask.value, ctx)
+    return t[0] >= ctx.int_bits and all(cexpr.num_type(a.text, a.value, ctx) == t and a.value & mask.value == a.value
+                                        for a in arms)
+
+
 def peephole(e, ctx):
     """e with what changes no value taken out: x + 0, x - 0, x | 0, x ^ 0 (x of int's width or wider), a
-    cast of a value to the type it has. Bottom up; returns a new tree."""
+    cast of a value to the type it has, a mask that keeps a select of constants whole. Bottom up;
+    returns a new tree."""
     if isinstance(e, C.Binary):
         l, r = peephole(e.l, ctx), peephole(e.r, ctx)
+        if e.op == "&" and (_mask_keeps(l, r, ctx) or _mask_keeps(r, l, ctx)):
+            return l if isinstance(l, C.Cond) else r
         if isinstance(l, C.Num) and isinstance(r, C.Num) and e.op in ("+", "-", "|", "&", "^", "<<", ">>", "*"):
             folded = fold_constants(e.op, l, r, ctx)
             if folded is not None:
@@ -1381,16 +1675,22 @@ def same_loads(a, b):
 def values(fn):
     """An assignment's value that the lifter computed the long way (an addition through 64 bits for its
     carry, a subtraction as an addition of the complement) as the operation it is, when the evaluator
-    finds one that gives the same value on boundary and random values of its operands."""
+    finds one that gives the same value on boundary and random values of its operands; a return's
+    value alike, as the function's result type has it (strcmp's return (u32)((u64)r2 + (u32)~r3 + 1)
+    is r2 - r3)."""
     ctx = context(fn)
     changed = False
-    for s in fn.body.body:
-        if not is_assign(s):
+    head = re.match(r"^\s*(\w+)\s+\w+\s*\(", fn.head or "")
+    result = ctx.ctype(head.group(1)) if head and head.group(1) != "void" else None
+    for s in with_arms(fn.body.body):       # (those inside a conditional block too)
+        if is_assign(s):
+            value, target = s.e.value, ctx.types.get(s.e.target.id)
+        elif isinstance(s, C.Return) and s.e is not None:
+            value, target = s.e, result
+        else:
             continue
-        value = s.e.value
         if size(value) < 6 or loads_once(value) is None or len(operands(value)) > 3:
             continue
-        target = ctx.types.get(s.e.target.id)
         if target is None or cexpr.z3 is None:
             continue
         cast = "%s%d" % ("s" if target[1] else "u", target[0])
@@ -1399,7 +1699,10 @@ def values(fn):
             if size(cand) >= size(value):
                 break
             if same_loads(value, cand) and check.stands_for(C.Cast(cast, cand)):
-                s.e.value = cand
+                if isinstance(s, C.Return):
+                    s.e = cand
+                else:
+                    s.e.value = cand
                 changed = True
                 break
     return changed
@@ -1467,7 +1770,7 @@ def literals(fn):
 PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("dead", dead), ("frame", frame_stores),
           ("locals", frame_locals),
           ("propagate", propagate),
-          ("selects", selects), ("merge", merge_ifs), ("fold", fold), ("spread", spread),
+          ("selects", selects), ("merge", merge_ifs), ("chains", chains), ("fold", fold), ("arms", empty_arms), ("spread", spread),
           ("addresses", addresses),
           ("expressions", tidy_expressions),
           ("values", values),
@@ -1624,9 +1927,11 @@ def flat_view(fn):
     inside a block (an IT block, merged ifs) apart from the definitions before it. The statements and
     expressions are fn's own, so what is renamed through the stand-in is renamed in fn; a condition
     replaced in a stand-in's if (pairs: (stand-in, fn's if)) is copied back by write_back. A block
-    that declares, labels, loops or switches stays one statement, as does an if that writes nothing."""
+    that declares, labels, loops or switches stays one statement, as does an if that writes nothing.
+    homes: {id(statement): the list in fn that holds it} for fn's own statements (the body's, a
+    block's), so that a pass may take one out or put another in its place (replace)."""
     import types
-    out, count, pairs = [], [0], []
+    out, count, pairs, homes = [], [0], [], {}
 
     def plain(s):
         if isinstance(s, C.Block):
@@ -1638,33 +1943,49 @@ def flat_view(fn):
     def writes(s):
         return any(isinstance(x, C.ExprStmt) for x in _flat(s))
 
-    def spread(s):
+    def spread(s, home):
         if isinstance(s, C.Block) and plain(s):
             for x in s.body:
-                spread(x)
+                spread(x, s.body)
         elif isinstance(s, C.If) and plain(s) and writes(s):
             count[0] += 1
             then_l, else_l, end_l = ("flat_%s_%d" % (w, count[0]) for w in ("then", "else", "end"))
             stand_in = C.If(s.cond, C.Goto(then_l))
             pairs.append((stand_in, s))
             out.extend([stand_in, C.Goto(else_l if s.orelse is not None else end_l), C.Label(then_l)])
-            spread(s.then)
+            spread(s.then, None)
             if s.orelse is not None:
                 out.extend([C.Goto(end_l), C.Label(else_l)])
-                spread(s.orelse)
+                spread(s.orelse, None)
             out.append(C.Label(end_l))
         else:
             out.append(s)
+            if home is not None:
+                homes[id(s)] = home
     for s in fn.body.body:
-        spread(s)
+        spread(s, fn.body.body)
     return types.SimpleNamespace(name=fn.name, params=fn.params, head=fn.head,
-                                 body=types.SimpleNamespace(body=out), pairs=pairs)
+                                 body=types.SimpleNamespace(body=out), pairs=pairs, homes=homes)
 
 
 def write_back(view):
     """The conditions a pass replaced in a flat_view's stand-in ifs, into the function's own ifs."""
     for stand_in, original in view.pairs:
         original.cond = stand_in.cond
+
+
+def replace(view, s, new=None):
+    """Statement s of a flat_view's function (one with a home) taken out of the list that holds it,
+    or new put in its place."""
+    home = view.homes[id(s)]
+    for k, x in enumerate(home):
+        if x is s:
+            if new is None:
+                del home[k]
+            else:
+                home[k] = new
+            return
+    raise ValueError("a statement no longer where the view found it")
 
 
 def webs(fn):

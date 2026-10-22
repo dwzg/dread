@@ -9,6 +9,30 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## IT blocks in readable C: one if/else, statements between written into both arms (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The lifters write each conditional instruction of a Thumb-2 IT block as an if of its
+  own on the flags. Ifs on one condition or its negation can be one if/else where the condition
+  keeps its truth. GCC often schedules an unconditional instruction between two IT blocks on one
+  condition (`itt ne; movne r2, #0xc1; movne r3, #addr; ldr r0, [r5]; it ne; strne r2, [r3]`): the
+  load keeps the two ifs apart, the registers the first block sets stay live on both paths (a call's
+  zeroed r2 and r3 too), and the store's address is no constant. What to do with such a statement?
+- **Options.** (a) Leave the ifs apart. (b) Move the statement before or after the ifs: not where it
+  is an effect (a volatile load or store moves past others). (c) Write it into both arms of the one
+  if/else (if (c) { A; S; C } else { B; S; D }): on each path the same statements run in the same
+  order, at the price of the statement twice.
+- **Choice: (c)**, for at most BETWEEN (1) statement without a call (dread.tidy merge_ifs), which
+  must not write what the condition reads. One statement written twice is as many statements as the
+  if it saves; what it enables (the zeroed registers dead, the address a constant, the flag read once
+  and folded into the if) is what pays: vInterruptMutexMasterTask on FreeRTOS GCC -Os has eight such
+  pairs (121 statements without, 81 with). Measured on FreeRTOS GCC -Os, the readable functions
+  matched to their source: 5840 statements with BETWEEN 0, 5756 with 1, 5759 with 2 (two statements
+  written twice gained in one function and lost in three); clang -O2 the same with each.
+- **How to undo.** BETWEEN = 0 in dread/tidy.py.
+- **Status.** In the code (dread.tidy merge_ifs).
+
 ## What the system run takes for a wait outside shared code: a loop found by its registers (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

@@ -2,6 +2,11 @@
 conditions and values. What the lifters compute for a compare's flags is proved equal to the
 comparison it stands for; a proposal that holds on the values tried but not on all is refused (the
 range check of gizmo's parse_kv, which testing alone let through)."""
+import ctypes
+import random
+import shutil
+import subprocess
+
 import pytest
 
 from dread import cexpr, cparse, tidy
@@ -469,3 +474,271 @@ def test_a_frame_address_computed_once_leaves_frame_slots_the_frame_pass_sees():
     out = cparse.unparse(fn, notes=False)
     assert "a_1" not in out and "sp0" not in out and "frame" not in out, out
 
+
+
+IT = """/* f at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+u32 f(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0, lr = (u32)__builtin_return_address(0);
+    u32 n = 0, z = 0, c = 0, v = 0;
+    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)lr;
+    r2 = 0x20000100u;  /* 0: ldr r2, [pc, #0x10] */
+    r1 = 0x20000200u;  /* 2: ldr r1, [pc, #0x14] */
+    r0 = (u32)*(volatile u32 *)((r2 + 0));  /* 4: ldr r0, [r2] */
+    r3 = (u32)*(volatile u32 *)((r1 + 0));  /* 6: ldr r3, [r1] */
+    { u32 x = r0, y = r3; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 8: cmp r0, r3 */
+    /* a: ite eq */
+    if (z) { r0 = 0x5u; }  /* c: moveq r0, #5 */
+    if (!z) { r0 = (u32)*(volatile u32 *)((r1 + 0)); }  /* e: ldrne r0, [r1] */
+    r3 = 0x20000300u;  /* 10: ldr r3, [pc, #0x10] */
+    /* 12: ite ne */
+    if (!z) { *(volatile u32 *)((r2 + 0)) = (u32)r0; }  /* 14: strne r0, [r2] */
+    if (z) { *(volatile u32 *)((r3 + 0)) = (u32)r0; }  /* 16: streq r0, [r3] */
+    r0 = (u32)*(volatile u32 *)((r3 + 0));  /* 18: ldr r0, [r3] */
+    return r0;  /* 1a: bx lr */
+}
+"""
+
+
+def tidy_text(text, name="f"):
+    fn = cparse.parse(text).function(name)
+    tidy.tidy(fn)
+    return cparse.unparse(fn, notes=False, style="readable")
+
+
+@needs_z3
+def test_an_it_blocks_conditional_instructions_are_one_if_else():
+    """GCC's IT blocks for `if (a == b) x = 5; else a = b;`: cmp; ite eq; moveq; ldrne; (a constant
+    load); ite ne; strne; streq. One if per instruction, on z and !z, with the instructions' notes and
+    a load between them, becomes one if/else on the comparison; each path keeps its loads and stores
+    in their order (b is loaded twice where the original loads it twice), the flag goes."""
+    out = tidy_text(IT)
+    assert out.count("if (") == 1 and "else" in out, out
+    assert "r0 == *(volatile u32 *)0x20000200u" in out, out              # (z's carry arithmetic: a ==)
+    assert "*(volatile u32 *)0x20000300u = 0x5u;" in out, out
+    assert "*(volatile u32 *)0x20000100u = *(volatile u32 *)0x20000200u;" in out, out
+    assert out.count("*(volatile u32 *)0x20000200u") == 2 and "u64" not in out and " z" not in out, out
+    assert out.index("r0 = *(volatile u32 *)0x20000100u;") < out.index("if ("), out
+
+
+def test_an_if_and_its_negation_are_merged_only_while_the_condition_holds():
+    body = ("    if (z) { r0 = 0x5u; }  /* 4: moveq r0, #5 */\n"
+            "    if (!z) { r1 = 0x6u; }  /* 6: movne r1, #6 */\n"
+            "    if (z) { r2 = 0x7u; }  /* 8: moveq r2, #7 */\n")
+    src = SNIPPET.replace(
+        "    { u32 x = r0, y = r3; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 4: cmp r0, r3 */\n"
+        "    if (!c || z) goto L_c;  /* 6: bls #0xc */\n", body)
+    fn = cparse.parse(src).function("f")
+    assert tidy.merge_ifs(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert out.count("if (") == 1 and "else" in out and "r2 = 0x7u;" in out.split("else")[0], out
+    writes = src.replace("if (!z) { r1 = 0x6u; }", "if (!z) { z = r1 == 0; }")    # (the else writes z)
+    fn = cparse.parse(writes).function("f")
+    tidy.merge_ifs(fn)
+    assert cparse.unparse(fn, notes=False).count("if (") == 2
+    jumps = src.replace("if (!z) { r1 = 0x6u; }", "if (!z) goto L_c;")         # (a branch stays one)
+    fn = cparse.parse(jumps).function("f")
+    tidy.merge_ifs(fn)
+    assert cparse.unparse(fn, notes=False).count("if (") == 3
+
+
+BETWEEN = """/* f at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 take(u32, u32, u32, u32);
+u32 f(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r5 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);
+    u32 n = 0, z = 0, c = 0, v = 0;
+    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)lr;
+    r5 = 0x20000400u;  /* 0: ldr r5, [pc, #0x20] */
+    r0 = take(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* 2: bl take */
+    { u32 x = r0, y = 0x1u; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 6: cmp r0, #1 */
+    /* 8: itt ne */
+    if (!z) { r2 = 0xc1u; }  /* a: movne r2, #0xc1 */
+    if (!z) { r3 = 0x20000500u; }  /* c: movne r3, #0x... */
+    r0 = (u32)*(volatile u32 *)((r5 + 0));  /* e: ldr r0, [r5] */
+    /* 10: it ne */
+    if (!z) { *(volatile u32 *)((r3 + 0)) = (u32)r2; }  /* 12: strne r2, [r3] */
+    return r0;  /* 14: pop {pc} */
+}
+"""
+
+
+@needs_z3
+def test_a_load_between_two_it_blocks_goes_into_both_arms():
+    """GCC puts a load between the IT block that sets up a store and the one that makes it (itt ne;
+    movne; movne; ldr r0, [r5]; it ne; strne): the load is written into both arms of the one if, so
+    the store's address is a constant on its path and the registers the call zeroed are dead."""
+    out = tidy_text(BETWEEN)
+    assert out.count("if (") == 1 and "else" in out, out
+    assert "if (take(r0, r1, r2, r3) != 1)" in out, out
+    assert "*(volatile u32 *)0x20000500u = 0xc1u;" in out, out
+    assert out.count("*(volatile u32 *)0x20000400u;") == 2 and " z" not in out and "= 0;" not in out, out
+    assert out.index("*(volatile u32 *)0x20000400u") < out.index("0x20000500u"), out   # (load, then store)
+    call = BETWEEN.replace("r0 = (u32)*(volatile u32 *)((r5 + 0));  /* e: ldr r0, [r5] */",
+                           "r0 = take(r0, r1, r2, r3);  /* e: bl take */")
+    out = tidy_text(call)                                     # (a call between: not written twice)
+    assert out.count("take(") == 2 and out.count("if (") == 2, out
+
+
+CCMP = """/* f at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+u32 f(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r12 = 0;
+    u32 n = 0, z = 0, c = 0, v = 0;
+    (void)n; (void)z; (void)c; (void)v; (void)r12;
+    r5 = r2 + 0x3u;  /* 0: adds r5, r2, #3 */
+    r4 = (u32)*(volatile u32 *)((r3 + 0));  /* 2: ldr r4, [r3] */
+    r1 = (u32)*(volatile u32 *)((r3 + 4));  /* 4: ldr r1, [r3, #4] */
+    { u32 x = r0, y = r5; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 6: cmp r0, r5 */
+    /* 8: it ne */
+    if (!z) { { u32 x = r4, y = r1; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; } }  /* a: cmpne r4, r1 */
+    /* c: ite ne */
+    if (!z) { r0 = 0x1u; }  /* e: movne r0, #1 */
+    if (z) { r0 = 0x0u; }  /* 10: moveq r0, #0 */
+    return r0;  /* 12: bx lr */
+}
+"""
+
+
+@needs_z3
+def test_a_conditional_compare_is_one_condition_and_its_loads_stay_unconditional():
+    """cmp r0, r5; it ne; cmpne r4, r1 leaves z = r0 == r5 || r4 == r1: the compare's block inside the
+    if is flattened like any other, and z = A; if (!z) z = B; is z = A || B. The second word was
+    loaded before the compare on every path: it is not folded into the right of the ||, where it
+    would be loaded only when r0 != r5."""
+    out = tidy_text(CCMP)
+    assert "r0 == r2 + 3 || r4 == r1" in out, out
+    assert "r1 = *(volatile u32 *)(r3 + 4);" in out and "u64" not in out, out
+
+
+FLAG = """/* f at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 g(u32, u32, u32, u32);
+u32 f(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r12 = 0;
+    u32 n = 0, z = 0, c = 0, v = 0;
+    (void)n; (void)z; (void)c; (void)v; (void)r12;
+    r5 = r2;  /* 2: mov r5, r2 */
+    r12 = (u32)*(volatile u32 *)((r1 + 0));  /* 4: ldr ip, [r1] */
+    { u32 x = r0, y = r12; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 6: cmp r0, ip */
+    /* 8: it eq */
+    if (z) { r1 = 0x1u; }  /* a: moveq r1, #1 */
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* c: bl g */
+    /* 10: it ne */
+    if (!z) { r0 = (u32)((u64)r0 + (u32)~r5 + 1); }  /* 12: subne r0, r0, r5 */
+    return r0;  /* 14: pop {r4, r5, pc} */
+}
+"""
+
+
+@needs_z3
+def test_a_flag_read_twice_is_a_comparison_and_a_return_a_plain_value():
+    """A flag two statements read stays a variable, its carry arithmetic a comparison: a call between
+    keeps the ifs apart, and its operand in memory keeps it out of the conditions; a subtraction the
+    lifter computed through 64 bits is one, in an arm as in a return."""
+    out = tidy_text(FLAG)
+    assert "z = r0 == *(volatile u32 *)r1;" in out and "if (z)" in out and "if (!z)" in out, out
+    assert "r0_1 = r0_1 - r2;" in out and "u64" not in out, out
+    out = tidy_text(FLAG.replace("    return r0;", "    return (u32)((u64)r0 + (u32)~r5 + 1);"))
+    assert "return r0_1 - r2;" in out and "u64" not in out, out
+
+
+def test_a_mask_that_keeps_a_select_of_constants_goes():
+    c = ctx()
+    out = tidy.peephole(expr("(a == b ? 0x1u : 0x0u) & 0x1u"), c)
+    assert cparse.expr_text(out) == "a == b ? 0x1u : 0x0u", cparse.expr_text(out)
+    for kept in ("(a == b ? 0x3u : 0x0u) & 0x1u", "(a == b ? 1 : 0) & 0x1ull", "(a == b ? x : 0x0u) & 0x1u"):
+        assert "&" in cparse.expr_text(tidy.peephole(expr(kept), c)), kept
+
+
+def random_it_function(rng, name, steps=10):
+    """A function in the lifters' dialect made of what Thumb-2's IT blocks become: compares (a block
+    that sets n, z, c, v), conditional blocks on the flags (most on z or !z, the rest on any condition
+    an IT block tests), some with a conditional compare inside, and plain statements between; calls
+    to probe log their order and arguments."""
+    regs = ["r0", "r1", "r2", "r3"]
+    conds = ["z", "!z", "c", "!c", "n != v", "n == v", "c && !z", "!c || z"]
+    lines = ["u32 %s(u32 a0, u32 a1, u32 a2, u32 a3)" % name, "{",
+             "    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0;",
+             "    u32 n = 0, z = 0, c = 0, v = 0;",
+             "    (void)n; (void)z; (void)c; (void)v; (void)r12;"]
+
+    def compare():
+        a, b = rng.sample(regs, 2)
+        return ("{ u32 x = %s, y = %s; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; "
+                "c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }" % (a, b))
+
+    def op():
+        a, b = rng.choice(regs), rng.choice(regs)
+        if rng.random() < 0.12:
+            return "%s = probe(r0, r1, r2, r3);" % a
+        return "%s = %s %s %s;" % (a, b, rng.choice(["+", "-", "^", "&", "|"]),
+                                   rng.choice([b, rng.choice(regs), "%du" % rng.randint(0, 9)]))
+    lines.append("    " + compare() + "  /* 0: cmp */")
+    for k in range(steps):
+        r = rng.random()
+        if r < 0.6:
+            cond = rng.choice(conds[:2]) if rng.random() < 0.7 else rng.choice(conds)
+            body = " ".join(op() for _ in range(rng.randint(1, 2)))
+            if rng.random() < 0.15:
+                body += " " + compare()
+            lines.append("    if (%s) { %s }  /* %x: it */" % (cond, body, 2 * k + 2))
+        elif r < 0.9:
+            lines.append("    %s  /* %x: op */" % (op(), 2 * k + 2))
+        else:
+            lines.append("    %s  /* %x: cmp */" % (compare(), 2 * k + 2))
+    lines.append("    return r0 ^ (r1 << 1) ^ (r2 << 2) ^ (r3 << 3);")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+PROBE = ("typedef unsigned int u32;\ntypedef unsigned long long u64;\ntypedef signed int s32;\nstatic u32 trace;\n"
+         "static u32 probe(u32 a, u32 b, u32 c, u32 d)\n{\n    trace = trace * 33u + a + 3u * b + 5u * c + 7u * d;\n"
+         "    return trace ^ 0x5au;\n}\n")
+
+
+def probe_caller(name, arity=4):
+    """call_NAME: NAME called with its first arity arguments (the clean-up drops trailing parameters
+    nothing reads), its result and probe's trace in one value."""
+    return ("u32 call_%s(u32 a0, u32 a1, u32 a2, u32 a3)\n{\n    u32 r;\n    trace = 0;\n"
+            "    r = %s(%s);\n    return r ^ (trace * 3u);\n}\n" % (name, name, ", ".join(
+                ["a0", "a1", "a2", "a3"][:arity])))
+
+
+@pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
+def test_random_it_blocks_cleaned_up_compute_the_same(tmp_path):
+    """Random functions of IT-block-like code (random_it_function), cleaned up (every pass), compiled
+    with the host's C compiler beside the originals and called with random arguments: the same result
+    and the same calls in the same order with the same arguments (probe's trace); and the clean-up
+    merged most of the conditional blocks."""
+    rng = random.Random(11)
+    count, originals, results, arity = 300, [], [], []
+    ifs_before = ifs_after = 0
+    for i in range(count):
+        text = random_it_function(rng, "orig_%d" % i, steps=rng.randint(4, 14))
+        originals.append(text)
+        fn = cparse.parse(PROBE + text.replace("orig_", "tidy_")).function("tidy_%d" % i)
+        tidy.tidy(fn)
+        out = cparse.unparse(fn, notes=False)
+        ifs_before += text.count("if (")
+        ifs_after += out.count("if (")
+        results.append(out)
+        arity.append(len(fn.params))
+    source = tmp_path / "its.c"
+    source.write_text(PROBE + "".join(originals) + "\n".join(results) + "\n" + "".join(
+        probe_caller("orig_%d" % i) + probe_caller("tidy_%d" % i, arity[i]) for i in range(count)))
+    lib = tmp_path / "its.so"
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(source)], check=True)
+    so = ctypes.CDLL(str(lib))
+    for i in range(count):
+        a, b = getattr(so, "call_orig_%d" % i), getattr(so, "call_tidy_%d" % i)
+        for f in (a, b):
+            f.restype, f.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * 4
+        for _ in range(30):
+            args = [rng.choice([0, 1, 2, 0x7fffffff, 0x80000000, 0xffffffff, rng.getrandbits(32)]) for _ in range(4)]
+            assert a(*args) == b(*args), (i, args, originals[i], results[i])
+    assert ifs_after < ifs_before * 0.75, (ifs_before, ifs_after)
