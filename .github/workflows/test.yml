@@ -30,10 +30,29 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Cross compiler
+        # The runner's mirror once sent the packages at 17 kB/s (2026-10-22: 53 MB in 53 minutes, and
+        # the job's limit cancelled the tests in two of three jobs): each try is bounded, and a try that
+        # fails or takes too long sends the next one to archive.ubuntu.com; stalled connections time out.
+        timeout-minutes: 35
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi binutils-arm-none-eabi \
-              libnewlib-arm-none-eabi gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf clang lld llvm
+          pkgs="gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi gcc-riscv64-unknown-elf
+                binutils-riscv64-unknown-elf clang lld llvm"
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
+          ok=
+          for try in 1 2; do
+            if timeout 300 $apt update && timeout 600 $apt install -y --no-install-recommends $pkgs; then
+              ok=1
+              break
+            fi
+            echo "::warning::apt try $try failed or took too long; the next goes to archive.ubuntu.com"
+            sudo dpkg --configure -a || true
+            for f in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+              if [ -f "$f" ]; then
+                sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' "$f"
+              fi
+            done
+          done
+          [ -n "$ok" ]
           arm-none-eabi-gcc --version | head -1
           riscv64-unknown-elf-gcc --version | head -1
           clang --version | head -1
