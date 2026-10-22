@@ -222,19 +222,38 @@ its sources.
 - [ ] **Function names.** `dread pilot --task name` (2026-10-22, docs/decisions.md): a question
   shows a function's readable C (dread.readable view: the tables applied, each constant followed by
   what it points to: text, a function's entry, or a table's first words, such as a localized
-  message's text pointers) or its listing where it does not lift; a function is asked once its callees are answered (call_components:
-  the call graph's strongly connected components; rounds with a barrier each slowed to a fifth once
-  they got small), --jobs at a time, each question showing the names proposed so far for its callees
-  and callers; names.tsv keeps every proposal with the form its
-  question showed, and a run started again goes on where the last one stopped. `--score TRUTH`
-  compares the proposals with true names (an ELF's function symbols, or the functions table of a copy
-  that has them): exact, the same words, shared words, the same prefix; `--judge PROVIDER` adds a
-  model's verdict per pair (same, close, different). The providers ask again after a rate limit or an
-  overload (HTTP 429, 529, 5xx). First measured on a stripped private firmware (DREAD's real-life test):
-  numbers below when the run is scored. Next: a second pass that shows the callers' proposals to the
-  leaves (a leaf that touches only unnamed globals gets a name made of an address), the globals named
-  first (the readable task's globals step), and a FreeRTOS build stripped of its names for a public
-  measurement.
+  message's text pointers; a variadic function's body behind its naked entry) or its listing where it
+  does not lift; a function is asked once its callees are answered (call_components: the call graph's
+  strongly connected components; rounds with a barrier each slowed to a fifth once they got small),
+  --jobs at a time, each question showing the names proposed so far for its callees and callers.
+  `--refine` asks again callers first, showing a function its callers' names and its first one.
+  names.tsv keeps every proposal with the form its question showed; a run started again goes on where
+  the last one stopped. `--score TRUTH` compares the proposals with true names (an ELF's function
+  symbols, or the functions table of a copy that has them): exact, the same words, shared words, the
+  same prefix; `--judge PROVIDER` adds a model's verdict per pair (same, close, different). The
+  providers ask again after a rate limit or an overload (HTTP 429, 529, 5xx).
+  Measured 2026-10-22 with Haiku 5.5, Sonnet 5.5 judging. FreeRTOS GCC -Os (mps2), every function
+  renamed FUN_address (366): first pass exact 6, the same words 40 (11 %), a word shared 230 (63 %),
+  half the words 81 (22 %), mean overlap 0.26; judged the same 87 (24 %), close 144 (39 %), different
+  135 (37 %); $0.12, 3 minutes. With --refine: the same words 45, a word shared 245 (67 %), half the
+  words 102 (28 %), overlap 0.31; judged the same 113 (31 %), close 142 (39 %), different 111 (30 %);
+  $0.12. The judge's own noise: the first pass judged again gave 95, 155, 116, the same verdict for
+  331 of 366 (90 %): totals move by up to 5 points. The model knows FreeRTOS, and callers' names help
+  it recognise the code. A stripped private firmware (DREAD's real-life test: 4,586 functions, 1,903
+  named by the people who reconstruct it): the first run judged the same 9 %, close 35 %, different
+  56 % (a word shared 29 %; $1.39, 29 minutes); with what a constant points to, 15 %, 41 %, 44 % (a
+  word shared 44 %; $1.40): the gain is the functions that show one localized message, a quarter of
+  the named ones, whose texts sat behind a table of pointers; with --refine 16 %, 41 %, 44 % (a word
+  shared 47 %, the same prefix 760 against 653; $1.55): more consistent, not more right. Names built
+  of an address fell from 222 to 126, but a driver whose first leaf was misread (a card driver taken
+  for a radio) carried the misreading to most of its functions on both passes, where another run had
+  named it right: a proposal shown to the callers spreads its errors too, and runs differ by subsystem.
+  What misses: a project's conventions (its subsystem prefixes, its RTOS's service names), drivers
+  whose device registers have no names, leaves that touch only unnamed globals.
+  Next, measured against these: the globals named first (the readable task's globals step), then a
+  run whose questions show their names; and subsystems as a step of their own (functions grouped by
+  calls and addresses, a prefix proposed a group with its evidence: texts, devices) to catch a
+  misread driver before its callers inherit it.
 - [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
 
