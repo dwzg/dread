@@ -276,6 +276,23 @@ def test_a_slot_does_not_take_the_name_of_a_type_the_function_uses():
 
 
 @needs_z3
+def test_a_16_bit_variable_does_not_make_int_16_bits():
+    """int is 16 bits where the lifter's registers are (MSP430); a u16 variable the readable C made (an
+    ARM function's 16-bit stack slot) left it 32: in 16 bits ~0xcu is 0xfff3, the subtraction's zero
+    test (u32)(s16)x != 12 never held, and the conditions pass proved it to be x >= 0."""
+    src = ('#include "dread.h"\nu32 f(u32 r0)\n{\n    u16 x;\n    x = (u16)r0;\n'
+           '    if (!((u32)((u64)(u32)(s16)x + (u32)~0xcu + 1) == 0)) return 1;\n    return 0;\n}\n')
+    fn = cparse.parse(src).function("f")
+    assert tidy.context(fn).int_bits == 32
+    assert tidy.conditions(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "if (x != 0xcu)" in out, out
+    msp = cparse.parse('#include "dread.h"\nu16 g(void)\n{\n    u16 r4 = 0, r12_1;\n    r12_1 = r4;\n'
+                       '    return r12_1;\n}\n').function("g")
+    assert tidy.context(msp).int_bits == 16                 # (the lifter's registers: MSP430)
+
+
+@needs_z3
 def test_a_carry_over_a_load_is_a_comparison_that_still_loads_once():
     tree = cparse.parse(SNIPPET.replace(
         "    { u32 x = r0, y = r3; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 4: cmp r0, r3 */\n"

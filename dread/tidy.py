@@ -21,6 +21,8 @@ its reader's. Functions whose lifted file asks for registers fixed or kept (drea
 lines) and blocks that bind variables to registers (__asm__("r0")) are left alone: their registers
 are behaviour.
 """
+import re
+
 from dread import cparse as C
 from dread import cexpr
 from dread.cflow import Graph, has_effects, walk_expr, _reads_of, is_volatile_access, is_pure_call
@@ -1078,12 +1080,20 @@ def tidy_declarations(fn):
     return changed
 
 
+LIFTER_REGISTER = re.compile(r"^(r\d+|p\d+|sp0)(_\d+)?$")   # MSP430's registers, parameters, frame address
+
+
 def context(fn):
     """cexpr's context for a function: its variables' types, int's width (16 bits where the registers
-    are: MSP430's lifted C has u16 registers and int is 16 bits there)."""
+    are: MSP430's lifted C has u16 registers and int is 16 bits there). Only the lifter's own
+    variables say so (a parameter, a register r4 or its webs' r4_1, sp0): a u16 variable of the
+    readable C's (a 16-bit stack slot of an ARM function) made a whole function 16-bit, and the
+    conditions pass then proved a wrong comparison ((u32)(s16)x != 12 as x >= 0, ~12 being 0xfff3 in
+    16 bits)."""
     ctx = cexpr.Ctx()
     narrow = any(p[0] == "u16" for p in fn.params) or any(
-        isinstance(x, C.Decl) and x.specs == "u16" for x in fn.body.body)
+        isinstance(x, C.Decl) and x.specs == "u16" and any(LIFTER_REGISTER.match(d.name) for d in x.items)
+        for x in fn.body.body)
     if narrow:
         ctx.int_bits, ctx.long_bits = 16, 32
     for name in all_names(fn):

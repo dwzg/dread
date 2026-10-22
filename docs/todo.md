@@ -70,6 +70,12 @@ its sources.
   32-bit unsigned x is (x >> (b - a)) & mask; propagation and the expressions' clean-up reach the
   statements inside a conditional block (flat_view: uart_getc's IT block loads io_40011000, not
   *(r3 + 0)); the printer adds the parentheses GCC's -Wparentheses asks for ((x >> 1) & 1u).
+  2026-10-22, on a private firmware: int's width was 16 bits in every function with a u16 variable
+  (meant for MSP430's registers), and a 16-bit stack slot made a variable turned an ARM function's
+  arithmetic 16-bit: the evaluator and z3 share the model and proved (u32)(s16)x != 12 to be x >= 0
+  (~0xcu is 0xfff3 in 16 bits); the gate turned such functions down. Only the lifter's registers,
+  parameters and sp0 decide now (tidy.context). Still read from the lifted C's dialect: int's width
+  is the target's (rule 2) and could come from it.
 - [x] **Structure.** Gotos to if/else, while, do-while and switch (pattern-independent structuring,
   "No More Gotos", NDSS 2015); a goto left only where the flow is irreducible. Done when the gotos
   left per build are in the bench report and the gate accepts as many as before.
