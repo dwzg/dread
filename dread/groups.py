@@ -4,9 +4,14 @@ would see (a kernel's queue, its timers, a driver, a demo's test, the C library'
 --subsystems shows them in the questions for the functions' names.
 
 No name is used, so a stripped image groups as its named build does. What each function touches is
-read as dread relations reads it (Facts: the accesses of its readable C at fixed addresses and the
-constants it makes that point to a text, a table or a function; the addresses its machine code makes
-where no C is made), kept in BUILD/relations. The graph has an edge between two functions for
+read from its machine code (the default, EVIDENCE "listing", since 2026-10-22: dread.relations
+flow_references follows the constants its registers hold over its control flow, and finds its loads
+and stores at a known address, the addresses it makes, and those it stores, passes or returns), or
+with --evidence readable from its readable C as dread relations reads it (Facts: the accesses of its
+readable C at fixed addresses and the constants it makes that point to a text, a table or a function;
+the addresses its machine code makes where no C is made; kept in BUILD/relations). Both say which
+globals, devices, texts, tables and functions' entries it touches (things()); the listing costs a
+few milliseconds a function, the readable C 0.1-0.5 s. The graph has an edge between two functions for
 
 - each thing both touch: a global (memory at a fixed address in RAM or rom, exactly that address), a
   device (its registers' block of DEVICE_BLOCK bytes), a text, a table of texts and functions. A thing
@@ -33,20 +38,27 @@ the adjusted Rand index (1 the same partition, about 0 one as good as chance), p
 functions in their group's most common file: groups that mix files lower it) and completeness (the
 share in their file's most common group: files split over groups lower it). On four FreeRTOS builds
 (GCC -Os, clang -O2 and GCC -O0 for a Cortex-M3, GCC -Os for RISC-V; 2026-10-22, docs/decisions.md)
-the index was 0.78-0.84, purity 0.74-0.85, completeness 0.89-0.98, 27-29 groups for 41-53 files: what
-lowers purity is mostly small neighbouring files of the demo in one group, and two files whose
-functions of the same names the linker put side by side. Not established: how the groups fall on
-firmware whose source files are not laid out one after the other (link-time optimisation, functions
-sorted by section names), and whether a file is the subsystem a reader means (a C library's many
-one-function files make one group, which is what a reader wants and what the score counts as
-impure).
+the index from the readable C was 0.78-0.84, purity 0.74-0.85, completeness 0.89-0.98, 27-29 groups
+for 41-53 files: what lowers purity is mostly small neighbouring files of the demo in one group, and
+two files whose functions of the same names the linker put side by side. From the listing (the same
+day, 38 FreeRTOS builds, docs/decisions.md): on the 27 ARM builds the index 0.004 higher on average
+(20 builds higher, 5 lower), the two groupings' index against each other 0.98; on RISC-V as high
+with clang (-0.01 to +0.05), 0.06-0.11 lower with GCC -Os (0.015 with -O2), where the listing sees
+one array's field in 11-13 of the kernel's functions that the readable C keeps behind a variable,
+and resolution 2 splits that file around it (given to the readable C's evidence alone, it lowers
+that score as much). Not established: how the groups fall on firmware whose source files are not
+laid out one after the other (link-time optimisation, functions sorted by section names), and
+whether a file is the subsystem a reader means (a C library's many one-function files make one
+group, which is what a reader wants and what the score counts as impure).
 
 The groups and the evidence they were found from are kept in BUILD/groups/IMAGE.json (load(), since
-2026-10-22) under a key made without reading a function: every module of DREAD (what the facts
-depend on is most of the package, so any change makes them anew), regflow's key (the image's bytes,
+2026-10-22) under a key made without reading a function: every module of DREAD (what the evidence
+depends on is most of the package, so any change makes them anew), regflow's key (the image's bytes,
 its functions, code ranges and startup), the target's description and the image's tables, the
-resolution and the weights. A second look costs the key (milliseconds) instead of every function's
-lift (2.8 s for a FreeRTOS build on 8 workers, 16 s with no facts kept); --fresh finds them anew.
+resolution, the weights and where the evidence comes from. A second look costs the key (milliseconds)
+instead of finding them: from the listing 0.3-0.5 s for a FreeRTOS build on 8 workers, the whole
+command; from the readable C 7-23 s with no facts kept and 1-5 s with them (each function's lift);
+--fresh finds them anew.
 
 --json prints the whole program as a graph of its groups (program_graph(), docs/formats.md, "The
 whole-program graph"): each group with a label (the pilot's subsystem name for exactly these
@@ -57,7 +69,7 @@ two groups the calls each way, the addresses of functions taken each way, and th
 its group, and the calls and taken addresses between functions. dread gui draws it (/api/program).
 
     dread groups [--target DIR] [--image NAME] [--resolution R] [--jobs N] [--score ELF] [--brief]
-                 [--json] [--fresh]
+                 [--json] [--fresh] [--evidence listing|readable]
 """
 import argparse
 import collections
@@ -77,13 +89,23 @@ CALLS = 0.0
 RESOLUTION = 2.0
 LEVELS = 32             # Louvain's levels at most, and its sweeps over the nodes of one level
 SWEEPS = 100
-KEEP_VERSION = 1        # what load() keeps and how its key is made: bump when either changes
+KEEP_VERSION = 2        # what load() keeps and how its key is made: bump when either changes (2: the evidence)
+EVIDENCE = "listing"    # where what a function touches is read from: "listing" or "readable" (evidence())
+SOURCES = ("listing", "readable")
 PREFIX_SHARE = 1 / 3    # a group is labelled by a name prefix that at least this share of its functions has
 
 
 def _facts_one(name):
     from dread.readable import _G
-    return _G["facts"].get(name)
+    return _G["facts"].get(name)["refs"]
+
+
+def _flow_one(name):
+    from dread import relations
+    from dread.readable import _G
+    program = _G["program"]
+    refs = relations.flow_references(program, program.by_name[name], scratch=_G["scratch"])
+    return [[a, t, i, r, w] for (a, t, i), (r, w) in refs.items()]
 
 
 def things(program, fn, refs):
@@ -112,16 +134,23 @@ def things(program, fn, refs):
     return sorted(out)
 
 
-def evidence(target, image, program, flow=None, jobs=None):
-    """{function name: things()} of every function of the program, from dread.relations Facts (made in
-    a pool of workers where they are not kept yet: 7-30 s on 8 workers for a FreeRTOS build, about a
-    second once kept)."""
-    from dread import readable, relations
-    facts = relations.Facts(target, image, program, flow)
-    facts.prepare()
+def evidence(target, image, program, flow=None, jobs=None, source=EVIDENCE):
+    """{function name: things()} of every function of the program, in a pool of workers. source
+    "listing": dread.relations flow_references, from the machine code alone (0.1-0.5 s on 8 workers for
+    a FreeRTOS build); "readable": dread.relations Facts, from each function's readable C (made where it
+    is not kept yet: 6-32 s on 8 workers for a FreeRTOS build, 1-5 s once kept, each function lifted)."""
+    from dread import readable, regflow, relations
+    if source not in SOURCES:
+        raise ValueError("evidence from %r: one of %s" % (source, ", ".join(SOURCES)))
     names = [fn.name for fn in sorted(program.functions, key=lambda f: f.entry)]
-    got = readable.in_pool(_facts_one, names, jobs, facts=facts)
-    return {n: things(program, program.by_name[n], f["refs"]) for n, f in zip(names, got)}
+    if source == "readable":
+        facts = relations.Facts(target, image, program, flow)
+        facts.prepare()
+        got = readable.in_pool(_facts_one, names, jobs, facts=facts)
+    else:
+        got = readable.in_pool(_flow_one, names, jobs, program=program,
+                               scratch=regflow.scratch_names(target, program.arch))
+    return {n: things(program, program.by_name[n], refs) for n, refs in zip(names, got)}
 
 
 def graph(program, touched, calls=None, shared=None, taken=TAKEN, adjacent=ADJACENT, call_weight=CALLS,
@@ -228,12 +257,13 @@ def louvain(n, edges, resolution=RESOLUTION):
     return [renumber[m] for m in member]
 
 
-def find(target, image, program, flow=None, jobs=None, touched=None, resolution=RESOLUTION, **weights):
+def find(target, image, program, flow=None, jobs=None, touched=None, resolution=RESOLUTION, source=EVIDENCE,
+         **weights):
     """The image's groups: [[function names in address order]], ordered by their first function's
-    address (a group's number is its place here). touched: evidence(), made here when not given;
-    weights: graph()'s keyword arguments."""
+    address (a group's number is its place here). touched: evidence() (from source), made here when
+    not given; weights: graph()'s keyword arguments."""
     if touched is None:
-        touched = evidence(target, image, program, flow, jobs)
+        touched = evidence(target, image, program, flow, jobs, source)
     order, edges = graph(program, touched, **weights)
     found = {}
     for name, c in zip(order, louvain(len(order), edges, resolution)):
@@ -252,11 +282,11 @@ def kept_path(target, image):
     return os.path.join(target.build, "groups", image.name + ".json")
 
 
-def cache_key(target, image, resolution=RESOLUTION, weights=None):
+def cache_key(target, image, resolution=RESOLUTION, weights=None, source=EVIDENCE):
     """A digest of what the groups are made from, made without reading a function (the module
     docstring): every Python module of DREAD, regflow's key, the target's description, each table of
-    the image (absent ones too), the resolution and graph()'s weights. Conservative: an edit anywhere
-    in DREAD, or a note in annotations.txt, makes the groups anew."""
+    the image (absent ones too), the resolution, graph()'s weights and where the evidence is read from.
+    Conservative: an edit anywhere in DREAD, or a note in annotations.txt, makes the groups anew."""
     import hashlib
     from dread import regflow
     h = hashlib.sha1(b"dread groups %d\0" % KEEP_VERSION)
@@ -277,51 +307,54 @@ def cache_key(target, image, resolution=RESOLUTION, weights=None):
         except OSError:
             h.update(b"(none)")
         h.update(b"\0")
-    h.update(json.dumps([float(resolution), weights or {}], sort_keys=True).encode())
+    h.update(json.dumps([float(resolution), weights or {}, source], sort_keys=True).encode())
     return h.hexdigest()
 
 
-def kept(target, image, key=None, resolution=RESOLUTION, weights=None):
-    """The record load() kept for the image when its key is key (cache_key() of the resolution and the
-    weights when not given), else None: {"groups": find()'s groups, "touched": evidence(), "key",
-    "resolution"}."""
+def kept(target, image, key=None, resolution=RESOLUTION, weights=None, source=EVIDENCE):
+    """The record load() kept for the image when its key is key (cache_key() of the resolution, the
+    weights and the evidence's source when not given), else None: {"groups": find()'s groups,
+    "touched": evidence(), "key", "resolution", "evidence"}."""
     try:
         with open(kept_path(target, image)) as f:
             data = json.load(f)
     except (OSError, ValueError):
         return None
     if key is None:
-        key = cache_key(target, image, resolution, weights)
+        key = cache_key(target, image, resolution, weights, source)
     if not isinstance(data, dict) or data.get("key") != key or data.get("version") != KEEP_VERSION:
         return None
     found, touched = data.get("groups"), data.get("touched")
     if not isinstance(found, list) or not isinstance(touched, dict):
         return None
     return {"groups": [list(g) for g in found], "key": key, "resolution": data.get("resolution"),
+            "evidence": data.get("evidence"),
             "touched": {n: [tuple(t) for t in things] for n, things in touched.items()}}
 
 
-def load(target, image, program, flow=None, jobs=None, resolution=RESOLUTION, fresh=False, **weights):
-    """kept()'s record, or the groups found now (find(), with the evidence) and kept for the next time
-    (BUILD/groups/IMAGE.json, docs/formats.md); fresh: found now whatever is kept."""
-    key = cache_key(target, image, resolution, weights)
+def load(target, image, program, flow=None, jobs=None, resolution=RESOLUTION, fresh=False, source=EVIDENCE,
+         **weights):
+    """kept()'s record, or the groups found now (find(), with the evidence from source) and kept for
+    the next time (BUILD/groups/IMAGE.json, docs/formats.md); fresh: found now whatever is kept."""
+    key = cache_key(target, image, resolution, weights, source)
     if not fresh:
         got = kept(target, image, key)
         if got is not None:
             return got
-    touched = evidence(target, image, program, flow, jobs)
+    touched = evidence(target, image, program, flow, jobs, source)
     found = find(target, image, program, flow, jobs, touched=touched, resolution=resolution, **weights)
     path = kept_path(target, image)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         temp = "%s.%d.tmp" % (path, os.getpid())
         with open(temp, "w") as f:
-            json.dump({"version": KEEP_VERSION, "key": key, "resolution": resolution, "groups": found,
-                       "touched": {n: [list(t) for t in touched[n]] for n in sorted(touched)}}, f, sort_keys=True)
+            json.dump({"version": KEEP_VERSION, "key": key, "resolution": resolution, "evidence": source,
+                       "groups": found, "touched": {n: [list(t) for t in touched[n]] for n in sorted(touched)}},
+                      f, sort_keys=True)
         os.replace(temp, path)
     except OSError:                         # (a build directory that cannot be written: found each time)
         pass
-    return {"groups": found, "touched": touched, "key": key, "resolution": resolution}
+    return {"groups": found, "touched": touched, "key": key, "resolution": resolution, "evidence": source}
 
 
 # ---- labels ----
@@ -518,6 +551,9 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true",
                         help="print the whole program as a graph of its groups (docs/formats.md)")
     parser.add_argument("--fresh", action="store_true", help="find the groups anew, whatever is kept")
+    parser.add_argument("--evidence", choices=SOURCES, default=EVIDENCE,
+                        help="what each function touches, read from its machine code (listing) or from its "
+                             "readable C (readable, slower; default %s)" % EVIDENCE)
     args = parser.parse_args(argv)
     try:
         target, image = tgt.from_args(args)
@@ -526,7 +562,7 @@ def main(argv=None):
         return 1
     from dread.program import Program
     program = Program(target, image)
-    record = load(target, image, program, None, args.jobs, args.resolution, fresh=args.fresh)
+    record = load(target, image, program, None, args.jobs, args.resolution, fresh=args.fresh, source=args.evidence)
     groups = record["groups"]
     if args.json:
         from dread import pilot

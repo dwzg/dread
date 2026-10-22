@@ -389,15 +389,18 @@ so the same tables give the same record.
 ### `BUILD/groups/IMAGE.json`
 
 Written by `dread groups` (since 2026-10-22; dread/groups.py load): the groups and the evidence they
-were found from, so that a second look reads them instead of every function's facts. `{"version": 1,
-"key", "resolution", "groups": [[function names in address order], ...] (numbered by their place,
-which is the order of their first functions' addresses), "touched": {name: [[kind, key], ...]}}`, the evidence
-`things()` gives a function: `global` (an address), `device` (the block's number: its address over
-DEVICE_BLOCK), `text` and `table` (an address), `taken` (another function's entry). The key is a
-digest of every Python module of DREAD, regflow's key, the target's dread.toml, each table of the
-image (absent ones too), the resolution and the weights: any change of these makes the groups anew;
-a file with another key or version is not used. `dread groups --fresh` finds them anew whatever is
-kept.
+were found from, so that a second look reads them instead of every function's facts. `{"version": 2,
+"key", "resolution", "evidence", "groups": [[function names in address order], ...] (numbered by their
+place, which is the order of their first functions' addresses), "touched": {name: [[kind, key], ...]}}`,
+the evidence `things()` gives a function: `global` (an address), `device` (the block's number: its
+address over DEVICE_BLOCK), `text` and `table` (an address), `taken` (another function's entry).
+`evidence` says where it was read from: `listing` (the machine code, dread.relations flow_references,
+the default) or `readable` (the readable C, dread.relations Facts; `dread groups --evidence readable`).
+The key is a digest of every Python module of DREAD, regflow's key, the target's dread.toml, each table
+of the image (absent ones too), the resolution, the weights and the evidence's source: any change of
+these makes the groups anew; a file with another key or version is not used (version 1, before the
+evidence had a choice, was always the readable C's: such a file is found anew). One record an image:
+the last one found. `dread groups --fresh` finds them anew whatever is kept.
 
 ## The whole-program graph (`dread groups --json`, `dread gui`'s `/api/program`)
 

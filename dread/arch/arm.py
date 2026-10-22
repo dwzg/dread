@@ -20,6 +20,8 @@ import unicorn as uc
 from capstone import arm as csarm
 from unicorn import arm_const as ua
 
+from dread.arch import sum_value
+
 REGS = tuple("r%d" % i for i in range(13)) + ("sp", "lr", "pc")
 ALIASES = {"sb": "r9", "sl": "r10", "fp": "r11", "ip": "r12", "r13": "sp", "r14": "lr", "r15": "pc"}
 UC_REGS = {name: getattr(ua, "UC_ARM_REG_" + name.upper()) for name in REGS}
@@ -109,6 +111,30 @@ for _regs, _names in (
 DATA_PROCESSING = {getattr(csarm, "ARM_INS_" + n) for n in (
     "MOV", "MVN", "ADD", "SUB", "RSB", "ADC", "SBC", "RSC", "AND", "ORR", "EOR", "BIC", "CMP", "CMN", "TST",
     "TEQ", "MSR") if hasattr(csarm, "ARM_INS_" + n)}
+
+
+def _typed_ids(text):
+    """{capstone id: type} of "NAME:type ..." (the names this capstone knows)."""
+    pairs = [w.split(":") for w in text.split()]
+    return {getattr(csarm, "ARM_INS_" + n): t for n, t in pairs if hasattr(csarm, "ARM_INS_" + n)}
+
+
+def _id_set(text):
+    return {getattr(csarm, "ARM_INS_" + n) for n in text.split() if hasattr(csarm, "ARM_INS_" + n)}
+
+
+# The loads and stores of one register or a pair at a register plus an offset (value_step), with the type
+# the lifters write their access with (vldr and vstr as u32 whatever their register)
+VALUE_LOADS = _typed_ids("LDR:u32 LDRB:u8 LDRH:u16 LDRSB:s8 LDRSH:s16 LDRD:u64 LDREX:u32 LDREXB:u8 LDREXH:u16 "
+                         "LDREXD:u64 LDRT:u32 LDRBT:u8 LDRHT:u16 LDRSBT:s8 LDRSHT:s16 LDA:u32 LDAB:u8 LDAH:u16 "
+                         "LDAEX:u32 VLDR:u32")
+VALUE_STORES = _typed_ids("STR:u32 STRB:u8 STRH:u16 STRD:u64 STREX:u32 STREXB:u8 STREXH:u16 STREXD:u64 STRT:u32 "
+                          "STRBT:u8 STRHT:u16 STL:u32 STLB:u8 STLH:u16 STLEX:u32 VSTR:u32")
+STATUS_STORES = _id_set("STREX STREXB STREXH STREXD STLEX")     # (their first register is the status)
+BLOCK_LOADS = _id_set("LDM LDMDA LDMDB LDMIB VLDMIA VLDMDB")
+BLOCK_STORES = _id_set("STM STMDA STMDB STMIB VSTMIA VSTMDB")
+VALUE_ADDS = _id_set("ADD ADDW")
+VALUE_SUBS = _id_set("SUB SUBW")
 
 
 class Rotated:
@@ -349,6 +375,101 @@ class Arm:
                     and ops[1].type == csarm.ARM_OP_IMM:   # (capstone 5 gives movw the id of mov)
                 pending[ops[0].reg] = (k, ops[1].imm & 0xFFFF)
         return out
+
+    def value_step(self, insn, isa, known, program):
+        """What an instruction does with the constants registers hold (dread.relations flow_references):
+        (values, accesses, stored). known: {register: (value, indexed)} in front of it, indexed True for
+        a constant plus something not known (an index). values: {register: (value, indexed) or None}
+        of the registers it writes whose value follows (None: not known; other registers it writes are
+        not known either): a literal (a word of the image), adr, mov, mvn, movw and movt, add and sub of
+        an immediate or of two registers, orr of an immediate, a base register moved by writeback.
+        accesses: [(base, offset, type, indexed, read, write)] of its load or store at a known base
+        (its value) plus an offset (a register index makes it indexed; the type as the lifters write
+        it), ldm and stm at their base; nothing at sp. stored: the registers whose values a store
+        writes to memory."""
+        ops, i = insn.operands, insn.id
+        values, accesses, stored = {}, [], []
+        if not ops:
+            return values, accesses, stored
+        lit = self.literal(insn, isa)
+        if lit is not None:
+            if lit[1] == 4 and ops[0].type == csarm.ARM_OP_REG and program.in_image(lit[0], 4):
+                values[self._name(insn.reg_name(ops[0].reg))] = (program.word(lit[0]), False)
+            return values, accesses, stored
+        at = self.pc_address(insn, isa)
+        if at is not None and ops[0].type == csarm.ARM_OP_REG:
+            values[self._name(insn.reg_name(ops[0].reg))] = (at, False)
+            return values, accesses, stored
+
+        def reg(o):
+            return self._name(insn.reg_name(o.reg)) if o.type == csarm.ARM_OP_REG else None
+        d = reg(ops[0])
+        if d is not None and len(ops) in (2, 3) and i not in VALUE_LOADS and i not in VALUE_STORES:
+            last = ops[-1]
+            first = d if len(ops) == 2 else reg(ops[1])
+            if i in (csarm.ARM_INS_MOV, csarm.ARM_INS_MVN) and len(ops) == 2:
+                if last.type == csarm.ARM_OP_IMM:
+                    v = last.imm & 0xFFFFFFFF
+                    values[d] = (~v & 0xFFFFFFFF if i == csarm.ARM_INS_MVN else v, False)
+                elif i == csarm.ARM_INS_MOV and last.type == csarm.ARM_OP_REG and not last.shift.type:
+                    values[d] = known.get(reg(last))
+                return values, accesses, stored
+            if i == csarm.ARM_INS_MOVT and len(ops) == 2 and last.type == csarm.ARM_OP_IMM:
+                low = known.get(d)
+                values[d] = ((((last.imm & 0xFFFF) << 16) | (low[0] & 0xFFFF)), False) \
+                    if low is not None and not low[1] else None
+                return values, accesses, stored
+            if i in VALUE_ADDS or i in VALUE_SUBS or i == csarm.ARM_INS_ORR:
+                a = known.get(first) if first is not None else None
+                if last.type == csarm.ARM_OP_IMM:
+                    b = (last.imm & 0xFFFFFFFF, False)
+                elif last.type == csarm.ARM_OP_REG and not last.shift.type:
+                    b = known.get(reg(last))
+                else:
+                    b = None
+                if i == csarm.ARM_INS_ORR:
+                    values[d] = (a[0] | b[0], False) if a and b and not (a[1] or b[1]) else None
+                elif a is None and last.type == csarm.ARM_OP_REG and i in VALUE_ADDS:
+                    values[d] = sum_value(b, a)         # (the register not known first: indexed)
+                else:
+                    values[d] = sum_value(a, b, i in VALUE_ADDS)
+                return values, accesses, stored
+        if i in VALUE_LOADS or i in VALUE_STORES:
+            mem = next((k for k, o in enumerate(ops) if o.type == csarm.ARM_OP_MEM), None)
+            if mem is None:
+                return values, accesses, stored
+            if i in VALUE_STORES:
+                regs = [reg(o) for o in ops[:mem] if o.type == csarm.ARM_OP_REG]
+                stored = regs[1:] if i in STATUS_STORES else regs
+            m = ops[mem].mem
+            base = self._name(insn.reg_name(m.base))
+            b = known.get(base)
+            if b is None or base in ("sp", "pc"):
+                return values, accesses, stored
+            disp = -m.disp if ops[mem].subtracted and m.disp > 0 else m.disp
+            post = mem + 1 < len(ops)       # (ldr r0, [r1], #4: the base itself, then it moves)
+            ctype = VALUE_LOADS.get(i) or VALUE_STORES.get(i)
+            accesses.append((b[0], 0 if post else disp, ctype, b[1] or bool(m.index), i in VALUE_LOADS,
+                             i in VALUE_STORES))
+            if insn.writeback:
+                if post:
+                    step = ops[mem + 1]
+                    if step.type == csarm.ARM_OP_IMM:
+                        delta = -step.imm if step.subtracted and step.imm > 0 else step.imm
+                        values[base] = ((b[0] + delta) & 0xFFFFFFFF, b[1])
+                    else:
+                        values[base] = sum_value(b, None)
+                elif not m.index:
+                    values[base] = ((b[0] + disp) & 0xFFFFFFFF, b[1])
+            return values, accesses, stored
+        if (i in BLOCK_LOADS or i in BLOCK_STORES) and ops[0].type == csarm.ARM_OP_REG:
+            if i in BLOCK_STORES:
+                stored = [reg(o) for o in ops[1:] if o.type == csarm.ARM_OP_REG]
+            base = reg(ops[0])
+            b = known.get(base)
+            if b is not None and base not in ("sp", "pc"):
+                accesses.append((b[0], 0, "u32", b[1], i in BLOCK_LOADS, i in BLOCK_STORES))
+        return values, accesses, stored
 
     def target(self, insn):
         """The destination of a direct branch or call (b, bl, blx #imm, cbz, cbnz), or None for an

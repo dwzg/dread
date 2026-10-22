@@ -7,6 +7,18 @@ under way) and MIPS (MIPS32r2 little endian, `dread.arch.mips`, under way). Anot
 """
 
 
+def sum_value(a, b, add=True):
+    """a + b, or a - b, of two register values of a layer's value_step ((value, indexed), indexed True
+    for a constant plus something not known), either of them None when not known: a known value plus
+    one not known is that value indexed (the readable C's constant + something); None when a is not
+    known, or b is not known in a difference."""
+    if a is None:
+        return None
+    if b is None:
+        return (a[0], True) if add else None
+    return ((a[0] + b[0] if add else a[0] - b[0]) & 0xFFFFFFFF, a[1] or b[1])
+
+
 def get(spec):
     """The architecture layer for an [arch] table (a dict with at least "name")."""
     name = spec.get("name")

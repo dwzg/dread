@@ -20,6 +20,8 @@ import capstone as cs
 import unicorn as uc
 from unicorn import riscv_const as ur
 
+from dread.arch import sum_value
+
 NAMES = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1"] + ["a%d" % i for i in range(8)] + \
         ["s%d" % i for i in range(2, 12)] + ["t3", "t4", "t5", "t6"]
 NUMBER = {name: i for i, name in enumerate(NAMES)}
@@ -37,6 +39,8 @@ OP = {(0, 0): "add", (0, 0x20): "sub", (1, 0): "sll", (2, 0): "slt", (3, 0): "sl
       (0, 1): "mul", (1, 1): "mulh", (2, 1): "mulhsu", (3, 1): "mulhu", (4, 1): "div", (5, 1): "divu",
       (6, 1): "rem", (7, 1): "remu"}
 CSR_OPS = {1: "csrrw", 2: "csrrs", 3: "csrrc", 5: "csrrwi", 6: "csrrsi", 7: "csrrci"}
+VALUE_TYPES = {"lb": "s8", "lbu": "u8", "lh": "s16", "lhu": "u16", "lw": "u32", "sb": "u8", "sh": "u16",
+               "sw": "u32"}    # the loads' and stores' types as the lifter writes their accesses (value_step)
 SYSTEM = {0x00000073: "ecall", 0x00100073: "ebreak", 0x30200073: "mret", 0x10200073: "sret",
           0x00200073: "uret", 0x10500073: "wfi"}
 
@@ -468,6 +472,37 @@ class RiscV:
     def pc_address(self, insn, isa):
         """The address auipc or lui + addi computes (joined by link_pair), else None."""
         return getattr(insn, "rv_address", None)
+
+    def value_step(self, insn, isa, known, program):
+        """What an instruction does with the constants registers hold (dread.relations flow_references;
+        the ARM layer's says what it returns): lui, auipc, addi (li and mv among them), add and sub give
+        values; a load or store at a known base plus its offset is an access (none at sp); a store
+        stores its rs2."""
+        f = fields(insn)
+        values, accesses, stored = {}, [], []
+
+        def value(n):
+            return (0, False) if n == 0 else known.get(NAMES[n])
+        op = f.op
+        if op in ("lui", "auipc", "addi", "add", "sub") and f.rd:
+            if op == "lui":
+                values[NAMES[f.rd]] = (f.imm & 0xFFFFFFFF, False)
+            elif op == "auipc":
+                values[NAMES[f.rd]] = ((insn.address + f.imm) & 0xFFFFFFFF, False)
+            elif op == "addi":
+                values[NAMES[f.rd]] = sum_value(value(f.rs1), (f.imm & 0xFFFFFFFF, False))
+            else:
+                a, b = value(f.rs1), value(f.rs2)
+                if a is None and op == "add":
+                    a, b = b, a             # (the register not known second: indexed)
+                values[NAMES[f.rd]] = sum_value(a, b, op == "add")
+        elif op in VALUE_TYPES:
+            if op[0] == "s" and f.rs2:
+                stored = [NAMES[f.rs2]]
+            b = value(f.rs1)
+            if b is not None and NAMES[f.rs1] != "sp":
+                accesses.append((b[0], f.imm, VALUE_TYPES[op], b[1], op[0] == "l", op[0] == "s"))
+        return values, accesses, stored
 
     def bound_check(self, insn, prior=(), known=None):
         """(register, limit, before) when the instruction bounds a switch index (dread.switches):

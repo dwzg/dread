@@ -538,7 +538,15 @@ its sources.
   GCC -O0, RISC-V GCC -Os; a bench step now, `groups`): adjusted Rand index 0.805, 0.785, 0.844,
   0.778, purity 0.755, 0.735, 0.798, 0.845, completeness 0.969, 0.973, 0.977, 0.894, 27-29 groups for
   41-53 files; what mixes files is small neighbouring files of the demo and two files whose functions
-  of the same names the linker put side by side. `dread pilot --task subsystems` asks for each group's
+  of the same names the linker put side by side. What a function touches comes from its machine code
+  since later that day (dread.relations flow_references: the constants its registers hold followed
+  over its control flow, the arch layer's value_step for ARM and RISC-V; `--evidence readable` for the
+  readable C's facts): `dread groups` took 0.3-0.5 s for a FreeRTOS build instead of 7-23 s (cold) or
+  1-5 s (facts kept); on 38 FreeRTOS builds the groups were as good on ARM (index +0.004, 20 builds
+  higher, 5 lower, the two groupings 0.98 alike) and on RISC-V with clang, 0.06-0.11 lower on RISC-V
+  with GCC -Os (one array field the readable C hides: The groups' sensitivity, below;
+  docs/decisions.md).
+  `dread pilot --task subsystems` asks for each group's
   name, prefix and sentence from all of its evidence at once (its functions' code cut to 24,000
   characters, the texts they point to, the devices they use, its callers and callees outside it; votes
   of five over the prefix), kept in subsystems.tsv beside names.tsv (docs/formats.md); `--task name
@@ -627,6 +635,18 @@ its sources.
   0.07); the grounded judge's re-measure of the groups 15:6 by groups (p 0.08; 68:34 by functions, p
   0.001), so their gain in what the names say is not established. Next: a setting compared over
   replicate runs (three a side cost about $3.50 on FreeRTOS GCC -Os with Haiku 5.5).
+- [ ] **The groups' sensitivity to one dense thing** (found 2026-10-22 when the evidence moved to the
+  listing, docs/decisions.md): on FreeRTOS RISC-V GCC -Os the listing sees one array field (the ready
+  lists' pxIndex, pxReadyTasksLists[i] + 4) in 11-13 of tasks.c's functions, which the readable C keeps
+  behind a variable it reuses; with it, resolution 2 splits tasks.c differently and the index falls by
+  0.06-0.11 (given to the readable C's evidence alone it falls as much). The evidence is right; the
+  grouping is what reacts. Counting things with the same users once was worse for both sources (the
+  mean index on ARM 0.797 and 0.796 against 0.801 and 0.804, on RISC-V 0.807 and 0.772 against 0.829
+  and 0.793); the index also moves by 0.02-0.05 (its standard deviation) when 2 % of the evidence is
+  dropped at random on these builds, by 0.003-0.012 on ARM. Next: a grouping that holds a large file
+  together (resolution per size, a refinement pass that merges a split file's parts by their
+  neighbours), measured on both sources and all 38 builds; on the private firmware, the groups from
+  the listing against those from the readable C, and the time.
 - [ ] **A no-confidence vote on existing names** (the user's idea, 2026-10-22: reverse engineering as
   a puzzle, where a sub-picture can look right in one context and wrong in another). Not a periodic
   re-vote by the same model: consistency is not correctness (a misread driver was named after the
@@ -2214,7 +2234,9 @@ tool, the page shows its records; the only changes are the command line's own.
     hairlines. Labels are placed largest first, none over another.
   - The tool computes, the page draws: `dread groups` keeps its groups and their evidence in
     BUILD/groups/IMAGE.json under a key over DREAD's code and the image's tables (a second look 0.09 s
-    instead of 2.8 s on a FreeRTOS build), and `--json` prints the whole-program graph (docs/formats.md).
+    instead of 2.8 s on a FreeRTOS build; since the evidence comes from the listing, found anew in
+    0.3-0.5 s, without waiting for the register analysis), and `--json` prints the whole-program graph
+    (docs/formats.md).
     The GUI's `/api/program` runs `dread groups` on the first request in a process of its own, because
     its pool forks and the server has threads, and reads the kept record after that.
   - Measured in headless Chrome, which here has no GPU and rasterizes in software (a lower bound):

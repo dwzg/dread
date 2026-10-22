@@ -544,10 +544,11 @@ class State:
 
     def make_groups(self, generation):
         """The groups thread: what dread groups kept for these tables, or dread groups run now in a
-        process of its own (its pool forks; this server has threads), once the register analysis is
-        done (the tool would make it again). close() and a new load end the process."""
+        process of its own (its pool forks; this server has threads): at once with the evidence from
+        the listing (the default), once the register analysis is done with the evidence from the
+        readable C (the tool would make it again). close() and a new load end the process."""
         from dread import groups
-        while True:
+        while groups.EVIDENCE == "readable":
             with self.lock:
                 if generation != self.generation:
                     return

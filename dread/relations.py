@@ -36,9 +36,13 @@ is not looked at. Making readable C costs 0.1-0.5 s a function on a FreeRTOS bui
 dread.tidy; several seconds for the largest): the facts are kept per function (Facts), dread gui
 makes them in the background and fills the graph in.
 
+flow_references reads the same kinds of facts from the machine code alone, by following the
+constants its registers hold (a few milliseconds a function): dread groups' evidence by default.
+
     dread relations [--target DIR] [--image NAME] [--depth N] [--json] NAME|ADDRESS
 """
 import argparse
+import heapq
 import json
 import os
 import sys
@@ -320,6 +324,143 @@ def listing_references(made):
     (made: materialized()), those of at least SMALLEST_POINTER: each only named, since a listing
     alone does not say what is done with it."""
     return {(a, None, False): [False, False] for a in made if SMALLEST_POINTER <= a <= MASK}
+
+
+FLOW_ROUNDS = 50        # flow_references' visits at most: this many an instruction of the function, and 100
+
+
+def flow_references(program, fn, made=None, scratch=None, made_named=True, indexed=True):
+    """{(address, type, indexed): [read, write]} of what a function does at fixed addresses, read from
+    its machine code alone, as c_references reads it from the readable C: a forward pass over the
+    function's control flow (dread.arch flow) follows the constants its registers hold (the arch
+    layer's value_step: literals, addresses made from the pc, immediates, sums; the target's fixed
+    registers, RISC-V's gp, everywhere), a value where every path brings the same one. A load or store
+    at a known base plus its offset reads or writes that address (indexed where a register index, or
+    a value that is a constant plus something unknown, is added: then only at an anchored address of
+    at least SMALLEST_POINTER, as there); a known value a store writes, a call is given in its argument
+    registers or a return leaves in its result registers is named (type None) when it is an anchored
+    address of at least SMALLEST_POINTER; so is every address the code makes (made: materialized(),
+    listing_references) with made_named, but where a literal lies whose word the layer reads as a
+    value (an ARM literal pool's slot: the C has its word). A call ends the scratch registers' values
+    (scratch: dread.regflow scratch_names, found when None); a conditional instruction keeps a
+    register's value only where it writes the same; code no direct path reaches (a switch's cases)
+    starts from what the indirect jumps in front of it leave. indexed False: a sum with an unknown term
+    is not known. Without a value_step (MIPS, MSP430: not written yet) it is listing_references(made).
+
+    Costs 0.5-2.3 ms a function on FreeRTOS builds in one process (8-30 us an instruction, 2026-10-22)
+    where readable C costs 0.1-0.5 s. Not established: values kept in the frame (spilled and loaded
+    back) are lost, and so is a value that differs by path where the paths join (the readable C names
+    each constant where a path sets it); a constant only compared is named when the code makes it
+    (made_named), where the readable C leaves comparisons out; the readable C names less where it
+    keeps an address in a variable it uses more than once (no access at a constant plus an index)."""
+    arch = program.arch
+    step = getattr(arch, "value_step", None)
+    if made is None:
+        made = materialized(program, fn)
+    found = {}
+
+    def note(address, ctype, ix, read, write):
+        r = found.setdefault((address, ctype, ix), [False, False])
+        r[0], r[1] = r[0] or read, r[1] or write
+    addrs = fn.insns
+    if step is None or not addrs:
+        return listing_references(made)
+    if scratch is None:
+        from dread.regflow import scratch_names
+        scratch = scratch_names(program.target, arch)
+    anchored = anchoring(program, made)
+    insns = program.instructions(fn)
+    n = len(addrs)
+    pos = {a: k for k, a in enumerate(addrs)}
+    succ, kinds, effects, ijumps = [[] for _ in range(n)], [None] * n, [None] * n, []
+    for k, insn in enumerate(insns):
+        if insn is None:
+            continue
+        kind, target, falls = arch.flow(insn)
+        if kind == "jump" and isinstance(target, int) and (target & ~1) in pos:
+            succ[k].append(pos[target & ~1])
+        elif kind == "jump" or kind == "ijump":
+            kind = "tail"                   # (out of the function: its arguments go with it)
+            if not isinstance(target, int):
+                ijumps.append(k)
+        kinds[k] = kind
+        effects[k] = (arch.reg_effects(insn)[1], arch.is_conditional(insn))
+        if k + 1 < n and addrs[k] + insn.size == addrs[k + 1] and (kind in ("next", "call", "icall") or falls):
+            succ[k].append(k + 1)
+    starts = {0, pos.get(fn.entry, pos.get(fn.entry & ~1, 0))}
+    reached = starts | {s for out in succ for s in out}
+    unreached = [k for k in range(n) if k not in reached]
+    for k in ijumps:
+        succ[k].extend(unreached)
+    fixed = {r: (v & MASK, False) for r, v in program.image.fixed.items()}
+    isas = [program.isa_at(a) for a in addrs]
+    before = [None] * n
+    for k in starts | (set() if ijumps else set(unreached)):
+        before[k] = dict(fixed)
+
+    def run(k, known):
+        values, accesses, stored = step(insns[k], isas[k], known, program)
+        writes, conditional = effects[k]
+        out = dict(known)
+        for r in writes:
+            out.pop(r, None)
+        for r, v in values.items():
+            if v is None or (conditional and known.get(r) != v) or (not indexed and v[1]):
+                out.pop(r, None)
+            else:
+                out[r] = v
+        if kinds[k] in ("call", "icall"):
+            for r in scratch:
+                out.pop(r, None)
+        out.update(fixed)
+        return out, accesses, stored, values
+    work = [k for k in range(n) if before[k] is not None]
+    heapq.heapify(work)
+    queued, budget = set(work), FLOW_ROUNDS * n + 100
+    while work and budget:
+        budget -= 1
+        k = heapq.heappop(work)
+        queued.discard(k)
+        if insns[k] is None:
+            continue
+        out = run(k, before[k])[0]
+        for s in succ[k]:
+            old = before[s]
+            new = dict(out) if old is None else {r: v for r, v in old.items() if out.get(r) == v}
+            if new != old:
+                before[s] = new
+                if s not in queued:
+                    heapq.heappush(work, s)
+                    queued.add(s)
+    abi = program.target.abi
+    slots = set()
+    for k in range(n):
+        known = before[k]
+        if known is None or insns[k] is None:
+            continue
+        _, accesses, stored, values = run(k, known)
+        if values and made_named:
+            lit = arch.literal(insns[k], isas[k])
+            if lit is not None:
+                slots.add(lit[0])
+        for base, offset, ctype, ix, read, write in accesses:
+            address = (base + offset) & MASK
+            if not ix or (address >= SMALLEST_POINTER and anchored(address, [base, offset])):
+                note(address, ctype, ix, read, write)
+        used = list(stored)
+        if kinds[k] in ("call", "icall", "tail"):
+            used += abi.arg_regs
+        elif kinds[k] == "return":
+            used += abi.result
+        for r in used:
+            v = known.get(r)
+            if v is not None and r not in fixed and SMALLEST_POINTER <= v[0] <= MASK and anchored(v[0], [v[0]]):
+                note(v[0], None, False, False, False)
+    if made_named:
+        for a in made - slots:
+            if SMALLEST_POINTER <= a <= MASK:
+                note(a, None, False, False, False)
+    return found
 
 
 def lifted_text(lifter, fn):

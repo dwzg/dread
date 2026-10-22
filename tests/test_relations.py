@@ -1,7 +1,7 @@
 """dread relations on copies of gizmo: a function's neighbourhood (callers up, callees down, to a
 depth), the memory its readable C reads and writes, the texts and tables its constants point to, the
 structures of the readable_types plan, how sure each name is; the numbers that are not addresses; the
-facts kept per function; the command line."""
+facts kept per function; what the listing alone reads (flow_references); the command line."""
 import json
 import os
 import shutil
@@ -180,6 +180,33 @@ def test_numbers_are_not_addresses():
     everything = relations.c_references(fn)                 # (without anchors: every constant is named)
     assert (0x123, None, False) in everything and (0x20000030, None, False) not in everything
     assert (0x20000000, None, False) not in everything and (0x20000100, None, False) not in everything
+
+
+def test_the_listing_alone_reads_what_the_readable_c_reads(variant, tmp_path, monkeypatch):
+    """flow_references, from the machine code alone, on each gizmo build: print_status reads the two
+    fields of g_config that its readable C reads (test_every_build); uart_putc reads the UART's status
+    register and writes its data register, offsets from the device's base; on the ARM builds dispatch
+    reads the commands table at GCC's section anchor plus an index plus 52 (indexed, as c_references
+    reads it from the C: test_a_table_of_functions_through_a_section_anchor); without a value_step
+    (MIPS and MSP430 so far) the addresses the code makes, each only named (listing_references)."""
+    target = copy_of(tmp_path, variant)
+    program = Program(target)
+
+    def accesses(name):
+        found = relations.flow_references(program, program.by_name[name])
+        return {(a, i): rw for (a, t, i), rw in found.items() if t is not None}
+    config = [a for k, a, n in program.symbols() if n == "g_config"][0]
+    assert {a for (a, i), (r, w) in accesses("print_status").items() if r and not w and not i} == {config + 4,
+                                                                                                 config + 8}
+    base = target.models["uart"]["base"]
+    assert accesses("uart_putc") == {(base + 4, False): [True, False], (base, False): [False, True]}
+    if program.arch.name == "arm":
+        table = [a for k, a, n in program.symbols() if n == "commands"][0]
+        assert accesses("dispatch") == {(table, True): [True, False]}
+    fn = program.by_name["uart_putc"]
+    made = relations.materialized(program, fn)
+    monkeypatch.delattr(type(program.arch), "value_step")
+    assert relations.flow_references(program, fn) == relations.listing_references(made)
 
 
 def test_the_neighbourhood_is_bounded():

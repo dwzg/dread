@@ -1,7 +1,9 @@
 """dread groups: Louvain's communities on graphs made by hand, the scores against a true partition,
-and the groups of gizmo's builds: the same every time, every function in one, mostly one source file
-a group (DWARF), the same with every name taken away, and the command line; the record kept in
-BUILD/groups and its key; the labels; the whole program as a graph of its groups (--json)."""
+and the groups of gizmo's builds from both sources of evidence (the listing, the default, and the
+readable C): the same every time, every function in one, mostly one source file a group (DWARF), the
+same with every name taken away, and the command line; the UART's device registers found from the
+listing; the record kept in BUILD/groups and its key; the labels; the whole program as a graph of
+its groups (--json)."""
 import json
 import os
 import shutil
@@ -84,27 +86,42 @@ def m3_copy(tmp_path_factory):
 
 @pytest.mark.slow
 def test_every_build_groups_its_functions_by_their_files(variant, tmp_path, capsys):
-    """Each gizmo build: every function in one group, the groups in address order, the same groups a
-    second time (from the facts kept), the UART driver's four functions in one group, and most of a
-    group's functions from one source file (purity 0.84-0.90 on 2026-10-22); the command line prints
+    """Each gizmo build, with the evidence from the listing (the default) and from the readable C: every
+    function in one group, the groups in address order, the same groups a second time, the UART
+    driver's four functions in one group, and most of a group's functions from one source file (purity
+    0.84-0.90 from the readable C, 0.86-0.96 from the listing on 2026-10-22); the command line prints
     the groups and the scores."""
     pytest.importorskip("elftools")
     target = copy_of(tmp_path, variant)
     program = Program(target)
-    found = groups.find(target, target.image(), program)
-    assert sorted(n for g in found for n in g) == sorted(fn.name for fn in program.functions)
-    firsts = [program.by_name[g[0]].entry for g in found]
-    assert firsts == sorted(firsts) and all([program.by_name[n].entry for n in g] == sorted(
-        program.by_name[n].entry for n in g) for g in found)
-    assert groups.find(target, target.image(), program) == found
-    member = groups.membership(found)
-    assert len({member[n] for n in UART}) == 1
-    totals, per = groups.score_groups(program, found, elf_of(target))
-    assert totals["purity"] >= 0.8 and totals["functions"] >= 40, totals
-    assert per[member["uart_putc"]][0] == ("hw.c", per[member["uart_putc"]][0][1])
-    assert groups.main(["--target", target.root, "--score", elf_of(target)]) == 0
-    out = capsys.readouterr().out
-    assert "group 0: " in out and "files: " in out and "adjusted Rand index" in out
+    for source in groups.SOURCES:
+        found = groups.find(target, target.image(), program, source=source)
+        assert sorted(n for g in found for n in g) == sorted(fn.name for fn in program.functions)
+        firsts = [program.by_name[g[0]].entry for g in found]
+        assert firsts == sorted(firsts) and all([program.by_name[n].entry for n in g] == sorted(
+            program.by_name[n].entry for n in g) for g in found)
+        assert groups.find(target, target.image(), program, source=source) == found
+        member = groups.membership(found)
+        assert len({member[n] for n in UART}) == 1, source
+        totals, per = groups.score_groups(program, found, elf_of(target))
+        assert totals["purity"] >= 0.8 and totals["functions"] >= 40, (source, totals)
+        assert per[member["uart_putc"]][0] == ("hw.c", per[member["uart_putc"]][0][1])
+    for source in groups.SOURCES:
+        assert groups.main(["--target", target.root, "--score", elf_of(target), "--evidence", source]) == 0
+        out = capsys.readouterr().out
+        assert "group 0: " in out and "files: " in out and "adjusted Rand index" in out
+
+
+def test_the_listing_finds_the_uart_device(m3_copy):
+    """evidence() from the listing (flow_references): the UART driver's functions touch the UART's
+    block of device registers, and nothing else does; a text main prints is one of main's things."""
+    target, program = m3_copy
+    touched = groups.evidence(target, target.image(), program, source="listing")
+    block = ("device", target.models["uart"]["base"] // groups.DEVICE_BLOCK)
+    assert {n for n, things in touched.items() if block in things} == {"uart_init", "uart_putc", "uart_getc"}
+    assert any(kind == "text" for kind, _ in touched["main"])
+    with pytest.raises(ValueError, match="evidence from"):
+        groups.evidence(target, target.image(), program, source="tea leaves")
 
 
 @pytest.mark.slow
@@ -140,25 +157,35 @@ def test_a_name_prefix_and_the_one_a_group_shares():
 
 @pytest.mark.slow
 def test_the_groups_are_kept_under_a_key(m3_copy, monkeypatch):
-    """load() finds the groups once and keeps them; a second load() reads them without reading a
-    function; another resolution, a changed table or --fresh finds them anew."""
+    """load() finds the groups once and keeps them, with where their evidence was read from; a second
+    load() reads them without reading a function; another resolution, the other source of evidence, a
+    changed table or --fresh finds them anew."""
     target, program = m3_copy
     image = target.image()
     first = groups.load(target, image, program)
-    assert os.path.exists(groups.kept_path(target, image))
+    assert os.path.exists(groups.kept_path(target, image)) and first["evidence"] == groups.EVIDENCE == "listing"
     assert sorted(n for g in first["groups"] for n in g) == sorted(fn.name for fn in program.functions)
+    assert groups.cache_key(target, image, source="readable") != first["key"]
 
     def no_facts(*args, **kw):
         raise AssertionError("the facts were read again")
-    monkeypatch.setattr(groups, "evidence", no_facts)
-    again = groups.load(target, image, program)
-    assert again["groups"] == first["groups"] and again["touched"] == first["touched"]
-    assert groups.kept(target, image, resolution=1.0) is None
-    with pytest.raises(AssertionError, match="read again"):
-        groups.load(target, image, program, fresh=True)
+    with monkeypatch.context() as m:
+        m.setattr(groups, "evidence", no_facts)
+        again = groups.load(target, image, program)
+        assert again["groups"] == first["groups"] and again["touched"] == first["touched"]
+        assert again["evidence"] == "listing"
+        assert groups.kept(target, image, resolution=1.0) is None
+        assert groups.kept(target, image, source="readable") is None
+        with pytest.raises(AssertionError, match="read again"):
+            groups.load(target, image, program, fresh=True)
+        with pytest.raises(AssertionError, match="read again"):
+            groups.load(target, image, program, source="readable")
+    readable = groups.load(target, image, program, source="readable")
+    assert readable["evidence"] == "readable" and groups.kept(target, image, source="readable")["key"] == readable["key"]
+    assert groups.kept(target, image) is None               # (one record an image: the last one made)
     with open(image.table("annotations"), "a") as f:
         f.write("0x%x | a note changes a table\n" % program.functions[0].entry)
-    assert groups.kept(target, image) is None
+    assert groups.kept(target, image, source="readable") is None
 
 
 @pytest.mark.slow

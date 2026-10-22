@@ -87,7 +87,7 @@ default. `--image NAME` or `$DREAD_IMAGE` selects another.
 | `vendor` | the vendor's file the image was taken from, when it has a container |
 | `container` | plugin that unpacks and packs `vendor` |
 | `limit` | the end of the room the overlay may use behind the image (default: the image's end) |
-| `fixed` | registers that hold one value in the whole program, `{gp = 0x80080800}`: RISC-V's `gp`, which GCC's code addresses small data from (the startup sets it to `__global_pointer$`; `dread import-elf --write-startup` writes it). The emulator sets them before every call, and the lifter takes them as constants and refuses a function that writes one |
+| `fixed` | registers that hold one value in the whole program, `{gp = 0x80080800}`: RISC-V's `gp`, which GCC's code addresses small data from (the startup sets it to `__global_pointer$`; `dread import-elf --write-startup` writes it). The emulator sets them before every call, the lifter takes them as constants and refuses a function that writes one, and dread groups' evidence from the listing (dread.relations flow_references) takes them as known everywhere |
 | `free` | ranges `[[start, end], ...]` inside the image that hold nothing (erased flash between the code and a vector table at the top of a microcontroller's flash): the overlay puts moved functions and the C's own code there; `dread import-elf --write-startup` writes them from the gaps between the ELF's sections |
 | `erased` | the value of unprogrammed flash (default `0xff`) |
 | `entry` | the reset entry, an address or a symbol name from the image's symbols (default: `base`) |

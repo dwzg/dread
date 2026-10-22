@@ -46,6 +46,7 @@ generator, the lifter, the reading aids)
 | `sets_flags(insn)` | whether the flags change (do not trust a disassembler's flag alone) |
 | `stack_kind(insn)` | push and pop forms |
 | `literal(insn, isa)`, `pc_address(insn, isa)`, `pc_value(address, isa)` | pc-relative loads and addresses |
+| `value_step(insn, isa, known, program)` | optional, for dread.relations flow_references (`dread groups`' evidence from the listing): given the constants registers hold in front of an instruction ({register: (value, indexed)}), the registers whose values follow from it, its loads and stores at a known base plus an offset, and the registers it stores (`dread.arch.sum_value` adds two values); without it flow_references gives the addresses `materialized` finds (ARM and RISC-V have one; MIPS's delay slots and MSP430's addressing modes are not written yet) |
 | `bound_check(insn)`, `switch_targets(insn, program, inside)` | switch shapes (dread.switches runs them) |
 | `mark_call(program, insn)`, `link_pair(prev, insn, isa)` | optional: calls that are not plain calls (stubs, switch helpers, two-instruction calls: RISC-V's auipc + jalr, and its auipc/lui + addi addresses) |
 | `link_reg`, `veneer_reg` | the register a call leaves the return address in (None where the call pushes it: MSP430), and the one veneers go through |

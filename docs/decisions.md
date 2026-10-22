@@ -9,6 +9,80 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The groups' evidence from the listing, not the readable C (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** `dread groups` read what each function touches from its readable C (dread.relations
+  Facts): 0.1-0.5 s a function, 6-32 s for a FreeRTOS build on 8 workers with no facts kept and 1-5 s
+  with them (each function lifted to check its facts' key), more in proportion on a larger firmware;
+  paid again after any change to DREAD's code (the kept groups' key holds every module) before `dread
+  gui`'s first whole-program view and before every `dread pilot --task name --subsystems` (the
+  default). Can the facts come from something much cheaper with the same groups?
+- **Options, measured** on 38 FreeRTOS builds (27 ARM: Cortex-M3 and M4F, GCC 4 to 16 at -Os, -O2 and
+  -O0, clang 12 to 23 at -Os and -O2; 11 RISC-V: GCC 10 to 16 at -Os and -O2, clang 14 to 23 at -Os),
+  against the source file of each function (DWARF) and against the readable C's groups (the adjusted
+  Rand index of one grouping against the other: agreement), each from a cold cache on 8 workers:
+  - (a) the readable C, as before: the index 0.801 on ARM, 0.829 on RISC-V (means over the builds);
+  - (b) the addresses the code makes alone (dread.relations materialized: literal pools, addresses
+    from the pc, movw + movt; what the pilot's device texts read): ARM 0.005 lower (5 builds higher, 21
+    lower), RISC-V 0.18 lower (GCC's lui pairs apart, its stores, gp-relative accesses unseen);
+  - (c) a forward pass of the constants registers hold over each function's control flow
+    (dread.relations flow_references with the arch layer's value_step: literals, adr, mov, movw, movt,
+    add, sub, orr, lui, auipc, addi, the target's fixed gp; a load or store at a known base plus an
+    offset; a constant plus an unknown index; the scratch registers ended at calls), naming the
+    addresses the code makes and the values it stores, passes or returns: ARM 0.004 higher (20 higher,
+    5 lower, a sign test p 0.004; with 2 % of the evidence dropped at random, 23 higher, 4 lower),
+    agreement 0.98 (at least 0.93); RISC-V 0.036 lower: with clang as high (-0.01 to +0.05), with GCC
+    -Os 0.06-0.11 lower, -O2 0.015, agreement 0.91 (at least 0.79). 0.06-0.5 s on 8 workers (in one
+    process 0.5-2.3 ms a function, 8-30 us an instruction);
+  - (c) without the values that are a constant plus an index: ARM +0.005, RISC-V -0.031; naming only
+    the values a function stores, passes or returns, not every address it makes: ARM +0.002, RISC-V
+    -0.028 to -0.047. The variants are within the scores' noise of each other: 2 % of the evidence
+    dropped at random moves the index by a standard deviation of 0.002-0.014 on ARM, 0.005-0.043 on
+    RISC-V, and the readable C's own index on the RISC-V GCC 16 -Os build spans 0.66-0.81 between
+    resolutions 1.8 and 2.2;
+  - (d) the second lever, a key over only the modules the facts depend on: the facts kept per function
+    have one already (dread.relations PIPELINE, eight modules, regflow's key, the function's lifted
+    C); a change elsewhere costs each function's lift, a change of the readable C's own modules (often)
+    or of regflow's every function's readable C again. The kept groups' key holds every module because
+    the import closure of dread.relations is 61 of DREAD's 84 modules: a narrower key would be a guess.
+  - MSP430 (one build of 98 functions; no value_step yet: the addresses the code makes): 0.403 against
+    0.386 from the readable C.
+  What (c) and (a) find, as function-thing pairs over the 38 builds: texts the same (10,081), device
+  blocks 1,115 alike (3 and 2 apart), globals 27,425 alike, 368 from the readable C alone (mostly
+  addresses that differ by path, which the readable C names where each path sets them and the pass
+  loses where the paths join: clang's unrolled loops, newlib's stdio set-up) and 1,113 from the
+  listing alone (constants only compared, accesses the readable C keeps behind a variable,
+  gp-relative ones in assembly the lifter refuses); the readable C's 46 tables are literal pools'
+  slots of functions it could not read, whose words (functions' entries) the listing counts as taken
+  (56 more).
+- **Choice:** (c) with the indexed values and every address the code makes named, the variant closest
+  to what c_references reads from the C, as the default (dread.groups EVIDENCE "listing"); the
+  readable C stays an option (`dread groups --evidence readable`), and the kept record says which and
+  holds it in its key. A layer without value_step (MIPS's delay slots, MSP430's addressing modes: not
+  written yet) gives the addresses its code makes. dread gui starts `dread groups` without waiting for
+  the register analysis, which the listing does not need.
+- **Why.** As good on ARM and on RISC-V with clang, and 20-50 times faster: 0.3-0.5 s for a FreeRTOS
+  build, the whole command, against 7-23 s cold (four builds); the time is what kept the groups from
+  the GUI's first view and from every pilot run. The loss on RISC-V GCC -Os is traced: the listing
+  sees one array field, the ready lists' pxIndex (pxReadyTasksLists[i] + 4), in 11-13 of tasks.c's
+  functions, where the readable C keeps the element's address in a variable it reuses and so reads no
+  access at a constant plus an index. With that one thing taken from the listing and everything else
+  from the readable C, the readable C's index falls as far (GCC 10 0.786 to 0.672, the listing's
+  0.677; GCC 12 and 13 0.761 to 0.691; GCC 14 0.770 to 0.699; GCC 16 0.778 to 0.738). The evidence is
+  right and the grouping at resolution 2 splits tasks.c around a dense clique: of the weight the
+  shared things put between two functions with a source file, the listing's joins one file more often
+  in every family over all the builds (ARM 91.9 % of 11,262 against 91.6 % of 10,943; RISC-V clang
+  92.4 % against 92.1 %; RISC-V GCC 90.5 % of 1,536 against 89.9 % of 1,476). That is a matter of the
+  method (docs/todo.md, The groups' sensitivity); counting things with the same users once was worse
+  for both.
+- **Undo.** EVIDENCE = "readable" in dread/groups.py, or `--evidence readable` for one run.
+- **Status.** Done (dread/relations.py flow_references, the value_step of dread/arch/arm.py and
+  riscv.py with dread.arch.sum_value, dread/groups.py evidence and the record's version 2, dread gui's
+  groups thread). Not measured on the private real-life firmware (its groups from both sources and the
+  times), nor beyond FreeRTOS's 38 builds and one MSP430 build.
+
 ## Two naming runs compared by groups (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
