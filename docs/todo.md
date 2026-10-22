@@ -220,10 +220,12 @@ its sources.
   pointer, unified across functions), with volatile in the pointer's declaration so that a field
   reads p->f, their names and fields' names proposed the same way.
 - [ ] **Function names.** `dread pilot --task name` (2026-10-22, docs/decisions.md): a question
-  shows a function's readable C (dread.readable view: the tables applied, a constant that points to
-  text followed by the text) or its listing where it does not lift; questions go callees first
-  (callees_first: rounds by the call graph's components), --jobs at a time, each showing the names
-  proposed so far for its callees and callers; names.tsv keeps every proposal with the form its
+  shows a function's readable C (dread.readable view: the tables applied, each constant followed by
+  what it points to: text, a function's entry, or a table's first words, such as a localized
+  message's text pointers) or its listing where it does not lift; a function is asked once its callees are answered (call_components:
+  the call graph's strongly connected components; rounds with a barrier each slowed to a fifth once
+  they got small), --jobs at a time, each question showing the names proposed so far for its callees
+  and callers; names.tsv keeps every proposal with the form its
   question showed, and a run started again goes on where the last one stopped. `--score TRUTH`
   compares the proposals with true names (an ELF's function symbols, or the functions table of a copy
   that has them): exact, the same words, shared words, the same prefix; `--judge PROVIDER` adds a

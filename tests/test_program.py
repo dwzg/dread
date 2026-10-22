@@ -342,3 +342,32 @@ def test_objects_without_mapping_symbols_beside_objects_with_them(tmp_path):
     assert "port_entry" not in p.by_name                # (code, not a function: as another build's marks)
     word = sym["marked"] + 4
     assert not any(lo <= word < hi for lo, hi in ranges)               # the marked data stays data
+
+
+def test_a_constant_is_shown_with_the_text_function_or_table_it_points_to():
+    """dread.constants pointed_note: text, a function's entry (the Thumb bit aside), a table whose
+    words point to texts and functions (a localized message: a pointer a language), else nothing."""
+    import struct
+    import types
+    from dread.constants import pointed_note
+    base, data = 0x1000, bytearray(0x400)
+    data[0x100:0x110] = struct.pack("<4I", 0x1200, 0x1301, 5, 0)       # a table at 0x1100
+    data[0x200:0x206] = b"HELLO\0"
+    data[0x380:0x384] = struct.pack("<I", 0x9999)                        # a word pointing nowhere
+
+    class Image:
+        def in_image(self, a, n=1):
+            return base <= a and a + n <= base + len(data)
+
+        def read(self, a, n):
+            return bytes(data[a - base:a - base + n])
+
+        def word(self, a):
+            return struct.unpack_from("<I", data, a - base)[0]
+    program = Image()
+    program.by_entry = {0x1300: types.SimpleNamespace(entry=0x1300, name="draw")}
+    assert pointed_note(program, 0x1200) == '"HELLO"'
+    assert pointed_note(program, 0x1301) == "&draw"
+    assert pointed_note(program, 0x1100) == '-> {"HELLO", draw, 0x5, 0x0, ...}'
+    assert pointed_note(program, 0x1380) is None                        # (no text, no function)
+    assert pointed_note(program, 0x1102) is None and pointed_note(program, 0x40) is None

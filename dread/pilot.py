@@ -462,7 +462,8 @@ the machine code by tools (variables named after the registers and stack slots t
 memory at fixed addresses written g_ADDRESS, io_ADDRESS for device registers, rom_ADDRESS in the
 image), or the machine code itself where no C could be made. A function without a name is written
 FUN_ and its address; some names of other functions are proposals made from their code earlier, likely
-but not certain. A comment after a constant shows the text it points to. A name says what the function
+but not certain. A comment after a constant shows what it points to: text, a function (&name), or the
+first words of a table (-> {...}: the texts and functions they point to). A name says what the function
 does, in snake_case, with a prefix for its subsystem when one is clear (uart_, gpio_, timer_, fs_,
 ui_); follow the style of the names you see. Answer with exactly two lines:
 
@@ -1102,15 +1103,16 @@ class Namer:
 
     def question(self, fn, shown_as=None):
         """(text, form) of the question for a function's name: its code (code()) with each constant
-        that points to text in the image followed by that text, other functions by their names in
-        shown_as ({name: name shown}: the run's proposals) where it has one, and its callers."""
-        from dread.constants import string_at
+        followed by what it points to (dread.constants pointed_note: text, a function, a table of
+        texts and functions), other functions by their names in shown_as ({name: name shown}: the
+        run's proposals) where it has one, and its callers."""
+        from dread.constants import pointed_note
         program = self.program
         text, form = self.code(fn)
         if form != "listing":               # (the listing shows the texts already)
             def note(m):
-                s = string_at(program, int(m.group(1), 16))
-                return m.group(0) + (' /* "%s" */' % s.replace("*/", "* /") if s else "")
+                s = pointed_note(program, int(m.group(1), 16))
+                return m.group(0) + (" /* %s */" % s.replace("*/", "* /") if s else "")
             text = HEX.sub(note, text)
         if shown_as:
             text = IDENT_WORD.sub(lambda m: shown_as.get(m.group(0), m.group(0)) if m.group(0) != fn.name
@@ -1238,12 +1240,12 @@ def write_log(target, image, name, log):
         f.write("\n\n".join(log) + "\n")
 
 
-def callees_first(program, names):
-    """The functions of names in rounds, as lists: a function's round comes after those of the
-    functions it calls among names (direct calls and tail calls), functions that call each other in a
-    circle sharing one round, so that a question can show what its callees were named."""
+def call_components(program, names):
+    """(component of each name, members of each component, the components each calls) of the call
+    graph among names (direct calls and tail calls): functions that call each other in a circle are
+    one component; components are numbered so that one comes after every component it calls."""
     from dread.lift import direct_callees
-    nameset = set(names)
+    nameset, position = set(names), {n: k for k, n in enumerate(names)}
     calls = {n: sorted(c for c in direct_callees(program, program.by_name[n]) if c in nameset and c != n)
              for n in names}
     index, low, on, stack, comp, comps = {}, {}, set(), [], {}, []
@@ -1274,13 +1276,22 @@ def callees_first(program, names):
                         members.append(w)
                         if w == v:
                             break
-                    comps.append(members)
+                    comps.append(sorted(members, key=position.get))
                 if work:
                     u = work[-1][0]
                     low[u] = min(low[u], low[v])
+    callees = [sorted({comp[w] for m in members for w in calls[m]} - {c}) for c, members in enumerate(comps)]
+    return comp, comps, callees
+
+
+def callees_first(program, names):
+    """The functions of names in rounds, as lists: a function's round comes after those of the
+    functions it calls among names (direct calls and tail calls), functions that call each other in a
+    circle sharing one round, so that a question can show what its callees were named."""
+    comp, comps, callees = call_components(program, names)
     level = {}
-    for c, members in enumerate(comps):     # (Tarjan finishes a component after those it reaches)
-        level[c] = 1 + max([level[comp[w]] for m in members for w in calls[m] if comp[w] != c] or [-1])
+    for c in range(len(comps)):             # (a component comes after those it calls)
+        level[c] = 1 + max([level[d] for d in callees[c]] or [-1])
     rounds = [[] for _ in range(1 + max(level.values(), default=-1))]
     for n in names:
         rounds[level[comp[n]]].append(n)
@@ -1288,17 +1299,27 @@ def callees_first(program, names):
 
 
 def name_functions(target, image, program, make_provider, names, flow=None, jobs=4, tries=2, out=print):
-    """Proposals for the functions of names, callees first (callees_first), jobs questions at a time
-    with a provider each (make_provider() makes one); each question shows the proposals made so far
-    for the other functions in place of their names. A function names.tsv has a proposal for already
-    is not asked again, its proposal shown. Returns (proposed, asked, spent: summed over the
-    providers)."""
+    """Proposals for the functions of names, callees first: a function is asked as soon as every
+    function it calls among names has its answer (call_components; functions that call each other in
+    a circle together), jobs questions at a time with a provider each (make_provider() makes one), each
+    question showing the proposals made so far for the other functions in place of their names. A
+    function names.tsv has a proposal for already is not asked again, its proposal shown. Returns
+    (proposed, asked, spent: summed over the providers). (Rounds with a barrier each ran at a fifth of
+    the speed once the rounds got small: each waited for its slowest answer.)"""
     import concurrent.futures
     import threading
     namer = Namer(target, image, program, flow)
     known = read_proposals(target, image)
     shown_as = {program.by_entry[a].name: p for a, (p, _) in known.items() if a in program.by_entry}
     namer.prepare([n for n in names if program.by_name[n].entry not in known])     # (before any thread)
+    comp, comps, callees = call_components(program, list(names))
+    callers = [[] for _ in comps]
+    for c, cs in enumerate(callees):
+        for d in cs:
+            callers[d].append(c)
+    waiting = [len(cs) for cs in callees]
+    left = [0] * len(comps)
+    ready = [c for c in range(len(comps)) if not waiting[c]]
     local, providers, lock = threading.local(), [], threading.Lock()
 
     def provider():
@@ -1314,42 +1335,66 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
         proposed, what, log, why = ask_name(p, program, name, user, tries)
         return name, form, proposed, what, log, why, p, (getattr(p, "last", {}) or {}).get("finish")
 
+    def finished(c):                        # (its callers may be ready now)
+        for d in callers[c]:
+            waiting[d] -= 1
+            if not waiting[d]:
+                ready.append(d)
+
     proposed = asked = declined_row = failed_row = 0
+    stopped = False
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-        for k, members in enumerate(callees_first(program, names)):
-            todo = [n for n in members if program.by_name[n].entry not in known]
-            if not todo:
-                continue
-            items = [(n,) + namer.question(program.by_name[n], shown_as) for n in todo]
-            for name, form, got, what, log, why, p, finish in pool.map(one, items):
+        running = {}
+        while (ready and not stopped) or running:
+            while ready and not stopped:
+                c = ready.pop(0)
+                todo = [n for n in comps[c] if program.by_name[n].entry not in known]
+                left[c] = len(todo)
+                if not todo:
+                    finished(c)
+                for n in todo:
+                    running[pool.submit(one, (n,) + namer.question(program.by_name[n], shown_as))] = c
+            if not running:
+                break
+            done, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                c = running.pop(future)
+                name, form, got, what, log, why, p, finish = future.result()
                 asked += 1
                 write_log(target, image, name, log)
+                left[c] -= 1
                 if got is None:
                     out("%-24s no proposal: %s" % (name, why))
                     declined_row = declined_row + 1 if finish in llm.Provider.REFUSED else 0
                     failed_row = failed_row + 1 if why.startswith("the provider:") else 0
-                    continue
-                declined_row = failed_row = 0
-                fn = program.by_name[name]
-                keep_proposal(target, image, fn, got, what, p, form)
-                known[fn.entry] = (got, what)
-                shown_as[name] = got
-                proposed += 1
-                out("%-24s proposed %s (%s): %s" % (name, got, form, what))
-            if declined_row >= DECLINED_IN_A_ROW:
-                out("dread pilot: the provider declined %d questions in a row; no more are asked" % declined_row)
-                break
-            if failed_row >= FAILED_IN_A_ROW:
-                out("dread pilot: the provider failed %d questions in a row; no more are asked (the run "
-                    "goes on where it stopped when started again)" % failed_row)
-                break
+                else:
+                    declined_row = failed_row = 0
+                    fn = program.by_name[name]
+                    keep_proposal(target, image, fn, got, what, p, form)
+                    known[fn.entry] = (got, what)
+                    shown_as[name] = got
+                    proposed += 1
+                    out("%-24s proposed %s (%s): %s" % (name, got, form, what))
+                if not left[c]:
+                    finished(c)
+                if not stopped and declined_row >= DECLINED_IN_A_ROW:
+                    out("dread pilot: the provider declined %d questions in a row; no more are asked" %
+                        declined_row)
+                    stopped = True
+                if not stopped and failed_row >= FAILED_IN_A_ROW:
+                    out("dread pilot: the provider failed %d questions in a row; no more are asked (the run "
+                        "goes on where it stopped when started again)" % failed_row)
+                    stopped = True
+            if stopped:                     # (the questions not begun yet are not asked)
+                for future in [f for f in running if f.cancel()]:
+                    running.pop(future)
     spent = {"answers": 0, "input": 0, "output": 0, "cost": None}
     for p in providers:
-        s = p.spent()
+        sp = p.spent()
         for key in ("answers", "input", "output"):
-            spent[key] += s[key]
-        if s.get("cost") is not None:
-            spent["cost"] = (spent["cost"] or 0.0) + s["cost"]
+            spent[key] += sp[key]
+        if sp.get("cost") is not None:
+            spent["cost"] = (spent["cost"] or 0.0) + sp["cost"]
     return proposed, asked, spent
 
 

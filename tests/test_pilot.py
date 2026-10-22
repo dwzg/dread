@@ -491,3 +491,21 @@ def test_a_provider_asks_again_after_an_overload_or_a_rate_limit(monkeypatch):
         assert len(Busy.calls) == 2
     finally:
         server.shutdown()
+
+
+def test_a_naming_run_stops_asking_a_provider_that_keeps_declining(gizmo):
+    """Three declined in a row end the run: the questions not begun yet are not asked."""
+    target, image, program, flow = gizmo
+    seen = []
+
+    def answer(messages):
+        import time
+        seen.append(messages[0]["content"])
+        time.sleep(0.05)                    # (an answer takes a while: the rest wait in the queue)
+        return {"text": "", "finish": "refusal"}
+    names = [fn.name for fn in program.functions][:12]
+    lines = []
+    made, asked, _ = pilot.name_functions(target, image, program, lambda: llm.Scripted(answer), names, flow,
+                                          jobs=1, out=lines.append)
+    assert made == 0 and asked == len(seen) and 3 <= asked <= 4
+    assert any("declined 3 questions in a row" in line for line in lines)

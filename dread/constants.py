@@ -191,3 +191,42 @@ def string_at(program, address, limit=48):
     if len(out) < 2:
         return None
     return out.decode("ascii").encode("unicode_escape").decode("ascii") + ("..." if len(out) >= limit else "")
+
+
+POINTED_WORDS = 4       # words of a table a constant points to that pointed_note shows at most
+SMALLEST_POINTER = 0x100    # a smaller constant is a number, even where the image begins at 0
+
+
+def pointed_note(program, address):
+    """What a reader wants to know about a constant: the text it points to ("CARD FULL"), the
+    function whose entry it is (&name), or, when it points to a table of words (aligned, in the
+    image), the texts and functions its first words point to: a localized message's table of
+    pointers, one a language, or a menu's pairs of a handler and a label (-> {name, "Label", ...}).
+    None when it is none of these."""
+    if address < SMALLEST_POINTER:
+        return None
+    text = string_at(program, address)
+    if text:
+        return '"%s"' % text
+    fn = program.by_entry.get(address & ~1) if hasattr(program, "by_entry") else None
+    if fn is not None and (address & ~1) == fn.entry:
+        return "&" + fn.name
+    if address % 4 or not program.in_image(address, 4):
+        return None
+    parts, useful = [], False
+    for k in range(POINTED_WORDS):
+        a = address + 4 * k
+        if not program.in_image(a, 4):
+            break
+        w = program.word(a)
+        text = string_at(program, w)
+        callee = program.by_entry.get(w & ~1)
+        if text:
+            parts.append('"%s"' % text)
+            useful = True
+        elif callee is not None and (w & ~1) == callee.entry:
+            parts.append(callee.name)
+            useful = True
+        else:
+            parts.append("0x%x" % w)
+    return "-> {%s, ...}" % ", ".join(parts) if useful else None
