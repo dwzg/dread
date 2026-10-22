@@ -93,6 +93,9 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   minutes more), are tested there in full and come onto `main` when they are done.
   Before the push, `bin/take-caches WORKTREE` copies the caches the worktree's suite made back
   into the checkout; without it the push's fast tests make them again after a VERSION change.
+  CI has none of these caches: a test must make or search for what it needs and pass on a checkout
+  without them (on 2026-10-22 a test read gizmo's cached cases without searching and failed only on
+  CI). To see what CI sees, delete the caches in a worktree of its own before running the test.
 - **Look for performance regularly** (the user, 2026-10-18): every few items, measure what is slow
   now (`pytest --durations=15`, `BUILD/times/`, the `seconds` of `BUILD/autocases/*.json`), profile
   the top item (cProfile) and fix what dominates. Prefer the algorithmic fix (work per byte or per

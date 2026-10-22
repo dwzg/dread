@@ -143,11 +143,13 @@ def test_a_function_without_cases_gets_some_from_a_short_search_kept_for_the_nex
 
 def test_sections_run_in_a_pool_and_say_whether_a_function_without_callers_returns_something(tmp_path):
     """sections(): a pool of workers gives what section() gives in this process; strlen has no
-    callers in gizmo, so its result is shown by its register's name."""
+    callers in gizmo, so its result is shown by its register's name. The pool searches for the
+    functions the copy has no cases of (a checkout without the lift check's caches, as CI's), and
+    the run in this process reads the cases it kept."""
     root = gizmo_copy(tmp_path)
     target, image, program, flow, gen = loaded(root)
     names = ["strlen", "ring_get", "gpio_set", "uart_puts", "apply_config", "checksum", "memset", "clamp", "led_on"]
-    pooled = behaviour.sections(target, image, program, flow, names, jobs=2, make=False)
+    pooled = behaviour.sections(target, image, program, flow, names, jobs=2, make=True)
     here = behaviour.sections(target, image, program, flow, names[:3], jobs=1, make=False)
     assert all(pooled[n] == here[n] for n in here)
     assert set(pooled) <= set(names) and len(pooled) >= 7
