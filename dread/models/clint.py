@@ -17,9 +17,10 @@ Interrupts, as the core numbers them (mcause): the machine timer interrupt (7) i
 mtime >= mtimecmp, the machine software interrupt (3) while msip's bit 0 is set; the software one
 first when both are (the privileged spec's order). The system run takes one when mstatus.MIE and the
 interrupt's bit in mie are set (may_take, with the layer's cpu_masks); both are levels, so a handler
-ends one by writing mtimecmp or msip. Assumed: one hart runs.
+ends one by writing mtimecmp or msip. Every read but mtime's (the clock) is plain (dread.models).
+Assumed: one hart runs.
 """
-from dread.models import Model
+from dread.models import Model, without
 
 MSIP, MTIMECMP, MTIME = 0x0, 0x4000, 0xBFF8
 SOFTWARE, TIMER = 3, 7
@@ -35,6 +36,7 @@ class Clint(Model):
         self.harts = self.number("harts", 1)
         self.rate = max(1, self.number("rate", 4))
         self.ranges = [(self.base, self.base + 0xC000)]
+        self.plain = without(self.ranges, [(self.base + MTIME, self.base + MTIME + 8)])
         self.msip = [0] * self.harts
         self.mtimecmp = [0] * self.harts
         self.offset = 0                     # mtime = clock // rate + offset (a write of mtime moves it)

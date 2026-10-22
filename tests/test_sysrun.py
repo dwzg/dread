@@ -586,6 +586,8 @@ def test_the_c_block_hook_gives_the_python_hooks_outcome(monkeypatch):
     from dread import fasthooks
     from dread.program import Program
     from dread.target import Target
+    if fasthooks.library() is None:
+        pytest.skip("the C hooks did not build (or DREAD_FASTHOOKS=0)")
     t = Target.load(gizmo_dir("m4"))
     image = t.image()
     keep = ("Reset_Handler", "TIMER_IRQHandler", "timer_irq", "uart_putc")
@@ -607,6 +609,258 @@ def test_the_c_block_hook_gives_the_python_hooks_outcome(monkeypatch):
     assert with_c == without
     assert none == 0 and done_in_c > 1000, done_in_c
     assert all(o[0].startswith("until") for o in with_c.values()), [o[0] for o in with_c.values()]
+
+
+def test_the_c_hooks_device_reads_give_the_python_hooks_outcome(target, monkeypatch):
+    """On Unicorn a read of a plain register (a model's `plain` ranges: no side effect, a value only
+    a call into the models changes; or a register no model owns) is done in C from the value the
+    model gave last, which the run asks for again after every such call (dread_sysio,
+    System._refresh_plain); every other access goes to System._io. Every scenario's outcome is the
+    Python hooks' (how, clock, device log with its counted repeats, reports, functions entered), with
+    all of gizmo shared and with all of it outside shared code (every block in a stretch, which a C
+    read ends as a Python one does), and the C hook did most of the reads. The UART's data register
+    (a read takes a byte) is not plain: the scenarios' input arrives alike."""
+    from dread import fasthooks
+    from dread.program import Program
+    if fasthooks.library() is None:
+        pytest.skip("the C hooks did not build (or DREAD_FASTHOOKS=0)")
+    image = target.image()
+    every = [fn.name for fn in Program(target, image).functions]
+
+    def outcomes():
+        out, in_c, reads = {}, 0, 0
+        for built in ((), every):
+            for name, scenario in sorted(target.scenarios.items()):
+                scenario = dict(scenario, _name=name)
+                system = sysrun.System(target, image, image.payload(), scenario=scenario, built=built)
+                o = system.run(int(scenario.get("limit", sysrun.LIMIT)))
+                out[name, len(built)] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+                in_c += system.st.io_fast if system.fast is not None else 0
+                reads += sum(e[5] for e in o.log if e[0] == "read")
+        return out, in_c, reads
+    with_c, in_c, reads = outcomes()
+    monkeypatch.setattr(fasthooks, "_LIB", [None])          # as without a C compiler
+    without, none, _ = outcomes()
+    assert with_c == without
+    assert none == 0 and in_c > reads // 2, (in_c, reads)
+    assert all(o[0].startswith("until") for o in with_c.values()), [o[0] for o in with_c.values()]
+
+
+def test_a_model_without_plain_registers_is_asked_at_every_read(monkeypatch):
+    """Only the registers a model names plain (dread.models.Model.plain) are read in C, and the
+    default is none: a model of the target's own is asked at every read, as before. gizmo with its
+    models' tables emptied: no read in C, the same outcome."""
+    from conftest import gizmo_dir
+    from dread import fasthooks, models
+    from dread.target import Target
+    if fasthooks.library() is None:
+        pytest.skip("the C hooks did not build (or DREAD_FASTHOOKS=0)")
+    t = Target.load(gizmo_dir("m3"))
+    image = t.image()
+
+    def run():
+        system = sysrun.System(t, image, image.payload(), scenario=t.scenarios["keys"])
+        o = system.run(int(t.scenarios["keys"]["limit"]))
+        return (o.how, o.clock, o.log, o.reports), system.st.io_fast if system.fast is not None else 0
+    a, in_c = run()
+    create = models.create
+
+    def no_plain(*args):
+        m = create(*args)
+        m.plain = []
+        return m
+    monkeypatch.setattr(models, "create", no_plain)
+    b, none = run()
+    assert a == b and none == 0 and in_c > 0, (none, in_c)
+
+
+READS = r'''
+#define UART_DATA (*(volatile unsigned *)0x40004000)
+#define UART_STAT (*(volatile unsigned *)0x40004004)
+#define T_COUNT (*(volatile unsigned *)0x40000000)
+#define T_LOAD (*(volatile unsigned *)0x40000004)
+#define T_CTRL (*(volatile unsigned *)0x40000008)
+#define T_STAT (*(volatile unsigned *)0x4000000c)
+#define SYST_CSR (*(volatile unsigned *)0xE000E010)
+#define SYST_RVR (*(volatile unsigned *)0xE000E014)
+#define SYST_CVR (*(volatile unsigned *)0xE000E018)
+#define ICSR (*(volatile unsigned *)0xE000ED04)
+__attribute__((noinline)) void poll(void) { while (!(UART_STAT & 2)) ; }
+__attribute__((noreturn)) void reset(void) {
+    unsigned n;
+    volatile unsigned i;
+    while (!(UART_STAT & 2)) ;                  /* 'a' arrives between chunks */
+    UART_DATA = UART_DATA;                      /* a read takes it */
+    __asm volatile ("cpsid i" ::: "memory");
+    ICSR = 1u << 28;                            /* PendSV pending, then not: ICSR reads both */
+    UART_DATA = '0' + (ICSR >> 28 & 1);
+    ICSR = 1u << 27;
+    UART_DATA = '0' + (ICSR >> 28 & 1);
+    __asm volatile ("cpsie i" ::: "memory");
+    SYST_RVR = 3000; SYST_CVR = 0; SYST_CSR = 1;
+    while (SYST_CVR > 1000) ;                   /* the current value moves with the clock */
+    while (!(SYST_CSR & (1u << 16))) ;          /* COUNTFLAG: a read clears it */
+    UART_DATA = '0' + (SYST_CSR >> 16 & 1);
+    SYST_CSR = 0;
+    T_LOAD = 300; T_CTRL = 1;
+    while (T_COUNT > 100) ;                     /* the count moves with the clock */
+    T_CTRL = 0;
+    UART_DATA = 'T';
+    poll();                                     /* 'b' arrives while poll reads */
+    UART_DATA = UART_DATA;
+    for (n = 0; n < 200; n++) {                 /* a read of the timer's count (not plain) between */
+        (void)UART_STAT;                        /* two of the C hook's */
+        (void)T_COUNT;
+    }
+    for (n = 0; n < 20000; n++) {               /* nothing scheduled, and every read a new entry */
+        (void)T_STAT;
+        (void)UART_STAT;
+    }
+    for (i = 0; i < 1000; i++)                  /* no access, nothing new: not yet quiet */
+        ;
+    for (;;)                                    /* the last read again and again, no new entry: */
+        (void)UART_STAT;                        /* quiet from this loop's first block on, "polls" */
+}
+__attribute__((section(".vectors"), used)) void (*const vectors[16])(void) = {
+    (void (*)(void))0x20004000, reset };
+'''
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_reads_in_c_follow_the_models(tmp_path, monkeypatch):
+    """The C hook's reads (dread_sysio) against the Python hooks on a program that tries them: a poll
+    of the UART's status while input arrives between chunks, ICSR read behind the writes that change
+    it, SysTick's current value and the timer's count, which move with the clock, COUNTFLAG, which a
+    read clears (none of the three plain), a poll in a function outside shared code (built: a stretch
+    that each read ends, and a read that makes an event due), reads of the count, done in Python,
+    between reads done in C (the log keeps their order and counts), alternating reads with nothing
+    scheduled (a new log entry each: not quiet, though longer than QUIET), a computation, and a poll
+    of the last register read, which ends the run as "polls" QUIET units after the loop's first
+    block (the clock of a new entry made in C, then of a new block, kept in that order). The same
+    outcome both ways, with poll shared and rebuilt, with the run's chunks and QUIET as they are and
+    with chunks of 13 blocks (the quiet rule is asked at every chunk's end: there it sees a clock of
+    the alternating reads or of the computation's blocks gone wrong); most reads done in C."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport, fasthooks
+    from dread.target import Target
+    if fasthooks.library() is None:
+        pytest.skip("the C hooks did not build (or DREAD_FASTHOOKS=0)")
+    (tmp_path / "t.c").write_text(READS)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) } > FLASH\n"
+                                   " .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "reset", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '''
+[image.main]
+original = "original/t.bin"
+base = 0x08000000
+entry = "reset"
+vectors = 0x08000000
+
+[compiler]
+cross = "arm-none-eabi-"
+
+[models.uart]
+kind = "uart"
+base = 0x40004000
+
+[models.timer]
+kind = "timer"
+base = 0x40000000
+count = 0x0
+load = 0x4
+ctrl = 0x8
+stat = 0xc
+rate = 1
+
+[models.nvic]
+kind = "nvic"
+systick_rate = 1
+
+[scenarios.reads]
+input = [[1_000, "uart", "a"], [40_000, "uart", "b"]]
+limit = 2_000_000
+''')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    image = t.image()
+    scenario = t.scenarios["reads"]
+
+    settings = ((sysrun.CHUNK, sysrun.QUIET), (13, 50_000))
+
+    def outcomes():
+        out, in_c = {}, 0
+        for chunk, quiet in settings:
+            monkeypatch.setattr(sysrun, "CHUNK", chunk)
+            monkeypatch.setattr(sysrun, "QUIET", quiet)
+            for built in ((), ("poll",)):
+                system = sysrun.System(t, image, image.payload(), scenario=scenario, built=built)
+                o = system.run(scenario["limit"])
+                out[chunk, built] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+                in_c += system.st.io_fast if system.fast is not None else 0
+        return out, in_c
+    with_c, in_c = outcomes()
+    monkeypatch.setattr(fasthooks, "_LIB", [None])
+    without, _ = outcomes()
+    assert with_c == without
+    for how, clock, log, reports, _, _ in with_c.values():
+        assert how.startswith("polls: register 0x40004004") and reports["uart"]["sent"] == "a100Tb", (how, reports)
+        assert clock > 360_000, (how, clock)            # (not quiet in the alternating reads)
+    reads = sum(e[5] for o in with_c.values() for e in o[2] if e[0] == "read")
+    assert in_c > reads // 2, (in_c, reads)
+
+
+def test_a_new_block_behind_reads_in_c_keeps_its_clock():
+    """The clock of the last new log entry or block (System.last_new, for the quiet rule) comes from
+    the C hook's reads when they made an entry, and from a new block or an access done here, in the
+    order they happened: a new block behind reads in C whose entries are not taken yet takes them
+    first and keeps its own clock (else the next take put the reads' older clock back, and a run
+    could end as quiet early, at a chunk's end that happened to fall in between)."""
+    from conftest import gizmo_dir
+    from dread.target import Target
+    t = Target.load(gizmo_dir("m3"))
+    image = t.image()
+    system = sysrun.System(t, image, image.payload(), scenario=t.scenarios["boot"])
+    if system.fast is None:
+        pytest.skip("the C hooks did not build")
+    st = system.st
+    system.last_new, st.clock, st.chunk = 100, 500, 10
+    st.io_done, st.last_new = 1, 300            # a read in C made an entry at clock 300, not taken yet
+    system._on_block(system.uc, image.base, 2, None)    # a block not seen before, of shared code
+    system._take_reads()
+    assert system.last_new == 500
+
+
+def test_a_system_run_is_collected():
+    """A System goes when nothing refers to it any more, and with it what its C state allocated
+    (dread.fasthooks frees that with the state). Once the state held the callbacks, through them
+    the System, and the finalizer that frees the C side held the state: every run stayed in memory
+    (3.5 MB each on gizmo's tour, 1.6 GB for 450 runs)."""
+    import gc
+    import weakref
+    from conftest import gizmo_dir
+    from dread.target import Target
+    t = Target.load(gizmo_dir("m3"))
+    image = t.image()
+    system = sysrun.System(t, image, image.payload(), scenario=t.scenarios["keys"])
+    system.run(int(t.scenarios["keys"]["limit"]))
+    gone = weakref.ref(system)
+    del system
+    gc.collect()
+    assert gone() is None
+
+
+def test_without_cuts_holes_out_of_ranges():
+    from dread.models import without
+    assert without([(0, 0x10)], [(4, 5)]) == [(0, 4), (5, 0x10)]
+    assert without([(0, 0x10), (0x20, 0x30)], [(0, 4), (8, 0xC), (0x2C, 0x40)]) == [(4, 8), (0xC, 0x10), (0x20, 0x2C)]
+    assert without([(0, 8)], [(0, 8)]) == [] and without([(0, 8)], [(9, 12)]) == [(0, 8)]
 
 
 def test_the_chunk_size_changes_nothing(monkeypatch):

@@ -33,12 +33,15 @@ enter_interrupt, exception_return): the extended frame with s0-s15 and FPSCR whe
 is active (CONTROL.FPCA), with EXC_RETURN's bit 4 clear; the hardware's lazy stacking is modelled
 eagerly (the same registers; the reserved words' memory differs when a handler never uses the FPU).
 
+Every read but CSR's (COUNTFLAG clears) and CVR's (the clock) is plain (dread.models): FreeRTOS's
+Cortex-M port reads ICSR in every critical section.
+
 Assumed: the model raises no NMI or fault exceptions of its own (an svc that cannot be taken would
 escalate to HardFault; the system run stops with a fault instead), tail-chaining is a return
 followed by an entry (the same memory and registers in the end), no late arrival, SHCSR and the
 fault status registers are memory.
 """
-from dread.models import Model
+from dread.models import Model, without
 
 SYST, NVIC, SCB = 0xE000E010, 0xE000E100, 0xE000ED00
 ICSR, VTOR, AIRCR, SHPR = SCB + 0x4, SCB + 0x8, SCB + 0xC, SCB + 0x18
@@ -61,6 +64,7 @@ class Nvic(Model):
             raise ValueError("model %s: priority_bits must be 1 to 8" % name)
         self.prio_mask = (0xFF << (8 - bits)) & 0xFF
         self.ranges = [(SYST, SYST + 0x10), (NVIC, IPR + self.lines), (ICSR, AIRCR + 4), (SHPR, SHPR + 12)]
+        self.plain = without(self.ranges, [(SYST, SYST + 4), (SYST + 8, SYST + 12)])
         self.enabled = self.pending = self.levels = 0       # bit n: line n
         self.system_pending = set()                         # pending exceptions below 16
         self.active = []                                    # active exceptions, the latest last

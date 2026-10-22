@@ -1,5 +1,13 @@
 """The hot emulator hooks in C (fasthooks.c): coverage, load tracing, store tracking and the Thumb IT
-repair without a Python call per event.
+repair without a Python call per event; and the system run's (dread.sysrun): its block hook
+(SysHooks: the blocks that only move the clock or only count) and its device accesses (add_io: the
+reads of plain registers, from the value the model gave last, which System asks for again after
+every call into the models; every other access goes to Python).
+
+The system run's state is SysState here and sys_t in C: a field added to one is added to the other
+(the sizes are compared when the library loads). What the C side keeps for System, the log entries
+of the reads it did (SysRead) and the registers it reads alone (SysPlain), it owns and frees with
+the state; System takes the entries into its log before it adds to the log or looks at it.
 
 The C file is compiled on first use with the system's C compiler (cc, or $CC) into
 ~/.cache/dread (keyed by the source's hash) and loaded with ctypes. When that fails, or with
@@ -11,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import weakref
 
 SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fasthooks.c")
 BLOCKS, TREE, READS, WRITES, PAGES, SEEN = range(6)
@@ -176,6 +185,24 @@ NO_EVENT = (1 << 63) - 1            # SysState.next_event when nothing is schedu
 SYS_REGS = 64                       # registers the loop search of a stretch can compare (SYS_REGS in C)
 
 BLOCK_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_void_p)
+IO_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int, ctypes.c_int64,
+                         ctypes.c_void_p)
+UNKNOWN, VALUE, MEMORY, NO_MODEL = range(4)     # SysPlain.kind
+
+
+class SysRead(ctypes.Structure):
+    """A device log entry of reads the C hook did (sysread_t): model is an index into the run's
+    models, -1 for none."""
+    _fields_ = [("address", ctypes.c_uint64), ("value", ctypes.c_uint64), ("count", ctypes.c_uint64),
+                ("model", ctypes.c_int32), ("size", ctypes.c_int32)]
+
+
+class SysPlain(ctypes.Structure):
+    """A register whose reads the C hook does (sysplain_t): VALUE and MEMORY hold while epoch is
+    the state's plain_epoch, NO_MODEL always; UNKNOWN asks Python."""
+    _fields_ = [("address", ctypes.c_uint64), ("value", ctypes.c_uint64), ("epoch", ctypes.c_int64),
+                ("size", ctypes.c_int32), ("model", ctypes.c_int32), ("kind", ctypes.c_int32),
+                ("used", ctypes.c_int32)]
 
 
 class SysState(ctypes.Structure):
@@ -192,7 +219,21 @@ class SysState(ctypes.Structure):
                 ("stretch_from", ctypes.c_int64), ("loop_max", ctypes.c_int64), ("anchor_next", ctypes.c_int64),
                 ("waited", ctypes.c_int64), ("anchor", ctypes.c_uint64), ("resume", ctypes.c_uint64),
                 ("waiting", ctypes.c_int32), ("nregs", ctypes.c_int32),
-                ("regs", ctypes.c_int32 * SYS_REGS), ("anchor_vals", ctypes.c_uint32 * SYS_REGS)]
+                ("regs", ctypes.c_int32 * SYS_REGS), ("anchor_vals", ctypes.c_uint32 * SYS_REGS),
+                # the device accesses (dread_sysio)
+                ("io_python", ctypes.c_void_p), ("reg_write", ctypes.c_void_p),
+                ("mem_read", ctypes.c_void_p), ("mem_write", ctypes.c_void_p),
+                ("access", ctypes.c_int64), ("settle", ctypes.c_int32), ("status_reg", ctypes.c_int32),
+                ("it_mask", ctypes.c_uint32), ("io_done", ctypes.c_int32),
+                ("tail_read", ctypes.c_int32), ("tail_model", ctypes.c_int32), ("tail_size", ctypes.c_int32),
+                ("tail_address", ctypes.c_uint64), ("tail_value", ctypes.c_uint64),
+                ("tail_extra", ctypes.c_uint64),
+                ("last_new", ctypes.c_int64), ("last_access", ctypes.c_int64),
+                ("reads", ctypes.POINTER(SysRead)), ("reads_n", ctypes.c_uint64), ("reads_cap", ctypes.c_uint64),
+                ("plain_index", Set), ("plain", ctypes.POINTER(SysPlain)), ("plain_n", ctypes.c_uint64),
+                ("plain_cap", ctypes.c_uint64), ("plain_epoch", ctypes.c_int64),
+                ("plain_used", ctypes.POINTER(ctypes.c_uint64)), ("plain_used_n", ctypes.c_uint64),
+                ("io_fast", ctypes.c_int64)]
 
 
 class SysHooks:
@@ -211,18 +252,54 @@ class SysHooks:
         lib.dread_sys_entered.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dread_sys_entered.restype = ctypes.c_size_t
         lib.dread_sys_entry.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        lib.dread_sys_plain.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int32, ctypes.c_int32]
+        lib.dread_sys_plain.restype = ctypes.c_int64
+        lib.dread_sys_free.argtypes = [ctypes.c_void_p]
         self.state = s = SysState()
         s.next_event = NO_EVENT
         s.reg_read = ctypes.cast(self.uclib.uc_reg_read, ctypes.c_void_p)
-        self.callback = BLOCK_CB(lambda uc, address, size, user: python(address, size))     # (kept alive here)
-        s.python = ctypes.cast(self.callback, ctypes.c_void_p)
+        s.last_new = -1
+        # The callbacks are kept alive here and given to the state as plain addresses: through a ctypes
+        # cast the state kept a reference to them, and through them to the System, which the
+        # finalizer below, holding the state, then kept alive for ever (every system run leaked).
+        self.callback = BLOCK_CB(lambda uc, address, size, user: python(address, size))
+        s.python = ctypes.cast(self.callback, ctypes.c_void_p).value
+        self.io_callback = None
         self.ranges = None
+        self._hook(UC_HOOK_BLOCK, lib.dread_sysblock, 1, 0)
+        # the memory the C side allocates for the state, freed with it (no hook runs after the run)
+        weakref.finalize(self, lib.dread_sys_free, ctypes.byref(s))
+
+    def _hook(self, kind, function, begin, end):
         handle = ctypes.c_ulong()
-        status = self.uclib.uc_hook_add(engine._uch, ctypes.byref(handle), UC_HOOK_BLOCK,
-                                        ctypes.cast(lib.dread_sysblock, ctypes.c_void_p),
-                                        ctypes.cast(ctypes.byref(s), ctypes.c_void_p), 1, 0)
+        status = self.uclib.uc_hook_add(self.engine._uch, ctypes.byref(handle), kind,
+                                        ctypes.cast(function, ctypes.c_void_p),
+                                        ctypes.cast(ctypes.byref(self.state), ctypes.c_void_p), begin, end)
         if status:
             raise OSError("uc_hook_add failed (%d)" % status)
+
+    def add_io(self, ranges, python, access, settle=None):
+        """The device accesses of [(lo, hi), ...] through the C hook (dread_sysio): the reads it can
+        do alone (plain_entry), every other access to `python`, a callable(access type, address,
+        size, value), which System._io_from_c serves. settle: (status register, IT mask) when every
+        access must clear a stale IT state (dread.arch.arm.settle_it), else None."""
+        from unicorn import UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE
+        s = self.state
+        self.io_callback = IO_CB(lambda uc, kind, address, size, value, user: python(kind, address, size, value))
+        s.io_python = ctypes.cast(self.io_callback, ctypes.c_void_p).value    # (see __init__)
+        s.reg_write = ctypes.cast(self.uclib.uc_reg_write, ctypes.c_void_p)
+        s.mem_read = ctypes.cast(self.uclib.uc_mem_read, ctypes.c_void_p)
+        s.mem_write = ctypes.cast(self.uclib.uc_mem_write, ctypes.c_void_p)
+        s.access = access
+        if settle is not None:
+            s.settle, s.status_reg, s.it_mask = 1, settle[0], settle[1]
+        for lo, hi in ranges:
+            self._hook(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self.lib.dread_sysio, lo, hi - 1)
+
+    def plain_entry(self, address, size, model):
+        """The index of the C hook's entry for reads of (address, size), made (UNKNOWN) when there
+        is none; model: its index in the run's models, -1 for none. -1: no memory for it."""
+        return self.lib.dread_sys_plain(ctypes.byref(self.state), address, size, model)
 
     def set_state_registers(self, registers):
         """The registers the loop search of a stretch compares (more than SYS_REGS: Python compares)."""

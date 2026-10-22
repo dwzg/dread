@@ -54,6 +54,19 @@ the rules; both read and write one state (System.st). Elsewhere (DREAD's own eng
 does every block. (FreeRTOS's RISC-V GCC -Os image with every lifted function rebuilt: a run to the
 limit took 20 s with its stretches' blocks in Python, 1.2 s with them in C.)
 
+The device accesses are the other hot path, once much of the code is outside shared code and its
+clock stands still: FreeRTOS's Cortex-M port reads ICSR in every critical section, and with the
+kernel rebuilt (lifted) a run's clock was nearly all accesses, 125,000 a million units. On Unicorn the C hook
+(dread_sysio) does the reads of plain registers alone: a model names them (dread.models, `plain`:
+no side effect, a value only a call into the models changes), and every register no model owns is
+memory. It answers from the value the model gave at the last read done here (_plain) and keeps the
+clock, the log with its counted repeats and the stop rules' clocks as _io does; after anything that
+may change a model (a write, a read with a side effect, the events and exceptions between chunks)
+the registers it read get their models' values again (_refresh_plain). Every other access goes to
+_io. (FreeRTOS's Cortex-M clang -Os with every lifted function rebuilt: the pair of runs to the
+limit 82 s -> 30 s, three reads of ICSR in four accesses done in C; the writes, PendSV set again
+and again while it is pending, are most of what is left in Python.)
+
 Scenarios are tables of the target's [scenarios] section:
 
     [scenarios.boot]
@@ -72,6 +85,7 @@ a difference.
 import argparse
 import bisect
 import collections
+import ctypes
 import os
 import sys
 
@@ -82,6 +96,7 @@ from dread import models as dmodels
 from dread import target as tgt
 from dread.build import recon_dir
 from dread.emu import Layout, core_reader
+from dread.fasthooks import MEMORY, NO_MODEL, VALUE
 from dread.program import Program
 
 CHUNK = 50_000           # blocks per emu_start (stop rules are checked between chunks); a chunk ends
@@ -121,6 +136,7 @@ class _State:
         # the stretch outside shared code (System._stretch): see SysState
         self.stretch_from, self.loop_max, self.anchor_next = FROZEN, LOOP_MAX, FROZEN
         self.waited = self.anchor = self.resume = self.waiting = 0
+        self.io_done = self.last_access = 0     # (the C hook's reads: none here)
 
 
 def _field(name, kind=int):
@@ -143,7 +159,7 @@ class System:
     ({name: {...}}) to tell shared code from C; built: the names of the functions built from C (for
     the original, whose code of them does not count)."""
 
-    spin_check, limit, frozen = (_field(n) for n in ("spin_check", "limit", "frozen"))
+    spin_check, limit, frozen, last_access = (_field(n) for n in ("spin_check", "limit", "frozen", "last_access"))
     due, irq_check = _field("due", bool), _field("irq_check", bool)
 
     # The state holds 64-bit times (C's), Python any: a timer model may schedule beyond 2**63 (the CLINT
@@ -199,6 +215,8 @@ class System:
         names = list(self.scenario["models"]) if "models" in self.scenario else sorted(target.models)
         self.models = [dmodels.create(self, n, target.models[n], target.root) for n in names]
         self.by_name = {m.name: m for m in self.models}
+        self.model_index = {m: i for i, m in enumerate(self.models)}
+        self.model_names = [m.name for m in self.models] + ["-"]   # by index; -1: no model owns it
         self.controllers = [m for m in self.models if hasattr(m, "pending_interrupt")]
         self.irq_check, self.deliver, self.interrupts = False, False, collections.Counter()
         # An interrupt that is wanted but masked (a lower priority's while a handler runs, one behind
@@ -212,7 +230,7 @@ class System:
         self.regs = _Registers(uc)
         owned = sorted((lo, hi, m) for m in self.models for lo, hi in m.ranges)
         self.owned_lo, self.owned = [lo for lo, _, _ in owned], owned
-        self.log, self.clock, self.new, self.stop = [], 0, 0, None
+        self.log, self.clock, self.stop = [], 0, None
         self.next_event = None
         self.levels = {}
         self.blocks, self.entered, self.order = {}, collections.Counter(), []    # blocks: address -> size
@@ -243,8 +261,16 @@ class System:
         self._shared(placement, built)
         if self.fast is None:
             uc.hook_add(UC_HOOK_BLOCK, self._on_block)
-        for lo, hi in self.layout.io:
-            uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._on_io, begin=lo, end=hi - 1)
+            for lo, hi in self.layout.io:
+                uc.hook_add(UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE, self._on_io, begin=lo, end=hi - 1)
+        else:
+            # The device accesses through the C hook (dread_sysio): the reads of plain registers it
+            # can do alone (_plain), every other access to _io; it repairs the IT state behind both.
+            arch = self.arch
+            self.fast.add_io(self.layout.io, self._io_from_c, ACCESS,
+                             settle=(arch.status_reg(), arch.IT_MASK) if self.layout.settle_it else None)
+        self._plain_at = {}                 # (address, size) -> the C hook's entry for its reads, -1: none
+        self._plain_info, self._plain_views, self._plain_base = [], [], None   # per entry (_new_plain)
         self.fault = None
         uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._on_unmapped)
         # An exception the core raises itself: svc (taken through a controller with pend(), the M
@@ -370,8 +396,7 @@ class System:
 
     def note(self, model, what, value):
         """A model reports something (a byte sent): part of the device log."""
-        self.log.append((model, what, value))
-        self.new += 1
+        self._log((model, what, value))
         self.last_new = self.progress = self.clock
         until = self.scenario.get("until") or {}
         if model in until:
@@ -424,9 +449,12 @@ class System:
         return masks
 
     def schedule(self):
-        times = [t for t in (m.next_event() for m in self.models) if t is not None]
-        times += [t for t, _, _ in self.pending_input]
-        self.next_event = min(times) if times else None
+        best = self.pending_input[0][0] if self.pending_input else None     # (sorted by time)
+        for m in self.models:
+            t = m.next_event()
+            if t is not None and (best is None or t < best):
+                best = t
+        self.next_event = best
 
     # ---- hooks ----
 
@@ -454,7 +482,8 @@ class System:
         if fresh or size > known:
             self.blocks[addr] = size
         if fresh:
-            self.new += 1
+            if st.io_done:                  # (the reads the C hook did came first)
+                self._take_reads()
             self.last_new = self.clock
         entry = self.entries.get(addr)
         if entry is not None:
@@ -513,24 +542,44 @@ class System:
         return None
 
     def _on_io(self, uc, access, addr, size, value, user):
+        """A device access, where the C hook is not at hand."""
+        self._io(uc, access, addr, size, value)
+        if self.layout.settle_it:
+            self.arch.settle_it(uc)
+
+    def _io_from_c(self, access, addr, size, value):
+        """An access the C hook hands over (dread.fasthooks, dread_sysio, which repairs the IT state
+        behind it): an exception cannot pass through the C between, so it stops the run and run()
+        raises it."""
+        try:
+            self._io(self.uc, access, addr, size, value)
+        except BaseException as e:          # noqa: B036 (raised again by run())
+            if self.callback_error is None:
+                self.callback_error = e
+            self.uc.emu_stop()
+
+    def _io(self, uc, access, addr, size, value):
+        st = self.st
+        if st.io_done:                      # the reads the C hook did came first
+            self._take_reads()
         model, mask = self._owner(addr), (1 << 8 * size) - 1
         who = model.name if model else "-"
-        st = self.st
         st.clock += ACCESS
         st.frozen = 0                       # the clock moved: a stretch outside shared code ends
         self.last_access = st.progress = st.clock
         if access == UC_MEM_WRITE:
-            self.log.append(("write", who, addr, size, value & mask))
-            self.new += 1
+            self._log(("write", who, addr, size, value & mask))
             self.last_new = self.clock
             if model is not None:
                 model.write(addr, size, value & mask)
                 self.schedule()             # a write may set when the model acts next (a timer's compare)
+            changed = model is not None
         else:
+            answer = None
             if model is not None:
-                got = model.read(addr, size)
-                if got is not None:
-                    uc.mem_write(addr, (got & mask).to_bytes(size, "little"))
+                answer = model.read(addr, size)
+                if answer is not None:
+                    uc.mem_write(addr, (answer & mask).to_bytes(size, "little"))
             got = int.from_bytes(uc.mem_read(addr, size), "little")
             for o in self.observers:
                 o.io(addr, size, got)
@@ -538,13 +587,123 @@ class System:
             if last is not None and last[:5] == ("read", who, addr, size, got):
                 self.log[-1] = last[:5] + (last[5] + 1,)        # the same read again: one entry, counted
             else:
-                self.log.append(("read", who, addr, size, got, 1))
-                self.new += 1
+                self._log(("read", who, addr, size, got, 1), read=(model, addr, size, got))
                 self.last_new = self.clock
+            changed = self.fast is not None and not self._plain(model, addr, size, answer, got)
         if st.clock >= st.next_event or st.clock >= st.limit:
             st.due = 1                      # (not emu_stop here: see self.due)
-        if self.layout.settle_it:
-            self.arch.settle_it(uc)
+        if changed and self.fast is not None:
+            self._refresh_plain()           # a write to a model, or a read that may have changed one
+
+    # ---- the C hook's reads (dread.fasthooks, dread_sysio) ----
+    #
+    # A read of a plain register (a model's `plain` ranges: no side effect, a value only a call into
+    # the models changes; or a register no model owns, which is memory) is done in C from the value
+    # read here last, and every other access comes to _io, as above. The C hook keeps the entries it
+    # makes until _take_reads puts them into the log, which comes first whenever this side adds to
+    # the log or uses it; st.tail_* is the log's last entry, for counting repeats as _io does.
+
+    def _log(self, entry, read=None):
+        """Append to the device log, behind the reads the C hook did. read: (model, address, size,
+        value) of a read's entry, whose repeats the C hook then counts into it."""
+        st = self.st
+        if st.io_done:
+            self._take_reads()
+        self.log.append(entry)
+        if self.fast is not None:
+            if read is None:
+                st.tail_read = 0
+            else:
+                model, address, size, value = read
+                st.tail_read, st.tail_model, st.tail_address, st.tail_size, st.tail_value = (
+                    1, self.model_index[model] if model is not None else -1, address, size, value)
+
+    def _take_reads(self):
+        """The reads the C hook did since the last call, into the log, and the clock of the last new
+        entry among them into last_new (which may hold a clock beyond the state's: see System.clock)."""
+        st, log = self.st, self.log
+        st.io_done = 0
+        if st.tail_extra:                   # repeats of the log's last entry
+            last = log[-1]
+            log[-1] = last[:5] + (last[5] + st.tail_extra,)
+            st.tail_extra = 0
+        n = st.reads_n
+        if n:
+            names, reads = self.model_names, st.reads
+            for i in range(n):
+                r = reads[i]
+                log.append(("read", names[r.model], r.address, r.size, r.value, r.count))
+            st.reads_n = 0
+        if st.last_new >= 0:
+            self.last_new, st.last_new = st.last_new, -1
+
+    def _plain(self, model, addr, size, answer, got):
+        """After a read in _io: whether the register is plain; then the C hook does its reads from
+        now on, until the next _refresh_plain (answer: what the model answered, None for memory)."""
+        at = self._plain_at.get((addr, size))
+        if at is None:
+            at = self._new_plain(model, addr, size)
+        if at < 0:
+            return False
+        st = self.st
+        e = self._plain_views[at]
+        if model is None:
+            e.kind = NO_MODEL
+        elif answer is None:
+            e.kind = MEMORY
+        else:
+            e.kind, e.value = VALUE, got
+        e.epoch = st.plain_epoch
+        if not e.used:
+            e.used = 1
+            st.plain_used[st.plain_used_n] = at
+            st.plain_used_n += 1
+        return True
+
+    def _new_plain(self, model, addr, size):
+        """The C hook's entry for the reads of (addr, size) when they are plain, else -1."""
+        at = -1
+        if 1 <= size <= 8 and (model is None or any(lo <= addr and addr + size <= hi
+                                                   for lo, hi in getattr(model, "plain", ()))):
+            at = self.fast.plain_entry(addr, size, self.model_index[model] if model is not None else -1)
+            if at >= 0:                     # (entries are made in order, each once)
+                self._plain_info.append((model, addr, size, (1 << 8 * size) - 1))
+                plain = self.st.plain
+                base = ctypes.cast(plain, ctypes.c_void_p).value
+                if base != self._plain_base:    # the C side moved its entries: new views of them
+                    self._plain_base = base
+                    self._plain_views = [plain[i] for i in range(len(self._plain_info))]
+                else:
+                    self._plain_views.append(plain[at])
+        self._plain_at[addr, size] = at
+        return at
+
+    def _refresh_plain(self):
+        """After a call into the models that may have changed them (a write, a read with a side
+        effect, the events and exceptions between chunks): the C hook's values no longer hold. The
+        registers it read since the last refresh get their models' values again; the others are
+        asked here at their next read."""
+        st = self.st
+        epoch = st.plain_epoch + 1
+        st.plain_epoch = epoch
+        n = st.plain_used_n
+        if not n:
+            return
+        used, views, info = st.plain_used, self._plain_views, self._plain_info
+        for i in range(n):
+            at = used[i]
+            e = views[at]
+            e.used = 0
+            model, address, size, mask = info[at]
+            if model is None:
+                continue
+            answer = model.read(address, size)
+            if answer is None:
+                e.kind = MEMORY
+            else:
+                e.kind, e.value = VALUE, answer & mask
+            e.epoch = epoch
+        st.plain_used_n = 0
 
     def _on_intr(self, uc, intno, user):
         kind = getattr(self.arch, "system_exception", lambda n: None)(intno)
@@ -567,6 +726,8 @@ class System:
         self.limit = limit
         self.st.observers, self.st.spin = 1 if self.observers else 0, SPIN
         self.st.stretch_from, self.st.loop_max = FROZEN, LOOP_MAX
+        if self.fast is not None:
+            self.st.access = ACCESS
         self.pending_input = sorted((int(t), str(m), d) for t, m, d in self.scenario.get("input", ()))
 
         def word(address):
@@ -585,7 +746,7 @@ class System:
             controller.taken(number)
             self.interrupts[number] += 1
             self.progress, self.frozen = self.clock, 0      # (a stretch outside shared code ends)
-            self.log.append(("interrupt", controller.name, number))
+            self._log(("interrupt", controller.name, number))
             vectors = controller.vector_base() if hasattr(controller, "vector_base") else self.image.vectors
             cause = controller.core_cause(number) if hasattr(controller, "core_cause") else None
             self._entering(pc)
@@ -594,13 +755,16 @@ class System:
             return pc
         how = None
         while True:
-            self.new = 0
             error = None
+            if self.fast is not None:           # (the models may have changed between chunks)
+                self._refresh_plain()
             try:
                 self.st.chunk = CHUNK
                 uc.emu_start(pc, self.layout.sentinel)
             except UcError as e:
                 error = e
+            if self.st.io_done:                 # the reads the C hook did, into the log
+                self._take_reads()
             if self.callback_error is not None:
                 raise self.callback_error
             back = arch.exception_return(uc, word)
@@ -620,7 +784,7 @@ class System:
             pc = arch.resume_address(uc)
             if self.syscall and hasattr(arch, "enter_syscall"):    # a trap the layer takes alone (ecall)
                 self.syscall, self.frozen = False, 0
-                self.log.append(("syscall",))     # (not its address: code that moved is elsewhere)
+                self._log(("syscall",))         # (not its address: code that moved is elsewhere)
                 self._entering(pc)
                 pc = arch.enter_syscall(uc, pc, word, write_word)
             if self.syscall:                    # svc: its exception, taken at once behind it

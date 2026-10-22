@@ -8,8 +8,8 @@
     size = 0x10
 
 A scenario sets the inputs ([[clock, "gpio", 5]]: pins 0 and 2 high from then on); every store to
-the output register is noted in the device log with the value. Assumed: no direction or pull
-registers, outputs not read back from the pins.
+the output register is noted in the device log with the value. Every read is plain
+(dread.models). Assumed: no direction or pull registers, outputs not read back from the pins.
 """
 from dread.models import Model
 
@@ -22,6 +22,7 @@ class Gpio(Model):
         base = self.number("base")
         self.input_at, self.output_at = base + self.number("input", 0), base + self.number("output", 4)
         self.ranges = [(base, base + self.number("size", 0x10))]
+        self.plain = list(self.ranges)
         self.pins_in, self.pins_out = 0, 0
 
     def read(self, address, size):

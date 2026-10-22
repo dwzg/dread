@@ -11,7 +11,8 @@ acknowledge register; the core's IRQ is asked while a pending source is enabled.
 
 A source is pending while its line is high, and from a rising edge until it is acknowledged. The IRQ
 is taken by the system run (the core's exception entry: vectors + 0x18) at a place where the core
-has interrupts enabled. Assumed: one IRQ line to the core, no priorities, no FIQ.
+has interrupts enabled. Every read is plain (dread.models). Assumed: one IRQ line to the core, no
+priorities, no FIQ.
 """
 from dread.models import Model
 
@@ -24,6 +25,7 @@ class Intc(Model):
         base = self.number("base")
         self.at = {k: base + self.number(k, d) for k, d in (("pending", 0), ("enable", 4), ("ack", 8))}
         self.ranges = [(base, base + self.number("size", 0x10))]
+        self.plain = list(self.ranges)
         self.levels, self.latched, self.enabled = 0, 0, 0
 
     def read(self, address, size):

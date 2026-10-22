@@ -10,6 +10,14 @@ configured in the target's dread.toml, one table each:
 
 A model is the same for both images of a comparison; a difference between them is traced to its
 instruction, never removed by changing a model. Each class's docstring says what it assumes.
+
+A model may name the registers whose reads are plain (`plain`, ranges like `ranges`): a read of
+them changes nothing (no queue popped, no flag cleared) and their value changes only through a call
+into the models (a write, an event, an input, an interrupt line, an exception taken or returned
+from), not with the clock or the core. The system run then does repeated reads of them without
+calling read() (on Unicorn in C, dread.fasthooks) and asks read() again after every such call; an
+access counts as plain when it lies wholly inside one range. The default is none, so a model of
+the target's own is asked at every read until it says otherwise.
 """
 import importlib.util
 import os
@@ -23,6 +31,7 @@ class Model:
     def __init__(self, system, name, config):
         self.system, self.name, self.config = system, name, dict(config)
         self.ranges = []                    # [(lo, hi)] of the registers this model answers
+        self.plain = []                     # [(lo, hi)] of those whose reads are plain (above)
 
     def number(self, key, default=None):
         value = self.config.get(key, default)
@@ -54,6 +63,18 @@ class Model:
 
     # An interrupt controller also has line(number, level), pending_interrupt() -> the number to
     # take or None, taken(number) and returned() (dread.models.intc, dread.models.nvic).
+
+
+def without(ranges, holes):
+    """`ranges` [(lo, hi)] less the address ranges `holes` [(lo, hi)]: for a model's plain ranges,
+    its registers less those with a side effect or a value that moves with the clock."""
+    out = []
+    for lo, hi in ranges:
+        parts = [(lo, hi)]
+        for h_lo, h_hi in holes:
+            parts = [p for a, b in parts for p in ((a, min(b, h_lo)), (max(a, h_hi), b)) if p[0] < p[1]]
+        out += parts
+    return out
 
 
 def classes():

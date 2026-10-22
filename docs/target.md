@@ -180,7 +180,11 @@ and SysTick, with priorities of `priority_bits` bits, PRIGROUP, nesting, BASEPRI
 and SVCall for svc; exceptions are taken through VTOR's vector table, on the main or the process
 stack as the core does), `clint` (RISC-V's core-local interruptor: mtime from the shared clock,
 mtimecmp and msip, the machine timer and software interrupts under mstatus.MIE and mie; ecall traps
-to mtvec, mret runs in the emulator). Example, a serial port:
+to mtvec, mret runs in the emulator). A model names the registers whose reads are plain (`plain`, as
+`dread.models` describes it: no side effect, a value only a call into the models changes); the
+system run then does repeated reads of them without asking the model (in C on Unicorn). A model of
+the target's own names none unless it sets `plain`, so it is asked at every read. Example, a serial
+port:
 
 ```toml
 [models.uart]

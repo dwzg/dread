@@ -677,8 +677,9 @@ may stay lifted.
   not decisive"). Left: clang -O2's runs still end early (next item); the M3 runs that now reach
   the limit take 95 to 141 s a pair (about a second when they spun early), 80 % of it in the Python
   peripheral hook (vPortEnterCritical reads ICSR on every critical section: with the kernel outside
-  the clock, 125,000 accesses a million units, nearly all of the clock): a C path for model reads
-  without side effects is the next performance item there.
+  the clock, 125,000 accesses a million units, nearly all of the clock). Done for the reads
+  (2026-10-22, "Performance, third pass": the reads of plain registers in C, 82 s -> 30 s a pair);
+  the writes are the next item there.
 - [ ] **An interrupt held off by a mask that code outside shared code lifts waits for the next
   shared block.** FreeRTOS clang -O2 with every lifted function rebuilt: both runs assert in
   GenQTest.c line 683 at 93,560 units ("ASSERT!", then "spins"), where the original alone runs to
@@ -1696,6 +1697,52 @@ The long runs set the pace of everything after them. Measure first, then cut.
   2.8 times faster beside the same load (0.73 us an instruction against 2.0), with the same results
   (msp430_check: 30,000 random blocks agree with GDB's simulator; three functions' generated cases
   identical, so cached cases stay valid).
+- [x] **A C path for the system run's device reads** (2026-10-22). Profiled first: FreeRTOS's
+  Cortex-M clang -Os image with every lifted function rebuilt runs to the limit (30 million units)
+  in 41 s; 83 % of it in System._on_io, 1.25 million calls in 10 million units, all of them ICSR:
+  portYIELD writes PENDSVSET and three critical sections read ICSR (vPortEnterCritical's assertion)
+  before the next, PendSV pending all along (the open item on interrupts held off by a mask that
+  code outside shared code lifts), so the clock is almost all device accesses. A model names its
+  plain registers now (dread.models: `plain` ranges, no side effect, a value only a call into the
+  models changes; the NVIC all but CSR, whose read clears COUNTFLAG, and CVR, which moves with the
+  clock; the UART all but its data register; the timer all but its count; the CLINT all but mtime;
+  gpio and intc all; a model of the target's own none until it says so), and a register no model
+  owns is memory. On Unicorn the device accesses go through a C hook (dread_sysio): a read of a
+  plain register comes from the value the model gave at the last read done in Python, written where
+  the load finds it, with the clock, the log and its counted repeats, the clock of the last new
+  entry and access, `due` and the stretch's end as System._io keeps them; the C hook's entries wait
+  in a buffer until System takes them, before it adds to the log or looks at it (System._take_reads).
+  After anything that may change a model (a write, a read with a side effect, the events, input and
+  exceptions between chunks) the registers read since are asked again (_refresh_plain); the others
+  wait for their next read in Python. Every other access goes to System._io as before. Measured
+  (the pair of runs, original and rebuilt, on the bench builds' whole images of measure-39, three
+  builds at a time): the clang -Os builds 86 -> 35 to
+  38 s (clang -Os alone: 82 -> 30 s), GCC -O2 84 -> 41 s, GCC 14 -O2 86 -> 42 s, GCC -O0 68 -> 40 s;
+  the four standard builds' short runs unchanged (alternating, five rounds: GCC -Os 0.71 -> 0.66 s,
+  clang -O2 0.13 -> 0.12 s, RISC-V GCC -Os 2.34 -> 2.34 s). Every outcome the same as before (how,
+  clock, device log, reports, functions entered and their order: the digests of all 18 runs of nine
+  builds), and as the Python hooks' on gizmo (every build and scenario, all of it shared and all of
+  it outside shared code) and on a program of the test's own that tries what a cached read could get
+  wrong (input arriving while a register is polled, registers that move with the clock or whose read
+  clears a flag, a read inside a stretch and one that makes an event due, the quiet rule at chunks
+  of 13 blocks); 18 mutants of the path (a register wrongly plain, a refresh left out, the order of
+  the clocks taken, the stretch's end, `due`, the callbacks held by the state) all fail the tests.
+  The C side frees what it allocates with the state (the block hook's sets were never freed: 450
+  gizmo runs in one process 79 -> 89 MB before, flat now; a state that held its callbacks through
+  ctypes kept every System alive on the way, 3.5 MB a run, and a test shows a finished one
+  collected). Of the reads of the clang -Os run 99.96 % are done in C. Left: the writes, now 53 % of that run (938,000 calls of 8.7 us), 66 % of GCC
+  -O2's; on -O0 the writes and the interrupt question each one raises behind the next shared block
+  (28 % and 37 %). Next item.
+- [ ] **The system run's repeated writes that change nothing, in C.** What is left of the M3 runs
+  above: portYIELD's PENDSVSET while PendSV is pending, 940,000 to 1.25 million writes a run. A
+  design (not tried): a model names registers whose write, repeated with the same value with no call
+  into the models between, changes nothing and calls nothing of the run but interrupts_changed (as
+  often as the first did); the run notes such a write when it did it in Python (only
+  interrupts_changed called during it), and the C hook does its repeats while the plain values hold
+  (the log entry, the clock, `due`, and interrupts_changed's flags and epoch moved to the state).
+  Writes that alternate between two registers would not gain (each refreshes the other's note).
+  Whether the interrupt question behind each such write can be skipped (nothing it depends on
+  changed) is a question of its own: it would cut -O0's share, but changes when the run asks.
 ## Phase 7: reading aids, plugin, documentation
 
 - [x] Reading aids: `dread flat` (a function's listing with targets and literals by name, texts,

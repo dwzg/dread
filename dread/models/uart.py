@@ -13,10 +13,10 @@
 
 A store to the data register sends its low byte: the bytes sent are the model's report, the text a
 scenario can wait for. A load takes the next byte of the receive queue (0 when it is empty). Reads
-of other registers in the range are plain memory. Assumed: no transmit delay, no overrun, no other
-status bits.
+of other registers in the range are plain memory. Every read but the data register's is plain
+(dread.models). Assumed: no transmit delay, no overrun, no other status bits.
 """
-from dread.models import Model
+from dread.models import Model, without
 
 
 class Uart(Model):
@@ -30,6 +30,7 @@ class Uart(Model):
         self.tx_ready, self.rx_ready = self.number("tx_ready", 1), self.number("rx_ready", 2)
         self.irq = self.config.get("irq")
         self.ranges = [(self.base, self.base + self.number("size", 0x10))]
+        self.plain = without(self.ranges, [(self.data_at, self.data_at + 1)])     # a read takes a byte
         self.sent, self.queue = bytearray(), bytearray()
 
     def read(self, address, size):

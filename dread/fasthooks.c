@@ -320,8 +320,25 @@ void dread_init(state_t *st)
  * keeps the rules in one place; the state both read and write is sys_t. */
 
 typedef void (*block_fn)(void *uc, uint64_t address, uint32_t size, void *user);
+typedef void (*io_fn)(void *uc, int type, uint64_t address, int size, int64_t value, void *user);
+typedef int (*mem_rw_fn)(void *uc, uint64_t address, void *bytes, uint64_t size);
 
 #define SYS_REGS 64
+#define UC_MEM_READ 16              /* Unicorn's uc_mem_type of a load */
+
+typedef struct {                    /* a device log entry of reads done here (dread_sysio) */
+    uint64_t address, value, count;
+    int32_t model, size;            /* model: its index in System.models, -1: no model owns it */
+} sysread_t;
+
+typedef struct {                    /* a register whose reads are done here (System._plain) */
+    uint64_t address, value;
+    int64_t epoch;                  /* VALUE and MEMORY hold while this is sys_t's plain_epoch */
+    int32_t size, model;
+    int32_t kind;                   /* 0: ask Python; 1 VALUE: the read gives value; 2 MEMORY: the
+                                       model leaves it to memory; 3 NO_MODEL: memory, always */
+    int32_t used;                   /* read since System last refreshed the entries */
+} sysplain_t;
 
 typedef struct {
     int64_t clock, progress, spin_check, next_event, limit, spin;  /* next_event INT64_MAX: none */
@@ -349,6 +366,29 @@ typedef struct {
     int32_t nregs;                  /* registers the loop search compares; -1: more than this hook holds */
     int32_t regs[SYS_REGS];
     uint32_t anchor_vals[SYS_REGS]; /* their values at the anchor */
+    /* the device accesses (dread_sysio, System._io) */
+    io_fn io_python;                /* System._io_from_c: every access not done here */
+    reg_rw_fn reg_write;
+    mem_rw_fn mem_read, mem_write;
+    int64_t access;                 /* sysrun's ACCESS: the clock units an access takes */
+    int32_t settle, status_reg;     /* clear a stale Thumb IT state behind every access (settle()) */
+    uint32_t it_mask;
+    int32_t io_done;                /* reads were done here since System last took them (_take_reads) */
+    int32_t tail_read;              /* the log's last entry (System.log, then reads) is a read: */
+    int32_t tail_model, tail_size;
+    uint64_t tail_address, tail_value;
+    uint64_t tail_extra;            /* reads done here that repeat System.log's last entry */
+    int64_t last_new;               /* the clock at the last new entry made here; -1: none since taken */
+    int64_t last_access;            /* the clock at the last device access (System.last_access) */
+    sysread_t *reads;               /* the entries done here, not yet in System.log */
+    uint64_t reads_n, reads_cap;
+    set_t plain_index;              /* address << 4 | size -> 1 + its entry */
+    sysplain_t *plain;
+    uint64_t plain_n, plain_cap;
+    int64_t plain_epoch;
+    uint64_t *plain_used;           /* the entries read since System last refreshed them, each once */
+    uint64_t plain_used_n;
+    int64_t io_fast;                /* accesses this hook did alone */
 } sys_t;
 
 static int sys_shared(const sys_t *st, uint64_t address)
@@ -476,4 +516,153 @@ size_t dread_sys_entered(sys_t *st, uint64_t *keys, uint32_t *vals)
 void dread_sys_entry(sys_t *st, uint64_t address)
 {
     set_put(&st->entry_set, address, 1, 1);
+}
+
+/* ---- the system run's device accesses (System._io) ----
+ *
+ * A device access moves the clock by ACCESS units and goes into the device log (a read repeated
+ * with nothing between is one entry, counted). A read of a register whose read changes nothing and
+ * whose value changes only by a call into the models (a model's plain ranges, dread.models.Model)
+ * or that no model owns (memory) is done here, from the value System last asked the model for
+ * (System._plain, _refresh_plain); every other access goes to System._io_from_c, which keeps the
+ * rules. The entries made here wait in `reads` until System takes them into its log
+ * (System._take_reads), before it adds to the log or looks at it; tail_* is the log's last entry,
+ * for the counting of repeats. */
+
+/* A read done here (1), or left to System (0, nothing changed). */
+static int sys_read_here(void *uc, uint64_t address, int size, sys_t *st)
+{
+    if (st->observers || !st->plain_n || size < 1 || size > 8 || st->clock < 0 || st->clock >= st->limit
+            || st->access < 0 || st->clock > INT64_MAX - st->access)
+        return 0;
+    uint32_t at = set_get(&st->plain_index, address << 4 | (uint64_t)size);
+    if (!at)
+        return 0;
+    sysplain_t *e = &st->plain[at - 1];
+    if (e->kind == 0 || (e->kind != 3 && e->epoch != st->plain_epoch) || e->address != address)
+        return 0;                   /* (the key holds 60 bits of the address) */
+    if (st->reads_n == st->reads_cap) {
+        uint64_t cap = st->reads_cap ? st->reads_cap * 2 : 256;
+        sysread_t *reads = realloc(st->reads, cap * sizeof(sysread_t));
+        if (!reads)
+            return 0;
+        st->reads = reads;
+        st->reads_cap = cap;
+    }
+    uint8_t bytes[8];
+    uint64_t got = 0;
+    if (e->kind == 1) {             /* the model's value, put where the load finds it */
+        got = e->value;
+        for (int i = 0; i < size; i++)
+            bytes[i] = (uint8_t)(got >> (8 * i));
+        if (st->mem_write(uc, address, bytes, (uint64_t)size))
+            return 0;
+    } else {
+        if (st->mem_read(uc, address, bytes, (uint64_t)size))
+            return 0;
+        for (int i = 0; i < size; i++)
+            got |= (uint64_t)bytes[i] << (8 * i);
+    }
+    st->clock += st->access;
+    st->frozen = 0;                 /* the clock moved: a stretch outside shared code ends */
+    st->progress = st->last_access = st->clock;
+    if (st->tail_read && st->tail_model == e->model && st->tail_address == address && st->tail_size == size
+            && st->tail_value == got) {
+        if (st->reads_n)
+            st->reads[st->reads_n - 1].count++;
+        else
+            st->tail_extra++;
+    } else {
+        sysread_t *r = &st->reads[st->reads_n++];
+        r->address = address;
+        r->value = got;
+        r->count = 1;
+        r->model = e->model;
+        r->size = size;
+        st->tail_read = 1;
+        st->tail_model = e->model;
+        st->tail_size = size;
+        st->tail_address = address;
+        st->tail_value = got;
+        st->last_new = st->clock;
+    }
+    st->io_done = 1;
+    st->io_fast++;
+    if (!e->used) {
+        e->used = 1;
+        st->plain_used[st->plain_used_n++] = at - 1;
+    }
+    if (st->clock >= st->next_event || st->clock >= st->limit)
+        st->due = 1;
+    return 1;
+}
+
+/* UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE over the peripheral ranges */
+void dread_sysio(void *uc, int type, uint64_t address, int size, int64_t value, sys_t *st)
+{
+    if (type != UC_MEM_READ || !sys_read_here(uc, address, size, st))
+        st->io_python(uc, type, address, size, value, NULL);
+    if (st->settle) {               /* as System._on_io's settle_it, on both ways */
+        uint32_t v = 0;
+        st->reg_read(uc, st->status_reg, &v);
+        if (v & st->it_mask) {
+            v &= ~st->it_mask;
+            st->reg_write(uc, st->status_reg, &v);
+        }
+    }
+}
+
+/* The entry of the register (address, size) of `model`, made when there is none (kind 0): its
+ * index, or -1 when there is no memory for it. */
+int64_t dread_sys_plain(sys_t *st, uint64_t address, int32_t size, int32_t model)
+{
+    uint64_t key = address << 4 | (uint64_t)size;
+    uint32_t at = set_get(&st->plain_index, key);
+    if (at)                         /* (another address with the same 60 low bits: none) */
+        return st->plain[at - 1].address == address ? (int64_t)at - 1 : -1;
+    if (st->plain_n == st->plain_cap) {
+        uint64_t cap = st->plain_cap ? st->plain_cap * 2 : 64;
+        sysplain_t *plain = realloc(st->plain, cap * sizeof(sysplain_t));
+        if (!plain)
+            return -1;
+        st->plain = plain;
+        uint64_t *used = realloc(st->plain_used, cap * sizeof(uint64_t));
+        if (!used)
+            return -1;
+        st->plain_used = used;
+        st->plain_cap = cap;
+    }
+    if (!set_put(&st->plain_index, key, (uint32_t)(st->plain_n + 1), 1))
+        return -1;
+    sysplain_t *e = &st->plain[st->plain_n];
+    memset(e, 0, sizeof *e);
+    e->address = address;
+    e->size = size;
+    e->model = model;
+    e->epoch = -1;
+    return (int64_t)st->plain_n++;
+}
+
+static void set_free(set_t *s)
+{
+    free(s->keys);
+    free(s->vals);
+    free(s->order);
+    memset(s, 0, sizeof *s);
+}
+
+/* What the system run's state holds in memory of its own, freed (when the run is gone). */
+void dread_sys_free(sys_t *st)
+{
+    set_free(&st->known);
+    set_free(&st->entry_set);
+    set_free(&st->entered);
+    set_free(&st->plain_index);
+    free(st->reads);
+    free(st->plain);
+    free(st->plain_used);
+    st->reads = NULL;
+    st->plain = NULL;
+    st->plain_used = NULL;
+    st->reads_n = st->reads_cap = st->plain_n = st->plain_cap = st->plain_used_n = 0;
 }
