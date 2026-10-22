@@ -60,6 +60,7 @@ class Shapes:
         self.shifted = False            # whether objects that meet at different offsets are merged
         self.share = False              # whether templates refer to memory reachable from fixed addresses
         self.embedded = set()           # (root, offset, root, offset) of those kept apart
+        self.interior = set()           # roots of values that met their own object at another offset
 
     # --- type variables
     def tv(self, key):
@@ -90,8 +91,13 @@ class Shapes:
                         self.embeds.add((xa, oa, xb, ob))   # and take the other's accesses there: FreeRTOS's
                     else:                   # pxIndex, a list's own end marker and its items, made the
                         self.conflicts.add(xa)      # items' kind the task block's)
+                        # (one object at two offsets: a pointer into it, such as a queue's pcHead, the
+                        # queue itself for a semaphore and its storage behind it for the others)
+                        self.interior.update((ra, rb))
                     continue
             self.tv_parent[rb] = ra
+            if rb in self.interior:
+                self.interior.add(ra)
             pa, pb = self.points.pop(ra, None), self.points.pop(rb, None)
             if pa and pb:
                 self.points[ra] = pa
@@ -239,7 +245,7 @@ class Shapes:
             child = None
             if t in self.points:
                 child = self.template(self.points[t], shared, depth - 1, path + ((root, off0),))
-            out[off - off0] = (frozenset(f.types), child)
+            out[off - off0] = (frozenset(f.types), child, t in self.interior)
         return ("copy", out, (root, off0))
 
     def instantiate(self, tmpl, location, stack=()):
@@ -254,11 +260,13 @@ class Shapes:
                 self.unify_locations(location, (o, off + tmpl[2]))
         else:
             stack = stack + (location,)
-            for rel, (types, child) in tmpl[1].items():
+            for rel, (types, child, interior) in tmpl[1].items():
                 f = self.field((location[0], location[1] + rel))
                 f.types |= types
                 if child is not None:
                     self.instantiate(child, self.pointer(f.content), stack)
+                if interior:
+                    self.interior.add(self.find(f.content))
 
 
 
@@ -294,15 +302,25 @@ def signed32(k):
     return k - 0x100000000 if k & 0x80000000 else k
 
 
+def reaches_below(tmpl):
+    """Whether a template has fields below the location it describes: the callee takes the pointer as
+    one into something larger, a header in front (FreeRTOS's vPortFree reads the heap block's size at
+    -4 of what it frees, pvPortMalloc hands out its block plus 8). What it sees there is its own
+    structure, not the caller's: copied, every structure allocated or freed through it took the heap
+    block's links, and linked, the heap block's kind."""
+    return tmpl is not None and tmpl[0] == "copy" and any(rel < 0 for rel in tmpl[1])
+
+
 class Collector:
     """Walks one function's readable tree and feeds the unification. key(v): the type variable of a
     variable of the function. summaries: {callee: {"params": {i: template}, "ret": template}} of the
     callees already done (their templates are copied); together: the functions of this one's
     component (their parameters are unified, as one function's)."""
 
-    def __init__(self, shapes, fn, macros, summaries=None, together=()):
+    def __init__(self, shapes, fn, macros, summaries=None, together=(), unread=()):
         self.s, self.fn, self.macros = shapes, fn, macros   # macros: {name: (address, type)}
         self.summaries, self.together = summaries or {}, set(together)
+        self.unread = unread            # functions whose result no caller reads (analyse)
 
     def key(self, name, write=False, entry=False):
         """The value of variable name here: one per web of its definitions (webs), so that a variable
@@ -387,7 +405,7 @@ class Collector:
         elif isinstance(st, C.Return):
             if st.e is not None:
                 v = self.value(st.e)
-                if v is not None:
+                if v is not None and self.fn.name not in self.unread:
                     self.s.unify(v, ("ret", self.fn.name))
         elif isinstance(st, (C.If, C.While, C.DoWhile)):
             self.value(st.cond)
@@ -463,7 +481,7 @@ class Collector:
                 summary = self.summaries[name]
                 for i, a in enumerate(e.args):
                     tmpl = summary["params"].get(i)
-                    if tmpl is None:
+                    if tmpl is None or reaches_below(tmpl):
                         self.value(a)
                         continue
                     location = self.address(a)
@@ -472,7 +490,7 @@ class Collector:
                         if structure(tmpl):
                             s.calls.append((location, tmpl[2]))
                 t = ("result", self.fn.name, id(e))
-                if summary.get("ret") is not None:
+                if summary.get("ret") is not None and not reaches_below(summary["ret"]):
                     # (its fields, but no kind: a function the source declares void hands back what
                     # its last call left in the result register, FreeRTOS's vListInsert's list, and
                     # every caller that passes that on linked lists with tasks)
@@ -634,9 +652,14 @@ def components(graph):
     return out
 
 
-def analyse(trees, depth=4, share=False):
+def analyse(trees, depth=4, share=False, unread=frozenset()):
     """Shapes from [(tree, fn, macros)]: every function's readable tree with its macros (name ->
-    (address, type)), callees first; returns the Shapes with .summaries."""
+    (address, type)), callees first; returns the Shapes with .summaries. unread: the functions whose
+    result no caller reads (dread.regflow's kept registers lack the result register): their returns
+    stay values of their own instead of one result. Such a function's lifted C hands back whatever its
+    result register holds on each path (FreeRTOS's vPortFree, void in the source: its parameter on one
+    path, the freed block's size on another), and made one, the size pointed to the parameter's memory:
+    every structure freed through it got a pointer to itself at the block header's offsets."""
     s = Shapes()
     s.share = share
     by_name = {fn.name: (tree, fn, macros) for tree, fn, macros in trees}
@@ -645,7 +668,7 @@ def analyse(trees, depth=4, share=False):
     for comp in components(graph):
         for name in comp:
             tree, fn, macros = by_name[name]
-            Collector(s, fn, macros, summaries, comp).run()
+            Collector(s, fn, macros, summaries, comp, unread).run()
         settle(s)
         shared = s.global_roots()
         for name in comp:
@@ -1204,6 +1227,9 @@ def plan(s, trees, digests=None, least=2):
             for off, f in s.fields.get(o, {}).items():
                 t = s.find(f.content)
                 if rows.get(off - b) != "u32" or t not in s.points:
+                    continue
+                if t in s.interior:         # (it also points into its own object at another offset)
+                    found.setdefault(off - b, set()).add(None)
                     continue
                 o2, off2 = s.loc(s.points[t])
                 k2 = s.kind_root.get(o2)

@@ -45,6 +45,59 @@ def test_a_header_in_front_of_a_structure_is_no_member_of_it():
     assert fields(s, "user") == {(0, 4)}
 
 
+def test_a_callee_that_reaches_below_its_pointer_lends_its_caller_nothing():
+    """A free with a block header in front (FreeRTOS's vPortFree: its free list's link at -8, the size
+    at -4 of what it frees) sees its own structure there, not its caller's: its template is not copied
+    onto the caller's memory, nor does the call link the two kinds."""
+    text = ("u32 release(u32 r0)\n{\n    u32 r1;\n    r1 = *(volatile u32 *)(r0 - 4);\n"
+            "    *(volatile u32 *)(r0 - 4) = r1 & ~1u;\n"
+            "    *(volatile u32 *)(r0 - 8) = *(volatile u32 *)0x20000100u;\n"
+            "    *(volatile u32 *)0x20000100u = r0 - 8;\n    return 0;\n}\n"
+            "u32 user(u32 r0)\n{\n    *(volatile u32 *)r0 = 5u;\n    *(volatile u32 *)(r0 + 4) = 6u;\n"
+            "    *(volatile u32 *)(r0 + 8) = 7u;\n    return release(r0);\n}\n")
+    s = analysed(text)
+    root, off = s.loc(s.points[s.find(("param", "user", 0))])
+    assert sorted(o - off for o in s.fields[root]) == [0, 4, 8], sorted(s.fields[root])
+    assert not s.calls
+
+
+def test_a_field_that_points_into_its_own_object_is_no_pointer_field():
+    """A queue's pcHead: the queue itself for a semaphore (no storage), its storage behind the
+    structure for the others, and pcWriteTo a copy of it. Pointing into its own object at two
+    offsets, it is no pointer to a structure (it held the queue's own type before)."""
+    text = ("u32 init(u32 r0, u32 r1)\n{\n    if (r1 == 0) *(volatile u32 *)r0 = r0;\n"
+            "    else *(volatile u32 *)r0 = r0 + 80;\n"
+            "    *(volatile u32 *)(r0 + 4) = *(volatile u32 *)r0;\n    *(volatile u32 *)(r0 + 8) = 1u;\n"
+            "    return 0;\n}\n"
+            "u32 create(u32 r0, u32 r1)\n{\n    *(volatile u32 *)(r0 + 12) = 0u;\n    return init(r0, r1);\n}\n")
+    tree = cparse.parse(HEAD + text)
+    trees = [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)]
+    p = shapes.plan(shapes.analyse(trees), trees)
+    assert p.typed.get("init") == {"r0": "s_1"} and p.structs["s_1"][:3] == [(0, "u32"), (4, "u32"), (8, "u32")]
+    assert not p.pointers, p.pointers
+    only_self = text.replace("    else *(volatile u32 *)r0 = r0 + 80;\n", "")
+    tree = cparse.parse(HEAD + only_self)
+    trees = [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)]
+    p = shapes.plan(shapes.analyse(trees), trees)
+    assert p.pointers == {"s_1": {0: "s_1", 4: "s_1"}}, p.pointers    # (only itself: a pointer to its kind)
+
+
+def test_the_results_of_a_function_whose_result_nobody_reads_stay_apart():
+    """A function the source declares void hands back what its result register holds on each path
+    (vPortFree: its parameter, or the freed block's size): made one result, the size would point to
+    the parameter's memory."""
+    text = ("u32 drop(u32 r0)\n{\n    if (r0 == 0) return r0;\n    r0 = *(volatile u32 *)(r0 - 4);\n"
+            "    return r0;\n}\n")
+    tree = cparse.parse(HEAD + text)
+    trees = [(tree, tree.function("drop"), {})]
+    for unread, points in ((frozenset(), True), (frozenset({"drop"}), False)):
+        s = shapes.analyse(trees, unread=unread)
+        root, off = s.loc(s.points[s.find(("var", "drop", "r0", None))]) if s.find(
+            ("var", "drop", "r0", None)) in s.points else s.loc(s.points[s.find(("param", "drop", 0))])
+        size = s.fields[root][off - 4]
+        assert (s.find(size.content) in s.points) == points
+
+
 def test_a_link_points_back_to_its_own_kind_and_reaches_the_caller():
     s = analysed("u32 walk(u32 r0)\n{\n    u32 r3;\n    r3 = r0;\n    while (r3 != 0) r3 = *(volatile u32 *)(r3 + 4);\n"
                  "    return *(volatile u32 *)(r0 + 8);\n}\n"

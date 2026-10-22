@@ -238,6 +238,20 @@ its sources.
   structure (GCC -Os 7 of 9, clang -O2 8 of 24, RISC-V 2 of 5, GCC -O0 3 of 4): the wrong ones come
   from kinds made one, a heap block (its free-list link at 0 a pointer to a block) and the queue
   allocated inside it (pcHead at 0); newlib's _cookie, a void * that holds its FILE, counts as wrong.
+  Traced 2026-10-22 on clang -O2 with the analysis's objects: the heap code (pvPortMalloc, vPortFree)
+  reaches below the pointer it hands out or frees (a header in front, a free list through it, sizes
+  added to pointers), and its templates carried that onto every structure allocated or freed through
+  it: queues, event groups, stream buffers and task blocks got pointers to themselves at +0 and +4. A
+  callee whose template has fields below the pointer lends its caller nothing now and links no kinds
+  (reaches_below); a value that met its own object at two offsets (a queue's pcHead: the queue itself
+  for a semaphore, its storage behind it for the others) makes no pointer field (Shapes.interior);
+  and the returns of a function whose result no caller reads (regflow's kept registers) stay apart.
+  The same pairing, main before against after: GCC -Os 6 of 8 -> 6 of 7, clang -O2 8 of 24 -> 8 of 12,
+  RISC-V 2 of 5, GCC -O0 5 of 7 (the counts of this morning's line came from older plans); no right
+  one lost. Fields against the source: clang -O2 490 of 532 (92 %) -> 459 of 462 (99 %), the members
+  found 28 % -> 26 %. Left, not traced: newlib's _cookie (three builds; right in fact, it holds its
+  own FILE), a static queue's pcHead and pcWriteTo, a task block's field at 0x2c on clang, and on
+  RISC-V a task block's fields at 0x10 and 0x24 and a list's count, typed as pointers.
   A field that points to an item or to a list's end marker (a list's links) points to no one base and
   stays u32: 32 of GCC -Os's source pointers to a structure. A structure needs a field wider than a byte
   (gizmo's string walks made structures of two u8 fields). Names: the pilot asks for the structures'
@@ -423,6 +437,24 @@ its sources.
   and the globals between the passes; then subsystems as a step of their own (functions grouped by
   calls and addresses, a prefix proposed a group with its evidence: texts, devices) to catch a
   misread driver before its callers inherit it.
+- [ ] **A no-confidence vote on existing names** (the user's idea, 2026-10-22: reverse engineering as
+  a puzzle, where a sub-picture can look right in one context and wrong in another). Not a periodic
+  re-vote by the same model: consistency is not correctness (a misread driver was named after the
+  misreading almost throughout, and a vote by fit with the neighbours would have voted out its few
+  right names), the judge flips 7-14 % of its own verdicts, and names that depend on each other can
+  oscillate. Instead: (1) triggers computed by code: the function's own evidence (texts, constants,
+  device registers, behaviour) against its name, low agreement of the votes (calibrated on FreeRTOS: a
+  name one vote of five gave judged different 88 %, a unanimous one 15 %; the ablation flag, the name
+  changing with the neighbours hidden, was measured and is no error signal), callers' summaries that
+  describe its role differently; (2) sub-pictures tested at their edges: a group of functions (calls,
+  addresses, one prefix) against what lies outside it (callers outside the group, the texts and
+  registers it uses), since a wrong sub-picture is consistent inside; (3) re-decided with hysteresis:
+  a challenged name changes only when a new one wins a pairwise comparison by a margin, "more general"
+  one of the outcomes (a helper two subsystems share), every change logged with its reason, rounds
+  capped; (4) names people gave are flagged for review with the reasons, never replaced. Measured on
+  the stripped FreeRTOS build and on a run where a whole driver was misread: does it find that group
+  by itself, and fix it without breaking right names? Builds on the votes' confidence (Function names,
+  2026-10-22).
 - [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
 

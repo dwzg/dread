@@ -38,6 +38,7 @@ class Context:
 
     def __init__(self, target=None, image=None, program=None, flow=None):
         self.arg_regs, self.reads, self.preserved, self.variadic = [], {}, {}, set()
+        self.unread = set()             # functions whose result no caller reads (dread.shapes analyse)
         self.names = {}                 # the image's readable_names table (dread.naming): functions
         self.globals = {}               # and memory at fixed addresses
         self.memory = None              # the target's [memory] (default names for fixed addresses)
@@ -59,6 +60,8 @@ class Context:
         self.arg_regs = list(target.abi.arg_regs)
         self.reads = {fn.name: set(flow.read_regs(fn.name)) for fn in program.functions}
         self.preserved = {fn.name: set(flow.preserved_regs(fn.name)) for fn in program.functions}
+        result = target.abi.result[0] if target.abi.result else None
+        self.unread = {fn.name for fn in program.functions if result not in flow.kept_regs(fn.name)}
         self.variadic = variadic_reach(program)
 
     def struct_names(self):
@@ -355,7 +358,7 @@ def check(target, image, names=None, out=print, jobs=None):
     from dread import shapes
     digests = {}
     trees = analysis_trees(program, context, lifter, lifted, named=context.globals, digests=digests)
-    context.plan = shapes.plan(shapes.analyse(trees), trees, digests)
+    context.plan = shapes.plan(shapes.analyse(trees, unread=context.unread), trees, digests)
     context._struct_names = None
     shapes.store_plan(image, context.plan)
     out("dread readable --check: %d structures, pointers to them in %d functions (readable_types)" % (
@@ -529,8 +532,9 @@ def main(argv=None):
         program = Program(target, image)
         flow = regflow.load(target, image, program)
         names = args.names or build.read_names(image.table("readable"))
-        trees = readable_trees(program, Context(target, image, program, flow), lift.make_lifter(program, flow), names)
-        s = shapes.analyse(trees)
+        context = Context(target, image, program, flow)
+        trees = readable_trees(program, context, lift.make_lifter(program, flow), names)
+        s = shapes.analyse(trees, unread=context.unread)
         for line in shapes.report(s, trees):
             print(line)
         if args.score:
