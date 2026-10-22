@@ -611,8 +611,9 @@ def test_declared_stack_arguments_of_a_context_switch(tmp_path):
 def test_registers_the_callers_keep_are_compiled_call_saved(tmp_path):
     """A scratch register the callers read after the call and the function leaves unchanged (GCC's
     -fipa-ra: FreeRTOS's prints keeps a value in r2 across printchar) is kept by the C: the lifted
-    file names it on its first line and GCC compiles it call-saved. Not the result, the ABI's
-    callee-saved registers or the veneers' register; no flag for another compiler."""
+    file names it on its first line and GCC compiles it call-saved. Not the result or the ABI's
+    callee-saved registers; the veneers' register too (r12: a function in its own slot has no veneer,
+    and its C must leave r12 as the original did); no flag for another compiler."""
     t = Target.load(gizmo_dir("m3"))
     program = Program(t, t.image())
 
@@ -623,7 +624,7 @@ def test_registers_the_callers_keep_are_compiled_call_saved(tmp_path):
         def preserved_regs(self, name):
             return ["r0", "r2", "r4", "r12"]
     lifter = lift.make_lifter(program, Flow())
-    assert lifter.call_saved(program.by_name["parse_kv"]) == ["r2"]
+    assert lifter.call_saved(program.by_name["parse_kv"]) == ["r2", "r12"]
     source = tmp_path / "f.c"
     source.write_text(build.CALL_SAVED + "r2 r3 */\nint f(void) { return 0; }\n")
     assert build.file_flags(t, str(source)) == ["-fcall-saved-r2", "-fcall-saved-r3"]

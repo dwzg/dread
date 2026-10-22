@@ -169,10 +169,12 @@ def foldable_into(s, v):
 
 
 def fixed_registers(tree):
-    """Whether the lifted file asks for registers fixed or kept (dread.build's header lines)."""
+    """Whether the lifted file reads registers as the caller left them (dread.build's FIXED line: the
+    C binds them with asm, and GCC's -ffixed-REG keeps them so): such C stays as the lifter wrote it.
+    A CALL_SAVED line (-fcall-saved-REG: registers the C must keep for its callers) constrains only
+    GCC's register allocation, whatever the C says; the stages run on such a file and keep the line."""
     from dread import build
-    return any(isinstance(i, C.Raw) and i.text.startswith((build.CALL_SAVED.rstrip(), build.FIXED.rstrip()))
-               for i in tree.items)
+    return any(isinstance(i, C.Raw) and i.text.startswith(build.FIXED.rstrip()) for i in tree.items)
 
 
 def declarations(fn):

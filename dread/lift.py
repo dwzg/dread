@@ -1240,15 +1240,18 @@ class Lifter:
         dread.regflow found that the callers read them after the call and that the function, its
         callees too, leaves them unchanged (GCC compiled the callers knowing, -fipa-ra: FreeRTOS's
         prints keeps a value in r2 across printchar, and the C, compiled alone, used r2). Not the
-        result, the ABI's callee-saved registers (kept anyway) or the register veneers go through
-        (the overlay's branch to a moved function sets it before the C runs). dread.build compiles
-        the function's file with them call-saved (GCC's -fcall-saved-REG)."""
+        result or the ABI's callee-saved registers (kept anyway). The register veneers go through is
+        kept too: a function the overlay places in its own slot has no veneer, and its C must leave
+        the register as the original did (until 2026-10-22 it was left out, and only luck kept an
+        in-place function's C off ARM's ip; a function the overlay moves loses it to the veneer anyway,
+        and its cases say so). dread.build compiles the function's file with them call-saved (GCC's
+        -fcall-saved-REG)."""
         flow = self.flow
         if flow is None:
             return []
         abi, regs = self.prog.target.abi, self.arch.general_regs()
         keep = set(flow.kept_regs(fn.name)) & set(flow.preserved_regs(fn.name))
-        keep -= set(abi.callee_saved) | set(abi.result[:1]) | {getattr(self.arch, "veneer_reg", None)}
+        keep -= set(abi.callee_saved) | set(abi.result[:1])
         return [r for r in regs if r in keep]
 
     def _check_kept(self, fn):

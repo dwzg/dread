@@ -215,3 +215,20 @@ def test_the_view_of_a_function_with_a_body_shows_the_body():
     text = readable.view("f", WRAPPED)
     assert text is not None and "f_dread_body(u32 a0" in text and "g(r0, r1, r2, r3)" in text, text
     assert text.index("f_dread_body(u32") < text.index("void f(void)")
+
+
+def test_a_call_saved_line_lets_the_stages_run_and_a_fixed_line_does_not():
+    """A CALL_SAVED line (-fcall-saved-REG) constrains only GCC's register allocation: the stages run
+    on such a file and keep the line, so that dread.build still compiles it so. A FIXED line (the C
+    reads registers as the caller left them, through asm) keeps the file as the lifter wrote it."""
+    from dread import build
+    body = ('/* h at 0x0, lifted by dread lift: one statement per instruction. */\n#include "dread.h"\n'
+            'u32 h(u32 a0, u32 a1, u32 a2, u32 a3)\n{\n'
+            '    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0;\n    u32 n = 0, z = 0, c = 0, v = 0;\n'
+            '    (void)n; (void)z; (void)c; (void)v; (void)r12;\n'
+            '    r0 = r0 + r1;  /* 0: adds r0, r1 */\n    return r0;  /* 2: bx lr */\n}\n')
+    saved = readable.transform("h", build.CALL_SAVED + "r12 */\n" + body)
+    assert saved is not None and saved.startswith(build.CALL_SAVED + "r12 */"), saved
+    assert "u32 h(u32 r0, u32 r1)" in saved and "return r0 + r1;" in saved and "(void)" not in saved, saved
+    fixed = readable.transform("h", build.FIXED + "r4 */\n" + body)
+    assert fixed is not None and "(void)n" in fixed, fixed
