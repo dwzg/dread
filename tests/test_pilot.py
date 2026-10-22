@@ -539,3 +539,38 @@ def test_a_second_pass_goes_callers_first_with_the_first_names(gizmo):
     seen.clear()
     assert pilot.name_functions(target, image, program, lambda: llm.Scripted(answer), ["led_on", "gpio_set"],
                                 flow, out=lambda *a: None, refine=True)[:2] == (0, 0)
+
+
+def test_the_globals_alone_and_the_name_questions_show_them(gizmo, monkeypatch, capsys):
+    """--task globals names the globals of every function's readable C, with no readable table (gizmo
+    has none), and asks nothing else; a function's name is refused; the questions for function names
+    show the names then. A run started again asks only for the globals still without one, and after a
+    naming run its question shows the functions by their proposals, which no global may take."""
+    from dread import naming
+    target, image, program, flow = gizmo
+    asked = []
+
+    def answer(messages):
+        asked.append(messages[0]["content"])
+        if len(asked) == 1:
+            return '```json\n{"g_2000004c": "tick_count", "io_40011000": "UART_DATA", "g_20000034": "gpio_set"}\n```'
+        return '```json\n{"g_20000034": "show_settings", "g_20000038": "mode"}\n```'
+    monkeypatch.setattr(llm, "load", lambda name=None, path=None: llm.Scripted(answer))
+    assert pilot.main(["--target", target.root, "--task", "globals"]) == 0
+    out = capsys.readouterr().out
+    assert len(asked) == 1 and "g_2000004c (0x2000004c, u32, in 2 functions):" in asked[0], asked
+    assert "    print_status: " in asked[0] and pilot.PROPOSED_FUNCTIONS not in asked[0]
+    assert "refused g_20000034=gpio_set" in out and "2 globals and 0 structures named" in out, out
+    assert {k: e["name"] for k, e in naming.load(image, "globals").items()} == {
+        "0x2000004c u32": "tick_count", "0x40011000 u32": "UART_DATA"}
+    assert not os.path.exists(pilot.names_path(target, image))         # (no function asked)
+    text, _ = pilot.Namer(target, image, program, flow).question(program.by_name["main"])
+    assert "while (tick_count == " in text and "g_2000004c" not in text, text
+    pilot.keep_proposal(target, image, program.by_name["print_status"], "show_settings", "prints them",
+                        llm.Scripted([]), "readable")
+    assert pilot.main(["--target", target.root, "--task", "globals"]) == 0
+    out = capsys.readouterr().out
+    assert len(asked) == 2 and "io_40011004 (" in asked[1] and "g_2000004c (" not in asked[1], asked
+    assert asked[1].startswith(pilot.PROPOSED_FUNCTIONS) and "    show_settings: " in asked[1], asked
+    assert "print_status" not in asked[1] and "refused g_20000034=show_settings" in out, out
+    assert naming.load(image, "globals")["0x20000038 u32"]["name"] == "mode"

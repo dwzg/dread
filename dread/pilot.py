@@ -39,6 +39,16 @@ proposals with true names (an ELF's symbols, or the functions table of a copy th
 --refine asks again, callers first, for every function with a proposal: its question shows its
 callers' names and its first one.
 
+--task readable names the variables of the readable table's functions (dread readable), after what
+they share with the rest of the image: the globals they use, then the structures their variables
+point to (where dread readable --check made a readable_types plan); --task globals asks for those
+alone, for every function's readable C, checked or not, as the questions for function names show it,
+which then show the names. Kept in the image's readable_names table; a run started again asks only
+what has no name yet. After a --task name run, the globals' questions show the functions by their
+proposals (names.tsv). On a build whose functions are all FUN_ (FreeRTOS, 2026-10-22: docs/todo.md),
+globals named before the first pass made the function names worse, between it and --refine slightly
+better.
+
 A provider that declines DECLINED_IN_A_ROW questions in a row (stop reason "refusal" or
 "content_filter") is asked no more in that run: its classifiers decline the same kind of question
 again, and another provider may answer it. On 2026-10-20 Anthropic's Sonnet 5.5 and Opus 5.5 declined
@@ -46,7 +56,7 @@ every --task input question on FreeRTOS (a listing with instructions to reach), 
 stated, while Haiku 5.5 answered the same question.
 
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
-                [--no-mutate] [--no-integration] [--dry-run] [--task write|input|name|readable]
+                [--no-mutate] [--no-integration] [--dry-run] [--task write|input|name|readable|globals]
                 [--jobs N] [--score TRUTH] [NAME...]
 """
 import argparse
@@ -530,20 +540,30 @@ def global_uses(program, context, lifter, names, per=2):
     return uses, by_function
 
 
-def name_globals(target, image, program, provider, keys, uses, batch=40, shown_functions=4, out=print):
+PROPOSED_FUNCTIONS = "The functions' names are proposals made from their code, likely but not certain."
+
+
+def name_globals(target, image, program, provider, keys, uses, batch=40, shown_functions=4, out=print,
+                 shown_as=None):
     """Ask for names of the memory at fixed addresses in keys that the readable_names table does not
     name yet, batch at a time, each with its uses in up to shown_functions functions; keep the names
-    that are C identifiers no function or other global has. Returns how many were named."""
+    that are C identifiers no function or other global has. shown_as ({function: name shown}: a naming
+    run's proposals) shows functions by those names, saying so (PROPOSED_FUNCTIONS). Returns how many
+    were named."""
     from dread import naming
     table = naming.load(image, "globals")
     todo = [k for k in keys if k not in table and k in uses]
-    taken = set(program.by_name) | {e.get("name") for e in table.values()} | naming.KEYWORDS
+    taken = set(program.by_name) | {e.get("name") for e in table.values()} | naming.KEYWORDS | set(
+        (shown_as or {}).values())
     folder = os.path.join(target.build, "pilot", image.name)
     os.makedirs(folder, exist_ok=True)
+
+    def as_shown(text):
+        return IDENT_WORD.sub(lambda m: shown_as.get(m.group(0), m.group(0)), text) if shown_as else text
     named = 0
     for start in range(0, len(todo), batch):
         part = todo[start:start + batch]
-        lines = []
+        lines = [PROPOSED_FUNCTIONS] if shown_as else []
         for key in part:
             u = uses[key]
             lines.append("%s (%s, in %d functions):" % (u["name"], key.replace(" ", ", "), len(u["functions"])))
@@ -553,7 +573,7 @@ def name_globals(target, image, program, provider, keys, uses, batch=40, shown_f
                     if len(fns) >= shown_functions:
                         continue
                     fns.append(fname)
-                lines.append("    %s: %s" % (fname, line))
+                lines.append("    %s: %s" % (as_shown(fname), as_shown(line)))
         user = "\n".join(lines)
         by_default = {uses[k]["name"]: k for k in part}
         try:
@@ -714,6 +734,28 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
         out("dread pilot: the structures' names: %d of %d named" % (
             sum(1 for k in part if k in naming.struct_names(plan, table, taken)), len(part)))
     return named
+
+
+def name_shared(target, image, program, provider, context, lifter, names, everything, out=print, shown_as=None):
+    """The names the functions of names share with the rest of the image, asked before their own: the
+    globals they use (name_globals, with their uses in the readable C of everything; shown_as: the
+    functions' proposed names), then the structures their variables point to (name_structs; only
+    where the image has a readable_types plan, which dread readable --check makes). context takes the
+    tables as they are then. Returns (globals named, structures named)."""
+    from dread import naming
+    every = sorted(set(everything) | set(names))
+    uses, by_function = global_uses(program, context, lifter, every)
+    wanted = sorted(set().union(*(by_function.get(n, set()) for n in names))) if names else []
+    named = name_globals(target, image, program, provider, wanted, uses, out=out, shown_as=shown_as)
+    context.globals = naming.load(image, "globals")
+    structs = 0
+    if context.plan.structs:                # (then the structures, which the variables' C shows)
+        suses = struct_uses(program, context, lifter, every)
+        swanted = sorted({k for n in names for k in context.plan.typed.get(n, {}).values()})
+        taken = {e.get("name") for e in context.globals.values() if isinstance(e, dict)}
+        structs = name_structs(target, image, program, provider, context.plan, suses, swanted, taken, out=out)
+        context.structs, context._struct_names = naming.load(image, "structs"), None
+    return named, structs
 
 
 def parse_names(answer):
@@ -1550,9 +1592,10 @@ def main(argv=None):
                         help="--task name: a second pass, callers first, over the functions with a proposal")
     parser.add_argument("--judge", metavar="PROVIDER",
                         help="with --score: a provider also judges each pair the same, close or different")
-    parser.add_argument("--task", choices=("write", "input", "name", "readable"), default="write",
-                        help="write C (default), find inputs for unrun instructions, propose names, or name the "
-                             "variables of readable C (dread readable)")
+    parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals"), default="write",
+                        help="write C (default), find inputs for unrun instructions, propose names, name the "
+                             "variables of readable C (dread readable), or name only what the functions share: "
+                             "their globals and structures")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):  # a line a function as it ends, also into a file (a run its
@@ -1585,28 +1628,34 @@ def main(argv=None):
             except llm.ProviderError as e:
                 print("dread pilot: %s" % e, file=sys.stderr)
                 return 1
-        if args.task == "readable":
-            from dread import build, lift, naming, readable
-            everything = shown(target, build.read_names(image.table("readable")), out=lambda *_: None)
+        if args.task in ("readable", "globals"):
+            from dread import build, lift, readable
+            # readable: the functions of the readable table, whose C is built; globals: every function,
+            # its readable C checked or not, as the questions for function names show it
+            listed = build.read_names(image.table("readable")) if args.task == "readable" else [
+                fn.name for fn in program.functions]
+            everything = shown(target, listed, out=lambda *_: None)
             names = shown(target, args.names) if args.names else everything
             names = names[:args.limit] if args.limit else names
             if args.dry_run:
                 print("\n".join(names))
-                print("dread pilot --task readable --dry-run: %d functions would be asked about; nothing asked"
-                      % len(names))
+                print("dread pilot --task %s --dry-run: %s%d functions would be asked about; nothing asked" % (
+                    args.task, "the globals and structures of " if args.task == "globals" else "", len(names)))
                 return 0
             context = readable.Context(target, image, program, flow)
             lifter = lift.make_lifter(program, flow)
-            uses, by_function = global_uses(program, context, lifter, sorted(set(everything) | set(names)))
-            wanted = sorted(set().union(*(by_function.get(n, set()) for n in names))) if names else []
-            name_globals(target, image, program, provider, wanted, uses)
-            context.globals = naming.load(image, "globals")
-            if context.plan.structs:            # (then the structures, which the variables' C shows)
-                suses = struct_uses(program, context, lifter, sorted(set(everything) | set(names)))
-                swanted = sorted({k for n in names for k in context.plan.typed.get(n, {}).values()})
-                taken = {e.get("name") for e in context.globals.values() if isinstance(e, dict)}
-                name_structs(target, image, program, provider, context.plan, suses, swanted, taken)
-                context.structs, context._struct_names = naming.load(image, "structs"), None
+            proposals = {program.by_entry[a].name: p for a, (p, _) in read_proposals(target, image).items()
+                         if a in program.by_entry} if args.task == "globals" else None
+            made = name_shared(target, image, program, provider, context, lifter, names, everything,
+                               shown_as=proposals)
+            if args.task == "globals":
+                spent = provider.spent()
+                print("dread pilot --task globals: %d globals and %d structures named (the table has %d and %d); "
+                      "%d answers, %d tokens in, %d out%s" % (
+                          made[0], made[1], len(context.globals), len(context.structs), spent["answers"],
+                          spent["input"], spent["output"],
+                          " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""))
+                return 0
             asking, named = Asking(provider), 0
             for name in names:
                 if not asking.go_on():

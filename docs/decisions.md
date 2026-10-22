@@ -9,6 +9,25 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Globals for function names: a step of their own, not a default (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Do names for the globals (memory at fixed addresses, g_ADDRESS in readable C) make
+  `dread pilot --task name`'s proposals better, and should naming them become part of that task?
+- **Options.** (a) The globals named before the first pass, by default; (b) named between the first
+  pass and --refine, their uses shown under the proposed function names; (c) a task of its own
+  (`--task globals`), showing the proposals when names.tsv has them, the order left to whoever runs
+  it.
+- **Choice: (c).** Measured on FreeRTOS GCC -Os with every function FUN_ (docs/todo.md, Function
+  names): (a) made the names worse (judged different 37-39 % after --refine against 27-30 % without
+  globals, the loss in the functions whose C shows a named global); (b) gained a little (paired with
+  the same first pass refined without globals, 21-25 changed names judged better and 9-10 worse;
+  the totals within the judge's noise) for $0.01.
+- **Undo.** `--task globals` is separate: nothing else asks for globals but `--task readable`; a
+  globals part removed from config/readable_names.json takes the names away again.
+- **Status.** Done (`dread pilot --task globals`). Not measured: a partly named image.
+
 ## Readable C's structures: kinds from calls between bases, null checks kept (2026-10-21)
 
 **Decided by me**, on the user's standing rule (decisions by recommendation; review here).

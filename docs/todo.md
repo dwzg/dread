@@ -287,10 +287,44 @@ its sources.
   named it right: a proposal shown to the callers spreads its errors too, and runs differ by subsystem.
   What misses: a project's conventions (its subsystem prefixes, its RTOS's service names), drivers
   whose device registers have no names, leaves that touch only unnamed globals.
-  Next, measured against these: the globals named first (the readable task's globals step), then a
-  run whose questions show their names; and subsystems as a step of their own (functions grouped by
-  calls and addresses, a prefix proposed a group with its evidence: texts, devices) to catch a
-  misread driver before its callers inherit it.
+  Globals, measured 2026-10-22 on the same stripped GCC -Os build with Haiku 5.5, each score judged
+  twice by Sonnet 5.5, against a control run of the same code without globals (the run above ran on
+  older code). `dread pilot --task globals` is the readable task's globals step alone, for every
+  function's readable C (362 of 366 have one, unchecked; their C uses 312 globals); after a naming
+  run its questions show the functions by their proposals. Named first, from uses shown under FUN_
+  names, the globals are guesses: 272 named ($0.01), none of the 231 at a data symbol's address as
+  the source, 35 of the 251 at or inside one sharing a word with it; demo task handles became
+  g_uart_handle, g_adc_handle and g_i2c_handle, an event group g_spi_dev, the UART's control
+  register io_dma_enable, and the functions' names echoed them: with newlib's errno named
+  g_irq_pending_count, _read_r, _write_r, _lseek_r and _close_r went from syscall_errno_wrapper and
+  the like (judged close) to irq_pending_reset_report and the like (different), prvSyncTask from
+  sync_barrier_wait to spi_handshake_task. The core's registers came out right (io_systick_csr,
+  io_nvic_iser, io_scb_icsr), but the functions using them were named as well without (the model
+  reads the addresses). First pass: the same words 41 against the control's 52 (the earlier run
+  40), overlap 0.26 against 0.28 (0.26); judged the same 93/94, close 128/127, different 145/145
+  (40 %) against 93/96, 143/150, 130/120 (33-36 %). After --refine: the same words 46 against 57,
+  overlap 0.29 against 0.31; judged the same 108/110, close 121/115, different 137/141 (37-39 %)
+  against 102/107, 166/151, 98/108 (27-30 %). The loss sits in the 212 functions whose C shows a
+  named global (different 44-46 % against 29-31 %, overlap 0.22 against 0.26; paired with the
+  control's names, 24 judged better and 51-56 worse); the other 154 did as the control's. Named
+  between the passes instead (the control's first pass copied; --task globals, then --refine), from
+  uses shown under the proposals, the globals are better: 292 named, 92 of the 271 at or inside a
+  data symbol sharing a word with it (34 % against 14 %). The refine then: the same words 55 against
+  57, a word shared 252 against 246, half the words 104 against 99, overlap 0.32 against 0.31;
+  judged the same 121/109 against 102/107, different 104/118 against 98/108, totals within the
+  judge's noise; paired, 282 of 366 proposals as the control's refine, of the 84 others 21-25 judged
+  better and 9-10 worse (17-20 against 6 where the C shows a named global). A small gain at best:
+  the globals take their names from the first pass's reading of their functions, and the refine
+  confirms that reading (a function first named watchdog_poll, its globals named watchdog_*, kept;
+  the source's vPeriodicEventGroupsProcessing). The judge's noise, measured: one file judged twice
+  changed 25-29 of 366 verdicts (7-8 %); a pair judged in other company (other pairs in its
+  question) changed 39-41 of 282 (14 %). Spent: Haiku 1,846 answers $0.62, Sonnet 80 $0.40. Not a
+  default of --task name (docs/decisions.md): first they hurt, between the passes they cost $0.01
+  and gain little. Not measured: a partly named image, whose named functions would tell the
+  globals' questions more.
+  Next: subsystems as a step of their own (functions grouped by calls and addresses, a prefix
+  proposed a group with its evidence: texts, devices) to catch a misread driver before its callers
+  inherit it; the globals between the passes on the private firmware.
 - [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
 

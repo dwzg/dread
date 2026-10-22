@@ -118,8 +118,9 @@ access's: u32, u8, ...). dread readable writes such an access as the name, a mac
 function that is the access itself; without an entry, or where the function's C uses the name for
 something else, the default name says where it is: `io_40004004` (a device register: `[memory]
 io`), `rom_c6e4` (a rom region), `g_20029aac` (anything else), with the type for an access other
-than a u32 one (`g_20029aac_u8`). The pilot asks for these before the functions' variables; they
-need no digest, since an address does not change with the transformations.
+than a u32 one (`g_20029aac_u8`). The pilot asks for these before the functions' variables, or
+alone for every function's readable C (`dread pilot --task globals`, with the structures below);
+they need no digest, since an address does not change with the transformations.
 
 Its `structs` part names the structures of the readable_types plan and their fields:
 `{"FUNCTION:VARIABLE": {"name", "fields": {"OFFSET": name}, "anchors": ["FUNCTION:VARIABLE", ...],
