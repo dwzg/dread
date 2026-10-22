@@ -779,7 +779,10 @@ def test_scores_by_confidence_and_two_runs_judged_pairwise(gizmo, tmp_path):
     assert any(line.startswith("dread pilot --score: confidence 0.40: 2, judged") for line in lines), lines
     scores = open(os.path.join(target.build, "pilot", image.name, "names-score.tsv")).read()
     assert pilot.compare_names(target, image, gizmo_elf(target), str(other), judge, out=lines.append) == {
-        "both": 4, "differ": 3, "judged": 3, "wins": 1, "losses": 1, "ties": 1, "p": 1.0}
+        "both": 4, "differ": 3, "judged": 3, "wins": 1, "losses": 1, "ties": 1, "p": 1.0,
+        "by": "source files", "groups_won": 0, "groups_lost": 0, "groups_even": 1, "groups_p": 1.0}   # (all hw.c)
+    assert any(line.startswith("dread pilot --score --against: by source files, this run's closer in 0, the other's "
+                               "in 0, even in 1") for line in lines), lines
     assert open(os.path.join(target.build, "pilot", image.name, "names-score.tsv")).read() == scores
     swapped = judge.asked[2][1][0]["content"]
     assert "| A: serial_out | B: uart_send_char" in swapped and "| A: uart_send_char" in judge.asked[1][1][0]["content"]
@@ -1024,7 +1027,9 @@ def test_names_judged_against_their_source(gizmo, tmp_path):
     assert all(parts[0]["cache"] for parts in asked)          # (two runs share each file's sources)
     pairwise = open(os.path.join(target.build, "pilot", image.name, "names-pairwise.tsv")).read()
     assert "\tpin_write\tpin_toggle\tthis\tright\twrong: it sets the pin\n" in pairwise
-    assert "against the source by scripted" in lines[-3] and "the other where they differ, 2 of 2" in lines[-1]
+    assert "against the source by scripted" in lines[-4] and "the other where they differ, 2 of 2" in lines[-1]
+    assert lines[-3].startswith("dread pilot --score --against: by source files, this run's closer in 0, the "
+                                "other's in 0, even in 1"), lines[-3]       # (uart_putc, gpio_set, delay: hw.c)
 
 
 def test_the_device_question_shows_the_texts_the_code_points_to(gizmo):
@@ -1116,3 +1121,29 @@ def test_naming_questions_begin_with_what_the_image_is(gizmo, monkeypatch, capsy
     with open(pilot.device_path(target, image), "a") as f:
         f.write("unknown\t1.00\tunknown\tscripted\t0\t0\n")
     assert pilot.known_device(target, image) == ""
+
+
+def test_two_runs_are_compared_by_groups_too(gizmo, tmp_path):
+    """group_sign counts a pairwise comparison by groups: the groups whose functions this run won more
+    often, those the other won more often, the even ones, the sign test over the first two; a function
+    outside every group is one of its own. pair_groups takes the run's groups.tsv where it holds the
+    functions, else the truth ELF's source files, else nothing (a functions table as truth)."""
+    target, image, program, flow = gizmo
+    pairs = {1: "a", 2: "a", 3: "b", 4: "b", 5: "b", 6: "tie", 7: "a", 8: "b"}
+    group = {1: "g", 2: "g", 3: "g", 4: "h", 5: "h", 6: "k", 7: "m", 8: "m"}
+    assert pilot.group_sign(pairs, group) == (1, 1, 1, 1.0)            # (g 2:1, h 0:2, m 1:1; k only a tie)
+    assert pilot.group_sign(pairs, {}) == (3, 4, 0, 1.0)               # (each alone: as by functions)
+    assert pilot.group_sign({a: "a" for a in range(10)}, {})[3] == pilot.sign_test(10, 0)
+    fns = [program.by_name[n] for n in ("uart_putc", "gpio_set", "led_on")]
+    by_files, by = pilot.pair_groups(target, image, gizmo_elf(target), [fn.entry for fn in fns])
+    assert by == "source files" and by_files[fns[0].entry] == by_files[fns[1].entry] != by_files[fns[2].entry]
+    table = tmp_path / "functions.tsv"
+    table.write_text("address\tname\n" + "".join("0x%x\t%s\n" % (fn.entry, fn.name) for fn in fns))
+    assert pilot.pair_groups(target, image, str(table), [fn.entry for fn in fns]) == ({}, None)
+    folder = os.path.join(target.build, "pilot", image.name)
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "groups.tsv"), "w") as f:
+        f.write("address\tnow\tgroup\tmembers\n" + "".join(
+            "0x%x\t%s\t%d\tk\n" % (fn.entry, fn.name, k) for k, fn in enumerate(fns)))
+    by_groups, by = pilot.pair_groups(target, image, gizmo_elf(target), [fn.entry for fn in fns])
+    assert by == "groups" and by_groups == {fn.entry: str(k) for k, fn in enumerate(fns)}

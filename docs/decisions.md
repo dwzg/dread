@@ -9,6 +9,28 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Two naming runs compared by groups (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The pairwise comparison of two naming runs (`dread pilot --score --against`) gave a
+  sign test over functions. Two FreeRTOS runs with the same settings came out 24:40 and 37:21 (p 0.06
+  and 0.05), as uneven as the comparisons that decided settings. Which test should decide?
+- **Options.** (a) The sign test over functions, as before. (b) The same over groups: a group counts
+  for the run whose names it judged closer more often. (c) Replicate runs of each setting, compared
+  by their means.
+- **Choice.** (b) in every `--against` (the run's groups.tsv, the grouping its groups were named for,
+  else the truth's source files), printed beside (a) and named the one to trust; (c) for a setting
+  whose effect is small, as the next step.
+- **Why.** A run's names hang together within a group: the group's prefix and the model's reading of
+  it go into all of its functions, so a run that reads one group differently wins or loses many
+  functions at once (one group made 11 of the 20 that one comparison lost). By groups the two
+  same-setting comparisons were 8:12 and 14:5 (p 0.50 and 0.06). Recounted from the stored judgments,
+  the earlier decisions hold (votes 35:7, the gate 27:8, the groups 22:3 and 20:3), and one does not:
+  the grounded judge's gain from the groups, 15:6 by groups (p 0.08).
+- **Undo.** Read the line over functions, which is still printed.
+- **Status.** In the code (dread/pilot.py: pair_groups, group_sign, compare_names).
+
 ## What the image is, in front of every naming question (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

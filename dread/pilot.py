@@ -43,7 +43,11 @@ each function the two runs named otherwise, of the name closer to the true one, 
 each function's source instead (dread.namejudge: the truth ELF's debug information and the files it
 names, --source DIR where they moved) and say whether the name says what the function does, right,
 partly or wrong whatever its style, the sentence judged apart (--names-only: the names alone); with
---against, function by function where the two runs' names differ. --refine asks again, callers
+--against, function by function where the two runs' names differ. Either --against also counts by
+groups (pair_groups: the run's groups.tsv, else the truth's source files; group_sign), which is the
+test to trust between two runs: a run's names hang together within a group, and two FreeRTOS runs
+with the same settings differed by 24:40 functions (sign test p 0.06) where by groups they were
+8:12 (p 0.50). --refine asks again, callers
 first, for every function with a proposal: its question shows its callers' names and its first one.
 --behaviour shows in each question what the function did in runs of its cases (dread.behaviour: its
 calls, device accesses, writes and results on a few generated inputs). --samples K asks each function K
@@ -2447,6 +2451,49 @@ def sign_test(wins, losses):
     return min(1.0, 2 * sum(math.comb(n, i) for i in range(min(wins, losses) + 1)) / 2 ** n)
 
 
+def pair_groups(target, image, truth_path, addresses):
+    """({address: group}, what the groups are) for the test over groups of a pairwise comparison: the
+    image's groups.tsv (the grouping a naming run with --subsystems named, dread groups) when it holds
+    any of addresses, else the truth ELF's source files (dread.groups source_files), else ({}, None)."""
+    path = os.path.join(target.build, "pilot", image.name, "groups.tsv")
+    if os.path.exists(path):
+        got = {}
+        with open(path) as f:
+            head = f.readline().rstrip("\n").split("\t")
+            for line in f:
+                row = dict(zip(head, line.rstrip("\n").split("\t")))
+                if row.get("address", "").startswith("0x") and row.get("group", "") != "":
+                    got[int(row["address"], 16)] = row["group"]
+        if any(a in got for a in addresses):
+            return got, "groups"
+    from dread import groups as grouping
+    try:
+        files = grouping.source_files(truth_path)
+    except Exception:                       # (a truth that is a functions table, or no debug information)
+        files = {}
+    if any(a in files for a in addresses):
+        return files, "source files"
+    return {}, None
+
+
+def group_sign(pairs, group):
+    """(won, lost, even, p) of a pairwise comparison counted by groups (pairs: {address: "a" this run
+    closer, "b" the other's, "tie"}; group: {address: its group}, pair_groups'): the groups in which
+    this run's closer names outnumber the other's, those where the other's do, those where they are
+    even, and the sign test over the first two. A function outside every group is a group of its own.
+    Between two runs this is the test to trust: a run's names hang together within a group (its prefix
+    and its reading go into all of its functions), so the sign test over functions takes too few
+    independent draws for many (2026-10-22: two FreeRTOS runs with the same settings 24:40 by functions,
+    p 0.06; by groups 8:12, p 0.50)."""
+    net = collections.Counter()
+    for a, v in pairs.items():
+        if v in ("a", "b"):
+            net[group.get(a, ("alone", a))] += 1 if v == "a" else -1
+    won = sum(1 for v in net.values() if v > 0)
+    lost = sum(1 for v in net.values() if v < 0)
+    return won, lost, sum(1 for v in net.values() if v == 0), sign_test(won, lost)
+
+
 def breakdown(rows, verdicts):
     """{"n", "same", "close", "different", "judged", "shared_word", "overlap"} of scored rows (dread.naming
     score_functions') with their verdicts."""
@@ -2626,6 +2673,10 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
     ties = sum(1 for v in pairs.values() if v == "tie")
     t = {"both": len(both), "differ": len(items), "judged": len(pairs), "wins": wins, "losses": losses, "ties": ties,
          "p": sign_test(wins, losses)}
+    group, by = pair_groups(target, image, truth_path, [a for a, _, _, _ in items])
+    if by is not None:
+        won, lost, even, gp = group_sign(pairs, group)
+        t.update({"by": by, "groups_won": won, "groups_lost": lost, "groups_even": even, "groups_p": gp})
     suffix = "-pass%d" % upto_pass if upto_pass is not None else ""
     path = os.path.join(target.build, "pilot", image.name, "names-pairwise%s.tsv" % suffix)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2643,6 +2694,10 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
         "closer %d, the other's closer %d, ties %d (sign test p = %.3g; %s)%s" % (
             against, len(items), len(both), " and have a source" if found else "", how, len(pairs), wins, losses,
             ties, t["p"], path, spent_text(judge)))
+    if by is not None:
+        out("dread pilot --score --against: by %s, this run's closer in %d, the other's in %d, even in %d (sign test "
+            "p = %.3g; the test to trust between two runs: a run's names hang together within a group)" % (
+                by, t["groups_won"], t["groups_lost"], t["groups_even"], t["groups_p"]))
     if found:
         for label, key in (("this run", "this"), ("the other", "other")):
             out("dread pilot --score --against: " + grounded_line(label + " where they differ", found[key], len(items),

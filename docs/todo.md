@@ -619,9 +619,14 @@ its sources.
   reading's run against one without it (25:45, p 0.02; and 45:32 against another). A run's names hang
   together (a group's prefix and reading go into all of its functions), so the sign test over
   functions is too sure of itself: counted by groups, none of the four comparisons went beyond chance.
-  Next: the pairwise scores report a test over groups (the run's groups.tsv, or dread groups), and a
-  setting is compared over replicate runs; the decisions measured with the sign test over functions
-  (the votes 163:47, the groups 153:51, the grounded judge's +0.047) to be looked at again that way.
+  Done the same day: `--against` also counts by groups (the run's groups.tsv, else the truth's source
+  files: pilot.pair_groups, group_sign), the test to trust between two runs. The stored comparisons
+  recounted that way: the votes of five against one question 35:7 by source files (p 2e-5; 180:33 by
+  functions), the gate's second pass 27:8 (p 0.002), the groups named first 22:3 and 20:3 by groups
+  (p 2e-4, 5e-4) and its variant 19:4 (p 0.003) all hold; two runs with the same settings 25:13 (p
+  0.07); the grounded judge's re-measure of the groups 15:6 by groups (p 0.08; 68:34 by functions, p
+  0.001), so their gain in what the names say is not established. Next: a setting compared over
+  replicate runs (three a side cost about $3.50 on FreeRTOS GCC -Os with Haiku 5.5).
 - [ ] **A no-confidence vote on existing names** (the user's idea, 2026-10-22: reverse engineering as
   a puzzle, where a sub-picture can look right in one context and wrong in another). Not a periodic
   re-vote by the same model: consistency is not correctness (a misread driver was named after the
