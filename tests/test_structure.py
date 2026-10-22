@@ -1,9 +1,10 @@
 """dread.structure: gotos as if/else and loops. The shapes one by one (a while, a do-while, an
-if/else, two conditions to one target as ||, a switch, joins in a loop that never ends, a short way
-repeated, shared blocks after an if without a join), and property tests: random functions of labels,
-arithmetic and gotos (irreducible flow among them; with switches; flow that mostly never returns),
-structured, compiled with the host's C compiler next to the originals and called with random
-arguments: every one gives the original's result."""
+if/else, two conditions to one target as || and &&, a switch, joins in a loop that never ends, a short
+way repeated, shared blocks after an if without a join, an else-if chain, early exits, a staircase of
+checks, an else if printed with comments), and property tests: random functions of labels,
+arithmetic and gotos (irreducible flow among them; with switches; flow that mostly never returns;
+runs of checks as compilers lay them out), structured, compiled with the host's C compiler next to
+the originals and called with random arguments: every one gives the original's result."""
 import ctypes
 import random
 import shutil
@@ -34,7 +35,13 @@ def test_the_shapes():
     e = structured("    if (r0 == 0) goto L_a;\n    r1 = 1;\n    goto L_b;\nL_a: ;\n    r1 = 2;\nL_b: ;\n    return r1;")
     assert "else" in e and "goto" not in e, e
     o = structured("    if (r0 == 1) goto L_t;\n    if (r1 == 2) goto L_t;\n    return 0;\nL_t: ;\n    return 1;")
-    assert "r0 == 1 || r1 == 2" in o and "goto" not in o, o
+    assert "if (r0 != 1 && r1 != 2) return 0;" in o and "goto" not in o, o     # (the way on first)
+    u = structured("    if (r0 == 1) goto L_t;\n    if (r1 != 2) goto L_u;\nL_t: ;\n    r2 = 5;\n    goto L_j;\n"
+                   "L_u: ;\n    r2 = 7;\nL_j: ;\n    return r2 + r3;")
+    assert "if (r0 == 1 || r1 == 2)" in u and u.index("r2 = 5") < u.index("r2 = 7") and "goto" not in u, u
+    a = structured("    if (r0 == 1) goto L_z;\n    if (r1 != 2) goto L_e;\nL_z: ;\n    if (r2 != 3) goto L_e;\n"
+                   "    r3 = 5;\n    goto L_j;\nL_e: ;\n    r3 = 7;\nL_j: ;\n    return r3 + r2;")
+    assert "if ((r0 == 1 || r1 == 2) && r2 == 3)" in a and "goto" not in a, a
 
 
 def random_function(rng, name, blocks=7, endless=False):
@@ -245,11 +252,14 @@ def never_returns(fn):
 
 
 @pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
-def test_random_endless_flow_structured_computes_the_same(tmp_path):
+@pytest.mark.parametrize("guards", ["default", 0])
+def test_random_endless_flow_structured_computes_the_same(tmp_path, monkeypatch, guards):
     """Random functions (half of them with switches) whose flow mostly never reaches a return: the fuel
     runs out into bail(), which leaves by longjmp. Structured, compiled next to the originals, called
     through setjmp with random arguments: every one gives the original's result, or bails out with
-    the same value."""
+    the same value. guards 0: early exits wherever they are no deeper (structure.GUARDS)."""
+    if guards != "default":
+        monkeypatch.setattr(structure, "GUARDS", guards)
     rng = random.Random(23)
     originals, results, shapes = [], [], {"goto": 0, "never returns": 0, "repeated": 0}
     count = 400
@@ -279,3 +289,169 @@ def test_random_endless_flow_structured_computes_the_same(tmp_path):
             args = [rng.choice([0, 1, 2, 7, rng.getrandbits(32)]) for _ in range(4)]
             assert a(*args) == b(*args), (i, args, originals[i], results[i])
     assert shapes["never returns"] > count // 2 and shapes["repeated"] > count // 10 and shapes["goto"] < count, shapes
+
+
+def depth_of(text):
+    """The deepest nesting of the function f's body in a text (structure.nesting)."""
+    return structure.nesting(cparse.parse("typedef unsigned int u32;\n" + text).function("f").body.body)[0]
+
+
+ELSE_IF = ("    if (r0 != 1) goto L_2;\n    r1 = 10;\n    goto L_end;\nL_2: ;\n"
+           "    if (r0 != 2) goto L_3;\n    r1 = 20;\n    goto L_end;\nL_3: ;\n"
+           "    if (r0 != 3) goto L_4;\n    r1 = 30;\n    goto L_end;\nL_4: ;\n"
+           "    if (r0 != 4) goto L_end;\n    r1 = 40;\nL_end: ;\n    return r1 + r2;")
+
+
+def test_an_else_if_chain_comes_out_flat():
+    """A chain as compilers lay it out (each test jumps to the next one, its arm falls through and jumps
+    to the end): each arm the then arm of its test, the rest of the chain its else (else if), in the
+    order of the code; not each test nested in the one before."""
+    s = structured(ELSE_IF)
+    assert s.count("else if") == 3 and "goto" not in s and depth_of(s) == 1, s
+    assert "if (r0 == 1)" in s, s
+    assert s.index("r1 = 10") < s.index("r1 = 20") < s.index("r1 = 30") < s.index("r1 = 40"), s
+    early = structured("    if (r0 == 0) goto L_x;\n    return 5;\nL_x: ;\n    r1 = r1 + 1;\n    r2 = r2 + r1;\n"
+                       "    return r2;")
+    assert "if (r0 != 0) return 5;" in early and depth_of(early) == 1, early     # (an arm that returns: an exit)
+
+
+def test_a_goto_to_where_the_if_falls_anyway_goes():
+    """A goto that ends an arm of an if and goes where control falls off the if (here after the if
+    around it) is dropped, and its label with it."""
+    fn = fn_of("    if (r0 == 0)\n    {\n        r1 = 1;\n        if (r2 == 0)\n        {\n"
+               "            r3 = 1;\n            goto L_a;\n        }\n        else\n        {\n"
+               "            r3 = 2;\n        }\n    }\nL_a: ;\n    return r1 + r3;")
+    body = [s for s in fn.body.body if not isinstance(s, cparse.Decl)]
+    out = structure.prune(body)
+    fn.body.body[:] = [s for s in fn.body.body if isinstance(s, cparse.Decl)] + out
+    text = cparse.unparse(fn, notes=False, style="readable")
+    assert "goto" not in text and "L_a" not in text and "r3 = 1;" in text, text
+
+
+SHARED_EXIT = ("    r1 = r1 + 1;\n    if (r1 != 7) goto L_f;\n    r2 = r2 + r1;\n    if (r2 != 7) goto L_f;\n"
+               "    r3 = r3 + r2;\n    if (r3 != 7) goto L_f;\n    r0 = r0 + r3;\n    if (r0 != 7) goto L_f;\n"
+               "    r0 = r0 ^ r1;\n    return r0;\nL_f: ;\n    r0 = r0 + 5u;\n    return r0 ^ r1;")
+ARMS_TO_RETURN = ("    if (r0 == 0) goto L_e1;\n    r1 = r1 + r0;\n    if (r1 == 0) goto L_e2;\n    r2 = r2 + r1;\n"
+                  "    if (r2 == 0) goto L_e3;\n    r3 = r2 + r3;\n    if (r3 == 9) goto L_end;\n"
+                  "    r3 = r3 ^ 1u;\n    goto L_end;\nL_e1: ;\n    r3 = 0;\n    goto L_end;\nL_e2: ;\n"
+                  "    r3 = 0;\n    goto L_end;\nL_e3: ;\n    r3 = 0;\nL_end: ;\n    return r3;")
+
+
+def test_a_staircase_of_checks_becomes_early_exits(monkeypatch):
+    """Checks that leave for one short block that returns (a stack check's four words), or whose arms
+    fall to one return (a check's failure arms, each a copy of the same code): nested one level per
+    check, or early exits that repeat the short way; the exits where they take GUARDS levels or more
+    off, and never with GUARDS None."""
+    s = structured(SHARED_EXIT)
+    assert s.count("return r0 ^ r1;") >= 4 and depth_of(s) == 1 and "goto" not in s, s
+    a = structured(ARMS_TO_RETURN)
+    assert a.count("return r3;") == 4 and depth_of(a) == 1 and "goto" not in a, a
+    monkeypatch.setattr(structure, "GUARDS", None)
+    plain = structured(SHARED_EXIT)
+    assert plain.count("return r0 ^ r1;") == 1 and depth_of(plain) == 4, plain
+    plain = structured(ARMS_TO_RETURN)
+    assert plain.count("return r3;") == 1 and depth_of(plain) == 4, plain
+
+
+def test_an_else_holding_comments_and_an_if_prints_as_else_if():
+    """In the readable style an else arm of comments (the instructions' notes) and one if is an else if,
+    the comments before it, as dread.cmetrics counts it."""
+    tree = cparse.parse("typedef unsigned int u32;\nu32 f(u32 a)\n{\n    u32 x;\n    if (a == 1)\n    {\n"
+                        "        x = 1;\n    }\n    else\n    {\n        /* 10: nop */\n"
+                        "        if (a == 2) { x = 2; } else { x = 3; }\n    }\n    return x;\n}\n")
+    text = cparse.unparse(tree.function("f"), style="readable")
+    lines = [line.strip() for line in text.splitlines()]
+    assert "else if (a == 2)" in lines and lines.index("/* 10: nop */") + 1 == lines.index("else if (a == 2)"), text
+
+
+def random_checks_function(rng, name, endless=False):
+    """A run of checks laid out as compilers lay them out: before each a few statements, then a test
+    whose one way does a few statements and comes back (an arm written after the run, as GCC puts an
+    error arm, or one in place that the test jumps over), leaves for a block several checks share (a
+    short one, which may be repeated, or a long one), or starts an else-if chain (each test jumping to
+    the next arm, each arm to the chain's end). endless: the run is the body of a loop that never ends
+    (a task's), left by bail() when the fuel runs out or in the shared block."""
+    regs, flip = ["r0", "r1", "r2", "r3"], {"<": ">=", ">=": "<", "==": "!=", "!=": "=="}
+
+    def arith():
+        a, b = rng.choice(regs), rng.choice(regs)
+        return "    %s = %s %s %s;" % (a, b, rng.choice(["+", "-", "^", "&", "|"]),
+                                         rng.choice([b, "%du" % rng.randint(1, 9)]))
+
+    def cond():
+        return [rng.choice(regs), rng.choice(list(flip)), rng.choice(regs + ["%du" % rng.randint(0, 9)])]
+    lines = ["u32 %s(u32 a0, u32 a1, u32 a2, u32 a3)" % name, "{",
+             "    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, fuel = 40;", "L_top: ;"]
+    if endless:
+        lines += ["    fuel = fuel - 1;", "    if (fuel == 0) bail(r0);"]
+    shared, after = rng.random() < 0.7, []
+    for i in range(rng.randint(3, 8)):
+        lines += [arith() for _ in range(rng.randint(0, 2))]
+        kind = rng.choice(["back", "inplace", "shared" if shared else "back", "elseif"])
+        a, op, b = cond()
+        if kind == "back":
+            lines += ["    if (%s %s %s) goto L_e%d;" % (a, op, b, i), "L_r%d: ;" % i]
+            after += ["L_e%d: ;" % i] + [arith() for _ in range(rng.randint(1, 2))] + ["    goto L_r%d;" % i]
+        elif kind == "inplace":
+            lines.append("    if (%s %s %s) goto L_r%d;" % (a, flip[op], b, i))
+            lines += [arith() for _ in range(rng.randint(1, 2))] + ["L_r%d: ;" % i]
+        elif kind == "shared":
+            lines.append("    if (%s %s %s) goto L_fail;" % (a, op, b))
+        else:
+            arms = rng.randint(2, 4)
+            for j in range(arms):
+                if j + 1 < arms:
+                    a, op, b = cond()
+                    lines.append("    if (%s %s %s) goto L_n%d_%d;" % (a, op, b, i, j))
+                lines += [arith() for _ in range(rng.randint(1, 2))]
+                if j + 1 < arms:
+                    lines += ["    goto L_x%d;" % i, "L_n%d_%d: ;" % (i, j)]
+            lines.append("L_x%d: ;" % i)
+    lines.append("    goto L_top;" if endless else "    return r1 ^ r2;")
+    lines += after
+    if shared:
+        lines.append("L_fail: ;")
+        lines += [arith() for _ in range(rng.choice([1, 2, 5]))]
+        lines.append("    for (;;) bail(r3 ^ 0x55u);" if endless else "    return r0 ^ 0x55u;")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+@pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
+@pytest.mark.parametrize("guards", ["default", 0])
+def test_random_runs_of_checks_structured_compute_the_same(tmp_path, monkeypatch, guards):
+    """Random runs of checks (random_checks_function; half of them in a loop that never ends), structured,
+    compiled next to the originals, called (through setjmp) with random arguments: every one gives the
+    original's result or bails out with the same value. Most come out flat. guards 0: early exits
+    wherever they are no deeper, so that the repeats they need run often."""
+    if guards != "default":
+        monkeypatch.setattr(structure, "GUARDS", guards)
+    rng = random.Random(31)
+    originals, results, shapes = [], [], {"goto": 0, "flat": 0, "else if": 0}
+    count = 300
+    for i in range(count):
+        text = random_checks_function(rng, "orig_%d" % i, endless=i % 2 == 1)
+        originals.append(text)
+        tree = cparse.parse("typedef unsigned int u32;\n" + text.replace("orig_", "rest_"))
+        fn = tree.function("rest_%d" % i)
+        structure.structure(fn)
+        out = cparse.unparse(fn, notes=False, style="readable")
+        shapes["goto"] += "goto" in out
+        shapes["flat"] += structure.nesting(fn.body.body)[0] <= 3
+        shapes["else if"] += "else if" in out
+        results.append(out)
+    source = tmp_path / "checks.c"
+    source.write_text(BAIL + "".join(originals) + "\n".join(results) + "\n" + "".join(
+        bail_caller("orig_%d" % i) + bail_caller("rest_%d" % i) for i in range(count)))
+    lib = tmp_path / "checks.so"
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(source)], check=True)
+    so = ctypes.CDLL(str(lib))
+    for i in range(count):
+        a, b = getattr(so, "call_orig_%d" % i), getattr(so, "call_rest_%d" % i)
+        for f in (a, b):
+            f.restype, f.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * 4
+        for _ in range(25):
+            args = [rng.choice([0, 1, 2, 7, rng.getrandbits(32)]) for _ in range(4)]
+            assert a(*args) == b(*args), (i, args, originals[i], results[i])
+    assert shapes["flat"] > count * 0.9 and shapes["else if"] > count // 3, shapes
+    assert shapes["goto"] < count // 10, shapes

@@ -1164,11 +1164,17 @@ class Printer:
                 then = Block([then])            # (the else is this if's, not the inner one's)
             self.body(then, depth)
             if s.orelse is not None:
-                inner = s.orelse.body[0] if isinstance(s.orelse, Block) and len(s.orelse.body) == 1 else s.orelse
-                if self.style == "readable" and isinstance(inner, If):
-                    start = len(self.lines)
-                    self.stmts([inner], depth)
+                arm = s.orelse.body if isinstance(s.orelse, Block) else [s.orelse]
+                k = 0
+                while k < len(arm) and isinstance(arm[k], Note):
+                    k += 1
+                if self.style == "readable" and k < len(arm) and isinstance(arm[k], If) and \
+                        all(isinstance(x, Note) for x in arm[k + 1:]):
+                    self.stmts(arm[:k], depth)          # (an arm of comments and an if: else if, the
+                    start = len(self.lines)             # comments before it and after it)
+                    self.stmts([arm[k]], depth)
                     self.lines[start] = self.unit * depth + "else " + self.lines[start].lstrip()
+                    self.stmts(arm[k + 1:], depth)
                 else:
                     self.emit(depth, "else")
                     self.body(s.orelse, depth)

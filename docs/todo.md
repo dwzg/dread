@@ -544,7 +544,8 @@ its sources.
     arms the compiler put after the loop with a jump back comes out as each check's success path
     nested in the one before, a label inside each level where the error arm returns: GCC -O0's
     prvSendFrontAndBackTest at depth 24 against 3 without any inlining, RISC-V's
-    prvLowPriorityMutexTask at 46 against 1 (124 statements with its three inlined functions).
+    prvLowPriorityMutexTask at 46 against 1 (124 statements with its three inlined functions). (Flat
+    after the structure rework of the same day; what nested after it: Staircases below.)
   - Cortex-M IT blocks as one if per instruction (`if (z) r2 = 0; if (!z) r1 = g_..;`) and the flag
     as a carry expression (`z = (u32)((u64)r0 + (u32)~g_.. + 1) == 0`, for r0 == g_..): GCC -Os's
     xAreStreamBufferTasksStillRunning, 65 statements against 15 (its two loops unrolled too). One
@@ -621,6 +622,52 @@ its sources.
   truth values are not yet the truth values they are (`r4_1 == r1_1 ? 0x0u : (!(r0 == r5 || r4 == r1)
   ? 0x1u : 0x0u)`), and a negated || of equalities is written with De Morgan only where the structure
   stage negates it (`if (!(r1 == 0 || r1_1 == 0))` beside `if (r1 != 0 && r1_2 != 0)`).
+- [x] **Staircases.** Readable C nested much deeper than its source in some functions (the readable
+  step's lists above): find why, and make dread.structure write such runs of checks flat where the
+  flow allows it. Done 2026-10-22 (dread/structure.py arrange; docs/decisions.md). Measured again
+  first: after the structure rework of the same day the runs the lists named were flat already
+  (prvSendFrontAndBackTest 3 levels against its source's 3 at -O0, prvLowPriorityMutexTask 2 against 1
+  on RISC-V: the joins where code never returns). What still nested was of two kinds. Else-if chains:
+  a compiler puts an if's then arm where its test falls through and jumps to the next test, and the
+  stage wrote the arm the branch jumps to first, so each test landed in the then arm of the one before
+  (GCC -Os's vTimerPeriodicISRTests, a chain of a dozen tests, 18 levels against 3; tiny_print's
+  format letters 9 against 3 at -O0). And runs of checks with statements between them that leave for
+  one short block that returns or never ends (vTaskSwitchContext's stack check, 6 against 2), or whose
+  failure arms each fall to one return (xQueueGenericCreate's, 5 against 2): each check's way on
+  nested in the one before, as the post-dominators have it. Now the ifs are arranged once the blocks
+  are emitted: the arm that falls through first, under the condition turned round; an arm that never
+  falls through as an early exit (either arm); an else that is one if as else if, tests that exit
+  folded into such a chain where they stand as an else; of these the least nested. Collapsed
+  conditions keep the block that comes next as the arm that falls through (if (a || b) T else U, as
+  the source has it), and a goto that ends an arm and goes where the if falls off to anyway goes.
+  Where that still leaves a function three levels (structure.GUARDS) or more deeper than early exits
+  that repeat the short way (TAIL) would, those exits are taken: rarely, since where a function is a
+  level or two deeper they mostly turned a source's single-exit nesting into code flatter than the
+  source with statements repeated (docs/decisions.md has the variants). Measured on copies of the four
+  builds with readable gates, the same functions before and after (each build's accepted ones; depth
+  against the source over those matched to it, summed):
+
+  | build | deepest | depth (source) | deeper, shallower than the source | levels deeper, shallower | gotos | statements |
+  |---|---|---|---|---|---|---|
+  | GCC -Os | 18 -> 5 | 521 -> 466 (460) | 52, 22 -> 36, 33 | 85, 24 -> 45, 39 | 27 -> 27 | 6,600 -> 6,617 |
+  | clang -O2 | 12 -> 12 | 415 -> 385 (373) | 47, 31 -> 38, 35 | 78, 36 -> 56, 44 | 32 -> 32 | 6,183 -> 6,192 |
+  | RISC-V GCC -Os | 6 -> 5 | 408 -> 374 (393) | 33, 27 -> 20, 37 | 46, 31 -> 25, 44 | 21 -> 20 | 5,249 -> 5,245 |
+  | GCC -O0 | 9 -> 6 | 511 -> 482 (490) | 29, 18 -> 17, 23 | 39, 18 -> 18, 26 | 5 -> 4 | 5,168 -> 5,169 |
+
+  Deepest against their sources now: functions with others inlined (vStartTimerDemoTask 4 against 1,
+  prvBlockingTask 4 against 2 with nine inlined), a loop the compiler unrolled into tests that all
+  leave for one block (clang -O2's prvInitialiseNewTask copying a task's name, 12 against 3), and
+  tests with statements between them in an else-if chain (RISC-V's xTaskCheckForTimeOut 3 against 1:
+  `a5_2 = *(volatile u32 *)a1;` before the next test, which no else if can hold). The gate accepts the
+  same functions as before on the eight builds (gizmo a32 35, m3 36, m4 44, rv32 31; FreeRTOS GCC -Os
+  316, clang -O2 275, RISC-V GCC -Os 251, GCC -O0 353). The stage takes 0.18 s instead of 0.06 s for
+  GCC -Os's 316 functions. tests/test_structure.py: an else-if chain, early exits, the two staircases
+  with GUARDS and without, an else if printed with its comments; property tests of runs of checks laid
+  out as compilers lay them out (an arm after the run that jumps back, one in place, a block several
+  checks share, else-if chains; half of them in loops that never end), compiled before and after, and
+  with the early exits wherever they are no deeper (GUARDS 0), here and for the flow that mostly never
+  returns. Not yet: an unrolled loop's exits written as do { } while (0) with break; a test's
+  statements folded into its condition.
 
 Limits known up front: readable C compiles to other code, often larger than the original's slot, so
 more functions need freed space (the overlay's placement report says where); a function whose lifted

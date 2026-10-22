@@ -9,6 +9,59 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C's ifs: the arm that falls through first, early exits, code repeated only for staircases (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Readable C nested much deeper than its source in some functions (the bench's readable
+  step; docs/todo.md, Staircases). The ones named there first (GCC -O0's prvSendFrontAndBackTest,
+  RISC-V's prvLowPriorityMutexTask) were flat already after the structure rework of the same day
+  (joins where code never returns); what was left: else-if chains with each test in the then arm of
+  the one before (the stage wrote the arm the branch jumps to first), and runs of checks that leave
+  for one short block or whose failure arms fall to one return, nested one level per check. How
+  should an if's arms be arranged, and should code be repeated to make early exits?
+- **Options.** (a) As before: the arm the branch jumps to first, an else after a first arm that never
+  falls through written after the if. (b) Each if arranged by its nesting: the arm the test falls
+  through to first (where compilers put an if's then arm), an arm that never falls through as an early
+  exit (either arm), an else that is one if as else if, tests that exit folded into an else-if chain
+  where they stand as an else; of these the least deeply nested (the deepest level, then the levels
+  summed), the fall-through arm first on a tie. (c) (b), and early exits that repeat short ways
+  (TAIL): a block several checks leave for that returns or never ends repeated at each jump instead of
+  following the outermost if, and the short way after an if repeated into an arm that falls into it
+  where that takes the if a level less deep; for every function (0), or where the function's deepest
+  nesting falls by at least 1, 2 or 3 levels (GUARDS).
+- **Choice: (b), with (c) where it takes 3 levels or more off (structure.GUARDS = 3).** Measured on
+  the four FreeRTOS builds with readable gates (GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; their
+  1,195 accepted functions, 1,087 matched to their source functions), summing per function how many
+  levels the readable C is deeper or shallower than the source: (a) 248 deeper and 109 shallower (357
+  in all), (b) 169 and 138 (307; 41 statements fewer than (a)), (c) at 0 or 1 level 92 and 256 (348;
+  about 330 statements more than (b)), at 2 levels 130 and 183 (313; 135 more), at 3 levels 144 and
+  153 (297; 64 more).
+  The repeats flatten what is a staircase (vTaskSwitchContext's stack check 6 levels to 2, its
+  source's 2; xQueueGenericCreate's failure arms 5 to 2, its source's 2), but where a function is
+  only a level or two deeper they mostly turn a source's single-exit nesting into early exits, flatter
+  than the source with code repeated (xQueueGenericReset 4 to 1 against 4). Of the functions whose
+  depth the choice changed against (a), 58 came closer to their source's, 30 went further; the gotos
+  went from 85 to 83.
+  Collapsed conditions keep the block that comes next as the way the test falls through
+  (if (a) goto T; if (b) goto U; T: is if (!a && b) goto U, so that (b) writes if (a || !b) T else U,
+  as the source has it).
+- **What it costs.** The structure stage takes 0.18 s instead of 0.06 s for GCC -Os's 316 functions
+  (the arms' nesting compared, the clean-up run before and after the arrangement, a second emission
+  for a function more than GUARDS levels deep), about 0.4 s instead of 0.15 s for the tests' 400
+  random functions that mostly never return (on a shared machine; tidy takes far longer). Where the
+  readable C of a function changes (the order of its if/else arms; 420 of the four builds' 1,229
+  lifted functions), the readable_names entry made for the old C waits for a new proposal (its
+  digest).
+- **Undo.** structure.GUARDS = None takes the repeats out; GUARDS = 0 makes early exits wherever they
+  are no deeper. Writing the jumped-to arm first again: arrange_if's tie order (or flatten_else, in
+  git history before this change).
+- **Status.** In the code (dread/structure.py: arrange, arrange_if, fold, short_way, nesting,
+  drop_fall_gotos, Emitter's guards, GUARDS). Not tried: a test's statements folded into its
+  condition (r3_1 = *r1; if (r3_1 == ...) as an else if), which would need assignments in
+  conditions; an unrolled loop's exits as a do { } while (0) with break (clang -O2's
+  prvInitialiseNewTask, 12 levels against 3).
+
 ## A whole image that differs with lifted C: the lift check keeps out a smallest set that makes it (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

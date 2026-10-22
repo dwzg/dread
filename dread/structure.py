@@ -25,6 +25,26 @@ post-dominators (endless_ends): without them no branch there had a join.
   post-dominator, left with break) or falling into the next group's where the code goes there.
   Inside it, break leaves the switch and continue still goes to the loop around it.
 
+Then the ifs are arranged (arrange_if), innermost first: an if's arms are the way its branch jumps
+and the way it falls through, and compilers put an if's then arm where the test falls through (if
+(!c) goto else; then...; goto end; else: ...). So the arm that falls through comes first, under the
+condition turned round; an arm that never falls through (a return, a break, a goto) ends the if as an
+early exit and the other arm follows it; an else that is one if is an else if, and an arm of tests
+that exit (if (a) X; if (b) Y; rest) is folded into one where it stands as an else. Of these the one
+least deeply nested is taken (nesting: the deepest level, then the levels summed; the fall-through
+arm first on a tie). Without it an else-if chain came out as a staircase, each test in the then arm
+of the one before (if (x != 1) { if (x != 2) { ... } else B } else A: FreeRTOS GCC -Os's
+vTimerPeriodicISRTests 18 levels deep against its source's 3, tiny_print 9 against 3 at -O0). A goto
+that ends an arm and goes where the if falls off to anyway is dropped (drop_fall_gotos).
+
+Where early exits that repeat a short way (TAIL) take GUARDS levels or more off a function's deepest
+nesting, its checks become such exits: a block several checks leave for that returns or never ends
+(a stack check's hook) is repeated where they jump instead of following the outermost if, and the
+short way after an if (vAssertCalled(...); r4 = 0; return r4;) is repeated at the end of an arm that
+falls into it, where that takes the if a level less deep (short_way). The function is made both ways
+and the exits are taken for all of it or not at all; taken for fewer levels, they mostly made
+functions flatter than their sources, with code repeated (docs/decisions.md).
+
 Correct whatever is decided: every block is emitted once, under its label (a short way to a return
 also repeated, without one, where jumps go to it), and every transfer of control is a fall-through
 to the block that really follows, a break or continue of the loop it leaves, or a goto (C lets a goto
@@ -34,7 +54,12 @@ before the next label) and the labels no goto names are dropped at the end. The 
 
 Measured on the 39 FreeRTOS builds of the bench (docs/todo.md, Structure): what gotos are left are
 mostly blocks several ways share whose code branches before it returns (conditions a compiler
-threaded into a lattice), then loops with exits to several places; irreducible flow is rare.
+threaded into a lattice), then loops with exits to several places; irreducible flow is rare. On four
+of them (GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0) against their sources (docs/todo.md,
+Staircases): what still nests deeper than the source is mostly code the compiler inlined or unrolled
+(clang -O2's prvInitialiseNewTask, a name copied in an unrolled loop whose exits all go to one block,
+12 levels against 3); a run of tests with statements between them that all leave for one longer
+block stays nested, as the conditions a source joined with && were.
 """
 import copy
 
@@ -375,9 +400,11 @@ class Shape:
 
 def collapse(blocks):
     """A branch whose way on is a block holding nothing but another branch (reached from it alone)
-    becomes one branch with both conditions: if (a) goto T; if (b) goto T;  ->  if (a || b) goto T;
-    and if (a) goto T; if (b) goto U; T:  ->  if (a || !b) goto T (U then the way on). The second
-    condition is evaluated only when the first fails, as || does."""
+    becomes one branch with both conditions: if (a) goto T; if (b) goto T; U:  ->  if (a || b) goto T
+    (U the way on); and if (a) goto T; if (b) goto U; T:  ->  if (!a && b) goto U (T the way on). The
+    second condition is evaluated only when the first fails, as || and && do. The way on stays the
+    block that comes next in the code, where compilers put an if's then arm (arrange_if writes that
+    arm first: if (a || !b) T else U)."""
     changed = True
     while changed:
         changed = False
@@ -393,18 +420,17 @@ def collapse(blocks):
                 continue
             target = b.succ[0]
             if f.succ[0] == target:
-                cond, rest = C.Binary("||", t[1], ft[1]), f.succ[1]
+                cond, goto, succ = C.Binary("||", t[1], ft[1]), t[2], [target, f.succ[1]]
             elif f.succ[1] == target:
-                from dread.structure import negate
-                cond, rest = C.Binary("||", t[1], negate(ft[1])), f.succ[0]
+                cond, goto, succ = C.Binary("&&", negate(t[1]), ft[1]), ft[2], [f.succ[0], target]
             else:
                 continue
-            b.term = ("cond", cond, t[2], C.If(cond, t[2], None, t[3].addr))
-            b.succ = [target, rest]
-            for s in f.succ:
-                blocks[s].pred = [b.index if p == f.index else p for p in blocks[s].pred]
-                if b.index in blocks[s].pred[1:] and blocks[s].pred.count(b.index) > 1:
-                    pass
+            b.term = ("cond", cond, goto, C.If(cond, goto, None, t[3].addr))
+            for s in set(b.succ) | set(f.succ):             # (one entry per edge, as blocks_of makes them)
+                blocks[s].pred = [p for p in blocks[s].pred if p not in (b.index, f.index)]
+            b.succ = succ
+            for s in succ:
+                blocks[s].pred.append(b.index)
             f.pred, f.succ = [], []
             changed = True
     return blocks
@@ -415,10 +441,12 @@ class Emitter:
     branch dominates that several ways reach are emitted after its if, in reverse postorder, instead
     of in the first arm that reaches them (Ramsey's merge nodes, "Beyond Relooper", ICFP 2022):
     "nojoin" where the branch's ways never meet (the default), True after every branch, False never.
-    After every branch cost more gotos than it saved on the bench (docs/decisions.md)."""
+    After every branch cost more gotos than it saved on the bench (docs/decisions.md). guards: such a
+    block that is a short way to a return or a statement that never ends (free) is no merge but is
+    repeated where the ways jump, so that each branch to it is an early exit (structure.GUARDS)."""
 
-    def __init__(self, blocks, labels, merges="nojoin"):
-        self.blocks, self.labels = blocks, labels
+    def __init__(self, blocks, labels, merges="nojoin", guards=False):
+        self.blocks, self.labels, self.guards = blocks, labels, guards
         self.shape = Shape(blocks)
         self.emitted = set()
         self.wanted = set()                 # labels a goto names
@@ -594,8 +622,9 @@ class Emitter:
         return j
 
     def merge_blocks(self, b, j, follow, loops, stops):
-        """The blocks b immediately dominates that several ways reach (but its join, the follow and what
-        a region around emits), in reverse postorder: emitted after b's if, where their ways meet."""
+        """The blocks b immediately dominates that several ways reach (but its join, the follow, what a
+        region around emits and, with guards, the short ways), in reverse postorder: emitted after b's
+        if, where their ways meet."""
         if not self.merges or (self.merges == "nojoin" and j is not None):
             return []
         ends = {f[0] for f in loops} | {f[1] for f in loops}
@@ -603,6 +632,8 @@ class Emitter:
         out = []
         for m in self.children.get(b, ()):
             if m in (j, follow) or m in stops or m in ends or m in self.emitted:
+                continue
+            if self.guards and self.free(m):
                 continue
             ways = {p for p in self.blocks[m].pred if p in idom and not dominates(idom, m, p)}
             if len(ways) >= 2:
@@ -685,6 +716,9 @@ def _with(stops, b):
     return stops | {b} if b is not None else stops
 
 
+GUARDS = 3          # levels a function's deepest nesting must fall by for the early exits that repeat short
+                    # ways (Emitter's guards, arrange's copies) to be taken (structure; None: never;
+                    # docs/decisions.md)
 TAIL = 4            # statements (a return, break or continue counted) a jump repeats instead of a goto
                     # (Emitter.repeat; at 1 only ways without a statement, as a lone return was before
                     # 2026-10-22; docs/decisions.md)
@@ -711,10 +745,14 @@ def negate(cond):
 
 
 def ends(stmts):
-    """Whether control never falls off the end of the statements."""
-    if not stmts:
+    """Whether control never falls off the end of the statements (comments and empty statements after
+    the last one do not count)."""
+    k = len(stmts)
+    while k and isinstance(stmts[k - 1], (C.Note, C.Empty)):
+        k -= 1
+    if not k:
         return False
-    last = stmts[-1]
+    last = stmts[k - 1]
     if isinstance(last, (C.Return, C.Goto, C.Break, C.Continue)):
         return True
     if isinstance(last, C.If) and last.orelse is not None:
@@ -744,24 +782,148 @@ def _has_effects(e):
     return has_effects(e)
 
 
-def flatten_else(stmts):
-    """if (c) { ... return; } else { rest }  ->  if (c) { ... return; } rest (one level less)."""
-    out = []
+def _real(stmts):
+    """The statements but comments and empty statements."""
+    return [s for s in stmts if not isinstance(s, (C.Note, C.Empty))]
+
+
+def nesting(stmts, level=0):
+    """(the deepest nesting of control statements, the sum of every statement's level) of a statement
+    list at level: an if, loop or switch is one level deeper than the statement around it; an else
+    that holds one if alone (else if) is no deeper, as dread.cparse prints it and dread.cmetrics
+    counts it; labels, case labels, comments and empty statements are no statements."""
+    deepest, total = 0, 0
     for s in stmts:
+        if isinstance(s, (C.Note, C.Empty, C.Label, C.Case)):
+            continue
+        if isinstance(s, C.Block):
+            d, t = nesting(s.body, level)
+            deepest, total = max(deepest, d), total + t
+            continue
+        total += level
         if isinstance(s, C.If):
-            s.then = C.Block(flatten_else(_list(s.then)))
+            deepest = max(deepest, level + 1)
+            arms = [(_list(s.then), level + 1)]
             if s.orelse is not None:
-                s.orelse = C.Block(flatten_else(_list(s.orelse)))
-                if ends(s.then.body):
-                    rest = s.orelse.body
-                    s.orelse = None
-                    out.append(s)
-                    out += rest
-                    continue
+                inner = _real(_list(s.orelse))
+                arms.append((inner, level) if len(inner) == 1 and isinstance(inner[0], C.If)
+                            else (_list(s.orelse), level + 1))
+            for arm, at in arms:
+                d, t = nesting(arm, at)
+                deepest, total = max(deepest, d), total + t
         elif isinstance(s, (C.For, C.While, C.DoWhile, C.Switch)):
-            s.body = C.Block(flatten_else(_list(s.body)))
+            d, t = nesting(_list(s.body), level + 1)
+            deepest, total = max(deepest, level + 1, d), total + t
+    return deepest, total
+
+
+def fold(stmts):
+    """A statement list as an else arm can hold it: if (c) X; rest, X never falling through, is
+    if (c) X else rest, and the rest folded in turn, so that an arm of such tests becomes an else-if
+    chain (each X one level less deep, the rest as deep as before). Comments before the test stay
+    before it."""
+    k = 0
+    while k < len(stmts) and isinstance(stmts[k], C.Note):
+        k += 1
+    if k < len(stmts) and isinstance(stmts[k], C.If) and stmts[k].orelse is None and _real(stmts[k + 1:]) and \
+            ends(_list(stmts[k].then)):
+        s = stmts[k]
+        return stmts[:k] + [C.If(s.cond, s.then, C.Block(fold(stmts[k + 1:])), s.addr)]
+    return stmts
+
+
+def arrange(stmts, way=None, copies=False):
+    """The ifs of a statement list arranged (arrange_if), from its end (each if knows what follows
+    it), inside loops and switches too. way: what control runs when it falls off the list's end, when
+    that is a short way that ends (short_way), else None."""
+    out = []
+    for s in reversed(stmts):
+        after = short_way(out if ends(out) or way is None else out + way)
+        if isinstance(s, C.If):
+            out = arrange_if(s, after, copies) + out
+            continue
+        if isinstance(s, (C.For, C.While, C.DoWhile, C.Switch)):
+            s.body = C.Block(arrange(_list(s.body), None, copies))
+        elif isinstance(s, C.Block):
+            s.body = arrange(s.body, after, copies)
+        out = [s] + out
+    return out
+
+
+def short_way(stmts):
+    """The statements as a copy can repeat them: when control never falls off their end and they are
+    at most TAIL statements (nested ones counted), without a declaration, a loop, a switch or a case,
+    and labels only in front of a statement (the copy leaves them out); else None."""
+    if not ends(stmts):
+        return None
+    out, count = [], 0
+    for s in stmts:
+        if isinstance(s, C.Label):
+            continue
+        n = _plain_count(s)
+        if n is None or count + n > TAIL:
+            return None
+        count += n
         out.append(s)
     return out
+
+
+def _plain_count(s):
+    """The statements in s (s counted), or None when it holds what short_way does not copy."""
+    if isinstance(s, (C.Note, C.Empty)):
+        return 0
+    if isinstance(s, C.If):
+        n = 1
+        for arm in [s.then] + ([s.orelse] if s.orelse is not None else []):
+            for x in _list(arm):
+                m = _plain_count(x)
+                if m is None:
+                    return None
+                n += m
+        return n
+    if isinstance(s, (C.Decl, C.Label, C.Case, C.Block, C.For, C.While, C.DoWhile, C.Switch)):
+        return None
+    return 1
+
+
+def arrange_if(s, way=None, copies=False):
+    """The statements for if (c) T else F (T the way the branch jumps, F the way it falls through, as
+    Emitter.block makes it), its arms arranged first: of
+      if (!c) F; T      when F never falls through (the arm that falls through first, as compilers
+      if (c) T; F       when T never falls through   lay out an if's then arm, and an early exit),
+      if (!c) F else T  and  if (c) T else F  (T and F folded into an else-if chain where they can be),
+    and, where a short way follows the if (way), the first two with that way repeated at the end of an
+    arm that falls through (an else arm made an early exit), the one least deeply nested (nesting:
+    the deepest level, then the levels summed), the earlier on a tie. An arm of comments only is an
+    empty arm. Every one runs what the if ran."""
+    then = arrange(_list(s.then), way, copies)
+    orelse = arrange(_list(s.orelse), way, copies) if s.orelse is not None else []
+    if not _real(then) and not _real(orelse):
+        return [make_if(s.cond, [], [], s.addr)]
+    if not _real(orelse):
+        return [C.If(s.cond, C.Block(then), None, s.addr)]
+    if not _real(then):
+        return [C.If(negate(s.cond), C.Block(orelse), None, s.addr)]
+    cond, other = s.cond, negate(s.cond)
+    choices = []
+    if ends(orelse):
+        choices.append([C.If(other, C.Block(orelse), None, s.addr)] + then)
+    if ends(then):
+        choices.append([C.If(cond, C.Block(then), None, s.addr)] + orelse)
+    choices.append([C.If(other, C.Block(orelse), C.Block(fold(then)), s.addr)])
+    choices.append([C.If(cond, C.Block(then), C.Block(fold(orelse)), s.addr)])
+    best = min(enumerate(choices), key=lambda kc: (nesting(kc[1]), kc[0]))[1]
+    if way is not None and copies:
+        extended = []
+        if not ends(orelse):
+            extended.append([C.If(other, C.Block(orelse + copy.deepcopy(way)), None, s.addr)] + then)
+        if not ends(then):
+            extended.append([C.If(cond, C.Block(then + copy.deepcopy(way)), None, s.addr)] + orelse)
+        if extended:
+            bc = min(enumerate(extended), key=lambda kc: (nesting(kc[1]), kc[0]))[1]
+            if nesting(bc)[0] < nesting(best)[0]:
+                return bc
+    return best
 
 
 def refine_loops(stmts):
@@ -855,10 +1017,8 @@ def drop_dead(stmts):
     that holds a label stays: a goto may enter it."""
     out, dead = [], False
     for s in stmts:
-        if isinstance(s, (C.Label, C.Case)) or _labels_in(s):
-            dead = False
-        if dead:
-            continue
+        if dead and not isinstance(s, (C.Label, C.Case)) and not _labels_in(s):
+            continue                        # (a label inside is looked for only in dead code: it walks s)
         if isinstance(s, C.If):
             s.then = C.Block(drop_dead(_list(s.then)))
             if s.orelse is not None:
@@ -868,6 +1028,47 @@ def drop_dead(stmts):
         out.append(s)
         dead = ends([s])
     return out
+
+
+def drop_fall_gotos(stmts, after=frozenset()):
+    """A goto that ends an arm of an if and goes to a label control reaches anyway when it falls off
+    the if (one right after it, or after the statement around it when the if ends that) goes:
+    if (c) { ...; goto L; } else { ... } L:  ->  if (c) { ... } else { ... } L:. after: the labels
+    falling off the end of stmts reaches (none in a loop's or a switch's body)."""
+    for k, s in enumerate(stmts):
+        nxt = _labels_after(stmts, k + 1, after)
+        if isinstance(s, C.If):
+            s.then = C.Block(_drop_last_goto(drop_fall_gotos(_list(s.then), nxt), nxt))
+            if s.orelse is not None:
+                s.orelse = C.Block(_drop_last_goto(drop_fall_gotos(_list(s.orelse), nxt), nxt))
+        elif isinstance(s, (C.For, C.While, C.DoWhile, C.Switch)):
+            s.body = C.Block(drop_fall_gotos(_list(s.body)))
+        elif isinstance(s, C.Block):
+            s.body = drop_fall_gotos(s.body, nxt)
+    return stmts
+
+
+def _labels_after(stmts, k, after):
+    """The labels control reaches without a statement on the way from position k of stmts on (after:
+    those after the list's end)."""
+    names = set()
+    while k < len(stmts):
+        s = stmts[k]
+        if isinstance(s, C.Label):
+            names.add(s.name)
+        elif not isinstance(s, (C.Note, C.Empty)):
+            return names
+        k += 1
+    return names | set(after)
+
+
+def _drop_last_goto(stmts, labels):
+    k = len(stmts)
+    while k and isinstance(stmts[k - 1], (C.Note, C.Empty)):
+        k -= 1
+    if k and isinstance(stmts[k - 1], C.Goto) and stmts[k - 1].label in labels:
+        return stmts[:k - 1] + stmts[k:]
+    return stmts
 
 
 def _labels_in(s):
@@ -923,7 +1124,9 @@ def gotos_in(stmts):
 
 def structure(fn, run=None):
     """The function's body with its gotos as if/else, loops and switches where they can be; unchanged
-    when the body holds what the cut does not handle (a switch other than a jump table)."""
+    when the body holds what the cut does not handle (a switch other than a jump table). Made once
+    plain and, where that nests more than GUARDS levels, once more with the early exits that repeat
+    short ways, taken when they take GUARDS levels or more off."""
     body = fn.body.body
     k = 0
     while k < len(body) and isinstance(body[k], (C.Decl, C.Note)):
@@ -934,19 +1137,41 @@ def structure(fn, run=None):
         return fn
     blocks, labels = cut
     collapse(blocks)
-    em = Emitter(blocks, labels)
-    out = em.region(0, None, [])
-    missing = [b for b in range(len(blocks)) if b not in em.emitted and b in em.shape.idom]
-    if missing:                             # (reachable but not emitted: leave the function as it is)
+    plain = _emit(blocks, labels, False)
+    out = plain
+    if GUARDS is not None and (plain is None or nesting(plain)[0] > GUARDS):
+        guarded = _emit(blocks, labels, True)   # (from the same blocks: what the emitter repeats it copies,
+                                                # and the passes after it only rewrap the arms they keep)
+        if plain is None or guarded is not None and nesting(guarded)[0] <= nesting(plain)[0] - GUARDS:
+            out = guarded
+    if out is None:                         # (reachable but not emitted: leave the function as it is)
         return fn
-    out, wanted = flatten_else(out), None
-    while True:                             # (code a pruned label led to can be dead in turn; before the
-        out = drop_dead(out)                # loops are refined: a label first in a loop body hides its test)
-        named = gotos_in(out)
-        out = prune_labels(out, named)
-        if named == wanted:
-            break
-        wanted = named
     out = refine_loops(out)
     fn.body.body[:] = head + out
     return fn
+
+
+def _emit(blocks, labels, guards):
+    """The statements for the blocks (Emitter, then prune, arrange and prune again), or None when a
+    block that can be reached was not emitted. guards: shared short ways repeated where they make
+    early exits (Emitter's guards, arrange's copies)."""
+    em = Emitter(blocks, labels, guards=guards)
+    out = em.region(0, None, [])
+    if any(b not in em.emitted for b in em.shape.idom):
+        return None
+    out = prune(out)                        # (the labels nobody names out first: one in an arm hides an if)
+    return prune(arrange(out, copies=guards))
+
+
+def prune(out):
+    """Statements nothing reaches, gotos to where control falls anyway and labels no goto names out,
+    until none is left (code a pruned label led to can be dead in turn; before the loops are refined: a
+    label first in a loop body hides its test)."""
+    wanted = None
+    while True:
+        out = drop_dead(drop_fall_gotos(out))
+        named = gotos_in(out)
+        out = prune_labels(out, named)
+        if named == wanted:
+            return out
+        wanted = named
