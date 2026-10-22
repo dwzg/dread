@@ -93,6 +93,10 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   minutes more), are tested there in full and come onto `main` when they are done.
   Before the push, `bin/take-caches WORKTREE` copies the caches the worktree's suite made back
   into the checkout; without it the push's fast tests make them again after a VERSION change.
+  A worktree's `.venv` is a link to the checkout's (ignored since 2026-10-22: `/.venv/` matched only
+  a directory): on 2026-10-22 a bare `git add -A` during a rebase committed the link, and merging it
+  into the checkout replaced the checkout's venv with a link to itself (git takes ignored files for
+  expendable); the venv had to be made anew. Add files by name in worktrees.
   CI has none of these caches: a test must make or search for what it needs and pass on a checkout
   without them (on 2026-10-22 a test read gizmo's cached cases without searching and failed only on
   CI). To see what CI sees, delete the caches in a worktree of its own before running the test.

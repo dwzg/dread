@@ -1025,3 +1025,94 @@ def test_names_judged_against_their_source(gizmo, tmp_path):
     pairwise = open(os.path.join(target.build, "pilot", image.name, "names-pairwise.tsv")).read()
     assert "\tpin_write\tpin_toggle\tthis\tright\twrong: it sets the pin\n" in pairwise
     assert "against the source by scripted" in lines[-3] and "the other where they differ, 2 of 2" in lines[-1]
+
+
+def test_the_device_question_shows_the_texts_the_code_points_to(gizmo):
+    """device_texts: the texts the code points to (literal pools and the tables they point to, read from
+    the listing), counted once a function, the most used first; a text needs three letters (gizmo's
+    "\\r\\n" has two); with [llm] only, the texts of the functions an LLM may be shown alone."""
+    target, image, program, flow = gizmo
+    texts = pilot.device_texts(target, program)
+    shown = [t for t, _ in texts]
+    assert dict(texts)["idle"] == 3 and dict(texts)["GIZMO 1000\\r\\n"] == 1, texts
+    assert shown.index("idle") < shown.index("GIZMO 1000\\r\\n") and "\\r\\n" not in shown, shown
+    assert [k for _, k in texts] == sorted((k for _, k in texts), reverse=True)
+    question = pilot.device_question(target, program, texts)
+    assert question.startswith("Processor: arm, t32, m, cortex-m3. Functions: %d." % len(program.functions))
+    assert '"GIZMO 1000\\r\\n" (1)' in question, question
+    target.llm_only = {"main"}
+    assert sorted(t for t, _ in pilot.device_texts(target, program)) == [
+        "GIZMO 1000\\r\\n", "READY\\r\\n", "crc ", "volume = 7\\nmode=2\\n  baud = 0x2580\\nname=3\\n"]
+
+
+def test_the_device_most_answers_agree_with_is_kept():
+    """choose_device: the answer whose words overlap most with the others', with the answers that
+    overlap it by half or more; parse_device takes the device: line."""
+    assert pilot.parse_device("Here.\ndevice: a test gadget  with a serial console.\n") == \
+        "a test gadget with a serial console"
+    assert pilot.parse_device("a gadget") is None and pilot.parse_device("device: .") is None
+    assert pilot.choose_device(["a test gadget with a serial console", None, "test gadget, serial console",
+                                "a coffee machine"]) == ("a test gadget with a serial console", 2)
+    assert pilot.choose_device([None, None]) == (None, 0)
+    assert pilot.choose_device(["unknown", "unknown", "a board"]) == ("unknown", 2)
+
+
+def test_naming_questions_begin_with_what_the_image_is(gizmo, monkeypatch, capsys):
+    """--task device asks --samples times and keeps the device most answers agree with in device.tsv
+    (the conversation in device.md); the questions for globals, function names and groups then begin
+    with it (DEVICE_READ), --no-device leaves it out, and a device the target states ([llm] device)
+    comes first; a reading of "unknown" says nothing."""
+    from dread import groups
+    target, image, program, flow = gizmo
+    answers = iter(["device: a test gadget with a serial console", "I think\ndevice: test gadget, serial console",
+                    "device: a coffee machine"])
+    seen = []
+
+    def answer(messages):
+        seen.append(messages[0]["content"])
+        return next(answers)
+    monkeypatch.setattr(llm, "load", lambda name=None, path=None: llm.Scripted(answer))
+    assert pilot.main(["--target", target.root, "--task", "device", "--samples", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "a test gadget with a serial console (2 of 3 answers agree" in out, out
+    assert seen[0].startswith("Processor: ") and '"GIZMO 1000\\r\\n" (1)' in seen[0], seen
+    row = pilot.read_device(target, image)
+    assert row["device"] == "a test gadget with a serial console" and row["confidence"] == "0.67", row
+    assert row["samples"] == "a test gadget with a serial console | test gadget, serial console | a coffee machine"
+    assert os.path.exists(os.path.join(target.build, "pilot", image.name, "device.md"))
+    line = pilot.DEVICE_READ.format(device="a test gadget with a serial console")
+    assert pilot.known_device(target, image) == line
+
+    asked = []
+
+    def names(messages):
+        asked.append(messages[0]["content"])
+        if "readable C" in messages[0]["content"] or "```json" in "".join(m["content"] for m in messages[1:]):
+            return "{}"
+        return '```json\n{"g_2000004c": "tick_count"}\n```'
+    monkeypatch.setattr(llm, "load", lambda name=None, path=None: llm.Scripted(names))
+    assert pilot.main(["--target", target.root, "--task", "globals"]) == 0
+    assert asked and asked[0].startswith(line + "\n\n"), asked[:1]
+    text, _ = pilot.Namer(target, image, program, flow, device=line).question(program.by_name["main"])
+    assert text.startswith(line + "\n\nThe function main"), text[:200]
+    assert not pilot.Namer(target, image, program, flow).question(program.by_name["main"])[0].startswith(line)
+    capsys.readouterr()
+    assert pilot.main(["--target", target.root, "--task", "subsystems", "--dry-run"]) == 0
+    printed = capsys.readouterr().out
+    assert "\n" + line + "\n\nThe group of " in printed, printed[:400]
+    assert pilot.main(["--target", target.root, "--task", "subsystems", "--dry-run", "--no-device"]) == 0
+    printed = capsys.readouterr().out
+    assert line not in printed and "The group of " in printed
+
+    touched = groups.evidence(target, image, program, flow)
+    group = groups.find(target, image, program, flow, touched=touched)[0]
+    stated = pilot.Namer(target, image, program, flow, device=pilot.DEVICE_STATED.format(device="a gadget"))
+    assert pilot.subsystem_question(stated, group, touched).startswith(
+        "What the image is, as its target states: a gadget.\n\nThe group of ")
+    with open(target.file, "a") as f:
+        f.write('\n[llm]\ndevice = "a gadget for tests."\n')
+    again = Target.load(target.root)
+    assert pilot.known_device(again, again.image()) == "What the image is, as its target states: a gadget for tests."
+    with open(pilot.device_path(target, image), "a") as f:
+        f.write("unknown\t1.00\tunknown\tscripted\t0\t0\n")
+    assert pilot.known_device(target, image) == ""

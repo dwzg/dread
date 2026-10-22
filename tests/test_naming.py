@@ -422,3 +422,20 @@ def test_words_whatever_the_naming_style():
     rows, totals = naming.score_functions({1: "task_sleep", 2: "queue_send"}, {1: "vTaskDelay", 2: "xQueueReceive"})
     assert [r["style"] for r in rows] == [1.0, pytest.approx(1 / 3)] and totals["style_half"] == 1
     assert totals["style"] == pytest.approx(2 / 3) and totals["style_same"] == 1
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_variables_questions_begin_with_what_the_image_is(tmp_path):
+    """readable_jobs with a device line (dread pilot known_device): each function's question begins
+    with it; what a proposal is made for (the digest of the C) is the same without it, so a run that
+    learns the device asks nothing again."""
+    from dread import pilot
+    target, image, program, context, lifter = gizmo_copy(tmp_path / "gizmo")
+    line = pilot.DEVICE_READ.format(device="a test gadget")
+    with_line, _ = pilot.readable_jobs(target, program, context, lifter, ["strlen"], {"strlen": ["main"]},
+                                       out=lambda *_: None, device=line)
+    without, _ = pilot.readable_jobs(target, program, context, lifter, ["strlen"], {"strlen": ["main"]},
+                                     out=lambda *_: None)
+    assert with_line[0]["user"] == line + "\n\n" + without[0]["user"], with_line[0]["user"][:200]
+    assert without[0]["user"].startswith("The function strlen (readable C):")
+    assert with_line[0]["digest"] == without[0]["digest"]

@@ -164,6 +164,9 @@ address faults before the run can stop.
 - `[llm]`: `only`, the names of the functions a language model may be shown; `dread pilot` asks
   about no other function (a `dread cclab` build of a proprietary toolchain lists its probes there,
   so that the toolchain's runtime library never reaches a model). Without it, any function may be.
+  `device`, what the image is for as a person states it, in a few words ("a digital camera", "a
+  FreeRTOS demo on a Cortex-M3 board"): every question of `dread pilot`'s naming tasks begins with
+  it, in place of the reading `dread pilot --task device` makes from the image's texts.
 - `[host]`: settings of the machine the tools run on (`jobs`, `free_cores`, `nice`). The environment
   variables of `dread.util.polite` override them.
 - `[plugins]`: a free-form section owned by the tools that read it.

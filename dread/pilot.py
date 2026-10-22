@@ -68,6 +68,17 @@ first and shows each function's question its group's name, prefix and sentence; 
 counts the proposals that begin with their group's prefix and sets each group beside its most common
 source file (names-subsystems.tsv).
 
+--task device asks what kind of device the image runs on, from the texts its code points to
+(device_texts: read from the listing, the ones most functions use first; --samples times, the device
+most answers agree with kept in BUILD/pilot/IMAGE/device.tsv). Every question of the naming tasks
+(name, readable, globals, subsystems) then begins with that reading (DEVICE_READ), or with what the
+target states ([llm] device: DEVICE_STATED), unless --no-device. Without either, the questions say
+only "a binary image" and the model guesses the kind of device from the code: on a private firmware,
+DREAD's real-life test, it named several large groups after a kind of device the image is not for,
+and asked again it guessed yet another; with the line they were named after parts of the right one
+(2026-10-22, docs/decisions.md). The line says the device alone: a sentence on what the program does
+as well made the model name groups after the parts that sentence mentioned.
+
 --task readable names the variables of the readable table's functions (dread readable), after what
 they share with the rest of the image: the globals they use, then the structures their variables
 point to (where dread readable --check made a readable_types plan); --task globals asks for those
@@ -94,7 +105,8 @@ stated, while Haiku 5.5 answered the same question.
 
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
                 [--no-mutate] [--no-integration] [--dry-run]
-                [--task write|input|name|readable|globals|subsystems] [--jobs N] [--refine] [--behaviour]
+                [--task write|input|name|readable|globals|subsystems|device] [--no-device] [--jobs N]
+                [--refine] [--behaviour]
                 [--[no-]subsystems] [--samples K] [--temperature T] [--gate C] [--passes N] [--ablate]
                 [--score TRUTH [--judge PROVIDER] [--grounded PROVIDER [--source DIR] [--names-only]]
                                [--upto-pass N] [--against NAMES_TSV]] [NAME...]
@@ -542,6 +554,22 @@ name: <the part's name>
 prefix: <the prefix>
 what: <one sentence: what the part does>"""
 
+DEVICE_SYSTEM = """You say what device a binary image is for, from its texts. Below: its processor, its
+number of functions, and the texts its code points to, those most of its functions use first. Name
+the device alone, the product or board the image runs on (a digital camera, a network router, a
+sports watch, a motor controller, a development board), as precisely as the texts allow (a maker or a
+model only where a text names one), not what the program does, its parts or its operating system; if
+the texts do not say, answer unknown. Answer with exactly one line:
+
+device: <the device, in a few words, or unknown>"""
+
+DEVICE_READ = "What the image is, as a reading of its texts says (likely, not certain): {device}."
+DEVICE_STATED = "What the image is, as its target states: {device}."
+DEVICE_TEXTS = 120      # texts the device question shows at most
+DEVICE_CHARS = 6000     # and their characters at most
+DEVICE_LETTERS = 3      # letters a text needs (shorter "texts" are mostly bytes that only look like one)
+DEVICE_COLUMNS = ("device", "confidence", "samples", "provider", "texts", "question")
+
 SUBSYSTEM_LINE = ("Tools grouped the program's functions from their code alone (what they share: memory, texts, "
                   "devices; neighbouring addresses), and a reading of all {size} functions of this one's group "
                   "named that part {name}, with the prefix {prefix} for its functions' names: {what}")
@@ -608,7 +636,7 @@ PROPOSED_FUNCTIONS = "The functions' names are proposals made from their code, l
 
 
 def name_globals(target, image, program, provider, keys, uses, batch=40, shown_functions=4, out=print,
-                 shown_as=None):
+                 shown_as=None, device=""):
     """Ask for names of the memory at fixed addresses in keys that the readable_names table does not
     name yet, batch at a time, each with its uses in up to shown_functions functions; keep the names
     that are C identifiers no function or other global has. shown_as ({function: name shown}: a naming
@@ -638,7 +666,7 @@ def name_globals(target, image, program, provider, keys, uses, batch=40, shown_f
                         continue
                     fns.append(fname)
                 lines.append("    %s: %s" % (as_shown(fname), as_shown(line)))
-        user = "\n".join(lines)
+        user = about(device, "\n".join(lines))
         by_default = {uses[k]["name"]: k for k in part}
         try:
             answer = provider.ask(GLOBALS_SYSTEM, [{"role": "user", "content": user}])
@@ -732,7 +760,7 @@ def struct_uses(program, context, lifter, names, per=3):
 
 
 def name_structs(target, image, program, provider, plan, uses, wanted, taken=(), batch=8, shown_functions=4,
-                 out=print):
+                 out=print, device=""):
     """Ask for names of the plan's structures in wanted and of their fields, batch at a time, each with
     its definition and its uses in up to shown_functions functions; keep in the readable_names table's
     structs part what dread.naming.struct_names accepts (keyed by the structure's first anchor, with
@@ -759,7 +787,7 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
                     fns.append(fname)
                 lines.append("    %s: %s" % (fname, line))
             blocks.append("\n".join(lines))
-        user = "\n\n".join(blocks)
+        user = about(device, "\n\n".join(blocks))
         try:
             answer = provider.ask(STRUCTS_SYSTEM, [{"role": "user", "content": user}])
         except Exception as e:
@@ -801,7 +829,8 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
     return named
 
 
-def name_shared(target, image, program, provider, context, lifter, names, everything, out=print, shown_as=None):
+def name_shared(target, image, program, provider, context, lifter, names, everything, out=print, shown_as=None,
+                device=""):
     """The names the functions of names share with the rest of the image, asked before their own: the
     globals they use (name_globals, with their uses in the readable C of everything; shown_as: the
     functions' proposed names), then the structures their variables point to (name_structs; only
@@ -811,14 +840,15 @@ def name_shared(target, image, program, provider, context, lifter, names, everyt
     every = sorted(set(everything) | set(names))
     uses, by_function = global_uses(program, context, lifter, every)
     wanted = sorted(set().union(*(by_function.get(n, set()) for n in names))) if names else []
-    named = name_globals(target, image, program, provider, wanted, uses, out=out, shown_as=shown_as)
+    named = name_globals(target, image, program, provider, wanted, uses, out=out, shown_as=shown_as, device=device)
     context.globals = naming.load(image, "globals")
     structs = 0
     if context.plan.structs:                # (then the structures, which the variables' C shows)
         suses = struct_uses(program, context, lifter, every)
         swanted = sorted({k for n in names for k in context.plan.typed.get(n, {}).values()})
         taken = {e.get("name") for e in context.globals.values() if isinstance(e, dict)}
-        structs = name_structs(target, image, program, provider, context.plan, suses, swanted, taken, out=out)
+        structs = name_structs(target, image, program, provider, context.plan, suses, swanted, taken, out=out,
+                               device=device)
         context.structs, context._struct_names = naming.load(image, "structs"), None
     return named, structs
 
@@ -858,7 +888,7 @@ def direct_callers(program):
     return {name: sorted(callers) for name, callers in out.items()}
 
 
-def readable_jobs(target, program, context, lifter, names, callers, out=print):
+def readable_jobs(target, program, context, lifter, names, callers, out=print, device=""):
     """The questions for the variables of names, prepared before any is asked: the readable C, its
     digest and both texts made by dread.readable question_trees (in a pool of workers for many
     functions), the callers each question names (callers: {name: [callers]}, direct_callers). Returns
@@ -880,7 +910,7 @@ def readable_jobs(target, program, context, lifter, names, callers, out=print):
             out("%-24s named already" % name)
             known[name] = entry
             continue
-        user = "The function %s (readable C):\n\n```c\n%s\n```" % (name, code)
+        user = about(device, "The function %s (readable C):\n\n```c\n%s\n```" % (name, code))
         shown_callers = [c for c in callers.get(name, []) if may_show(target, c)][:12]
         if shown_callers:
             user += "\n\nIt is called by: %s." % ", ".join(shown_callers)
@@ -952,7 +982,7 @@ def keep_readable(image, folder, name, entry, why, log, out=print):
     return entry
 
 
-def name_readable(target, image, program, provider, name, context, lifter, tries=2, out=print):
+def name_readable(target, image, program, provider, name, context, lifter, tries=2, out=print, device=""):
     """Ask for the names of a function's variables in its readable C (dread readable), put them in with
     dread.naming and keep them in the image's readable_names table when the C still compiles to the
     same code; tell the model what was wrong and ask again up to tries answers. Returns the table
@@ -960,7 +990,8 @@ def name_readable(target, image, program, provider, name, context, lifter, tries
     this thread; name_variables asks many at a time."""
     from dread import readable
     context = context if context is not None else readable.Context()
-    jobs, known = readable_jobs(target, program, context, lifter, [name], {name: callers_of(program, name)}, out)
+    jobs, known = readable_jobs(target, program, context, lifter, [name], {name: callers_of(program, name)}, out,
+                                device)
     if not jobs:
         return known.get(name)
     folder = os.path.join(target.build, "pilot", image.name)
@@ -981,7 +1012,8 @@ def summed(spents):
     return spent
 
 
-def name_variables(target, image, program, make_provider, names, context, lifter, jobs=4, tries=2, out=print):
+def name_variables(target, image, program, make_provider, names, context, lifter, jobs=4, tries=2, out=print,
+                   device=""):
     """The variables of names named as name_readable names one function's, jobs functions at a time
     (--task readable). First, before any thread starts, every question is prepared (readable_jobs:
     the readable C in a pool of worker processes, which fork, the callers in one walk over the code);
@@ -997,7 +1029,7 @@ def name_variables(target, image, program, make_provider, names, context, lifter
     import concurrent.futures
     import threading
     started = time.time()
-    todo, known = readable_jobs(target, program, context, lifter, names, direct_callers(program), out)
+    todo, known = readable_jobs(target, program, context, lifter, names, direct_callers(program), out, device)
     out("dread pilot --task readable: %d functions to ask, %d named already, %d without readable C (prepared "
         "in %.0f s)" % (len(todo), len(known), len(names) - len(todo) - len(known), time.time() - started))
     folder = os.path.join(target.build, "pilot", image.name)
@@ -1299,9 +1331,10 @@ class Namer:
     lifter, the image's readable table, the callers of every function; with behaviour, what each
     function did in runs of its cases (dread.behaviour)."""
 
-    def __init__(self, target, image, program, flow=None, behaviour=False):
+    def __init__(self, target, image, program, flow=None, behaviour=False, device=""):
         from dread import build, flat, lift, readable
         self.target, self.image, self.program, self.flow = target, image, program, flow
+        self.device = device                # (known_device's line: every question begins with it)
         self.context = readable.Context(target, image, program, flow)
         self.lifter = lift.make_lifter(program, flow)
         self.readable = set(build.read_names(image.table("readable")))
@@ -1417,7 +1450,7 @@ class Namer:
             size, row = self.subsystem[fn.name]
             user += "\n\n" + SUBSYSTEM_LINE.format(size=size, name=row["name"], prefix=row["prefix"], what=row["what"])
             form += SUBSYSTEM
-        return user, form
+        return about(self.device, user), form
 
     def caller_names(self, fn):
         """The functions that call fn directly that an LLM may be shown, each once, in call order."""
@@ -1788,6 +1821,8 @@ def subsystem_question(namer, group, touched, shown_as=None):
     first, last = program.by_name[group[0]], program.by_name[group[-1]]
     lines = ["The group of %d functions at 0x%x-0x%x (of %d functions in the image)." % (
         len(group), first.entry, last.entry, len(program.functions))]
+    if getattr(namer, "device", ""):
+        lines.insert(0, namer.device)
     names = [shown_as.get(n, n) for n in members]
     named = [x for x in names if not UNNAMED.match(x)]
     if named:
@@ -2038,7 +2073,7 @@ def question_key(text):
 
 def name_functions(target, image, program, make_provider, names, flow=None, jobs=4, tries=2, out=print,
                    refine=False, behaviour=False, samples=1, temperature=None, gate=None, passes=1,
-                   ablate=False, subsystems=False):
+                   ablate=False, subsystems=False, device=""):
     """Proposals for the functions of names, callees first: a function is asked as soon as every
     function it calls among names has its answer (call_components; functions that call each other in
     a circle together), jobs questions at a time with a provider each (make_provider() makes one), each
@@ -2087,7 +2122,7 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
     import concurrent.futures
     import threading
     from dread import naming
-    namer = Namer(target, image, program, flow, behaviour)
+    namer = Namer(target, image, program, flow, behaviour, device)
     samples = max(1, int(samples))
     state = last_rows(read_name_rows(names_path(target, image)))     # {entry: the last row}
     refined = {e for e, r in state.items() if marked(r["shown"], REFINED)}
@@ -2626,6 +2661,171 @@ def spent_text(provider):
         sp["output"], " ($%.2f)" % sp["cost"] if sp.get("cost") is not None else "")
 
 
+# ---- what the image is (--task device) ----
+
+def device_texts(target, program):
+    """[(text, functions)] for the device question: the texts that the code of the functions an LLM may
+    be shown points to (dread.relations materialized: literal pools, addresses made from the pc, wide
+    constants; and the texts of a table one of them points to, dread.constants pointed), each counted
+    once a function; those most functions use first, then the longer; a text needs DEVICE_LETTERS
+    letters, and letters and spaces for at least half of it; DEVICE_TEXTS and DEVICE_CHARS at most.
+    Read from the listing alone (no C is made): seconds for thousands of functions."""
+    from dread.constants import pointed
+    from dread.relations import materialized
+    count = collections.Counter()
+    for fn in program.functions:
+        if not may_show(target, fn.name):
+            continue
+        found = set()
+        for address in materialized(program, fn):
+            got = pointed(program, address)
+            if got is None:
+                continue
+            if got[0] == "text":
+                found.add(got[1])
+            elif got[0] == "table":
+                found.update(value for kind, value, _ in got[1] if kind == "text")
+        count.update(found)
+
+    def wordy(text):
+        letters = sum(c.isalpha() for c in text)
+        return letters >= DEVICE_LETTERS and 2 * (letters + text.count(" ")) >= len(text)
+    out, used = [], 0
+    for text in sorted((t for t in count if wordy(t)), key=lambda t: (-count[t], -len(t), t)):
+        if len(out) >= DEVICE_TEXTS or used + len(text) > DEVICE_CHARS:
+            break
+        out.append((text, count[text]))
+        used += len(text)
+    return out
+
+
+def device_question(target, program, texts):
+    """The device question: the processor (the target's [arch]), the number of functions, and the texts
+    (device_texts), each with the number of functions that use it."""
+    arch = target.arch_data
+    processor = ", ".join(str(arch[k]) for k in ("name", "isa", "profile", "cpu") if arch.get(k))
+    lines = ["Processor: %s. Functions: %d." % (processor, len(program.functions)),
+             "The texts its code points to, with the number of functions that use each, the most used first:"]
+    lines += ['"%s" (%d)' % (text, k) for text, k in texts]
+    return "\n".join(lines)
+
+
+def parse_device(answer):
+    """The device an answer names (its device: line, its spaces made one, a full stop at its end
+    dropped), or None."""
+    m = re.search(r"^\s*device\s*:\s*(.+?)\s*$", answer or "", re.M | re.I)
+    return " ".join(m.group(1).split()).rstrip(".").strip() or None if m else None
+
+
+def choose_device(answers):
+    """(device, agreement) of the answers' devices (None for an answer that named none): the device
+    whose words (lower case, letters and digits) overlap most with the others' (the sum of the Jaccard
+    indexes; the first of equals), and the number of answers whose words overlap it by half or more,
+    itself among them. (None, 0) when no answer named one."""
+    named = [a for a in answers if a]
+    if not named:
+        return None, 0
+    words = [set(re.findall(r"[a-z0-9]+", a.lower())) for a in named]
+
+    def jaccard(x, y):
+        return len(x & y) / len(x | y) if x | y else 1.0
+    best = max(range(len(named)), key=lambda i: (sum(jaccard(words[i], w) for w in words), -i))
+    return named[best], sum(1 for w in words if jaccard(words[best], w) >= 0.5)
+
+
+def device_path(target, image):
+    return os.path.join(target.build, "pilot", image.name, "device.tsv")
+
+
+def read_device(target, image):
+    """device.tsv's last row ({column: value}), or None."""
+    path = device_path(target, image)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        lines = [line.rstrip("\n") for line in f if line.strip()]
+    if len(lines) < 2:
+        return None
+    return dict(zip(lines[0].split("\t"), lines[-1].split("\t")))
+
+
+def known_device(target, image):
+    """The line every naming question begins with: what the target's [llm] device states
+    (DEVICE_STATED), else what --task device read from the image's texts (DEVICE_READ, device.tsv's
+    last row), else "" (also when that reading was unknown)."""
+    stated = getattr(target, "llm_device", None)
+    if stated:
+        return DEVICE_STATED.format(device=" ".join(stated.split()).rstrip("."))
+    device = (read_device(target, image) or {}).get("device", "")
+    if not device or device.lower() == "unknown":
+        return ""
+    return DEVICE_READ.format(device=device)
+
+
+def about(device, user):
+    """A question with the device line (known_device's, or "") in front of it."""
+    return "%s\n\n%s" % (device, user) if device else user
+
+
+def device_task(target, image, program, provider, samples=NAME_SAMPLES, dry_run=False, out=print):
+    """dread pilot --task device: ask samples times what kind of device the image runs on
+    (DEVICE_SYSTEM; the question shows the texts its code points to, device_question) and keep the
+    device most answers agree with (choose_device) as a row of BUILD/pilot/IMAGE/device.tsv: the
+    device, the share of answers that agree as its confidence, every answer's device, the provider,
+    a digest of the texts shown and the question's key; the conversation goes to device.md beside it.
+    Returns 0, or 1 when no device was named."""
+    import hashlib
+    texts = device_texts(target, program)
+    user = device_question(target, program, texts)
+    if dry_run:
+        print(user)
+        out("dread pilot --task device --dry-run: %d texts would be shown; nothing asked" % len(texts))
+        return 0
+    if not texts:
+        out("dread pilot --task device: the code points to no texts; nothing asked")
+        return 1
+    log = ["# What the image is, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (
+        provider.label(), DEVICE_SYSTEM, user)]
+    answers = []
+    for k in range(max(1, samples)):
+        provider.last = {}
+        try:
+            answer = provider.ask(DEVICE_SYSTEM, [{"role": "user", "content": user}])
+        except Exception as e:
+            out("dread pilot --task device: the provider: %s" % e)
+            break
+        log.append("## Answer %d\n\n%s" % (k + 1, answer))
+        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+            out("dread pilot --task device: the provider declined")
+            break
+        answers.append(parse_device(answer))
+    path = device_path(target, image)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(os.path.join(os.path.dirname(path), "device.md"), "w") as f:
+        f.write("\n\n".join(log) + "\n")
+    device, agreement = choose_device(answers)
+    if device is None:
+        out("dread pilot --task device: no answer named a device (%s)" % os.path.join(os.path.dirname(path),
+                                                                                      "device.md"))
+        return 1
+    values = {"device": device, "confidence": "%.2f" % (agreement / len(answers)),
+              "samples": " | ".join(a or "-" for a in answers), "provider": provider.label(),
+              "texts": hashlib.sha1("\n".join(t for t, _ in texts).encode()).hexdigest()[:12],
+              "question": question_key(user)}
+    new = not os.path.exists(path)
+    with open(path, "a") as f:
+        if new:
+            f.write("\t".join(DEVICE_COLUMNS) + "\n")
+        f.write("\t".join(" ".join(values[k].split()) for k in DEVICE_COLUMNS) + "\n")
+    spent = provider.spent()
+    out("dread pilot --task device: %s (%d of %d answers agree; %d texts shown; %s)%s; %d answers, %d tokens in, "
+        "%d out%s" % (device, agreement, len(answers), len(texts), path,
+                      "" if known_device(target, image) == DEVICE_READ.format(device=device) else
+                      ": the target's [llm] device is shown instead", spent["answers"], spent["input"],
+                      spent["output"], " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""))
+    return 0
+
+
 def subsystems_task(target, image, program, flow, args, provider):
     """dread pilot --task subsystems: the image's groups (dread.groups find) named where subsystems.tsv
     has no name for them yet (name_subsystems: --samples questions a group, --jobs at a time), each
@@ -2633,7 +2833,7 @@ def subsystems_task(target, image, program, flow, args, provider):
     the questions instead."""
     import threading
     from dread import groups as grouping
-    namer = Namer(target, image, program, flow)
+    namer = Namer(target, image, program, flow, device="" if args.no_device else known_device(target, image))
     touched = grouping.evidence(target, image, program, flow)
     found = grouping.find(target, image, program, flow, touched=touched)
     namer.prepare_code([fn.name for fn in program.functions if may_show(target, fn.name)])
@@ -2748,11 +2948,16 @@ def main(argv=None):
                         help="with --score and --judge: judge pairwise, where they differ, which of this build's "
                              "proposals and another run's names.tsv is closer to the true name (instead of the "
                              "absolute verdicts)")
-    parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals", "subsystems"),
+    parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals", "subsystems", "device"),
                         default="write",
                         help="write C (default), find inputs for unrun instructions, propose names, name the "
                              "variables of readable C (dread readable), name only what the functions share: "
-                             "their globals and structures, or name the groups dread groups finds")
+                             "their globals and structures, name the groups dread groups finds, or say what "
+                             "kind of device the image is for, from its texts")
+    parser.add_argument("--no-device", action="store_true",
+                        help="--task name, readable, globals and subsystems: the questions do not say what the image "
+                             "is for (by default they begin with the target's [llm] device, or with what --task "
+                             "device read from its texts)")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):  # a line a function as it ends, also into a file (a run its
@@ -2802,6 +3007,13 @@ def main(argv=None):
             except llm.ProviderError as e:
                 print("dread pilot: %s" % e, file=sys.stderr)
                 return 1
+        if args.task == "device":
+            return device_task(target, image, program, provider, args.samples, args.dry_run)
+        device = "" if args.no_device else known_device(target, image)
+        if not device and not args.no_device and not args.dry_run and args.task in (
+                "name", "readable", "globals", "subsystems"):
+            print("dread pilot: the questions do not say what the image is for (dread pilot --task device reads it "
+                  "from its texts; [llm] device in dread.toml states it)", file=sys.stderr)
         if args.task == "subsystems":
             return subsystems_task(target, image, program, flow, args, provider)
         if args.task in ("readable", "globals"):
@@ -2824,7 +3036,7 @@ def main(argv=None):
                          if a in program.by_entry} if args.task == "globals" else None
             begun = time.time()
             made = name_shared(target, image, program, provider, context, lifter, names, everything,
-                               shown_as=proposals)
+                               shown_as=proposals, device=device)
             if args.task == "globals":
                 spent = provider.spent()
                 print("dread pilot --task globals: %d globals and %d structures named (the table has %d and %d); "
@@ -2835,7 +3047,7 @@ def main(argv=None):
                 return 0
             started = time.time()
             named, asked, spent = name_variables(target, image, program, lambda: llm.load(args.provider), names,
-                                                 context, lifter, jobs=args.jobs, tries=args.tries)
+                                                 context, lifter, jobs=args.jobs, tries=args.tries, device=device)
             spent = summed([provider.spent(), spent])     # (the globals' and structures' answers too)
             print("dread pilot --task readable: %d of %d functions named, %d asked, %d at a time (%.0f s; the globals "
                   "and structures before them %.0f s); %d answers, %d tokens in, %d out%s" % (
@@ -2866,7 +3078,7 @@ def main(argv=None):
                                                 flow, jobs=args.jobs, tries=min(args.tries, 3), refine=args.refine,
                                                 behaviour=args.behaviour, samples=args.samples,
                                                 temperature=args.temperature, gate=args.gate, passes=passes,
-                                                ablate=args.ablate, subsystems=args.subsystems)
+                                                ablate=args.ablate, subsystems=args.subsystems, device=device)
             cost = " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""
             print("dread pilot --task name: %d of %d asked functions got a proposal%s (%s); %d answers, %d tokens "
                   "in, %d out%s" % (made, asked, ", over the passes" if passes > 1 else "",

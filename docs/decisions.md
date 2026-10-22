@@ -9,6 +9,47 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## What the image is, in front of every naming question (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The pilot's naming questions said only "a binary image". On a private firmware
+  (DREAD's real-life test) the subsystem names called several large groups after a kind of device the
+  image is not for, with high confidence, and the same questions asked again guessed another kind for
+  one of them. A reverse engineer always knows what device a firmware is for. Should the questions
+  say it, where does it come from, and how much do they say?
+- **Options.** (a) Nothing, as before. (b) A person states it in the target. (c) A model reads it
+  once from the texts the image's code points to, and every question begins with that reading.
+  (d) As (c), with a sentence on what the program does as well.
+- **Choice.** (b) where a person stated it (`[llm] device`), else (c); not (d). `dread pilot --task
+  device` makes the reading (five answers, the device most of them agree with, in device.tsv) and the
+  naming tasks (name, readable, globals, subsystems) begin each question with it unless `--no-device`.
+  The reading is a task of its own, asked once, not before every naming run: the naming tasks' tests
+  script every answer, and a run that does not know the device says so on stderr.
+- **Why.** The private firmware's texts named its device at once (every answer agreed). With the line,
+  the groups in question were named after parts of the right kind of device, and the others stayed
+  as they were. With the program sentence as well, the model named groups after the parts that
+  sentence mentioned where they were other parts: the details primed it, the device alone did not.
+  The question asks for the device alone, the product or board, not what the program does or its
+  operating system: asked more openly, FreeRTOS GCC -Os read as "Cortex-M3 microcontroller board
+  running a FreeRTOS demo/test application", and that run's names put "demo" into kernel functions'
+  names (egdemo_set_bits for vEventGroupSetBitsCallback). Asked for the device alone, FreeRTOS reads
+  as unknown (five of five: its texts name no product or board), so its questions stay as they were;
+  the private firmware's reading stayed the same. The reading costs a few thousand tokens an image.
+- **Measured on FreeRTOS GCC -Os** (the defaults, Haiku 5.5; Sonnet's grounded pairwise judge, where
+  two runs' names differ): the run with the open reading against one without the line 25:45 by
+  functions (sign test p 0.02); but two runs without the line differed as much (24:40 and 37:21, p 0.06
+  and 0.05), and the same run won against another one without the line (45:32). Counted by groups
+  (dread groups: a group's names hang together through its prefix and reading), 6:11, 8:12, 14:5 and
+  15:8, none beyond chance (p 0.06 to 0.50); one group made 11 of the 20 that the first comparison
+  lost. So no effect on FreeRTOS's function names is measured either way.
+- **Not established.** Whether the function names gain where the device is known (a naming run of the
+  private firmware with the line against its last one: running); a reading can be wrong (the texts of
+  a library, a vendor's sample code), so the line says "likely, not certain", and a person's
+  statement wins.
+- **Undo.** `--no-device`, or remove device.tsv.
+- **Status.** In the code (dread/pilot.py: device_task, known_device, about).
+
 ## Function names scored against their source: a judge that reads it, the bench's main measure (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

@@ -599,6 +599,29 @@ its sources.
   50 functions (made outside the repository: it holds FreeRTOS's code) against the judge's verdicts;
   the judge on the bench's other builds and on a firmware it knows less; style words in the votes
   (dread.naming.vote pairs similarity()'s words), not tried.
+  What the image is, in front of every question (2026-10-22, docs/decisions.md): the questions said
+  only "a binary image". `--subsystems` on the private real-life test named several large groups after
+  a kind of device the image is not for, with high confidence, and asked again without anything else
+  changed it guessed another one; the texts its code points to say what it is at once (every answer
+  agreed). `dread pilot --task device` reads it from them (device_texts: the texts of the functions an
+  LLM may be shown, from the listing alone, the most used first; five answers, the device most agree
+  with, in device.tsv) and every naming question then begins with it; a target's `[llm] device`
+  states it instead; `--no-device` leaves it out. On the private firmware the groups in question were
+  then named after parts of the right kind of device and the others stayed as they were; a sentence
+  on what the program does as well made the model name groups after the parts that sentence mentioned,
+  so the line says the device alone: the product or board, not what the program does or its operating
+  system (asked more openly, FreeRTOS GCC -Os read as "a Cortex-M3 board running a FreeRTOS demo/test
+  application" and "demo" went into kernel functions' names). FreeRTOS now reads as unknown (its texts
+  name no product or board) and its questions stay as they were. Not measured yet: the function names
+  of the private firmware with the line against its last run (running).
+  Measuring between runs (2026-10-22): two FreeRTOS runs with the same settings differed by 24:40 and
+  37:21 in the grounded pairwise judge (sign test over functions p 0.06 and 0.05), as much as the open
+  reading's run against one without it (25:45, p 0.02; and 45:32 against another). A run's names hang
+  together (a group's prefix and reading go into all of its functions), so the sign test over
+  functions is too sure of itself: counted by groups, none of the four comparisons went beyond chance.
+  Next: the pairwise scores report a test over groups (the run's groups.tsv, or dread groups), and a
+  setting is compared over replicate runs; the decisions measured with the sign test over functions
+  (the votes 163:47, the groups 153:51, the grounded judge's +0.047) to be looked at again that way.
 - [ ] **A no-confidence vote on existing names** (the user's idea, 2026-10-22: reverse engineering as
   a puzzle, where a sub-picture can look right in one context and wrong in another). Not a periodic
   re-vote by the same model: consistency is not correctness (a misread driver was named after the

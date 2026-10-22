@@ -317,6 +317,19 @@ the truth's debug information; empty without), `from_file` (how many come from i
 functions with a proposal), `use_prefix` (how many of those begin with its prefix), `judged` (with
 `--judge`: whether the name and prefix name that file's part, `same`, `close`, `different`).
 
+### `BUILD/pilot/IMAGE/device.tsv`
+
+Written by `dread pilot --task device` (since 2026-10-22): what kind of device the image runs on, as
+a model read it from the texts its code points to. A line a run, appended; the last line counts:
+`device` (the device most answers agree with, dread pilot `choose_device`; `unknown` when the texts
+did not say), `confidence` (the share of the answers whose words overlap it by half or more),
+`samples` (every answer's device in the order asked, ` | ` between them, `-` for an answer that named
+none), `provider`, `texts` (a digest of the texts shown), `question` (a digest of the question's
+text). The conversation is kept in `device.md` beside it. The naming tasks (`--task name`,
+`readable`, `globals`, `subsystems`) begin every question with the last line's device, unless the
+target states one (`[llm] device`, docs/target.md), the device is `unknown`, or `--no-device` is
+given.
+
 ### `BUILD/lift-check/IMAGE/verdicts.tsv`
 
 Written by `dread lift --check`: one line per function it looked at, `function`, `verdict`

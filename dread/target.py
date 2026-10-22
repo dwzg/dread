@@ -60,7 +60,7 @@ SCHEMA = {
                  "include": list, "idioms": str, "tools": dict, "profile": str},
     "paths": {"build": str, "src": str},
     "host": {"jobs": int, "free_cores": int, "nice": int},
-    "llm": {"only": list},
+    "llm": {"only": list, "device": str},
 }
 IMAGE_KEYS = {
     "original": str, "vendor": str, "container": str, "base": int, "limit": int, "erased": int,
@@ -542,6 +542,7 @@ class Target:
         self.host = dict(data.get("host", {}))
         llm_data = data.get("llm", {})       # the functions an LLM may be shown (None: any)
         self.llm_only = set(llm_data["only"]) if "only" in llm_data else None
+        self.llm_device = llm_data.get("device")    # what the image is for, as a person states it (dread pilot)
         self.models = data.get("models", {})
         self.plugins = data.get("plugins", {})
         self.scenarios = data.get("scenarios", {})
