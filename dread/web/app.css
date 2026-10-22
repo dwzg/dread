@@ -9,6 +9,9 @@
   --ran: #8fb0d0; --missed: #c4514d; --unreached: #c3cad1;
   --code-kw: #3d6590; --code-type: #5c7c99; --code-num: #8a5a2b; --code-str: #4b744b; --code-com: #8d97a1;
   --shadow: 0 1px 2px rgba(20, 30, 40, .06), 0 8px 24px rgba(20, 30, 40, .08);
+  --g-named: #3f6d99; --g-named-line: #2b5279; --g-proposed: #a9c8e6; --g-proposed-line: #5B7FA5;
+  --g-unnamed: #eef1f4; --g-unnamed-line: #8e99a4; --g-text: #e4eee1; --g-text-line: #6d966a;
+  --g-call: #8b97a3; --g-read: #5B7FA5; --g-write: #b5763c; --g-weak: #a9b2bb; --g-struct: #6f9494;
   --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color-scheme: light;
@@ -24,6 +27,9 @@
     --ran: #48698a; --missed: #d0605b; --unreached: #363f48;
     --code-kw: #9cc2e6; --code-type: #8badc9; --code-num: #d4a570; --code-str: #9cc49a; --code-com: #66717c;
     --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .4);
+    --g-named: #9cc2e6; --g-named-line: #d3e5f5; --g-proposed: #3e6185; --g-proposed-line: #87acd1;
+    --g-unnamed: #232a31; --g-unnamed-line: #66727e; --g-text: #1f2c21; --g-text-line: #8db88a;
+    --g-call: #6f7c88; --g-read: #87acd1; --g-write: #d39c5f; --g-weak: #4f5a65; --g-struct: #7fabab;
     color-scheme: dark;
   }
 }
@@ -37,6 +43,9 @@
   --ran: #48698a; --missed: #d0605b; --unreached: #363f48;
   --code-kw: #9cc2e6; --code-type: #8badc9; --code-num: #d4a570; --code-str: #9cc49a; --code-com: #66717c;
   --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .4);
+  --g-named: #9cc2e6; --g-named-line: #d3e5f5; --g-proposed: #3e6185; --g-proposed-line: #87acd1;
+  --g-unnamed: #232a31; --g-unnamed-line: #66727e; --g-text: #1f2c21; --g-text-line: #8db88a;
+  --g-call: #6f7c88; --g-read: #87acd1; --g-write: #d39c5f; --g-weak: #4f5a65; --g-struct: #7fabab;
   color-scheme: dark;
 }
 
@@ -270,6 +279,74 @@ canvas.map { display: block; width: 100%; cursor: pointer; }
 .runs .k { font-family: var(--mono); font-size: 12px; }
 .runs .v { color: var(--muted); }
 
+/* relations: the graph around a function */
+.fn-title .modes { margin-right: 4px; }
+.fn-head.compact { padding-bottom: 10px; }
+.rel { display: flex; flex-direction: column; min-width: 0; }
+.rel-bar {
+  display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 7px 14px; font-size: 12px;
+  color: var(--muted); background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.rel-bar .grow { flex: 1; }
+.rel-k { color: var(--faint); }
+.rel-note { font-size: 12px; color: var(--muted); }
+.rel-note .busy-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 6px;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.chip .glyph { width: 11px; height: 11px; margin-left: -1px; }
+.rel-stage { position: relative; min-height: 360px; height: 60vh; background: var(--panel); overflow: hidden; }
+.graph { display: block; width: 100%; height: 100%; cursor: grab; user-select: none; touch-action: none; }
+.graph.panning { cursor: grabbing; }
+.graph .node { cursor: pointer; }
+.glyph .shape, .graph .shape { stroke-width: 1.3; fill: var(--g-unnamed); stroke: var(--g-unnamed-line); }
+.glyph .inner, .graph .inner { fill: none; stroke: var(--g-unnamed-line); stroke-width: .9; }
+.n-named .shape { fill: var(--g-named); stroke: var(--g-named-line); }
+.n-proposed .shape { fill: var(--g-proposed); stroke: var(--g-proposed-line); }
+.n-unnamed .shape { fill: var(--g-unnamed); stroke: var(--g-unnamed-line); }
+.k-text .shape, .glyph.k-text .shape { fill: var(--g-text); stroke: var(--g-text-line); }
+.k-rom .shape { stroke-dasharray: 2.5 1.5; }
+.graph .center .shape { stroke: var(--accent-strong); stroke-width: 3; }
+.graph .node text {
+  display: none; font: 11px var(--mono); fill: var(--text); paint-order: stroke; stroke: var(--panel); stroke-width: 3.5px;
+  stroke-linejoin: round; pointer-events: none;
+}
+.graph .node text .more { fill: var(--faint); font-size: 10px; }
+.graph.labels .node text, .graph.zoomed .node text, .graph .node.major text, .graph .node.hl text { display: block; }
+.graph .k-text text { fill: var(--code-str); }
+.graph .center text { font-size: 12.5px; font-weight: 650; }
+.edge { fill: none; stroke-width: 1.2; stroke: var(--g-call); }
+.edge.e-calls, .edge.e-refers-to-function { stroke: var(--g-call); }
+.edge.e-refers-to-function { stroke-dasharray: 5 3; }
+.edge.e-access { stroke: var(--g-read); }
+.edge.e-access.w { stroke: var(--g-write); }
+.edge.e-uses { stroke: var(--g-weak); stroke-dasharray: 4 3; }
+.edge.e-refers-to-text { stroke: var(--g-text-line); stroke-dasharray: 1.5 3; }
+.edge.e-uses-structure, .edge.e-points-to { stroke: var(--g-struct); stroke-dasharray: 6 3; }
+.mk-call { fill: var(--g-call); } .mk-read { fill: var(--g-read); } .mk-write { fill: var(--g-write); }
+.mk-hl { fill: var(--accent-strong); }
+.graph .node, .graph .edge { transition: opacity .12s; }
+.graph.focus .node:not(.hl) { opacity: .2; }
+.graph.focus .edge:not(.hl) { opacity: .07; }
+.graph .edge.hl { stroke-width: 2; }
+.graph.dense:not(.focus) .edge { opacity: .5; }
+.rel-legend {
+  position: absolute; left: 10px; bottom: 10px; display: grid; gap: 3px; padding: 6px 10px; font-size: 11px;
+  color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; opacity: .94;
+  pointer-events: none;
+}
+.lg-row { display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.lg .glyph { width: 12px; height: 12px; }
+.lg .line { width: 22px; height: 8px; }
+.tip.wide { white-space: normal; max-width: min(420px, calc(100vw - 16px)); font-family: var(--sans); }
+.tip .tip-h { font: 600 12.5px var(--mono); margin-bottom: 4px; overflow-wrap: anywhere; }
+.tip .tip-g { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; font-size: 12px; }
+.tip .tip-g .tk { color: var(--faint); }
+.tip .tip-g .mono { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
+.tip .dot { display: inline-block; vertical-align: 0; }
+.tip .tip-hint { margin-top: 5px; color: var(--faint); font-size: 11px; }
+
 /* floating things */
 .tip {
   position: fixed; z-index: 30; pointer-events: none; padding: 5px 9px; border-radius: 6px; font: 12px var(--mono);
@@ -322,4 +399,6 @@ canvas.map { display: block; width: 100%; cursor: pointer; }
   .cpane { border-left: 0; border-top: 1px solid var(--line); position: static; max-height: none; }
   .fn-head, .ov { padding-left: 16px; padding-right: 16px; }
   .cards { grid-template-columns: minmax(0, 1fr); }
+  .rel-legend { display: none; }
+  .rel-bar { padding: 7px 10px; }
 }

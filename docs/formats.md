@@ -261,3 +261,44 @@ Written by `dread lift --check`: one line per function it looked at, `function`,
 system run disagree or do not run all of it, or the overlay cannot place it; `by hand`: src defines
 it), `reason` (the lifter's or the test run's words), `missed` (for a dropped function, the
 instructions no case ran). `dread gui` reads it; `dread rename` renames in it.
+
+### `BUILD/relations/IMAGE/NAME.json`
+
+What `dread relations` read of one function, kept so that a second look costs a lift instead of
+the readable C's clean-up: `{"key", "facts": {"from": "readable C" or "listing", "why": why not its
+C (null when from it), "digest": its readable C's digest before names (dread.naming; what the
+readable_types plan is made for) or null, "refs": [[address, type or null, indexed, read, write],
+...]}}`. A ref is an access at a constant address (indexed false) or at a constant plus something
+(indexed true, at the sum of the constants), with its access type and whether it reads or writes,
+or an address the code only names (type null, neither read nor written). The key is a digest of
+what the facts are made from: the function's lifted C (or why there is none), regflow's cache key,
+the code that makes and reads readable C, the memory map. A file whose key differs is made again;
+none is edited by hand, and a renamed function's old file is left (its key no longer matches).
+
+## The relations graph (`dread relations --json`, `dread gui`'s `/api/graph`)
+
+`{"center", "depth", "nodes": [...], "edges": [...], "missing", "left_out": {"functions", "nodes"},
+"counts": {kind: number}}`. The GUI's answer has `pending` instead of `missing` (the functions
+whose facts its worker still makes), `status`, and an `origin` on each function node.
+
+- A node: `id` (`f:NAME`, `m:0xADDRESS`, `t:0xADDRESS`, `s:s_N`), `kind` (`function`, `global`,
+  `register`, `rom`, `table`, `text`, `structure`), `name`, `address` (null for a structure),
+  `size` (null where unknown), `naming` (`named`, `proposed`, `unnamed`; null for a text) and
+  `proposed` (`{"name", "what"}`) where the pilot proposed one.
+  - A function also has `distance` and `side` (`center`, `caller`, `callee`, `both`, or `referred`
+    for one whose address is taken here), `more` (`{"callers", "callees"}` beyond the graph), `facts`
+    (`readable C`, `listing`, `pending`, or null outside the depth), `why`, `lifted` and `readable`
+    (the tables').
+  - Memory has `types` (the access types) and `default` (the default name); a table also has `words`
+    (how many of its words were read).
+  - A text has `text`.
+  - A structure has `plan` (s_N) and `fields` ([[offset, type, field name], ...]).
+- An edge: `from`, `to`, `kind`:
+  - `calls`, with `sites`;
+  - `reads`, `writes` or `uses`, with `types` and `indexed`;
+  - `refers-to-text` and `refers-to-function`, from a function or a table;
+  - `uses-structure`, with `variables`;
+  - `points-to`, from structure to structure, with `offsets`.
+
+Nodes come in a fixed order (the functions by distance, side and address, then what each touches),
+so the same tables give the same record.

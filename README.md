@@ -55,6 +55,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
 | Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order; renaming everywhere at once (`dread rename`) | done |
 | Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes | done |
+| Relations (`dread relations`, and in the browser): a function's callers, callees, memory, texts and structures as a graph, each piece marked by how sure its name is | first version |
 | Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
 | Method documentation and a porting guide | done |
 | Library functions by their bytes (`dread whatcc`): the C library, libgcc and libm of every toolchain image, the host's and archives of one's own matched against an image's functions, the linker's fields masked: which toolchain's libraries it links (ties said as such) and names for a firmware without symbols (calls checked, ambiguous names given as such); ARM (RISC-V's relaxed calls not yet) | done |
@@ -99,6 +100,7 @@ bin/dread cclab compare ti-arm gcc-arm              # where two compilers differ
 bin/dread whatcc --target ~/dread-bench/freertos/mps2-gcc7-Os   # whose C library it links, and names for its functions
 bin/dread flat --target examples/gizmo/m3 print_status        # one function to read: names, literals, arguments
 bin/dread callsites --target examples/gizmo/m3 --by 0 gpio_set # who calls it, with which constants
+bin/dread relations --target examples/gizmo/m3 print_status   # what it calls, reads, writes and prints
 bin/dread callpair --target OTHER --other examples/gizmo/a32 --seed FUN_08000738=main   # names by call order
 bin/dread rename --target examples/gizmo/m3 beep_on=buzzer_on  # a new name everywhere, or nowhere
 bin/dread pilot --target examples/gizmo/m3 --limit 4          # a language model writes C, the tools decide
@@ -112,10 +114,20 @@ decided: where each function stands (written by hand, by the pilot, lifted, refu
 map of the image, the listing with the instructions the cases ran or missed, the C beside it,
 verdicts and cases, search by name, address and text. It changes nothing but names (through `dread
 rename`) and notes (annotations.txt); everything else is the tools' work. Keys: `/` search, `j` `k`
-lines, `Enter` follow, `n` rename, `;` note, `?` all of them.
+lines, `Enter` follow, `n` rename, `;` note, `r` relations, `?` all of them.
+
+A function's relations are the pieces of the puzzle around it, as a graph:
+- its callers above and callees below, to a depth of 1 to 3;
+- the memory its readable C reads and writes;
+- the texts and tables its constants point to;
+- the structures its variables point to.
+
+Each piece is coloured by how sure its name is: named, proposed by the pilot, or none yet. A click
+walks to another function; pointing at a piece lights what it joins.
 
 ![The overview of gizmo in dread gui](docs/images/gui-overview.webp)
 ![A function with its listing, coverage and C](docs/images/gui-function.webp)
+![The relations of a function: who writes the global that another one reads](docs/images/gui-relations.webp)
 
 ### With Claude Code
 

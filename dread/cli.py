@@ -27,6 +27,7 @@ COMMANDS = {
     "rename": ("dread.rename", "give functions new names, everywhere a name is written"),
     "gui": ("dread.gui", "browse an image in the web browser: listings, C, coverage, verdicts"),
     "callsites": ("dread.callsites", "the calls of functions with the constant arguments at each"),
+    "relations": ("dread.relations", "a function's neighbourhood as a graph: calls, memory, texts, structures"),
     "samecode": ("dread.samecode", "functions that are the same code as functions of another image"),
     "callpair": ("dread.callpair", "names for another image's functions from the order of calls"),
     "noreturn": ("dread.noreturn", "the functions that never return"),

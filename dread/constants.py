@@ -213,20 +213,22 @@ POINTED_WORDS = 4       # words of a table a constant points to that pointed_not
 SMALLEST_POINTER = 0x100    # a smaller constant is a number, even where the image begins at 0
 
 
-def pointed_note(program, address):
-    """What a reader wants to know about a constant: the text it points to ("CARD FULL"), the
-    function whose entry it is (&name), or, when it points to a table of words (aligned, in the
-    image), the texts and functions its first words point to: a localized message's table of
-    pointers, one a language, or a menu's pairs of a handler and a label (-> {name, "Label", ...}).
-    None when it is none of these."""
+def pointed(program, address):
+    """What a constant points to, as data: ("text", the text), ("function", its name) when it is a
+    function's entry (the Thumb bit aside), or, when it points to a table of words (aligned, in the
+    image) one of whose first POINTED_WORDS words points to a text or a function, ("table", [(kind,
+    value, word)]) with kind "text" (value the text), "function" (value the name) or "word" (value
+    the word); None when it is none of these. pointed_note writes it for a reader; dread relations
+    makes nodes of it."""
     if address < SMALLEST_POINTER:
         return None
     text = string_at(program, address)
     if text:
-        return '"%s"' % text
-    fn = program.by_entry.get(address & ~1) if hasattr(program, "by_entry") else None
+        return "text", text
+    by_entry = getattr(program, "by_entry", {})
+    fn = by_entry.get(address & ~1)
     if fn is not None and (address & ~1) == fn.entry:
-        return "&" + fn.name
+        return "function", fn.name
     if address % 4 or not program.in_image(address, 4):
         return None
     parts, useful = [], False
@@ -236,13 +238,31 @@ def pointed_note(program, address):
             break
         w = program.word(a)
         text = string_at(program, w)
-        callee = program.by_entry.get(w & ~1)
+        callee = by_entry.get(w & ~1)
         if text:
-            parts.append('"%s"' % text)
+            parts.append(("text", text, w))
             useful = True
         elif callee is not None and (w & ~1) == callee.entry:
-            parts.append(callee.name)
+            parts.append(("function", callee.name, w))
             useful = True
         else:
-            parts.append("0x%x" % w)
-    return "-> {%s, ...}" % ", ".join(parts) if useful else None
+            parts.append(("word", w, w))
+    return ("table", parts) if useful else None
+
+
+def pointed_note(program, address):
+    """What a reader wants to know about a constant: the text it points to ("CARD FULL"), the
+    function whose entry it is (&name), or, when it points to a table of words (aligned, in the
+    image), the texts and functions its first words point to: a localized message's table of
+    pointers, one a language, or a menu's pairs of a handler and a label (-> {name, "Label", ...}).
+    None when it is none of these (pointed)."""
+    got = pointed(program, address)
+    if got is None:
+        return None
+    kind, value = got
+    if kind == "text":
+        return '"%s"' % value
+    if kind == "function":
+        return "&" + value
+    return "-> {%s, ...}" % ", ".join('"%s"' % v if k == "text" else v if k == "function" else "0x%x" % v
+                                      for k, v, _ in value)

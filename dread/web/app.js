@@ -8,6 +8,8 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 const hex = (n) => "0x" + n.toString(16);
 const hex8 = (n) => n.toString(16).padStart(8, "0");
 const fnLink = (name, at) => "#/f/" + encodeURIComponent(name) + (at != null ? "@" + hex(at) : "");
+const relLink = (name) => "#/r/" + encodeURIComponent(name);
+const modeLink = (name) => (S.mode === "relations" ? relLink(name) : fnLink(name));    // the view it is in
 
 const ORIGINS = {
   hand: { short: "hand", long: "written by hand" },
@@ -22,7 +24,7 @@ const ANALYSES = { callers: "callers", endless: "returns", flow: "registers", te
 const S = {
   overview: null, functions: [], byName: new Map(), order: [], current: null, sel: -1,
   filter: "", origins: new Set(), sort: "address", showBytes: false, showC: true, by: "bytes",
-  generation: 0, pending: [], view: null, tab: null,
+  generation: 0, pending: [], view: null, tab: null, mode: "code",
 };
 
 // ---- small helpers ----
@@ -164,9 +166,9 @@ let renders = 0;
 
 async function route(keep = false) {
   const hash = decodeURIComponent(location.hash.slice(1));
-  const m = hash.match(/^\/f\/([^@]+)(?:@(0x[0-9a-f]+))?$/i);
+  const m = hash.match(/^\/([fr])\/([^@]+)(?:@(0x[0-9a-f]+))?$/i);
   if (!keep) $("#side").classList.remove("open");
-  if (m) await showFunction(m[1], m[2] ? parseInt(m[2], 16) : null, keep);
+  if (m) await showFunction(m[2], m[3] ? parseInt(m[3], 16) : null, keep, m[1] === "r" ? "relations" : "code");
   else await showOverview(keep);
 }
 
@@ -182,6 +184,7 @@ async function showOverview(keep = false) {
     return;
   }
   if (mine !== renders) return;
+  stopRelations();
   const scroll = $("#main").scrollTop, again = keep && S.view === "overview";
   S.view = "overview";
   S.overview = o;
@@ -326,7 +329,7 @@ function mapHit(event) {
 
 // ---- one function ----
 
-async function showFunction(name, at, keep = false) {
+async function showFunction(name, at, keep = false, mode = "code") {
   const mine = ++renders;
   let d;
   try {
@@ -337,13 +340,22 @@ async function showFunction(name, at, keep = false) {
   }
   if (mine !== renders) return;
   const main = $("#main");
-  const same = S.current && S.current.header.name === name && S.view === "function";
+  const same = S.current && S.current.header.name === name && S.view === "function" && S.mode === mode;
   const scroll = main.scrollTop, sel = S.sel;
   S.view = "function";
+  S.mode = mode;
   S.current = d;
   S.sel = -1;
   document.title = name + " · DREAD";
   if (!same) S.tab = null;
+  if (mode === "relations") {
+    main.innerHTML = headerHTML(d, true) + relationsHTML();
+    main.scrollTop = 0;
+    revealInList(name);
+    watch(d.status);
+    return showRelations(name, mine);
+  }
+  stopRelations();
   main.innerHTML = headerHTML(d) + `
     <div class="split${S.showC ? "" : " no-c"}" id="split">
       <section class="pane">
@@ -360,7 +372,7 @@ async function showFunction(name, at, keep = false) {
   watch(d.status);
 }
 
-function headerHTML(d) {
+function headerHTML(d, compact = false) {
   const h = d.header;
   const meta = [`<span class="mono">${hex8(h.entry)}–${hex8(h.end)}</span>`, `${h.count} instructions`, `${d.size} bytes`, esc(h.isa)];
   if (d.placement) {
@@ -390,16 +402,19 @@ function headerHTML(d) {
   const cases = Object.entries(d.cases).filter(([k]) => k !== "auto").map(([k, n]) => `${n} ${k}`);
   if (cases.length || d.cases.auto) facts.push(["cases", (cases.join(" · ") || "") + (d.cases.auto ? `${cases.length ? " · " : ""}generated for it (auto)` : "")]);
   const notes = h.notes.length ? `<div class="notes">${esc(h.notes.join("\n"))}</div>` : "";
+  const modes = `<div class="seg modes" id="modes">${[["code", "Code"], ["relations", "Relations"]].map(([m, label]) =>
+    `<button data-mode="${m}"${m === S.mode ? ' class="on"' : ""} title="${m === "code" ? "The listing and the C" : "The functions, memory, texts and structures around it"} (r)">${label}</button>`).join("")}</div>`;
   return `
-    <div class="fn-head">
+    <div class="fn-head${compact ? " compact" : ""}">
       <div class="fn-title"><h1>${esc(h.name)}</h1>
         <span class="badge">${dot(d.origin)}${esc(ORIGINS[d.origin].long)}</span>${d.system ? "<span class=\"badge\">tested by the system run</span>" : ""}
         <span class="grow"></span>
+        ${modes}
         <button id="note-btn" title="Note on the selected line (;)">Note</button>
         <button id="rename-btn" title="Rename (n)">Rename</button></div>
       <div class="meta">${meta.map((m) => `<span>${m}</span>`).join("")}</div>
-      <div class="facts">${facts.map(([k, val]) => `<span class="k">${k}</span><span class="v">${val}</span>`).join("")}</div>
-      ${notes}
+      ${compact ? "" : `<div class="facts">${facts.map(([k, val]) => `<span class="k">${k}</span><span class="v">${val}</span>`).join("")}</div>
+      ${notes}`}
     </div>`;
 }
 
@@ -533,6 +548,542 @@ function goLabel(address) {
   selectAddress(address, true);
 }
 
+// ---- relations: the graph around a function (dread relations, /api/graph) ----
+//
+// The server says what is related (calls, memory read and written, texts, structures) and how sure
+// each name is; this lays it out (a small force simulation: callers pulled up, callees down, the
+// function fixed in the middle, seeded from the last layout so that a step through the graph keeps
+// its shape) and draws it as SVG. No randomness: the same graph reached the same way gives the same
+// picture.
+
+const KIND_GROUP = { function: "function", global: "memory", register: "memory", rom: "memory", table: "memory",
+  text: "text", structure: "structure" };
+const KIND_LONG = { function: "function", global: "memory in RAM", register: "device register", rom: "data in rom",
+  table: "table of pointers", text: "text", structure: "structure (readable_types)" };
+const GROUPS = [["function", "functions"], ["memory", "memory"], ["text", "texts"], ["structure", "structures"]];
+const GROUP_TITLE = { function: "the callers, callees and functions whose address is taken",
+  memory: "globals, device registers, data in rom and tables of pointers", text: "the texts the code points to",
+  structure: "the structures its variables point to (readable_types)" };
+const NAMING = { named: "named", proposed: "name proposed", unnamed: "no name yet" };
+const LABELS_ALL = 60;          // up to this many nodes every label shows; beyond, LABELS_SOME and on hover
+const LABELS_SOME = 28;         // the labels a larger graph shows: the function, then the best-joined near pieces
+const LABEL_ZOOM = 1.35;        // and every label from this zoom on
+const SIM = { layer: 120, band: 0.8, spread: 90, repel: 9000, spring: 0.08, pull: 0.12, gravity: 0.004, step: 30, reach: 420 };
+const REST = { calls: 95, "refers-to-function": 85, access: 52, "refers-to-text": 44, "uses-structure": 60, "points-to": 60 };
+
+const R = {
+  center: null, depth: 1, graph: null, pos: new Map(), view: null, sticky: null, timer: null,
+  groups: new Set(GROUPS.map(([k]) => k)), shown: null, drag: null, touched: false,
+};
+const KEEP_POSITIONS = 4000;    // positions remembered across the walk at most
+
+function shapePath(kind, center = false) {
+  if (kind === "function") return `<circle class="shape" r="${center ? 10 : 6.5}"/>`;
+  if (kind === "register") return `<path class="shape" d="M0,-7.5L7.5,0L0,7.5L-7.5,0Z"/>`;
+  if (kind === "table") return `<rect class="shape" x="-8" y="-5" width="16" height="10" rx="1.5"/><path class="inner" d="M-8,0H8M0,-5V5"/>`;
+  if (kind === "text") return `<rect class="shape" x="-8" y="-4.5" width="16" height="9" rx="4.5"/>`;
+  if (kind === "structure") return `<path class="shape" d="M0,-7.5L7.5,5.5H-7.5Z"/>`;
+  return `<rect class="shape" x="-5.5" y="-5.5" width="11" height="11" rx="${kind === "rom" ? 0 : 2}"/>`;
+}
+
+function radius(d) {
+  return d.kind === "function" ? (d.id === "f:" + R.center ? 11 : 7) : d.kind === "text" || d.kind === "table" ? 8 : 7;
+}
+
+function relationsHTML() {
+  const icon = { function: "function", memory: "global", text: "text", structure: "structure" };
+  return `
+    <section class="rel" id="rel">
+      <div class="rel-bar">
+        <span class="rel-k">depth</span>
+        <div class="seg" id="rel-depth">${[1, 2, 3].map((n) =>
+          `<button data-depth="${n}"${n === R.depth ? ' class="on"' : ""} title="callers and callees ${n} call${n > 1 ? "s" : ""} away">${n}</button>`).join("")}</div>
+        <div class="chips" id="rel-kinds">${GROUPS.map(([k, label]) =>
+          `<span class="chip${R.groups.has(k) ? " on" : ""}" data-group="${k}" title="${GROUP_TITLE[k]}"><svg viewBox="-9 -9 18 18" class="glyph k-${icon[k]}">${shapePath(icon[k])}</svg>${label}</span>`).join("")}</div>
+        <span class="grow"></span>
+        <span class="rel-note" id="rel-note"></span>
+        <button id="rel-fit" title="Fit the graph (f)">Fit</button>
+      </div>
+      <div class="rel-stage" id="rel-stage">
+        <svg class="graph" id="rel-svg" role="img" aria-label="Relations"></svg>
+        <div class="rel-legend" id="rel-legend">${legendHTML()}</div>
+      </div>
+    </section>`;
+}
+
+function legendHTML() {
+  const sw = (cls, text) => `<span class="lg"><svg viewBox="-9 -9 18 18" class="glyph ${cls}">${shapePath("function")}</svg>${text}</span>`;
+  const sh = (kind, text) => `<span class="lg"><svg viewBox="-9 -9 18 18" class="glyph k-${kind} n-unnamed">${shapePath(kind)}</svg>${text}</span>`;
+  const ln = (cls, text) => `<span class="lg"><svg viewBox="0 0 22 8" class="line"><path class="edge ${cls}" d="M1,4H21"/></svg>${text}</span>`;
+  return `<div class="lg-row">${sw("n-named", "named")}${sw("n-proposed", "name proposed")}${sw("n-unnamed", "no name yet")}</div>` +
+    `<div class="lg-row">${sh("global", "RAM")}${sh("register", "register")}${sh("rom", "rom")}${sh("table", "table")}${sh("text", "text")}${sh("structure", "structure")}</div>` +
+    `<div class="lg-row">${ln("e-calls", "calls")}${ln("e-refers-to-function", "address taken")}${ln("e-access", "reads")}${ln("e-access w", "writes")}</div>` +
+    `<div class="lg-row">${ln("e-uses", "uses")}${ln("e-refers-to-text", "refers to")}${ln("e-uses-structure", "structure")}</div>`;
+}
+
+function stopRelations() {
+  clearTimeout(R.timer);
+  R.timer = null;
+}
+
+async function showRelations(name, mine) {
+  stopRelations();
+  if (R.center !== name) { R.sticky = null; }
+  let g;
+  try {
+    g = await api("/api/graph", { name, depth: R.depth });
+  } catch (e) {
+    if (mine === renders) relNote(e.message);
+    return;
+  }
+  if (mine !== renders || S.mode !== "relations") return;
+  const moved = R.center !== name;
+  if (moved) R.touched = false;
+  R.center = name;
+  R.graph = g;
+  sizeStage();
+  layoutGraph(moved);
+  drawGraph();
+  if (moved || !R.view || !R.touched) fitGraph(); else applyView();      // (it grows as the C is read)
+  relNote();
+  if (g.waiting || g.pending.length) {
+    R.timer = setTimeout(() => { if (mine === renders) showRelations(name, mine); }, g.waiting ? 500 : 900);
+  }
+}
+
+function relNote(error) {
+  const box = $("#rel-note");
+  if (!box) return;
+  if (error) { box.innerHTML = `<span class="bad">${esc(error)}</span>`; return; }
+  const g = R.graph, shown = R.shown;
+  const parts = [];
+  if (g.waiting) parts.push("finding the callers");
+  else {
+    parts.push(`${shown.nodes.length} of ${g.nodes.length} nodes`);
+    if (g.pending.length) parts.push(`<span class="busy-dot"></span>reading the C of ${g.pending.length} function${g.pending.length > 1 ? "s" : ""}`);
+    if (g.left_out && (g.left_out.functions || g.left_out.nodes)) {
+      parts.push(`<span class="warn" title="dread relations' limits: MAX_FUNCTIONS, MAX_NODES">${g.left_out.functions + g.left_out.nodes} left out</span>`);
+    }
+  }
+  box.innerHTML = parts.join(" · ");
+}
+
+// What the filters let through: the center and what joins it through nodes of the kinds shown.
+function visibleGraph() {
+  const g = R.graph, center = "f:" + g.center;
+  const adj = new Map();
+  for (const e of g.edges) {
+    if (!adj.has(e.from)) adj.set(e.from, []);
+    if (!adj.has(e.to)) adj.set(e.to, []);
+    adj.get(e.from).push(e.to);
+    adj.get(e.to).push(e.from);
+  }
+  const visible = new Set(g.nodes.some((n) => n.id === center) ? [center] : []);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const n of g.nodes) {
+      if (visible.has(n.id) || !R.groups.has(KIND_GROUP[n.kind])) continue;
+      if ((adj.get(n.id) || []).some((m) => visible.has(m))) { visible.add(n.id); grew = true; }
+    }
+  }
+  const nodes = g.nodes.filter((n) => visible.has(n.id));
+  const links = [], pairs = new Map();
+  for (const e of g.edges) {
+    if (!visible.has(e.from) || !visible.has(e.to)) continue;
+    if (e.kind === "reads" || e.kind === "writes" || e.kind === "uses") {
+      const key = e.from + "\u0000" + e.to;
+      let l = pairs.get(key);
+      if (!l) {
+        l = { source: e.from, target: e.to, kind: "access", read: false, write: false, uses: false, edges: [] };
+        pairs.set(key, l);
+        links.push(l);
+      }
+      l[e.kind === "reads" ? "read" : e.kind === "writes" ? "write" : "uses"] = true;
+      l.edges.push(e);
+    } else {
+      links.push({ source: e.from, target: e.to, kind: e.kind, edges: [e] });
+    }
+  }
+  return { nodes, links, byId: new Map(nodes.map((n) => [n.id, n])) };
+}
+
+function layoutGraph(moved) {
+  const shown = R.shown = visibleGraph();
+  const { nodes, links } = shown;
+  const n = nodes.length, center = "f:" + R.graph.center;
+  const index = new Map(nodes.map((d, i) => [d.id, i]));
+  const x = new Float64Array(n), y = new Float64Array(n), ty = new Float64Array(n);
+  const layered = new Uint8Array(n), known = new Uint8Array(n);
+  const neighbours = nodes.map(() => []);
+  const L = links.map((l) => {
+    const s = index.get(l.source), t = index.get(l.target);
+    neighbours[s].push(t);
+    neighbours[t].push(s);
+    return { s, t, len: REST[l.kind] || 60 };
+  });
+  for (const l of L) {                  // (a hub's links pull softly: its forty callers do not fall into it)
+    l.k = SIM.spring / Math.sqrt(Math.max(1, Math.min(neighbours[l.s].length, neighbours[l.t].length)));
+  }
+  const old = R.pos, base = old.get(center) || { x: 0, y: 0 };
+  // functions on layers: callers above, callees and taken addresses below, by address along a layer
+  const layers = new Map();
+  nodes.forEach((d, i) => {
+    if (d.kind !== "function") return;
+    const dist = d.distance || 0;
+    ty[i] = d.side === "caller" ? -dist * SIM.layer : d.side === "callee" || d.side === "referred" ? dist * SIM.layer : 0;
+    layered[i] = 1;
+    if (!layers.has(ty[i])) layers.set(ty[i], []);
+    layers.get(ty[i]).push(i);
+  });
+  for (const [level, members] of layers) {
+    members.sort((a, b) => nodes[a].address - nodes[b].address);
+    members.forEach((i, j) => { x[i] = (j - (members.length - 1) / 2) * SIM.spread; y[i] = level; });
+  }
+  const place = (i) => {
+    const p = old.get(nodes[i].id);
+    if (p) { x[i] = p.x - base.x; y[i] = p.y - base.y; known[i] = 1; }
+  };
+  nodes.forEach((d, i) => { if (d.kind === "function") place(i); });
+  let k = 0;                            // the rest around their first neighbour already placed (golden angle)
+  nodes.forEach((d, i) => {
+    if (d.kind === "function") return;
+    const at = neighbours[i].find((j) => nodes[j].kind === "function") ?? neighbours[i][0];
+    const angle = k * 2.399963, r = 48 + 5 * Math.sqrt(k);
+    k += 1;
+    x[i] = (at != null ? x[at] : 0) + r * Math.cos(angle);
+    y[i] = (at != null ? y[at] : 0) + r * Math.sin(angle);
+    place(i);
+  });
+  const c = index.get(center);
+  if (c != null) { x[c] = 0; y[c] = 0; }
+  const share = n ? known.reduce((t, v) => t + v, 0) / n : 0;
+  // fresh: the whole cooling; a step to another function: most of it; more of the same graph: a settling
+  const [iterations, start] = share < 0.25 ? [320, 1] : moved ? [240, 0.6] : share > 0.6 ? [90, 0.3] : [200, 0.6];
+  let temp = start;
+  const cool = Math.pow(0.02 / temp, 1 / iterations);
+  const fx = new Float64Array(n), fy = new Float64Array(n);
+  const reach2 = SIM.reach * SIM.reach;
+  for (let it = 0; it < iterations; it++) {
+    fx.fill(0);
+    fy.fill(0);
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        let dx = x[i] - x[j], dy = y[i] - y[j], d2 = dx * dx + dy * dy;
+        if (d2 > reach2) continue;
+        if (d2 < 0.01) { dx = 0.1 * (1 + (i % 7)); dy = 0.1 * (1 + (j % 5)); d2 = dx * dx + dy * dy; }
+        const f = SIM.repel / (d2 * Math.sqrt(d2));          // (inverse square: near nodes part, far ones barely)
+        fx[i] += dx * f; fy[i] += dy * f; fx[j] -= dx * f; fy[j] -= dy * f;
+      }
+    }
+    for (const l of L) {
+      const dx = x[l.t] - x[l.s], dy = y[l.t] - y[l.s], d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      const f = (d - l.len) * l.k / d;
+      fx[l.s] += dx * f; fy[l.s] += dy * f; fx[l.t] -= dx * f; fy[l.t] -= dy * f;
+    }
+    const max = SIM.step * temp;
+    for (let i = 0; i < n; i++) {
+      if (i === c) continue;
+      let mx = fx[i] - x[i] * SIM.gravity, my = fy[i] - y[i] * SIM.gravity;
+      if (layered[i]) {                 // callers kept above their line, callees below theirs, free beyond it
+        const line = ty[i] * SIM.band;
+        if (ty[i] < 0 ? y[i] > line : ty[i] > 0 ? y[i] < line : true) my += (line - y[i]) * SIM.pull;
+      }
+      const m = Math.sqrt(mx * mx + my * my);
+      if (m > max) { mx *= max / m; my *= max / m; }
+      x[i] += mx;
+      y[i] += my;
+    }
+    temp *= cool;
+  }
+  R.pos = new Map();                    // (every position in the frame of the function now in the middle)
+  if (old.size < KEEP_POSITIONS) for (const [id, p] of old) R.pos.set(id, { x: p.x - base.x, y: p.y - base.y });
+  nodes.forEach((d, i) => R.pos.set(d.id, { x: x[i], y: y[i] }));
+}
+
+function nodeLabel(d) {
+  const name = d.kind === "text" ? (d.name.length > 30 ? d.name.slice(0, 28) + "…\"" : d.name) : d.name;
+  const more = d.more ? d.more.callers + d.more.callees : 0;
+  return esc(name) + (more ? `<tspan class="more" dx="4">+${more}</tspan>` : "");
+}
+
+function drawGraph() {
+  const svg = $("#rel-svg");
+  if (!svg || !R.shown) return;
+  const { nodes, links } = R.shown, center = "f:" + R.graph.center;
+  const shared = new Map();             // how many functions each node is joined to: a shared piece is labelled
+  for (const l of links) {
+    shared.set(l.target, (shared.get(l.target) || 0) + 1);
+    shared.set(l.source, (shared.get(l.source) || 0) + 1);
+  }
+  const marker = (id, cls) => `<marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" ` +
+    `markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="${cls}" d="M0,1.5L9,5L0,8.5Z"/></marker>`;
+  const defs = `<defs>${marker("ah-call", "mk-call")}${marker("ah-read", "mk-read")}${marker("ah-write", "mk-write")}${marker("ah-hl", "mk-hl")}</defs>`;
+  const edges = links.map((l, i) => {
+    const cls = l.kind === "access" ? `e-access${l.write ? " w" : ""}${l.uses && !l.read && !l.write ? " e-uses" : ""}` : "e-" + l.kind;
+    return `<path class="edge ${cls}" data-i="${i}"/>`;
+  }).join("");
+  const many = nodes.length > LABELS_ALL;
+  const ranked = nodes.filter((d) => d.id !== center && ((d.kind === "function" && (d.distance || 0) <= 1) || (shared.get(d.id) || 0) > 2))
+    .sort((a, b) => (shared.get(b.id) || 0) - (shared.get(a.id) || 0) || (a.distance || 0) - (b.distance || 0) || (a.address || 0) - (b.address || 0));
+  const labelled = new Set([center, ...ranked.slice(0, LABELS_SOME).map((d) => d.id)]);
+  const body = nodes.map((d) => {
+    const p = R.pos.get(d.id);
+    const major = !many || labelled.has(d.id);
+    const naming = d.kind === "text" ? "n-none" : "n-" + (d.naming || "unnamed");
+    const r = radius(d);
+    return `<g class="node k-${d.kind} ${naming}${d.id === center ? " center" : ""}${major ? " major" : ""}" data-id="${esc(d.id)}" ` +
+      `transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">${shapePath(d.kind, d.id === center)}` +
+      `<text x="${r + 3}" y="4">${nodeLabel(d)}</text></g>`;
+  }).join("");
+  svg.innerHTML = `${defs}<g id="rel-view"><g class="edges">${edges}</g><g class="nodes">${body}</g></g>`;
+  svg.classList.toggle("labels", !many);
+  svg.classList.toggle("dense", links.length > 120);
+  placeEdges();
+  if (R.sticky && R.shown.byId.has(R.sticky)) focusNode(R.sticky);
+}
+
+function placeEdges(only) {
+  const svg = $("#rel-svg");
+  if (!svg || !R.shown) return;
+  const { links, byId } = R.shown;
+  const paths = svg.querySelectorAll(".edges .edge");
+  links.forEach((l, i) => {
+    if (only && l.source !== only && l.target !== only) return;
+    const a = R.pos.get(l.source), b = R.pos.get(l.target), path = paths[i];
+    if (!a || !b || !path) return;
+    const dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
+    const ra = radius(byId.get(l.source)) + 1.5, rb = radius(byId.get(l.target)) + 1.5;
+    const x1 = a.x + dx / d * ra, y1 = a.y + dy / d * ra, x2 = b.x - dx / d * rb, y2 = b.y - dy / d * rb;
+    path.setAttribute("d", `M${x1.toFixed(1)},${y1.toFixed(1)}L${x2.toFixed(1)},${y2.toFixed(1)}`);
+    let start = null, end = null;      // data flows: a read towards the function, a write towards the memory
+    if (l.kind === "calls" || l.kind === "refers-to-function" || l.kind === "points-to") end = "ah-call";
+    else if (l.kind === "access") { if (l.read) start = "ah-read"; if (l.write) end = "ah-write"; }
+    if (start) path.setAttribute("marker-start", `url(#${start})`); else path.removeAttribute("marker-start");
+    if (end) path.setAttribute("marker-end", `url(#${end})`); else path.removeAttribute("marker-end");
+  });
+}
+
+function sizeStage() {
+  const stage = $("#rel-stage");
+  if (!stage) return;
+  const top = stage.getBoundingClientRect().top;
+  stage.style.height = Math.max(360, Math.floor(window.innerHeight - top - 10)) + "px";
+}
+
+// The function in the middle, everything else in view: the zoom that fits the farthest node on each side.
+function fitGraph() {
+  const stage = $("#rel-stage");
+  if (!stage || !R.shown) return;
+  const w = stage.clientWidth, h = stage.clientHeight;
+  let ex = 40, ey = 40;
+  for (const d of R.shown.nodes) {
+    const p = R.pos.get(d.id);
+    const label = Math.min(d.name.length, 30) * 6.6 + 16;
+    ex = Math.max(ex, Math.abs(p.x) + (p.x >= 0 ? label : 14));
+    ey = Math.max(ey, Math.abs(p.y) + 14);
+  }
+  const k = Math.max(0.15, Math.min(1.4, (w / 2 - 12) / ex, (h / 2 - 12) / ey));
+  R.view = { k, tx: w / 2, ty: h / 2 };
+  applyView();
+}
+
+function applyView() {
+  const g = $("#rel-view"), svg = $("#rel-svg");
+  if (!g || !R.view) return;
+  g.setAttribute("transform", `translate(${R.view.tx.toFixed(1)},${R.view.ty.toFixed(1)}) scale(${R.view.k.toFixed(4)})`);
+  svg.classList.toggle("zoomed", R.view.k >= LABEL_ZOOM);
+}
+
+function focusNode(id) {
+  const svg = $("#rel-svg");
+  if (!svg || !R.shown) return;
+  const near = new Set([id]);
+  R.shown.links.forEach((l, i) => {
+    const on = l.source === id || l.target === id;
+    if (on) { near.add(l.source); near.add(l.target); }
+    const path = svg.querySelector(`.edges .edge[data-i="${i}"]`);
+    if (path) path.classList.toggle("hl", on);
+  });
+  for (const g of svg.querySelectorAll(".node")) g.classList.toggle("hl", near.has(g.dataset.id));
+  svg.classList.add("focus");
+}
+
+function unfocus() {
+  const svg = $("#rel-svg");
+  if (!svg) return;
+  svg.classList.remove("focus");
+  for (const e of svg.querySelectorAll(".hl")) e.classList.remove("hl");
+  if (R.sticky && R.shown && R.shown.byId.has(R.sticky)) focusNode(R.sticky);
+}
+
+function nodeTip(d) {
+  const { links, byId } = R.shown;
+  const rows = [];
+  const line = (k, v) => rows.push(`<div class="tk">${k}</div><div>${v}</div>`);
+  const others = (pred, pick) => links.filter(pred).map((l) => esc(byId.get(pick(l)).name));
+  if (d.address != null) line("address", `<span class="mono">${hex(d.address)}</span>${d.size ? ` · ${d.size} bytes` : ""}`);
+  if (d.kind === "function") {
+    line("where", d.side === "center" ? "the function shown" : d.side === "referred" ? "its address is taken here"
+      : `${d.side === "both" ? "caller and callee" : d.side} ${d.distance} call${d.distance > 1 ? "s" : ""} away`);
+    if (d.origin) line("origin", `${dot(d.origin)} ${esc(ORIGINS[d.origin].long)}${d.readable ? ", readable C accepted" : ""}`);
+    if (d.more && (d.more.callers || d.more.callees)) line("beyond", `${d.more.callers} more callers, ${d.more.callees} more callees`);
+    if (d.facts === "pending") line("read from", "its C is being read");
+    else if (d.facts === "readable C") line("read from", "its readable C");
+    else if (d.facts === "listing") line("read from", `its listing only (each address "uses"): ${esc(d.why || "")}`);
+    else if (d.facts === null) line("read from", "not read: outside the depth");
+    else line("read from", `<span class="bad">${esc(d.why || "nothing")}</span>`);
+  } else if (d.kind === "text") {
+    line("text", `<span class="mono">${esc(d.text)}</span>`);
+    line("used by", others((l) => l.target === d.id, (l) => l.source).join(", "));
+  } else if (d.kind === "structure") {
+    line("fields", d.fields.slice(0, 10).map(([off, type, field]) => `<span class="mono">${field} ${type} +0x${off.toString(16)}</span>`).join("<br>") +
+      (d.fields.length > 10 ? `<br>and ${d.fields.length - 10} more` : ""));
+    line("used by", links.filter((l) => l.target === d.id && l.kind === "uses-structure")
+      .map((l) => `${esc(byId.get(l.source).name)} (${esc(l.edges[0].variables.join(", "))})`).join(", "));
+  } else {
+    if (d.types && d.types.length) line("accessed as", esc(d.types.join(", ")));
+    if (d.default && d.default !== d.name) line("default name", `<span class="mono">${esc(d.default)}</span>`);
+    const read = others((l) => l.target === d.id && l.read, (l) => l.source);
+    const written = others((l) => l.target === d.id && l.write, (l) => l.source);
+    const used = others((l) => l.target === d.id && l.uses && !l.read && !l.write, (l) => l.source);
+    if (read.length) line("read by", read.join(", "));
+    if (written.length) line("written by", written.join(", "));
+    if (used.length) line("named by", used.join(", "));
+    if (d.kind === "table") line("holds", others((l) => l.source === d.id, (l) => l.target).join(", ") + (d.words ? ` (its first ${d.words} words read)` : ""));
+  }
+  if (d.naming) {
+    let v = NAMING[d.naming];
+    if (d.proposed) v += `: <span class="mono">${esc(d.proposed.name)}</span>${d.proposed.what ? " — " + esc(d.proposed.what) : ""}`;
+    line("name", v);
+  }
+  const hint = d.kind !== "function" ? "click: keep it lit" : d.id === "f:" + R.graph.center
+    ? "double-click or Shift+click: its code" : "click: its relations · Shift+click: its code";
+  return `<div class="tip-h">${esc(d.name)} <span class="sub">${esc(KIND_LONG[d.kind] || d.kind)}</span></div>` +
+    `<div class="tip-g">${rows.join("")}</div><div class="tip-hint">${hint}</div>`;
+}
+
+function showTip(event, d) {
+  const tip = $("#tip");
+  tip.innerHTML = nodeTip(d);
+  tip.classList.add("wide");
+  tip.hidden = false;
+  const x = Math.min(event.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  const y = event.clientY + 16 + tip.offsetHeight > window.innerHeight ? event.clientY - tip.offsetHeight - 12 : event.clientY + 16;
+  tip.style.transform = `translate(${Math.max(8, x)}px, ${Math.max(8, y)}px)`;
+}
+
+function hideTip() {
+  const tip = $("#tip");
+  tip.hidden = true;
+  tip.classList.remove("wide");
+}
+
+function graphPoint(event) {
+  const box = $("#rel-svg").getBoundingClientRect(), v = R.view;
+  return { x: (event.clientX - box.left - v.tx) / v.k, y: (event.clientY - box.top - v.ty) / v.k };
+}
+
+function wireRelations() {
+  const main = $("#main");
+  main.addEventListener("pointerdown", (e) => {
+    const svg = e.target.closest("#rel-svg");
+    if (!svg || e.button !== 0 || !R.view) return;
+    const node = e.target.closest(".node");
+    R.drag = { id: node ? node.dataset.id : null, x: e.clientX, y: e.clientY, moved: false, tx: R.view.tx, ty: R.view.ty };
+    svg.setPointerCapture(e.pointerId);
+  });
+  main.addEventListener("pointermove", (e) => {
+    const svg = e.target.closest("#rel-svg");
+    if (R.drag && R.view) {
+      const dx = e.clientX - R.drag.x, dy = e.clientY - R.drag.y;
+      if (!R.drag.moved && dx * dx + dy * dy < 16) return;
+      R.drag.moved = true;
+      hideTip();
+      R.touched = true;
+      if (R.drag.id) {
+        const p = graphPoint(e);
+        R.pos.set(R.drag.id, p);
+        const g = $(`#rel-svg .node[data-id="${CSS.escape(R.drag.id)}"]`);
+        if (g) g.setAttribute("transform", `translate(${p.x.toFixed(1)},${p.y.toFixed(1)})`);
+        placeEdges(R.drag.id);
+      } else {
+        R.view.tx = R.drag.tx + dx;
+        R.view.ty = R.drag.ty + dy;
+        $("#rel-svg").classList.add("panning");
+        applyView();
+      }
+      return;
+    }
+    if (!svg || !R.shown) return;
+    const node = e.target.closest(".node");
+    if (!node) { if (!$("#tip").hidden) { hideTip(); unfocus(); } return; }
+    const d = R.shown.byId.get(node.dataset.id);
+    if (!d) return;
+    focusNode(d.id);
+    showTip(e, d);
+  });
+  main.addEventListener("pointerup", (e) => {
+    const drag = R.drag;
+    R.drag = null;
+    const svg = $("#rel-svg");
+    if (svg) svg.classList.remove("panning");
+    if (!drag || drag.moved || !R.shown) return;
+    if (!drag.id) { R.sticky = null; unfocus(); return; }
+    const d = R.shown.byId.get(drag.id);
+    if (d && d.kind === "function" && e.shiftKey) {
+      hideTip();
+      location.hash = fnLink(d.name);                   // (Shift: its code)
+    } else if (d && d.kind === "function" && d.id !== "f:" + R.graph.center) {
+      hideTip();
+      location.hash = relLink(d.name);
+    } else if (d) {
+      R.sticky = R.sticky === d.id ? null : d.id;
+      unfocus();
+    }
+  });
+  main.addEventListener("dblclick", (e) => {
+    const node = e.target.closest("#rel-svg .node");
+    if (!node || !R.shown) return;
+    const d = R.shown.byId.get(node.dataset.id);
+    if (d && d.kind === "function") location.hash = fnLink(d.name);
+  });
+  main.addEventListener("wheel", (e) => {
+    if (!e.target.closest("#rel-svg") || !R.view) return;
+    e.preventDefault();
+    const box = $("#rel-svg").getBoundingClientRect();
+    const k = Math.max(0.1, Math.min(4, R.view.k * Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015))));
+    const px = e.clientX - box.left, py = e.clientY - box.top;
+    R.view.tx = px - (px - R.view.tx) * (k / R.view.k);
+    R.view.ty = py - (py - R.view.ty) * (k / R.view.k);
+    R.view.k = k;
+    R.touched = true;
+    applyView();
+  }, { passive: false });
+  main.addEventListener("click", (e) => {
+    const depth = e.target.closest("#rel-depth button");
+    if (depth) {
+      R.depth = +depth.dataset.depth;
+      prefs.set("rel-depth", R.depth);
+      for (const b of $("#rel-depth").children) b.classList.toggle("on", +b.dataset.depth === R.depth);
+      if (S.current) showRelations(S.current.header.name, renders);
+      return;
+    }
+    const chip = e.target.closest("#rel-kinds .chip");
+    if (chip) {
+      const k = chip.dataset.group;
+      if (R.groups.has(k)) R.groups.delete(k); else R.groups.add(k);
+      prefs.set("rel-groups", [...R.groups]);
+      chip.classList.toggle("on", R.groups.has(k));
+      if (R.graph) { layoutGraph(false); drawGraph(); applyView(); relNote(); }
+      return;
+    }
+    if (e.target.closest("#rel-fit")) { R.touched = false; fitGraph(); return; }
+    const mode = e.target.closest("#modes button");
+    if (mode && S.current) location.hash = mode.dataset.mode === "relations" ? relLink(S.current.header.name) : fnLink(S.current.header.name);
+  });
+  window.addEventListener("resize", () => { if (S.mode === "relations" && $("#rel-stage")) { sizeStage(); applyView(); } });
+}
+
 // ---- search ----
 
 let searchTimer = null, results = [], active = -1, searched = "";
@@ -570,7 +1121,7 @@ function openResult(i) {
   if (!r) return;
   $("#results").hidden = true;
   $("#search").blur();
-  location.hash = fnLink(r.name, r.kind === "name" ? null : r.address);
+  location.hash = r.kind === "name" ? modeLink(r.name) : fnLink(r.name, r.address);
 }
 
 // ---- changes ----
@@ -714,7 +1265,7 @@ function wire() {
   });
   $("#list").addEventListener("click", (e) => {
     const row = e.target.closest(".fnrow");
-    if (row) location.hash = fnLink(row.dataset.name);
+    if (row) location.hash = modeLink(row.dataset.name);
   });
   $("#menu").addEventListener("click", () => $("#side").classList.toggle("open"));
   $("#theme").addEventListener("click", cycleTheme);
@@ -775,10 +1326,12 @@ function wire() {
   });
   main.addEventListener("mousemove", (e) => {
     const tip = $("#tip");
+    if (e.target.closest("#rel-svg")) return;              // (the graph has tips of its own)
     if (e.target.id !== "map") { tip.hidden = true; return; }
     const fn = mapHit(e);
     if (!fn) { tip.hidden = true; return; }
     tip.innerHTML = `${esc(fn.name)} <span class="sub">${hex(fn.entry)} · ${fn.size} bytes · ${esc(ORIGINS[fn.origin].long)}</span>`;
+    tip.classList.remove("wide");
     tip.hidden = false;
     const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
     tip.style.transform = `translate(${x}px, ${e.clientY + 16}px)`;
@@ -802,12 +1355,14 @@ function wire() {
       b: () => { S.showBytes = !S.showBytes; prefs.set("bytes", S.showBytes); const l = $("#listing"); if (l) l.classList.toggle("show-bytes", S.showBytes); },
       c: () => { S.showC = !S.showC; prefs.set("c", S.showC); const s = $("#split"); if (s) s.classList.toggle("no-c", !S.showC); },
       o: () => { location.hash = "#/"; }, t: cycleTheme, "?": () => { $("#help").hidden = false; },
+      r: () => { const n = S.current.header.name; location.hash = S.mode === "relations" ? fnLink(n) : relLink(n); },
+      f: () => { if (S.mode === "relations") { R.touched = false; fitGraph(); } },
       "[": () => stepFunction(-1), "]": () => stepFunction(1),
       Escape: () => { selectRow(-1); },
     };
     const action = keys[e.key];
     if (!action) return;
-    if (S.view !== "function" && ["j", "k", "ArrowDown", "ArrowUp", "Enter", "n", ";", "Escape"].includes(e.key)) return;
+    if (S.view !== "function" && ["j", "k", "ArrowDown", "ArrowUp", "Enter", "n", ";", "Escape", "r", "f"].includes(e.key)) return;
     e.preventDefault();
     action();
   });
@@ -817,7 +1372,7 @@ function stepFunction(step) {
   if (!S.order.length) return;
   const at = S.current ? S.order.findIndex((fn) => fn.name === S.current.header.name) : -1;
   const next = at < 0 ? 0 : Math.max(0, Math.min(S.order.length - 1, at + step));
-  location.hash = fnLink(S.order[next].name);
+  location.hash = modeLink(S.order[next].name);
 }
 
 async function start() {
@@ -825,10 +1380,14 @@ async function start() {
   S.showBytes = prefs.get("bytes", false);
   S.showC = prefs.get("c", true);
   S.by = prefs.get("by", "bytes");
+  R.depth = [1, 2, 3].includes(prefs.get("rel-depth", 1)) ? prefs.get("rel-depth", 1) : 1;
+  const groups = prefs.get("rel-groups", null);
+  if (Array.isArray(groups)) R.groups = new Set(groups.filter((k) => GROUPS.some(([g]) => g === k)));
   $("#sort").value = S.sort;
   applyTheme();
   renderChips();
   wire();
+  wireRelations();
   try {
     const o = await api("/api/overview");
     const images = o.image.images;

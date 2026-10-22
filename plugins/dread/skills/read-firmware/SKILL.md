@@ -19,6 +19,11 @@ hand or as a note in `dread gui`).
   dispatcher with command codes, a register writer with addresses.
 - `dread callsites --reaches TARGET PATTERN`: the shortest call chains from matching functions to
   TARGET (how does the main loop get to the flash writer?).
+- `dread relations NAME` (`--depth 2`, `--json`): the pieces around a function as a graph: its
+  callers and callees, the globals and device registers its readable C reads and writes, the texts
+  and tables (of handlers, of messages) its constants point to, the structures of the readable_types
+  plan, each marked named, proposed (by the pilot) or unnamed. Two functions that touch the same
+  global are a lead: one writes what the other reads. In `dread gui` it is the Relations tab (`r`).
 - `dread functions`: every function with its extent; `dread noreturn`: those that never return.
 - `dread gui`: the same reading in the browser (overview, map, listing with coverage, the C, search);
   rename (`n`) and notes (`;`) from there go through `dread rename` and annotations.txt.

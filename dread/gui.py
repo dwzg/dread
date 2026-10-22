@@ -10,12 +10,18 @@ the tools know and decided, and runs nothing heavy itself:
   cases ran or missed (from the last dread test or dread lift --check), the C (the source of a
   rewritten function; the lifted C, built or lifted on the spot), its verdict, cases, placement and
   annotations;
+- one function's relations (dread relations, /api/graph): its callers and callees to a depth of 1 to
+  3, the memory its readable C reads and writes, the texts and tables its constants point to, the
+  structures of the readable_types plan, each piece coloured by how sure its name is (named, proposed
+  by dread pilot, none yet); a click walks to another function. The functions come at once; the
+  memory, texts and structures follow as a worker reads each function's C, nearest first (kept per
+  function in BUILD/relations, so a second look costs a lift);
 - search by name, by address and by the text a function refers to;
 - two kinds of change, made as the command line makes them: rename (dread rename, checked and
   undone when the tree contradicts it) and annotate (annotations.txt).
 It reloads by itself when the tables or the tools' records change. The analyses that take a while on
-a large image (callers, regflow, never-returning functions, the text index) run in the background;
-the page fills them in when they are ready.
+a large image (callers, regflow, never-returning functions, the text index, the relations' readable
+C) run in the background; the page fills them in when they are ready.
 
 Safety: the server listens on 127.0.0.1 unless told otherwise, answers only requests addressed to
 that host name (no DNS rebinding), and a change needs the token of the page it served (no other web
@@ -225,6 +231,9 @@ class State:
         self.suite = None
         self.lifter = None                                  # one per load: it keeps what it learns
         self.analyses = {}
+        self.relations = None                               # (call maps, Names) for the graph
+        self.known = {}                                     # name -> its facts (dread.relations), made
+        self.wanted, self.worker = [], None                 # what the facts worker makes next
         threading.Thread(target=self.analyse, args=(self.program, self.generation), daemon=True).start()
 
     def analyse(self, program, generation):
@@ -423,6 +432,73 @@ class State:
                 out["auto"] = True
         return out
 
+    def graph(self, name, depth=1):
+        """The relations around a function (dread.relations graph) with what is known now: the calls
+        once the callers are found; the memory, texts and structures of each function once its facts
+        are made, which the worker does in the background, nearest first ("pending": the functions
+        still without them; the page asks again)."""
+        from dread import relations
+        prog = self.program
+        if name not in prog.by_name:
+            raise KeyError(name)
+        try:
+            depth = max(0, min(int(depth), relations.MAX_DEPTH))
+        except ValueError:
+            depth = relations.DEPTH
+        if "callers" not in self.analyses:
+            return {"center": name, "depth": depth, "nodes": [], "edges": [], "pending": [], "waiting": "callers",
+                    "status": self.status()}
+        if self.relations is None:
+            names = relations.Names(self.target, self.image, prog)
+            self.relations = (relations.call_maps(prog, self.ready("callers") or {}), names)
+        calls, names = self.relations
+        names.refresh()
+        origin = self.origin
+        out = relations.graph(prog, name, depth, calls, self.known, names,
+                              extra=lambda n: {"origin": origin.get(n, "original")})
+        self.want(out["missing"])
+        out["pending"] = out.pop("missing")
+        out["status"] = self.status()
+        return out
+
+    def want(self, names):
+        """Facts for these functions next, in this order, instead of what was wanted before (the page
+        shows one neighbourhood at a time). Called with the lock held."""
+        self.wanted = [n for n in names if n not in self.known]
+        if self.wanted and self.worker is None:
+            self.worker = threading.Thread(target=self.make_facts, args=(self.generation,), daemon=True)
+            self.worker.start()
+
+    def make_facts(self, generation):
+        """The facts worker: one function at a time, the lift under the lock, the readable C without
+        it (dread.relations Facts); it waits for the register analysis and the never-returning
+        functions, and ends when nothing is wanted or the state was loaded anew."""
+        from dread import relations
+        made = None
+        while True:
+            with self.lock:
+                if generation != self.generation or not self.wanted:
+                    if generation == self.generation:
+                        self.worker = None
+                    return
+                ready = "flow" in self.analyses and "endless" in self.analyses
+                if ready:
+                    name = self.wanted.pop(0)
+                    if made is None:
+                        made = relations.Facts(self.target, self.image, self.program, self.ready("flow"),
+                                               self.ready("endless"), lock=self.lock)
+            if not ready:
+                time.sleep(0.2)
+                continue
+            try:
+                facts = made.get(name)
+            except Exception as e:              # (the page says so and goes on)
+                facts = {"from": "nothing", "why": "dread relations failed: %s" % e, "digest": None, "refs": []}
+            with self.lock:
+                if generation != self.generation:
+                    return
+                self.known[name] = facts
+
     def search(self, query, limit=40):
         prog = self.program
         query = query.strip()
@@ -546,6 +622,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, state.function(query.get("name", "")))
                 if url.path == "/api/search":
                     return self.reply(200, state.search(query.get("q", "")))
+                if url.path == "/api/graph":
+                    return self.reply(200, state.graph(query.get("name", ""), query.get("depth", "1")))
                 if url.path == "/api/status":
                     return self.reply(200, state.status())
         except KeyError as e:

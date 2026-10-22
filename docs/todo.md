@@ -1505,8 +1505,46 @@ tool, the page shows its records; the only changes are the command line's own.
 - [ ] (Later: after MSP430) v2: a failing case's differences (the test run keeps them per function),
   pilot review (conversations, argued survivors and name proposals, accepted or rejected from the
   page through `dread rename` and argued.tsv).
-- [ ] (Later) v3: the call graph around a function, the system run's timeline (device logs of both
-  images side by side).
+- [x] v3, first part: the relations around a function as a graph (asked for by the user on
+  2026-10-22: reverse engineering is a puzzle; show how the pieces join). A tool computes it, `dread
+  relations` (text or `--json`, docs/formats.md), and the page draws its record. Here is what it holds:
+  - its callers up and callees down to a depth of 1 to 3 (nearest first, at most 150 functions and
+    400 nodes, what is left out counted);
+  - the memory each function's readable C reads and writes (`g_`/`io_`/`rom_` as readable C names it;
+    an indexed access at the sum of its constants, which finds GCC's section anchors: gizmo's dispatch
+    reads `commands`, not mode_name's table at the anchor);
+  - the texts, functions and tables of pointers its constants point to (dread.constants pointed, now
+    structured; pointed_note writes it);
+  - the readable_types plan's structures;
+  - the name status of each piece (named, proposed by the pilot: names.tsv or readable_names; none yet).
+
+  A constant counts as an address only where the machine code makes it as compilers make addresses
+  (literal pools, pc-relative, a RAM address shortly after one). Without that, an image at 0 took
+  delays for addresses: vTaskDelay "referred" to 89 texts, mostly tails of strings, 23 with it. A
+  refused function is read from its listing ("uses" only).
+
+  The page: a Relations tab (`#/r/NAME`, key `r`) with a force layout in plain JS and SVG. Callers are
+  held above their line and callees below theirs; the function is fixed in the middle; each layout is
+  seeded from the last, so a click that walks to another function keeps the picture. Shapes by kind,
+  colours by name status, filters per kind, depth 1-3, hover lighting a piece's neighbours, drag, zoom.
+  The functions come at once; a worker reads each function's C in the background, nearest first, and
+  the page polls. The facts are kept per function in BUILD/relations under a content key: making
+  readable C costs 0.1-0.5 s a function (tidy's condition simplification is 78 % of it on the slowest
+  FreeRTOS functions), a kept one a lift.
+
+  Measured:
+  - gizmo: neighbourhoods of 8-40 nodes, 3 s cold, 0.5 s kept;
+  - FreeRTOS GCC -Os: xQueueGenericSend has 153 nodes at depth 1 (25 s cold) and 255 at depth 2;
+    vTaskDelay at depth 2 takes 18 s cold and 3 s kept;
+  - layout and drawing: 15-19 ms in Chrome at 150-260 nodes.
+
+  Every label shows up to 60 nodes; beyond that, the 28 best-joined near pieces and the rest on hover
+  or zoom. A hub with 40 callers gives an overview where the clusters show, not the names.
+- [ ] v3, next: an overview where a cluster of functions is one node (a subsystem: by call structure,
+  by the files of the ELF where a bench build has them to score it), opened by a click; colours from
+  name confidence rather than name status, and the pilot's no-confidence vote's suspects marked once
+  it exists; calls through pointers from the system run's record (who called whom), so that a task's
+  or a callback's caller shows; the system run's timeline (device logs of both images side by side).
 
 ## A realistic benchmark: FreeRTOS (asked for by the user, 2026-10-19; before the rest of MSP430)
 

@@ -111,6 +111,58 @@ def test_search_by_name_address_and_text(server):
     assert any(f["kind"] == "text" and f["name"] == "print_status" for f in found)
 
 
+def graph(srv, name, depth=1, timeout=120):
+    """The relations of a function once the facts worker has read every function of it."""
+    deadline = time.time() + timeout
+    while True:
+        status, g = answer(srv, "/api/graph?name=%s&depth=%d" % (name, depth))
+        assert status == 200, g
+        if not g.get("waiting") and not g["pending"]:
+            return g
+        assert time.time() < deadline, g["pending"]
+        time.sleep(0.1)
+
+
+@pytest.mark.slow
+def test_the_relations_of_a_function(server):
+    """/api/graph: the functions at once, the memory and texts as the worker reads each function's C
+    (the function first); calls and globals right; a function without callees; a depth of 2."""
+    srv, _ = server
+    status, first = answer(srv, "/api/graph?name=print_status")
+    assert status == 200 and first["pending"][0] == "print_status"
+    assert {n["name"] for n in first["nodes"]} == {"print_status", "handle_key", "main", "mode_name", "fmt_dec",
+                                                   "uart_puts"}
+    g = graph(srv, "print_status")
+    nodes = {n["name"]: n for n in g["nodes"]}
+    names = {n["id"]: n["name"] for n in g["nodes"]}
+    found = {(names[e["from"]], e["kind"], names[e["to"]]) for e in g["edges"]}
+    assert {("main", "calls", "print_status"), ("handle_key", "calls", "print_status"),
+            ("print_status", "calls", "mode_name"), ("print_status", "calls", "fmt_dec"),
+            ("print_status", "calls", "uart_puts"), ("print_status", "reads", "g_20000034"),
+            ("print_status", "reads", "g_20000038"), ("print_status", "refers-to-text", '"mode "'),
+            ("main", "reads", "g_ticks")} <= found
+    assert nodes["print_status"]["origin"] == "lifted" and nodes["print_status"]["side"] == "center"
+    assert nodes["g_20000034"]["kind"] == "global" and nodes["g_20000034"]["naming"] == "unnamed"
+    assert nodes["g_ticks"]["naming"] == "named"
+    g = graph(srv, "cmd_mode")
+    assert {n["name"] for n in g["nodes"] if n["kind"] == "function"} == {"cmd_mode", "apply_config"}
+    assert not [e for e in g["edges"] if e["kind"] == "calls" and e["from"] == "f:cmd_mode"]
+    assert [e["kind"] for e in g["edges"] if e["from"] == "f:cmd_mode"] == ["writes"]
+    g = graph(srv, "print_status", depth=2)
+    nodes = {n["name"]: n for n in g["nodes"]}
+    assert g["depth"] == 2 and nodes["Reset_Handler"]["distance"] == 2 and nodes["uart_putc"]["side"] == "callee"
+    assert answer(srv, "/api/graph?name=nosuch")[0] == 404
+
+
+def test_the_page_draws_the_relations(server):
+    srv, _ = server
+    script = request(srv, "/app.js")[2].decode()
+    assert "/api/graph" in script and "function relationsHTML" in script and "function layoutGraph" in script
+    assert "#/r/" in script                                 # (a function's relations have an address of their own)
+    page = request(srv, "/")[2].decode()
+    assert "<kbd>r</kbd>" in page and "relations" in page
+
+
 def test_a_note_goes_into_the_annotations(server):
     srv, target = server
     fn = srv.state.program.by_name["print_status"]

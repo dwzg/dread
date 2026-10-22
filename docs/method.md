@@ -137,8 +137,11 @@ no longer pins the layout, and it comes with cases), never a reconstruction.
 ## 10. Reading: names first
 
 `dread flat` (a function with everything resolved), `dread callsites` (who calls what with which
-constants, and call chains), `dread samecode` and `dread callpair` (names carried over from another
-image, by identical code or by call order). Names and descriptions go into the target's tables.
+constants, and call chains), `dread relations` (a function's neighbourhood as a graph: its callers
+and callees, the memory its readable C reads and writes, the texts and tables its constants point
+to, the structures of the readable_types plan, each named, proposed or unnamed; `dread gui` draws
+it), `dread samecode` and `dread callpair` (names carried over from another image, by identical code
+or by call order). Names and descriptions go into the target's tables.
 
 ## The order of work
 
