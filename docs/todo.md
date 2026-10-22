@@ -755,8 +755,9 @@ its sources.
   so the line says the device alone: the product or board, not what the program does or its operating
   system (asked more openly, FreeRTOS GCC -Os read as "a Cortex-M3 board running a FreeRTOS demo/test
   application" and "demo" went into kernel functions' names). FreeRTOS now reads as unknown (its texts
-  name no product or board) and its questions stay as they were. Not measured yet: the function names
-  of the private firmware with the line against its last run (running).
+  name no product or board) and its questions stay as they were. On the private firmware (2026-10-23)
+  the run with the line named every misread group for the right kind of device, and its function names
+  were judged closer to the true ones than the run's before it, beyond chance by groups.
   Measuring between runs (2026-10-22): two FreeRTOS runs with the same settings differed by 24:40 and
   37:21 in the grounded pairwise judge (sign test over functions p 0.06 and 0.05), as much as the open
   reading's run against one without it (25:45, p 0.02; and 45:32 against another). A run's names hang

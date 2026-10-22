@@ -411,10 +411,14 @@ docs/todo.md, Compiler diversity).
   (dread groups: a group's names hang together through its prefix and reading), 6:11, 8:12, 14:5 and
   15:8, none beyond chance (p 0.06 to 0.50); one group made 11 of the 20 that the first comparison
   lost. So no effect on FreeRTOS's function names is measured either way.
-- **Not established.** Whether the function names gain where the device is known (a naming run of the
-  private firmware with the line against its last one: running); a reading can be wrong (the texts of
-  a library, a vendor's sample code), so the line says "likely, not certain", and a person's
-  statement wins.
+- **Measured on the private firmware** (2026-10-23, the defaults with the line against the run before
+  it without): the groups named after the wrong kind of device were all named for the right one, and
+  the function names were judged closer to the true ones in more groups than not, beyond chance by
+  groups (the test to trust between runs); the judge also called fewer of them different, and the
+  names it was surest of most so.
+- **Not established.** A reading can be wrong (the texts of a library, a vendor's sample code), so the
+  line says "likely, not certain", and a person's statement wins; a firmware whose texts name no
+  device gets no line (FreeRTOS).
 - **Undo.** `--no-device`, or remove device.tsv.
 - **Status.** In the code (dread/pilot.py: device_task, known_device, about).
 
