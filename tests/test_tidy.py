@@ -204,6 +204,36 @@ def test_a_slot_whose_name_is_taken_gets_another_prefix():
     assert tidy.frame_locals(fn)
     out = cparse.unparse(fn, notes=False)
     assert "sl8" in out and "u32 s8" in out, out
+def test_a_frame_pointer_read_on_every_path_is_written_into_its_uses():
+    """GCC -O0's frame pointer: set once from the frame (r4 = sp0 - 16), read on both arms of a
+    branch and more than eight times. sp0 never changes, so each use reached by that one assignment
+    alone takes sp0 - 16 in its place (r4 + 8 is sp0 - 8), and the slots become variables."""
+    text = FRAME.replace("    *(volatile u32 *)(sp0 - 8) = r1;  /* 0: str r1, [sp, #8] */\n",
+                         "    r4 = (sp0 - 16) + 0x0u;  /* 0: add r4, sp, #0 */\n"
+                         "    *(volatile u32 *)(r4 + 8) = r1;  /* 0: str r1, [r4, #8] */\n"
+                         "    *(volatile u32 *)(r4 + 4) = r2;  /* 0: str r2, [r4, #4] */\n"
+                         "    if (r0 == 0) goto L_x;  /* 0: cbz r0 */\n"
+                         "    *(volatile u32 *)(r4 + 4) = r3;  /* 0: str r3, [r4, #4] */\n"
+                         "L_x:\n")
+    text = text.replace("    r1 = *(volatile u32 *)(sp0 - 8);  /* 6: ldr r1, [sp, #8] */\n",
+                        "    r1 = *(volatile u32 *)(r4 + 8);  /* 6: ldr r1, [r4, #8] */\n" +
+                        "".join("    r1 = r1 + *(volatile u32 *)(r4 + %d);  /* 6: ldr */\n" % (4 + 4 * (k % 2))
+                                for k in range(9)))
+    fn = cparse.parse(text).function("h")
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "r4" not in out and "sp0" not in out and "frame" not in out, out
+    twice = text.replace("    if (r0 == 0) goto L_x;", "    r4 = sp0 - 8;  /* 0: add */\n    if (r0 == 0) goto L_x;")
+    fn = cparse.parse(twice).function("h")
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)                  # (two values of r4: each use takes its own)
+    assert "r4" not in out, out
+    for source, kept in ((text, False), (text.replace("L_x:\n", "L_x:\n    sp0 = sp0 - 4;  /* 0: sub */\n"), True)):
+        fn = cparse.parse(source).function("h")            # (the pass alone: with sp0 written, its
+        while tidy.addresses(fn):                          # value may differ where r4 is read)
+            pass
+        out = cparse.unparse(fn, notes=False)
+        assert ("r4 + 8" in out) == kept, out
 
 
 @needs_z3

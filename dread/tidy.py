@@ -830,17 +830,23 @@ def spread(fn):
     return False
 
 
-def _offset_of_variable(e):
-    """Whether e is a variable plus or minus a constant (the frame's sp0 too: its accesses then are
-    frame slots the frame passes see)."""
+def _offset_base(e):
+    """The variable of e when e is a variable plus or minus constants ((sp0 - 16) + 0x0u, as the
+    lifters write add r7, sp, #0; the frame's sp0 too: its accesses then are frame slots the frame
+    passes see), else None."""
     if isinstance(e, C.Cast) and e.type == "u32":
         e = e.e
     if isinstance(e, C.Binary) and e.op in ("+", "-") and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
         e = e.l
         if isinstance(e, C.Cast) and e.type == "u32":
             e = e.e
-        return isinstance(e, C.Name)
-    return False
+        return e.id if isinstance(e, C.Name) else _offset_base(e)
+    return None
+
+
+def _offset_of_variable(e):
+    """Whether e is a variable plus or minus a constant (_offset_base)."""
+    return _offset_base(e) is not None
 
 
 def _fold_offsets(e):
@@ -872,33 +878,43 @@ def _reads_everywhere(s, name):
     return n + sum(_reads_everywhere(inner, name) for inner in _inner(s))
 
 
+FRAME_BASE = "sp0"          # the lifters' address of the frame's end, declared once and never written
+
+
 def addresses(fn):
     """An address computed once from a variable (the variable plus or minus a constant: the base the
     lifters give an ldrd, ldm or stm, a_1 = r0 + 4) and read by a few statements on one straight path
     behind it, nothing on the way writing that variable: written into each of them, so that an access
     through it reads as one through the variable (r0 + 8 once the constants are folded), which the
-    types write as a member (r0->f_8)."""
+    types write as a member (r0->f_8). A frame base (sp0 plus or minus a constant: GCC -O0's frame
+    pointer, r7 = sp0 - 16) is written into every use it alone reaches, on any path and however many:
+    sp0 is never written, so the value is the same wherever it arrives, and each use becomes a frame
+    slot's address (r7 + 4 is sp0 - 12), which frame_locals and dread.frames see."""
     g = Graph(fn)
     reach = g.reaching()
     readers = {}
     for m in g.nodes:
         for v in m.reads:
             readers.setdefault(v, []).append(m)
+    writes = [m for m in g.nodes if FRAME_BASE in m.writes]  # (its declaration alone: then it never changes)
+    sp0_fixed = len(writes) == 1 and isinstance(writes[0].stmt, C.Decl)
     for n in g.nodes:
         s = n.stmt
         if not is_assign(s) or s.e.target.id not in g.scope:
             continue
         v, value = s.e.target.id, s.e.value
-        if not _offset_of_variable(value) or reads_count(value, v):
+        base = _offset_base(value)
+        if base is None or reads_count(value, v):
             continue
+        frame = base == FRAME_BASE and sp0_fixed
         uses = [m for m in readers.get(v, ()) if n.index in (reach[m.index].get(v) or ())]
-        if not uses or len(uses) > 8 or any(reach[m.index].get(v) != {n.index} or m.index <= n.index
-                                             for m in uses):
+        if not uses or (len(uses) > 8 and not frame) or any(reach[m.index].get(v) != {n.index} or
+                                                             m.index <= n.index for m in uses):
             continue
         if any(_reads_everywhere(m.stmt, v) != reads_count_stmt(m.stmt, v) for m in uses):
             continue                        # (a read the substitution would not reach: an arm's, an asm's)
         last = max(m.index for m in uses)
-        if not _path_clear(g, n.index, last, _reads_of(value) | {v}, uses):
+        if not frame and not _path_clear(g, n.index, last, _reads_of(value) | {v}, uses):
             continue
         for m in uses:
             for get, put in stmt_exprs(m.stmt):
