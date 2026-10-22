@@ -132,8 +132,16 @@ its sources.
   stays is renamed aN (the same function had r2 and r3, written before every read, as parameters);
   plain declarations of one type share a line. Small unsigned literals are written plainly where C
   means the same (r3 == 2, not 0x2u: beside an unsigned operand, assigned, as an argument or a
-  shift's count). Open: frames whose address goes to a callee (FreeRTOS's TimeOut_t on xQueueGenericSend's
-  stack: the frame stays whole). MSP430 (paused):
+  shift's count). Frames whose address goes to a callee (FreeRTOS's TimeOut_t on
+  xQueueGenericSend's stack), since 2026-10-22: the slots wholly below the lowest address that
+  leaves become variables too (outgoing stack arguments, locals nobody is given); from there up the
+  frame stays as it is, since what the address is handed to may reach anything above it. Raw frame
+  accesses left in readable C: FreeRTOS GCC -Os 771 -> 642, a private firmware's 3,147 -> 2,878; the
+  gate as before on the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V
+  GCC -Os, GCC -O0; the private firmware's waits for its cases made anew by generator 34). Open: that region as a local structure (fields at the offsets
+  the function uses, the address handed out its own or a field's: &stack40.f_8). One object for the
+  whole region keeps what the callee may reach; split at each address that leaves (one local each)
+  it reads better but trusts each callee to stay inside its object. MSP430 (paused):
   ulTaskGenericNotifyTake's readable C makes every case stack-dependent (refused, so it stays
   lifted), not traced; its critical sections are asm on the real stack beside the lifted frame.
 - [ ] **Types.** The structures behind pointers, as C structures the readable C uses (p->f_58). Done

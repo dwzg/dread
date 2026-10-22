@@ -171,6 +171,26 @@ def test_a_frame_word_nobody_else_sees_is_a_variable():
     assert "*(volatile u32 *)(sp0 - 8)" in text, text      # (its address leaves: the frame stays)
 
 
+def test_a_slot_below_a_frame_address_that_leaves_is_a_variable():
+    """What a frame address is handed to may reach the frame above it, not below: a slot below the
+    lowest address that leaves (an outgoing stack argument, a local nobody is given) becomes a
+    variable, the slots from there up stay as they are."""
+    text = FRAME.replace("    *(volatile u32 *)(sp0 - 8) = r1;  /* 0: str r1, [sp, #8] */\n",
+                         "    *(volatile u32 *)(sp0 - 8) = r1;  /* 0: str r1, [sp, #8] */\n"
+                         "    *(volatile u32 *)(sp0 - 16) = r2;  /* 0: str r2, [sp] */\n")
+    text = text.replace("r0 = g(r0, r1, r2, r3);", "r0 = g(r0, sp0 - 8, r2, r3);")
+    text = text.replace("    r0 = r0 + r1;  /* 8: adds r0, r1 */\n",
+                        "    r0 = r0 + r1 + *(volatile u32 *)(sp0 - 16);  /* 8: adds r0, r1 */\n")
+    fn = cparse.parse(text).function("h")
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "*(volatile u32 *)(sp0 - 8)" in out and "sp0 - 16" not in out, out
+    fn = cparse.parse(text.replace("sp0 - 8, r2", "sp0 - 16, r2")).function("h")   # (the lowest leaves)
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "*(volatile u32 *)(sp0 - 16)" in out and "*(volatile u32 *)(sp0 - 8)" in out, out
+
+
 @needs_z3
 def test_a_carry_over_a_load_is_a_comparison_that_still_loads_once():
     tree = cparse.parse(SNIPPET.replace(

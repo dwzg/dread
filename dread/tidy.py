@@ -556,12 +556,15 @@ def frame_offset(e):
 
 
 def frame_locals(fn):
-    """The frame's words as variables of their own when no frame address leaves the function (sp0
-    only in the addresses of its own loads and stores), every slot is accessed with one type and no
-    two overlap: *(volatile u32 *)(sp0 - 36) becomes s36. Undone when a slot may be read before it is
-    written (what earlier frames left there: the lift check compares such reads apart)."""
+    """The frame's words as variables of their own: *(volatile u32 *)(sp0 - 36) becomes s36, where
+    every slot is accessed with one type and no two overlap. When frame addresses leave the function
+    (sp0 - 64 passed to a call, a local's address), only the slots wholly below the lowest of them
+    (outgoing stack arguments, locals nobody else is given) become variables; from there up the frame
+    stays as it is, since what the address is handed to may reach anything above it. Nothing changes
+    when an address that leaves is not a constant offset below sp0. Undone when a slot may be read
+    before it is written (what earlier frames left there: the lift check compares such reads apart)."""
     import copy
-    accesses, escapes = {}, [False]
+    accesses, escapes, escaped = {}, [False], set()
 
     def visit(e):
         if e is None:
@@ -573,6 +576,13 @@ def frame_locals(fn):
                 escapes[0] = True
                 return
             accesses.setdefault(off, set()).add(pointee[0])
+            return
+        if frame_address(e):                # a frame address as a value: it leaves (a call's argument)
+            off = frame_offset(e)
+            if off is None or off >= 0:
+                escapes[0] = True
+            else:
+                escaped.add(off)
             return
         if isinstance(e, C.Name) and e.id == "sp0":
             escapes[0] = True
@@ -598,6 +608,12 @@ def frame_locals(fn):
     if escapes[0] or not accesses:
         return False
     sizes = {"u8": 1, "s8": 1, "u16": 2, "s16": 2, "u32": 4, "s32": 4, "u64": 8, "s64": 8}
+    if escaped:                             # (only the slots wholly below what leaves)
+        low = min(escaped)
+        accesses = {off: types for off, types in accesses.items()
+                    if all(t in sizes for t in types) and off + max(sizes[t] for t in types) <= low}
+        if not accesses:
+            return False
     spans = []
     for off, types in accesses.items():
         if len(types) != 1 or next(iter(types)) not in sizes:
@@ -615,7 +631,8 @@ def frame_locals(fn):
     def rewrite(e):
         if e is None:
             return None
-        if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and frame_address(e.e.e):
+        if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and frame_address(e.e.e) and \
+                frame_offset(e.e.e) in names:
             return C.Name(names[frame_offset(e.e.e)])
         if isinstance(e, C.Assign):
             return C.Assign(e.op, rewrite(e.target), rewrite(e.value))
