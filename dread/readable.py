@@ -19,6 +19,10 @@ Where the image with lifted C alone already differs from the original in the sce
 run's clock on some builds), the scenarios decide nothing and the function-level runs decide alone;
 elsewhere a difference with readable C sends the guilty functions back to lifted C, found by halves.
 
+`--figures FILE` measures the readable table's functions (dread.cmetrics: statements, nesting,
+gotos, casts, raw accesses, members, typed variables) in their readable C as built, and their lifted
+C beside it, into a JSON file: what dread bench's readable step compares with the source.
+
 Not yet: functions that never return and were accepted by the system run (they stay lifted).
 """
 import argparse
@@ -235,6 +239,29 @@ def _analysis_one(name):
 def _view_one(name):
     text = _lifted_text(name)
     return view(name, text, context=_G["context"]) if text is not None else None
+
+
+def _figures_one(name):
+    from dread import cmetrics
+    text = _lifted_text(name)
+    made = _named(name, text, None, _G["context"]) if text is not None else None
+    if made is None:
+        return None
+    tree, fn, stages = made
+    lifted = cparse.parse(text).function(name)      # (it parsed in _named)
+    return {"readable": cmetrics.readable_figures(tree, fn),
+            "lifted": cmetrics.count(cmetrics.skeleton(lifted.body.body)),
+            "kept_lifted": stages is not None and not stages}       # (_named: [] for fixed registers)
+
+
+def figures(program, context, lifter, names, jobs=None):
+    """{name: {"readable": dread.cmetrics.readable_figures of its readable C (the tables applied, as
+    built), "lifted": the statements, depth, gotos and labels of its lifted C, "kept_lifted": whether
+    its readable C is its lifted C (fixed registers: no stage ran)}} for the functions that lift and
+    are the dialect, made in a pool (in_pool)."""
+    warm(lifter)
+    got = in_pool(_figures_one, list(names), jobs, program=program, context=context, lifter=lifter)
+    return {n: g for n, g in zip(names, got) if g is not None}
 
 
 def warm(lifter):
@@ -514,6 +541,9 @@ def main(argv=None):
                         "structures' fields too")
     parser.add_argument("--shapes", action="store_true", help="the structures behind pointers (dread.shapes) of "
                         "the readable functions (or those named), largest first")
+    parser.add_argument("--figures", metavar="FILE", help="write the figures of the readable functions' (or the "
+                        "named ones') readable C and lifted C to FILE as JSON (dread.cmetrics: statements, "
+                        "depth, gotos, casts, raw accesses, members, typed variables; dread bench's readable step)")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     try:
@@ -525,6 +555,20 @@ def main(argv=None):
         from dread.util.polite import polite
         polite()
         check(target, image, args.names or None)
+        return 0
+    if args.figures:
+        import json
+        from dread import build, lift, regflow
+        from dread.program import Program
+        from dread.util.polite import polite
+        polite()
+        program = Program(target, image)
+        flow = regflow.load(target, image, program)
+        names = args.names or build.read_names(image.table("readable"))
+        got = figures(program, Context(target, image, program, flow), lift.make_lifter(program, flow), names)
+        with open(args.figures, "w") as f:
+            json.dump(got, f, indent=1, sort_keys=True)
+        print("dread readable --figures: %d of %d functions measured, into %s" % (len(got), len(names), args.figures))
         return 0
     if args.shapes:
         from dread import build, lift, regflow, shapes

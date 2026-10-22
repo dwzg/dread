@@ -323,3 +323,28 @@ whose facts its worker still makes), `status`, and an `origin` on each function 
 
 Nodes come in a fixed order (the functions by distance, side and address, then what each touches),
 so the same tables give the same record.
+
+### `BUILD/readable-check/IMAGE/verdicts.tsv`
+
+Written by `dread readable --check`: one line per function of the lifted table (or per name it was
+given), `function`, `verdict` (`readable`: built from readable C; `lifted`: it stays lifted; `not
+lifted`: a name not in the lifted table), `reason` (why it stays lifted, in the gate's words: the
+system run accepted it, it no longer lifts, its lifted C is not the dialect dread.cparse reads, the
+overlay's refusal or lack of room, its readable C does not compile or calls what the original does
+not, the FAIL or UNCOVERED line of its cases, the whole image differs with it). `dread bench`'s
+readable step counts the reasons by category (dread.bench readable_reason).
+
+### Figures of readable C (`dread readable --figures FILE`) and `BUILD/work/readable.tsv`
+
+`dread readable --figures FILE` writes JSON, `{function: {"readable": {...}, "lifted": {...},
+"kept_lifted": bool}}`, for the readable table's functions (or those named): `readable` the figures
+of its readable C as built (dread.cmetrics READABLE: `statements`, `depth`, `gotos`, `labels`,
+`loops`, `casts`, `raw`, `frame_raw`, `members`, `frame_members`, `fixed`, `variables`, `typed`;
+what each counts is in dread.cmetrics' docstring), `lifted` the first five of its lifted C,
+`kept_lifted` whether its readable C is its lifted C (fixed registers: no stage ran). A function
+that does not lift or is not the dialect is left out. `dread bench`'s readable step reads it and
+writes `BUILD/work/readable.tsv` in a bench build: one line per readable function, `function` and
+the columns of dread.bench TABLE_COLUMNS (its figures, its lifted C's statements and gotos, how it
+was matched to its source function and that function's figures, the ratios, the functions inlined
+into it), `-` where there is none. Columns may be added at the end; a reader takes them by the
+header's names.

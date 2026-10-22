@@ -486,8 +486,69 @@ its sources.
   the stripped FreeRTOS build and on a run where a whole driver was misread: does it find that group
   by itself, and fix it without breaking right names? Builds on the votes' confidence (Function names,
   2026-10-22).
-- [ ] **Scored against the sources.** A bench step: per build, the functions turned readable and
+- [x] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
+  Done 2026-10-22: `dread bench measure RECIPE [BUILD...] --steps readable`, one of the default steps,
+  after the lift check and the recorded cases (dread/bench.py readable_step, dread/cmetrics.py,
+  docs/decisions.md). It runs `dread readable --check` again only when a digest of what the gate
+  decides from changed (DREAD's code but the two measuring modules, the build's tables, image and
+  kept cases; otherwise its last verdicts are taken) and counts the functions lifted, turned readable
+  (built from readable C and tried) and accepted, and why the rest stays lifted, by category.
+  `dread readable --figures FILE` measures the accepted functions' readable C as built, on
+  dread.cparse's tree: statements, the deepest nesting of control statements (an else if no deeper,
+  a macro's do { } while (0) a block), gotos, labels, loops, casts (not those of raw accesses), raw
+  accesses through pointer casts and of them those through the frame's base, members p->f_.. and of
+  the frame's object, fixed addresses by name, variables and the typed ones (a structure or a pointer
+  to one): sums, medians and maxima, beside the same functions' lifted C. Against the source: a
+  readable function's entry gives the subprogram DWARF has there (a clone's source function through
+  its abstract origin, a .part kept out of the ratios), its translation unit is found among the
+  project's sources by the end of its path (patched copies, moved builds), and the source function
+  is counted with the same skeleton and count on clang's JSON tree of the source as the build's own
+  compiler preprocessed it (macros expanded: configASSERT is an if and a call on both sides; in its
+  container for a toolchain's build; clang told the compiler's C standard, C23 from GCC 15 on). Per
+  function readable / source, also against the source with the functions DWARF says were inlined into
+  it; median and quartiles; the ten worst by statements and by depth, named, with what was inlined.
+  Written to metrics.json (readable), the report (two tables across builds, the lists per build) and
+  BUILD/work/readable.tsv (every readable function's figures). Tests: tests/test_cmetrics.py (a
+  function written by hand whose counts are known, counted alike by dread.cparse and by clang; the
+  readable-only figures; gizmo's DWARF with its clone), tests/test_bench.py (the step on gizmo-m3:
+  36 of 36 readable, 35 matched, statements against the source median 1.50; a second measurement
+  reuses the gate and gives the same figures). Measured on copies of the four builds with readable
+  gates (sums; readable functions matched to their source; ratios per function, median (quartiles)):
+
+  | build | readable of lifted | gotos left (functions; lifted C) | statements, median | depth median, max | raw (frame) | members (frame's object) | typed of variables | matched | statements readable / source | with inlined | depth readable / source | deeper, shallower |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | GCC -Os | 317 of 329 | 259 (84; 1339) | 6775, 11 | 1, 22 | 367 (23) | 661 (354) | 232 of 2401 | 284 | 1.29 (1.00-1.65) | 1.22 (1.00-1.50) | 1.00 (1.00-1.25) | 66, 26 |
+  | clang -O2 | 275 of 286 | 270 (65; 1172) | 6286, 12 | 1, 28 | 360 (12) | 623 (398) | 215 of 1968 | 241 | 1.33 (1.10-1.91) | 1.25 (1.00-1.49) | 1.00 (1.00-1.00) | 51, 39 |
+  | GCC -O0 | 354 of 357 | 188 (49; 1597) | 5428, 10 | 1, 24 | 352 (38) | 675 (943) | 250 of 1699 | 320 | 1.20 (1.00-1.40) | 1.18 (1.00-1.40) | 1.00 (1.00-1.00) | 55, 16 |
+  | RISC-V GCC -Os | 252 of 259 | 289 (68; 1189) | 5537, 12 | 1, 46 | 191 (20) | 410 (435) | 159 of 2124 | 245 | 1.28 (1.00-1.76) | 1.23 (0.92-1.67) | 1.00 (1.00-1.25) | 55, 26 |
+
+  The rest stays lifted only because the system run accepted it (12, 11, 3, 7). Not matched: newlib's
+  and libgcc's functions (26, 27, 27, 6: their sources are not here) and those without debug
+  information at their entry (7, 7, 7, 1: newlib's stubs and lock functions; on RISC-V
+  xTaskGetTickCountFromISR, whose DWARF describes it without a code range though GCC emitted its
+  code, the same as xTaskGetTickCount's: not traced further). The source has one goto in all (each build's 177
+  to 289 are the structure stage's); readable C has as many loops as the source in sum (136 against
+  129 on GCC -Os), unrolled ones offset by inlined ones. Time per build, the step alone on a shared
+  machine: 101 s (GCC -Os) and 158 s (clang -O2) with the cases cached, nearly all of it the gate;
+  18 s when the gate is reused (figures 12-17 s in a pool, the source side 1-2 s, 8 s in a toolchain's
+  container); GCC -O0 708 s and RISC-V 300 s, whose gates first made every case anew (generator 34
+  came after their lift check). What the lists point at, by name:
+  - Staircases: a source's run of checks (`if (x != expected) xErrorDetected = pdTRUE;`) whose error
+    arms the compiler put after the loop with a jump back comes out as each check's success path
+    nested in the one before, a label inside each level where the error arm returns: GCC -O0's
+    prvSendFrontAndBackTest at depth 24 against 3 without any inlining, RISC-V's
+    prvLowPriorityMutexTask at 46 against 1 (124 statements with its three inlined functions).
+  - Cortex-M IT blocks as one if per instruction (`if (z) r2 = 0; if (!z) r1 = g_..;`) and the flag
+    as a carry expression (`z = (u32)((u64)r0 + (u32)~g_.. + 1) == 0`, for r0 == g_..): GCC -Os's
+    xAreStreamBufferTasksStillRunning, 65 statements against 15 (its two loops unrolled too).
+  - Loops the compiler unrolled (clang -O2's vQueueAddToRegistry, 96 statements against 13) and
+    callees it inlined (vInterruptMutexMasterTask, 169 against 8, 66 with its two inlined ones).
+  - RISC-V's yield (ecall) with all eight argument registers bound in and out, 17 statements each:
+    vTaskDelay 52 against 9.
+  This closes the clean-up's and the structure's "in the bench report" (statements against the
+  lifted C's and the source's, gotos left per build). Not established: that the readable C reads
+  well; only how it compares in size and nesting with what was compiled.
 
 Limits known up front: readable C compiles to other code, often larger than the original's slot, so
 more functions need freed space (the overlay's placement report says where); a function whose lifted

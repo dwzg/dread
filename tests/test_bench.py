@@ -559,3 +559,93 @@ def test_reasons_fall_into_categories_across_builds():
     a = c("refused: N reads REG behind the call of vAssertCalled (what the callee leaves)")
     b = c("refused: N reads REG behind the call of xQueueGenericSendFromISR (what the callee leaves)")
     assert a == b == "refused: N reads REG behind the call of F", a
+
+
+def test_readable_reasons_fall_into_categories():
+    """Why the readable gate left a function lifted, as categories across builds; the drops by what
+    stopped them, as the lift check's."""
+    c = bench.readable_reason
+    assert c("accepted by the system run: readable C is not checked there yet") == \
+        "accepted by the system run (not checked there yet)"
+    assert c("no longer lifts: N reads r3") == "no longer lifts"
+    assert c("the overlay: no room left for its readable C (12 bytes short)") == "no room for its readable C"
+    assert c("its readable C calls __aeabi_uidiv, which the original does not call") == \
+        "its readable C calls what the original does not"
+    assert c("FAIL prvSenderTask_7abc [case generation]") == "no generated input ends"
+    assert c("FAIL xQueuePeek [generated 3]") == "a case differs"
+    assert c("UNCOVERED f: 2 of 9 instructions of the original never ran: 8000a 8000c") == \
+        "cases leave instructions unrun"
+    assert c("the whole image differs with its readable C (found by halves): boot") == \
+        "the whole image differs with its readable C"
+
+
+def test_how_the_source_side_reads_a_build():
+    """clang's target for a build's preprocessed C (a clang build's own, a GNU prefix, 32-bit for an
+    RV32 build of a riscv64 compiler), the C standard its compiler preprocessed (GCC 15 on: C23), and
+    the source a translation unit's path names (a patched copy, a moved build: by the end)."""
+    assert bench.source_target({"cc": "clang", "cflags": ["--target=thumbv7m-none-eabi", "-O2"]}) == \
+        ["--target=thumbv7m-none-eabi"]
+    assert bench.source_target({"cc": "arm-none-eabi-gcc", "cflags": ["-mthumb"]}) == ["--target=arm-none-eabi"]
+    assert bench.source_target({"cc": "/usr/bin/riscv64-unknown-elf-gcc", "cflags": ["-march=rv32imac_zicsr"]}) == \
+        ["--target=riscv32-unknown-elf"]
+    assert bench.source_target({"cc": "gcc", "cflags": []}) == []
+    assert bench.c_standard("#define __STDC__ 1\n#define __STDC_VERSION__ 202311L\n") == "-std=gnu2x"
+    assert bench.c_standard("#define __STDC_VERSION__ 201710L\n") == "-std=gnu17"
+    assert bench.c_standard("#define __STDC_VERSION__ 201112L\n") == "-std=gnu11"
+    assert bench.c_standard("#define __STDC__ 1\n") == "-std=gnu89"
+    units = ["FreeRTOS/Source/tasks.c", "Demo/main.c", "main.c"]
+    assert bench.translation_unit("/home/x/src/freertos/FreeRTOS/Source/tasks.c", units) == "FreeRTOS/Source/tasks.c"
+    assert bench.translation_unit("/bench/b/work/patched/Demo/main.c", units) == "Demo/main.c"
+    assert bench.translation_unit("main.c", units) == "main.c"
+    assert bench.translation_unit("/build/newlib/libc/stdio/findfp.c", units) is None
+    assert bench.translation_unit(None, units) is None
+
+
+@pytest.mark.slow
+@needs_gcc
+def test_the_readable_step_measures_readable_c_against_the_source(tmp_path, monkeypatch):
+    """The readable step on gizmo-m3 (its lifted table, cases and ELF with debug information, where the
+    recipe's build lies): the gate accepts what it accepts on gizmo, the figures of the readable C are
+    smaller than the lifted C's, each readable function is matched to its source function, and a
+    second measurement takes the gate's results again (the digest of its inputs is the same) and gives
+    the same figures; the report has its tables and lists."""
+    from dread import build
+    from dread.target import Target
+    from conftest import GIZMO
+    root = tmp_path / "bench"
+    monkeypatch.setenv("DREAD_BENCH", str(root))
+    r = recipe(tmp_path)
+    shutil.copytree(GIZMO, root / "gizmo", ignore=shutil.ignore_patterns("build"))   # (its builds share files)
+    where = root / "gizmo" / "m3-Os"
+    os.rename(root / "gizmo" / "m3", where)
+    cases = os.path.join(GIZMO, "m3", "build", "autocases")
+    if os.path.isdir(cases):
+        shutil.copytree(cases, where / "build" / "autocases")
+    shutil.copyfile(where / "original" / "gizmo.elf", where / "firmware.elf")
+    target = Target.load(str(where))
+    image = target.image()
+    got = bench.readable_step(r, "m3-Os", target, image, str(where), bench=str(root), out=lambda *a: None)
+    lifted = build.read_names(image.table("lifted"))
+    assert got["ran"] and got["gate"] == "ran" and got["lifted"] == len(lifted), got
+    assert len(got["accepted"]) == got["measured"] >= len(lifted) - 2 and got["turned"] >= len(got["accepted"])
+    assert got["accepted"] == sorted(build.read_names(image.table("readable")))
+    assert 0 < got["statements"]["sum"] < got["lifted_statements"]["sum"] and got["statements"]["median"] > 0
+    assert got["gotos"]["sum"] < got["lifted_gotos"]["sum"] and got["variables"]["sum"] > 0
+    table = (where / "work" / "readable.tsv").read_text().splitlines()
+    assert table[0].startswith("function\tstatements\tdepth\tgotos") and len(table) == 1 + got["measured"]
+    s = got["source"]
+    if shutil.which("clang") and s.get("ran"):
+        assert s["matched"] + s["part"] + sum(u["count"] for u in s["unmatched"].values()) == got["measured"]
+        assert s["matched"] >= got["measured"] - 4, s          # (a linker veneer: no debug information)
+        assert 0.5 <= s["ratio"][1] <= 3 and s["errors"] == {}, s
+        assert all(w["unit"] in ("start_m3.c", "lib.c", "util.c", "hw.c", "main.c") for w in s["worst_larger"])
+        assert len(s["worst_larger"]) <= bench.WORST and s["sum_src_statements"] > 0
+    again = bench.readable_step(r, "m3-Os", target, image, str(where), bench=str(root), out=lambda *a: None)
+    assert again["gate"] == "reused"
+    same = ("accepted", "statements", "depth", "gotos", "raw", "members", "typed", "source")
+    strip = ("seconds", "flags")
+    assert {k: again[k] for k in same if k != "source"} == {k: got[k] for k in same if k != "source"}
+    assert {k: v for k, v in again["source"].items() if k not in strip} == \
+        {k: v for k, v in got["source"].items() if k not in strip}
+    lines = bench.readable_report([{"build": "m3-Os", "readable": got}])
+    assert any(line.startswith("| m3-Os | %d | " % len(lifted)) for line in lines), lines

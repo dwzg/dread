@@ -20,6 +20,26 @@ it measures what DREAD makes of the image, running its tools as they are run on 
 - recorded inputs (when the target has system-run scenarios): dread sysrecord records calls of the
   functions the lifter left uncovered or got no inputs for in each scenario, and the lift check
   runs again with the cases kept (a rebuild whose image differs drops them);
+- readable C (readable_step): dread readable --check on the lifted table (run again only when a
+  digest of what it decides from changed: DREAD's code, the build's tables, image and cases kept;
+  otherwise its last results are taken), the functions lifted, turned readable (the gate built
+  them from readable C) and accepted, and why the rest stays lifted, by category; then the
+  readable C of the accepted ones measured by dread.cmetrics (dread readable --figures): statements,
+  the deepest nesting of control statements, gotos and labels left, casts, raw memory accesses
+  through pointer casts (those through the frame's base apart), members of structures (p->f_..;
+  the frame's object apart), fixed addresses by name, variables and the typed ones, as sums,
+  medians and maxima, beside the same functions' lifted C; and against the source: each readable
+  function is matched by its entry to the subprogram DWARF has there (a clone, .constprop, .isra,
+  .part, to its source function; .part is a piece of it and stays out of the ratios), its
+  translation unit to the project's source by the end of its path, and the source function's
+  statements, depth and gotos are counted alike on clang's tree of that source as the build's
+  compiler preprocessed it (source_side); per function readable / source (and against the source
+  with the functions DWARF says were inlined into it), median and quartiles, and the ten worst
+  functions by statements and by depth, by name, for reading. What did not match is counted by why
+  (no debug information at its entry: none, or a subprogram without code there; a library's source;
+  not in the source's tree). Every readable function's
+  figures go to BUILD/work/readable.tsv. Without clang or pyelftools the source side is skipped and
+  says so. It does not establish that readable C reads well, only how it compares;
 - noreturn: the functions found never to return;
 - callconv: dread callconv, the registers each function's cases show it reads and changes, against
   dread.regflow's answers: the functions that disagree, by kind and by name;
@@ -76,7 +96,7 @@ compiler gives (cc --version), which the report shows: a compiler's version deci
     dread bench toolchain NAME... [--rebuild] [--prune]
     dread bench fetch RECIPE
     dread bench build RECIPE [BUILD...]
-    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,noreturn,callconv,whatcc]
+    dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,readable,noreturn,callconv,whatcc]
     dread bench report RECIPE
     dread bench all RECIPE [BUILD...] [--steps ...]
 """
@@ -90,7 +110,7 @@ import subprocess
 import sys
 import time
 
-STEPS = ("asm", "ghidra", "lift", "record", "noreturn", "callconv", "whatcc")
+STEPS = ("asm", "ghidra", "lift", "record", "readable", "noreturn", "callconv", "whatcc")
 RECORDABLE = ("UNCOVERED", "[case generation]")     # refusals that recorded inputs may lift
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -329,24 +349,35 @@ def made_from(recipe, name):
     return hashlib.sha1(blob.encode()).hexdigest()
 
 
+def compiling(recipe, name, work, bench=None, out=print):
+    """How a build compiles its sources: (src, {source: the file compiled}, flags, tool), tool(cmd)
+    the command as it runs (on the host, or in the toolchain's container with the source read-only
+    and the build's directory writable). The patched copies go to work (build: BUILD/work)."""
+    b = the_build(recipe, name)
+    project = recipe["projects"][b["project"]]
+    src = fetch(recipe, bench, out)
+    where = build_dir(recipe, name, bench)
+    files, first = patched_sources(project, src, work, b.get("patches", ()))
+    flags = home(b["cflags"]) + ["-D" + d for d in project.get("defines", ())] + ["-I" + d for d in first] + \
+        ["-I" + os.path.join(src, i) for i in project.get("includes", ())]
+    image = ensure_toolchain(b["toolchain"], out=out) if b.get("toolchain") else None
+
+    def tool(cmd):
+        return in_container(cmd, image, [(src, True), (where, False)], src) if image else cmd
+    return src, files, flags, tool
+
+
 def build(recipe, name, bench=None, jobs=None, out=print):
     """Compile and link one build, make its DREAD target and import the ELF; returns the target
     directory."""
     b = the_build(recipe, name)
     project = recipe["projects"][b["project"]]
-    src = fetch(recipe, bench, out)
     where = build_dir(recipe, name, bench)
     work = os.path.join(where, "work")
     objdir = os.path.join(work, "obj")
     os.makedirs(objdir, exist_ok=True)
-    files, first = patched_sources(project, src, work, b.get("patches", ()))
-    flags = home(b["cflags"]) + ["-D" + d for d in project.get("defines", ())] + ["-I" + d for d in first] + \
-        ["-I" + os.path.join(src, i) for i in project.get("includes", ())]
+    src, files, flags, tool = compiling(recipe, name, work, bench, out)
     cc, ld = b["cc"], b.get("ld", b["cc"])
-    image = ensure_toolchain(b["toolchain"], out=out) if b.get("toolchain") else None
-
-    def tool(cmd):                      # (on the host, or in the toolchain's container)
-        return in_container(cmd, image, [(src, True), (where, False)], src) if image else cmd
     version = run(tool([cc, "--version"]), cwd=src).strip().splitlines()[0]
     started = time.time()
     objects = []
@@ -440,6 +471,7 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
         with open(previous) as f:
             metrics = {k: v for k, v in json.load(f).items() if k in STEPS}
     earlier = metrics.get("lift", {}).get("accepted")
+    earlier_readable = metrics.get("readable", {}).get("accepted")
     metrics.update({"build": name, "functions": len(program.functions),
                     "instruction_bytes": sum(e - s for s, e, _ in program.ranges),
                     "image_bytes": len(image.payload())})
@@ -475,6 +507,12 @@ def measure(recipe, name, bench=None, steps=STEPS, out=print):
             before = metrics.get("lift", {}).get("verdicts", {}).get("accepted")
             metrics["lift"] = lift_step(target, image, where, "lift-recorded.log")
             metrics["record"]["accepted_before"] = before
+    if "readable" in steps:             # (after the lift check and the recorded cases: the gate builds on them)
+        metrics["readable"] = readable_step(recipe, name, target, image, where, bench, out)
+        if earlier_readable is not None and metrics["readable"].get("ran"):
+            now = set(metrics["readable"]["accepted"])
+            metrics["readable"]["against_last"] = {"gained": sorted(now - set(earlier_readable)),
+                                                   "lost": sorted(set(earlier_readable) - now)}
     if "noreturn" in steps:
         seconds, code, text = dread("noreturn", "--target", where, log=os.path.join(where, "work", "noreturn.log"))
         metrics["noreturn"] = {"functions": len([l for l in text.splitlines() if l.strip()]) if code == 0 else None,
@@ -570,6 +608,342 @@ def record_step(target, image, where):
     return {"ran": ran, "functions": len(names), "kept": kept, "seconds": round(seconds, 1)}
 
 
+# ---- the readable step
+
+NOT_TURNED = ("accepted by the system run", "no longer lifts", "its lifted C is not the dialect")
+WORST = 10                  # functions in each of the readable step's lists of the worst
+WORST_LEAST = 5             # ... of those with at least this many statements in the source (smaller ones
+                            # make large ratios of a few statements)
+CODE = (".py", ".c", ".h", ".java")     # DREAD's files the gate's digest reads,
+MEASURING = ("dread/bench.py", "dread/cmetrics.py")     # but those that only measure what the gate made
+
+
+def readable_reason(reason):
+    """Why the readable gate left a function lifted (a reason of its verdicts.tsv), as a category
+    across builds; the drops by what stopped them as the lift check's (reason_category)."""
+    for start, category in (("accepted by the system run", "accepted by the system run (not checked there yet)"),
+                            ("no longer lifts", "no longer lifts"),
+                            ("its lifted C is not the dialect", "its lifted C is not the dialect dread.cparse reads"),
+                            ("the overlay: no room", "no room for its readable C"),
+                            ("the overlay", "the overlay refused its readable C"),
+                            ("its readable C does not compile", "its readable C does not compile"),
+                            ("the whole image differs", "the whole image differs with its readable C")):
+        if reason.startswith(start):
+            return category
+    if "which the original does not call" in reason:
+        return "its readable C calls what the original does not"
+    if reason.startswith(("FAIL", "UNCOVERED", "never returns")):
+        return reason_category("dropped: " + reason_kind(reason))
+    return reason_kind(reason)
+
+
+def gate_digest(target, image):
+    """A digest of what dread readable --check decides from: DREAD's code, the build's description
+    (dread.toml), its image, its tables (but the gate's own: the readable and readable_types tables)
+    and the cases it keeps. The readable step runs the gate again when this changed (a new lifted
+    table, a change of DREAD's) and takes its last results otherwise. The modules that only measure
+    (MEASURING: this one and dread.cmetrics, which the gate does not import) are left out, so that a
+    change of the figures does not run every gate again."""
+    h = hashlib.sha1()
+    skip = {os.path.abspath(image.table("readable")), os.path.abspath(image.table("readable_types"))} | \
+        {os.path.abspath(os.path.join(ROOT, m)) for m in MEASURING}
+
+    def tree(root, only=None):
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+            for f in sorted(files):
+                path = os.path.join(dirpath, f)
+                if os.path.abspath(path) in skip or (only and not f.endswith(only)):
+                    continue
+                h.update(os.path.relpath(path, root).encode() + b"\0")
+                with open(path, "rb") as fh:
+                    h.update(hashlib.sha1(fh.read()).digest())
+    tree(os.path.join(ROOT, "dread"), CODE)
+    for part in (image.config, image.extra_cases, image.kept_cases):
+        tree(part)
+    h.update(image.payload())
+    with open(target.file, "rb") as fh:
+        h.update(fh.read())
+    return h.hexdigest()
+
+
+def source_target(b):
+    """clang's --target for reading a build's preprocessed C: a clang build's own, else the GNU
+    prefix of its compiler (arm-none-eabi-gcc: arm-none-eabi), 32-bit where a riscv64 compiler builds
+    for RV32 (-march=rv32..., -mabi=ilp32...). [] for a compiler without a prefix (the host's)."""
+    for f in b["cflags"]:
+        if f.startswith("--target="):
+            return [f]
+    cc = os.path.basename(b["cc"])
+    prefix = cc[:-len("gcc")].rstrip("-") if cc.endswith("gcc") else ""
+    if prefix.startswith("riscv64") and any(f.startswith(("-march=rv32", "-mabi=ilp32")) for f in b["cflags"]):
+        prefix = "riscv32" + prefix[len("riscv64"):]
+    return ["--target=" + prefix] if prefix else []
+
+
+def c_standard(macros):
+    """clang's -std for the C a compiler preprocessed, from its predefined macros (cc -dM -E): GCC 15
+    on default to C23, whose headers clang's default (C17) does not read (stddef.h's nullptr)."""
+    import re
+    m = re.search(r"#define __STDC_VERSION__ (\d+)L", macros)
+    version = int(m.group(1)) if m else 0
+    return "-std=" + ("gnu2x" if version > 201710 else "gnu17" if version == 201710 else
+                      "gnu11" if version >= 201112 else "gnu99" if version >= 199901 else "gnu89")
+
+
+def source_side(recipe, name, bench=None, out=print, jobs=None):
+    """The figures (dread.cmetrics.count) of the functions the build's C sources define, as compiled:
+    each preprocessed by the build's compiler with its flags (in its container, for a toolchain's
+    build), then read by the host's clang (-Xclang -ast-dump=json) for the build's target and C
+    standard. Why clang: it reads C with every GNU extension the sources and their libraries' headers
+    use (extended asm with operands, attributes, statement expressions), which pycparser does not, and
+    the preprocessed text is the C the compiler compiled, macros expanded. {"ran": True, "functions":
+    {source: {name: figures}}, "errors": {source: [clang's errors]}, "skipped": [sources not C],
+    "files": n, "seconds"}, or {"ran": False, "why"}."""
+    from dread import cmetrics
+    from dread.util.polite import workers
+    if shutil.which("clang") is None:
+        return {"ran": False, "why": "no clang on this machine"}
+    started = time.time()
+    b = the_build(recipe, name)
+    where = build_dir(recipe, name, bench)
+    work = os.path.join(where, "work", "readable-src")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    src, files, flags, tool = compiling(recipe, name, work, bench, out)
+    try:
+        macros = run(tool([b["cc"]] + flags + ["-dM", "-E", "-x", "c", "/dev/null"]), cwd=src)
+    except BenchError as e:
+        return {"ran": False, "why": "the compiler's macros: %s" % str(e)[:200]}
+    clang_flags = source_target(b) + [c_standard(macros)]
+    sources = sorted(s for s in files if s.endswith(".c"))
+
+    def one(source):
+        i_file = os.path.join(work, source.replace("/", "__") + ".i")
+        try:
+            run(tool([b["cc"]] + flags + ["-E", files[source], "-o", i_file]), cwd=src)
+        except BenchError as e:
+            return source, {}, ["preprocessing failed: %s" % str(e)[-200:]]
+        ast, errors = cmetrics.clang_ast(i_file, clang_flags)
+        os.remove(i_file)
+        return source, cmetrics.source_functions(ast), errors
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs or workers()) as pool:
+        got = list(pool.map(one, sources))
+    shutil.rmtree(work, ignore_errors=True)
+    return {"ran": True, "functions": {s: fns for s, fns, _ in got}, "errors": {s: e for s, _, e in got if e},
+            "skipped": sorted(s for s in files if s not in sources), "files": len(sources), "flags": clang_flags,
+            "seconds": round(time.time() - started, 1)}
+
+
+def translation_unit(path, sources):
+    """The source (a path relative to the source's root) whose translation unit DWARF names path, or
+    None: the path itself or a copy of it (a patched copy, a build moved: matched by the end)."""
+    if not path:
+        return None
+    path = path.replace(os.sep, "/")
+    found = [s for s in sources if path == s or path.endswith("/" + s)]
+    return max(found, key=len) if found else None
+
+
+def readable_step(recipe, name, target, image, where, bench=None, out=print):
+    """The readable gate and what its readable C looks like, against the source (see the module's
+    docstring); {"ran": False, "why"} without a lifted table."""
+    from dread import build as dbuild, cmetrics
+    from dread.program import Program
+    started = time.time()
+    lifted = dbuild.read_names(image.table("lifted")) if os.path.exists(image.table("lifted")) else []
+    if not lifted:
+        return {"ran": False, "why": "no lifted table (the lift step first)"}
+    work = os.path.join(where, "work")
+    os.makedirs(work, exist_ok=True)
+    stamp = os.path.join(work, "readable-gate.json")
+    verdicts_path = os.path.join(target.build, "readable-check", image.name, "verdicts.tsv")
+    digest = gate_digest(target, image)
+    try:
+        with open(stamp) as f:
+            last = json.load(f)
+    except (OSError, ValueError):
+        last = {}
+    reused = last.get("digest") == digest and all(os.path.exists(p) for p in (
+        image.table("readable"), image.table("readable_types"), verdicts_path))     # (the gate's outputs)
+    if reused:
+        gate_seconds = last.get("seconds")
+    else:
+        if os.path.exists(stamp):
+            os.remove(stamp)
+        gate_seconds, code, _ = dread("readable", "--target", where, "--check", log=os.path.join(work, "readable.log"))
+        if code or not os.path.exists(verdicts_path):
+            return {"ran": False, "why": "dread readable --check failed (work/readable.log)",
+                    "seconds": round(time.time() - started, 1)}
+        gate_seconds = round(gate_seconds, 1)
+        with open(stamp, "w") as f:
+            json.dump({"digest": digest, "seconds": gate_seconds}, f)
+    gate = {}
+    with open(verdicts_path) as f:
+        next(f)
+        for line in f:
+            fn, verdict, reason = (line.rstrip("\n").split("\t") + ["", ""])[:3]
+            gate[fn] = (verdict, reason)
+    in_table = set(dbuild.read_names(image.table("readable")))
+    accepted = sorted(n for n in lifted if n in in_table)
+    stay, turned = {}, 0
+    for fn in lifted:
+        verdict, reason = gate.get(fn, ("lifted", "not checked by the gate"))
+        if fn in in_table:
+            turned += 1
+            continue
+        stay[readable_reason(reason)] = stay.get(readable_reason(reason), 0) + 1
+        if fn in gate and not reason.startswith(NOT_TURNED):
+            turned += 1                     # (its readable C was built and tried: the gate refused it)
+    # the figures of the accepted readable C (and of the same functions' lifted C)
+    figures_file = os.path.join(work, "readable-figures.json")
+    fig_seconds, code, _ = dread("readable", "--target", where, "--figures", figures_file,
+                                 log=os.path.join(work, "readable-figures.log"))
+    figs = {}
+    if code == 0:
+        with open(figures_file) as f:
+            figs = json.load(f)
+    rows = {n: dict(figs[n]["readable"], lifted_statements=figs[n]["lifted"]["statements"],
+                    lifted_gotos=figs[n]["lifted"]["gotos"], kept_lifted=figs[n]["kept_lifted"])
+            for n in accepted if n in figs}
+    result = {"ran": True, "lifted": len(lifted), "turned": turned, "accepted": accepted,
+              "stay_lifted": dict(sorted(stay.items(), key=lambda kv: (-kv[1], kv[0]))),
+              "gate": "reused" if reused else "ran", "measured": len(rows),
+              "kept_lifted": sum(1 for r in rows.values() if r["kept_lifted"])}
+    if code:
+        result["figures_failed"] = "dread readable --figures failed (work/readable-figures.log)"
+    for key in cmetrics.READABLE + ("lifted_statements", "lifted_gotos"):
+        values = [r[key] for r in rows.values()]
+        result[key] = {"sum": sum(values), "median": cmetrics.median(values), "max": max(values, default=0),
+                       "functions": sum(1 for v in values if v)}
+    # against the source: the function DWARF says each one is, its figures from clang's tree
+    elf = os.path.join(where, "firmware.elf")
+    result["source"] = {"ran": False, "why": "no readable function measured"}
+    if rows:
+        try:
+            dwarf = cmetrics.out_of_line(elf)
+        except ImportError:
+            dwarf = None
+            result["source"] = {"ran": False, "why": "pyelftools is missing (pip install -e '.[dwarf]')"}
+        if dwarf == {}:
+            result["source"] = {"ran": False, "why": "the ELF has no debug information"}
+        elif dwarf:
+            source = source_side(recipe, name, bench, out)
+            result["source"] = source
+            if source.get("ran"):
+                result["source"] = against_source(rows, source, dwarf, Program(target, image), elf)
+                result["source"].update(ran=True, files=source["files"], seconds=source["seconds"],
+                                        flags=source["flags"], skipped=source["skipped"],
+                                        errors={s: e[:3] for s, e in source["errors"].items()})
+    write_readable_table(os.path.join(work, "readable.tsv"), rows)
+    result["seconds"] = round(time.time() - started, 1)
+    result["seconds_gate"] = gate_seconds
+    result["seconds_figures"] = round(fig_seconds, 1)
+    return result
+
+
+MATCHES = ("matched", "part", "no debug information at its entry", "not the project's sources",
+           "not in the source's tree")
+
+
+def against_source(rows, source, dwarf, program, elf_path):
+    """rows (name: figures) joined to their source functions; each row gains match (MATCHES), source,
+    unit, src_statements, src_depth, src_gotos, src_labels, src_loops, src_inlined (the source's
+    statements with those of the functions inlined into it, each inlined instance counted: a function
+    inlined from another unit, which only link-time optimisation does, counts nothing), inlined
+    (their names); the matched ones (not .part) ratio, ratio_inlined and ratio_depth. Returns the
+    summary for metrics.json: counts by match, quartiles of the ratios, sums and medians of the matched
+    ones' figures on both sides, and the worst lists (WORST functions of WORST_LEAST source statements
+    or more by statements against the source with its inlined functions; WORST deeper than the
+    source, most levels deeper first)."""
+    from dread import cmetrics
+    from dread.elf import Elf, STT_FUNC
+    entries = {fn.name: fn.entry for fn in program.functions}
+    symbols = {}
+    for s in Elf(elf_path).symbols:
+        if s.kind == STT_FUNC and s.name and s.shndx:
+            symbols.setdefault(s.value & ~1, s.name)
+    units = source["functions"]
+    unmatched = {}
+    for name, row in sorted(rows.items()):
+        d = dwarf.get(entries.get(name, -1) & ~1)
+        unit = translation_unit(d["cu"], units) if d else None
+        defined = units.get(unit, {})
+        if d is None:
+            row["match"] = MATCHES[2]
+        elif unit is None:
+            row["match"] = MATCHES[3]
+        elif d["name"] not in defined:
+            row["match"] = MATCHES[4]
+        else:
+            symbol = symbols.get(entries[name] & ~1, "")
+            row["match"] = MATCHES[1] if ".part." in symbol else MATCHES[0]
+            mine = defined[d["name"]]
+            row.update(source=d["name"], unit=unit, src_statements=mine["statements"], src_depth=mine["depth"],
+                       src_gotos=mine["gotos"], src_labels=mine["labels"], src_loops=mine["loops"],
+                       inlined=d["inlined"],
+                       src_inlined=mine["statements"] + sum(defined.get(i, {}).get("statements", 0)
+                                                            for i in d["inlined"]))
+        if row["match"] not in MATCHES[:2]:
+            unmatched.setdefault(row["match"], []).append(name)
+    whole = [(n, r) for n, r in sorted(rows.items()) if r["match"] == MATCHES[0]]
+
+    def ratio(a, b):
+        return round(a / b, 3) if b else None
+    for n, r in whole:
+        r["ratio"] = ratio(r["statements"], r["src_statements"])
+        r["ratio_inlined"] = ratio(r["statements"], r["src_inlined"])
+        r["ratio_depth"] = ratio(r["depth"], r["src_depth"])
+    out = {"matched": len(whole), "part": sum(1 for r in rows.values() if r["match"] == MATCHES[1]),
+           "unmatched": {k: {"count": len(v), "names": v[:WORST]} for k, v in sorted(unmatched.items())}}
+    for key in ("ratio", "ratio_inlined", "ratio_depth"):
+        q = cmetrics.quartiles([r[key] for _, r in whole if r[key] is not None])
+        out[key] = [round(x, 2) for x in q] if q else None
+    for key in ("statements", "src_statements", "src_inlined", "depth", "src_depth", "gotos", "src_gotos", "loops",
+                "src_loops"):
+        out["sum_" + key] = sum(r[key] for _, r in whole)
+        out["median_" + key] = cmetrics.median([r[key] for _, r in whole])
+    out["deeper"] = sum(1 for _, r in whole if r["depth"] > r["src_depth"])
+    out["shallower"] = sum(1 for _, r in whole if r["depth"] < r["src_depth"])
+    out["inlining"] = sum(1 for _, r in whole if r["inlined"])
+
+    def entry(n, r):
+        return {"name": n, "source": r["source"], "unit": r["unit"], "statements": r["statements"],
+                "src_statements": r["src_statements"], "src_inlined": r["src_inlined"], "depth": r["depth"],
+                "src_depth": r["src_depth"], "gotos": r["gotos"], "loops": r["loops"], "src_loops": r["src_loops"],
+                "inlined": sorted(set(r["inlined"])), "inlined_instances": len(r["inlined"])}
+    big = [(n, r) for n, r in whole if r["src_statements"] >= WORST_LEAST]
+    out["worst_larger"] = [entry(n, r) for n, r in sorted(
+        big, key=lambda nr: (-(nr[1]["ratio_inlined"] or 0), -nr[1]["statements"], nr[0]))[:WORST]]
+    out["worst_deeper"] = [entry(n, r) for n, r in sorted(
+        (nr for nr in whole if nr[1]["depth"] > nr[1]["src_depth"]),
+        key=lambda nr: (-(nr[1]["depth"] - nr[1]["src_depth"]), -nr[1]["statements"], nr[0]))[:WORST]]
+    return out
+
+
+TABLE_COLUMNS = ("statements", "depth", "gotos", "labels", "loops", "casts", "raw", "frame_raw", "members",
+                 "frame_members", "fixed", "variables", "typed", "lifted_statements", "lifted_gotos", "kept_lifted",
+                 "match", "source", "unit", "src_statements", "src_depth", "src_gotos", "src_loops", "src_inlined",
+                 "ratio", "ratio_inlined", "ratio_depth", "inlined")
+
+
+def write_readable_table(path, rows):
+    """BUILD/work/readable.tsv: one line per readable function, its figures (TABLE_COLUMNS; - where
+    there is none)."""
+    def cell(v):
+        if v is None:
+            return "-"
+        if isinstance(v, bool):
+            return "yes" if v else "no"
+        if isinstance(v, list):             # (the inlined functions: each once)
+            return ",".join(sorted(set(v))) or "-"
+        return str(v)
+    with open(path, "w") as f:
+        f.write("function\t" + "\t".join(TABLE_COLUMNS) + "\n")
+        for name, row in sorted(rows.items()):
+            f.write(name + "\t" + "\t".join(cell(row.get(c)) for c in TABLE_COLUMNS) + "\n")
+
+
 def reason_kind(reason):
     """A refusal's reason without its particulars (registers, addresses, numbers), for counting."""
     import re
@@ -616,10 +990,87 @@ def summary_line(m):
     r = m.get("record", {})
     if r.get("kept"):
         parts.append("%d recorded cases (%d before them)" % (r["kept"], r.get("accepted_before") or 0))
+    rd = m.get("readable", {})
+    if rd.get("ran"):
+        parts.append("readable %d of %d lifted (gotos %d, statements against the source's: %s)" % (
+            len(rd["accepted"]), rd["lifted"], rd["gotos"]["sum"],
+            "median %.2f" % rd["source"]["ratio"][1] if (rd.get("source") or {}).get("ratio") else "not measured"))
     c = m.get("callconv", {})
     if c.get("ran"):
         parts.append("registers measured: %d of %d disagree with regflow" % (c["measured"] - c["agree"], c["measured"]))
     return ", ".join(parts)
+
+
+def readable_report(rows):
+    """The report's lines on the readable step: the tables across builds, then each build's worst
+    functions and why the rest stays lifted."""
+    measured = [m for m in rows if m.get("readable", {}).get("ran")]
+    if not measured:
+        return []
+
+    def fig(rd, key, median=False):
+        f = rd.get(key) or {}
+        return ("%d" % f.get("sum", 0)) + (" (%g)" % f["median"] if median and f.get("median") is not None else "")
+
+    def quart(q):
+        return "%.2f (%.2f-%.2f)" % (q[1], q[0], q[2]) if q else "-"
+    lines = ["", "## Readable C (dread readable --check, figures by dread.cmetrics)", "",
+             "Sums over the readable functions, medians per function in parentheses; raw: accesses through a "
+             "pointer cast (of them through the frame's base); members: p->f (the frame's object's); typed: "
+             "variables of a structure or a pointer to one.", "",
+             "| build | lifted | turned readable | readable | stay lifted | gotos left (functions) | labels | "
+             "statements | depth | casts | raw (frame) | members (frame) | fixed-address names | typed of variables | "
+             "lifted C: statements, gotos | seconds (gate, figures, source) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for m in measured:
+        rd = m["readable"]
+        stay = rd.get("stay_lifted", {})
+        lines.append("| %s | %d | %d | %d | %s | %d (%d) | %s | %s | %s (max %d) | %s | %d (%d) | %d (%d) | %d | %d of %d "
+                     "| %d, %d | %s, %s, %s |" % (
+                         m["build"], rd["lifted"], rd["turned"], len(rd["accepted"]),
+                         "; ".join("%d %s" % (n, k) for k, n in stay.items()) or "-",
+                         rd["gotos"]["sum"], rd["gotos"]["functions"], fig(rd, "labels"), fig(rd, "statements", True),
+                         "%g" % (rd["depth"]["median"] or 0), rd["depth"]["max"], fig(rd, "casts"),
+                         rd["raw"]["sum"], rd["frame_raw"]["sum"], rd["members"]["sum"], rd["frame_members"]["sum"],
+                         rd["fixed"]["sum"], rd["typed"]["sum"], rd["variables"]["sum"],
+                         rd["lifted_statements"]["sum"], rd["lifted_gotos"]["sum"],
+                         "reused" if rd.get("gate") == "reused" else rd.get("seconds_gate", "-"),
+                         rd.get("seconds_figures", "-"),
+                         (rd.get("source") or {}).get("seconds", "-")))
+    lines += ["", "### Readable C against the source", "",
+              "Each readable function matched by its entry to the function DWARF names (a clone's source "
+              "function), counted on clang's tree of the preprocessed source; ratios readable / source per "
+              "function, median (quartiles); with inlined: the source's statements and those of every function "
+              "DWARF says was inlined into it; depth only where the source nests.", "",
+              "| build | readable | matched | part (.part) | unmatched | statements readable / source | with inlined "
+              "| depth readable / source | deeper, shallower | statements: readable, source, with inlined | "
+              "gotos: readable, source | loops: readable, source |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for m in measured:
+        rd, s = m["readable"], m["readable"].get("source") or {}
+        if "matched" not in s:
+            lines.append("| %s | %d | %s | | | | | | | | | |" % (m["build"], len(rd["accepted"]), s.get("why", "-")))
+            continue
+        lines.append("| %s | %d | %d | %d | %s | %s | %s | %s | %d, %d | %d, %d, %d | %d, %d | %d, %d |" % (
+            m["build"], rd["measured"], s["matched"], s["part"],
+            "; ".join("%d %s" % (u["count"], k) for k, u in s["unmatched"].items()) or "-",
+            quart(s["ratio"]), quart(s["ratio_inlined"]), quart(s["ratio_depth"]), s["deeper"], s["shallower"],
+            s["sum_statements"], s["sum_src_statements"], s["sum_src_inlined"], s["sum_gotos"], s["sum_src_gotos"],
+            s.get("sum_loops", 0), s.get("sum_src_loops", 0)))
+    for m in measured:
+        s = m["readable"].get("source") or {}
+        for key, title in (("worst_larger", "much larger than the source (against the source with its inlined "
+                            "functions)"), ("worst_deeper", "deeper than the source")):
+            if s.get(key):
+                lines += ["", "#### %s: readable C %s" % (m["build"], title), ""]
+                lines += ["- %s%s (%s): %d statements against %d%s, depth %d against %d, loops %d against %d%s" % (
+                    w["name"], "" if w["name"] == w["source"] else " = " + w["source"], w["unit"], w["statements"],
+                    w["src_statements"], " (%d with %d inlined: %s)" % (
+                        w["src_inlined"], w["inlined_instances"], ", ".join(w["inlined"][:4]) +
+                        (" ..." if len(w["inlined"]) > 4 else "")) if w["inlined"] else "",
+                    w["depth"], w["src_depth"], w.get("loops", 0), w.get("src_loops", 0),
+                    ", %d goto%s" % (w["gotos"], "s" if w["gotos"] > 1 else "") if w["gotos"] else "")
+                    for w in s[key]]
+    return lines
 
 
 def compiler_cell(m):
@@ -677,6 +1128,7 @@ def report(recipe, bench=None, out=print):
             m["build"], compiler_cell(m), sum(n for v, n in lf["verdicts"].items() if v != "accepted"),
             " | ".join(str(counts.get(c, 0)) for c in CATEGORIES), sum(refused.values()),
             "%d x %s" % (top[1], top[0][len("refused: "):]) if top else "-"))
+    lines += readable_report(rows)
     if any(m.get("whatcc", {}).get("ran") for m in rows):
         lines += ["", "## Library functions by their bytes (dread whatcc)", "",
                   "| build | built with | best (ties) | right | functions matched | named as certain | "

@@ -9,6 +9,43 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C against its source: clang's tree of what the compiler preprocessed (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The bench's readable step compares each readable function with its source function
+  (statements, the deepest nesting of control statements, gotos). How are the source's figures
+  counted, for C with GNU extensions (FreeRTOS's ports: extended asm with operands, attributes;
+  newlib's and the toolchains' headers)?
+- **Options.** (a) pycparser on preprocessed source: pure Python, but it reads no GNU extension;
+  every asm statement, attribute and statement expression would have to be rewritten away first,
+  with fake headers for the C library. (b) clang's JSON tree (`-Xclang -ast-dump=json
+  -fsyntax-only`) on the sources with the build's include paths and defines: clang's own predefined
+  macros then pick the #if branches (__clang__, its __GNUC__ of 4), not those GCC compiled, and the
+  headers' search path of the build's compiler has to be given. (c) The build's compiler
+  preprocesses each source with its exact flags (in its container for a toolchain's build), clang
+  reads the preprocessed text for the build's target and the C standard the compiler preprocessed
+  (GCC 15 on: C23, whose stddef.h has nullptr, which clang's default C17 refused in every kernel
+  file). (d) dread.cparse: it reads only the lifters' dialect.
+- **Choice: (c).** The preprocessed text is the C that was compiled, macros expanded (configASSERT
+  is an if and a call in the source as in the readable C; a macro's `do { } while (0)` is counted
+  as the block it is); clang reads every extension the FreeRTOS builds' files use (41 C files on
+  the Cortex-M builds, 39 on RISC-V), a source file in about 0.1 s, a build's in 1 to 2 s in threads
+  (8 s where a toolchain's container preprocesses). Both sides go through one
+  skeleton and one count (dread.cmetrics), so a statement means the same on both. A source function
+  is found by the out-of-line function's entry in DWARF (the subprogram there, through its abstract
+  origin for a clone), its translation unit by the end of its path (a patched copy, a moved build),
+  and its name in that unit's tree, never by DREAD's name (prvEchoServer_544c).
+- **What it costs.** clang on the measuring machine (the bench's clang builds need it anyway; CI has
+  it); without it the source side is skipped and says so. A construct GCC accepts and clang refuses
+  is an error the report lists per file (startup_gcc.c: a C statement in a naked function, a
+  function no readable C has). Functions the compiler inlined count in the readable C, not in the
+  source function: the comparison is also made against the source with its inlined functions
+  (DWARF's inlined subroutines), and the lists of the worst say what was inlined.
+- **How to undo.** dread.cmetrics' clang_skeleton and dread.bench's source_side are the only users;
+  another reader of the source only has to give the same skeleton.
+- **Status.** In the code (dread.cmetrics, dread.bench readable_step and source_side).
+
 ## Readable C's structure: a jump repeats a few statements; shared blocks after an if without a join (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
