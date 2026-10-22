@@ -19,6 +19,23 @@ def gizmo_dir(variant):
 
 
 @pytest.fixture(autouse=True)
+def _no_threads_left():
+    """A test leaves no thread of its own running: DREAD's pools fork, and a thread left running (the
+    GUI's analyses, its facts worker) may hold a lock the forked child then waits for forever (the
+    suite hung on CI so after the GUI's tests, 2026-10-22). Threads get some time to end."""
+    import threading
+    import time
+    before = set(threading.enumerate())
+    yield
+    left = [t for t in threading.enumerate() if t not in before and t.is_alive()]
+    deadline = time.time() + 60
+    for t in left:
+        t.join(max(0.0, deadline - time.time()))
+    left = [t.name for t in left if t.is_alive()]
+    assert not left, "threads left running after the test (a later fork may deadlock): %s" % left
+
+
+@pytest.fixture(autouse=True)
 def _usage_ledger(tmp_path, monkeypatch):
     """Tests never write to the real usage ledger of language-model answers (dread.llm.USAGE)."""
     from dread import llm

@@ -25,6 +25,9 @@ dread = ["include/*.h", "ghidra/*.java", "fasthooks.c", "web/*", "cclab/probes/*
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A fork while other threads run may deadlock the child (DREAD's pools fork): Python 3.12 and later
+# warn of it, and the suite takes the warning for an error (the tests after the GUI's hung on CI so)
+filterwarnings = ["error:This process .* is multi-threaded:DeprecationWarning"]
 markers = [
     "slow: takes more than a few seconds",
     "ghidra: needs a Ghidra installation (GHIDRA_INSTALL_DIR)",

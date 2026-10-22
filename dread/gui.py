@@ -147,6 +147,7 @@ class State:
         self.stamp = None
         self.analyses = {}
         self.generation = 0
+        self.threads = []                   # the analyses' and the facts worker's (close joins them)
         self.refresh()
 
     # -- files --
@@ -234,7 +235,30 @@ class State:
         self.relations = None                               # (call maps, Names) for the graph
         self.known = {}                                     # name -> its facts (dread.relations), made
         self.wanted, self.worker = [], None                 # what the facts worker makes next
-        threading.Thread(target=self.analyse, args=(self.program, self.generation), daemon=True).start()
+        self.start(self.analyse, self.program, self.generation)
+
+    def start(self, work, *args):
+        """A thread of this state's, kept so that close() can wait for it. Called with the lock held."""
+        self.threads = [t for t in self.threads if t.is_alive()]
+        thread = threading.Thread(target=work, args=args, daemon=True)
+        self.threads.append(thread)
+        thread.start()
+        return thread
+
+    def close(self, timeout=120):
+        """Stop the state's threads (the analyses end after the step they are in, the facts worker after
+        its function) and wait for them; returns whether all ended. A thread left running while the
+        process forks a pool (DREAD's pools fork) may hold a lock the child then waits for forever: the
+        tests after the GUI's hung on CI so (2026-10-22), Python warning that the process was
+        multi-threaded at every fork."""
+        with self.lock:
+            self.generation += 1
+            self.wanted = []
+            threads = list(self.threads)
+        deadline = time.time() + timeout
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.time()))
+        return not any(t.is_alive() for t in threads)
 
     def analyse(self, program, generation):
         """The slow analyses, one after another, each stored as soon as it is done."""
@@ -466,8 +490,7 @@ class State:
         shows one neighbourhood at a time). Called with the lock held."""
         self.wanted = [n for n in names if n not in self.known]
         if self.wanted and self.worker is None:
-            self.worker = threading.Thread(target=self.make_facts, args=(self.generation,), daemon=True)
-            self.worker.start()
+            self.worker = self.start(self.make_facts, self.generation)
 
     def make_facts(self, generation):
         """The facts worker: one function at a time, the lift under the lock, the readable C without
@@ -655,6 +678,15 @@ class Handler(BaseHTTPRequestHandler):
         return self.reply(404, {"error": "not found"})
 
 
+class Server(ThreadingHTTPServer):
+    """The page's server; closing it also stops the threads of the images' states (State.close)."""
+
+    def server_close(self):
+        super().server_close()
+        for state in list(self.RequestHandlerClass.states.values()):
+            state.close()
+
+
 def serve(target, image, host="127.0.0.1", port=8350, allow_hosts=()):
     """The server, not yet serving (serve_forever() or a thread does that); its address is
     server.server_address. Requests are answered for the host names 127.0.0.1, localhost, [::1],
@@ -668,7 +700,7 @@ def serve(target, image, host="127.0.0.1", port=8350, allow_hosts=()):
     handler = type("BoundHandler", (Handler,), {"target": target, "default": image.name, "states": {image.name: state},
                                                 "token": token, "lock": threading.Lock(),
                                                 "hosts": frozenset(n.lower() for n in names)})
-    server = ThreadingHTTPServer((host, port), handler)
+    server = Server((host, port), handler)
     server.daemon_threads = True
     server.token, server.state = token, state
     return server

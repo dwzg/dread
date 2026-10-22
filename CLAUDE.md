@@ -96,6 +96,10 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   CI has none of these caches: a test must make or search for what it needs and pass on a checkout
   without them (on 2026-10-22 a test read gizmo's cached cases without searching and failed only on
   CI). To see what CI sees, delete the caches in a worktree of its own before running the test.
+  Threads and forks do not mix: DREAD's pools fork, and a thread left running (the GUI's analyses and
+  facts worker) may hold a lock the child then waits for forever. On 2026-10-22 the suite hung on CI
+  in the tests after the GUI's, intermittently, never here; conftest now fails a test that leaves a
+  thread running, and pytest takes Python's "multi-threaded, use of fork()" warning for an error.
 - **Look for performance regularly** (the user, 2026-10-18): every few items, measure what is slow
   now (`pytest --durations=15`, `BUILD/times/`, the `seconds` of `BUILD/autocases/*.json`), profile
   the top item (cProfile) and fix what dominates. Prefer the algorithmic fix (work per byte or per
