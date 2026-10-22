@@ -555,6 +555,12 @@ def frame_offset(e):
     return None
 
 
+# The prefixes of frame slots made variables (frame_locals), tried in order: s36 for sp0 - 36 unless a
+# name of the function has it already, as RISC-V's saved registers s4 and s8 and the VFP's single
+# registers do; then every slot of that function takes the next prefix (sl36).
+SLOT_PREFIXES = ("s", "sl", "slot")
+
+
 def frame_locals(fn):
     """The frame's words as variables of their own: *(volatile u32 *)(sp0 - 36) becomes s36, where
     every slot is accessed with one type and no two overlap. When frame addresses leave the function
@@ -623,9 +629,12 @@ def frame_locals(fn):
     if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
         return False
     before = copy.deepcopy(fn.body.body)
-    names = {off: ("s%d" % -off if off < 0 else "s_%d" % off) for off in accesses}
     taken = all_names(fn)
-    if set(names.values()) & taken:
+    for prefix in SLOT_PREFIXES:            # (the first under which no slot's name is taken)
+        names = {off: ("%s%d" % (prefix, -off) if off < 0 else "%s_%d" % (prefix, off)) for off in accesses}
+        if not set(names.values()) & taken:
+            break
+    else:
         return False
 
     def rewrite(e):

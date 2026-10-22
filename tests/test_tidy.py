@@ -191,6 +191,21 @@ def test_a_slot_below_a_frame_address_that_leaves_is_a_variable():
     assert "*(volatile u32 *)(sp0 - 16)" in out and "*(volatile u32 *)(sp0 - 8)" in out, out
 
 
+def test_a_slot_whose_name_is_taken_gets_another_prefix():
+    """A slot is named s8 for sp0 - 8; where the function has a name s8 already (RISC-V's saved
+    register, a VFP register, here a parameter), its slots take the next prefix instead of staying
+    raw."""
+    text = FRAME.replace("u32 a3)", "u32 s8)").replace("r3 = a3", "r3 = s8")
+    fn = cparse.parse(text).function("h")
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "sp0" not in out and "frame" not in out, out
+    fn = cparse.parse(text.replace(" (void)sp0;", "")).function("h")     # (the pass alone)
+    assert tidy.frame_locals(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "sl8" in out and "u32 s8" in out, out
+
+
 @needs_z3
 def test_a_carry_over_a_load_is_a_comparison_that_still_loads_once():
     tree = cparse.parse(SNIPPET.replace(
