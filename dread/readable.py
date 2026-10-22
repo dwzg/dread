@@ -615,6 +615,12 @@ def main(argv=None):
             print("dread readable --score: %d fields declared pointers to a structure, %d such pointers in the "
                   "source (%.0f %%); %d of the source's pointers to a structure left integers" % (
                       pt["fields"], pt["right"], 100.0 * pt["right"] / max(pt["fields"], 1), pt["missed"]))
+            sp = shapes.score_plan(Program(target, image), context.plan, args.score)
+            print("dread readable --score: %d structures of typed parameters: %d fields declared (those of the "
+                  "structures they hold included), %d the source's (%.0f %%); %d structures held as members, %d "
+                  "where the source holds one" % (
+                      sp["structures"], sp["fields"], sp["right"], 100.0 * sp["right"] / max(sp["fields"], 1),
+                      sp["held"], sp["held_right"]))
         rows, totals = naming.score_globals(image, args.score)
         for r in rows:
             where = ("%s+%d" % (r["symbol"], r["offset"]) if r["offset"] else r["symbol"]) if r["symbol"] else "?"

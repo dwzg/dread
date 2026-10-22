@@ -323,6 +323,7 @@ canvas.map { display: block; width: 100%; cursor: pointer; }
 .edge.e-uses { stroke: var(--g-weak); stroke-dasharray: 4 3; }
 .edge.e-refers-to-text { stroke: var(--g-text-line); stroke-dasharray: 1.5 3; }
 .edge.e-uses-structure, .edge.e-points-to { stroke: var(--g-struct); stroke-dasharray: 6 3; }
+.edge.e-holds { stroke: var(--g-struct); }
 .mk-call { fill: var(--g-call); } .mk-read { fill: var(--g-read); } .mk-write { fill: var(--g-write); }
 .mk-hl { fill: var(--accent-strong); }
 .graph .node, .graph .edge { transition: opacity .12s; }

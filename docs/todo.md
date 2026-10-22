@@ -246,10 +246,10 @@ its sources.
   structure can be two types, each right; every access is at its offset either way). Typed
   C compiles with -fno-delete-null-pointer-checks (GCC dropped null checks of dereferenced pointers).
   A function whose readable C does not compile now stays lifted instead of ending the check (printi's
-  structure with a pad of 4 GB: + 0xffffffffu is - 1, offsets are signed now). Open: a pointer to a
-  field inside a structure (a task's xStateListItem at 4) stays an integer; a list reached through an
-  item's pointer field is a kind of its own (joining kinds through pointer fields would join what a
-  void * field holds, an item's owner: tasks and timers); embedded structures as members. An address
+  structure with a pad of 4 GB: + 0xffffffffu is - 1, offsets are signed now). Open: a list reached
+  through an item's pointer field is a kind of its own (joining kinds through pointer fields would
+  join what a void * field holds, an item's owner: tasks and timers). (A pointer to a structure
+  inside another, a task's xStateListItem at 4, and such structures as members: done, below.) An address
   computed once from a variable (an ldrd's, ldm's or stm's base, a_1 = r0 + 4, the frame's a_1 = sp0
   - 16 too) and read by a few statements on one straight path behind it, the variable unchanged on
   the way, is written into each of them with its offsets folded since 2026-10-22 (dread.tidy
@@ -298,6 +298,41 @@ its sources.
   or the source has dummies (StaticQueue_t's pvDummy1). Parameters 35 of 49 as the source (71 %), 46
   sharing a word (94 %); 7 of 14 globals. 39 answers, 41,180 tokens in and 41,378 out, about $0.025.
   The model knows FreeRTOS, and the functions' names tell it: a stripped firmware is the harder test.
+  Structures held inside others as members since 2026-10-22 (dread.shapes kinds, plan, embed,
+  apply_types; docs/decisions.md): where one kind's memory holds another's at an offset (a call hands
+  outer + 4 to a function that takes the inner one; or v = w + 4 met after a call gave v an object of
+  its own, and w - 4 from a member, its holder), the holder declares a member of the held structure
+  (struct s_24 f_4;) where C can hold it: at an offset of its alignment, ending where the holder's
+  fields reach, overlapping no other member, no field across its ends, the holder's fields inside it
+  fitting the held structure's, which takes them over. The holder's accesses there are p->f_4.f_8,
+  its address &p->f_4, and a variable that holds only such addresses is a pointer to the held
+  structure (r5 = &r0->f_4); a held structure's pointer fields are its own kind's (what the holders'
+  objects hold there came from callees' templates, kinds never joined, and made the item's previous
+  link no pointer). Members: FreeRTOS GCC -Os 7 (the task block's items at 4 and 0x18, the queue's
+  lists at 0x10 and 0x24, the event groups' list at 4), clang -O2 13, RISC-V GCC -Os 11, GCC -O0 10;
+  in the structures of typed parameters 8, 8, 7 and 8, every one where the source holds a structure.
+  Against the source (dread readable --score; the plan's fields of typed parameters, members'
+  flattened): GCC -Os 151 of 154 -> 152 of 155, clang -O2 209 of 212 -> 210 of 213, RISC-V 113 of 116
+  -> 118 of 121, GCC -O0 141 of 144 -> 146 of 149; pointer fields 6 of 7 -> 9 of 10, 7 of 11 -> 9 of
+  13, 2 of 5 -> 4 of 8, 5 of 7 -> 6 of 7 (the task block's items' previous links are pointers now; the
+  items' owners, void * in the source, are not; RISC-V's list count, a pointer to the list since
+  before and not traced, now counts once more in each list a queue holds); the source's pointers to a
+  structure left integers 33 -> 30, 54 -> 52, 40 -> 39, 40 -> 39. The analysis's fields (dread
+  readable --shapes --score) as before: 658 of 662, 449 of 452, 430 of 451, 679 of 683. Readable C
+  (dread.cmetrics over the readable functions): members 656 -> 690, 629 -> 661, 405 -> 428, 672 ->
+  705 (inside held structures 64, 54, 54 and 50;
+  members' addresses 34, 29, 23 and 33, (u32)r0 + 0x10u before), raw accesses 327, 372 -> 369, 196,
+  327, typed variables 222, 205 -> 208, 157, 244, casts 1293 -> 1304, 1103 -> 1116, 689 -> 700, 1062 ->
+  1060 (an integer stored into or read from the items' previous link, now a pointer). The gate
+  accepts the same functions as before on the eight builds (gizmo a32 35, m3 36, m4 44, rv32 31;
+  FreeRTOS GCC -Os 316, clang -O2 275, RISC-V GCC -Os 251, GCC -O0 353).
+  On the list functions themselves little changes (the item takes its owner field at 12 from the task
+  block's accesses through its held item): the readable C that changes is that of the functions
+  reaching lists and items inside queues, task blocks and event groups. Left: kinds stay fragmented
+  (a task block reached through an item's owner, a queue whose lists go only to functions that touch
+  one field of them, holds nothing); a list's end marker at 8, a 12-byte mini item used as a 20-byte
+  item, is no member (the pun still types a pointer to it as an item pointer, as the source's pxIndex
+  is); the pilot's names for held members (xStateListItem) not measured yet.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
   Thought 2026-10-21: plain accesses let GCC merge and hoist loads, and a loop that waits for a flag

@@ -132,6 +132,19 @@ def test_what_readable_c_alone_is_measured_for():
         "frame_members": 1, "fixed": 1, "variables": 5, "typed": 2}
 
 
+def test_a_member_of_a_held_structure_is_one_member():
+    """p->f_4.f_8 (a field of the structure held at 4) is one member access, &p->f_4 one member."""
+    tree = cparse.parse("""#include "dread.h"
+u32 h(volatile struct s_1 *r0)
+{
+    r0->f_4.f_8 = (u32)&r0->f_4;
+    return r0->f_0;
+}
+""")
+    got = cmetrics.readable_figures(tree, tree.function("h"))
+    assert (got["members"], got["frame_members"], got["casts"]) == (3, 0, 1), got
+
+
 def test_quartiles_and_median():
     assert cmetrics.median([3, 1, 2]) == 2 and cmetrics.median([4, 1, 2, 3]) == 2.5 and cmetrics.median([]) is None
     assert cmetrics.quartiles([1, 2, 3, 4, 5, 6, 7, 8]) == (2.5, 4.5, 6.5)

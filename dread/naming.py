@@ -649,7 +649,7 @@ def struct_names(plan, entries, taken=()):
         name = entry.get("name")
         if not good(name) or name in used_names:
             continue
-        offsets = {off for off, _ in plan.structs.get(k, [])}
+        offsets = {off for off, _ in plan.members(k)}      # (a structure held inside it is a member too)
         fields, seen = {}, set()
         for off, fname in sorted((entry.get("fields") or {}).items(), key=lambda kv: int(kv[0])):
             off = int(off)

@@ -137,15 +137,20 @@ before the functions' variables, which then see the names.
 
 The structures readable C declares (dread.shapes): `{"version": 1, "structs": {NAME: [[offset,
 type], ...]}, "functions": {FUNCTION: {"digest", "vars": {VARIABLE: NAME}}}, "pointers": {NAME:
-{"OFFSET": NAME}}}`. `pointers` (left out when empty) lists the word fields that point to a
-structure's base: every object of the kind that points somewhere from the field points there; such a
-field is declared `volatile struct NAME *`. A structure's fields
+{"OFFSET": NAME}}, "embeds": {NAME: {"OFFSET": NAME}}}`. `pointers` (left out when empty) lists the
+word fields that point to a structure's base: every object of the kind that points somewhere from
+the field points there; such a field is declared `volatile struct NAME *`. `embeds` (left out when
+empty; since 2026-10-22) lists the structures a structure holds as members (`struct NAME f_4;`): the
+holder's `structs` row leaves out what lies inside them, a held structure's fields are its own. A
+structure's fields
 are those a C structure holds at their offsets without packing (naturally aligned, not overlapping,
 the gaps bytes); a function's variables listed there are declared `volatile struct NAME *` and their
-accesses written as members (`p->f_2c`), every other use cast to u32. `digest` is the readable C's
+accesses written as members (`p->f_2c`, `p->f_4.f_8` inside a held structure; its address
+`&p->f_4`), every other use cast to u32. `digest` is the readable C's
 before names (dread.naming): a function whose C changed since gets no types until the next check.
 Written by `dread readable --check` from every lifted function's readable C before it checks any;
-the builds read it. Not edited by hand.
+the builds read it. Not edited by hand. A file from before `embeds` has none: its structures are
+flat, as they were written; an `embeds` entry naming a structure the file lacks is left out.
 
 ### `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
 
@@ -346,13 +351,15 @@ whose facts its worker still makes), `status`, and an `origin` on each function 
   - Memory has `types` (the access types) and `default` (the default name); a table also has `words`
     (how many of its words were read).
   - A text has `text`.
-  - A structure has `plan` (s_N) and `fields` ([[offset, type, field name], ...]).
+  - A structure has `plan` (s_N) and `fields` ([[offset, type, field name], ...]; a structure it
+    holds is a field of type `struct NAME`).
 - An edge: `from`, `to`, `kind`:
   - `calls`, with `sites`;
   - `reads`, `writes` or `uses`, with `types` and `indexed`;
   - `refers-to-text` and `refers-to-function`, from a function or a table;
   - `uses-structure`, with `variables`;
-  - `points-to`, from structure to structure, with `offsets`.
+  - `points-to`, from structure to structure, with `offsets`;
+  - `holds`, from a structure to one it holds as a member, with `offsets`.
 
 Nodes come in a fixed order (the functions by distance, side and address, then what each touches),
 so the same tables give the same record.

@@ -130,7 +130,8 @@ def test_names_proposed_and_structures(m3, tmp_path):
                                                "anchors": ["ring_get:r0", "ring_put:r0"], "by": "played"}}}, f)
     digest = m3[3].get("ring_get")["digest"]
     with open(image.table("readable_types"), "w") as f:
-        json.dump({"version": 1, "structs": {"s_1": [[32, "u32"], [36, "u32"]]},
+        json.dump({"version": 1, "structs": {"s_1": [[32, "u32"], [36, "u32"]], "s_2": [[0, "u32"], [4, "u16"]]},
+                   "embeds": {"s_1": {"40": "s_2"}},
                    "functions": {"ring_get": {"digest": digest, "vars": {"r0": "s_1", "r2": "s_1"}},
                                  "ring_put": {"digest": "made for other C", "vars": {"r0": "s_1"}}}}, f)
     try:
@@ -140,7 +141,10 @@ def test_names_proposed_and_structures(m3, tmp_path):
         nodes = by_name(g)
         assert nodes["ring_get"]["proposed"] == {"name": "ring_take", "what": "takes a byte"}
         assert nodes["ring"]["kind"] == "structure" and nodes["ring"]["naming"] == "proposed"
-        assert [f[2] for f in nodes["ring"]["fields"]] == ["head", "tail"]
+        assert [f[2] for f in nodes["ring"]["fields"]] == ["head", "tail", "f_28"]
+        assert nodes["ring"]["fields"][2][1] == "struct s_2" and nodes["ring"]["size"] == 48     # (s_2 held at 40)
+        e = [e for e in g["edges"] if e["kind"] == "holds"]
+        assert len(e) == 1 and e[0]["offsets"] == [40] and e[0]["to"] == "s:s_2", e
         e = [e for e in g["edges"] if e["kind"] == "uses-structure"]
         assert len(e) == 1 and e[0]["variables"] == ["r0", "r2"]
         assert nodes["g_ticks"]["naming"] == "named" and nodes["g_ticks"]["proposed"] == {"name": "tick_count"}

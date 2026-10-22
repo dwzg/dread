@@ -690,13 +690,15 @@ def graph(program, center, depth=DEPTH, calls=None, facts=None, names=None, extr
         if node_id not in nodes:
             if not room(node_id):
                 return None
-            rows = plan.structs[k]
             label, fields = names.structs.get(k, (k, {}))
             from dread.shapes import field_name
+            held = plan.embeds.get(k, {})       # (a structure held inside it: struct NAME, its size)
+            rows = [(off, t if off not in held else "struct " + names.structs.get(held[off], (held[off], {}))[0],
+                     SIZES.get(t, 4) if off not in held else plan.size(held[off])) for off, t in plan.members(k)]
             nodes[node_id] = {"id": node_id, "kind": "structure", "name": label, "plan": k,
                               "naming": "proposed" if label != k else "unnamed", "address": None,
-                              "size": max((off + SIZES.get(t, 4) for off, t in rows), default=0),
-                              "fields": [[off, t, field_name(fields, off)] for off, t in rows]}
+                              "size": max((off + z for off, _, z in rows), default=0),
+                              "fields": [[off, t, field_name(fields, off)] for off, t, _ in rows]}
         return node_id
     for name in order:
         f = facts.get(name)
@@ -714,6 +716,11 @@ def graph(program, center, depth=DEPTH, calls=None, facts=None, names=None, extr
             s = struct_node(other) if other in plan.structs else None
             if s:
                 e = edge(node_id, s, "points-to", offsets=[])
+                e["offsets"].append(offset)
+        for offset, other in sorted(plan.embeds.get(k, {}).items()):
+            s = struct_node(other) if other in plan.structs else None
+            if s:
+                e = edge(node_id, s, "holds", offsets=[])
                 e["offsets"].append(offset)
 
     # the calls between the functions shown, and how many each has beyond them

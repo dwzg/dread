@@ -34,6 +34,21 @@ a function, and a structure whose fields are only reached through other pointers
 its twins (a list item reached as an item's next is not known to be an item unless something says
 so). The gate decides nothing here; a rewrite that uses these shapes will be checked like every
 other.
+
+For readable C (plan, apply_types) the objects are sorted into kinds: kinds() joins the memory a
+call hands at a structure's base to what the callee takes, and records where one kind's memory holds
+another's at an offset (embeds: a call handed outer + 4 to a function that takes an item, or v = w +
+4 met after v had an object of its own; FreeRTOS's task block holds two list items at 4 and 24, a
+queue two lists at 16 and 36, an event group one at 4). The plan declares such a held structure a
+member of its holder (struct s_7 f_4;) where C can hold it: at an offset of its alignment, ending
+where the holder's fields reach, not overlapping another member, no field across its ends, and what
+the holder accesses inside it fitting the held structure's fields (embed). The holder's accesses
+there are written through the member (p->f_4.f_8), its address as &p->f_4 (a variable that holds
+only such addresses a pointer to the held structure: r5 = &r4->f_4), and every access stays the one
+volatile access it was. A place two kinds claim that could not be made one, or a held structure the
+plan does not declare, leaves the holder's fields flat. Measured on four FreeRTOS builds against the
+source (score_plan; docs/todo.md, Types): of the members declared in typed parameters' structures,
+every one lies where the source's structure holds a structure.
 """
 import re
 
@@ -54,6 +69,8 @@ class Shapes:
         self.pending = []               # (kind, a, b, k): relations that wait for a pointer
         self.kind_parent = {}           # object -> (object, shift): what the memory is, as obj_parent
         self.embeds = set()             # (kind, offset, kind, offset): one kind's memory inside another's
+        self.kind_embeds = {}           # (kind, offset from its base) -> the kind held there (kinds())
+        self.offsets = []               # (location, location): one memory, met late (settle's v = w + k)
         self.calls = []                 # (the argument's location, the callee's parameter's): kinds (kinds())
         self.frames = set()             # objects that are a function's stack frame (reached from sp0)
         self.var_webs = {}              # (function, variable) -> its values' keys, one per web
@@ -568,6 +585,10 @@ def settle(shapes):
                     o, off = s.pointer(b)
                     pa = s.find(a)
                     if pa in s.points:
+                        # (v points somewhere already, a call gave it a fresh object: r5 = r0 + 4 met
+                        # after uxListRemove(r5); objects at other offsets stay apart, and kinds() reads
+                        # the pair as one inside the other)
+                        s.offsets.append((s.points[pa], (o, off + k)))
                         for x, y in s.unify_loc(s.points[pa], (o, off + k)):
                             s.unify(x, y)
                     else:
@@ -759,11 +780,13 @@ def source_layouts(elf_path):
             for entry, params in source_params(elf_path).items()}
 
 
-def source_params(elf_path, pointers=None):
+def source_params(elf_path, pointers=None, held=None):
     """{function entry: {parameter index: ([the type's names, its typedefs first and the structure's
     tag last], {(offset, size): [the member names on the way to that leaf]})}} of the parameters that
     are pointers to a structure, from the ELF's debug information (pyelftools). pointers, a dict:
-    gets {function entry: {parameter index: {offsets of the leaves that point to a structure}}}."""
+    gets {function entry: {parameter index: {offsets of the leaves that point to a structure}}};
+    held, a dict: {function entry: {parameter index: {offset: size}}} of the structures (and unions)
+    the parameter's structure holds as members, at any depth."""
     from elftools.elf.elffile import ELFFile
     out = {}
     complete = {}                           # struct name -> its definition (a file that only declares it:
@@ -788,11 +811,13 @@ def source_params(elf_path, pointers=None):
             return 4
         return None
 
-    def leaves(die, base, into, depth=0, path=(), ptrs=None):
+    def leaves(die, base, into, depth=0, path=(), ptrs=None, inner=None):
         die = strip(die)
         if die is None or depth > 6:
             return
         if die.tag in ("DW_TAG_structure_type", "DW_TAG_union_type"):
+            if depth and inner is not None:
+                inner.setdefault(base, size_of(die))
             for m in die.iter_children():
                 if m.tag != "DW_TAG_member" or "DW_AT_type" not in m.attributes:
                     continue
@@ -800,7 +825,7 @@ def source_params(elf_path, pointers=None):
                 off = loc.value if loc is not None and isinstance(loc.value, int) else 0
                 mname = m.attributes.get("DW_AT_name")
                 leaves(m.get_DIE_from_attribute("DW_AT_type"), base + off, into, depth + 1,
-                       path + ((mname.value.decode(errors="replace"),) if mname else ()), ptrs)
+                       path + ((mname.value.decode(errors="replace"),) if mname else ()), ptrs, inner)
         elif die.tag == "DW_TAG_array_type":
             elem = die.get_DIE_from_attribute("DW_AT_type") if "DW_AT_type" in die.attributes else None
             esize = size_of(elem) if elem is not None else None
@@ -813,7 +838,7 @@ def source_params(elf_path, pointers=None):
                         count = sub.attributes["DW_AT_upper_bound"].value + 1
             if esize and count:
                 for k in range(min(count, 64)):
-                    leaves(elem, base + k * esize, into, depth + 1, path, ptrs)
+                    leaves(elem, base + k * esize, into, depth + 1, path, ptrs, inner)
         else:
             size = size_of(die)
             if size:
@@ -857,10 +882,12 @@ def source_params(elf_path, pointers=None):
                         names, target = type_names(t.get_DIE_from_attribute("DW_AT_type"))
                         target = strip(target)
                         if target is not None and target.tag in ("DW_TAG_structure_type", "DW_TAG_union_type"):
-                            into, ptrs = {}, set()
-                            leaves(target, 0, into, ptrs=ptrs)
+                            into, ptrs, inner = {}, set(), {}
+                            leaves(target, 0, into, ptrs=ptrs, inner=inner)
                             if pointers is not None:
                                 pointers.setdefault(entry, {})[k] = ptrs
+                            if held is not None:
+                                held.setdefault(entry, {})[k] = inner
                             name = target.attributes.get("DW_AT_name")
                             out.setdefault(entry, {})[k] = (handle + names + [name.value.decode() if name else "?"],
                                                             into)
@@ -868,15 +895,11 @@ def source_params(elf_path, pointers=None):
     return out
 
 
-def score_pointers(program, p, elf_path):
-    """The plan's pointer fields against the source (debug information), for the structures of
-    typed parameters whose source type points to a structure, each pair of our structure and the
-    source's once: {"fields": pointer fields, "right": of them pointers to a structure in the
-    source, "missed": the source's pointers to a structure at word fields the plan left integers}."""
-    ptrs = {}
-    src = source_params(elf_path, pointers=ptrs)
+def _typed_params(program, p, src):
+    """[(function, parameter index, our structure)] of the typed parameters whose source type is a
+    pointer to a structure (src: source_params'), each pair of our structure and the source's once."""
     regs = list(program.target.abi.arg_regs)
-    seen, out = set(), {"fields": 0, "right": 0, "missed": 0}
+    seen, out = set(), []
     for f, variables_ in sorted(p.typed.items()):
         fn = program.by_name.get(f)
         params = src.get(fn.entry, {}) if fn is not None else {}
@@ -887,10 +910,57 @@ def score_pointers(program, p, elf_path):
             if (k, params[i][0][-1]) in seen:
                 continue
             seen.add((k, params[i][0][-1]))
-            mine, theirs = p.pointers.get(k, {}), ptrs.get(fn.entry, {}).get(i, set())
-            out["fields"] += len(mine)
-            out["right"] += sum(1 for off in mine if off in theirs)
-            out["missed"] += sum(1 for off, t in p.structs[k] if t == "u32" and off in theirs and off not in mine)
+            out.append((fn, i, k))
+    return out
+
+
+def score_pointers(program, p, elf_path):
+    """The plan's pointer fields against the source (debug information), for the structures of
+    typed parameters whose source type points to a structure, each pair of our structure and the
+    source's once: {"fields": pointer fields, "right": of them pointers to a structure in the
+    source, "missed": the source's pointers to a structure at word fields the plan left integers}.
+    A structure's fields include those of the structures it holds, at their offsets in it."""
+    ptrs = {}
+    src = source_params(elf_path, pointers=ptrs)
+    out = {"fields": 0, "right": 0, "missed": 0}
+    for fn, i, k in _typed_params(program, p, src):
+        mine, theirs = p.leaf_pointers(k), ptrs.get(fn.entry, {}).get(i, set())
+        out["fields"] += len(mine)
+        out["right"] += sum(1 for off in mine if off in theirs)
+        out["missed"] += sum(1 for off, t in p.leaves(k) if t == "u32" and off in theirs and off not in mine)
+    return out
+
+
+def held_offsets(p, name, depth=0):
+    """The offsets in a structure of the structures it holds, theirs included."""
+    out = []
+    for d, inner in sorted(p.embeds.get(name, {}).items()):
+        out.append(d)
+        if depth < 8:
+            out += [d + x for x in held_offsets(p, inner, depth + 1)]
+    return out
+
+
+def score_plan(program, p, elf_path):
+    """The plan's structures against the source (debug information), for the structures of typed
+    parameters whose source type is a pointer to a structure, each pair of our structure and the
+    source's once: {"structures": such pairs, "fields": the fields declared (those of the structures
+    a structure holds at their offsets in it), "right": of them a leaf of the source's structure at
+    that offset with that size, "held": the structures declared members of another, "held_right": of
+    them at an offset where the source's structure holds a structure or a union}."""
+    inner = {}
+    src = source_params(elf_path, held=inner)
+    out = dict.fromkeys(("structures", "fields", "right", "held", "held_right"), 0)
+    for fn, i, k in _typed_params(program, p, src):
+        leaves = set(src[fn.entry][i][1])
+        mine = {(off, SIZES[t]) for off, t in p.leaves(k)}
+        theirs = inner.get(fn.entry, {}).get(i, {})
+        held = held_offsets(p, k)
+        out["structures"] += 1
+        out["fields"] += len(mine)
+        out["right"] += len(mine & leaves)
+        out["held"] += len(held)
+        out["held_right"] += sum(1 for d in held if d in theirs)
     return out
 
 
@@ -1042,6 +1112,18 @@ def kinds(s, trees):
             links.append((ra, rb))
         elif ra not in frames:
             s.embeds.add((ra, oa, rb, ob))
+    # One memory reached as two objects at offsets of their own (v = w + k met after v had an object):
+    # the one at its base lies inside the other (a task block's list item at 4, or the block from its
+    # item, w - 4).
+    for a, b in s.offsets:
+        (ra, oa), (rb, ob) = s.loc(a), s.loc(b)
+        if ra == rb or ra in frames or rb in frames:
+            continue
+        da, db = oa - base.get(ra, 0), ob - base.get(rb, 0)
+        if da == 0 and db > 0:
+            s.embeds.add((rb, ob, ra, oa))
+        elif db == 0 and da > 0:
+            s.embeds.add((ra, oa, rb, ob))
     # The strongest links first: the more identical fields two sides share, the surer they are one
     # structure; a link whose layouts do not fit is left (one structure handed to a helper that takes
     # several, clang's vPortFree whose free list walk reaches past its header, comes last and fails).
@@ -1081,6 +1163,21 @@ def kinds(s, trees):
             kind.targets[off - b] = kind.targets.get(off - b, 0) + n
     s.kind_root = {o: find(o) for o, (p, _) in s.obj_parent.items() if p == o}
     s.kind_base = base
+    # What sits inside what, kind by kind: {(outer kind, offset from its base): the inner kind, at its
+    # base} (a task block's two list items at 4 and 24, a queue's two lists at 16 and 36). A place
+    # that two kinds claim which could not be made one holds neither; a kind inside itself (a walk
+    # from inside, a pun) is no member.
+    s.kind_embeds, clash = {}, set()
+    for ra, oa, rb, ob in sorted(s.embeds):
+        if ob != base.get(rb, 0):
+            continue
+        outer, rel, inner = find(ra), oa - base.get(ra, 0), find(rb)
+        if rel <= 0 or outer == inner:
+            continue
+        if s.kind_embeds.setdefault((outer, rel), inner) != inner:
+            clash.add((outer, rel))
+    for key in clash:
+        del s.kind_embeds[key]
     return out
 
 
@@ -1111,14 +1208,21 @@ def field_name(fields, rel):
     return (fields or {}).get(rel) or "f_%x" % rel
 
 
-def struct_text(name, rows, fields=None, pointers=None):
+def struct_text(name, rows, fields=None, pointers=None, embeds=None):
     """The C definition of a structure with these fields, gaps filled with bytes; fields: their names
     by offset where they have one; pointers: {offset: the name of the structure the field points to},
-    such a field declared volatile struct NAME * (a word, as its u32)."""
+    such a field declared volatile struct NAME * (a word, as its u32); embeds: {offset: (the name of
+    a structure held there, its size)}, declared struct NAME (defined before this one)."""
+    members = [(rel, ctype, None) for rel, ctype in rows] + \
+        [(rel, None, inner) for rel, inner in (embeds or {}).items()]
     lines, pos = ["struct %s" % name, "{"], 0
-    for rel, ctype in rows:
+    for rel, ctype, inner in sorted(members, key=lambda m: m[0]):
         if rel > pos:
             lines.append("    u8 pad_%x[%d];" % (pos, rel - pos))
+        if inner is not None:
+            lines.append("    struct %s %s;" % (inner[0], field_name(fields, rel)))
+            pos = rel + inner[1]
+            continue
         if (pointers or {}).get(rel):
             lines.append("    volatile struct %s *%s;" % (pointers[rel], field_name(fields, rel)))
         else:
@@ -1134,11 +1238,14 @@ TABLE = "readable_types"
 class Plan:
     """What readable C declares (the image's readable_types table): structures ({name: [(offset,
     type)]}) and, per function, which variables point to one ({function: {variable: name}}) with the
-    digest of the readable C it was made for ({function: digest}: dread.naming.digest)."""
+    digest of the readable C it was made for ({function: digest}: dread.naming.digest). A structure
+    held inside another is a member of it (embeds: {outer: {offset: inner}}); the outer's rows leave
+    out what lies inside its members (the inner's fields are its own)."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
         self.pointers = {}              # structure -> {offset: the structure the field points to}
+        self.embeds = {}                # structure -> {offset: the structure held there as a member}
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -1147,6 +1254,9 @@ class Plan:
         if self.pointers:
             out["pointers"] = {n: {str(off): t for off, t in sorted(ps.items())}
                                for n, ps in sorted(self.pointers.items()) if ps}
+        if any(self.embeds.values()):
+            out["embeds"] = {n: {str(off): t for off, t in sorted(es.items())}
+                             for n, es in sorted(self.embeds.items()) if es}
         return out
 
     @classmethod
@@ -1157,7 +1267,67 @@ class Plan:
             p.typed[f] = dict(entry.get("vars", {}))
             p.digests[f] = entry.get("digest")
         p.pointers = {n: {int(off): t for off, t in ps.items()} for n, ps in data.get("pointers", {}).items()}
+        p.embeds = {n: {int(off): t for off, t in es.items() if t in p.structs}     # (a member of a structure
+                    for n, es in data.get("embeds", {}).items() if n in p.structs}  # the table lacks: none)
         return p
+
+    def align(self, name, depth=0):
+        """A structure's alignment in C: its widest field's, its members' structures' included."""
+        out = max((SIZES[t] for _, t in self.structs.get(name, [])), default=1)
+        if depth < 8:
+            for inner in self.embeds.get(name, {}).values():
+                out = max(out, self.align(inner, depth + 1))
+        return out
+
+    def size(self, name, depth=0):
+        """sizeof the structure in C: the end of its last field or member, rounded up to its alignment."""
+        end = max((off + SIZES[t] for off, t in self.structs.get(name, [])), default=0)
+        if depth < 8:
+            for off, inner in self.embeds.get(name, {}).items():
+                end = max(end, off + self.size(inner, depth + 1))
+        a = self.align(name, depth)
+        return (end + a - 1) // a * a
+
+    def members(self, name):
+        """[(offset, type)] of a structure's members in order: its fields' types, and "struct NAME"
+        for a structure it holds."""
+        rows = list(self.structs.get(name, []))
+        rows += [(off, "struct " + inner) for off, inner in self.embeds.get(name, {}).items()]
+        return sorted(rows)
+
+    def leaves(self, name, depth=0):
+        """[(offset, type)] of every field a structure holds, its members' structures' fields at their
+        offsets in it (what the memory holds, the nesting flattened)."""
+        out = list(self.structs.get(name, []))
+        if depth < 8:
+            for off, inner in self.embeds.get(name, {}).items():
+                out += [(off + o, t) for o, t in self.leaves(inner, depth + 1)]
+        return sorted(out)
+
+    def leaf_pointers(self, name, depth=0):
+        """{offset: structure} of the pointer fields a structure holds, its members' at their offsets
+        in it."""
+        out = dict(self.pointers.get(name, {}))
+        if depth < 8:
+            for off, inner in self.embeds.get(name, {}).items():
+                out.update({off + o: t for o, t in self.leaf_pointers(inner, depth + 1).items()})
+        return out
+
+    def place(self, name, off, depth=0):
+        """([(structure, offset) of each member on the way], structure, offset in it) of offset off of a
+        structure, down through the structures it holds as members (one of them where off lies inside
+        it)."""
+        path = []
+        while depth < 8:
+            for d, inner in sorted(self.embeds.get(name, {}).items()):
+                if d <= off < d + self.size(inner):
+                    path.append((name, d))
+                    name, off = inner, off - d
+                    break
+            else:
+                break
+            depth += 1
+        return path, name, off
 
 
 def load_plan(image):
@@ -1181,25 +1351,53 @@ def store_plan(image, p):
     os.replace(path + ".tmp", path)
 
 
+EMBED_DEPTH = 4                     # how deep a pointer is followed into structures held inside others
+
+
 def plan(s, trees, digests=None, least=2):
     """The plan for the analysed functions: a structure for every kind with a base and at least
     least fields, named s_1, s_2 ... in the order of the first (function, variable) pointing to it;
-    a variable typed as a pointer to it when it points to the base. digests: {function: the digest
-    of its readable C before names} (readable_trees)."""
+    a variable typed as a pointer to it when it points to the base, or to where another kind's memory
+    holds this one (a task block's list item at 4: kinds()' embeds); the structures one holds inside
+    it declared members of it where C can hold them (embed). digests: {function: the digest of its
+    readable C before names} (readable_trees)."""
     ks = kinds(s, trees)
-    pointing = {}
     frames = {s.loc((o, 0))[0] for o in s.frames}
+    held = {}                               # kind -> [(offset, the kind held there)]
+    for (k, rel), inner in sorted(s.kind_embeds.items()):
+        held.setdefault(k, []).append((rel, inner))
+
+    def inside(k, rel, depth=0):
+        """The kind whose base lies at offset rel of kind k's memory: k at 0, else one held there (or
+        inside one held there); None for none."""
+        if rel == 0:
+            return k
+        if depth >= EMBED_DEPTH:
+            return None
+        if (k, rel) in s.kind_embeds:
+            return s.kind_embeds[(k, rel)]
+        for d, inner in held.get(k, ()):
+            got = inside(inner, rel - d, depth + 1) if 0 < d < rel else None
+            if got is not None:
+                return got
+        return None
+
+    def target(location):
+        """The kind whose base a pointer to location points to, or None. (A function's own stack frame
+        is its locals, not a structure: GCC -O0's 253 functions had one each.)"""
+        o, off = s.loc(location)
+        k = s.kind_root.get(o)
+        if o in frames or k not in ks:
+            return None
+        return inside(k, off - s.kind_base.get(o, 0))
+    pointing = {}
     for _, fn, _ in trees:
         for v in sorted(pointer_candidates(fn) - _uses(fn) - {FRAME}):
             seen = set()                    # (what each of its webs points to: one structure's base, or
             for key in s.var_webs.get((fn.name, v), ()):        # it stays an integer)
                 r = s.find(key)
                 if r in s.points:
-                    o, off = s.loc(s.points[r])
-                    k = s.kind_root.get(o)
-                    # (a function's own stack frame is its locals, not a structure: GCC -O0's 253
-                    # functions had one each)
-                    seen.add(k if o not in frames and k in ks and off == s.kind_base.get(o, 0) else None)
+                    seen.add(target(s.points[r]))
             if len(seen) == 1 and None not in seen:
                 pointing.setdefault(next(iter(seen)), []).append((fn.name, v))
     out = Plan()
@@ -1213,33 +1411,102 @@ def plan(s, trees, digests=None, least=2):
         out.structs[name] = layout(ks[k])
         for fname, v in pointing[k]:
             out.typed.setdefault(fname, {})[v] = name
+    embed(out, {names_of[k]: [(rel, names_of[inner]) for rel, inner in rows if inner in names_of]
+                for k, rows in held.items() if k in names_of})
     # A word field is a pointer to a structure when every object of the kind that points somewhere
     # from it points to the base of one structure (a list item's next and previous, its container).
-    # (Also requiring a variable of that structure loaded from or stored into the field halved what
-    # was found and kept the share the source declares so, 48 %: the wrong ones come from kinds made
-    # one, a heap block and the queue allocated in it.)
-    for k, name in names_of.items():
-        rows, found = dict(out.structs[name]), {}
-        for o, root in s.kind_root.items():
-            if root != k:
+    # A structure held inside another is decided by its own kind's objects: what a task block holds
+    # at its items' links came from callees' templates copied onto it, fresh objects of kinds never
+    # joined, and made the item's previous no pointer (docs/decisions.md). (Also requiring a variable
+    # of that structure loaded from or stored into the field halved what was found and kept the share
+    # the source declares so, 48 %: the wrong ones come from kinds made one, a heap block and the
+    # queue allocated in it.)
+    found = {}
+    for o, root in s.kind_root.items():
+        name = names_of.get(root)
+        if name is None:
+            continue
+        b = s.kind_base.get(o, 0)
+        rows = dict(out.structs[name])
+        for off, f in s.fields.get(o, {}).items():
+            t = s.find(f.content)
+            if rows.get(off - b) != "u32" or t not in s.points:
                 continue
-            b = s.kind_base.get(o, 0)
-            for off, f in s.fields.get(o, {}).items():
-                t = s.find(f.content)
-                if rows.get(off - b) != "u32" or t not in s.points:
-                    continue
-                if t in s.interior:         # (it also points into its own object at another offset)
-                    found.setdefault(off - b, set()).add(None)
-                    continue
-                o2, off2 = s.loc(s.points[t])
-                k2 = s.kind_root.get(o2)
-                to = names_of.get(k2) if o2 not in frames and off2 == s.kind_base.get(o2, 0) else None
-                found.setdefault(off - b, set()).add(to)
-        ptrs = {rel: next(iter(ts)) for rel, ts in found.items() if len(ts) == 1 and None not in ts}
+            # (a value that also points into its own object at another offset points to no one base)
+            to = None if t in s.interior else names_of.get(target(s.points[t]))
+            found.setdefault(name, {}).setdefault(off - b, set()).add(to)
+    for name, rels in found.items():
+        ptrs = {rel: next(iter(ts)) for rel, ts in rels.items() if len(ts) == 1 and None not in ts}
         if ptrs:
             out.pointers[name] = ptrs
     out.digests = {f: (digests or {}).get(f) for f in out.typed}
     return out
+
+
+def embed(p, held):
+    """Declares in plan p the members held proposes ({outer: [(offset, inner)]}, the plan's
+    structures), each where C can hold it: the inner structures first (in a cycle, the link that
+    closes it is left out); at an offset of the inner's alignment, ending where the outer's fields
+    reach, not overlapping another member, no field of the outer across its ends; the outer's fields
+    inside it go into the inner where they fit (_fit), else the member is left out and the fields
+    stay the outer's."""
+    order, state = [], {}
+
+    def visit(k):
+        state[k] = 1
+        for _, inner in held.get(k, ()):
+            if inner not in state:
+                visit(inner)
+        state[k] = 2
+        order.append(k)
+    for k in sorted(p.structs, key=lambda n: (len(n), n)):
+        if k not in state:
+            visit(k)
+    done = set()
+    for k in order:
+        # (a member ends where the holder's fields are known to reach: FreeRTOS's list keeps its end
+        # marker, a 12-byte mini item, at 8 and uses it as a 20-byte item; held there, the list grew to
+        # 28 bytes, and a queue's two lists 20 bytes apart could no longer both be members)
+        reach = max((r + SIZES[t] for r, t in p.structs[k]), default=0)
+        for d, inner in sorted(held.get(k, ())):
+            if inner not in done or inner == k:
+                continue                    # (a cycle: it would hold itself)
+            z, a = p.size(inner), p.align(inner)
+            if z == 0 or d % a or d + z > reach \
+                    or any(e < d + z and d < e + p.size(i) for e, i in p.embeds.get(k, {}).items()):
+                continue
+            rows = p.structs[k]
+            if any(r < d < r + SIZES[t] or r < d + z < r + SIZES[t] for r, t in rows):
+                continue
+            adds = _fit(p, inner, [(r - d, t) for r, t in rows if d <= r < d + z])
+            if adds is None:
+                continue
+            for k2, r, t in adds:
+                p.structs[k2] = sorted(p.structs[k2] + [(r, t)])
+            p.structs[k] = [(r, t) for r, t in rows if not d <= r < d + z]
+            p.embeds.setdefault(k, {})[d] = inner
+        done.add(k)
+
+
+def _fit(p, name, fields):
+    """[(structure, offset, type)] of the fields (offset in structure name, type) that structure name
+    (or a structure it holds) lacks and can take: naturally aligned, no wider than its alignment (its
+    size and alignment stay what its holders were built on), inside its size, across no field or
+    member; one it has needs the same size. None when one does not fit."""
+    adds = []
+    for r, t in fields:
+        _, k, off = p.place(name, r)
+        rows, z = dict(p.structs[k]), SIZES[t]
+        if off in rows:
+            if SIZES[rows[off]] != z:
+                return None
+            continue
+        if off < 0 or off % z or z > p.align(k) or off + z > p.size(k) \
+                or any(o < off + z and off < o + SIZES[u] for o, u in rows.items()) \
+                or any(d < off + z and off < d + p.size(i) for d, i in p.embeds.get(k, {}).items()):
+            return None
+        adds.append((k, off, t))
+    return adds
 
 
 def _uses(fn):
@@ -1275,12 +1542,13 @@ def _uses(fn):
 
 def apply_types(tree, fn, p, made_for=None, names=None):
     """The function's pointer variables declared as pointers to the plan's structures (volatile, so
-    that every access stays one), their accesses written as members (p->f_2c; with a cast where the
-    access reads another type of the field's size, as raw access where the structure has no such
-    field), every other use cast to u32; the structures defined above the function. Only when the
-    plan was made for this C (made_for: its digest before names). names: {s_N: (name, {offset: field
-    name})} from the readable_names table (dread.naming struct_names). Returns the names of the
-    structures it used."""
+    that every access stays one), their accesses written as members (p->f_2c, p->f_4.f_8 inside a
+    structure it holds; with a cast where the access reads another type of the field's size, as raw
+    access where the structure has no such field), the address of a structure held inside one as
+    &p->f_4, every other use cast to u32; the structures defined above the function, a held one
+    before its holder. Only when the plan was made for this C (made_for: its digest before names).
+    names: {s_N: (name, {offset: field name})} from the readable_names table (dread.naming
+    struct_names). Returns the names of the structures it defined."""
     names = names or {}
 
     def cname(k):
@@ -1296,10 +1564,28 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     typed = {v: k for v, k in typed.items() if v in allowed}
     if not typed:
         return []
-    fields = {k: dict(p.structs[k]) for k in set(typed.values())}
-    ptrs = {k: dict(p.pointers.get(k, {})) for k in fields}
+    order = []                              # (the structures defined: those typed and those they hold,
+                                            # a held one before its holder)
+    def visit(k, depth=0):
+        if k in order or depth > 8:
+            return
+        for inner in sorted(set(p.embeds.get(k, {}).values())):
+            visit(inner, depth + 1)
+        order.append(k)
+    for k in sorted(set(typed.values())):
+        visit(k)
+    fields = {k: dict(p.structs[k]) for k in order}
+    ptrs = {k: dict(p.pointers.get(k, {})) for k in order}
     ptype = {k: "volatile struct %s *" % cname(k) for k in set(fields) | {t for ps in ptrs.values()
                                                                          for t in ps.values()}}
+
+    def chain(base, path, last=None):
+        """base->m.n...: the members on path ((structure, offset) pairs) and then last, a field's name."""
+        parts = [fname(k, d) for k, d in path] + ([last] if last else [])
+        e = C.Member(C.Name(base), parts[0], True)
+        for part in parts[1:]:
+            e = C.Member(e, part, False)
+        return e
 
     def member(e):
         """(member expression, its type, the access's type) for an access through a typed variable,
@@ -1309,28 +1595,39 @@ def apply_types(tree, fn, p, made_for=None, names=None):
         if acc is None or not isinstance(acc[0], C.Name) or acc[0].id not in typed:
             return None
         base, k, ctype = acc
-        rows = fields[typed[base.id]]
-        if rows.get(k) is not None and SIZES[rows[k]] == SIZES.get(ctype):
-            target = ptrs[typed[base.id]].get(k)
-            return C.Member(C.Name(base.id), fname(typed[base.id], k), True), \
-                ("ptr", target) if target else rows[k], ctype
+        path, k2, rel = p.place(typed[base.id], k)
+        rows = fields[k2]
+        if rows.get(rel) is not None and SIZES[rows[rel]] == SIZES.get(ctype):
+            target = ptrs[k2].get(rel)
+            return chain(base.id, path, fname(k2, rel)), ("ptr", target) if target else rows[rel], ctype
         address = C.Cast("u32", C.Name(base.id))
         if k:
             address = C.Binary("+" if k > 0 else "-", address, C.Num("%d" % abs(k)))
         return C.Unary("*", C.Cast("volatile %s *" % ctype, address)), ctype, ctype
+
+    def held(e):
+        """(structure, &member) for a typed variable plus the offset of a structure its structure holds
+        (r4 + 4 for a task block's list item at 4); None for anything else."""
+        if not (isinstance(e, C.Binary) and e.op == "+" and isinstance(e.l, C.Name) and e.l.id in typed
+                and isinstance(e.r, C.Num) and isinstance(e.r.value, int)):
+            return None
+        path, k2, rel = p.place(typed[e.l.id], signed32(e.r.value))
+        if not path or rel:
+            return None
+        return k2, C.Unary("&", chain(e.l.id, path))
 
     def value(e):
         return _rewrite(e, f)
 
     def pointer(e):
         """(structure, expression) of what points to a structure as it is: a typed variable, a field
-        that points to one; None for anything else."""
+        that points to one, the address of one held inside another; None for anything else."""
         if isinstance(e, C.Name) and e.id in typed:
             return typed[e.id], C.Name(e.id)
         m = member(e)
         if m is not None and isinstance(m[1], tuple):
             return m[1][1], m[0]
-        return None
+        return held(e)
 
     own = {i: typed[n] for i, (_, n) in enumerate(fn.params) if n in typed}     # (its own typed parameters)
 
@@ -1350,9 +1647,12 @@ def apply_types(tree, fn, p, made_for=None, names=None):
                 v = e.value
                 if isinstance(v, C.Name) and typed.get(v.id) == k:
                     return C.Assign("=", C.Name(e.target.id), C.Name(v.id))
-                mv = member(v)              # (a field that points to its structure: no cast)
+                mv = member(v)              # (a field that points to its structure, or the address of one
+                hv = held(v)                # held inside another: no cast)
                 if mv is not None and mv[1] == ("ptr", k):
                     return C.Assign("=", C.Name(e.target.id), mv[0])
+                if hv is not None and hv[0] == k:
+                    return C.Assign("=", C.Name(e.target.id), hv[1])
                 return C.Assign("=", C.Name(e.target.id), C.Cast(ptype[k], value(v)))
             m = member(e.target)
             if m is not None:
@@ -1360,6 +1660,9 @@ def apply_types(tree, fn, p, made_for=None, names=None):
                     v, t = e.value, m[1][1]
                     if (isinstance(v, C.Name) and typed.get(v.id) == t) or (isinstance(v, C.Num) and v.value == 0):
                         return C.Assign("=", m[0], C.Name(v.id) if isinstance(v, C.Name) else v)
+                    hv = held(v)
+                    if hv is not None and hv[0] == t:
+                        return C.Assign("=", m[0], hv[1])
                     return C.Assign("=", m[0], C.Cast(ptype[t], value(v)))
                 return C.Assign(e.op, m[0], value(e.value))
             return None
@@ -1369,9 +1672,16 @@ def apply_types(tree, fn, p, made_for=None, names=None):
             return expr if ftype == ctype else C.Cast(ctype, expr)
         if isinstance(e, C.Binary) and e.op in ("==", "!="):
             pa, pb = pointer(e.l), pointer(e.r)
-            if pa is not None and (pb is not None and pb[0] == pa[0] or isinstance(e.r, C.Num) and e.r.value == 0):
-                return C.Binary(e.op, pa[1], pb[1] if pb is not None else e.r)
+            if pa is not None and pb is not None and pb[0] == pa[0]:
+                return C.Binary(e.op, pa[1], pb[1])
+            # (with 0: a typed variable or a pointer field, not a member's address, which a compiler
+            # may take for never 0)
+            if pa is not None and held(e.l) is None and isinstance(e.r, C.Num) and e.r.value == 0:
+                return C.Binary(e.op, pa[1], e.r)
             return None
+        hv = held(e)
+        if hv is not None:
+            return C.Cast("u32", hv[1])
         if isinstance(e, C.Name) and e.id in typed:
             return C.Cast("u32", C.Name(e.id))
         return None
@@ -1405,9 +1715,10 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     at = next((i + 1 for i, item in enumerate(tree.items)       # (after the #include: before the file's
                if isinstance(item, C.Raw) and item.text.startswith("#include")), tree.items.index(fn))    # declarations)
     present = {item.text for item in tree.items if isinstance(item, C.Raw)}     # (a file whose other function
-    for k in sorted(fields, reverse=True):                                      # has them already: C17 forbids
+    for k in reversed(order):                                                   # has them already: C17 forbids
         text = struct_text(cname(k), p.structs[k], names.get(k, (k, {}))[1],    # a second definition)
-                           {off: cname(t) for off, t in ptrs[k].items()})
+                           {off: cname(t) for off, t in ptrs[k].items()},
+                           {off: (cname(i), p.size(i)) for off, i in p.embeds.get(k, {}).items()})
         if text not in present:
             tree.items.insert(at, C.Raw(text))
     for t in sorted({t for ps in ptrs.values() for t in ps.values()}, reverse=True):
@@ -1415,4 +1726,4 @@ def apply_types(tree, fn, p, made_for=None, names=None):
             tree.items.insert(at, C.Raw("struct %s;" % cname(t)))
     from dread.build import NULL_CHECKS     # (a pointer it dereferences may be 0 and still be compared with 0:
     tree.items.insert(0, C.Raw(NULL_CHECKS))    # dread.build compiles it so)
-    return sorted(fields)
+    return sorted(order)

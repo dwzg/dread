@@ -19,7 +19,8 @@ statement or a level of nesting means the same on both sides:
 Readable C alone also gets what a reader trips over and what helps (readable_figures): casts (not
 counting those of raw accesses), raw memory accesses through pointer casts (`*(volatile u32 *)(r4 +
 56)`), of them raw frame accesses (the address built from the frame's base sp0), accesses as
-structure members (`p->f_38`; the frame's object, `stack36.f_4`, apart), memory at fixed addresses
+structure members (`p->f_38`, and `p->f_4.f_8` once, a member of a structure held inside another;
+the frame's object, `stack36.f_4`, apart; a member's address counts as well), memory at fixed addresses
 written as a name (dread.naming's macros: `io_e000ed04`), and the variables, typed ones (a structure or
 a pointer to one) apart.
 
@@ -166,7 +167,7 @@ def readable_figures(tree, fn):
             m = STRUCT_TYPEDEF.match(item.text.strip())
             if m:
                 structs.add(m.group(1))
-    raw_casts = set()
+    raw_casts, inner = set(), set()
     extra = dict.fromkeys(("casts", "raw", "frame_raw", "members", "frame_members", "fixed"), 0)
     for n in nodes(fn.body):
         if isinstance(n, cparse.Unary) and n.op == "*" and isinstance(n.e, cparse.Cast) and "*" in n.e.type:
@@ -174,8 +175,14 @@ def readable_figures(tree, fn):
             raw_casts.add(id(n.e))
             if _has_frame_base(n.e.e):
                 extra["frame_raw"] += 1
-        elif isinstance(n, cparse.Member):
-            extra["members" if n.arrow else "frame_members"] += 1
+        elif isinstance(n, cparse.Member) and id(n) not in inner:
+            # (a member of a structure held inside one, p->f_4.f_8, is one member: of a structure behind
+            # a pointer when the chain has an arrow)
+            arrow, x = n.arrow, n.base
+            while isinstance(x, cparse.Member):
+                inner.add(id(x))
+                arrow, x = arrow or x.arrow, x.base
+            extra["members" if arrow else "frame_members"] += 1
         elif isinstance(n, cparse.Name) and n.id in fixed:
             extra["fixed"] += 1
     extra["casts"] = sum(1 for n in nodes(fn.body) if isinstance(n, cparse.Cast) and id(n) not in raw_casts)

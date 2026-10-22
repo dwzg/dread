@@ -1,7 +1,9 @@
 """dread.shapes: the structures behind pointers. A callee's fields are copied onto its caller's memory
 (polymorphic functions: two callers of one helper keep their structures apart); a header in front of
-a structure is no member; a list's link points back to its own kind; the source's layouts come from
-debug information, a structure a file only declares looked up by name."""
+a structure is no member; a list's link points back to its own kind; a structure held inside another
+is a member of it (p->f_18.f_10, &p->f_4), unless it overlaps another or two kinds claim its place;
+the source's layouts come from debug information, a structure a file only declares looked up by
+name."""
 import shutil
 import subprocess
 
@@ -127,6 +129,9 @@ def test_the_source_s_layouts_come_from_debug_information(tmp_path):
     assert found and found[0][0][1] == leaves, layouts
     opaque = [v for v in layouts.values() if 1 in v]        # (b.c only declares struct S: looked up by name)
     assert opaque and opaque[0][1] == ("S", leaves), layouts
+    held = {}                                               # (the structures it holds: in at 8, 8 bytes)
+    shapes.source_params(elf, held=held)
+    assert sorted(v[0] for v in held.values() if 0 in v) == [{8: 8}], held
 
 
 GET = """/* get */
@@ -335,3 +340,109 @@ def test_pointer_fields_compile(tmp_path):
     (src / "linked.c").write_text(text)
     assert build.compile_all(target, image, str(src), str(tmp_path / "obj"), quiet=True,
                              flags=target.compiler.generated_cflags())
+
+
+HELD = ("u32 unlink(u32 r0)\n{\n    u32 r1, r2;\n    r1 = *(volatile u32 *)(r0 + 4);\n"
+        "    r2 = *(volatile u32 *)(r0 + 8);\n    *(volatile u32 *)(r1 + 8) = r2;\n    *(volatile u32 *)(r2 + 4) = r1;\n"
+        "    *(volatile u32 *)(r0 + 16) = 0u;\n    return *(volatile u32 *)r0;\n}\n"
+        "u32 drop(u32 r0)\n{\n    u32 r5;\n    r5 = r0 + 4u;\n    unlink(r5);\n    *(volatile u32 *)(r0 + 16) = r0;\n"
+        "    if (*(volatile u32 *)(r0 + 40) != 0) unlink(r0 + 24u);\n"
+        "    return *(volatile u32 *)(r5 + 8) + *(volatile u32 *)(r0 + 44);\n}\n")
+
+
+def test_a_structure_held_inside_another_is_a_member_of_it():
+    """A task block holds two list items (at 4 and 24): an item at 4 handed to the list function
+    through a variable (r5 = r0 + 4, met after the call gave r5 an object of its own) and one at 24
+    handed directly. The block's structure declares them as members of the item's structure; what the
+    block accesses inside one (its owner at 12 of the first) becomes the item's field, and the block
+    keeps what lies outside them."""
+    p = plan_of(HELD)
+    assert p.embeds == {"s_1": {4: "s_2", 24: "s_2"}}, p.embeds
+    assert p.structs["s_1"] == [(44, "u32")], p.structs
+    assert p.structs["s_2"] == [(0, "u32"), (4, "u32"), (8, "u32"), (12, "u32"), (16, "u32")], p.structs
+    assert p.typed["drop"] == {"r0": "s_1", "r5": "s_2"} and p.typed["unlink"] == {"r0": "s_2"}, p.typed
+    assert p.size("s_2") == 20 and p.size("s_1") == 48 and p.align("s_1") == 4
+    assert p.leaves("s_1")[:2] == [(4, "u32"), (8, "u32")] and (40, "u32") in p.leaves("s_1")
+    assert p.place("s_1", 40) == ([("s_1", 24)], "s_2", 16) and p.place("s_1", 44) == ([], "s_1", 44)
+    assert shapes.held_offsets(p, "s_1") == [4, 24]
+    again = shapes.Plan.from_json(p.to_json())
+    assert again.embeds == p.embeds and again.structs == p.structs
+    data = p.to_json()
+    data["embeds"]["s_1"]["8"] = "s_9"                  # (a member of a structure the table lacks: none)
+    assert shapes.Plan.from_json(data).embeds == p.embeds
+    assert shapes.struct_text("s_1", p.structs["s_1"], embeds={4: ("s_2", 20), 24: ("s_2", 20)}) == (
+        "struct s_1\n{\n    u8 pad_0[4];\n    struct s_2 f_4;\n    struct s_2 f_18;\n    u32 f_2c;\n};")
+
+
+def test_accesses_inside_a_held_structure_are_its_members_and_its_address_is_taken_as_such():
+    """p->f_18.f_10 for the second item's container, &p->f_18 for its address handed on, r5 = &p->f_4
+    for a variable that points to the first item; the item's structure defined before the block's."""
+    p = plan_of(HELD)
+    tree = cparse.parse(HEAD + HELD)
+    assert shapes.apply_types(tree, tree.function("drop"), p) == ["s_1", "s_2"]
+    out = cparse.unparse(tree, notes=False)
+    assert out.index("struct s_2\n{") < out.index("struct s_1\n{"), out
+    assert "    struct s_2 f_4;\n    struct s_2 f_18;\n" in out, out
+    body = out[out.index("u32 drop("):]
+    assert body == ("u32 drop(volatile struct s_1 *r0)\n{\n    volatile struct s_2 *r5;\n    r5 = &r0->f_4;\n"
+                    "    unlink((u32)r5);\n    r0->f_4.f_c = (u32)r0;\n"
+                    "    if (r0->f_18.f_10 != 0) unlink((u32)&r0->f_18);\n"
+                    "    return r5->f_8 + r0->f_2c;\n}\n"), body
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_held_structures_compile_to_the_same_code(tmp_path):
+    """Every access through a member of a held structure is the volatile access of the same width at
+    the same address, and &p->f_4 the address p + 4: the typed function compiles to the integer
+    one's code."""
+    from conftest import gizmo_dir
+    from dread import naming
+    from dread.target import Target
+    target = Target.load(gizmo_dir("m3"))
+    p = plan_of(HELD)
+    text = '#include "dread.h"\n' + HELD.replace("u32 drop(", "extern u32 unlink(u32);\nu32 drop(")
+    tree = cparse.parse(text)
+    tree.items = [i for i in tree.items if not (isinstance(i, cparse.Function) and i.name == "unlink")]
+    before = cparse.unparse(tree, notes=False)
+    shapes.apply_types(tree, tree.function("drop"), p)
+    after = cparse.unparse(tree, notes=False)
+    assert "r0->f_18.f_10" in after and "&r0->f_4" in after, after
+    assert naming.same_code(target, target.image(), before, after, str(tmp_path / "drop"))
+
+
+def test_a_member_that_overlaps_another_or_that_two_kinds_claim_is_left_out():
+    """Two items handed at 4 and at 8 would overlap: the first is the member, what the second covered
+    beyond it stays the block's. Two kinds that cannot be one (words, halfwords) at one place: no
+    member there, the fields stay the block's."""
+    two = ("u32 a(u32 r0)\n{\n    return *(volatile u32 *)r0 + *(volatile u32 *)(r0 + 4);\n}\n"
+           "u32 b(u32 r0)\n{\n    return *(volatile u16 *)r0 + *(volatile u16 *)(r0 + 2);\n}\n")
+    p = plan_of(two, "u32 o(u32 r0)\n{\n    *(volatile u32 *)(r0 + 12) = 1u;\n    a(r0 + 4u);\n"
+                "    return a(r0 + 8u) + *(volatile u32 *)r0;\n}\n")
+    outer = p.typed["o"]["r0"]
+    assert p.embeds == {outer: {4: p.typed["a"]["r0"]}}, p.embeds
+    assert p.structs[outer] == [(0, "u32"), (12, "u32")], p.structs
+    # (handed through a variable, r5 = r0 + 4 met late: the blocks keep no fields of what they hold,
+    # so the two blocks are one kind, which holds a's at 4 for o and b's at 4 for q)
+    p = plan_of(two, "u32 o(u32 r0)\n{\n    u32 r5;\n    r5 = r0 + 4u;\n    a(r5);\n"
+                "    return *(volatile u32 *)r0 + *(volatile u32 *)(r0 + 16);\n}\n"
+                "u32 q(u32 r0)\n{\n    u32 r5;\n    r5 = r0 + 4u;\n    b(r5);\n    *(volatile u32 *)(r0 + 16) = 2u;\n"
+                "    return o(r0);\n}\n")
+    outer = p.typed["o"]["r0"]
+    assert p.typed["q"]["r0"] == outer and p.structs[outer] == [(0, "u32"), (16, "u32")], (p.typed, p.structs)
+    assert not p.embeds, p.embeds
+
+
+def test_a_held_structure_ends_where_its_holder_s_fields_reach():
+    """FreeRTOS keeps a list's end marker, a 12-byte mini item, at 8 and hands it on as a 20-byte item:
+    held there, the list would grow to 28 bytes and a queue's two lists 20 bytes apart could not both
+    be members. The list holds no item; its links still point to items, the end marker among them."""
+    p = plan_of(HELD.split("u32 drop(")[0],
+                "u32 init(u32 r0)\n{\n    u32 r3;\n    r3 = r0 + 8u;\n    unlink(r3);\n    *(volatile u32 *)r0 = 0u;\n"
+                "    *(volatile u32 *)(r0 + 4) = r3;\n    *(volatile u32 *)(r0 + 8) = 0xffffffffu;\n"
+                "    *(volatile u32 *)(r0 + 12) = r3;\n    *(volatile u32 *)(r0 + 16) = r3;\n    return 0;\n}\n"
+                "u32 make(u32 r0)\n{\n    *(volatile u32 *)(r0 + 56) = 0u;\n    init(r0 + 16u);\n"
+                "    return init(r0 + 36u);\n}\n")
+    item, lst, queue = p.typed["unlink"]["r0"], p.typed["init"]["r0"], p.typed["make"]["r0"]
+    assert p.embeds == {queue: {16: lst, 36: lst}}, p.embeds
+    assert p.structs[lst] == [(0, "u32"), (4, "u32"), (8, "u32"), (12, "u32"), (16, "u32")] and p.size(lst) == 20
+    assert p.pointers[lst] == {4: item, 12: item, 16: item}, p.pointers

@@ -9,6 +9,44 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C's structures: what one holds inside another as members (2026-10-22)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** dread.shapes knew where one kind of memory holds another (a call hands outer + 4 to
+  a function that takes an item: FreeRTOS's task block with its two list items at 4 and 24, a queue
+  with its lists at 16 and 36), but readable C declared every structure flat (the block's f_8 for
+  its first item's next) and wrote the item's address as (u32)r0 + 4. How should readable C use it,
+  and what decides the held structure's fields and pointer fields?
+- **Options.** (1) The held structure a member of its holder (struct s_7 f_4;), the holder's
+  accesses inside it p->f_4.f_8, its address &p->f_4; or (2) flat fields named after the member
+  (f_4_8): no nesting, but no C type for a pointer to the item either. For the held structure's
+  fields: (a) its own kind's fields only; (b) also what the holder accesses inside it. For its
+  pointer fields: (i) the objects of every kind that holds it count, as the objects of its own kind
+  do; (ii) only its own kind's objects decide, as before.
+- **Choice: (1), with (b) and (ii).** (1) is how the source declares it, and a pointer computed from
+  the holder (r5 = r0 + 4, then r5->f_c) can be typed as a pointer to the held structure, written
+  r5 = &r0->f_4. (b): the memory at the block's offset 4 is an item, so the block's accesses there
+  are an item's fields; a field that does not fit (another size, across a field, wider than the
+  item's alignment) leaves the member out instead. (ii): the holders' fields inside a held
+  structure point to objects that callees' templates copied onto them, kinds never joined; counted,
+  they made GCC -Os's item link at 8 no pointer (pointer fields against the source 5 of 6 instead of
+  9 of 10). A member is declared only where C can hold it: at an offset of its alignment, ending
+  where the holder's fields reach, not overlapping another member, no field across its ends (on
+  clang -O2 and RISC-V GCC -Os the list's end marker, a 12-byte mini item at 8 that FreeRTOS uses as
+  a 20-byte item, had made the list hold an item and grow to 28 bytes; then a queue could hold only
+  one of its lists). The pun still types a pointer to the end marker as an item pointer, as the
+  source declares pxIndex. A late offset (v = w + 4 met after a call gave v an object of its own)
+  is read as one memory inside the other too, in both directions (w - 4 from a member is its
+  holder). In comparisons a member's address meets only a pointer to its structure, never 0 (a
+  compiler may take the address of a member for never null). In dread.cmetrics a member of a held
+  structure (p->f_4.f_8) is one member, and a member's address counts as a member, as the frame
+  object's always did.
+- **Undo.** dread/shapes.py: embed() not called from plan() leaves every structure flat; the late
+  offsets are Shapes.offsets, read in kinds(); held structures' pointer fields from every holder:
+  the found loop in plan() through Plan.place.
+- **Status.** Done (dread/shapes.py kinds, plan, embed, apply_types; docs/todo.md, Types).
+
 ## Function names: each question shows its group's name and prefix, the default (2026-10-22)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

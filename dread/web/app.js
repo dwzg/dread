@@ -856,7 +856,7 @@ function placeEdges(only) {
     const x1 = a.x + dx / d * ra, y1 = a.y + dy / d * ra, x2 = b.x - dx / d * rb, y2 = b.y - dy / d * rb;
     path.setAttribute("d", `M${x1.toFixed(1)},${y1.toFixed(1)}L${x2.toFixed(1)},${y2.toFixed(1)}`);
     let start = null, end = null;      // data flows: a read towards the function, a write towards the memory
-    if (l.kind === "calls" || l.kind === "refers-to-function" || l.kind === "points-to") end = "ah-call";
+    if (l.kind === "calls" || l.kind === "refers-to-function" || l.kind === "points-to" || l.kind === "holds") end = "ah-call";
     else if (l.kind === "access") { if (l.read) start = "ah-read"; if (l.write) end = "ah-write"; }
     if (start) path.setAttribute("marker-start", `url(#${start})`); else path.removeAttribute("marker-start");
     if (end) path.setAttribute("marker-end", `url(#${end})`); else path.removeAttribute("marker-end");
