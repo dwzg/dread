@@ -67,7 +67,7 @@ from dread.cases import Suite
 from dread.emu import EmuError, Layout, Machine
 from dread.overlay import load_placement
 from dread.program import Program
-from dread.util.polite import die_with_parent, polite, workers
+from dread.util.polite import die_with_parent, polite, resident, workers
 from dread.util.poolorder import longest_first
 
 RUN = {}        # what the workers need; filled before they are forked
@@ -376,7 +376,7 @@ def run(names, only=False, out=print, jobs=None):
     failed, uncovered, results = 0, [], []
     RUN["missed"] = {}
     times = os.path.join(RUN["target"].build, "times", "tests-%s%s.json" % (RUN["image"].name, "-some" if only else ""))
-    with multiprocessing.get_context("fork").Pool(jobs or workers(), initializer=die_with_parent) as pool:
+    with multiprocessing.get_context("fork").Pool(jobs or workers(memory_each=resident()), initializer=die_with_parent) as pool:
         for name, count, bad, lines, missed in longest_first(pool, run_function, names, str, times):
             out("\n".join(lines))
             failed += bad

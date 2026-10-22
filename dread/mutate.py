@@ -59,7 +59,7 @@ import tempfile
 from dread import build, overlay, runner
 from dread import target as tgt
 from dread.elf import Elf
-from dread.util.polite import die_with_parent, polite, workers
+from dread.util.polite import die_with_parent, polite, resident, workers
 
 SWAPS = (("==", "!="), ("!=", "=="), ("<=", "<"), (">=", ">"), ("&&", "||"), ("||", "&&"),
          (" + ", " - "), (" - ", " + "), (" < ", " <= "), (" > ", " >= "), (" & ", " | "), (" | ", " & "))
@@ -490,7 +490,7 @@ def check(target, image, name, line_range=None, seconds=300, jobs=None, out=prin
         # handler thread, and a fork from a thread of a process that holds emulators can hang or die
         # in the child; its task is lost and waited for until the time limit (205 of the test
         # suite's 290 seconds went there).
-        with multiprocessing.get_context("fork").Pool(jobs or workers(), initializer=die_with_parent) as pool:
+        with multiprocessing.get_context("fork").Pool(jobs or workers(memory_each=resident()), initializer=die_with_parent) as pool:
             handles = [(t[0], pool.apply_async(judge, (t,))) for t in tasks[1:]]
             for k, h in handles:
                 try:

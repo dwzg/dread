@@ -2844,14 +2844,14 @@ def system_check(target, image, program, lifter, names, out=print, verdicts=None
     run on the original. The checks run in parallel. Returns {name: "the system run" or "loop cases
     and the system run"}; verdicts, a dict, gets the reason of each one dropped (see check)."""
     import multiprocessing
-    from dread.util.polite import die_with_parent, workers
+    from dread.util.polite import die_with_parent, resident, workers
     verdicts = {} if verdicts is None else verdicts
     kept = {}
     if not names:
         return kept
     G.update(target=target, image=image, program=program, lifter=lifter, original=image.payload(),
              work=os.path.join(target.build, "lift-system", image.name), loop_missed=loop_missed or {})
-    with multiprocessing.get_context("fork").Pool(min(len(names), jobs or workers()),
+    with multiprocessing.get_context("fork").Pool(min(len(names), jobs or workers(memory_each=resident())),
                                                   initializer=die_with_parent) as pool:
         results = pool.map(_system_one, list(names))
     for name, verdict, reason, missed, how in results:

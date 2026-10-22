@@ -52,7 +52,9 @@ def workers(memory_each=None):
     polite(), those of the cores not left free), capped by $DREAD_JOBS, and with memory_each (bytes a
     worker may come to) by the memory available. A forked worker copies what it touches of its
     parent: the readable C of a large firmware cost 1 GB a worker beside a parent of 2.5 GB, 32 GB
-    for 32 workers."""
+    for 32 workers; its cases made anew after a generator VERSION bump left 4 GB of 62 free. The
+    pools of the case runs, the lift check, the mutation check, the integration run and callconv
+    pass the parent's resident size (resident()), an upper bound of what a worker copies."""
     try:
         n = len(os.sched_getaffinity(0)) or 1
     except AttributeError:

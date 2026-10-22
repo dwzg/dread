@@ -44,7 +44,7 @@ import sys
 from dread import target as tgt
 from dread.emu import EmuError, Layout, Machine
 from dread.program import Program
-from dread.util.polite import die_with_parent, polite, workers
+from dread.util.polite import die_with_parent, polite, resident, workers
 
 MAX_CASES = 12              # cases a function at most: a register an input reads shows in most of them
 VARY = 0x5A5A5A5A           # xor'ed into a register's entry value for its second run
@@ -198,7 +198,7 @@ def prepare(target, image):
 def measure_all(names, jobs=None):
     """{name: result} for the functions that have cases (RUN prepared)."""
     results = {}
-    with multiprocessing.get_context("fork").Pool(jobs or workers(), initializer=die_with_parent) as pool:
+    with multiprocessing.get_context("fork").Pool(jobs or workers(memory_each=resident()), initializer=die_with_parent) as pool:
         for name, out in pool.imap_unordered(measure, names):
             if out is not None:
                 results[name] = out

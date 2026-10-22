@@ -42,7 +42,7 @@ from dread import autocase, build, runner
 from dread import target as tgt
 from dread.emu import EmuError, Machine
 from dread.overlay import load_placement
-from dread.util.polite import die_with_parent, polite, workers
+from dread.util.polite import die_with_parent, polite, resident, workers
 from dread.util.poolorder import longest_first
 
 LIMIT = 300_000
@@ -258,7 +258,7 @@ def main(argv=None):
     times = os.path.join(target.build, "times", "integration-%s.json" % image.name)
     ran = clean = cases = 0
     bad = []
-    with multiprocessing.get_context("fork").Pool(workers(), initializer=die_with_parent) as pool:
+    with multiprocessing.get_context("fork").Pool(workers(memory_each=resident()), initializer=die_with_parent) as pool:
         for name, count, problems in longest_first(pool, check, items, lambda item: item[0], times):
             cases += count
             if count:
