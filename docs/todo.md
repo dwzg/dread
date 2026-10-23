@@ -591,11 +591,46 @@ its sources.
   alone for half a minute). The names as good: parameters 211 of 374 as the source (56 %) before,
   216 of 378 (57 %) with --jobs 1, 215 of 377 (57 %) with --jobs 16; sharing a word 74 %, 75 %, 76 %;
   local names among the source's 115 of 1,064, 106 of 1,075, 121 of 1,071; $0.16-0.17 a run, the
-  globals' and structures' questions included. Those go first, one batch after another (176-193 s
-  here, now more than the variables with --jobs 16), and struct_uses makes every function's typed C
-  in this process (23 s here); left to do: the batches at a time too (their questions do not depend
-  on each other's answers either; the names taken would be checked in their order) and struct_uses
-  in the pool. Next: types: the
+  globals' and structures' questions included. Those went first, one batch after another (176-193 s
+  here, more than the variables with --jobs 16), struct_uses making every function's typed C in this
+  process (23 s here). Since 2026-10-23 they go --jobs at a time as well (name_shared,
+  docs/decisions.md), in two rounds: the globals' batches (the structures of static data and their
+  fields among them), then the structures', whose questions show the globals' names. In each round the
+  uses come from a pool of worker processes (global_uses, struct_uses: only their lines come back),
+  every batch's question is made, and the batches are asked by threads, a provider each while it asks;
+  the main thread checks and writes the answers in the order of the batches, an answer that ends early
+  waiting for those before it, so a name two batches propose goes to the earlier one and the table
+  ends as one batch after another leaves it (a test plays answers that end out of order and fails
+  when they are settled as they end). After a failed or declined batch nothing more is asked, as
+  before; what was asked by then is kept. Measured 2026-10-23 on a copy of the gate's GCC -Os build,
+  its readable_types plan made again with dread readable --check (the same 316 readable functions and
+  52 structures, now also 15 structures of static data: 289 globals, structures and fields to ask, in
+  8 batches; 51 structures in 7), Haiku 5.5, each run on a copy of its own:
+      code                   shared names  globals (uses + asking)  structures (uses + asking)  variables  whole run
+      main's, --jobs 16      260 s         137 s (9 + 128)          124 s (21 + 103)            103 s      364 s
+      this, --jobs 16         53 s          31 s (9 + 21)            23 s (4 + 19)               94 s      148 s
+      this, --jobs 1         259 s         146 s (9 + 136)          114 s (4 + 110)           1,303 s    1,563 s
+  (361-372 answers, $0.18-0.19 a run; the uses with 8 workers, DREAD_JOBS=8; the --jobs 1 run had the
+  full suite beside it for 11 of its 26 minutes.) Asked without a model, the uses are byte for byte
+  main's. The names as good (dread readable --score; main's code, --jobs 16, --jobs 1): parameters
+  199 of 374 as the source (53 %), 206 of 376 (55 %), 207 of 373 (55 %), sharing a word 73 %, 76 %,
+  75 %; local names among the source's 109 of 1,123, 108 of 1,101, 105 of 1,104; structures against a
+  parameter's source type 7 of 15, 6 of 15, 7 of 16 as the source, fields 54 of 83, 50 of 79, 58 of 84;
+  globals named 250, 241, 285, as the source 4, 19, 22, sharing a word 128, 144, 152. The globals'
+  differences are which batch came back empty: in main's run and in the --jobs 16 run one of the eight
+  globals' answers named (almost) nothing, Haiku taking the system prompt's example names (g_20029aac,
+  io_40004004, g_20000030) for the ones asked ("None of the four names you asked for appear in the
+  listing" and an empty block; or a first block with the example names and a corrected second one,
+  which the pilot does not read); in main's run that was the batch of the kernel's globals
+  (xYieldPending, pxCurrentTimerList: names the model knows from FreeRTOS), in the --jobs 16 run one of
+  the demo's; the --jobs 1 run had none. Left to do: example names in GLOBALS_SYSTEM (and
+  STRUCTS_SYSTEM) that cannot be taken for the image's, placeholders, measured before and after.
+  Found on the way: readable.transform kept its results by the context's id, and a context made where
+  one had died got the dead one's results, made with its tables (38 of 50 new contexts in a row on
+  gizmo; struct_uses's context of its own could get another's lines); now kept per context, weakly.
+  Builds from readable C in one process lose the reuse that luck gave them (three builds of the GCC -Os
+  build in a row with main's code: 55, 55 and 7 s): a build makes every readable function's C in one
+  process (48 s of the 55), a candidate for a pool. Next: types: the
   structures behind pointers derived by code (accesses at constant offsets through the same
   pointer, unified across functions), with volatile in the pointer's declaration so that a field
   reads p->f, their names and fields' names proposed the same way.

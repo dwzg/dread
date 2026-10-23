@@ -191,6 +191,31 @@ def test_the_trees_made_in_a_pool_are_those_made_in_one_process(monkeypatch):
     assert sum(not isinstance(got, str) for got in made[1][5].values()) > 40
 
 
+def test_a_new_context_gets_readable_c_made_with_its_own_tables():
+    """readable.transform keeps its results for a context while the context lives: one made after
+    another died gets C made with its own tables. Until 2026-10-23 the results were kept by the
+    context's id, which a new context often takes over from a dead one (38 of 50 in a row got the
+    dead one's names); a copy of a context (dread pilot struct_uses) has results of its own too."""
+    import copy
+    from dread import lift, readable, regflow
+    from dread.program import Program
+    from dread.target import Target
+    target = Target.load(gizmo_dir("m3"))
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    text = lift.make_lifter(program, flow).lift(program.by_name["uart_putc"]).text
+    for i in range(20):
+        context = readable.Context(target, image, program, flow)
+        context.globals = {"0x40011000 u32": {"name": "DATA_%d" % i}}
+        assert "DATA_%d = " % i in readable.transform("uart_putc", text, context=context)
+        other = copy.copy(context)
+        other.globals = {"0x40011000 u32": {"name": "OTHER_%d" % i}}
+        assert "OTHER_%d = " % i in readable.transform("uart_putc", text, context=other)
+        assert "DATA_%d = " % i in readable.transform("uart_putc", text, context=context)
+        del context, other
+
+
 def test_a_pool_takes_no_more_workers_than_the_memory_holds(monkeypatch):
     from dread.util import polite
     monkeypatch.delenv("DREAD_JOBS", raising=False)

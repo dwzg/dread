@@ -9,6 +9,36 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The shared names asked --jobs batches at a time: answers settled in the batches' order (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** `dread pilot --task readable` (and `--task globals`) asks the names of the globals
+  (40 a question) and of the structures (8 a question) before the variables; one batch after another,
+  each answer's names were checked against those the batches before it had taken, so a name two
+  batches proposed went to the earlier one. Asked side by side, how do two batches avoid taking the
+  same name, and what happens to the others when one fails?
+- **Options.** (a) Settle in the batches' order: every question made first, the answers checked and
+  written by the main thread in the order of the batches, an answer that ends early waiting for those
+  before it. (b) Settle as the answers end, then a final pass that settles conflicts in batch order.
+  (c) Show each question the names taken so far (each would wait for the ones before it: no longer side
+  by side). (d) Give each batch its own part of the names (a prefix): other names.
+- **Choice.** (a). No question depends on another's answer (a batch shows its globals' uses or its
+  structures' definitions and uses, made before any batch is asked), and the model is told nothing of
+  the refused names either way, so checking each answer against the names of the batches before it is
+  what one batch after another did: the table ends byte for byte the same (tests/test_naming.py, with
+  answers ending out of order). (b) ends the same after writing twice, (c) is one after another again,
+  (d) changes the names.
+- **Two rounds.** The structures' questions show the globals' names (struct_uses reads the C with them),
+  so they are made once the globals' answers are settled. Made with the rest at the start, they would
+  show the default names (g_2000...): one answer's time faster, but other questions than before.
+- **A failure.** After a batch the provider failed or declined, no batch is asked that was not asked by
+  then (one after another stopped there); the answers of those asked are kept (they are paid for, and a
+  run started again asks what has no name yet). With a failure, a run with --jobs N may thus keep more
+  names than one with --jobs 1.
+- **How to undo.** --jobs 1 asks one batch after another, as before.
+- **Status.** In the code (dread/pilot.py: ask_batches, name_globals, name_structs, name_shared).
+
 ## How sure names are, in dread gui: levels from the vote, a disc filled by it, the review's marks (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

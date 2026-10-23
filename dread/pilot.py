@@ -115,7 +115,18 @@ each answer as before; the main thread alone writes the table, the conversations
 the answers end. No question depends on another's answer (each shows its function's own C, the
 globals and structures named before, and its callers by their names), so the table ends as one
 question after another leaves it (FreeRTOS GCC -Os, 316 functions, Haiku 5.5: 149 s with --jobs 16,
-1,325 s with --jobs 1, the names as good: docs/todo.md). After a --task name run, the globals'
+1,325 s with --jobs 1, the names as good: docs/todo.md). The shared names before them go the same
+way since 2026-10-23 (name_shared; one batch after another before, 176-193 s on that build, longer
+than the variables with --jobs 16), in two rounds: the globals' batches (the structures of static
+data and their fields among them), then the structures', whose questions show the globals' names. In
+each round the uses come from a pool of worker processes (global_uses, struct_uses), every batch's
+question is made, and the batches are asked --jobs at a time (ask_batches: threads, each with a
+provider while it asks); the main thread checks and writes the answers in the order of the batches,
+an answer that ends early waiting for those before it, so each is checked against the names the
+batches before it took (a name two batches propose goes to the earlier one) and the tables end as
+one batch after another leaves them (the same build with its 15 structures of static data, Haiku 5.5:
+the shared names 53 s with --jobs 16, 260 s one batch after another; the whole run 148 s, 364 s with
+the code before at --jobs 16; the names as good: docs/todo.md). After a --task name run, the globals'
 questions show the functions by their proposals (names.tsv). On a build whose functions are all FUN_
 (FreeRTOS, 2026-10-22: docs/todo.md), globals named before the first pass made the function names
 worse, between it and --refine slightly better.
@@ -637,47 +648,163 @@ Answer with one ```json block mapping the shown names to yours:
 A name is a C identifier of at most 48 characters, no C keyword, no function's name, no two alike.
 Leave out one you cannot name."""
 DEFAULT_GLOBAL = re.compile(r"^(g|io|rom)_[0-9a-f]+(_[us]\d+)?$")
+GLOBALS_BATCH = 40      # globals a question of name_globals asks about at most
+STRUCTS_BATCH = 8       # structures a question of name_structs asks about at most
 
 
-def global_uses(program, context, lifter, names, per=2):
+def _global_uses_one(name):
+    """One function's part of global_uses, in a worker process of dread.readable in_pool (_G: program,
+    context, lifter, per, bases): ({key: its name there}, {key: [lines]}), or None (no readable C)."""
+    import bisect
+    from dread import cparse, naming, readable
+    from dread.readable import _G
+    made = readable.readable_one(_G["program"], _G["context"], _G["lifter"], name, statics=True)
+    if made is None:
+        return None
+    _, fn, macros, _ = made
+    bases = _G["bases"]
+    chosen = {naming.global_key(*at): gname for gname, at in macros.items()}
+    for gname, (address, _) in macros.items():
+        if "." in gname:                    # (a field: its structure too)
+            b = bases[bisect.bisect_right(bases, address) - 1]
+            chosen[naming.static_key(b)] = gname.split(".")[0]
+    body = cparse.unparse(fn, notes=False, style="readable").splitlines()
+    lines = {}
+    for key, gname in chosen.items():
+        pattern = re.compile(r"\b%s\b" % re.escape(gname))
+        lines[key] = [line.strip()[:160] for line in body if pattern.search(line)][:_G["per"]]
+    return chosen, lines
+
+
+def global_uses(program, context, lifter, names, per=2, jobs=None):
     """What the readable C of the functions names says about its memory at fixed addresses:
     ({key: {"name": its name there, "functions": [names], "uses": [(function, line)]}},
     {function: {keys}}), at most per lines a function. With the context's structures of static data
     applied (dread.statics): a field's key is its address and type, its name OBJECT.FIELD, and the
     structure has a key of its own (dread.naming static_key) with the lines that use any of its
-    fields."""
-    import bisect
-    from dread import cparse, naming, readable
+    fields. Each function's readable C is made and read in a pool of worker processes (dread.readable
+    in_pool; jobs workers at most), which send back only its lines."""
+    from dread import readable
+    names = list(names)
+    readable.warm(lifter)                   # (once, before the pool forks: the workers share them)
+    context.static_names()
+    got = readable.in_pool(_global_uses_one, names, jobs, program=program, context=context, lifter=lifter, per=per,
+                           bases=sorted(context.plan.statics))
     uses, by_function = {}, {}
-    bases = sorted(context.plan.statics)
-    for tree, fn, macros in readable.readable_trees(program, context, lifter, names, statics=True):
-        name = fn.name
-        chosen = {naming.global_key(*at): gname for gname, at in macros.items()}
-        for gname, (address, _) in macros.items():
-            if "." in gname:                # (a field: its structure too)
-                b = bases[bisect.bisect_right(bases, address) - 1]
-                chosen[naming.static_key(b)] = gname.split(".")[0]
-        body = cparse.unparse(fn, notes=False, style="readable").splitlines()
+    for name, one in zip(names, got):
+        if one is None:
+            continue
+        chosen, lines = one
         by_function[name] = set(chosen)
         for key, gname in chosen.items():
             u = uses.setdefault(key, {"name": gname, "functions": [], "uses": []})
             u["functions"].append(name)
-            pattern = re.compile(r"\b%s\b" % re.escape(gname))
-            u["uses"] += [(name, line.strip()[:160]) for line in body if pattern.search(line)][:per]
+            u["uses"] += [(name, line) for line in lines[key]]
     return uses, by_function
+
+
+class Providers:
+    """Providers for questions that threads ask side by side: take() hands out one that no question
+    being asked holds (a free one, else a new one that make() makes), give() takes it back, spent() sums
+    what every one made spent. At most as many are made as questions are asked at once. Given a
+    provider instead of a function that makes one, that provider is the only one (limit 1: one question
+    at a time, since a provider keeps how its last answer ended)."""
+
+    def __init__(self, provider):
+        import threading
+        self.lock = threading.Lock()
+        if callable(provider):
+            self.make, self.free, self.made, self.limit = provider, [], [], None
+        else:
+            self.make, self.free, self.made, self.limit = None, [provider], [provider], 1
+
+    def take(self):
+        with self.lock:
+            if self.free:
+                return self.free.pop()
+            p = self.make()
+            self.made.append(p)
+            return p
+
+    def give(self, p):
+        with self.lock:
+            self.free.append(p)
+
+    def spent(self):
+        return summed(p.spent() for p in self.made)
+
+
+def ask_batches(providers, system, users, jobs=1):
+    """Ask each question of users once (with system), jobs at a time in threads, each with a provider
+    of providers (Providers) while it is asked, the next one asked as soon as one ends. Yields (k,
+    answer, label, failure) in the order of users, each once it and every question before it have ended,
+    so that the thread that iterates settles the answers in that order whatever order they end in:
+    failure None, "declined" (the provider declined: llm.Provider.REFUSED) or "the provider: ERROR"
+    (answer None); label the provider's. After a failure no question is asked that was not asked by
+    then (one after another stops there); those asked end and are yielded. Only the threads ask: the
+    caller writes, and no thread is left when it ends (the caller may fork then)."""
+    import concurrent.futures
+    jobs = max(1, min(jobs, providers.limit or jobs))
+
+    def one(k):
+        p = providers.take()
+        try:
+            p.last = {}                     # (what it said of the question before is not this one's)
+            try:
+                answer = p.ask(system, [{"role": "user", "content": users[k]}])
+            except Exception as e:
+                return k, None, p.label(), "the provider: %s" % e
+            finish = (getattr(p, "last", {}) or {}).get("finish")
+            return k, answer, p.label(), "declined" if finish in llm.Provider.REFUSED else None
+        finally:
+            providers.give(p)
+    ended, asked, settled, stopped = {}, 0, 0, False
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        running = set()
+        while True:
+            while asked < len(users) and len(running) < jobs and not stopped:
+                running.add(pool.submit(one, asked))
+                asked += 1
+            if not running:
+                break
+            done, running = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                got = future.result()
+                ended[got[0]] = got
+                stopped = stopped or got[3] is not None
+            while settled in ended:
+                yield ended.pop(settled)
+                settled += 1
 
 
 PROPOSED_FUNCTIONS = "The functions' names are proposals made from their code, likely but not certain."
 
 
-def name_globals(target, image, program, provider, keys, uses, batch=40, shown_functions=4, out=print,
-                 shown_as=None, device=""):
+def json_block(answer):
+    """The value of an answer's ```json block, or None."""
+    import json
+    m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
+    try:
+        return json.loads(m.group(1)) if m else None
+    except ValueError:
+        return None
+
+
+def name_globals(target, image, program, provider, keys, uses, batch=None, shown_functions=4, out=print,
+                 shown_as=None, device="", jobs=1):
     """Ask for names of the memory at fixed addresses in keys that the readable_names table does not
-    name yet, batch at a time, each with its uses in up to shown_functions functions; keep the names
-    that are C identifiers no function or other global has. shown_as ({function: name shown}: a naming
-    run's proposals) shows functions by those names, saying so (PROPOSED_FUNCTIONS). Returns how many
-    were named."""
+    name yet, batch (default GLOBALS_BATCH) at a time, each with its uses in up to shown_functions
+    functions; keep the names that are C identifiers no function or other global has. shown_as
+    ({function: name shown}: a naming run's proposals) shows functions by those names, saying so
+    (PROPOSED_FUNCTIONS). Every batch's question is made first, then they are asked jobs at a time
+    (ask_batches; provider: a provider, then one at a time, a function that makes one, or a Providers),
+    and this thread alone checks the answers and writes them in the order of the batches, an answer
+    that ends early waiting for those before it: each is checked against the names the batches before
+    it took, so a name two batches propose goes to the earlier one, and the table ends as one batch
+    after another leaves it. After a batch the provider failed or declined, no batch is asked that was
+    not asked by then; those asked are kept. Returns how many were named."""
     from dread import naming
+    batch = batch or GLOBALS_BATCH
     table = naming.load(image, "globals")
     todo = [k for k in keys if k not in table and k in uses]
     taken = set(program.by_name) | {e.get("name") for e in table.values()} | naming.KEYWORDS | set(
@@ -687,7 +814,7 @@ def name_globals(target, image, program, provider, keys, uses, batch=40, shown_f
 
     def as_shown(text):
         return IDENT_WORD.sub(lambda m: shown_as.get(m.group(0), m.group(0)), text) if shown_as else text
-    named = 0
+    parts, users = [], []
     for start in range(0, len(todo), batch):
         part = todo[start:start + batch]
         lines = [PROPOSED_FUNCTIONS] if shown_as else []
@@ -701,28 +828,26 @@ def name_globals(target, image, program, provider, keys, uses, batch=40, shown_f
                         continue
                     fns.append(fname)
                 lines.append("    %s: %s" % (as_shown(fname), as_shown(line)))
-        user = about(device, "\n".join(lines))
-        by_default = {uses[k]["name"]: k for k in part}
-        try:
-            answer = provider.ask(GLOBALS_SYSTEM, [{"role": "user", "content": user}])
-        except Exception as e:
-            out("dread pilot: the globals' names: the provider: %s" % e)
-            break
-        with open(os.path.join(folder, "globals-%d.md" % (start // batch)), "w") as f:
+        parts.append(part)
+        users.append(about(device, "\n".join(lines)))
+    providers = provider if isinstance(provider, Providers) else Providers(provider)
+    named = 0
+    for k, answer, label, failure in ask_batches(providers, GLOBALS_SYSTEM, users, jobs):
+        part = parts[k]
+        if answer is None:
+            out("dread pilot: the globals' names: %s" % failure)
+            continue
+        with open(os.path.join(folder, "globals-%d.md" % k), "w") as f:
             f.write("# Globals, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s\n\n## Answer\n\n%s\n" % (
-                provider.label(), GLOBALS_SYSTEM, user, answer))
-        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+                label, GLOBALS_SYSTEM, users[k], answer))
+        if failure:
             out("dread pilot: the globals' names: the provider declined")
-            break
-        import json
-        m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
-        try:
-            proposed = json.loads(m.group(1)) if m else None
-        except ValueError:
-            proposed = None
+            continue
+        proposed = json_block(answer)
         if not isinstance(proposed, dict):
             out("dread pilot: the globals' names: no ```json block in the answer")
             continue
+        by_default = {uses[key]["name"]: key for key in part}
         refused = []
         for shown_name, new in proposed.items():
             key = by_default.get(shown_name)
@@ -733,10 +858,10 @@ def name_globals(target, image, program, provider, keys, uses, batch=40, shown_f
                 refused.append("%s=%s" % (shown_name, new))
                 continue
             taken.add(new)
-            naming.store(image, key, {"name": new, "by": provider.label()}, part="globals")
+            naming.store(image, key, {"name": new, "by": label}, part="globals")
             named += 1
         out("dread pilot: the globals' names: %d of %d named%s" % (
-            sum(1 for k in part if k in naming.load(image, "globals")), len(part),
+            sum(1 for key in part if key in naming.load(image, "globals")), len(part),
             "; refused %s" % ", ".join(refused[:8]) if refused else ""))
     return named
 
@@ -759,32 +884,47 @@ A name is a C identifier of at most 48 characters, no C keyword; no two structur
 fields of one structure alike. Leave out what you cannot name."""
 
 
-def struct_uses(program, context, lifter, names, per=3):
+def _struct_uses_one(name):
+    """One function's part of struct_uses, in a worker process of dread.readable in_pool (_G: program,
+    context, lifter): [(s_N, [lines])] for the structures its variables point to, or None (no readable
+    C)."""
+    from dread import readable
+    from dread.readable import _G
+    context = _G["context"]
+    typed = context.plan.typed[name]
+    text = readable.lifted_text(_G["program"], _G["lifter"], name)
+    out = readable.transform(name, text, context=context) if text is not None else None
+    if not out:
+        return None
+    lines = [line.split("  /*")[0].strip() for line in out.splitlines()]
+    found = []
+    for k in sorted(set(typed.values())):
+        pattern = re.compile(r"\b(%s)->" % "|".join(re.escape(v) for v, kk in typed.items() if kk == k))
+        found.append((k, [line[:160] for line in lines if pattern.search(line)]))
+    return found
+
+
+def struct_uses(program, context, lifter, names, per=3, jobs=None):
     """{s_N: [(function, line)]} of the lines of the functions' typed readable C that reach a field of
     a plan structure (dread.shapes), at most per lines a function, with the default names (s_N, f_2c,
-    the registers' names): what a question about the structures shows."""
+    the registers' names): what a question about the structures shows. Each function's typed readable C
+    is made and read in a pool of worker processes (dread.readable in_pool; jobs workers at most),
+    which send back only its lines (in one process until 2026-10-23: 21 s of FreeRTOS GCC -Os's
+    question time)."""
     import copy
-    from dread import lift, readable
+    from dread import readable
     context = copy.copy(context)            # (a context of its own: readable.transform keeps its results
     context.names, context.structs, context._struct_names = {}, {}, None    # by context, names apart)
     context._static_names = None
+    names = [n for n in names if context.plan.typed.get(n) and n in program.by_name]
+    readable.warm(lifter)                   # (once, before the pool forks: the workers share them)
+    context.struct_names()
+    context.static_names()
     uses = {k: [] for k in context.plan.structs}
-    for name in names:
-        typed = context.plan.typed.get(name)
-        fn_p = program.by_name.get(name)
-        if not typed or fn_p is None:
-            continue
-        try:
-            text = lifter.lift(fn_p).text
-        except lift.Refused:
-            continue
-        out = readable.transform(name, text, context=context)
-        if not out:
-            continue
-        lines = [line.split("  /*")[0].strip() for line in out.splitlines()]
-        for k in sorted(set(typed.values())):
-            pattern = re.compile(r"\b(%s)->" % "|".join(re.escape(v) for v, kk in typed.items() if kk == k))
-            uses.setdefault(k, []).extend((name, line[:160]) for line in lines if pattern.search(line))
+    got = readable.in_pool(_struct_uses_one, names, jobs, program=program, context=context, lifter=lifter)
+    for name, found in zip(names, got):
+        for k, lines in found or ():
+            uses.setdefault(k, []).extend((name, line) for line in lines)
     for k in uses:
         by_fn, kept = {}, []
         for fname, line in uses[k]:
@@ -795,20 +935,25 @@ def struct_uses(program, context, lifter, names, per=3):
     return uses
 
 
-def name_structs(target, image, program, provider, plan, uses, wanted, taken=(), batch=8, shown_functions=4,
-                 out=print, device=""):
-    """Ask for names of the plan's structures in wanted and of their fields, batch at a time, each with
-    its definition and its uses in up to shown_functions functions; keep in the readable_names table's
-    structs part what dread.naming.struct_names accepts (keyed by the structure's first anchor, with
-    all its anchors: the function:variable pairs pointing to it). Returns how many were named."""
-    import json
+def name_structs(target, image, program, provider, plan, uses, wanted, taken=(), batch=None, shown_functions=4,
+                 out=print, device="", jobs=1):
+    """Ask for names of the plan's structures in wanted and of their fields, batch (default STRUCTS_BATCH)
+    at a time, each with its definition and its uses in up to shown_functions functions; keep in the
+    readable_names table's structs part what dread.naming.struct_names accepts (keyed by the
+    structure's first anchor, with all its anchors: the function:variable pairs pointing to it). As
+    name_globals: every batch's question made first, asked jobs at a time, the answers checked and
+    written by this thread alone in the order of the batches, each against the table as the batches
+    before it left it (a name two structures are given goes to one of them, struct_names decides by
+    their anchors), so that the table ends as one batch after another leaves it. Returns how many were
+    named."""
     from dread import naming, shapes
+    batch = batch or STRUCTS_BATCH
     table = naming.load(image, "structs")
     done = naming.struct_names(plan, table, taken)
     todo = [k for k in wanted if k in plan.structs and k not in done and uses.get(k)]
     folder = os.path.join(target.build, "pilot", image.name)
     os.makedirs(folder, exist_ok=True)
-    named = 0
+    parts, users = [], []
     for start in range(0, len(todo), batch):
         part = todo[start:start + batch]
         blocks = []
@@ -823,23 +968,22 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
                     fns.append(fname)
                 lines.append("    %s: %s" % (fname, line))
             blocks.append("\n".join(lines))
-        user = about(device, "\n\n".join(blocks))
-        try:
-            answer = provider.ask(STRUCTS_SYSTEM, [{"role": "user", "content": user}])
-        except Exception as e:
-            out("dread pilot: the structures' names: the provider: %s" % e)
-            break
-        with open(os.path.join(folder, "structs-%d.md" % (start // batch)), "w") as f:
+        parts.append(part)
+        users.append(about(device, "\n\n".join(blocks)))
+    providers = provider if isinstance(provider, Providers) else Providers(provider)
+    named = 0
+    for b, answer, label, failure in ask_batches(providers, STRUCTS_SYSTEM, users, jobs):
+        part = parts[b]
+        if answer is None:
+            out("dread pilot: the structures' names: %s" % failure)
+            continue
+        with open(os.path.join(folder, "structs-%d.md" % b), "w") as f:
             f.write("# Structures, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s\n\n## Answer\n\n%s\n" % (
-                provider.label(), STRUCTS_SYSTEM, user, answer))
-        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+                label, STRUCTS_SYSTEM, users[b], answer))
+        if failure:
             out("dread pilot: the structures' names: the provider declined")
-            break
-        m = re.search(r"```(?:json)?\s*\n(.*?)```", answer or "", re.S)
-        try:
-            proposed = json.loads(m.group(1)) if m else None
-        except ValueError:
-            proposed = None
+            continue
+        proposed = json_block(answer)
         if not isinstance(proposed, dict):
             out("dread pilot: the structures' names: no ```json block in the answer")
             continue
@@ -854,7 +998,7 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
                     fields[str(int(fm.group(1), 16))] = fname
             anchors = naming.struct_anchors(plan, k)
             candidate = dict(table, **{anchors[0]: {"name": entry["name"], "fields": fields, "anchors": anchors,
-                                                     "by": provider.label()}})
+                                                     "by": label}})
             if k not in naming.struct_names(plan, candidate, taken):
                 continue                    # (refused: no C name, taken, or another structure has it)
             table = candidate
@@ -866,28 +1010,46 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
 
 
 def name_shared(target, image, program, provider, context, lifter, names, everything, out=print, shown_as=None,
-                device=""):
+                device="", jobs=1):
     """The names the functions of names share with the rest of the image, asked before their own: the
     globals they use (name_globals, with their uses in the readable C of everything; shown_as: the
-    functions' proposed names), then the structures their variables point to (name_structs; only
-    where the image has a readable_types plan, which dread readable --check makes). context takes the
-    tables as they are then. Returns (globals named, structures named)."""
+    functions' proposed names; the structures of static data, dread.statics, and their fields among
+    them), then the structures their variables point to (name_structs; only where the image has a
+    readable_types plan, which dread readable --check makes). Two rounds, since the structures'
+    questions show the globals' names (struct_uses reads the C with them): in each, the uses come from
+    a pool of worker processes, every batch's question is made, and the batches are asked jobs at a
+    time (provider: a function that makes providers, as many as questions are asked at once, or a
+    provider, then one question at a time), their answers checked and written by this thread in the
+    order of the batches, so that the tables end as one batch after another leaves them (name_globals).
+    context takes the tables as they are then. Returns (globals named, structures named, what the
+    providers spent: summed)."""
     from dread import naming
+    providers = provider if isinstance(provider, Providers) else Providers(provider)
+    at_once = max(1, min(jobs, providers.limit or jobs))
     every = sorted(set(everything) | set(names))
+    started = time.time()
     uses, by_function = global_uses(program, context, lifter, every)
     wanted = sorted(set().union(*(by_function.get(n, set()) for n in names))) if names else []
-    named = name_globals(target, image, program, provider, wanted, uses, out=out, shown_as=shown_as, device=device)
+    asking = time.time()
+    named = name_globals(target, image, program, providers, wanted, uses, out=out, shown_as=shown_as, device=device,
+                         jobs=jobs)
+    out("dread pilot: %d globals named, of %d the functions use (their uses %.0f s, the questions %.0f s, %d at a "
+        "time)" % (named, len(wanted), asking - started, time.time() - asking, at_once))
     context.globals, context._static_names = naming.load(image, "globals"), None
     structs = 0
     if context.plan.structs:                # (then the structures, which the variables' C shows)
+        started = time.time()
         suses = struct_uses(program, context, lifter, every)
         swanted = sorted({k for n in names for k in context.plan.typed.get(n, {}).values()})
         taken = {e.get("name") for e in context.globals.values() if isinstance(e, dict)}
-        structs = name_structs(target, image, program, provider, context.plan, suses, swanted, taken, out=out,
-                               device=device)
+        asking = time.time()
+        structs = name_structs(target, image, program, providers, context.plan, suses, swanted, taken, out=out,
+                               device=device, jobs=jobs)
+        out("dread pilot: %d structures named, of %d their variables point to (their uses %.0f s, the questions "
+            "%.0f s, %d at a time)" % (structs, len(swanted), asking - started, time.time() - asking, at_once))
         context.structs, context._struct_names = naming.load(image, "structs"), None
         context._static_names = None        # (they keep clear of the structures' names)
-    return named, structs
+    return named, structs, providers.spent()
 
 
 def parse_names(answer):
@@ -3029,8 +3191,8 @@ def main(argv=None):
     parser.add_argument("--usage", nargs="?", const="", metavar="YYYY-MM",
                         help="print the tokens (and costs, where llm.toml gives prices) of a month's answers; ask nothing")
     parser.add_argument("--jobs", type=int, default=4,
-                        help="--task name, readable and subsystems, and --grounded: questions asked at a time "
-                             "(default 4)")
+                        help="--task name, readable, globals and subsystems, and --grounded: questions asked at a "
+                             "time (default 4)")
     parser.add_argument("--score", metavar="TRUTH",
                         help="--task name: compare the proposals (names.tsv) with true names (an ELF's symbols, "
                              "or a functions table of a copy that has them) and ask nothing")
@@ -3176,21 +3338,25 @@ def main(argv=None):
             lifter = lift.make_lifter(program, flow)
             proposals = {program.by_entry[a].name: p for a, (p, _) in read_proposals(target, image).items()
                          if a in program.by_entry} if args.task == "globals" else None
+            first = [provider]
+
+            def make_provider():            # (the first question takes the provider already loaded)
+                return first.pop() if first else llm.load(args.provider)
             begun = time.time()
-            made = name_shared(target, image, program, provider, context, lifter, names, everything,
-                               shown_as=proposals, device=device)
+            made = name_shared(target, image, program, make_provider, context, lifter, names, everything,
+                               shown_as=proposals, device=device, jobs=args.jobs)
             if args.task == "globals":
-                spent = provider.spent()
-                print("dread pilot --task globals: %d globals and %d structures named (the table has %d and %d); "
-                      "%d answers, %d tokens in, %d out%s" % (
-                          made[0], made[1], len(context.globals), len(context.structs), spent["answers"],
-                          spent["input"], spent["output"],
+                spent = made[2]
+                print("dread pilot --task globals: %d globals and %d structures named (the table has %d and %d), %d "
+                      "questions at a time (%.0f s); %d answers, %d tokens in, %d out%s" % (
+                          made[0], made[1], len(context.globals), len(context.structs), max(1, args.jobs),
+                          time.time() - begun, spent["answers"], spent["input"], spent["output"],
                           " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""))
                 return 0
             started = time.time()
             named, asked, spent = name_variables(target, image, program, lambda: llm.load(args.provider), names,
                                                  context, lifter, jobs=args.jobs, tries=args.tries, device=device)
-            spent = summed([provider.spent(), spent])     # (the globals' and structures' answers too)
+            spent = summed([made[2], spent])        # (the globals' and structures' answers too)
             print("dread pilot --task readable: %d of %d functions named, %d asked, %d at a time (%.0f s; the globals "
                   "and structures before them %.0f s); %d answers, %d tokens in, %d out%s" % (
                       named, len(names), asked, max(1, args.jobs), time.time() - started, started - begun,

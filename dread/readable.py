@@ -34,6 +34,7 @@ import argparse
 import os
 import re
 import sys
+import weakref
 
 from dread import cparse, naming, structure, tidy
 from dread import target as tgt
@@ -140,17 +141,23 @@ class Run:
         self.returns = {}           # callee -> its declared result type (the file's extern declarations)
 
 
-_MEMO = {}          # (name, text, stages, context) -> the readable C: a check's rounds build the same again
+_MEMO = {}                              # (name, text, stages) -> readable C made without a context, and
+_MEMO_OF = weakref.WeakKeyDictionary()  # context -> {(name, text, stages): readable C}: a check's rounds
+                                        # build the same again
 
 
 def transform(name, text, stages=None, context=None):
     """The readable C of a lifted file (text) whose function is name, or None when it is not the
     lifters' dialect (it then stays lifted). The file's other functions (an MSP430 file's helpers)
-    are printed as they were written. context: a Context (the calls' arguments)."""
-    key = (name, text, id(STAGES if stages is None else stages), id(context))
-    if key not in _MEMO:
-        _MEMO[key] = _transform(name, text, stages, context)
-    return _MEMO[key]
+    are printed as they were written. context: a Context (the calls' arguments). Kept for each context
+    while it lives (weakly: its results go with it) and for the stages themselves; until 2026-10-23 by
+    the ids of both, and a context made where one had died got the dead one's results, made with its
+    tables (38 of 50 new contexts in a row did)."""
+    key = (name, text, None if stages is None else tuple(stages))
+    memo = _MEMO if context is None else _MEMO_OF.setdefault(context, {})
+    if key not in memo:
+        memo[key] = _transform(name, text, stages, context)
+    return memo[key]
 
 
 EXTERN = re.compile(r"^extern (\w+) (\w+)\(([^)]*)\);$")
@@ -189,10 +196,12 @@ _G = {}             # what the workers share with the process that forked them (
 
 
 def in_pool(work, names, jobs=None, **shared):
-    """[work(name)] for each of names, in order, work a function of this module that reads shared from
-    _G: in forked worker processes (dread.util.polite.workers(), or jobs), or in this process for
+    """[work(name)] for each of names, in order, work a module's function (pickled by its name: of this
+    module, or of one that reads this module's _G, as dread.groups and dread.pilot do) that reads shared
+    from _G: in forked worker processes (dread.util.polite.workers(), or jobs), or in this process for
     fewer than POOL_MIN names or one worker. On a large firmware, making the analysis trees took
-    minutes on one core."""
+    minutes on one core. The process must have no other thread when it forks (a lock one holds stays
+    held in the child)."""
     import multiprocessing
     from dread.util.polite import die_with_parent, polite, resident, workers
     _G.clear()
@@ -210,30 +219,41 @@ def in_pool(work, names, jobs=None, **shared):
         _G.clear()
 
 
-def _lifted_text(name):
+def lifted_text(program, lifter, name):
+    """The lifted C of the function name, or None (no such function, or the lifter refuses it)."""
     from dread import lift
-    fn_p = _G["program"].by_name.get(name)
+    fn_p = program.by_name.get(name)
     if fn_p is None:
         return None
     try:
-        return _G["lifter"].lift(fn_p).text
+        return lifter.lift(fn_p).text
     except lift.Refused:
         return None
 
 
-def _readable_one(name):
-    text = _lifted_text(name)
-    context = _G["context"]
+def _lifted_text(name):
+    return lifted_text(_G["program"], _G["lifter"], name)
+
+
+def readable_one(program, context, lifter, name, named=None, statics=False):
+    """(tree, function, macros, digest) of one function as readable_trees makes them (in the worker
+    processes of a pool too: dread pilot global_uses), or None where it does not lift or is not the
+    dialect."""
+    text = lifted_text(program, lifter, name)
     made = readable_tree(name, text, context=context) if text is not None else None
     if made is None:
         return None
     tree, fn = made
     digest = naming.digest(fn)
-    with_statics = _G.get("statics") and context is not None
-    chosen = naming.apply_globals(tree, fn, _G["named"], context.memory if context is not None else None,
+    with_statics = statics and context is not None
+    chosen = naming.apply_globals(tree, fn, named, context.memory if context is not None else None,
                                   statics=context.plan.statics if with_statics else None,
                                   names=context.static_names() if with_statics else None)
     return tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}, digest
+
+
+def _readable_one(name):
+    return readable_one(_G["program"], _G["context"], _G["lifter"], name, _G["named"], _G.get("statics"))
 
 
 def _analysis_one(name):

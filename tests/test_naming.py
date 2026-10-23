@@ -325,6 +325,157 @@ def test_the_pilot_stops_asking_a_provider_that_keeps_declining_or_failing(tmp_p
     assert (named, asked) == (2, 1) and "%-24s named already" % "strlen" in lines, lines
 
 
+def shared_copy(path):
+    """gizmo_copy with a readable_types plan put together by hand (gizmo's code alone gives none): the
+    ring's two counters (ring_put's and ring_get's r0) one structure, copy_words' two pointers a
+    structure of a word each, and g_config a structure of static data (as tests/test_statics.py)."""
+    from dread import readable, shapes
+    target, image, program, _, lifter = gizmo_copy(path)
+    p = shapes.Plan()
+    p.structs = {"s_1": [(32, "u32"), (36, "u32")], "s_2": [(0, "u32")], "s_3": [(0, "u32")]}
+    p.typed = {"ring_put": {"r0": "s_1"}, "ring_get": {"r0": "s_1"}, "copy_words": {"r0": "s_2", "r1": "s_3"}}
+    at = {name: a for kind, a, name in program.symbols() if kind == "d"}["g_config"]
+    p.statics = {at: [(0, "u32"), (4, "u32"), (8, "u32")]}
+    shapes.store_plan(image, p)
+    return target, image, program, readable.Context(target, image, program), lifter
+
+
+def shared_model(jobs, firsts, batches, said):
+    """The model, played for the threads of name_shared: each global named after its address, but the
+    first one a question shows "shared_name", which every batch thus proposes; the structures s_1 and s_2
+    both named Ring (s_1 has more anchors), s_3 Words. With more than one job the first batch of each
+    round (the one whose first shown name is firsts[kind]) is answered only after min(jobs,
+    batches[kind]) - 1 others of its round, and after the thread that settles had a second to write a
+    line (said: its out) for one of them, which it must not do before the first batch's: the answers
+    end out of order. Returns (answer, (kind, first shown name) in the order answered)."""
+    import json
+    import re
+    import threading
+    import time
+    lock, order, count = threading.Lock(), [], {"globals": 0, "structs": 0}
+    others = {kind: threading.Event() for kind in count}
+    for kind in count:
+        if min(jobs, batches[kind]) <= 1:
+            others[kind].set()
+
+    def answer(messages):
+        user = messages[0]["content"]
+        structs = re.findall(r"^struct (s_\d+)$", user, re.M)
+        kind = "structs" if structs else "globals"
+        shown = structs or re.findall(r"^(\S+) \(0x[0-9a-f]+, \w+, in \d+ functions\):$", user, re.M)
+        first = shown[0] == firsts[kind]
+        if first and jobs > 1:
+            assert others[kind].wait(60), "the other batches were not asked beside the first"
+            before, until = len(said), time.time() + 1.0
+            while len(said) == before and time.time() < until:
+                time.sleep(0.01)
+        if structs:
+            names = {s: {"name": "Words", "fields": {"f_0": "word"}} if s == "s_3" else
+                     {"name": "Ring", "fields": {"f_20": "head", "f_24": "tail"} if s == "s_1" else {"f_0": "word"}}
+                     for s in structs}
+        else:
+            names = {n: "shared_name" if i == 0 else "var_" + re.sub(r"\W", "_", n.split("_", 1)[1])
+                     for i, n in enumerate(shown)}
+        with lock:
+            order.append((kind, shown[0]))
+            if not first:
+                count[kind] += 1
+                if count[kind] >= min(jobs, batches[kind]) - 1:
+                    others[kind].set()
+        return "```json\n%s\n```" % json.dumps(names)
+    return answer, order
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_shared_names_asked_jobs_at_a_time_end_as_one_after_another(tmp_path, monkeypatch):
+    """name_shared with jobs: the uses made in a pool of worker processes (POOL_MIN lowered) or in this
+    process, every batch's question made first (three globals a batch, one structure a batch), then
+    asked four at a time, the first batch of each round answered after the others. This thread settles
+    the answers in the order of the batches: the name every batch proposes is kept once, by the first
+    batch, as one after another keeps it, and of the two structures given one name the one with more
+    anchors keeps it (struct_names), the other's entry refused as one after another refuses it; the
+    table, the conversations and the lines end byte for byte as with jobs 1. (Settled as they ended,
+    the second batch took the shared name, and the second structure's entry stayed in the table.)"""
+    from dread import llm, naming, pilot, readable
+    monkeypatch.setattr(pilot, "GLOBALS_BATCH", 3)
+    monkeypatch.setattr(pilot, "STRUCTS_BATCH", 1)
+    tables, talks, lines = {}, {}, {}
+    for jobs in (1, 4):
+        monkeypatch.setattr(readable, "POOL_MIN", 1 if jobs > 1 else 10 ** 6)
+        target, image, program, context, lifter = shared_copy(tmp_path / ("jobs%d" % jobs))
+        names = [f.name for f in program.functions]
+        uses, _ = pilot.global_uses(program, context, lifter, names)
+        first = sorted(uses)[0]
+        batches = {"globals": -(-len(uses) // 3), "structs": 3}
+        lines[jobs] = []
+        answer, order = shared_model(jobs, {"globals": uses[first]["name"], "structs": "s_1"}, batches, lines[jobs])
+        made = []
+
+        def provider():
+            made.append(llm.Scripted(answer))
+            return made[-1]
+        named, structs, spent = pilot.name_shared(target, image, program, provider, context, lifter, names, names,
+                                                  out=lines[jobs].append, jobs=jobs)
+        assert len(uses) >= 12 and batches["globals"] >= 4, sorted(uses)
+        assert (named, structs) == (len(uses) - batches["globals"] + 1, 2), lines[jobs]
+        assert sum(len(p.asked) for p in made) == batches["globals"] + 3 and 1 <= len(made) <= jobs, made
+        assert spent == pilot.summed(p.spent() for p in made)
+        if jobs > 1:                        # (the first batch of each round ended after the others)
+            assert order.index(("globals", uses[first]["name"])) >= 3, order
+            assert [s for kind, s in order if kind == "structs"][-1] == "s_1", order
+        table = naming.load(image, "globals")
+        assert table[first]["name"] == "shared_name", table
+        assert [e["name"] for e in table.values()].count("shared_name") == 1
+        assert sum("=shared_name" in line for line in lines[jobs]) == batches["globals"] - 1, lines[jobs]
+        assert naming.struct_names(context.plan, naming.load(image, "structs"), {e["name"] for e in table.values()}) \
+            == {"s_1": ("Ring", {32: "head", 36: "tail"}), "s_3": ("Words", {0: "word"})}
+        assert sorted(naming.load(image, "structs")) == ["copy_words:r1", "ring_get:r0"]
+        with open(image.table("readable_names")) as f:
+            tables[jobs] = f.read()
+        folder = os.path.join(target.build, "pilot", image.name)
+        talks[jobs] = {n: open(os.path.join(folder, n)).read() for n in sorted(os.listdir(folder))
+                       if n.endswith(".md")}
+        assert len(talks[jobs]) == batches["globals"] + 3, sorted(talks[jobs])
+    assert tables[1] == tables[4] and talks[1] == talks[4]
+    assert [line for line in lines[1] if "their uses" not in line] == [
+        line for line in lines[4] if "their uses" not in line]
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_shared_names_stop_asking_after_a_failure(tmp_path):
+    """name_globals, one global a batch, the provider failing the second batch: one after another asks
+    nothing after it, as before; with every batch asked at once the others' answers are kept, and the
+    failed batch's global waits for a run started again."""
+    import json
+    import re
+    import threading
+    from dread import llm, naming, pilot
+    keys = ["0x2000%04x u32" % (4 * i) for i in range(3)]
+    uses = {k: {"name": "g_2000%04x" % (4 * i), "functions": ["main"], "uses": [("main", "g_2000%04x = 1;" % (4 * i))]}
+            for i, k in enumerate(keys)}
+    for jobs in (1, 3):
+        target, image, program, _, _ = gizmo_copy(tmp_path / ("jobs%d" % jobs))
+        together, asked = threading.Barrier(jobs, timeout=60), []
+
+        def answer(messages):
+            shown = re.findall(r"^(g_\w+) \(", messages[0]["content"], re.M)
+            asked.append(shown[0])
+            together.wait()
+            if shown[0] == "g_20000004":
+                raise llm.ProviderError("scripted: down")
+            return "```json\n%s\n```" % json.dumps({shown[0]: "named_" + shown[0]})
+        lines = []
+        named = pilot.name_globals(target, image, program, lambda: llm.Scripted(answer), keys, uses, batch=1,
+                                   out=lines.append, jobs=jobs)
+        table = naming.load(image, "globals")
+        assert "dread pilot: the globals' names: the provider: scripted: down" in lines, lines
+        if jobs == 1:
+            assert asked == ["g_20000000", "g_20000004"] and named == 1 and sorted(table) == keys[:1], (asked, lines)
+        else:
+            assert sorted(asked) == ["g_20000000", "g_20000004", "g_20000008"], asked
+            assert named == 2 and sorted(table) == [keys[0], keys[2]], (table, lines)
+
+
 def plan_with(number):
     from dread import shapes
     p = shapes.Plan()
