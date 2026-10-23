@@ -942,7 +942,8 @@ TABLE_COLUMNS = ("statements", "depth", "gotos", "labels", "loops", "casts", "ra
                  "frame_members", "fixed", "fixed_members", "variables", "typed", "lifted_statements", "lifted_gotos",
                  "kept_lifted",
                  "match", "source", "unit", "src_statements", "src_depth", "src_gotos", "src_loops", "src_inlined",
-                 "ratio", "ratio_inlined", "ratio_depth", "inlined", "fixed_indexed", "fixed_addresses")
+                 "ratio", "ratio_inlined", "ratio_depth", "inlined", "fixed_indexed", "fixed_addresses", "pointers",
+                 "signed")
 
 
 def write_readable_table(path, rows):

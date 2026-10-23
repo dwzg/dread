@@ -915,7 +915,8 @@ def test_a_bit_field_value_at_a_small_address_stays_a_number(tmp_path):
     shifted one with 0x404, and gauge_spin's count 0x404 stay numbers (they had read (u32)&g_400[0] and
     (u32)&g_400[0].f_4), while the field's address handed to gauge_link, which stores through it, and
     to gauge_same, which reads bytes at it plus an index (a sum the shapes do not follow), and the one
-    the cursor is compared with are addresses; the gate accepts every function."""
+    the cursor is compared with are addresses (since dread.vartypes, &g_400[0].f_8 where gauge_link's
+    extern takes the pointer it stores through); the gate accepts every function."""
     from dread import build, readable
     target = kind_target(tmp_path, "m3", GAUGE, ram=0x400)
     image = target.image()
@@ -937,9 +938,10 @@ def test_a_bit_field_value_at_a_small_address_stays_a_number(tmp_path):
     mode, band, hook, back = text("gauge_mode"), text("gauge_band"), text("gauge_hook"), text("gauge_back")
     assert "== 0x400u)" in mode and "&g_" not in mode, mode
     assert "0x404u == r0 >> 4" in band and "&g_" not in band, band
-    assert "gauge_link((u32)&g_400[0].f_8, r0);" in hook and "gauge_spin(0x404u)" in hook, hook
+    # (an address, as an integer or, where dread.vartypes types the extern's parameter, as a pointer)
+    assert re.search(r"gauge_link\((\(u32\))?&g_400\[0\]\.f_8, r0\);", hook) and "gauge_spin(0x404u)" in hook, hook
     assert "== (u32)&g_400[0].f_4)" in back, back
-    assert "gauge_same((u32)&g_400[0].f_4, " in text("gauge_check"), text("gauge_check")
+    assert re.search(r"gauge_same\((\([\w *]+\))?&g_400\[0\]\.f_4, ", text("gauge_check")), text("gauge_check")
 
 
 def test_the_arrays_of_gizmo_start_where_its_code_makes_their_address(variant):

@@ -1589,7 +1589,7 @@ model).
   type is not known); a word read from memory and compared with an object's address may be a number (a
   state word); an index that readable C adds to an address whole makes its parameter a pointer
   (memset's count); a parameter only stored is none (pvParameters).
-- [ ] **Pointer types for parameters and prototypes.** A parameter that is only dereferenced (and
+- [x] **Pointer types for parameters and prototypes.** A parameter that is only dereferenced (and
   advanced) stays u32 with a `*(volatile T *)p` cast at every use, and arguments to callees whose
   extern DREAD writes as all-u32 get `(u32)&x`. Type a parameter or variable dereferenced at one width
   as a pointer to that width (`const s8 *` for signed byte loads only), from a callee parameter's
@@ -1597,6 +1597,48 @@ model).
   has. Public examples: gizmo a32 strncpy, read_line, parse_kv (char pointers as u32); FreeRTOS
   mps2-gcc-Os vStartTimerDemoTask (`memset((u32)&g_200017c5[0], 0, 0x15u)` under `extern u32
   memset(u32, u32, u32)`).
+  Done 2026-10-23 with the item "Signed types from signed use" (dread.vartypes; the readable_types
+  table's `variables` and `prototypes`; dread.readable check, _named and _question_one; dread.build
+  WRAPS; dread.polish's pointer casts; dread.cmetrics `pointers` and `signed`; docs/decisions.md,
+  "Pointer and signed types for variables and parameters; externs typed where a file's calls fit
+  them"). Variables that copy one another or add a constant or an index to one another are one group
+  and get one type: a pointer to the width their accesses have (`volatile u8 *`, `const` where nothing
+  is stored through them, s8/s16 where every access is a signed load), a structure pointer where they
+  only go to a callee parameter dread.shapes types so; each kept where the function's C holds no more
+  casts with it (a trial). Accesses are `p[k]` and `*p`, pointer arithmetic counts elements (+ 4 on a
+  u32 pointer is + 1, a shifted index the index; dread.shapes' advance of a structure pointer by its
+  size `(volatile struct s *)((u32)p + 12)` is p + 1); a pointer used as a number is (u32)p. Volatile
+  stays on every typed pointer (the Memory item below stays open). Externs: a callee's parameter has
+  the callee's type in a file where the calls pass what C takes for it without a cast (`&g_x[0]`,
+  `&r0->f_4`, a typed pointer, 0), else u32 as the lifter wrote it: the callee's type in every extern
+  added a cast at every call that passes a number (FreeRTOS GCC -Os: casts with raw accesses 1,250 ->
+  1,588 that way, a queue handle a u32 global holds, a text's address). strncpy: `u32 strncpy(volatile
+  u8 *r0, const volatile u8 *r1, u32 r2)`, `r12 = r1_1[1]; r1_1++;`, `*r3 = r12; r3++;`; read_line:
+  `s32 read_line(volatile u8 *r0, u32 r1)`, `r0[r4] = r0_1;`; parse_kv: `u32 parse_kv(const volatile
+  u8 *r0, volatile u8 *r1, u32 r2, u32 r3)`; vStartTimerDemoTask: `memset(&g_200017c5[0], 0, 0x15u);`
+  under `extern u32 memset(volatile u8 *, u32, u32);`, its timer array walked as `volatile u32 *r5,
+  *w_1` (`w_1 = r5 + 1; *r5 = r0_1;`, `w_1[-1]`). Measured on copies of the eight builds (gizmo a32,
+  m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; main -> this): the gate accepts
+  the same functions, name by name (35, 36, 44, 31, 315, 275, 252, 354), in the same time (warm
+  caches, main run again on the same copies: 299 -> 308 s on GCC -Os, 49 -> 48, 20 -> 21, 80 -> 72;
+  noise); over every lifted function's readable C, parameters typed as pointers to scalars 0 -> 14,
+  14, 15, 15, 63, 57, 47, 58, such variables 0 -> 22, 17, 17, 19, 61, 35, 25, 32, structure pointer
+  parameters 70 -> 86, 53 -> 57, 57 -> 66, 63 -> 71 on FreeRTOS (handed on to callees that take one),
+  raw accesses through variables 33, 34, 35, 35, 206, 248, 147, 212 -> 6, 13, 13, 3, 64, 94, 72, 100,
+  casts with raw accesses 75, 67, 71, 69, 1,250, 1,088, 714, 999 -> 46, 43, 47, 40, 1,055, 891, 596,
+  783, casts at uses (raw accesses through variables, (u32) and (s32) of a variable, pointer casts)
+  48, 48, 52, 43, 681, 642, 443, 573 -> 19, 24, 28, 13, 539, 501, 345, 453, externs with a type 1, 0,
+  0, 0, 0, 0, 0, 0 -> 4, 3, 3, 2, 115, 58, 94, 68; lines 0.5-2 % more (a declaration line per type).
+  The structures' scores against the source (dread readable --shapes --score, --statics --score,
+  --score) the same, line for line. The plan takes 1.4-1.7 s a FreeRTOS build; every GCC -Os
+  function's readable C in one process 43.8 -> 48.8 s of CPU.
+  Left: pointer results (a function returning a typed pointer stays u32: `return (u32)r0;`, and
+  memcpy's destination, returned twice, stays u32 by the count of casts); globals that hold pointers
+  (a queue handle in a u32 global: its calls keep the externs' u32, and the pointer casts it would
+  need are why); an access past a structure through its pointer stays raw (`r0[2].f_0` would need the
+  field's name); arrays of structures dread.shapes makes no structure of are walked as words (spool's
+  cells on ARM: `w_1 = r3 + 3`, `w_1[-1]`); the const of a parameter only handed on follows the
+  callees' types, not the source.
 - [ ] **Memory (the open item), more evidence.** On a private firmware volatile on RAM showed in the
   readable C beyond the raw accesses: dead loads printed as `(void)g;`, loads kept in temporaries to
   keep their order, constants that do not fold through a volatile local array, and the naming model
@@ -1604,7 +1646,9 @@ model).
   vTaskSwitchContext (`(void)g_20029aac;`, a dead RAM load); the frame structures of gizmo a32
   print_status and FreeRTOS xTimerGenericCommandFromTask are declared volatile. A first step that
   keeps the item's concern (a wait for a flag an interrupt sets): no volatile on frame objects, and
-  none in what the naming question shows.
+  none in what the naming question shows. The pointers dread.vartypes types (2026-10-23: `volatile u8
+  *p`, `const volatile u16 *q`) are volatile-qualified as dread.shapes' structure pointers are, every
+  access through them the one volatile access it was: this item decides for them too.
 - [ ] **Arrays and members for uniform runs and interior pointers.** An object accessed at constant
   offsets of one element type prints as a structure of numbered fields and padding, walked by integer
   pointer arithmetic; an access through `p + k` stays raw where the structure has a member at k; the
@@ -1734,11 +1778,27 @@ model).
   files (line for line), and builds the same payloads; every digest is as before. Not established: a
   statement in an IT block's arm has no instruction of its own (its if carries it), so its line has no
   address; an instruction the clean-up dropped as dead is no statement's.
-- [ ] **Signed types from signed use.** A variable compared only with signed conditions stays u32
+- [x] **Signed types from signed use.** A variable compared only with signed conditions stays u32
   with `(s32)` at every compare, and -1 compares as 0xffffffffu. Type it s32 when its compares are
   signed (its constants then print signed), and a result signed when its callers compare it signed.
   Public examples: FreeRTOS mps2-gcc-Os vPrimaryBlockTimeTestTask (`if ((s32)r2_1 > 4) break;`);
   gizmo a32 read_line (`if ((s32)r0 < 0)` on uart_getc's int result).
+  Done 2026-10-23 with the item "Pointer types for parameters and prototypes" (dread.vartypes): a
+  variable compared in order only signed is s32 where its function's C holds no more casts so ((s32)v
+  is v; (u32)v where the lifted C read it unsigned: an unsigned order, a right shift, a division, a
+  64-bit conversion; x >>= k of it is x = (u32)x >> k); a function's result is s32 where a caller
+  compares it signed, `(s32)f()` or a variable every definition of which that reaches the comparison
+  is the call (dread.cflow's reaching definitions: handle_key's r0 holds its parameter and then
+  led_on's leftover, no evidence for led_on). Signed arithmetic wraps (-fno-strict-overflow, the
+  WRAPS line). vPrimaryBlockTimeTestTask: `s32 r2_1, r2_2, r3_1, ...`, `if (r2_1 > 4) break;`;
+  read_line: `s32 r0_1;`, `if (r0_1 < 0)`, `extern s32 uart_getc(void);` and uart_getc's own `s32
+  uart_getc(void)`. Signed parameters 0 -> 2, 2, 3, 2, 5, 3, 4, 3 and variables
+  0 -> 2, 2, 3, 5, 21, 23, 10, 24 on the eight builds, (s32) of a variable 7, 7, 8, 7, 28, 32, 16, 32
+  -> 0, 0, 0, 0, 1, 5, 1, 1 (what is left: a variable also compared unsigned, or read so where the
+  casts back would be more). Left: a compare the compiler made on an expression (GCC's strength
+  reduction: `(s32)(r0 - (r3 + (r3 << 1))) > 4`) types nothing; a result its callers only pass on to
+  a callee that compares it signed is no evidence; whether a counter's s32 is the source's int (a
+  value compared signed by the compiler's choice, a loop's bound) is not established.
 - [x] **Casts and constants.** `(u8)0x1u` for a byte store of 1, cast chains `(u16)(u32)(s16)x`, `+
   0`, `0x0u |`, `((u64)0x0u << 32) | 0x0u`, `x = (u32)(x + 1)`, and 0 and 1 as `0x0u`/`0x1u`. Drop
   the casts a store's width implies, collapse chains, fold `+ 0` and `| 0`, print small values in

@@ -198,6 +198,22 @@ and as an operand of `==` or `!=` or a value assigned to a variable only where i
 address there (dread.naming apply_globals); never for an object where the image keeps no static
 data (outside its bytes and its startup's ranges).
 
+`variables` and `prototypes` (left out when empty; since 2026-10-23) hold the types dread.vartypes
+gives readable C's variables and prototypes. `variables`: `{FUNCTION: {"digest", "types": {VARIABLE:
+TYPE}, "calls": {CALLEE: {"INDEX": TYPE}}}}`, a variable's type a pointer (`volatile u8 *`, `const
+volatile u16 *`, `volatile struct s_3 *`: a structure by its name in `structs`) or `s32`; `calls` (left
+out when empty) the callees' parameters (by index) that the function's file declares in their externs
+with a type, the others staying as the lifter declared them. `digest` as in `functions`: the variables
+and the externs' parameters are typed only in the C they were made for. `prototypes`: `{FUNCTION:
+[RESULT, PARAMETER, ...]}`, each a type or null (as the lifter declared it): the function's own
+parameters' types (its variables', and the structure pointers of `functions`) and its result (`s32`
+where its callers compare it signed; a caller's extern takes the result type whatever its digest).
+Every expression is rewritten to compute what it did (pointer arithmetic in elements, casts where a
+pointer meets a number); a file whose rewrite wrote pointer arithmetic or an s32 variable starts with
+the line `/* dread: overflow wraps */` (dread.build: compiled with -fno-strict-overflow), one with typed
+pointers with dread.build's null checks line. A file from before has neither part: readable C is as
+before (a structure pointer's advance by its size is p + 1 all the same).
+
 ### `wide_results.txt` (`wide_results`)
 
 Callees whose generic stubs (dread.autocase: a case's `calls`) answer two words: one name per line,
@@ -713,14 +729,15 @@ readable step counts the reasons by category (dread.bench readable_reason).
 "kept_lifted": bool}}`, for the readable table's functions (or those named): `readable` the figures
 of its readable C as built (dread.cmetrics READABLE: `statements`, `depth`, `gotos`, `labels`,
 `loops`, `casts`, `raw`, `frame_raw`, `members`, `frame_members`, `fixed`, `fixed_members`,
-`variables`, `typed`, and since 2026-10-23 `fixed_indexed` and `fixed_addresses`; what each counts is
-in dread.cmetrics' docstring), `lifted` the first five of its lifted C,
+`variables`, `typed`, and since 2026-10-23 `fixed_indexed`, `fixed_addresses`, `pointers` and
+`signed`; what each counts is in dread.cmetrics' docstring), `lifted` the first five of its lifted C,
 `kept_lifted` whether its readable C is its lifted C (fixed registers: no stage ran). A function
 that does not lift or is not the dialect is left out. `dread bench`'s readable step reads it and
 writes `BUILD/work/readable.tsv` in a bench build: one line per readable function, `function` and
 the columns of dread.bench TABLE_COLUMNS (its figures, its lifted C's statements and gotos, how it
 was matched to its source function and that function's figures, the ratios, the functions inlined
-into it), `-` where there is none. Columns may be added at the end; a reader takes them by the
+into it; since 2026-10-23 `pointers` and `signed` at the end), `-` where there is none. Columns may
+be added at the end; a reader takes them by the
 header's names.
 
 ### Printed readable C (`dread readable [--plain] [--out DIR]`) and the header `readable_types.h`

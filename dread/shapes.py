@@ -1926,7 +1926,13 @@ class Plan:
     the element, type)])}, dread.statics find_arrays), written so too. params: {function: the indices of
     the parameters it uses as a pointer} for every analysed function (pointer_params), None where the
     table does not say (made before 2026-10-23): dread.naming apply_globals writes the address of
-    static data as an argument only for such a parameter of a function listed."""
+    static data as an argument only for such a parameter of a function listed. variables: {function:
+    {"digest": the digest of the C it was made for, "types": {variable: type}, "calls": {callee:
+    {parameter index: type}}: the callees' parameters its externs declare with a type}} and prototypes:
+    {function: [result type or None, parameter type or None, ...]} (dread.vartypes: pointers to the
+    width a variable is dereferenced at, structure pointers a callee takes, s32 from signed compares;
+    the prototypes also hold the structure pointers of typed parameters above), empty where the table
+    has none (made before 2026-10-23's types of variables)."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
@@ -1935,6 +1941,8 @@ class Plan:
         self.statics = {}               # address -> [(offset, type)]: structures of static data (dread.statics)
         self.arrays = {}                # address -> (element size, count, [(offset, type)]): arrays of static data
         self.params = None              # function -> [indices of the parameters it uses as a pointer]
+        self.variables = {}             # function -> {"digest": ..., "types": {variable: type}} (dread.vartypes)
+        self.prototypes = {}            # function -> [result, parameters ...]: types or None (dread.vartypes)
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -1953,6 +1961,10 @@ class Plan:
                              for a, (k, n, rows) in sorted(self.arrays.items())}
         if self.params:
             out["params"] = {f: sorted(ix) for f, ix in sorted(self.params.items())}
+        if self.variables:
+            out["variables"] = {f: _variables_entry(e) for f, e in sorted(self.variables.items())}
+        if self.prototypes:
+            out["prototypes"] = {f: list(t) for f, t in sorted(self.prototypes.items())}
         return out
 
     @classmethod
@@ -1969,6 +1981,8 @@ class Plan:
         p.arrays = {int(a, 16): (e["size"], e["count"], [tuple(r) for r in e["fields"]])
                     for a, e in data.get("arrays", {}).items()}
         p.params = {f: list(ix) for f, ix in data["params"].items()} if "params" in data else None
+        p.variables = {f: _variables_entry(e) for f, e in data.get("variables", {}).items()}
+        p.prototypes = {f: list(t) for f, t in data.get("prototypes", {}).items()}
         return p
 
     def align(self, name, depth=0):
@@ -2028,6 +2042,15 @@ class Plan:
                 break
             depth += 1
         return path, name, off
+
+
+def _variables_entry(e):
+    """One function's entry of the plan's variables part (dread.vartypes), its parts sorted."""
+    out = {"digest": e.get("digest"), "types": dict(sorted((e.get("types") or {}).items()))}
+    if e.get("calls"):
+        out["calls"] = {f: {str(i): t for i, t in sorted(ps.items(), key=lambda kv: int(kv[0]))}
+                        for f, ps in sorted(e["calls"].items())}
+    return out
 
 
 POINTER_ROUNDS = 8      # rounds of pointer_params' reading over the functions (callees' answers spread up)

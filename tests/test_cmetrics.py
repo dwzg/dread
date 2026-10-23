@@ -130,7 +130,29 @@ def test_what_readable_c_alone_is_measured_for():
     assert cmetrics.readable_figures(tree, tree.function("g")) == {
         "statements": 8, "depth": 1, "gotos": 1, "labels": 1, "loops": 0, "casts": 2, "raw": 2, "frame_raw": 1, "members": 1,
         "frame_members": 1, "fixed": 1, "fixed_members": 0, "variables": 5, "typed": 2, "fixed_indexed": 0,
-        "fixed_addresses": 0}
+        "fixed_addresses": 0, "pointers": 0, "signed": 0}
+
+
+def test_pointers_and_signed_variables_are_counted_apart_from_structures():
+    """Variables and parameters declared pointers to bytes, words (dread.vartypes) count as pointers, a
+    structure pointer as typed, s32 and s16 ones as signed (an s32 pointer is a pointer)."""
+    tree = cparse.parse("""#include "dread.h"
+u32 k(const volatile u8 *r0, s32 r1, volatile struct s_1 *r2)
+{
+    volatile u32 *r3, *r4;
+    s16 r5;
+    const volatile s32 *r6;
+    u32 r7;
+    r3 = (volatile u32 *)r0;
+    r4 = r3 + 1;
+    r6 = (const volatile s32 *)r4;
+    r5 = (s16)*r6;
+    r7 = *r4 + r5 + r1;
+    return r7 + r2->f_0;
+}
+""")
+    got = cmetrics.readable_figures(tree, tree.function("k"))
+    assert (got["pointers"], got["signed"], got["typed"], got["variables"]) == (4, 2, 1, 8), got
 
 
 def test_a_member_of_a_held_structure_is_one_member():

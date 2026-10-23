@@ -46,6 +46,11 @@ by where its value goes, its use, and only where C gives the printed form the sa
   (T)x where U is at least as wide as T or holds every value of x's type; where only a value's low
   bits count (a sum converted to 32 bits), the casts that widen its operands go with the sum's width
   ((u32)((u64)(u32)p + 4) is p + 4), the operation keeping a type of that width that cannot overflow;
+  a pointer cast of a pointer taken through an integer of 32 bits or more is a cast of the pointer
+  ((const volatile u8 *)(u32)&stack28.f_0, where dread.frames wrote the address inside a cast
+  dread.vartypes made: (const volatile u8 *)&stack28.f_0; the lifter's stack argument
+  *(volatile u32 *)(u32)&s0: *(volatile u32 *)&s0, the same volatile access); an integer cast of a
+  pointer stays ((u8)(u32)p: never (u8)p, and (u64)p would extend the pointer by its sign);
 - constant expressions fold where the result is a number ((u8)0x0u, ((u64)0x0u << 32) | 0x0u, (u32)
   ((u64)0x0u + (u32)~0x8u + 1)), not where they show a mask or a comparison (0x20001913u & ~0x7u, if
   (0x80000000u == 0)); a select on a constant condition is its arm (the lifters' guard of a division by
@@ -791,6 +796,10 @@ class Polisher:
 
     def _cast(self, e, use):
         t = self.types.parse(e.type)
+        if t and t[0] == "ptr" and isinstance(e.e, C.Cast) and INTS.get(e.e.type, (0,))[0] >= 32:
+            inner = self.types.of(e.e.e)    # ((T *)(u32)&stack28.f_0, a pointer through a word: (T *)&stack28.f_0)
+            if inner is not None and inner[0] in ("ptr", "array"):
+                return C.Cast(e.type, self._expr(e.e.e, SAME))
         if not t or t[0] != "int":
             return C.Cast(e.type, self._expr(e.e, SAME))
         t = t[1]

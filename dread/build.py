@@ -53,6 +53,7 @@ def recon_dir(target, image):
 CALL_SAVED = "/* dread: call-saved "     # a lifted file's first line: registers to keep (Lifter.call_saved)
 FIXED = "/* dread: fixed "               # ... or registers the C gets as the caller left them (handed)
 NULL_CHECKS = "/* dread: null checks kept */"   # readable C with pointers (dread.shapes): address 0 is memory
+WRAPS = "/* dread: overflow wraps */"       # readable C with typed variables (dread.vartypes): arithmetic wraps
 
 
 def file_flags(target, path):
@@ -60,12 +61,17 @@ def file_flags(target, path):
     of a CALL_SAVED line, -ffixed-REG for those of a FIXED line (the C reads them as the caller left
     them; other compilers have no such options for these targets); -fno-delete-null-pointer-checks
     for a NULL_CHECKS line (GCC and clang: readable C that dereferences a pointer would otherwise
-    lose its comparisons of that pointer with 0, and address 0 is memory on these targets)."""
+    lose its comparisons of that pointer with 0, and address 0 is memory on these targets);
+    -fno-strict-overflow for a WRAPS line (-fwrapv and -fwrapv-pointer for GCC 8 and later and clang 23;
+    an older clang's -fwrapv-pointer is not confirmed): readable C with signed variables and typed
+    pointers (dread.vartypes) computes what the lifted C's u32 arithmetic did, which wraps."""
     with open(path) as f:
-        lines = [f.readline() for _ in range(4)]
+        lines = [f.readline() for _ in range(6)]
     flags = []
     if any(line.startswith(NULL_CHECKS) for line in lines):
         flags.append("-fno-delete-null-pointer-checks")
+    if any(line.startswith(WRAPS) for line in lines):
+        flags.append("-fno-strict-overflow")
     if target.compiler.kind != "gcc":
         return flags
     for line in lines:

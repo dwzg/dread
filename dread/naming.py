@@ -168,8 +168,9 @@ def rename(fn, names):
         visit(s)
     m = re.match(r"^(\w+) (\w+)\((.*)\)$", fn.head.strip())
     new_params = [(t, names.get(n, n)) for t, n in fn.params]
-    if m and new_params != fn.params:
-        fn.head = "%s %s(%s)" % (m.group(1), m.group(2), ", ".join("%s %s" % p for p in new_params) or "void")
+    if m and new_params != fn.params:           # (a pointer's star beside its name: volatile u8 *buf)
+        fn.head = "%s %s(%s)" % (m.group(1), m.group(2), ", ".join(
+            "%s%s" % p if p[0].endswith("*") else "%s %s" % p for p in new_params) or "void")
         fn.params = new_params
 
 

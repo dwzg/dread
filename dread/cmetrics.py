@@ -21,12 +21,14 @@ counting those of raw accesses), raw memory accesses through pointer casts (`*(v
 56)`), of them raw frame accesses (the address built from the frame's base sp0), accesses as
 structure members (`p->f_38`, and `p->f_4.f_8` once, a member of a structure held inside another;
 the frame's object, `stack36.f_4`, apart; a member's address counts as well), memory at fixed addresses
-written as a name (dread.naming's macros: `io_e000ed04`), and the variables, typed ones (a structure or
-a pointer to one) apart; a member of a structure of static data (`g_20000030.f_4`, dread.statics) or an
-element of an array of it (`g_20000c74[1]`, `g_200299f8[r3].f_4`: one each) counts as one apart
-(fixed_members), not as a name of memory at a fixed address; of those, the elements reached with an
-index that is no constant (fixed_indexed); and the addresses of such objects, their fields and
-elements written as such (`&g_20029988`, `&g_x.f_8`, `&g_200299f8[r3]`: fixed_addresses).
+written as a name (dread.naming's macros: `io_e000ed04`), and the variables (parameters too), typed
+ones (a structure or a pointer to one) apart, as are those declared a pointer to anything else (pointers:
+`volatile u8 *p`, dread.vartypes) and those declared signed (signed: s8, s16, s32); a member of a
+structure of static data (`g_20000030.f_4`, dread.statics) or an element of an array of it
+(`g_20000c74[1]`, `g_200299f8[r3].f_4`: one each) counts as one apart (fixed_members), not as a name
+of memory at a fixed address; of those, the elements reached with an index that is no constant
+(fixed_indexed); and the addresses of such objects, their fields and elements written as such
+(`&g_20029988`, `&g_x.f_8`, `&g_200299f8[r3]`: fixed_addresses).
 
 The source is taken after preprocessing: what the compiler compiled, macros expanded (FreeRTOS's
 configASSERT is an if and a call, as in the readable C). A function the compiler inlined into the
@@ -157,13 +159,13 @@ def _has_frame_base(e):
 
 
 READABLE = FIGURES + ("casts", "raw", "frame_raw", "members", "frame_members", "fixed", "fixed_members", "variables",
-                      "typed", "fixed_indexed", "fixed_addresses")
+                      "typed", "fixed_indexed", "fixed_addresses", "pointers", "signed")
 
 
 def readable_figures(tree, fn):
     """The figures of one function of a dread.cparse file (count's, and casts, raw, frame_raw,
-    members, frame_members, fixed, fixed_members, variables, typed, fixed_indexed, fixed_addresses:
-    see the module's docstring)."""
+    members, frame_members, fixed, fixed_members, variables, typed, fixed_indexed, fixed_addresses,
+    pointers, signed: see the module's docstring)."""
     out = count(skeleton(fn.body.body))
     fixed, statics, structs, arrays = set(), set(), set(), set()
     for item in tree.items if tree is not None else []:
@@ -242,12 +244,15 @@ def readable_figures(tree, fn):
     def typed(spec, ptr=""):
         words = set(re.findall(r"\w+", spec or ""))
         return "struct" in words or bool(words & structs)
-    variables = [(t, n) for t, n in fn.params]
+    variables = [(t, n, "") for t, n in fn.params]
     for d in nodes(fn.body):
         if isinstance(d, cparse.Decl) and not re.search(r"\b(typedef|extern)\b", d.specs or ""):
-            variables.extend((d.specs, item.name) for item in d.items)
+            variables.extend((d.specs, item.name, item.ptr or "") for item in d.items)
     out["variables"] = len(variables)
-    out["typed"] = sum(1 for spec, _ in variables if typed(spec))
+    out["typed"] = sum(1 for spec, _, _ in variables if typed(spec))
+    out["pointers"] = sum(1 for spec, _, ptr in variables if ("*" in spec or ptr) and not typed(spec))
+    out["signed"] = sum(1 for spec, _, ptr in variables if not ("*" in spec or ptr)
+                        and re.sub(r"\b(volatile|const|register)\s+", "", spec or "").strip() in ("s8", "s16", "s32"))
     return out
 
 

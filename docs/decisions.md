@@ -9,6 +9,102 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Pointer and signed types for variables and parameters; externs typed where a file's calls fit them (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20; two items of docs/todo.md,
+"From a review against hand-written C": Pointer types for parameters and prototypes, Signed types from
+signed use).
+
+- **Question.** Readable C declared every register u32: a parameter only dereferenced and advanced
+  read `*(volatile u8 *)(r1_1 + 1)` at every use, an argument for an all-u32 extern `(u32)&g_x[0]`, a
+  counter compared signed `(s32)r2_1 > 4`. Which variables and parameters get which types, how are
+  externs written, and how is the C kept doing what it did?
+- **Options and choices.**
+  1. Which variables: (a) every variable dereferenced at one width; (b) groups of variables that copy
+     one another or add a constant or an index to one another (one type a group), each group kept
+     where the function's C with it holds no more casts than without (a trial: the rewriter on the
+     statements that name the group). **(b)**: (a) types a pointer loaded from memory and used once at
+     the price of a cast where it is loaded, and a group's members typed apart would meet with casts.
+  2. Volatile: (a) `volatile T *`, every access through it the one volatile access it was; (b) plain
+     `T *`. **(a)**: the Memory item (whether accesses to RAM need volatile) stays open, as the item
+     asked; dread.shapes' structure pointers are volatile too. `const` where nothing is stored through
+     the group (the review's `const s8 *`), s8/s16 where every access is a signed load.
+  3. Externs: (a) every caller's extern as the callee's own readable C declares it (the item's
+     wording); (b) per file: a callee's parameter typed where the file's calls pass what C takes for it
+     without a cast (a pointer of that type, the address of an object of it, 0), else u32 as the lifter
+     wrote it; the variables a function only hands to such parameters typed with them (a trial too).
+     **(b)**: (a) measured on FreeRTOS GCC -Os (the same code otherwise): casts with raw accesses 1,250
+     -> 1,588, pointer casts 147 -> 858 (queue handles held in u32 globals, texts' addresses, callees'
+     results: a cast at every call), while (b) took them to 1,055 and 216. A callee's result type is its
+     own everywhere; a function that calls itself declares itself as its head (C takes no other).
+  4. Signed: a variable compared in order only signed is s32 (a trial: kept where no more casts), a
+     result s32 where a caller compares it signed: (a) any caller variable typed s32 that the call
+     assigns; (b) a variable every definition of which that reaches the signed comparison is the call
+     (dread.cflow's reaching definitions). **(b)**: (a) made gizmo's led_on and beep_off s32 through
+     handle_key's r0, which holds its parameter and then a callee's leftover.
+  5. Where it is decided: (a) at each build on the function's final C; (b) in the readable_types plan,
+     made by the check over every lifted function before any is checked, its trials on copies of the
+     analysis trees with the static data's objects and dread.shapes' structures applied (finished).
+     **(b)**: callers need the callees' parameter types; the trials on the plain analysis trees had seen
+     `0x200017c5u` where the build has `(u32)&g_200017c5[0]` and typed no extern.
+  6. Keeping the behaviour: (a) arithmetic kept in u32 with casts around every pointer and s32 use;
+     (b) a rewriter that writes every expression for its value (an integer of the lifted C's type, or
+     only its low 32 bits where only they count) or its address (pointer arithmetic in elements: + 4 on
+     a u32 pointer is + 1, a shifted index the index; an offset that is no whole number of elements
+     keeps the integer arithmetic), with -fno-strict-overflow for files with typed variables or pointer
+     arithmetic (dread.build WRAPS: signed and pointer arithmetic wrap, as the lifted u32 arithmetic
+     did) and -fno-delete-null-pointer-checks (NULL_CHECKS) for typed pointers. **(b)**: (a) would read
+     no better. A structure pointer's advance by its size, dread.shapes' `(volatile struct s *)((u32)p
+     + 12)`, is p + 1 too (where the file defines the structure: a declared one has no size). The
+     address of a variable of the function stays an integer, and a variable given one stays u32: a
+     first version wrote the lifter's stack arguments as pointers, and the gate turned four functions
+     of clang -O2 down (xTaskCreateStatic read the argument after s1 through `a_1 = &s1; a_1[1]`, which
+     the compiler may take for never: dread.shapes keeps such variables untyped for the same reason)
+     and one of GCC -O0 (xEventGroupWaitBits' `*(volatile u32 *)(u32)&s0 = 0`, the store at the
+     argument's slot, had become `*&s0 = 0`, which the compiler may keep in a register).
+  7. dread.polish: a pointer cast of a pointer taken through a word, `(T *)(u32)&stack28.f_0` (dread.frames
+     writes the frame's address inside the rewriter's cast), is `(T *)&stack28.f_0`, and the lifter's
+     stack argument `*(volatile u32 *)(u32)&s0` is `*(volatile u32 *)&s0` (the same volatile access); an
+     integer cast of a pointer keeps its (u32) ((u64)p would extend the address by its sign).
+- **Measured** (copies of the eight builds: gizmo a32, m3, m4, rv32; FreeRTOS mps2-gcc-Os,
+  mps2-clang-O2, virt-gcc-Os, mps2-gcc-O0; main against this, the same inputs). The gate accepts the
+  same functions, name by name: 35, 36, 44, 31, 315, 275, 252, 354. Over every lifted function's
+  readable C (a script, not in the repository: declarations, casts and raw accesses counted on the
+  trees as built): parameters typed as pointers to scalars 0 -> 14, 14, 15, 15, 63, 57, 47, 58 and such
+  variables 0 -> 22, 17, 17, 19, 61, 35, 25, 32; structure pointer parameters (dread.shapes' and now
+  those handed on) 70 -> 86, 53 -> 57, 57 -> 66, 63 -> 71 on FreeRTOS (gizmo none), such variables
+  126 -> 131, 123 -> 130, 70 -> 74, 144 -> 145; signed parameters 0 -> 2, 2, 3, 2, 5, 3, 4, 3 and
+  variables 0 -> 2, 2, 3, 5, 21, 23, 10, 24; raw accesses through variables 33, 34, 35, 35, 206, 248,
+  147, 212 -> 6, 13, 13, 3, 64, 94, 72, 100; casts with raw accesses 75, 67, 71, 69, 1,250, 1,088, 714,
+  999 -> 46, 43, 47, 40, 1,055, 891, 596, 783; casts at uses (raw accesses through variables, (u32) and
+  (s32) of a variable, pointer casts) 48, 48, 52, 43, 681, 642, 443, 573 -> 19, 24, 28, 13, 539, 501,
+  345, 453; (s32) of a variable 7, 7, 8, 7, 28, 32, 16, 32 -> 0, 0, 0, 0, 1, 5, 1, 1; (u32) of a
+  variable 7, 6, 8, 1, 300, 219, 158, 156 -> 12, 10, 14, 10, 258, 216, 127, 138 (a pointer returned
+  as the u32 result, handed to a u32 parameter); pointer casts 1, 1, 1, 0, 147, 143, 122, 173 -> 1, 1,
+  1, 0, 216, 186, 145, 214 (an integer given to a typed variable, a structure's pointer given to a
+  scalar one); externs with a type 1, 0, 0, 0, 0, 0, 0, 0 -> 4, 3, 3, 2, 115, 58, 94, 68 of 46, 45,
+  49, 39, 945, 773, 661, 941; lines 570, 569, 681, 620, 8,833, 8,183, 6,810, 7,582 -> 582, 580, 691,
+  629, 8,891, 8,222, 6,841, 7,620 (a declaration line per type). Every function's readable C of FreeRTOS
+  GCC -Os in one process 43.8 -> 48.8 s of CPU (the machine shared); the plan 1.4-1.7 s a FreeRTOS
+  build; the check with warm caches (main run again on the same copies) 5, 4, 4, 3, 299, 49, 20, 80 ->
+  5, 4, 4, 3, 308, 48, 21, 72 s, noise on a shared machine. The structures' scores against the source
+  (dread readable --shapes --score, --statics --score, --score with each one's table) the same on the
+  four FreeRTOS builds, line for line.
+- **Not established.** That a group is one object (a copy into a variable that then holds something
+  else is one group: the tidy's webs mostly split those); pointer results (memcpy's destination,
+  returned twice, stays u32 by the count of casts); globals that hold pointers (a queue handle in a u32
+  global, so its calls keep u32 externs); an older clang's -fwrapv-pointer (clang 23 sets it); an access
+  past a structure through its pointer stays raw; whether const is what the source declares where a
+  function only reads through a pointer it hands on (const only from the function's own stores and the
+  callees' parameters as typed).
+- **Undo.** Take vartypes.apply out of readable._named and _question_one and vartypes.plan out of
+  readable.check (a readable_types table without `variables` and `prototypes` types nothing); per
+  rule: candidates() without the "handed", "signed" or "extern" kinds; Planner.decide_result returning
+  False; the WRAPS line's flag in dread.build; polish's pointer-cast rule (Polisher._cast's first
+  branch).
+- **Status.** Done (dread/vartypes.py; dread.shapes Plan, dread.readable, dread.build, dread.polish,
+  dread.naming rename, dread.cmetrics pointers and signed; tests/test_vartypes.py, test_cmetrics.py).
+
 ## Flags as comparisons: a flag read through variables, proved where it is read (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

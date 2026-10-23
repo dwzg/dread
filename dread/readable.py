@@ -14,7 +14,8 @@ Stages so far: the clean-up (dread.tidy: what only the machine needed out, compa
 branches as comparisons), then the structure (dread.structure: gotos as if/else and loops). After
 them the tables (_named): memory at fixed addresses as names, the fields of structures of static
 data as members of one object (dread.naming apply_globals with the readable_types plan's statics,
-dread.statics: g_20000030.f_4), the structures behind pointers (dread.shapes), the variables' names;
+dread.statics: g_20000030.f_4), the structures behind pointers (dread.shapes), the types of variables,
+parameters and externs (dread.vartypes: volatile u8 *p, p[1], s32), the variables' names;
 then the part of the frame that addresses handed out reach becomes one local object (dread.frames: a
 structure, stack36.f_4, (u32)&stack36.f_4, with a union where accesses overlap; an array of bytes
 where none is at a constant offset, (u32)stack40). Last, constants and casts are written by their use
@@ -347,6 +348,8 @@ def _question_one(name):
                          names=context.static_names(), arrays=context.plan.arrays, pointers=context.plan.params,
                          image=context.image_spans)
     shapes.apply_types(tree, fn, context.plan, digest, names=context.struct_names())
+    from dread import vartypes
+    vartypes.apply(tree, fn, context.plan, digest, names=context.struct_names(), int_bits=int_bits)
     if not tidy.fixed_registers(tree):
         polish_tree(tree, fn, context, int_bits)
     return tree, fn, digest, print_file(tree, fn), cparse.unparse(fn, notes=False, style="readable")
@@ -713,8 +716,9 @@ def _named(name, text, stages, context=None):
                              pointers=context.plan.params if context is not None else None,
                              image=context.image_spans if context is not None else None)
         if context is not None:
-            from dread import shapes
+            from dread import shapes, vartypes
             shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
+            vartypes.apply(tree, fn, context.plan, made_for, names=context.struct_names(), int_bits=int_bits)
         if entry:
             naming.apply(tree, fn, entry, made_for)     # (only for the C it was made for: its digest)
         from dread import frames            # (the frame that addresses handed out reach as one object:
@@ -897,6 +901,8 @@ def check(target, image, names=None, out=print, jobs=None):
     context.plan.statics, context.plan.arrays = found, arrays
     context.plan.params = shapes.pointer_params(s, trees)
     context._struct_names = context._static_names = None
+    from dread import vartypes                  # (the types of variables and prototypes: dread.vartypes)
+    vartypes.plan(context.plan, trees, digests, context)
     shapes.store_plan(image, context.plan)
     out("dread readable --check: %d structures, pointers to them in %d functions; %d structures and %d arrays of "
         "static data (readable_types)" % (len(context.plan.structs), len(context.plan.typed),
