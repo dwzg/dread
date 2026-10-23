@@ -9,6 +9,101 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Results beyond r0:r1: a naked entry hands them back, no groups (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** A function whose callers read r2 or r3 after the call was refused ("its callers read
+  r2, which it sets ...; C returns r0 and r1 only"): an old ARM compiler's __value_in_regs returns a
+  structure of up to four words in r0-r3, and C under the AAPCS returns r0:r1 at most (RISC-V: a0:a1;
+  a function that leaves a value in a2 or a3 for its callers was refused the same way, and so were
+  those callers, which ARM lifts as bound calls). On a private real-life target many functions are
+  refused so (docs/todo.md). How is such a function lifted, and its callers; and the registers a
+  callee reads of its caller (the stale readers)?
+- **Options and choices.**
+  1. How the extra results leave the C: (a) a group: the function lifted with all of its callers,
+     the extra results handed among their C functions through a structure (an out-parameter, or a
+     structure returned through a hidden pointer: their convention among themselves is free),
+     refused while a caller stays machine code; (b) a naked entry at the function's place that
+     reserves an area for the extra registers, calls the C body with the area's address as one
+     argument more, and loads them from it before it returns; (c) both, (b) only where a caller
+     stays machine code. **(b)** (Lifter.more_results, render, more_entry). The entry keeps the
+     original's convention at the original's place, so every caller finds the registers where the
+     original leaves them: machine code, lifted C (its bound call, unchanged), hand-written C, a
+     case's stub of the function, the overlay's branch at the old entry. The function is accepted
+     alone, by its own cases, and the lift check's loop (drop what fails, try again, the halving for
+     the whole image) stays as it is. (a) changes the convention between C functions where much
+     expects the original's: a stub at the function's entry answers by the original's convention,
+     which a group's C caller would not read; one caller that fails its cases, an exception handler
+     or an asm_only caller keeps the whole group out (a function many others call is the common
+     case), and the loop and the halving would have to take groups as units. What (a) saves is the entry's code
+     (for two registers: ARM state 40 bytes, Thumb-2 30, Thumb-1 28, RISC-V 28 with compressed
+     instructions; the body is a function of its own beside it) and a few cycles a call. It can come
+     later as an optimisation (callers' C calling the body directly where every caller is C) without
+     changing what is compared.
+  2. What the entry may change before the body runs: only the link register (Thumb-1, which cannot
+     store lr: one of r4-r7 that is not handed in, saved and restored), so registers the C gets as
+     the caller left them (-ffixed-REG) arrive untouched. The area lies above two words of the
+     entry's own (the body's fifth argument, the saved return address), the stack's alignment kept
+     (8 bytes, 16 on RISC-V); the entry loads the registers before it gives the area back (an
+     interrupt takes the stack below sp). Thumb-1 returns with bx lr (ARMv4T's pop {pc} does not
+     return to ARM code). The forms are those GNU as takes in both of GCC's syntaxes.
+  3. Such a function that takes stack arguments: (a) the wrapped frame (frame and stack arguments on
+     the real stack, as for a va_list), the area below the frame; (b) the entry copies the stack
+     arguments. **(a)** where the wrapped frame exists (ARM state, Thumb-2, RISC-V); on Thumb-1 such
+     a function stays refused. Its callers that read the extra results stay refused too: a bound call
+     passes no stack arguments (none on the public builds needs it; not measured on the private one).
+  4. A tail call, and a call whose registers the function hands back: bound calls (the bl or the call
+     in an asm statement with the argument registers bound in and out), so that the C has what the
+     callee leaves. A tail call through a register in such a function is refused (not bound).
+  5. RISC-V had no bound calls (a caller that read a2 behind a call was refused): now it has them,
+     a0-a7 bound, ra and the other scratch registers clobbered, a scratch register the caller reads
+     behind the call bound too.
+  6. The stale readers: on ARM with GCC the C gets r4-r12 as the caller left them (-ffixed-REG,
+     2026-10-22) and a bound call hands r4-r11 on. It hands on r12 now too: the callers of a function
+     that reads r12 where its predicated write did not run were refused (FreeRTOS's hard-float builds:
+     the tasks that call __aeabi_d2f). Left out, with the reason: other compilers (clang has no
+     -ffixed-REG for these registers; the entry could carry them in its area, but the only such
+     functions on the public builds are refused for other reasons: prvPortStartFirstTask falls
+     through, xPortPendSVHandler reads the process stack pointer), RISC-V (the C reads no register as
+     its caller left it there, Lifter.can_hand; on the public builds only the millicode's t0, its
+     return address: another convention), and a callee with stack arguments. A group would not have
+     made them liftable either without a convention of its own between the C functions, which is
+     what (1) rejects.
+  7. The generic stubs (dread.autocase): (a) as they were, r2 and r3 left as the caller had them;
+     (b) a stub of a function that hands back more registers answers them too, derived from its
+     answer, as a wide_results callee's answers r1. **(b)**: a lifted caller's C has 0 in r2 behind an
+     earlier C call where the original has what that callee left, and a stub that leaves r2 alone
+     hands that difference to the caller's reads (a false difference, the caller dropped). Images
+     with such functions get new case keys (environment: the functions and their registers), the
+     others keep theirs.
+  8. Comparisons (rule 6): nothing taken away. The cases compared every register the callers read
+     after the call already (dread.runner's kept: r1, r2, r3, r12 and the flags, beyond the result in
+     r0): r2 and r3 of such a function are compared, as r1 of a wide one was (m.wide_result is for
+     written cases). A planted wrong r3 is dropped (tests/test_lift_results.py).
+- **Figures.** Programs of our own (tests/test_lift_results.py): every function the item is about
+  lifts and is accepted on ARM state, Thumb-2 (its C by GCC and by clang), Thumb-1 and RISC-V (GCC,
+  clang), except what (3) and (6) leave out. The 39 FreeRTOS builds: 23 of 13,684 functions go from
+  refused to lifting, on six builds; every other function's C is byte for byte as before. Lift checks
+  with the system run and the whole image on those six, the code before against this: accepted
+  341 -> 343 (GCC 14 -Os), 337 -> 338 (GCC 9), 336 -> 337 (GCC 8), 356 -> 358 and 344 -> 347 (hard
+  float, GCC and clang), 272 -> 274 (RISC-V, GCC 10), no other verdict changed, the whole image agreeing
+  on every one. Of the 23, 11 are accepted (vPortExitCritical, vTaskDelay, __aeabi_dcmpgt, pvPortMalloc,
+  prvInitialiseNewTask_constprop_0 with their entries; xTaskCreate's bound call; the tasks that call
+  __aeabi_d2f, on clang by the system run), 2 stay refused by the check for another reason (other code
+  branches into __adddf3), 10 are dropped: vAssertCalled three times for its case generation (as on the
+  builds where it always lifted), four for coverage (instructions no case or system run reached), and
+  three because the r2 they hand back is on one path what an earlier callee left (xTaskResumeAll on GCC
+  14, xTimerIsTimerActive on GCC 8 and 9: dread.regflow takes a read under a condition behind a write
+  under the same condition in another block for a read, here prvStaticallyAllocatedCreator's it ne;
+  movwne r2 ... it ne; strne r2; no C reproduces a callee's leftover, and the comparison says so).
+  gizmo has no such function: its lifted tables stay as they are on all seven builds.
+- **Undo.** MORE = () in dread/lift.py and dread/lift_riscv.py brings the refusals back; HANDED in
+  _call's check back to BOUND_IN the refusal of r12; RISC-V's calls without bind its refusal of a
+  caller that reads a2; the stubs' extra answers are AutoCase.more.
+- **Status.** Done (dread/lift.py, dread/lift_riscv.py, dread/lift_msp430.py: no extra results there,
+  dread/autocase.py, tests/test_lift_results.py).
+
 ## Two settings of the naming compared over replicate runs; the groups named first kept (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

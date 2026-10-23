@@ -630,7 +630,7 @@ its sources.
   wait for a flag an interrupt sets would spin forever) and the gate's per-access identity no longer
   holds. Not now: the raw accesses are better served by more of them becoming members (structures,
   arrays) than by losing their volatile.
-- [ ] **Results in r2 and r3, and registers a caller leaves.** A function whose callers read r2 or r3
+- [x] **Results in r2 and r3, and registers a caller leaves.** A function whose callers read r2 or r3
   after the call (an old ARM compiler's __value_in_regs: a structure of up to four words returned in
   r0-r3) is refused while any original caller reads them, since C under the AAPCS returns at most
   r0:r1; so is one that reads registers its caller left (the stale readers). On the private real-life
@@ -641,6 +641,49 @@ its sources.
   thin asm wrapper that loads r2 and r3 from that structure for callers that stay machine code.
   Measured on what a public build has of it first (gizmo or a test program with __value_in_regs-like
   returns in asm), then on the private firmware's refusals.
+  Done 2026-10-23 with the wrapper, not groups (docs/decisions.md): a function whose callers read
+  registers beyond r0:r1 that it sets (dread.lift more_results: r2, r3 and r12 on ARM, a2-a7 and t0-t6
+  on RISC-V) gets a naked entry at its place that reserves an area, calls the C body with the area's
+  address and loads the registers from it before it returns; only lr (Thumb-1: a saved register of
+  r4-r7 not handed in; RISC-V: ra) changes before the body runs. A caller that reads them behind the
+  call makes a bound call (RISC-V got bound calls for it), and so do the function's own tail calls and
+  calls whose registers it hands back; with stack arguments its frame is the wrapped one (not on
+  Thumb-1). A bound call hands r12 to a callee that reads it as its caller left it. The generic stubs
+  answer the extra registers too (docs/formats.md, wide_results.txt). The cases compared r2 and r3
+  already (dread.runner compares every register the callers read after the call). Measured first on
+  programs of our own in assembly (tests/test_lift_results.py: ARM state on ARMv4T, Thumb-2 on a
+  Cortex-M3, Thumb-1 on a Cortex-M0, RISC-V): the four-word function, the two that hand its words on
+  and those that hand back more were refused ("its callers read r2, which it sets ...; C returns r0
+  and r1 only"), on RISC-V their callers too ("reads a2 behind the call of ..."), a caller of a helper
+  that reads r12 ("calls ip_shift_tail, which reads r12 its caller leaves"); now all of them are
+  accepted except what the decision leaves out, a wrong r3 is caught, callers in machine code read the
+  registers from the entry, and the system run agrees on the whole image. On the 39 FreeRTOS builds
+  23 of 13,684 functions go from refused to lifting, on six builds (GCC 8, 9 and 14 -Os: 3, 3 and 4
+  kernel functions around vAssertCalled; the hard-float builds: libgcc's __adddf3, __aeabi_dcmpgt,
+  __aeabi_d2f and pvPortMalloc with GCC, two of them with clang, and on both the two tasks that call
+  __aeabi_d2f, through r12; RISC-V with GCC 10: prvInitialiseNewTask_constprop_0 and its two callers);
+  every other function's C is byte for byte as before, and gizmo's lifted tables are unchanged.
+  Accepted by the lift check (the system run and the whole image agree on all six): 11 of the 23
+  (341 -> 343 on GCC 14, 337 -> 338 on GCC 9, 336 -> 337 on GCC 8, 356 -> 358 and 344 -> 347 on the
+  hard-float builds with GCC and clang, 272 -> 274 on RISC-V), 2 refused by the check for another
+  reason (other code branches into __adddf3), 10 dropped: vAssertCalled for its case generation (as
+  where it always lifted), four for coverage, three whose r2 is on one path what an earlier callee left
+  (xTaskResumeAll on GCC 14, xTimerIsTimerActive on GCC 8 and 9; see the over-reading below).
+  Left: the private firmware's refusals (not measured here); a bound call that passes stack
+  arguments (a caller of such a function that reads the extra results stays refused); Thumb-1 with
+  stack arguments; the stale readers on clang targets and on RISC-V, where the C gets no register as
+  its caller left it (the entry's area could carry them; no public function would gain: those there
+  are refused for other reasons); groups as an optimisation (the entry's bytes where every caller is
+  C). On the public builds none of the extra results is one a programmer meant: dread.regflow's
+  over-reading, a read under a condition behind a write under the same condition in another block
+  taken for a read of what the call left (prvStaticallyAllocatedCreator's it ne; movwne r2 ... it ne;
+  strne r2 on GCC 8, 9 and 14; libgcc's __extendsfdf2 on the hard-float builds), and on RISC-V with
+  GCC 10 a callee that copies a register nothing set (prvAddNewTaskToReadyList's mv s4, a4). The
+  over-read functions now carry an entry they would not need, and where the register is on some path
+  what an earlier callee left, the C cannot have it (the three dropped above); a fix in dread.regflow
+  would spare both. The readable C of such a function shows the naked entry and
+  leaves the body as lifted C (as for a wrapped function), and lr read as a value in the body is the
+  entry's return address (likewise).
 - [ ] **The pilot on the draft.** Names for the readable C: the model proposes a map of names and a
   sentence, code applies it (docs/decisions.md). Built 2026-10-21: dread/naming.py (the
   readable_names table, applied by digest, a map kept only when its names are C identifiers nothing

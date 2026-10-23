@@ -312,6 +312,7 @@ class Generator:
         self.real = {self.entries[n] for n in REAL_LIBRARY if n in self.entries}
         self.writing = {self.entries[n] for n in WRITING_LIBRARY if n in self.entries}
         self.wide = self._wide_results()
+        self._more = None                   # see more()
         self._tracer = None                 # dread.uncovered's Context, when a branch's sources are traced
         self._domains()
         self.io_fixed, self.long = False, 0
@@ -327,6 +328,28 @@ class Generator:
             with open(path) as f:
                 names = {l.split()[0] for l in f if l.strip() and not l.startswith("#")}
         return {self.entries[n] for n in names if n in self.entries}
+
+    def more(self):
+        """{entry: registers} of the functions that hand back registers beyond a C result (dread.lift's
+        more_results: their callers read r2 or r3, which they set). A generic stub of one answers those
+        too, derived from its answer as a wide_results callee's second word is (since 2026-10-23): a
+        lifted caller's C has 0 in r2 behind an earlier C call where the original has what that callee
+        left, and a stub that left r2 alone handed that difference on to the caller's reads of it. Found
+        once; {} without regflow or a lifter for the architecture."""
+        if self._more is None:
+            self._more = {}
+            flow = self.flow()
+            if flow:
+                from dread import lift
+                try:
+                    lifter = lift.make_lifter(self.program, flow)
+                except lift.NoLifter:
+                    lifter = None
+                for fn in self.program.functions if lifter is not None else ():
+                    regs = lifter.more_results(fn.name)
+                    if regs:
+                        self._more[fn.entry] = regs
+        return self._more
 
     def _domains(self):
         """The image's domains table: {address: (bytes, values)}, rows NAME:rN+OFF (pointer
@@ -623,6 +646,8 @@ class Generator:
             if target in self.result_domains:
                 values = self.result_domains[target]
                 answer = values[answer % len(values)]
+            for k, reg in enumerate(self.more().get(target, ())):     # (more: what its callers read beyond)
+                m.reg(reg, (answer * 0x9E3779B1 + 0x7F4A7C15 * (k + 2)) & 0xFFFFFFFF)
             if target in self.wide and len(lay.result_regs) > 1:
                 return answer, (answer * 0x9E3779B1 + 0x7F4A7C15) & 0xFFFFFFFF
             return answer
@@ -669,7 +694,8 @@ class Generator:
         what the loader puts into RAM, and what dread.regflow found in the image (a hung callee's
         stub logs what it reads, a function's float arguments get values): its result, not its
         version, so that a new version that finds the same in an image keeps that image's cases (a
-        version that changed only what ARM's FPU pushes mean regenerated every image's)."""
+        version that changed only what ARM's FPU pushes mean regenerated every image's), and the
+        functions whose stubs answer registers beyond a C result (more), where there are any."""
         if self._environment is None:
             h = hashlib.sha1(bytes(self.payload))
             for c in self.image.startup():
@@ -680,6 +706,8 @@ class Generator:
             h.update(b"regflow " + hashlib.sha1(found).digest())
             if self.stall_part:             # (only where it applies: the other images keep their cases)
                 h.update(b"stall %d" % self.stall_part)
+            if self.more():                 # (the stubs' answers beyond a C result: likewise)
+                h.update(b"more " + repr(sorted(self.more().items())).encode())
             if self.pointer_slots != [self.scratch + POINTER_BASE + POINTER_STEP * k for k in range(POINTER_SLOTS)]:
                 h.update(b"pointer slots " + repr(self.pointer_slots).encode())     # (a small scratch only)
             # the memory map: what an input may reach (the lab's page at address 0 let a probe's null

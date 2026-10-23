@@ -185,9 +185,23 @@ structure, an array's element or a field of either as a value (an argument, a va
 compared, a result), it is written as such (`(u32)&g_20029988`, `(u32)&g_200299f8[r3]`). A file from
 before has none: indexed accesses stay as the lifter's arithmetic.
 
-### `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
+### `wide_results.txt` (`wide_results`)
 
-Described with the tools that use them, as those tools arrive in DREAD.
+Callees whose generic stubs (dread.autocase: a case's `calls`) answer two words: one name per line,
+`#` comments, anything behind the name ignored (a target's evidence). Such a stub answers its answer
+in r0 and `(answer * 0x9E3779B1 + 0x7F4A7C15) & 0xFFFFFFFF` in r1 (a1, ...: the second result
+register). The lifter takes a function's width from dread.regflow, not from here; the table is only
+the stubs'. A function whose callers read registers beyond the C result that it sets (dread.lift's
+more_results: r2, r3, r12 on ARM, a2-a7 and t0-t6 on RISC-V) needs no row: since 2026-10-23 its stub
+answers those as well, the k-th of them (from 0) `(answer * 0x9E3779B1 + 0x7F4A7C15 * (k + 2)) &
+0xFFFFFFFF`, and the images that have such functions get new case keys (dread.autocase environment),
+the others keep theirs.
+
+### `domains.tsv`, `stale_readers.tsv`, `function_starts.txt`
+
+Described with the tools that use them, as those tools arrive in DREAD (no tool reads
+`stale_readers.tsv`: the lifter finds the registers a callee reads of its caller itself,
+dread.lift's leaves).
 
 ## The rebuilt image (`BUILD/recon/IMAGE/`)
 

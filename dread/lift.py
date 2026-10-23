@@ -22,6 +22,19 @@ call through a register passes the four registers and the lowest frame words, wh
 original's callee would find stack arguments. A switch is a C switch over the index its bound check
 compares, with the target dread.switches finds for every value the check lets through.
 
+A function whose callers read registers beyond r0 and r1 that it sets (an old ARM compiler's
+__value_in_regs returns a structure of up to four words in r0-r3; r2, r3 and r12 on ARM, a2-a7 and
+t0-t6 on RISC-V: Lifter.more_results) gets a naked entry at its place: the entry reserves an area for
+them, calls the C body (NAME_dread_body) with the area's address as one argument more, and loads them
+from it before it returns; the body stores them at every return. Only the link register changes
+before the body runs (Thumb-1: a register of r4-r7 not handed in, saved), so what the C gets as the
+caller left it is untouched. Callers in machine code and in C find them where the original leaves
+them; a lifted caller that reads them behind the call makes a bound call (an asm statement around the
+bl or call with the argument registers bound in and out), as does such a function's tail call and its
+call of a function whose registers it hands back. With stack arguments its frame is the real one
+(wrapped, below), the area below it; on Thumb-1, which has no wrapped frame, it stays refused. Until
+2026-10-23 every such function was refused, and on RISC-V their callers too.
+
 Lifted C is a stepping stone, not a reconstruction: no names, no structure, nobody read it. It is
 useful because it builds and comes with generated cases that must cover every instruction of the
 original and agree on all of them before it is accepted (see --check). The translation of each
@@ -31,13 +44,18 @@ wrong translation apart (an xor loop run once from zero agrees with an or).
 A function is refused, with the reason, when it uses something not modelled exactly: an unknown
 instruction (coprocessor and status register access included), a stack pointer that is not static
 or moves under a condition, a register or the flags read before anything writes them (what the
-caller leaves: C receives r0-r3 only), callers that read a register it sets other than r0 and r1 or
-the flags it leaves (C cannot return them), a read of a scratch register or the flags behind a call
-that the callee leaves (dread.regflow), a call of a function that reads registers its caller leaves
-(beyond r0-r3; lr included: such a helper finds data behind the call), the address of a stack
-argument, an indirect jump that is neither a resolved switch nor a tail call, an exception return,
-code that falls through into what follows, or an entry in the asm_only table. A call of a function
-that never returns (dread.noreturn) does not fall through: an endless loop follows it in the C.
+caller leaves: C receives r0-r3 only; with GCC on ARM the C gets r4-r12 as the caller left them,
+can_hand), callers that read the flags it leaves (C cannot return them) or a register beyond r0 and
+r1 it sets that no naked entry hands back (cannot_return_more: a compiler without naked functions, an
+exception handler, stack arguments on Thumb-1), a read of a scratch register or the flags behind a
+call that the callee leaves where the call cannot be bound (dread.regflow; a callee with stack
+arguments), a call of a function that reads registers its caller leaves where the call cannot be
+bound (beyond r0-r3 and r4-r12, lr included: such a helper finds data behind the call; a callee with
+stack arguments), a tail call through a register in a function that hands back more results, the
+address of a stack argument, an indirect jump that is neither a resolved switch nor a tail call, an
+exception return, code that falls through into what follows, or an entry in the asm_only table. A
+call of a function that never returns (dread.noreturn) does not fall through: an endless loop follows
+it in the C.
 
 With --check the lifted C is put to the test: every function that lifts (and that src does not
 define by hand, and that no code outside the function enters behind its entry: a branch of other
@@ -136,8 +154,14 @@ BOUND = frozenset(("r1", "r2", "r3", "r12", "flags"))
 BOUND_IN = frozenset(("r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11"))
 # What the C of a function can get as its caller left it (Lifter.can_hand): the same registers, and
 # r12, which code may read on a path where a predicated write did not run and use only under that
-# condition again (libgcc's rsble ip, r2, #32; lsr.w ip, r0, ip; orrle r1, r1, ip in __adddf3's tail)
+# condition again (libgcc's rsble ip, r2, #32; lsr.w ip, r0, ip; orrle r1, r1, ip in __adddf3's tail).
+# A bound call hands a callee these as well (r12 since 2026-10-23: the callers of such a helper were
+# refused, FreeRTOS's hard-float builds' callers of __aeabi_d2f)
 HANDED = BOUND_IN | {"r12"}
+# What the C of a function can hand back beyond a C result (Lifter.more_results): the scratch registers
+# beyond r0:r1 (an old ARM compiler's __value_in_regs returns a structure of up to four words in r0-r3).
+# The C body stores them, the naked entry render puts in front of it loads them before it returns.
+MORE = ("r2", "r3", "r12")
 STACK_POINTERS = ("msp", "psp", "msp_ns", "psp_ns", "sp")
 MAX_STACK_ARGS = 16      # stack words a function may take; more is refused
 # The loads and stores with one memory operand, by the bytes they access (Lifter.frame_effects)
@@ -192,6 +216,12 @@ class FrameEffects:
     def __init__(self, reads=(), writes=()):
         self.accesses, self.reads, self.writes = [], set(reads), set(writes)
         self.stored, self.loaded, self.hands, self.opaque, self.words = set(), set(), set(), False, []
+
+
+def a32_immediate(value):
+    """Whether value is an ARM-state data-processing immediate: eight bits rotated right by an even
+    amount (what the entry of more results may add to sp in one instruction: Lifter.more_entry)."""
+    return any(((value << r | value >> (32 - r)) & 0xFFFFFFFF) < 256 for r in range(0, 32, 2))
 
 
 def dict_origins(pairs, reg):
@@ -302,7 +332,7 @@ class Lifter:
     flow, the stack pointer's depth, the registers a function reads before writing them, the
     acceptance. Another instruction set subclasses it (dread.lift_riscv)."""
 
-    REGS, ARGS, AFTER_CALL = REGS, ARGS, AFTER_CALL     # the architecture's names (class attributes)
+    REGS, ARGS, AFTER_CALL, MORE = REGS, ARGS, AFTER_CALL, MORE     # the architecture's names (class attributes)
     # The functions the hand-written C calls (dread.build sets it before it lifts): callers the original
     # does not have, which may read more of a result than the original's callers do. dread.lift_msp430
     # gives them all four result registers; this translator and dread.lift_riscv do not use it.
@@ -470,8 +500,8 @@ class Lifter:
         after = self.step(insn, depth, values)[0]
         if after:
             raise Refused("0x%x falls into %s with %d bytes of frame" % (insn.address, callee.name, after))
-        call = self._fp_call(self._call(callee, insn))
-        return "%s %sreturn %s;" % (call, self._fp_sync("out"), self._ret())
+        call = self._fp_call(self._call(callee, insn, bind=True) if self.ctx.get("more") else self._call(callee, insn))
+        return "%s %s" % (call, self._return())
 
     def states(self, fn, strict=True, switch=False):
         """{address: (depth, values)} before every instruction a path from the entry reaches.
@@ -824,7 +854,8 @@ class Lifter:
         start = frozenset(r for r in self.REGS + (bits or ["flags"]) + fpu
                           if r not in tuple(args) + ("sp", "pc", link) + fixed + tuple(given))
         try:
-            results = () if not args else ("r0", "r1") if self._wide(fn.name) else ("r0",)
+            results = () if not args else (("r0", "r1") if self._wide(fn.name) else ("r0",)) + \
+                tuple(self.more_results(fn.name))
         except Exception:
             results = ("r0",)
         undef_at, partial_at, found = {fn.insns[0]: start}, {fn.insns[0]: frozenset()}, {}
@@ -1009,10 +1040,42 @@ class Lifter:
         return out
 
     def results(self, fn, handler=None):
-        """The registers fn's C returns (none for an exception handler)."""
+        """The registers fn's C returns (none for an exception handler), those its entry hands back
+        (more_results) included."""
         if handler:
             return ()
-        return ("r0", "r1") if self._wide(fn.name) else ("r0",)
+        return (("r0", "r1") if self._wide(fn.name) else ("r0",)) + tuple(self.more_results(fn.name))
+
+    def more_results(self, name):
+        """The registers beyond the C result (r0, or r0 and r1: _wide) that the function's callers read
+        after the call and that it sets (dread.regflow: kept, not preserved), in MORE's order: results a
+        C function cannot return. An old ARM compiler's __value_in_regs returns a structure of up to
+        four words in r0-r3; a caller also reads r2 where a predicated write did not run and a read
+        under the same condition follows (FreeRTOS's GCC 8, 9 and 14 builds: vAssertCalled and the
+        kernel functions on its paths). The C hands them back through a naked entry (render: its body
+        stores them in an area the entry reserves, the entry loads them before it returns), so its
+        callers find them where the original leaves them, whatever code they are; [] for most."""
+        flow = self.flow
+        if flow is None:
+            return []
+        kept = set(flow.kept_regs(name)) - set(flow.preserved_regs(name))
+        return [r for r in self.MORE if r in kept]
+
+    def cannot_return_more(self, fn):
+        """Why fn's C cannot hand back its more_results through a naked entry, or None: its compiler has
+        no naked functions (GCC and clang do), it is an exception handler, or it takes stack arguments
+        and its frame cannot be the real stack (can_wrap: Thumb-1), which an entry with an area of its
+        own in between would need (render, wrapped)."""
+        if self.prog.target.compiler.kind not in ("gcc", "clang"):
+            return "its compiler has no naked functions for an entry that hands them back"
+        try:
+            if self.handler_kind(fn):
+                return "it is an exception handler"
+        except Refused:
+            pass
+        if self.stack_args(fn) and not self.can_wrap(fn):
+            return "it takes stack arguments, which an entry that hands them back does not pass on here"
+        return None
 
     @staticmethod
     def _frame_address(value):
@@ -1245,8 +1308,16 @@ class Lifter:
     def lift(self, fn):
         """The C of fn (Lifted). Where it is refused only for an address that needs the original's
         frame next to the stack arguments (WRAP), it is lifted again wrapped: an assembly entry
-        reserves the original's frame on the real stack and hands the C body its stack pointer."""
+        reserves the original's frame on the real stack and hands the C body its stack pointer. A
+        function that hands back more_results and takes stack arguments is lifted wrapped at once:
+        the area its entry reserves for them lies between the stack arguments and the body."""
         self._wrapping = False
+        if self.more_results(fn.name) and self.stack_args(fn) and self.can_wrap(fn):
+            self._wrapping = True
+            try:
+                return self._lift(fn)
+            finally:
+                self._wrapping = False
         try:
             return self._lift(fn)
         except Refused as e:
@@ -1317,6 +1388,10 @@ class Lifter:
         frame = (max(depth.values()) + 7) & ~7
         wrapped = getattr(self, "_wrapping", False)
         out = 0 if wrapped else self.saves_out(fn, states, handler)     # (a wrapped frame is the real stack)
+        more = [] if handler else self.more_results(fn.name)
+        if more and stack_params:           # (lift wraps such a function: its stack arguments as they lie)
+            raise Refused("its callers read %s, which it sets, and it takes stack arguments, which an entry "
+                          "that hands it back does not pass on here" % more[0])
         targets = set()
         for insn in insns:
             kind, target, _ = arch.flow(insn)
@@ -1325,7 +1400,8 @@ class Lifter:
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
                     "bound": set(), "handed": handed, "save_area": self.save_area(fn, insns), "wrapped": wrapped,
                     "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns), "out": out,
-                    "stack_params": stack_params, "switch": {}, "switch_targets": set()}
+                    "stack_params": stack_params, "switch": {}, "switch_targets": set(), "more": more,
+                    "more_at": self.more_address(frame, wrapped, more) if more else None}
         self._switches(fn)
         body, own = [], set(fn.insns)
         for insn in insns:
@@ -1348,7 +1424,59 @@ class Lifter:
                      [a for a in fn.insns if a not in depth and a not in stubs],
                      list(fn.insns) if isinstance(fn, Body) else None, out)
         got.handed = sorted(self.ctx["handed"], key=lambda r: int(r[1:]))
+        got.more = list(self.ctx["more"])   # handed back by its naked entry (more_results)
         return got
+
+    def more_area(self, more):
+        """The bytes of the area a naked entry reserves for the registers it hands back (more_results):
+        a word each, the stack's alignment kept (8 bytes here)."""
+        return (4 * len(more) + 7) & ~7
+
+    def more_address(self, frame, wrapped, more):
+        """The C expression of where the body stores more_results: the area the naked entry reserves
+        (render), the body's fifth argument, or below the frame of a wrapped function (sp0 its top)."""
+        return "sp0 - %d" % (frame + self.more_area(more)) if wrapped else "more"
+
+    def more_entry(self, body):
+        """The assembly of the naked entry that hands back more_results (render; the lines of an asm
+        string). ARM state and Thumb-2: it reserves the area and two words below it (the body's fifth
+        argument, the area's address or for a wrapped function sp0, and the return address), calls the
+        body, loads the registers from the area and returns; a wrapped function's frame lies above the
+        area. Thumb-1 has no stores of lr: the entry saves a register of r4-r7 that is not handed in and
+        computes the address with it (a wrapped frame is not made there: lift refuses that first), and
+        returns with bx lr, which ARMv4T's Thumb needs to return to ARM code. Only lr, or that saved
+        register, changes before the body runs, so registers handed in arrive as the caller left them.
+        The forms are those GNU as takes in both of GCC's syntaxes (sub sp, #N on Thumb-1)."""
+        ctx = self.ctx
+        more = ctx["more"]
+        area = self.more_area(more)
+        thumb1 = self.prog.isa_at(ctx["fn"].entry) == "t32" and getattr(self.arch, "thumb2", None) is False
+        if thumb1:
+            free = [r for r in ("r4", "r5", "r6", "r7") if r not in ctx.get("handed", ())]
+            if not free:
+                raise Refused("its entry that hands back %s has no free register (r4-r7 handed in)" % more[0])
+            s = free[0]
+            loads = []
+            for i, r in enumerate(more):
+                if r == "r12":              # (Thumb-1 loads into r0-r7 only)
+                    loads += ["ldr %s, [sp, #%d]" % (s, 8 + 4 * i), "mov r12, %s" % s]
+                else:
+                    loads.append("ldr %s, [sp, #%d]" % (r, 8 + 4 * i))
+            code = (["push {%s, lr}" % s, "sub sp, #%d" % (area + 8), "add %s, sp, #8" % s, "str %s, [sp]" % s,
+                     "bl %s" % body] + loads +
+                    ["add sp, #%d" % (area + 8), "ldr %s, [sp, #4]" % s, "mov lr, %s" % s, "pop {%s}" % s,
+                     "add sp, #4", "bx lr"])
+        else:
+            room = area + 8 + (ctx["frame"] if ctx.get("wrapped") else 0)
+            if not (a32_immediate(room) if self.prog.isa_at(ctx["fn"].entry) == "a32" else room <= 4095):
+                raise Refused("its entry that hands back %s would move sp by %d bytes, not one instruction's "
+                              "immediate" % (more[0], room))
+            code = (["sub sp, sp, #%d" % room, "str lr, [sp, #4]",
+                     "add lr, sp, #%d" % (room if ctx.get("wrapped") else 8), "str lr, [sp]", "bl %s" % body,
+                     "ldr lr, [sp, #4]"] +
+                    ["ldr %s, [sp, #%d]" % (r, 8 + 4 * i) for i, r in enumerate(more)] +
+                    ["add sp, sp, #%d" % room, "bx lr"])
+        return "\\n\\t".join(code)
 
     def entered_unseen(self, fn, lifted):
         """Why fn's C would free code that something outside the code enters, or None: code of fn that
@@ -1501,21 +1629,29 @@ class Lifter:
             lines.append("{")
             lines.append("    u32 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
                          " r10 = 0, r11 = 0, r12 = 0, lr = 0;")
-        elif ctx.get("wrapped"):
-            # the original's frame on the real stack, below its stack pointer at the entry (sp0), the
-            # stack arguments above it as they lie: the entry reserves the frame and calls the body
-            # with sp0 as its fifth argument (the pushed r12)
+        elif ctx.get("wrapped") or ctx.get("more"):
+            # wrapped: the original's frame on the real stack, below its stack pointer at the entry (sp0),
+            # the stack arguments above it as they lie: the entry reserves the frame and calls the body
+            # with sp0 as its fifth argument (the pushed r12). more (more_results): the entry reserves an
+            # area for the registers beyond a C result, below the frame when wrapped, hands the body the
+            # area's address as its fifth argument (sp0 when wrapped) and loads them from it behind the
+            # call; it uses no register but lr before the body runs (registers handed in stay as the
+            # caller left them)
             body_name = fn.name + "_dread_body"
-            lines.append("%s %s(u32 a0, u32 a1, u32 a2, u32 a3, u32 sp0);" % (
-                "u64" if self._wide(fn.name) else "u32", body_name))
+            fifth = "sp0" if ctx.get("wrapped") else "more"
+            lines.append("%s %s(u32 a0, u32 a1, u32 a2, u32 a3, u32 %s);" % (
+                "u64" if self._wide(fn.name) else "u32", body_name, fifth))
             lines.append("__attribute__((naked)) void %s(void)" % fn.name)
             lines.append("{")
-            lines.append('    __asm__ volatile ("mov r12, sp\\n\\tsub sp, sp, #%d\\n\\tpush {r12, lr}\\n\\t'
-                         'bl %s\\n\\tpop {r12, lr}\\n\\tadd sp, sp, #%d\\n\\tbx lr");'
-                         % (ctx["frame"], body_name, ctx["frame"]))
+            if ctx.get("more"):
+                lines.append('    __asm__ volatile ("%s");' % self.more_entry(body_name))
+            else:
+                lines.append('    __asm__ volatile ("mov r12, sp\\n\\tsub sp, sp, #%d\\n\\tpush {r12, lr}\\n\\t'
+                             'bl %s\\n\\tpop {r12, lr}\\n\\tadd sp, sp, #%d\\n\\tbx lr");'
+                             % (ctx["frame"], body_name, ctx["frame"]))
             lines.append("}")
-            lines.append("__attribute__((noinline, used)) %s %s(u32 a0, u32 a1, u32 a2, u32 a3, u32 sp0)" % (
-                "u64" if self._wide(fn.name) else "u32", body_name))
+            lines.append("__attribute__((noinline, used)) %s %s(u32 a0, u32 a1, u32 a2, u32 a3, u32 %s)" % (
+                "u64" if self._wide(fn.name) else "u32", body_name, fifth))
             lines.append("{")
             lines.append("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0,"
                          " r10 = 0, r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);")
@@ -1570,8 +1706,10 @@ class Lifter:
         return [r for r in regs if r in keep]
 
     def _check_kept(self, fn):
-        """Refuse when callers read what C cannot hand back: the flags, or a register other than r0
-        and r1 that the function sets."""
+        """Refuse when callers read what C cannot hand back: the flags, or a register beyond r0 and r1
+        that the function sets and that no naked entry hands back (more_results: MORE's registers,
+        where cannot_return_more finds nothing in the way). Until 2026-10-23 every register beyond r0
+        and r1 was refused."""
         flow = self.flow
         if flow is None:
             return
@@ -1579,10 +1717,15 @@ class Lifter:
         kept = set(flow.kept_regs(fn.name)) - result - FPU_MIRRORED     # (handed back at every return)
         if "flags" in kept:
             raise Refused("its callers read the flags it leaves (%s)" % flow.why(fn.name, "flags"))
-        written = sorted(kept - set(flow.preserved_regs(fn.name)))
+        written = sorted(kept - set(flow.preserved_regs(fn.name)) - set(self.MORE))
         if written:
             raise Refused("its callers read %s, which it sets (%s); C returns r0 and r1 only" % (
                 written[0], flow.why(fn.name, written[0])))
+        more = self.more_results(fn.name)
+        why = self.cannot_return_more(fn) if more else None
+        if why:
+            raise Refused("its callers read %s, which it sets (%s); C returns r0 and r1 only, and %s" % (
+                more[0], flow.why(fn.name, more[0]), why))
 
     def _left_out(self, k):
         """Whether the frame word k bytes below the entry's stack pointer lies in the top that the C's
@@ -1765,7 +1908,7 @@ class Lifter:
                 loads = self._frame_ldm(insn, returning=True)
             else:
                 loads = ""
-            return (loads + " " if loads else "") + self._fp_sync("out") + "return %s;" % self._ret()
+            return (loads + " " if loads else "") + self._return()
         if kind == "jump":
             t = target & ~1
             if t not in self.ctx["depth"] and falls and self.decided(insn, self.values()) is False:
@@ -1784,10 +1927,11 @@ class Lifter:
             after = self.step(insn, *self.ctx["states"][insn.address])[0]
             if after:                           # its frame open: code that ends it (shared_code), not a call
                 raise Refused("0x%x branches into %s with %d bytes of frame" % (insn.address, callee.name, after))
-            call = self._fp_call(self._call(callee, insn))
+            # (handing back more_results: a bound call, the registers the callers read as the callee leaves them)
+            call = self._fp_call(self._call(callee, insn, bind=bool(self.ctx.get("more"))))
             if arch.predicate(insn) is not None:
-                return "if (%s) { %s %sreturn %s; }" % (COND[insn.cc], call, self._fp_sync("out"), self._ret())
-            return "%s %sreturn %s;" % (call, self._fp_sync("out"), self._ret())
+                return "if (%s) { %s %s }" % (COND[insn.cc], call, self._return())
+            return "%s %s" % (call, self._return())
         if kind == "call":
             callee = prog.by_entry.get(target & ~1)
             if callee is None:
@@ -1813,7 +1957,7 @@ class Lifter:
             raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
         if kind == "ijump":
             if self.ret_jump(insn, self.values()):
-                return self._fp_sync("out") + "return %s;" % self._ret()
+                return self._return()
             return self._switch_jump(insn)
         if kind == "stop":
             raise Refused("0x%x: %s" % (insn.address, insn.mnemonic))
@@ -2160,6 +2304,19 @@ class Lifter:
             return ""
         return "((u64)r1 << 32 | r0)" if self._wide(self.ctx["fn"].name) else "r0"
 
+    def _return(self):
+        """The C of a return: s0-s15 handed back (FPU_MIRROR), the registers the naked entry hands back
+        stored into its area (more_results), the result returned."""
+        return self._fp_sync("out") + self._more_out() + "return %s;" % self._ret()
+
+    def _more_out(self):
+        """The stores of more_results into the area of the entry that hands them back, or ""."""
+        more, at = self.ctx.get("more"), self.ctx.get("more_at")
+        if not more:
+            return ""
+        return " ".join("*(volatile u32 *)(%s) = %s;" % (at if not i else "%s + %d" % (at, 4 * i), r)
+                        for i, r in enumerate(more)) + " "
+
     def _call(self, callee, insn, bind=False):
         if not IDENT.match(callee.name):
             raise Refused("0x%x calls %s, whose name is not a C identifier" % (insn.address, callee.name))
@@ -2168,7 +2325,7 @@ class Lifter:
             raise Refused("0x%x calls %s, whose stack arguments are not known (its stack pointer is not static)"
                           % (insn.address, callee.name))
         leaves = self.leaves(callee)
-        if leaves and not (bind and nstack == 0 and set(leaves) <= BOUND_IN):
+        if leaves and not (bind and nstack == 0 and set(leaves) <= HANDED):
             raise Refused("0x%x calls %s, which reads %s its caller leaves" % (
                 insn.address, callee.name, ", ".join(leaves)))
         behind = self._check_after_call(callee, insn, bind=bind and nstack == 0)
@@ -2244,18 +2401,18 @@ class Lifter:
         the bl in an asm statement with r0-r3 bound in and out (r12 too when it is read) and, when the
         flags are read, an mrs right behind the bl, so that the C goes on with what the original's
         caller finds. The callee takes no stack arguments; the r4-r11 it keeps by the convention, and
-        those it reads from its caller (inputs: a compiler's shared code) are bound as well, from the
-        C's variables (and back: whatever it leaves there)."""
+        those it reads from its caller (inputs: a compiler's shared code), r12 too (HANDED), are bound as
+        well, from the C's variables (and back: whatever it leaves there)."""
         self.ctx["bound"].add(callee.name)      # no prototype (the asm names it); a callee all the same
-        regs = ["r0", "r1", "r2", "r3"] + (["r12"] if "r12" in behind else []) + sorted(
-            inputs, key=lambda r: int(r[1:]))
+        regs = ["r0", "r1", "r2", "r3"] + (["r12"] if "r12" in behind or "r12" in inputs else []) + sorted(
+            set(inputs) - {"r12"}, key=lambda r: int(r[1:]))
         binds = ", ".join('x%s __asm__("%s") = %s' % (r[1:], r, r) for r in regs)
         outs = ['"+r"(x%s)' % r[1:] for r in regs]
         text = "bl %s" % callee.name
         if "flags" in behind:
             outs.append('"=r"(t)')
             text += "\\n\\tmrs %%%d, apsr" % (len(outs) - 1)
-        clobbers = ['"lr"', '"cc"', '"memory"'] + ([] if "r12" in behind else ['"r12"'])
+        clobbers = ['"lr"', '"cc"', '"memory"'] + ([] if "r12" in regs else ['"r12"'])
         if self.ctx.get("fp"):              # a hard-float callee may change s0-s15 (FPU_MIRROR reads them back)
             clobbers += ['"s%d"' % k for k in range(16)]
         lines = ["{ register u32 %s;" % binds]
@@ -2265,7 +2422,7 @@ class Lifter:
         lines.append(" ".join("%s = x%s;" % (r, r[1:]) for r in regs))
         if "flags" in behind:
             lines.append("n = t >> 31; z = t >> 30 & 1; c = t >> 29 & 1; v = t >> 28 & 1;")
-        if "r12" not in behind and "r12" not in set(self.flow.preserved_regs(callee.name)):
+        if "r12" not in regs and "r12" not in set(self.flow.preserved_regs(callee.name)):
             lines.append("r12 = 0;")
         return " ".join(lines) + " }"
 
@@ -2311,7 +2468,7 @@ class Lifter:
         slots = self.ldm_slots(insn, st[0], st[1])
         if slots is None or insn.writeback:
             raise Refused("0x%x: %s %s is not modelled" % (insn.address, insn.mnemonic, insn.op_str))
-        keep = ({"r0", "r1"} if self._wide(self.ctx["fn"].name) else {"r0"}) if returning else None
+        keep = set(self.results(self.ctx["fn"])) if returning else None
         out = []
         for r, key in slots:
             if r in ("sp", "pc") or (keep is not None and r not in keep):
@@ -2344,7 +2501,7 @@ class Lifter:
         """The popped registers from the frame; when returning, only those that carry the result; none
         from the words the frame array leaves out (saves_out: nothing reads what they restore)."""
         d = self.ctx["depth"][insn.address]
-        keep = ({"r0", "r1"} if self._wide(self.ctx["fn"].name) else {"r0"}) if returning else None
+        keep = set(self.results(self.ctx["fn"])) if returning else None
         values = self.values()
         out = []
         for k, (r, var) in enumerate(self.stack_words(insn)):
@@ -2878,7 +3035,11 @@ class Lifter:
     def _indirect_tail(self, insn):
         """An indirect jump whose every target is another function's entry: a tail call. With one
         target (a veneer, a far jump through a literal) the call goes to that address; with several
-        (bx rN after a table of function pointers) through the register."""
+        (bx rN after a table of function pointers) through the register. Refused in a function that
+        hands back more_results: such a call is not made bound (_bound_call), and the C would lose them."""
+        if self.ctx.get("more"):
+            raise Refused("0x%x: its callers read %s behind a tail call through a register" % (
+                insn.address, self.ctx["more"][0]))
         got = self.resolve(self.ctx["fn"], insn.address)
         callees = [self.prog.by_entry.get(t & ~1) for t in got[1]] if got and not got[0] else []
         if not callees or not all(callees):
@@ -2936,14 +3097,15 @@ class Lifter:
         result is returned, as an indirect call is lifted (the argument registers). Only where the
         function takes no stack arguments itself (so a callee can find none its callers passed) and its
         callers read no second result register (an unknown callee may not set it), and no run landed
-        inside the function (a switch). None otherwise."""
+        inside the function (a switch), and not in a function that hands back more_results. None
+        otherwise."""
         from dread import switches
         fn = self.ctx["fn"]
         if (got and got[0]) or self.ctx["depth"][insn.address] or \
                 self.values().get(self.arch.link_reg) != self.RET or not switches.pointer_tail(self.prog, fn, insn.address):
             return None                     # (pointer_tail: the inputs of such a jump get the pointer stub)
         pointer = self._jump_register(insn)
-        if pointer is None or self.stack_args(fn) != 0 or self._wide(fn.name):
+        if pointer is None or self.stack_args(fn) != 0 or self._wide(fn.name) or self.ctx.get("more"):
             return None
         return "return ((u32 (*)(%s))%s)(%s);" % (", ".join(["u32"] * len(self.ARGS)), pointer, ", ".join(self.ARGS))
 
@@ -2961,7 +3123,7 @@ class Lifter:
             return self._indirect_tail(insn)
         check, reg, values = got
         cases = " ".join("case %d: goto L_%x;" % (k, t) for k, t in sorted(values.items()))
-        return "switch (index) { %s default: return r0; }" % cases
+        return "switch (index) { %s default: %s }" % (cases, self._return() if self.ctx.get("more") else "return r0;")
 
 
 def check(target, image, names=None, out=print, jobs=None, system=True, loop_cases=True):

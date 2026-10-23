@@ -146,9 +146,16 @@ Where the C cannot say what the original's code relies on, the translation says 
   function that enters it with its frame open;
 - what a caller reads behind a call that a C call cannot return (a 64-bit remainder in r2:r3, the
   flags of a compare helper, a register the callee leaves) and what a callee reads of its caller's
-  registers: a call in an asm statement that binds them (bound calls);
-- what the caller left in r4-r11 that the function hands back or reads (a frame's pad popped into
-  r0): the C gets it as the caller left it, the file compiled with GCC's -ffixed-REG.
+  registers: a call in an asm statement that binds them (bound calls; on RISC-V too since
+  2026-10-23);
+- results beyond what a C function returns (an old ARM compiler's __value_in_regs, a structure of up
+  to four words in r0-r3; a value a RISC-V function leaves in a2 for its callers, where C returns a0
+  and a1): the C body stores them into an area that a naked entry at the function's place reserves,
+  and the entry loads them before it returns. Every caller, C or the original's machine code, finds
+  them where the original leaves them, and the function is accepted alone (ARM state, Thumb-1,
+  Thumb-2, RISC-V; with stack arguments the frame is the real one, as above, except on Thumb-1);
+- what the caller left in r4-r11 or r12 that the function hands back or reads (a frame's pad popped
+  into r0): the C gets it as the caller left it, the file compiled with GCC's -ffixed-REG.
 
 Lifted C has no names, no structure, and nobody read it: it is a stepping stone (the code is C, so it
 no longer pins the layout, and it comes with cases), never a reconstruction.

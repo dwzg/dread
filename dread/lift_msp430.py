@@ -144,6 +144,7 @@ CTYPES = {1: "u16", 2: "u32", 4: "u64"}
 
 class Msp430Lifter(lift.Lifter):
     REGS, ARGS, AFTER_CALL = REGS, ARGS, AFTER_CALL
+    MORE = ()                           # results are as wide as the callers read them (r12-r15): no entry
 
     def __init__(self, program, flow=None, endless=None):
         super().__init__(program, flow, endless)
