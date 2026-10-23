@@ -1975,6 +1975,28 @@ undone). Other decisions are taken by the recommended option and written down in
 
 ## Phase 4: cases, mutation, coverage (rest)
 
+- [x] **Why the cases leave code unrun, by code** (`dread uncovered`, 2026-10-23; asked for before the
+  generator gets new work: on a private firmware, DREAD's real-life test, the lift check drops about an
+  eighth of its functions as UNCOVERED, a few of them without a single instruction run). For each
+  function a lift check dropped for missed instructions (verdicts.tsv): the missed code in regions, each
+  region's way in (branch, switch, call, straight, not entered, unreached), and for a branch or switch
+  what decides it traced back to its source (argument, callee's result, stubbed or real, global, device
+  register, field by its base, local, loop counter, system register, constant); with the cached cases:
+  the values seen where the branch was decided, the search's stubs, stops and polls, and a forced run
+  sent the missed way (returns, faults, the limit and where, touches the image). On the 39 FreeRTOS
+  builds' last lift checks (1,910 dropped functions, 7,432 regions, 64,616 missed instructions; 151 s for
+  all of them): of what the ordinary functions' cases miss (22,057 instructions) 54 % lies behind a
+  branch on a real callee's result (most of it the demo's own checks that its queue and stream-buffer
+  calls answered as expected; forced that way, 57 % of everything ends in vAssertCalled's wait for a
+  debugger), 13 % behind a stubbed callee's answer the search never gave, 9 % behind a global, 8 %
+  behind calls the cases stop at (vAssertCalled) and 6 % behind a field of an argument; of what the
+  functions that never return miss (41,450) 56 % lies behind a loop that needs more rounds than a loop
+  case runs and 23 % behind a stubbed callee's answer, and no loop case gets to the frontier of 51 % of it
+  (only the system run does). The bench's caches were made by an older generator: its cases are taken
+  as they are, and the measurement is of the cases those lift checks ran. Not done: MSP430 and MIPS have
+  no value_step, so memory through a register is "unknown" there; the system run's share of a function
+  that never returns is not run again.
+
 - [x] **Code only a dropped case reached** (found 2026-10-22 on a private firmware, DREAD's real-life
   test: its uncovered functions took far longer to generate than those accepted, and most of them
   met callees stubbed for hanging). A case that should end at a call (stops, a loop case)

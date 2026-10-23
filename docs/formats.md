@@ -407,7 +407,40 @@ with it, alone or together with the functions its reason names; `by hand`: src d
 (the lifter's or the test run's words), `missed` (for a dropped function, the instructions no case
 ran). `dread gui` reads it; `dread rename` renames in it. Beside it `whole.txt`: the whole image's
 outcome (`agrees` or its first difference) on the first line, then one line per set of functions
-dropped for it (`dropped for it: A, B; with them alone: ...`, since 2026-10-22).
+dropped for it (`dropped for it: A, B; with them alone: ...`, since 2026-10-22). `dread uncovered`
+reads it (the `missed` column, and the reason's first words for how the function was dropped).
+
+### Why cases leave code unrun (`dread uncovered --json FILE`)
+
+`{"totals", "table", "forced", "functions"}`, since 2026-10-23. Addresses are hexadecimal strings
+(`"0x1a2"`); every list is in a fixed order (functions, regions and ways by address, rows by missed
+instructions, then regions, cause and source), so the same verdicts, image and cases give the same bytes.
+
+- `totals`: `functions`, `regions`, `instructions` (missed), `kinds` (functions per kind, below),
+  `stale` (functions whose cases were cached under another key than the generator makes now).
+- `table`: one row per cause and source, `{cause, source, regions, instructions, functions,
+  examples}`; `examples` holds `--examples` lines `FUNCTION START: TEXT`. `forced`: the same rows by
+  cause and the main way's forced run (`returns`, `faults`, `limit`, `spins`, `stops`, `touches the
+  image`, `not sent`, `no case got there`; regions without one are left out); empty with `--no-runs`.
+- `functions`: `{NAME: {kind, missed, instructions, entry, reason, regions, cases, runs}}`. `kind`:
+  `cases` (UNCOVERED by its cases), `loop cases and the system run` (a function that never returns),
+  `no cases` (its generation failed: every instruction counts as missed), `other`; `missed` and
+  `instructions` are counts; `reason` the verdict's. `cases` (not with `--no-runs`): `cases` (how many
+  were found), `stale`, `failed` (a failed generation's message, or why there are none), `stubbed` and
+  `stops` (`{callee: cases}`), `polled` (registers), `hang` (cases), `loop`, `refused` (the lift
+  check's REFUSED and FAIL lines), `kind`, `reason`. `runs`: `{runs, ends: {how a run ended: runs}}`.
+- A region: `start`, `instructions`, `missed` (its addresses), `cause` (`branch`, `switch`, `call`,
+  `straight`, `not entered`, `unreached`), `source` (the main way's source class, or null), `text`,
+  `key` (`[cause, the table's source column]`), `forced` (the second table's column), `notes` (the
+  search's words), `ways`.
+- A way in: `at` (the instruction that ran), `to` (the first missed one), `cause`, `insn`, `text`; for a
+  branch or switch `deciders` (the instructions that decide it), `inputs` (`[decider, register]`),
+  `sources` (`[[class, text], ...]`, the main one first), `source`, `primary` (its text), `base` (a
+  field's base class), `callee` and `device` where the main source is one; for a call `callee` (null:
+  through a register). With runs: `reached` (runs that got to `at`), `values` (`{reached, registers:
+  {register: [[value, runs], ...]}}`, the most frequent first, at most six and `["...", more]`), `ends`
+  (a call's: `{how the runs that got there ended: runs}`), `forced` (`{end, ran}`: how the run sent the
+  missed way ended, and how many of the region's instructions it ran).
 
 ### `BUILD/relations/IMAGE/NAME.json`
 

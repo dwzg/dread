@@ -47,6 +47,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | Listing generator and byte-identical rebuild, Ghidra pipeline | done |
 | Emulator, differential test runner, overlay linker | done |
 | Case generator (coverage- and compare-guided, pointer learning, a dictionary for parsers) | done |
+| Why cases leave code unrun (`dread uncovered`): each missed region's way in, what decides it traced back to its source (an argument, a callee's result, a global, a device register, a field, a loop), what the cases saw there and a run sent that way | first version |
 | Mutation check with survivor search and argued survivors | done |
 | Integration run: generated inputs with real callees, also through original callers | done |
 | Register flow across calls: what callers read after a call, compared at the return | done |
@@ -91,6 +92,7 @@ bin/dread integration --target examples/gizmo/m3 --callers    # the same with re
 bin/dread sysrun --target examples/gizmo/m3                   # the whole firmware from reset, both images
 bin/dread sysrecord --target examples/gizmo/m3 --scenario config read_line   # cases from what the run saw
 bin/dread lift --target examples/gizmo/m3 --check  # lift every function, keep those whose cases agree
+bin/dread uncovered --target examples/gizmo/m3     # why the cases it dropped leave code unrun: each region's way in, what decides it
 bin/dread readable --target examples/gizmo/m3 --check  # build the lifted functions from readable C where the cases agree
 bin/dread liftfuzz --isa t32                        # the lifter on random instructions, against the emulator
 bin/dread test --target examples/gizmo/rv32         # the same tools on the RISC-V build

@@ -75,6 +75,12 @@ the timer queue so. A difference the fills do not move keeps the case failed.
   another task or an interrupt replays with what they wrote meanwhile, and handlers are recorded up
   to their exception return).
 
+What the cases leave unrun is explained by code before anyone writes inputs: `dread uncovered` takes
+the functions a lift check dropped for it, groups their missed instructions into regions, and for
+each region's way in (a branch, a switch, a call that never came back) traces what decides it back to
+its source (an argument, a callee's result, a global, a device register, a field, a counter a loop
+carries), with the values the cached cases saw there and how a run sent that way ends.
+
 ## 5. Are the cases strong enough? `dread mutate`
 
 The C is changed in small ways (an operator, a constant, a comparison) and every change must make
