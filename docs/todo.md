@@ -1341,6 +1341,201 @@ more functions need freed space (the overlay's placement report says where); a f
 C keeps registers exact for its callers (bound calls, -ffixed-REG, registers a callee reads stale)
 may stay lifted.
 
+### From a review against hand-written C (2026-10-23)
+
+A review on the private real-life test put DREAD's readable C (names from the pilot) beside a
+human's hand-written C of the same functions, a sample drawn over subsystems and sizes (the
+pairs and the counts are in that target's notes). Every function was structured (no goto), a few
+read as well as the human's, and in a third of them DREAD printed something a reader would take for
+a fact that is not one. The items below are what DREAD can fix by a rule, ranked by that first
+(what is wrong to a reader), then by what must be decoded by hand, then by what only lengthens;
+each names a public function that shows it, or a test to write where none was found. Not DREAD's
+to fix in code: wrong or vague names, the names of error codes and macros, and descriptions with
+the oddities and evidence a person writes (two of the items take away noise that misled the naming
+model).
+
+- [ ] **Array bases where the code indexes them.** An array of structures indexed as `table[i - 1]`
+  prints with its base folded one element down (`table[i]` at `base - size`), and a structure whose
+  lowest accessed field is not its first starts at that field, so every printed offset is shifted
+  and the base matches no address in the listing. Keep the base the code makes (the literal it
+  loads) as the array's start, print the index as the code computes it (`i - 1`), and start the
+  structure at that base, not at its lowest accessed offset. Public example: none found (the
+  FreeRTOS builds index from 0, and every static array's base matched its symbol). Test: a gizmo
+  function reading `table[id - 1].b` of a structure whose field `a` at offset 0 nothing reads, on
+  every gizmo build.
+- [ ] **No argument from a result register the callee always writes.** trim_calls keeps a used
+  call's result registers as arguments, because a callee that does not write them hands back what
+  the caller passed (newlib's lock functions). A callee that writes them on every path gets a
+  phantom argument, and the caller's own parameter then looks read, so functions that take nothing
+  get a parameter. Give regflow a must-write set (registers written on every path to a return,
+  beside preserved) and keep the argument only for a result register outside it. Public examples:
+  FreeRTOS mps2-gcc-Os prvCheckExpectedTimeIsWithinAnAcceptableMargin, `r0_2 = xTaskGetTickCount(r0)
+  - r0;`, while xTaskGetTickCount's own readable C is `u32 xTaskGetTickCount(void)`; gizmo a32
+  read_line, `r0 = uart_getc(r0);` (source `int c = uart_getc();`), and uart_getc itself printed as
+  `u32 uart_getc(u32 r0)`. A second way to a phantom parameter, not this rule: gizmo a32
+  print_status(void) prints with four parameters because the push that makes room for its buffer
+  stores r0-r3 into it.
+- [ ] **Flags as comparisons, the rest.** After the IT-block work, flags still print as u64 sums with
+  carry and zero variables where one compare or subtraction is read by two conditions (borrow, then
+  zero), where an add's carry is tested, where a compiler dispatches by successive subtractions
+  (`subs #1; blo; beq; subs #2; beq; ...`) and in carry chains of multi-word arithmetic. Fold a
+  borrow/zero pair into `x <= k`/`x == k`, a chain of subtractions into comparisons with the
+  accumulated constant (`x - 1 - 2 == 5` is `x == 8`), an add's carry into `sum < operand`, and an
+  adds/adc pair into a 64-bit sum. Public examples: gizmo a32 cmd_mode (`if (mode > 7) return -1;`
+  printed as `t_1 = (u64)r0 + (u32)~0x7u + 1; ... return !c || z ? 0x0u : ~0x0u;`), parse_kv;
+  FreeRTOS mps2-gcc-Os prvAddCurrentTaskToDelayedList (`t_7 = (u64)r5 + r0 + 0; ... if (t_7 >
+  0xffffffffu)` for the wake time's overflow test); mps2-gcc-O0 vPortFree (`(u32)((u64)0x0u +
+  (u32)~0x8u + 1) + r0` for `r0 - 8`). The successive-subtraction dispatch: none found in GCC builds;
+  test with hand-written ARM-state code (gizmo assembly) or a unit test of the conditions pass.
+- [ ] **Local objects whose address goes to a callee.** A frame region whose address is passed on
+  prints as raw accesses through the lifted frame array, or as one packed structure named after its
+  offset with word fields over a byte buffer or over separate scalars; a frame array indexed by a loop
+  variable stays raw too. Split such a region into locals by its runs of accesses (scalars, `u8
+  x[n]` for byte runs, a structure for mixed runs, typed by the callee parameter's shape where there
+  is one), without volatile, and make an indexed region an array. Public examples: gizmo a32
+  print_status (`char buf[12]` as `volatile stack20_t stack20` with u32 fields, `(u32)&stack20.f_0`
+  to fmt_dec and uart_puts); FreeRTOS mps2-gcc-Os xTimerGenericCommandFromTask (the daemon message as
+  a packed `stack40_t`). The raw form (no structure at all): none found in the public builds.
+- [ ] **Two-word results that are leftovers.** A function whose callers, or their callers through
+  returns, read r1 after it returns is lifted with a u64 result; its readable C reassigns both words
+  in every arm, and its callers show `(u32)(f(...) >> 32)`. When the second word is only what a callee
+  left, the reader sees a function that returns a pair. Keep the behaviour but print it as a one-word
+  result with the leftover handed back through a named macro of dread.h (`RETURN2(r0, r1)` or the
+  like) and the reader regflow found in a comment (its `why`); in regflow, follow which bits of a
+  register flow (a bic/orr that keeps the upper half of a register the caller left) so that a read of
+  bits nobody uses stops counting. Public example: none found (GCC code does not read r1 after a call
+  of a one-word function); test with gizmo assembly: a callee that leaves r1, a caller that passes it
+  on, a reader at the top.
+- [ ] **Bound calls in one line.** A call whose callee reads registers its caller left, or behind
+  which the caller reads scratch registers, prints as an inline-asm block that binds every register,
+  plus asm reads of those registers at the function's entry: many lines for one call. Print it as one
+  statement through a dread.h macro that names the registers it hands over, and let a target table
+  mark a register read as unreachable (a report on a path that cannot run), so that the call is a
+  plain call there. Public example: none found (GCC code does not read registers its caller left);
+  test: gizmo assembly.
+- [ ] **No address for a plain value.** The pass that prints `(u32)&object` for constants that are
+  the address of static data also replaces a constant compared with a masked word, a bit-field value,
+  by the address of an object that happens to lie at that number. Substitute an address only where
+  the constant is used as one (dereferenced, passed where a callee dereferences it, stored into a
+  pointer, compared with a pointer), never where it meets the result of a mask or a shift, and not for
+  objects outside the image. Public example: none found (the public substitutions compare list
+  pointers with list addresses, which is right); test: a unit test with a static object at a small
+  address and a masked compare.
+- [ ] **Pointer types for parameters and prototypes.** A parameter that is only dereferenced (and
+  advanced) stays u32 with a `*(volatile T *)p` cast at every use, and arguments to callees whose
+  extern DREAD writes as all-u32 get `(u32)&x`. Type a parameter or variable dereferenced at one width
+  as a pointer to that width (`const s8 *` for signed byte loads only), from a callee parameter's
+  shape where there is one, and write extern prototypes with the types the callee's own readable C
+  has. Public examples: gizmo a32 strncpy, read_line, parse_kv (char pointers as u32); FreeRTOS
+  mps2-gcc-Os vStartTimerDemoTask (`memset((u32)&g_200017c5[0], 0, 0x15u)` under `extern u32
+  memset(u32, u32, u32)`).
+- [ ] **Memory (the open item), more evidence.** On a private firmware volatile on RAM showed in the
+  readable C beyond the raw accesses: dead loads printed as `(void)g;`, loads kept in temporaries to
+  keep their order, constants that do not fold through a volatile local array, and the naming model
+  reading plain pointers and buffers as device registers. Public examples: FreeRTOS mps2-gcc-Os
+  vTaskSwitchContext (`(void)g_20029aac;`, a dead RAM load); the frame structures of gizmo a32
+  print_status and FreeRTOS xTimerGenericCommandFromTask are declared volatile. A first step that
+  keeps the item's concern (a wait for a flag an interrupt sets): no volatile on frame objects, and
+  none in what the naming question shows.
+- [ ] **Arrays and members for uniform runs and interior pointers.** An object accessed at constant
+  offsets of one element type prints as a structure of numbered fields and padding, walked by integer
+  pointer arithmetic; an access through `p + k` stays raw where the structure has a member at k; the
+  address of an embedded structure is `(u32)((u64)(u32)p + 4 + 0)`. Make a run of same-type fields at
+  a fixed stride that code walks with a pointer an array, print `p->member` and `&p->member` for
+  derived pointers, and an embedded structure as a member of its type. Public examples: FreeRTOS
+  mps2-gcc-Os vStartTimerDemoTask (xAutoReloadTimers, an array of 21 handles, as `struct
+  g_200017dc_t { u32 f_0; u8 pad_4[72]; u32 f_4c; u32 f_50; }`, filled by `*(volatile u32 *)r5 =
+  r0_1; r5 = w_1;`); xTimerCreate and prvProcessExpiredTimer
+  (`vListInitialiseItem((u32)((u64)(u32)r0_1 + 4 + 0))` for `&pxNewTimer->xTimerListItem`).
+- [ ] **Structures that share a header stay apart.** Structures that begin with the same link (a list
+  node at offset 0) and pass through the same list functions merge into one type with each one's
+  fields at their offsets; an access to one's field that falls inside another's member prints raw.
+  Unify through a callee's parameter only over what the callee reaches (the header), and keep the
+  containers apart. Public example: none found (FreeRTOS's lists are members at nonzero offsets);
+  test: gizmo with two structures that start with the same link and a list function taking either.
+- [ ] **One name per static object.** A static block's structure can end early and its later fields
+  print as loose macros, and an address read and written at two signednesses gets two names. Extend
+  a structure over the fields the code reaches from the same base (a data symbol inside such a run a
+  member, not an end), and give a field one name with a cast for the other width or signedness.
+  Public example: FreeRTOS mps2-gcc-Os prvSemaphoreTest (`g_200018dc_u16 = (u16)(g_200018dc_s16 +
+  1);` for `sNextCheckVariable++`). The early end: none found.
+- [ ] **Negative constants by use.** An mvn immediate prints as `~0xNu` also where the value is a
+  negative number. Print `-(N+1)` where it is returned, compared, stored or passed as a value, and
+  `~N` where it is a mask (and, bic, eor). Public examples: FreeRTOS mps2-gcc-Os
+  xTimerPendFunctionCallFromISR (`stack24.f_0 = ~0x1u;` for tmrCOMMAND_EXECUTE_CALLBACK_FROM_ISR,
+  -2); gizmo a32 parse_kv (`~0x0u`, `~0x1u`, `~0x2u` for -1, -2, -3), read_line, cmd_mode.
+- [ ] **Extensions and bit fields.** `(s32)(x << 16) >> 16` for a halfword's sign extension, `(x &
+  0xffff) << 16 >> 16`, `(u32)((s32)(w & m) >> n)` for a field whose mask clears the sign bit, `(x <<
+  2) & 4` for `(x & 1) << 2`, a final mask the bits already satisfy. Fold to `(s16)x`, `(u16)x`, `(w
+  >> n) & (m >> n)`, `(x & 1) << 2`, and drop masks a known-bits pass proves redundant. Public
+  example: none found (Thumb-2 has sxth and ubfx; gizmo's ARMv4T build has no signed halfwords).
+  Test: a gizmo function on a32 that returns a signed short and extracts a field with a signed shift.
+- [ ] **One variable per value.** A register that holds unrelated values in turn (a pointer, then
+  loaded bytes, then a callee's second word; a parameter, then a callee's result) stays one variable,
+  and the pilot names it after one of its uses. Split variables where their live ranges do not meet
+  (the webs pass, extended to the parameters' registers and to values that pass through a call).
+  Public examples: FreeRTOS mps2-gcc-Os xTimerGenericCommandFromTask (`if (r0 == 0) r0 =
+  vAssertCalled(0x1131u);`: the parameter variable takes vAssertCalled's result, then is passed on);
+  gizmo a32 read_line (`r0 = uart_getc(r0);`).
+- [ ] **Merged arms and hoisted statements.** Arms with identical bodies stay apart, and a statement
+  common to every arm is printed in each. Merge arms with one body into one condition with ||, hoist
+  what all arms begin or end with. Public example: FreeRTOS mps2-gcc-Os
+  prvCheckExpectedTimeIsWithinAnAcceptableMargin (`r4 = r1 + 7;` in both arms; the source computes
+  the bound once).
+- [ ] **Structure definitions once per image.** Every function's readable C repeats the full
+  definition of each structure it touches. Write them to one header per image (`--out` writes it
+  beside the files; the printed form includes it), and print only the members a function uses, as a
+  comment, if anything. Public example: FreeRTOS mps2-gcc-O0 prvInitialiseTaskLists (59 lines of
+  declarations, six structures, for a 20-line body); 60 of 357 functions of that build and 84 of 329
+  of mps2-gcc-Os have more declaration lines than body lines.
+- [ ] **Loops in their source shape.** Several exits at a loop's head print as `for (;;) { if (c)
+  break; ... }`, a counted loop whose first test holds as a do-while after its initialisation, and
+  post-increments as a copy and an add. Make leading breaks the while condition, a do-while whose
+  condition holds on entry a for loop, and a use of the copy made before an increment `*p++`. Public
+  example: gizmo a32 strncpy (`for (;;) { if (r2 == 0) break; ... if (r12 == 0) break; ...}` for
+  `while (n && *src)`; `*(volatile u8 *)r3 = (u8)r12; r3 = r3 + 1;` for `*d++ = *src++`).
+- [ ] **A reading form without the instruction comments.** Every statement carries its instruction,
+  pushes, pops and stack adjustments are comment lines, and a statement made of several instructions
+  carries one of them (a call can carry the mov after it). An option (`--plain`, and the GUI's
+  reading view) that leaves them out, with the address of each statement's first instruction in a
+  margin. Public example: every function (FreeRTOS mps2-gcc-Os xTaskGetTickCount).
+- [ ] **Signed types from signed use.** A variable compared only with signed conditions stays u32
+  with `(s32)` at every compare, and -1 compares as 0xffffffffu. Type it s32 when its compares are
+  signed (its constants then print signed), and a result signed when its callers compare it signed.
+  Public examples: FreeRTOS mps2-gcc-Os vPrimaryBlockTimeTestTask (`if ((s32)r2_1 > 4) break;`);
+  gizmo a32 read_line (`if ((s32)r0 < 0)` on uart_getc's int result).
+- [ ] **Casts and constants.** `(u8)0x1u` for a byte store of 1, cast chains `(u16)(u32)(s16)x`, `+
+  0`, `0x0u |`, `((u64)0x0u << 32) | 0x0u`, `x = (u32)(x + 1)`, and 0 and 1 as `0x0u`/`0x1u`. Drop
+  the casts a store's width implies, collapse chains, fold `+ 0` and `| 0`, print small values in
+  decimal where the type is clear, `x++`/`x += k`. Public examples: FreeRTOS mps2-gcc-O0
+  eTaskGetState (`sl9 = (u8)0x0u;` ... `(u8)0x2u`), mps2-gcc-Os xTimerCreate (`+ 4 + 0`), gizmo a32
+  strncpy (`(u8)0x0u`).
+- [ ] **Names without their type.** DREAD's default names for narrow accesses carry the type
+  (g_20001830_u8), and the naming model keeps the suffix in what it proposes. Strip a trailing type
+  suffix from a proposed name that has other words (the answer's check), or show the question's
+  defaults without it. Public example: the defaults of FreeRTOS mps2-gcc-Os (g_20001830_u8); whether
+  the model keeps them on FreeRTOS was not checked (no pilot names in the bench copies).
+- [ ] **Radix by use.** Counts, delays, sizes and line numbers print in hex, and a value compared in
+  decimal can be stored in hex in the same function. Print a constant in decimal where it is a count,
+  a multiplier, a size compared with decimal constants or stored beside them, unless it looks like a
+  mask (a run of ones, one bit) or an address. Public example: FreeRTOS mps2-gcc-Os
+  prvCheckExpectedTimeIsWithinAnAcceptableMargin (`g_200009d0 = 0x2f7u;` for `xErrorOccurred =
+  __LINE__`, line 759).
+- [ ] **Addresses of functions and texts by name.** A function's entry (with the Thumb bit) or the
+  address of a string in the image passed or stored as a value prints as a number. Print the
+  function's name (`&f`) and, for text, a comment with the string or a named constant. Public
+  examples: FreeRTOS mps2-gcc-Os vStartTimerDemoTask (`xTimerCreate(0xd9cu, ..., 0x913du)`: the timer
+  name "FR Timer" and prvAutoReloadTimerCallback; `vAssertCalled(0xd3fu)` passes the source file's
+  name); gizmo a32 print_status (`uart_puts(0x20d35u)` for "mode ").
+- [ ] **Initialised local arrays.** A byte-copy loop from constant data in the image into the frame
+  (how some compilers initialise a local array) prints as a do-while over integer pointers. Make it a
+  local array with its initialiser read from the image (or a copy helper's call). Public example: none
+  found (GCC calls memcpy or copies words); test: gizmo assembly.
+- [ ] **Characters as characters.** Bytes from char loads compared with printable codes print as hex
+  (`0x20u`, `0x3du`, `0xdu`). Print a printable or common-escape constant compared with or stored
+  from a char-typed value as a character literal. Public examples: gizmo a32 parse_kv (`0x20u`,
+  `0x3du`), read_line (`0xdu`, `0xau`); FreeRTOS mps2-gcc-O0 tiny_print (`0x25u`, `0x2du`, `0x30u`).
+
 ## Compiler diversity (the user, 2026-10-20: first, on ARM/Cortex-M and RISC-V)
 
 - [x] **The whole image of FreeRTOS RISC-V GCC -Os and Cortex-M clang -O2 differs with lifted C
