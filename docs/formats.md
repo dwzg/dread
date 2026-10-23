@@ -183,7 +183,20 @@ element (`#define g_200299f8 ((volatile struct g_200299f8_t *)0x200299f8u)`, `((
 at constant places (at least one), not the source's. Where readable C uses the address of a
 structure, an array's element or a field of either as a value (an argument, a value assigned or
 compared, a result), it is written as such (`(u32)&g_20029988`, `(u32)&g_200299f8[r3]`). A file from
-before has none: indexed accesses stay as the lifter's arithmetic.
+before has none: indexed accesses stay as the lifter's arithmetic. Since 2026-10-23 an array starts
+at the address the code made where its accesses' constants lie below it (`table[id - 1]`: the
+literal, not the constant an element below it); an access whose constant lies below an array that
+starts at the address its arithmetic adds is that array's element at the index minus the elements
+below (`g_20000020[r0 - 1].f_4`). A file from before keeps its starts (an array then started at the
+lowest constant, or was not found).
+
+`params` (left out when empty; since 2026-10-23) lists, for every analysed function, the indices of
+its parameters that it uses as a pointer (dread.shapes pointer_params): `{FUNCTION: [0, 2]}`. A
+constant that is the address of static data is written `(u32)&g_x` as an argument only where the
+callee is listed with that parameter (a callee not listed, or a file without `params`: as before),
+and as an operand of `==` or `!=` or a value assigned to a variable only where it is used as an
+address there (dread.naming apply_globals); never for an object where the image keeps no static
+data (outside its bytes and its startup's ranges).
 
 ### `wide_results.txt` (`wide_results`)
 

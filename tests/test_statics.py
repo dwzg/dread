@@ -357,7 +357,7 @@ def test_arrays_from_the_indexed_accesses_of_readable_c(tmp_path):
             3, {"array of scalar": 2, "array of struct": 1}, 3), got
         assert got["array_fields"] == got["array_right"] == 11, got
     indexed = {fn.name: statics.indexed_accesses(fn, program.target.memory) for _, fn, _ in trees}
-    assert (at["heron_slots"] + 12, 16, "u32") in indexed["heron_note"], indexed
+    assert (at["heron_slots"] + 12, 16, "u32", at["heron_slots"]) in indexed["heron_note"], indexed
 
 
 def test_a_run_of_one_type_reached_with_an_index_is_an_array():
@@ -440,7 +440,7 @@ def test_what_a_variable_holds_as_an_index_times_a_scale():
     fn = cparse.parse(FACTS).function("f")
     seen = []
     statics.straight_facts(fn, lambda s, facts: seen.append((cparse.unparse(s, notes=False).splitlines()[0].strip(),
-                                                              {v: (k, x.id) for v, (k, x, _) in facts.items()})))
+                                                              {v: (k, x.id) for v, (k, x, *_) in facts.items()})))
     got = dict(seen)
     assert len(got) == len(seen), seen
     assert got["r2 = r3;"] == {"r3": (4, "r0")} and got["if (r1 != 0) r0 = r1;"] == {}, got
@@ -449,8 +449,8 @@ def test_what_a_variable_holds_as_an_index_times_a_scale():
     assert "r3" not in statics.scales_of(fn)
     one = cparse.parse("u32 g(u32 r0)\n{\n    u32 r3, r5;\n    r3 = r0 << 3;\n    r5 = r3 + 0x20000100u;\n"
                        "    return *(volatile u32 *)(r5 + 4);\n}\n").function("g")
-    assert statics.scales_of(one) == {"r3": (8, None, 0), "r5": (8, None, 0x20000100)}
-    assert statics.indexed_accesses(one) == [(0x20000104, 8, "u32")]
+    assert statics.scales_of(one) == {"r3": (8, None, 0, None), "r5": (8, None, 0x20000100, 0x20000100)}
+    assert statics.indexed_accesses(one) == [(0x20000104, 8, "u32", 0x20000100)]
 
 
 INDEXED = ("/* f at 0x0 */\n#include \"dread.h\"\nextern u32 heron_link(u32, u32);\n"
@@ -611,3 +611,351 @@ def test_the_pilot_names_an_array_of_static_data_and_its_elements_fields(tmp_pat
     out = readable.transform("heron_note", lifter.lift(program.by_name["heron_note"]).text,
                              context=readable.Context(target, image, program, flow))
     assert "egret_table[r0].egret_tail = r1;" in out, out
+
+
+# ---- array bases where the code indexes them, and no address for a plain value (2026-10-23)
+
+# An array of structures that the code indexes by id - 1, whose first field nothing reads, behind another
+# array: GCC and clang make slot_ledgers' own address and fold the -1 into the index's arithmetic or into
+# the access's offset, so that the constant part of every access lies an element below the array (in
+# slot_floor, a data symbol in front of it)
+SLOT_LEDGER = HEAD + """struct slot_ledger { u32 owner; u32 level; u16 mark; u16 spare; u32 limit; u32 seen; };
+u32 slot_floor[8];
+struct slot_ledger slot_ledgers[6];
+u32 slot_tally;
+u32 slot_floor_get(u32 i) { return slot_floor[i]; }
+u32 slot_ledger_read(u32 id) { return slot_ledgers[id - 1].level; }
+void slot_ledger_write(u32 id, u32 v)
+{ slot_ledgers[id - 1].level = v; slot_ledgers[id - 1].limit = v + 1; slot_tally++; }
+u32 slot_ledger_mark(u32 id) { return slot_ledgers[id - 1].mark + slot_ledgers[id - 1].seen; }
+int main(void) { return 0; }
+"""
+
+KIND_TOML = {
+    "a32": ('''[target]
+name = "statics-a32"
+[arch]
+name = "arm"
+isa = "a32"
+profile = "a"
+[memory]
+regions = [{name = "flash", base = 0x0, size = 0x100000, kind = "rom"},
+           {name = "ram", base = %(ram)s, size = 0x8000},
+           {name = "scratch", base = 0x40100000, size = 0x20000}]
+stack = {top = %(top)s, size = 0x1000}
+sentinel = 0x0fff0000
+scratch = {base = 0x40100000, size = 0x20000}
+[image.main]
+original = "original/t.bin"
+base = 0x20000
+limit = 0x30000
+[compiler]
+cross = "arm-none-eabi-"
+cflags = ["-march=armv4t", "-marm", "-mabi=aapcs", "-mfloat-abi=soft", "-Os", "-ffreestanding"]
+''', ["arm-none-eabi-gcc", "-march=armv4t", "-marm", "-mabi=aapcs", "-mfloat-abi=soft"], 0x20000, 0x40000000),
+    "m3": ('''[target]
+name = "statics-m3"
+[arch]
+name = "arm"
+isa = "t32"
+profile = "m"
+cpu = "cortex-m3"
+[memory]
+regions = [{name = "flash", base = 0x08000000, size = 0x10000, kind = "rom"},
+           {name = "ram", base = %(ram)s, size = 0x8000},
+           {name = "scratch", base = 0x20100000, size = 0x20000}]
+stack = {top = %(top)s, size = 0x1000}
+sentinel = 0x1fff0000
+scratch = {base = 0x20100000, size = 0x20000}
+[image.main]
+original = "original/t.bin"
+base = 0x08000000
+limit = 0x08010000
+[compiler]
+cross = "arm-none-eabi-"
+cflags = ["-mthumb", "-mcpu=cortex-m3", "-Os"]
+''', ["arm-none-eabi-gcc", "-mthumb", "-mcpu=cortex-m3"], 0x08000000, 0x20000000),
+    "rv32": ('''[target]
+name = "statics-rv32"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "flash", base = 0x20000000, size = 0x100000, kind = "rom"},
+           {name = "ram", base = %(ram)s, size = 0x8000},
+           {name = "scratch", base = 0x80100000, size = 0x20000}]
+stack = {top = %(top)s, size = 0x1000}
+sentinel = 0x1fff0000
+scratch = {base = 0x80100000, size = 0x20000}
+[image.main]
+original = "original/t.bin"
+base = 0x20000000
+limit = 0x20020000
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-Os"]
+''', None, 0x20000000, 0x80000000),
+}
+
+
+def kind_target(tmp_path, kind, source, ram=None):
+    """The target of a C program (source) built with GCC -Os for kind ("a32": ARMv4T in ARM state,
+    "m3": a Cortex-M3, "rv32": RV32IMAC), its code in flash and its data in RAM at ram (default the
+    kind's) in the order of their names, imported from its ELF with its startup's ranges; its lift check
+    run."""
+    from conftest import RISCV_CROSS, RISCV_MARCH, riscv_toml
+    from dread import elfimport, lift
+    from dread.target import Target
+    toml, cc, text, data = KIND_TOML[kind]
+    ram = data if ram is None else ram
+    if cc is None:
+        cc = [RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32"]
+        toml = riscv_toml(toml)
+    (tmp_path / "t.c").write_text(source)
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x%x; .text : { *(.text*) *(.rodata*) } . = 0x%x; .data : "
+                                   "{ *(SORT_BY_NAME(.data*)) } .bss : { *(SORT_BY_NAME(.bss*)) *(COMMON) } }\n"
+                                   % (text, ram))
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(cc + ["-Os", "-ffreestanding", "-nostdlib", "-fno-common", "-ffunction-sections", "-fdata-sections",
+                         "-g", "-T", str(tmp_path / "t.ld"), "-Wl,-e,main", "-o", elf, str(tmp_path / "t.c")],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(toml % {"ram": hex(ram), "top": hex(ram + 0x8000)})
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    assert lift.main(["--target", str(tmp_path), "--check"]) == 0
+    return Target.load(str(tmp_path))
+
+
+def kind_plan(target, symbols=True):
+    """(program, context, lifter, structures, arrays, shapes) of a target's static data as dread readable
+    --check makes them (the lifted functions' readable C and every function's machine code)."""
+    from dread import lift, readable, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    context = readable.Context(target, image, program, flow)
+    lifter = lift.make_lifter(program, flow)
+    trees = readable.analysis_trees(program, context, lifter, [fn.name for fn in program.functions],
+                                    named=context.globals)
+    found, arrays, s = readable.static_plan(program, context, trees, flow, symbols=symbols)
+    return program, context, lifter, found, arrays, s
+
+
+def needs_kind(kind):
+    from conftest import needs_riscv_gcc
+    return needs_riscv_gcc if kind == "rv32" else needs_gcc
+
+
+@pytest.mark.parametrize("kind", [pytest.param(k, marks=needs_kind(k)) for k in ("a32", "m3", "rv32")])
+def test_an_array_indexed_below_its_start_keeps_the_base_the_code_makes(kind, tmp_path):
+    """slot_ledgers[id - 1].level: GCC -Os for ARM state, Thumb-2 and RISC-V makes slot_ledgers' own
+    address (a literal, movw and movt, lui with addi) and folds the -1 into the index's arithmetic or
+    the access's offset, so that readable C's constant part lies an element below the array. The
+    array starts at the base the code makes, with or without the data symbols (before, it started at
+    that constant, its structure at the lowest field read and every printed offset shifted, or, with
+    the symbols, it was not found at all: slot_ledgers' symbol cut it to less than an element), the
+    elements' structure has the unread first field's place as a gap, and readable C reads
+    slot_ledgers[id - 1].level as g_x[r0 - 1].f_4; the gate accepts every function so."""
+    from dread import build, readable
+    from dread.program import Program
+    target = kind_target(tmp_path, kind, SLOT_LEDGER)
+    at = data(Program(target, target.image()))
+    rows = [(4, "u32"), (8, "u16"), (12, "u32"), (16, "u32")]
+    for symbols in (True, False):
+        program, context, lifter, found, arrays, _ = kind_plan(target, symbols)
+        assert arrays.get(at["slot_ledgers"]) == (20, 1, rows), (symbols, statics.describe(found, arrays))
+        assert not any(at["slot_floor"] < a < at["slot_ledgers"] for a in list(arrays) + list(found)), arrays
+    image = target.image()
+    lines = []
+    accepted = readable.check(target, image, out=lines.append)
+    assert accepted == sorted(build.read_names(image.table("lifted"))) and "slot_ledger_mark" in accepted, lines
+    context = readable.Context(target, image)
+    reg = "a0" if kind == "rv32" else "r0"
+    name = "g_%x" % at["slot_ledgers"]
+    for fn, wanted in (("slot_ledger_read", ["%s[%s - 1].f_4" % (name, reg)]),
+                       ("slot_ledger_write", ["%s[%s - 1].f_4 = " % (name, reg), "%s[%s - 1].f_c = " % (name, reg)]),
+                       ("slot_ledger_mark", ["%s[%s - 1].f_8" % (name, reg), "%s[%s - 1].f_10" % (name, reg)])):
+        out = readable.transform(fn, lifter.lift(program.by_name[fn]).text, context=context)
+        for text in wanted:
+            assert text in out, (text, out)
+        assert "struct %s_t\n{\n    u8 pad_0[4];\n    u32 f_4;\n    u16 f_8;" % name in out, out
+
+
+def test_an_index_below_the_base_names_the_element_it_lies_in():
+    """dread.statics base_of finds the literal a sum adds whole (also through a variable that holds it,
+    straight_facts' and scales_of's facts), and an access whose constant lies below an array that starts
+    at that base is that array's element index - 1 (not the element of the object in front that the
+    constant lies in: a structure array before it, of the same element size)."""
+    assert statics.base_of(parse_expr("0x14u * (r0 - 1) + 0x20000020u + 4")) == 0x20000020
+    assert statics.base_of(parse_expr("(r0 + 0xffffffffu) * 0x14u + 0x80000020u + 0x4u")) == 0x80000020
+    assert statics.base_of(parse_expr("r3 + 4"), {"r3": (20, cparse.Name("r0"), 0x2000000c, 0x20000020)}) == 0x20000020
+    assert statics.base_of(parse_expr("0x20000020u - r3 + 0x20000000u")) is None       # (two of them)
+    text = ("u32 f(u32 r0)\n{\n    u32 r3;\n    r3 = 0x14u * (r0 - 1) + 0x20000020u;\n"
+            "    *(volatile u32 *)(r3 + 4) = 0x0u;\n"
+            "    return *(volatile u32 *)(0x20000020u + ((r0 + (r0 << 2)) << 2) - 16);\n}\n")
+    t = cparse.parse(text)
+    fn = t.function("f")
+    assert statics.indexed_accesses(fn) == [(0x20000010, 20, "u32", 0x20000020)] * 2
+    arrays = {0x20000000: (20, 1, [(0, "u32"), (4, "u32"), (16, "u32")]), 0x20000020: (20, 2, [(4, "u32")])}
+    naming.apply_globals(t, fn, None, None, statics={}, arrays=arrays)
+    out = cparse.unparse(t, notes=False)
+    assert "g_20000020[r0 - 1].f_4 = 0x0u;" in out and "return g_20000020[r0 - 1].f_4;" in out, out
+    assert "g_20000000" not in out, out
+
+
+def test_where_an_array_starts_from_the_addresses_the_code_made():
+    """find_arrays: accesses whose constants lie below every address the code made them from start the
+    array at the lowest of those (table[i - 1]), or at a data symbol within an element below it;
+    where one function made the array's start and another a field's address in it (FreeRTOS GCC -Os
+    loads pxReadyTasksLists + 4 in one function, pxReadyTasksLists in others), the start stays where it
+    was (the lowest made address at or below the accesses); an anchor far below is no start; a table
+    without a symbol indexed by c - 'b' starts at its own address, not at the variable in front of it."""
+    table, field = 0x20000120, 0x20000104          # (an array at 0x20000120; one at 0x20000100, its field 4)
+
+    def start(rows, symbols=()):
+        got = statics.find_arrays({"f": rows}, {}, {}, data_symbols=symbols)
+        return sorted((a, k, n) for a, (k, n, _) in got.items())
+    below = [(table - 16, 20, "u32", table), (table - 8, 20, "u32", table)]
+    assert start(below) == [(table, 20, 1)]
+    assert start(below, {table - 20}) == [(table, 20, 1)]       # (a symbol in front: another variable)
+    assert start(below, {table - 20, table}) == [(table, 20, 1)]
+    both = [(0x20000100, 20, "u32", 0x20000100), (field - 4, 20, "u32", field), (field + 8, 20, "u32", field)]
+    assert start(both) == [(0x20000100, 20, 1)]
+    only = both[1:]                                 # (no function made the array's start)
+    assert start(only, {0x20000100}) == [(0x20000100, 20, 1)]
+    assert start(only) == [(field, 20, 1)]          # (without symbols: not established, the field's address)
+    anchor = [(0x20000100 + 52, 8, "u32", 0x20000100)]
+    assert start(anchor) == [(0x20000100 + 52, 8, 1)]
+    switch = [(0x20000200 - 0x62, 1, "s8", 0x20000200)]    # (a table without a symbol indexed by c - 'b')
+    assert start(switch, {0x20000200 - 0x10}) == [(0x20000200, 1, 1)]     # (not the variable in front)
+
+
+NOTES = ("/* f at 0x0 */\n#include \"dread.h\"\nextern u32 gauge_note(u32, u32);\n"
+         "u32 f(u32 r0, u32 r1)\n{\n    u32 r3, r4, r5, r6, r7;\n"
+         "    r6 = *(volatile u32 *)(r0 + 12);\n"
+         "    if (r6 != 0x404u) r0 = r0 + 4;\n"
+         "    r7 = *(volatile u32 *)(r0 + 16);\n"
+         "    if (r7 != 0x408u) r1 = r1 + 4;\n"
+         "    r7 = (u32)*(volatile u16 *)(r0 + 2);\n"
+         "    if (r7 != 0x408u) r1 = r1 + 8;\n"
+         "    r3 = r0 & 0xf00u;\n"
+         "    if (r3 == 0x400u) r1 = r1 + 1;\n"
+         "    if ((r1 & 0x7f0u) != 0x404u) r0 = 0x0u;\n"
+         "    if (r1 >> 4 == 0x400u) r0 = r0 + 2;\n"
+         "    if (r1 == 0x404u) r0 = r0 + 3;\n"
+         "    gauge_note(0x400u, 0x404u);\n"
+         "    r4 = 0x400u;\n"
+         "    r5 = 0x404u;\n"
+         "    *(volatile u32 *)(r4 + 8) = r5 + r1;\n"
+         "    if (*(volatile u32 *)(r0 + 4) == 0x408u) r0 = 1;\n"
+         "    *(volatile u32 *)0x404u = r0;\n"
+         "    return 0x408u;\n}\n")
+NOTE_PLAN = {0x400: [(0, "u32"), (4, "u32"), (8, "u32")]}
+
+
+def notes_c(pointers=None, image=None):
+    t = cparse.parse(NOTES)
+    naming.apply_globals(t, t.function("f"), None, None, statics=NOTE_PLAN, pointers=pointers, image=image)
+    return cparse.unparse(t, notes=False)
+
+
+def test_no_address_for_a_plain_value():
+    """A static object at a small address (0x400) and values that happen to be its address: one compared
+    with a masked word (directly, or a variable given the mask), with a shifted one, with a parameter
+    used only as a number, assigned to a variable used only in arithmetic, passed where the callee takes
+    a count (pointers: dread.shapes pointer_params) stay numbers; one assigned to a variable the
+    function dereferences, compared with a word read from memory (directly, kept in a variable, or in a
+    variable that holds it there and a halfword later), passed where the callee takes a pointer, stored
+    and returned is the object's address; and none for an object where the image keeps no static data
+    (image)."""
+    out = notes_c()
+    for line in ("if (r6 != (u32)&g_400.f_4) r0 = r0 + 4;", "if (r7 != (u32)&g_400.f_8) r1 = r1 + 4;",
+                 "if (r7 != 0x408u) r1 = r1 + 8;", "if (r3 == 0x400u)", "if ((r1 & 0x7f0u) != 0x404u)",
+                 "if (r1 >> 4 == 0x400u)",
+                 "if (r1 == 0x404u)", "r5 = 0x404u;", "r4 = (u32)&g_400;", "gauge_note((u32)&g_400, (u32)&g_400.f_4);",
+                 "if (*(volatile u32 *)(r0 + 4) == (u32)&g_400.f_8) r0 = 1;", "g_400.f_4 = r0;",
+                 "return (u32)&g_400.f_8;"):
+        assert line in out, (line, out)
+    assert "gauge_note(0x400u, (u32)&g_400.f_4);" in notes_c({"gauge_note": [1]})
+    assert "gauge_note(0x400u, 0x404u);" in notes_c({"gauge_note": []})
+    outside = notes_c(image=[(0x20000000, 0x20001000)])
+    assert "&g_" not in outside and "g_400.f_4 = r0;" in outside, outside
+    assert "r4 = (u32)&g_400;" in notes_c(image=[(0x400, 0x40c)])
+
+
+# A structure array at a small address (RAM from 0x400), a bit field's values compared with a masked and
+# a shifted word that happen to be its address and its second field's, a count that is the address of a
+# field handed to a function that counts with it, and real addresses: a field's handed to a function
+# that stores through it, a cursor compared with one
+GAUGE = HEAD + """struct gauge_cell { u32 level; u32 limit; u32 mark; };
+struct gauge_cell gauge_cells[4];
+u32 *gauge_cursor;
+u32 gauge_state;
+__attribute__((noinline)) void gauge_link(u32 *p, u32 v) { *p = v; }
+__attribute__((noinline)) u32 gauge_spin(u32 n) { u32 s = 0; while (n--) s += n; return s; }
+__attribute__((noinline)) u32 gauge_same(const u8 *a, const u8 *b, u32 n)
+{ u32 i; for (i = 0; i < n; i++) if (a[i] != b[i]) return 1; return 0; }
+u32 gauge_check(void) { return gauge_same((const u8 *)&gauge_cells[0].limit, (const u8 *)gauge_cursor, 4); }
+u32 gauge_pick(u32 i) { return gauge_cells[i].limit + gauge_cells[i].mark; }
+void gauge_mode(u32 w) { if ((w & 0xf00) == 0x400) gauge_state = 1; }
+void gauge_band(u32 w) { if ((w >> 4) == 0x404) gauge_state = 2; }
+void gauge_hook(u32 v) { gauge_link(&gauge_cells[0].mark, v); gauge_state = gauge_spin(0x404); }
+void gauge_back(void) { if (gauge_cursor == &gauge_cells[0].limit) gauge_cursor = &gauge_cells[1].limit; }
+int main(void) { return 0; }
+"""
+
+
+@needs_gcc
+def test_a_bit_field_value_at_a_small_address_stays_a_number(tmp_path):
+    """The gauge program on a Cortex-M3 with its RAM at 0x400: gauge_cells is an array at 0x400, and
+    gauge_mode's masked compare with 0x400 (through a variable that holds the masked word), gauge_band's
+    shifted one with 0x404, and gauge_spin's count 0x404 stay numbers (they had read (u32)&g_400[0] and
+    (u32)&g_400[0].f_4), while the field's address handed to gauge_link, which stores through it, and
+    to gauge_same, which reads bytes at it plus an index (a sum the shapes do not follow), and the one
+    the cursor is compared with are addresses; the gate accepts every function."""
+    from dread import build, readable
+    target = kind_target(tmp_path, "m3", GAUGE, ram=0x400)
+    image = target.image()
+    lines = []
+    accepted = readable.check(target, image, out=lines.append)
+    assert accepted == sorted(build.read_names(image.table("lifted"))) and "gauge_mode" in accepted, lines
+    from dread import lift, regflow
+    from dread.program import Program
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    context = readable.Context(target, image, program)
+    assert context.plan.arrays.get(0x400, (None,))[0] == 12 and context.plan.params["gauge_link"] == [0], \
+        (context.plan.arrays, context.plan.params)
+    assert context.plan.params["gauge_spin"] == [] and {0, 1} <= set(context.plan.params["gauge_same"]), \
+        context.plan.params             # (its count too where the loop adds it to a pointer: not told apart)
+
+    def text(name):
+        return readable.transform(name, lifter.lift(program.by_name[name]).text, context=context)
+    mode, band, hook, back = text("gauge_mode"), text("gauge_band"), text("gauge_hook"), text("gauge_back")
+    assert "== 0x400u)" in mode and "&g_" not in mode, mode
+    assert "0x404u == r0 >> 4" in band and "&g_" not in band, band
+    assert "gauge_link((u32)&g_400[0].f_8, r0);" in hook and "gauge_spin(0x404u)" in hook, hook
+    assert "== (u32)&g_400[0].f_4)" in back, back
+    assert "gauge_same((u32)&g_400[0].f_4, " in text("gauge_check"), text("gauge_check")
+
+
+def test_the_arrays_of_gizmo_start_where_its_code_makes_their_address(variant):
+    """On every gizmo build, each array of static data starts at a data symbol or at an address the
+    machine code makes (dread.relations materialized: a literal, movw and movt, lui with addi): gizmo
+    a32's handle_key indexes its switch table by c - 'b' from the table's literal, and the table started
+    98 bytes in front of it, at the constant readable C's sum folded (a place the code never makes)."""
+    from conftest import gizmo_dir
+    from dread.program import Program
+    from dread.relations import materialized
+    from dread.target import Target
+    target = Target.load(gizmo_dir(variant))
+    program = Program(target, target.image())
+    made = set().union(*(materialized(program, fn) for fn in program.functions))
+    symbols = set(data(program).values())
+    _, _, _, found, arrays, _ = kind_plan(target)
+    assert all(a in made or a in symbols for a in arrays), (sorted(arrays), statics.describe(found, arrays))
+    if variant == "a32":                    # (handle_key's table: its literal, 0x20dac)
+        assert arrays.get(0x20dac, (None,))[0] == 1 and 0x20dac - 98 not in arrays, statics.describe(found, arrays)

@@ -381,7 +381,191 @@ def static_names(statics, named=None, memory=None, avoid=(), arrays=None):
     return out
 
 
-def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, names=None, arrays=None):
+def _plus(index, j):
+    """index + j as readable C writes an element's index: index itself for 0, index - 1 for -1."""
+    if j == 0:
+        return index
+    return C.Binary("+", index, C.Num("%d" % j)) if j > 0 else C.Binary("-", index, C.Num("%d" % -j))
+
+
+BITS = ("&", "|", "^", "<<", ">>")       # operators whose result is a mask's or a shift's, never an address
+
+
+NARROW = ("u8", "s8", "u16", "s16")      # casts that cut a value below a pointer's width
+
+
+def _bit_value(e, bits=()):
+    """Whether e (through casts) is the result of a mask, a shift (BITS, ~) or a narrowing cast, or a
+    variable of bits (_bit_variables): a bit field's value, which no address is compared with."""
+    while isinstance(e, C.Cast):
+        if " ".join(e.type.split()) in NARROW:
+            return True
+        e = e.e
+    if isinstance(e, C.Binary) and e.op in BITS or isinstance(e, C.Unary) and e.op == "~":
+        return True
+    return isinstance(e, C.Name) and e.id in bits
+
+
+def _bit_variables(fn):
+    """The function's variables that an assignment gives the result of a mask or a shift (_bit_value,
+    or &=, |=, ^=, <<=, >>=): r3 = r0 & 0xf00u before if (r3 == 0x200u)."""
+    from dread import statics as st
+    from dread.cflow import walk_expr
+    out = set()
+    for s in st._statements(fn):
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Assign) and isinstance(x.target, C.Name) and (
+                        x.op[:-1] in BITS or (x.op == "=" and _bit_value(x.value))):
+                    out.add(x.target.id)
+    return out
+
+
+def _word_read(e):
+    """Whether e (through casts) is a word read from memory (an access of a u32 or s32) or a call's
+    result: a value a pointer may be."""
+    while isinstance(e, C.Cast):
+        e = e.e
+    if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast):
+        m = ACCESS.match(" ".join(e.e.type.split()))
+        return m is not None and m.group(1) in ("u32", "s32")
+    return isinstance(e, C.Call)
+
+
+def _loaded_variables(fn):
+    """The function's variables (not its parameters, whose value at the entry is the caller's) that only
+    plain assignments write, each of them a word read from memory or a call's result (_word_read) or
+    another such variable: r5 = *(volatile u32 *)(r4 + 20) before if (r5 == 0x20029988u), a list's
+    container compared with a list's address."""
+    from dread import statics as st
+    from dread.cflow import walk_expr
+    defs, bad = {}, {n for _, n in fn.params}
+    for s in st._statements(fn):
+        if isinstance(s, C.Asm):
+            bad.update(x.id for o in s.outputs for x in walk_expr(o.e) if isinstance(x, C.Name))
+        if isinstance(s, C.Decl):
+            for d in s.items:
+                if d.init is not None:
+                    defs.setdefault(d.name, []).append(d.init)
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Assign) and isinstance(x.target, C.Name):
+                    if x.op == "=":
+                        defs.setdefault(x.target.id, []).append(x.value)
+                    else:
+                        bad.add(x.target.id)
+                elif isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--") and isinstance(x.e, C.Name):
+                    bad.add(x.e.id)
+                elif isinstance(x, C.Unary) and x.op == "&" and isinstance(x.e, C.Name):
+                    bad.add(x.e.id)         # (its address taken: a callee may write it)
+    out, changed = set(), True
+    while changed:
+        changed = False
+        for v, values in defs.items():
+            if v in out or v in bad:
+                continue
+            if all(_word_read(x) or (isinstance(x, C.Name) and x.id in out) for x in values):
+                out.add(v)
+                changed = True
+    return out
+
+
+def _straight_values(fn):
+    """{id(statement): {variable: whether its value is a word read (_word_read)}} of the values the
+    function's variables hold at each statement by a plain assignment earlier in the same list of
+    statements or in one around it, nothing between them writing the variable and no label or case
+    between (dread.statics straight_facts' rule), taken before anything is rewritten: where a variable
+    that holds several values in turn holds a word read from memory (clang -O2's vTaskResume compares
+    r0_2, a list item's container just read, with a list's address, and r0_2 holds bytes later)."""
+    from dread import statics as st
+    out, cache = {}, {}
+
+    def written(s):
+        if id(s) not in cache:
+            cache[id(s)] = st._written([s])
+        return cache[id(s)]
+
+    def walk(stmts, known):
+        for s in stmts:
+            names, labelled = written(s)
+            if labelled:
+                known = {}
+            known = {v: x for v, x in known.items() if v not in names}
+            out[id(s)] = known
+            for inner in ([s.body] if isinstance(s, C.Block) else [[x] for x in _inner(s)]):
+                walk(inner, known)
+            got = st._assignment(s)
+            if got is not None:
+                known = dict(known)
+                known[got[0]] = _word_read(got[1])
+    walk(fn.body.body, {})
+    return out
+
+
+def _address_variables(fn, pointers=None, unknown=True):
+    """The function's variables whose value it uses as an address: a variable the address of an access
+    adds whole (*(volatile u32 *)(r3 + 4), *(volatile u8 *)(a0 + a4): the index too, which the sum does
+    not tell from the pointer), an argument for a parameter its callee uses as a pointer (pointers:
+    {callee: its parameters' indices that it uses as a pointer}, dread.shapes pointer_params; a callee
+    it does not know, or pointers None, counts as using every one), with unknown also a value stored
+    into memory, returned, or an asm's input (what becomes of it is not known; a variable itself, not a
+    sum of several); and those whose value goes on into such a variable (w = v, w = v + 4, w = v + i, a
+    conditional's arm) or that are compared with one (== and !=)."""
+    from dread import statics as st
+    from dread.cflow import walk_expr
+    used, edges = set(), []
+
+    def names_of(e):
+        """The variables a value adds whole (statics.linear: through casts and sums), and a conditional's
+        arms': what an address may be made from."""
+        if isinstance(e, C.Cond):
+            return names_of(e.t) + names_of(e.f)
+        _, terms = st.linear(e)
+        return [term.id for k, term in terms.values() if k == 1 and isinstance(term, C.Name)]
+
+    def value_of(e):
+        """The variable a value is (through casts and constants added), and a conditional's arms'."""
+        if isinstance(e, C.Cond):
+            return value_of(e.t) + value_of(e.f)
+        names = names_of(e)
+        _, terms = st.linear(e)
+        return names if len(terms) == 1 else []
+    for s in st._statements(fn):
+        if unknown and isinstance(s, C.Return) and s.e is not None:
+            used.update(value_of(s.e))
+        if unknown and isinstance(s, C.Asm):
+            for o in s.inputs:
+                used.update(value_of(o.e))
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Unary) and x.op == "*" and isinstance(x.e, C.Cast):
+                    used.update(names_of(x.e.e))
+                elif isinstance(x, C.Call):
+                    callee = x.f.id if isinstance(x.f, C.Name) else None
+                    for i, a in enumerate(x.args):
+                        if pointers is None or callee not in pointers or i in pointers[callee]:
+                            used.update(value_of(a))
+                elif isinstance(x, C.Assign) and x.op == "=":
+                    if isinstance(x.target, C.Name):
+                        edges.extend((v, x.target.id) for v in names_of(x.value))
+                    elif unknown:
+                        used.update(value_of(x.value))
+                elif isinstance(x, C.Binary) and x.op in ("==", "!="):
+                    for a in value_of(x.l):
+                        for b in value_of(x.r):
+                            edges += [(a, b), (b, a)]
+    changed = True
+    while changed:
+        changed = False
+        for src, dst in edges:
+            if dst in used and src not in used:
+                used.add(src)
+                changed = True
+    return used
+
+
+def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, names=None, arrays=None,
+                  pointers=None, image=None):
     """The function's accesses to memory at fixed addresses written as names, a macro for each above
     the function (#define g_20029aac (*(volatile u32 *)0x20029aacu)): the table's name (named: the
     globals part) where it has one the file does not use for something else (nor avoid: the names the
@@ -397,8 +581,10 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
     of static data) an access to an element's field is written as one: at a constant address inside the
     array (g_20000c74[1], g_2002990c[0].f_4) and at the array's constant plus an index times the
     element size (*(volatile u32 *)(0x200299f8u + 0x14u * r9 + 4) is g_200299f8[r9].f_4, the index
-    plus the element the constant lies in where that is not the first: g_x[r3 + 1]); the index may
-    come through a variable that holds it times the element size (r8_3 = 0x14u * r8_2 ... 0x200299f8u +
+    plus the element the constant lies in where that is not the first: g_x[r3 + 1], or minus the
+    elements it lies below the array's start where that is the address the code made, dread.statics
+    base_of: 0x14u * (r0 - 1) + 0x20000020u + 4 is g_20000020[r0 - 1].f_4); the index may come
+    through a variable that holds it times the element size (r8_3 = 0x14u * r8_2 ... 0x200299f8u +
     r8_3 is g_200299f8[r8_2]: dread.statics straight_facts says where that holds). The array's macro is
     a pointer to its first element, (#define g_200299f8 ((volatile struct g_200299f8_t *)0x200299f8u),
     of u32 for an array of scalars), so that C knows no bound for the index (an index past the end
@@ -407,9 +593,22 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
     argument, the value assigned or compared with == and !=, a result), a constant one inside an object
     or an array element's (the constant plus a scaled index) is written as that: (u32)&g_20029988,
     (u32)&g_20000030.f_8, (u32)&g_200299f8[r8_2]; an address inside an object at no field stays the
-    number. Every access stays one volatile access of its width at its address; an access of another
-    type than its field stays the macro it was (a read of the field's width and the other signedness
-    is cast: (s16)g_200018de[r6]). Returns {key: name} of what it named: a structure's fields under
+    number. A constant is written so only where it is used as an address (2026-10-23, after a review
+    on a private firmware found a bit field's value compared with a masked word written as the address
+    of an object that happened to lie at that number): an argument for a parameter the callee uses as
+    a pointer (pointers: {callee: its parameters' indices}, dread.shapes pointer_params; a callee not in
+    it, or pointers None, as before), a value assigned to a variable the function uses as an address
+    (_address_variables) or stored into memory, a result, and an operand of == or != whose other
+    operand is a variable used as an address or holding only words read from memory
+    (_loaded_variables) or one there (_straight_values), a word read from memory or a call's result,
+    never the result of a mask, a
+    shift or a narrowing cast nor a variable given one (_bit_variables); and only for an object where
+    the image keeps static data (image: [(start, end)], dread.statics image_spans; None: every object).
+    An element's address the code computes (the constant plus a scaled index) is one wherever it is
+    used, for an object in the image. Every access stays one volatile access of its width at its
+    address; an access of another type than its field stays the macro it was (a read of the field's
+    width and the other signedness is cast: (s16)g_200018de[r6]). Returns {key: name} of what it
+    named: a structure's fields under
     their address and type as "NAME.FIELD", an array under static_key as its name and its elements'
     fields under the address and type of its first element's as "NAME[].FIELD" (what dread pilot asks
     names for)."""
@@ -495,7 +694,7 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
         rows, k, _ = rows_of[b]
         e = C.Name(name)
         if k is not None:
-            i = C.Num("%d" % j) if index is None else (index if j == 0 else C.Binary("+", index, C.Num("%d" % j)))
+            i = C.Num("%d" % j) if index is None else _plus(index, j)
             e = C.Index(e, i)
             if scalar_array(k, rows):
                 return e
@@ -505,23 +704,62 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
 
     def indexed(addr, facts):
         """(object, element index, offset, index expression) of an address that is an array's constant
-        plus an index times its element size, or None."""
+        plus an index times its element size, or None. Where the constant lies below the address the
+        code made (dread.statics base_of: table[i - 1].level, 0x14u * (r0 - 1) + 0x20000020u + 4) and an
+        array starts there, the element is counted from that array's start (-1), not from the object the
+        constant happens to lie in."""
         used = set()
         got = st.scaled(addr, facts, used)
         if got is None or got[2] is None:
             return None
         const, k, index = got
-        where = inside(const)
+        base = st.base_of(addr, facts, memory)
+        if base in rows_of and rows_of[base][1] == k and st.below_base(base, const, k, memory):
+            where = (base, (const - base) // k, (const - base) % k)
+        else:
+            where = inside(const)
         if where is None or rows_of[where[0]][1] != k:
             return None
         via.update(used)
         return where[0], where[1], where[2], index
 
-    def address_of(e, facts, f):
+    bits = _bit_variables(fn) if rows_of else set()
+    addressed = _address_variables(fn, pointers) if rows_of else set()
+    loaded = _loaded_variables(fn) if rows_of else set()
+    values = _straight_values(fn) if rows_of else {}
+    here = [{}]                             # (what the variables hold at the statement being rewritten)
+
+    def pointer_like(x):
+        """Whether an operand a constant is compared with is one an address may be compared with: a
+        variable the function uses as an address, that holds only words read from memory or holds one
+        here (_straight_values), a word read from memory, a call's result (through casts); never the
+        result of a mask or a shift, nor a variable given one."""
+        if _bit_value(x, bits):
+            return False
+        while isinstance(x, C.Cast):
+            x = x.e
+        if isinstance(x, C.Name):
+            return x.id in addressed or x.id in loaded or here[0].get(x.id, False)
+        return _word_read(x)
+
+    def as_address(use):
+        """Whether a constant used so (("arg", callee, index), ("value", target), ("compare", the other
+        operand), ("result",)) is used as an address."""
+        kind = use[0]
+        if kind == "arg":
+            return pointers is None or use[1] not in pointers or use[2] in pointers[use[1]]
+        if kind == "value":
+            return not isinstance(use[1], C.Name) or use[1].id in addressed
+        if kind == "compare":
+            return pointer_like(use[1])
+        return True
+
+    def address_of(e, facts, f, use):
         """The address expression ((u32)&g_x.f_8, (u32)&g_x[r3]) of a value e that is an address
-        inside an object at a field or an element, else None."""
+        inside an object at a field or an element, else None: a constant only where it is used as an
+        address (use: as_address), and only for an object where the image keeps static data (image)."""
         if isinstance(e, C.Num) and isinstance(e.value, int):
-            if e.value < SMALLEST_POINTER:  # (a small number is a count, not where an object lies)
+            if e.value < SMALLEST_POINTER or not as_address(use):   # (a small number is a count)
                 return None
             where = inside(e.value)
             index = None
@@ -530,7 +768,7 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
             if got is None:
                 return None
             where, index = got[:3], _rewrite(copy.deepcopy(got[3]), f)
-        if where is None:
+        if where is None or (image is not None and not st.holds(image, where[0])):
             return None
         b, j, off = where
         rows, k, _ = rows_of[b]
@@ -538,7 +776,7 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
             target = C.Name(obj(b)[0])
         elif k is not None and off == 0:    # (an element's: &g_x[3])
             name = obj(b)[0]
-            i = C.Num("%d" % j) if index is None else (index if j == 0 else C.Binary("+", index, C.Num("%d" % j)))
+            i = C.Num("%d" % j) if index is None else _plus(index, j)
             target = C.Index(C.Name(name), i)
         elif off in dict(rows) and not (k is not None and scalar_array(k, rows)):
             target = element(b, j, off, index)
@@ -578,26 +816,30 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
                         return got if field == m.group(1) else C.Cast(m.group(1), got)
                 return None
             if isinstance(e, C.Call):
-                return C.Call(_rewrite(e.f, f), [address_of(x, facts, f) or _rewrite(x, f) for x in e.args])
+                callee = e.f.id if isinstance(e.f, C.Name) else None
+                return C.Call(_rewrite(e.f, f), [address_of(x, facts, f, ("arg", callee, i)) or _rewrite(x, f)
+                                                 for i, x in enumerate(e.args)])
             if isinstance(e, C.Assign):
-                value = (address_of(e.value, facts, f) if e.op == "=" else None) or _rewrite(e.value, make(facts))
+                value = (address_of(e.value, facts, f, ("value", e.target)) if e.op == "=" else None) \
+                    or _rewrite(e.value, make(facts))
                 return C.Assign(e.op, _rewrite(e.target, make(facts, True)), value)
             if isinstance(e, (C.Post, C.Unary)) and e.op in ("++", "--"):
                 return type(e)(e.op, _rewrite(e.e, make(facts, True)))
             if isinstance(e, C.Binary) and e.op in ("==", "!="):
-                return C.Binary(e.op, address_of(e.l, facts, f) or _rewrite(e.l, f),
-                                address_of(e.r, facts, f) or _rewrite(e.r, f))
+                return C.Binary(e.op, address_of(e.l, facts, f, ("compare", e.r)) or _rewrite(e.l, f),
+                                address_of(e.r, facts, f, ("compare", e.l)) or _rewrite(e.r, f))
             return None
         return f
 
     if rows_of:
         def visit(s, facts):
+            here[0] = values.get(id(s), {})
             f = make(facts)
             if isinstance(s, C.Return) and s.e is not None:
-                s.e = address_of(s.e, facts, f) or _rewrite(s.e, f)
+                s.e = address_of(s.e, facts, f, ("result",)) or _rewrite(s.e, f)
             else:
                 _rewrite_stmt(s, f, inner=False)
-        st.straight_facts(fn, visit)
+        st.straight_facts(fn, visit, memory)
         st.drop_unread(fn, via)
     else:
         f0 = make({})

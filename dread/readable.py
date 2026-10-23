@@ -69,6 +69,7 @@ class Context:
         from dread import shapes
         self.plan = shapes.Plan()       # the image's readable_types table (dread.shapes)
         self.structs = {}               # the readable_names table's structs part
+        self.image_spans = None         # where the image keeps static data (dread.statics image_spans)
         self._struct_names = None
         self._static_names = None
         if target is None:
@@ -78,10 +79,11 @@ class Context:
         self.names = naming.load(image)
         self.globals = naming.load(image, "globals")
         self.memory = target.memory
-        from dread import regflow
+        from dread import regflow, statics
         from dread.program import Program
         program = program or Program(target, image)
         flow = flow or regflow.load(target, image, program)
+        self.image_spans = statics.image_spans(program)
         self.arg_regs = list(target.abi.arg_regs)
         self.results = list(target.abi.result)
         self.reads = {fn.name: set(flow.read_regs(fn.name)) for fn in program.functions}
@@ -279,7 +281,9 @@ def readable_one(program, context, lifter, name, named=None, statics=False):
     chosen = naming.apply_globals(tree, fn, named, context.memory if context is not None else None,
                                   statics=context.plan.statics if with_statics else None,
                                   names=context.static_names() if with_statics else None,
-                                  arrays=context.plan.arrays if with_statics else None)
+                                  arrays=context.plan.arrays if with_statics else None,
+                                  pointers=context.plan.params if with_statics else None,
+                                  image=context.image_spans if with_statics else None)
     return tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}, digest
 
 
@@ -326,7 +330,8 @@ def _question_one(name):
     digest = naming.digest(fn)
     int_bits = tidy.context(fn).int_bits
     naming.apply_globals(tree, fn, context.globals, context.memory, statics=context.plan.statics,
-                         names=context.static_names(), arrays=context.plan.arrays)
+                         names=context.static_names(), arrays=context.plan.arrays, pointers=context.plan.params,
+                         image=context.image_spans)
     shapes.apply_types(tree, fn, context.plan, digest, names=context.struct_names())
     if not tidy.fixed_registers(tree):
         polish_tree(tree, fn, context, int_bits)
@@ -443,7 +448,9 @@ def _named(name, text, stages, context=None):
                              context.memory if context is not None else None, avoid=mine,
                              statics=context.plan.statics if context is not None else None,
                              names=context.static_names() if context is not None else None,
-                             arrays=context.plan.arrays if context is not None else None)
+                             arrays=context.plan.arrays if context is not None else None,
+                             pointers=context.plan.params if context is not None else None,
+                             image=context.image_spans if context is not None else None)
         if context is not None:
             from dread import shapes
             shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
@@ -627,6 +634,7 @@ def check(target, image, names=None, out=print, jobs=None):
     found, arrays, s = static_plan(program, context, trees, flow)
     context.plan = shapes.plan(s, trees, digests)
     context.plan.statics, context.plan.arrays = found, arrays
+    context.plan.params = shapes.pointer_params(s, trees)
     context._struct_names = context._static_names = None
     shapes.store_plan(image, context.plan)
     out("dread readable --check: %d structures, pointers to them in %d functions; %d structures and %d arrays of "

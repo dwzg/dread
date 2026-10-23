@@ -9,6 +9,102 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Array bases where the code indexes them, and no address for a plain value (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Two items of docs/todo.md's review against hand-written C. (1) An array of structures
+  indexed as `table[i - 1]` printed with its base folded down: readable C's arithmetic (`0x14u * (r0 -
+  1) + 0x20000020u + 4`) folds the literal the code loads with the index's -1 and the field's offset
+  into one constant (0x20000010, an element below the array); dread.statics find_arrays started the
+  array there (no data symbol and no origin lay within an element below it), its structure at the
+  lowest field read, so every printed offset was shifted; with the data symbols the array's own cut it
+  to less than an element and it was not found at all. Where does an array start, and how is such an
+  index printed? (2) dread.naming apply_globals wrote `(u32)&object` for every constant inside an
+  object of static data used whole (an argument, a value assigned or compared, a result), also for a
+  bit field's value compared with a masked word and for a count, where an object happened to lie at
+  that number (most likely where objects lie at small addresses). Where is a constant an address?
+- **What the compilers make.** A test program (an array of 20-byte structures behind another array,
+  indexed by `id - 1`, its first field read nowhere) and arrays of words, halfwords, pairs and 16-byte
+  structures, built with GCC 16 -Os and -O2 for ARM state, Thumb-2 and RISC-V, GCC 4.9 for ARM and
+  clang 23 for Thumb-2 and RISC-V: each loads the array's own address (a literal, movw and movt, lui
+  with addi) and puts the -1 into the index's arithmetic (`sub r0, #1; mla`, `addi a0, a0, -1`) or the
+  access's offset (`ldr r0, [r3, #-16]` after `add r3, r3, r0, lsl #2`); none folds it into the
+  literal. Through a section anchor (GCC without -fdata-sections) or clang's merged globals (RISC-V)
+  the base is the anchor and the -1 goes into its offset. FreeRTOS clang -O2's xTaskGetHandle is a
+  public example (`pxReadyTasksLists[uxQueue]` after `uxQueue--`, unrolled: `[lr - 1]` and `[lr - 2]`
+  through `r9 - 20` and `r9 - 40`), gizmo a32's handle_key another (its switch table indexed by `c -
+  'b'` from the table's literal). But FreeRTOS GCC -Os loads a field's address as a literal in some
+  functions (pxReadyTasksLists + 4, xQueueRegistry + 4, its accesses below and above it), and a first
+  version that took any address the code made above the accesses for the start moved both arrays four
+  bytes up.
+- **Options and choices.**
+  1. The base: (a) the machine code's origin (dread.statics evidence) only: its pass does not follow
+     `mla`, and its constant differs from readable C's where the -1 is in the index register (RISC-V);
+     (b) the literal readable C's sum adds whole (base_of, also through a variable straight_facts or
+     scales_of know, whose facts now carry it), else the origin. **(b).**
+  2. Where an array starts: (a) at the base wherever the accesses lie below it; (b) where every base
+     of a run's accesses lies above all of them (at most BELOW = 256 elements: `c - 'b'`), at the
+     lowest, or at a data symbol within an element below it (the variable a field's literal lies in,
+     or the array's own), else as before (a data symbol within an element below the lowest access, an
+     origin there, the lowest); (b') as (b) with any data symbol between the lowest access and the
+     base. **(b)**: a function that made the array's start keeps it where it was (FreeRTOS GCC -Os);
+     (b') took gizmo a32's commands, in front of the anonymous switch table, for the table's start.
+  3. Printing: `g_x[r0 - 1].f_4`, the index minus the elements below the start, as the code computes
+     it, through the array's pointer macro, also for an address (`(u32)&g_x[lr - 1].f_8`) and through
+     a variable that holds the element's address; apply_globals counts the element from the array that
+     starts at the expression's base, not from an object in front the constant lies in.
+  4. The machine code's evidence: an indexed access below its origin starts the origin's array, not a
+     place in front (plan()'s starts), and is no index there for the rule that makes a run of equal
+     fields an array of words (clang -O2's `[lr - 2]` reached into xQueueRegistry in front and cut its
+     structure at 44 bytes; with the start moved, it had made the registry an array of words).
+  5. Where a constant is an address: (a) everywhere used whole (main); (b) where the machine code
+     makes it as compilers make addresses (dread.relations' anchoring); (c) by its use: an argument
+     only for a parameter the callee uses as a pointer (dread.shapes pointer_params, a new `params`
+     part of the readable_types table: param_used, the templates, and readable C that adds the
+     parameter whole to an access's address, which the shapes do not follow through a sum of two
+     variables: memcmp's `a0 + a4`; a callee not analysed as before), a value assigned to a variable
+     the function uses as an address or stored into memory, a result, an operand of == or != whose
+     other operand is a variable used as an address or holding a word read from memory (every value it
+     is given, or the one it holds there: _straight_values), a word read or a call's result; never one
+     that meets a mask's, a shift's or a narrowing cast's result or a variable given one; never for an
+     object outside the image's bytes and its startup's ranges (dread.statics image_spans; without
+     startup ranges every region but rom counts). An element's address the code computes (a constant
+     plus a scaled index) is one wherever it is used. **(c)**: (b) tells no count from an address
+     where ARM state loads both from a literal pool (0x404 is no ARM immediate), nor on RISC-V, where
+     lui with addi makes every large constant.
+- **Measured** (main -> now, copies of the eight builds, the same inputs). The gate accepts the same
+  functions, name by name: gizmo a32 35, m3 36, m4 44, rv32 31; FreeRTOS GCC -Os 315, clang -O2 275,
+  RISC-V GCC -Os 252, GCC -O0 354. Its time, on a shared machine whose load varied: GCC -Os 912 -> 728
+  s, clang -O2 334 -> 267, RISC-V 153 -> 138, GCC -O0 493 -> 448, gizmo 3-7 s either way;
+  pointer_params takes 0.2 s on GCC -Os. Static data: every structure and array the same but clang
+  -O2's xQueueRegistry (11 words -> 18; static data's fields that are the source's 136 of 136 -> 143
+  of 143, dread readable --statics --score) and gizmo a32's switch table (0x20d4a -> 0x20dac, at no
+  variable either way); no array's base moved on a FreeRTOS build. On all 39 FreeRTOS builds of the
+  benchmark (dread readable --statics, with the data symbols and without) every structure and array of
+  static data is the same but clang -O2's xQueueRegistry (the command took 530 -> 450 s and 542 -> 550
+  s for the 39, on the shared machine). Structures behind pointers: the same plans and scores on every
+  build (dread readable --shapes --score, --score). Addresses written as & in every function's
+  readable C: GCC -Os 80 -> 78, clang -O2 96 -> 104, RISC-V 63 -> 63, GCC -O0 74 -> 71, gizmo none; in
+  the readable functions (dread.cmetrics fixed_addresses) 61 -> 59, 75 -> 80, 36 -> 36, 52 -> 49.
+  Gone: xTaskCreate's pvParameters (GCC -Os, clang -O2: it only stores it), values passed only to
+  vPortExitCritical and xTaskResumeAll, which take none (GCC -O0 three, GCC -Os one); come:
+  xQueueRegistry's fields' addresses and xTaskGetHandle's list ends (clang -O2). In clang -O2's
+  readable functions members of static data 148 -> 166, fixed-address macros 1524 -> 1506.
+- **Not established.** That a literal a compiler loads is its array's start where every function loads
+  a field's address (none did here) and no symbol says otherwise; `table[i - 1]` through a section
+  anchor or merged globals still starts at the folded constant; whether a store or a result holds an
+  address (written as & as before: the field's or result's type is not known); a word read from memory
+  and compared with an object's address may be a number (a state word); an index that readable C adds
+  to an address whole makes its parameter a pointer (memset's count); a parameter only stored
+  (xTaskCreate's pvParameters) is no pointer for the call rule.
+- **Undo.** statics.BELOW = 0 takes the start at a base above the accesses out (an index below the
+  base then names no element: the constant's own object or the number); apply_globals(pointers=None,
+  image=None) and a readable_types table without `params` give main's call rule; the comparisons' and
+  assignments' rules have no switch (as_address in apply_globals); the rest is this change's revert.
+- **Status.** In the code (branch array-bases): docs/todo.md, the two items of "From a review against
+  hand-written C".
+
 ## Readable C's constants and casts by their use: a last pass, exact checks, evidence from the function (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20; four items of docs/todo.md,

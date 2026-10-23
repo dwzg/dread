@@ -1354,15 +1354,52 @@ to fix in code: wrong or vague names, the names of error codes and macros, and d
 the oddities and evidence a person writes (two of the items take away noise that misled the naming
 model).
 
-- [ ] **Array bases where the code indexes them.** An array of structures indexed as `table[i - 1]`
+- [x] **Array bases where the code indexes them.** An array of structures indexed as `table[i - 1]`
   prints with its base folded one element down (`table[i]` at `base - size`), and a structure whose
   lowest accessed field is not its first starts at that field, so every printed offset is shifted
   and the base matches no address in the listing. Keep the base the code makes (the literal it
   loads) as the array's start, print the index as the code computes it (`i - 1`), and start the
-  structure at that base, not at its lowest accessed offset. Public example: none found (the
-  FreeRTOS builds index from 0, and every static array's base matched its symbol). Test: a gizmo
-  function reading `table[id - 1].b` of a structure whose field `a` at offset 0 nothing reads, on
-  every gizmo build.
+  structure at that base, not at its lowest accessed offset.
+  Done 2026-10-23 (dread.statics base_of, find_arrays and _made_above; dread.naming apply_globals;
+  docs/decisions.md, "Array bases where the code indexes them, and no address for a plain value"). GCC
+  16 (-Os, -O2; ARM state, Thumb-2, RISC-V), GCC 4.9 (ARM) and clang 23 (Thumb-2, RISC-V) load the
+  array's own address for `table[id - 1]` and fold the -1 into the index's arithmetic or into the
+  access's offset; readable C's sum then folded the literal into a constant an element below the
+  array, where find_arrays started it (with the data symbols the array's own cut it to less than an
+  element: no array at all). The literal readable C's sum adds whole (base_of, also through the
+  variables straight_facts and scales_of know, whose facts carry it) is the base now: where every base
+  a run of indexed accesses was made from lies above them all (by at most BELOW = 256 elements), the
+  array starts at the lowest, or at a data symbol within an element below it (FreeRTOS GCC -Os loads
+  pxReadyTasksLists + 4 and xQueueRegistry + 4 in some functions: a first version moved both arrays
+  four bytes up), else as before. An access below an array that starts at its sum's base is that
+  array's element `index - n` (`g_20000020[r0 - 1].f_4`, as an address `(u32)&g_20029954[lr -
+  1].f_8`), the element's unread first field a gap (`u8 pad_0[4]`). An indexed access below the
+  address the machine code made it from starts that address's array, not a place in front (plan's
+  starts), and makes no run of equal fields in front an array of words (clang -O2's
+  `pxReadyTasksLists[i - 2]` had cut xQueueRegistry's structure at 44 bytes). Public examples after
+  all: FreeRTOS clang -O2 xTaskGetHandle (`uxQueue--` before `pxReadyTasksLists[uxQueue]`, unrolled:
+  it read `r9 = (u32)&g_20029954[lr]; if (*(volatile u32 *)(r9 - 20) != 0)`, now `if (g_20029954[lr -
+  1].f_0 != 0)` and the list end's address `(u32)&g_20029954[lr - 1].f_8`; the function does not lift
+  there, so the gate does not see it); gizmo a32's handle_key switch table, indexed by `c - 'b'`,
+  starts at its literal 0x20dac, not 98 bytes in front (`(void)rom_20dac[r3];`). Tests
+  (tests/test_statics.py): the slot ledger program (an array of 20-byte structures behind another
+  array, indexed by `id - 1`, its first field read nowhere) built with GCC -Os for ARM state, Thumb-2
+  and RISC-V, with and without the data symbols, through the gate; the start rule (a run below its
+  base, a field's literal with and without the array's start made elsewhere, a switch table, an
+  anchor); the element counted from the base's array, not the one in front; on every gizmo build, each
+  array starts at a data symbol or an address its code makes. Measured on the eight builds (main ->
+  now): the gate accepts the same functions (gizmo a32 35, m3 36, m4 44, rv32 31; FreeRTOS GCC -Os
+  315, clang -O2 275, RISC-V GCC -Os 252, GCC -O0 354, name by name); every structure and array of
+  static data and every structure behind pointers is the same, but clang -O2's xQueueRegistry (a
+  structure of 11 words -> 18; static data's fields that are the source's 136 of 136 -> 143 of 143)
+  and gizmo a32's switch table (0x20d4a -> 0x20dac, at no variable either way); the shapes' scores the
+  same on every build; on all 39 FreeRTOS builds of the benchmark (dread readable --statics) every
+  structure and array of static data the same but that one, with the data symbols and without. Left: a
+  compiler that loads a field's address (`table + 4`) in every function that indexes the array starts
+  it there where no symbol says otherwise; `table[i - 1]` through a section anchor (GCC without
+  -fdata-sections) or clang's merged globals (RISC-V) is made from the anchor, and the array still
+  starts at the folded constant (or, with the data symbols, is not found); `arr[i + 1]` through a base
+  of its own still makes an array of its own.
 - [x] **No argument from a result register the callee always writes.** trim_calls keeps a used
   call's result registers as arguments, because a callee that does not write them hands back what
   the caller passed (newlib's lock functions). A callee that writes them on every path gets a
@@ -1467,14 +1504,40 @@ model).
   mark a register read as unreachable (a report on a path that cannot run), so that the call is a
   plain call there. Public example: none found (GCC code does not read registers its caller left);
   test: gizmo assembly.
-- [ ] **No address for a plain value.** The pass that prints `(u32)&object` for constants that are
+- [x] **No address for a plain value.** The pass that prints `(u32)&object` for constants that are
   the address of static data also replaces a constant compared with a masked word, a bit-field value,
   by the address of an object that happens to lie at that number. Substitute an address only where
   the constant is used as one (dereferenced, passed where a callee dereferences it, stored into a
   pointer, compared with a pointer), never where it meets the result of a mask or a shift, and not for
-  objects outside the image. Public example: none found (the public substitutions compare list
-  pointers with list addresses, which is right); test: a unit test with a static object at a small
-  address and a masked compare.
+  objects outside the image.
+  Done 2026-10-23 (dread.naming apply_globals' as_address with _bit_variables, _address_variables,
+  _loaded_variables and _straight_values; dread.shapes pointer_params and the readable_types table's
+  `params`; dread.statics image_spans; docs/decisions.md, as above). A constant is an object's address
+  only as an argument for a parameter the callee uses as a pointer (the shapes' param_used and
+  templates, and readable C that adds the parameter whole to an access's address, which the shapes do
+  not follow through a sum of two variables: memcmp's `a0 + a4`; a callee not analysed as before), as
+  a value assigned to a variable the function uses as an address or stored into memory, as a result,
+  and as an operand of == or != whose other operand is a variable used as an address or holding a word
+  read from memory (all its values, or the one it holds there), a word read from memory or a call's
+  result; never where the other operand is a mask's, a shift's or a narrowing cast's result or a
+  variable given one, and never for an object outside the image's bytes and its startup's ranges. An
+  element's address the code computes (a constant plus a scaled index) is one wherever it is used.
+  Tests (tests/test_statics.py): a unit test with a static object at 0x400 (masked, shifted and narrow
+  compares, a parameter used as a number, arithmetic, a count for a callee that takes none, a variable
+  holding a word and then a halfword, the image rule); the gauge program on a Cortex-M3 with its RAM
+  at 0x400 through the gate: main wrote `if ((r0 & 0xf00u) == (u32)&g_400[0])`, `(u32)&g_400[0].f_4 ==
+  r0 >> 4` and `gauge_spin((u32)&g_400[0].f_4)` for a count; they are numbers now, while gauge_link's,
+  gauge_same's (bytes at it plus an index) and the cursor's compare keep their addresses. Measured
+  (main -> now, every function's readable C): GCC -Os 80 -> 78 addresses, clang -O2 96 -> 104, RISC-V
+  GCC -Os 63 -> 63, GCC -O0 74 -> 71, gizmo none; in the readable functions (dread.cmetrics
+  fixed_addresses) 61 -> 59, 75 -> 80, 36 -> 36, 52 -> 49. Gone: xTaskCreate's pvParameters (GCC -Os,
+  clang -O2: xTaskCreate only stores it), values passed only to vPortExitCritical and xTaskResumeAll,
+  which take none (GCC -O0 three, GCC -Os one: the phantom arguments' item); come: xQueueRegistry's
+  fields (its structure grew, above) and xTaskGetHandle's list ends. pointer_params takes 0.2 s on GCC
+  -Os. Left: whether a store or a result holds an address (both as before: the field's or result's
+  type is not known); a word read from memory and compared with an object's address may be a number (a
+  state word); an index that readable C adds to an address whole makes its parameter a pointer
+  (memset's count); a parameter only stored is none (pvParameters).
 - [ ] **Pointer types for parameters and prototypes.** A parameter that is only dereferenced (and
   advanced) stays u32 with a `*(volatile T *)p` cast at every use, and arguments to callees whose
   extern DREAD writes as all-u32 get `(u32)&x`. Type a parameter or variable dereferenced at one width

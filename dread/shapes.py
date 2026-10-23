@@ -1923,7 +1923,10 @@ class Plan:
     static data at fixed addresses ({address: [(offset, type)]}, dread.statics), which every function
     writes its accesses there through, whatever its digest (an address does not change with the
     transformations); arrays: the arrays of static data ({address: (element size, count, [(offset in
-    the element, type)])}, dread.statics find_arrays), written so too."""
+    the element, type)])}, dread.statics find_arrays), written so too. params: {function: the indices of
+    the parameters it uses as a pointer} for every analysed function (pointer_params), None where the
+    table does not say (made before 2026-10-23): dread.naming apply_globals writes the address of
+    static data as an argument only for such a parameter of a function listed."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
@@ -1931,6 +1934,7 @@ class Plan:
         self.embeds = {}                # structure -> {offset: the structure held there as a member}
         self.statics = {}               # address -> [(offset, type)]: structures of static data (dread.statics)
         self.arrays = {}                # address -> (element size, count, [(offset, type)]): arrays of static data
+        self.params = None              # function -> [indices of the parameters it uses as a pointer]
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -1947,6 +1951,8 @@ class Plan:
         if self.arrays:
             out["arrays"] = {"0x%x" % a: {"size": k, "count": n, "fields": [list(r) for r in rows]}
                              for a, (k, n, rows) in sorted(self.arrays.items())}
+        if self.params:
+            out["params"] = {f: sorted(ix) for f, ix in sorted(self.params.items())}
         return out
 
     @classmethod
@@ -1962,6 +1968,7 @@ class Plan:
         p.statics = {int(a, 16): [tuple(r) for r in rows] for a, rows in data.get("statics", {}).items()}
         p.arrays = {int(a, 16): (e["size"], e["count"], [tuple(r) for r in e["fields"]])
                     for a, e in data.get("arrays", {}).items()}
+        p.params = {f: list(ix) for f, ix in data["params"].items()} if "params" in data else None
         return p
 
     def align(self, name, depth=0):
@@ -2021,6 +2028,40 @@ class Plan:
                 break
             depth += 1
         return path, name, off
+
+
+POINTER_ROUNDS = 8      # rounds of pointer_params' reading over the functions (callees' answers spread up)
+
+
+def pointer_params(s, trees):
+    """{function: [indices]} of the parameters each analysed function ([(tree, fn, macros)]) uses as a
+    pointer: it dereferences the parameter's value, or one it is copied into, or hands it to a callee
+    that takes a pointer there (Collector.run's param_used), or the value points to memory the
+    analysis knows (its summary has a template for it: stored where something reads through it), or
+    the readable C adds it whole to an access's address, also through variables it goes on into, or
+    passes it on for such a parameter (dread.naming _address_variables without the uses whose end is
+    not known; the analysis follows no sum of two variables, and memcmp's a0 + a4 had made its
+    parameters no pointers), over the functions until nothing changes (at most POINTER_ROUNDS rounds).
+    What dread.naming apply_globals takes for "passed where the callee dereferences it"; not
+    established for a parameter only stored where no analysed code reads through it, and an index the
+    readable C adds to an address whole counts as well (a sum does not say which term is the pointer)."""
+    from dread.naming import _address_variables
+    out = {}
+    for _, fn, _ in trees:
+        summary = (getattr(s, "summaries", None) or {}).get(fn.name, {})
+        out[fn.name] = {i for i in range(len(fn.params))
+                        if s.param_used.get((fn.name, i)) or i in summary.get("params", {})}
+    for _ in range(POINTER_ROUNDS):
+        changed = False
+        for _, fn, _ in trees:
+            used = _address_variables(fn, out, unknown=False)
+            more = {i for i, (_, name) in enumerate(fn.params) if name in used} - out[fn.name]
+            if more:
+                out[fn.name] |= more
+                changed = True
+        if not changed:
+            break
+    return {name: sorted(ix) for name, ix in out.items()}
 
 
 def load_plan(image):
