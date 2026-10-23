@@ -25,7 +25,11 @@ Newest first. "Status" says whether the choice is in the code yet.
      caller or a frame's made-up return address, and as cheap as a store a block, where (c) takes every
      block out of C. An exception taken in front of an entry keeps what came before it, by entry and
      stack pointer, until that entry runs again with that stack pointer: without it every interrupt
-     that came there turned the call into a return from the handler.
+     that came there turned the call into a return from the handler. A vector made of instructions
+     (the layer says where: enters_code_vector) passes the mark on from a slot that only branches,
+     also where the tables call the slot a function's entry (binutils 2.35 for RISC-V, which has no
+     mapping symbols, makes the table's label one: CI's Ubuntu 22.04 job); the M profile's handlers,
+     named by a table of addresses, keep it.
   2. When: (a) always, (b) behind an option. **(a)**: on FreeRTOS's GCC -Os demo (its original's run
      to the limit) the run took about 5 % longer (3.99 s against 3.78 s, the best of six alternating
      runs on a shared machine), 7 % on DREAD's MSP430 engine, which does every block in Python (the

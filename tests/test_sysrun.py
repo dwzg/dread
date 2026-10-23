@@ -386,6 +386,98 @@ limit = 200_000
     assert unexplained == 0
 
 
+@needs_riscv_gcc
+def test_a_vector_table_the_tables_call_a_function(tmp_path, monkeypatch):
+    """mtvec's vectored mode with the table under a label typed as a function, as an import makes it
+    of a toolchain without RISC-V's mapping symbols (binutils 2.35: CI's Ubuntu 22.04 job): ecall
+    enters the table's first slot, the entry of `vectors`, which only branches; the system call's mark
+    goes on to sync_trap all the same (System._vector_at), not to the table, in the C hook and in the
+    Python hooks alike."""
+    import subprocess
+    from dread import elfimport, fasthooks
+    from dread.program import Program
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(r'''
+#define THR (*(volatile unsigned char *)0x10000000)
+#define LSR (*(volatile unsigned char *)0x10000005)
+__attribute__((noinline)) void put(int c) { while (!(LSR & 0x20)) ; THR = c; }
+__attribute__((interrupt("machine"))) void sync_trap(void) {
+    unsigned epc;
+    __asm volatile ("csrr %0, mepc" : "=r"(epc));
+    put('E');
+    __asm volatile ("csrw mepc, %0" :: "r"(epc + 4));
+}
+__attribute__((interrupt("machine"))) void other_trap(void) { put('?'); for (;;) ; }
+extern char vectors[];
+__asm__(".section .text.vectors\n.balign 64\n.option push\n.option norvc\n.global vectors\n.type vectors, @function\n"
+        "vectors:\n j sync_trap\n j other_trap\n j other_trap\n j other_trap\n j other_trap\n j other_trap\n j other_trap\n"
+        " j other_trap\n.size vectors, . - vectors\n.option pop\n");
+__attribute__((noreturn)) void cmain(void) {
+    __asm volatile ("csrw mtvec, %0" :: "r"((unsigned)vectors | 1));
+    put('a');
+    __asm volatile ("ecall" ::: "memory");
+    put('b');
+    for (;;) ;
+}
+__asm__(".section .text.start\n.global _start\n.type _start, @function\n_start:\n li sp, 0x80090000\n j cmain\n"
+        ".size _start, . - _start\n");
+''')
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text.start) *(.text*) }\n"
+                                   " . = 0x80080000; .bss : { *(.sbss*) *(.bss*) } }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-O2", "-nostdlib",
+                    "-ffunction-sections", "-T", str(tmp_path / "t.ld"), "-e", "_start", "-o", elf, str(tmp_path / "t.c")],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(riscv_toml('''[target]
+name = "vectors"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "rom", base = 0x80000000, size = 0x10000, kind = "rom"},
+           {name = "ram", base = 0x80080000, size = 0x10000}]
+io = [[0x10000000, 0x10001000]]
+stack = {top = 0x80090000, size = 0x1000}
+sentinel = 0x7fff0000
+[image.main]
+original = "original/t.bin"
+base = 0x80000000
+entry = "_start"
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-O2"]
+[models.uart]
+kind = "uart"
+base = 0x10000000
+data = 0x0
+status = 0x5
+tx_ready = 0x20
+rx_ready = 0x1
+size = 0x8
+[scenarios.ecall]
+until = {uart = "b"}
+limit = 200_000
+'''))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    image = t.image()
+    program = Program(t, image)
+    assert "vectors" in program.by_name and "sync_trap" in program.by_name     # (the table is a function here)
+    run = sysrun.run_image(t, image, image.payload(), t.scenarios["ecall"])
+    assert run.how.startswith("until") and run.reports["uart"]["sent"] == "aEb", (run.how, run.reports)
+    rows, unexplained = sysrun.transfers(program, run.calls)
+    got = {(r["how"], r["to"]) for r in rows if r["how"] in ("exception", "syscall", "reset")}
+    assert got == {("reset", "_start"), ("syscall", "sync_trap")}, got
+    assert unexplained == 0
+    if fasthooks.library() is not None:
+        monkeypatch.setattr(fasthooks, "_LIB", [None])              # as without a C compiler
+        python = sysrun.run_image(t, image, image.payload(), t.scenarios["ecall"])
+        assert (python.calls, python.log) == (run.calls, run.log)
+
+
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_a_run_that_spins_with_its_interrupt_masked_ends(tmp_path):
     """After three ticks the program masks interrupts and spins (as an assertion's loop does): the

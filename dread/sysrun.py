@@ -81,7 +81,9 @@ into a function comes from (System._ran, in C sys_ran: st.came), and at a functi
 (where the block before ended, the entry) is counted; the reset, an exception the run takes and a
 system call it takes alone leave a mark there instead (CAME_*), which the block they enter hands on
 when it is no function's entry (a vector that only branches: the A profile's, RISC-V's vectored
-mode). An exception taken in front of a function's entry (the block has not run) keeps what came
+mode), and also at an entry where the exception enters a vector made of instructions whose slot there
+is a lone unconditional branch (the layer's enters_code_vector; a table under a label of its own is a
+function in some imports, binutils 2.35's for RISC-V). An exception taken in front of a function's entry (the block has not run) keeps what came
 before it, by the entry and the stack pointer, until that entry runs with that stack pointer again
 (when the exception returned, or the task it interrupted runs again: _suspend), so that the transfer
 counts from the call, not from the exception's return. transfers() names each pair by the
@@ -171,6 +173,7 @@ CLOCK_MAX = NO_EVENT - 1    # the state's clock and times stop here (64 bits in 
 # address: instructions start at even addresses on every core the system run runs): odd marks
 CAME_RESET = 1              # the run's first block
 CAME_SYSCALL = 5            # a system call the layer takes alone (RISC-V's ecall)
+PASS_ON = 2                 # _State.vector: the block entered is a vector's lone branch (System._vector_at)
 
 
 def came_exception(number):
@@ -603,10 +606,14 @@ class System:
         transfer into it, from where the last block that ran ended (st.came), or the mark the reset, an
         exception or a system call left; an entry an exception came in front of (_suspend) gets what
         came before the exception, found by its stack pointer. Then where the block ends. The block an
-        exception enters, when it is no function's entry (a vector that branches on: the A profile's,
-        RISC-V's vectored mode), hands the mark on to the block it goes to."""
+        exception enters hands the mark on to the block it goes to when it is no function's entry (a
+        vector that branches on: the A profile's, RISC-V's vectored mode), and also at an entry where the
+        exception enters a vector made of instructions whose slot there only branches (_vector_at)."""
         st = self.st
         if addr in self.entries:
+            if st.vector == PASS_ON:        # (a slot that only branches on, whatever the tables call it)
+                st.vector = 0
+                return
             came = st.came
             if st.suspended_n > 0:
                 back = self._resume(addr, self.regs.reg_read(self.layout.sp))
@@ -619,6 +626,28 @@ class System:
             st.vector = 0
             return
         st.came = addr + size
+
+    def _vector_at(self, pc):
+        """The flag for the block an exception or a system call enters at pc (st.vector, _ran):
+        PASS_ON where the layer says the core enters a vector made of instructions there
+        (enters_code_vector: the A profile's table, RISC-V's vectored mode) and that slot's instruction
+        is an unconditional branch: the mark goes on to where it branches, whatever the tables call the
+        slot (a table under a label of its own is a function in some imports: RISC-V's with binutils
+        2.35, which has no mapping symbols); else 1, the mark going on only from a block that is no
+        function's entry. A handler a table of addresses names (the M profile's, MSP430's) keeps the
+        mark, also where it is only a branch (gizmo's TIMER_IRQHandler is b.w timer_irq). The reset
+        keeps the old rule: the image's entry is the target's."""
+        code = getattr(self.arch, "enters_code_vector", None)
+        if code is None or not code(self.uc, pc):
+            return 1
+        try:
+            insn = self.program.insn(pc & ~1)
+        except Exception:                   # (no instruction of the image there: RAM, a gap)
+            return 1
+        if insn is None:
+            return 1
+        kind, _, falls = self.arch.flow(insn)
+        return PASS_ON if kind in ("jump", "ijump") and not falls else 1
 
     def _suspend(self, pc):
         """An exception is about to be taken in front of the block at pc: where that block is a
@@ -933,8 +962,9 @@ class System:
             cause = controller.core_cause(number) if hasattr(controller, "core_cause") else None
             self._entering(pc)
             self._suspend(pc)
-            self.st.came, self.st.vector = came_exception(number), 1
+            self.st.came = came_exception(number)
             pc = arch.enter_interrupt(uc, number, pc, vectors, word, write_word, cause=cause)
+            self.st.vector = self._vector_at(pc)
             self.interrupts_changed()
             return pc
         how = None
@@ -971,8 +1001,9 @@ class System:
                 self._log(("syscall",), at=pc & ~1)     # (not its address: code that moved is elsewhere)
                 self._entering(pc)
                 self._suspend(pc)
-                self.st.came, self.st.vector = CAME_SYSCALL, 1
+                self.st.came = CAME_SYSCALL
                 pc = arch.enter_syscall(uc, pc, word, write_word)
+                self.st.vector = self._vector_at(pc)
             if self.syscall:                    # svc: its exception, taken at once behind it
                 self.syscall = False
                 number = getattr(arch, "syscall_exception", None)

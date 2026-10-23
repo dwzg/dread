@@ -743,6 +743,13 @@ class RiscV:
         """mstatus and mie, for a controller that decides itself (dread.models.clint)."""
         return {"mstatus": engine.reg_read(ur.UC_RISCV_REG_MSTATUS), "mie": engine.reg_read(ur.UC_RISCV_REG_MIE)}
 
+    def enters_code_vector(self, engine, address):
+        """Whether a trap enters a vector made of instructions: mtvec's vectored mode (interrupts at
+        base + 4 * cause, the synchronous traps at the base: slots of a table, mostly a j to the
+        handler); in direct mode the base is the handler itself. dread.sysrun hands the trap's mark on
+        through such a slot when it only branches."""
+        return engine.reg_read(ur.UC_RISCV_REG_MTVEC) & 3 == 1
+
     def system_exception(self, intno):
         """ecall (from U, S or M mode: Unicorn's exception numbers are the causes) is a system call;
         any other exception is a fault of the run."""

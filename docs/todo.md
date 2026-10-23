@@ -2899,6 +2899,13 @@ tool, the page shows its records; the only changes are the command line's own.
     a call through a stub that only branches on (ARMv4T's call_via) counts from the stub; an exception
     whose handler is no function's entry of the tables names none; the KEEP window shows at most
     100,000 entries of a longer run.
+  - CI's Ubuntu 22.04 job (RISC-V GCC 10.2, binutils 2.35, which has no RISC-V mapping symbols) made
+    the vector table's label a function of the tables, and the system call that entered its first
+    slot counted as entering the table. The mark now goes on through a slot of a vector made of
+    instructions (the layer's enters_code_vector: the A profile's, RISC-V's vectored mode) whose
+    instruction only branches, whatever the tables call it; a handler a table of addresses names (the
+    M profile's) keeps it, also where it is only a branch. A test with the label typed as a function
+    shows it on every toolchain.
 
 ## A realistic benchmark: FreeRTOS (asked for by the user, 2026-10-19; before the rest of MSP430)
 

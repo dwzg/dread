@@ -943,6 +943,13 @@ class Arm:
     # go on at the EXC_RETURN address)
     syscall_exception = None                # the exception svc raises (M profile: SVCall)
 
+    def enters_code_vector(self, engine, address):
+        """Whether an exception the run takes enters a vector made of instructions at `address` (the A
+        profile's table, a slot an instruction: mostly a branch to the handler), not the handler whose
+        address a table of words gives (the M profile's). dread.sysrun hands the exception's mark on
+        through such a slot when it only branches."""
+        return self.profile != "m"
+
     def system_exception(self, intno):
         """What an exception Unicorn raised means in a system run: "syscall", "return" or None (a
         fault). Only the M profile's are modelled."""

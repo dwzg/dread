@@ -401,7 +401,8 @@ typedef struct {
     /* the transfers into functions (System._ran): where the last block that ran ends, or a mark
        (System's CAME_*), the transfers counted here, and the entries an exception came in front of */
     uint64_t came;
-    int32_t vector;                 /* the block an exception enters next: no entry, it hands the mark on */
+    int32_t vector;                 /* the block an exception enters next: no entry (1) or a lone branch of a
+                                       vector made of instructions (2), it hands the mark on (sys_ran) */
     int32_t sp_reg, pc_reg;         /* the stack pointer's and the program counter's register ids */
     set_t calls;                    /* came << 32 | entry -> the transfers counted here */
     set_t suspended;                /* entry << 32 | sp -> came then; 0: gone (System._suspend) */
@@ -438,12 +439,18 @@ static int sys_masks_hold(void *uc, sys_t *st)
 /* A block that runs (System._ran): where it is a function's entry, the entry counted and the transfer
  * into it, from where the last block that ran ends (or the mark an exception, a system call or the
  * reset left; an entry an exception came in front of keeps what came before the exception, found by
- * its stack pointer); then where it ends. The block an exception enters, when it is no entry (a
- * vector that branches on), hands the exception's mark on. Keep the two alike. */
+ * its stack pointer); then where it ends. The block an exception enters hands the exception's mark
+ * on when it is no entry (a vector that branches on), and also at an entry when System said the
+ * exception enters a vector made of instructions that only branches there (vector 2: PASS_ON). Keep
+ * the two alike. */
 static void sys_ran(void *uc, uint64_t address, uint32_t size, sys_t *st)
 {
     if (set_get(&st->entry_set, address)) {
         set_put(&st->entered, address, set_get(&st->entered, address) + 1, 0);
+        if (st->vector == 2) {      /* (a slot that only branches on, whatever the tables call it) */
+            st->vector = 0;
+            return;
+        }
         uint64_t came = st->came;
         if (st->suspended_n > 0) {
             uint64_t sp = 0;
