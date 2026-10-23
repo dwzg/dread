@@ -1149,6 +1149,111 @@ def test_two_runs_are_compared_by_groups_too(gizmo, tmp_path):
     assert by == "groups" and by_groups == {fn.entry: str(k) for k, fn in enumerate(fns)}
 
 
+REPLICATES = {          # each run's proposals; the judge's verdict is the name's last word (ok, meh, bad)
+    "memcpy": ("copy_ok", "copy_ok", "copy_bad", "move_bad"),
+    "strlen": ("len_ok", "size_ok", "len_ok", "count_meh"),
+    "checksum": ("sum_ok", "sum_ok", "sum_ok", "sum_ok"),
+    "clamp": ("limit_meh", "clip_ok", "limit_ok", "bound_bad"),
+    "uart_putc": ("put_ok", "put_bad", "out_ok", "put_ok"),
+    "gpio_set": ("pin_ok", "pin_ok", "pin_meh", "set_meh"),
+    "read_line": ("line_bad", "line_bad", "read_ok", "get_ok"),
+    "print_status": ("show_ok", "status_ok", "show_bad", "print_meh")}
+
+
+def test_settings_compared_over_replicate_runs(gizmo, tmp_path):
+    """compare_runs (--against RUN... --vs RUN...): each run judged once against the source, every run of
+    one setting paired with every run of the other from those verdicts (names that differ, the better
+    verdict closer), counted by groups over all the pairings with a sign test, the runs' means with a
+    permutation test over runs, the pairs within a setting as the noise floor; the grouping is the
+    groups.tsv beside the runs where there is one, the source files beside it; judged again with the
+    kept answers, nothing is asked."""
+    pytest.importorskip("elftools")
+    target, image, program, flow = gizmo
+    fns = {name: program.by_name[name] for name in REPLICATES}
+    runs = []
+    for k, label in enumerate(("a1", "a2", "b1", "b2")):
+        folder = tmp_path / label
+        folder.mkdir()
+        (folder / "names.tsv").write_text("address\tnow\tproposed\twhat\tprovider\tshown\n" + "".join(
+            "0x%x\t%s\t%s\tdoes it\tp\treadable\n" % (fns[n].entry, n, REPLICATES[n][k]) for n in REPLICATES))
+        runs.append(str(folder / "names.tsv"))
+    verdict = {"ok": "right | right", "meh": "partly: vague | right", "bad": "wrong: no | right"}
+
+    def answer(messages):
+        numbered = re.findall(r"^(\d+)\. (\w+): ", messages[0]["content"][1]["text"], re.M)
+        return "```json\n%s\n```" % json.dumps({n: verdict[name.rsplit("_", 1)[1]] for n, name in numbered})
+    fw = os.path.join(os.path.dirname(target.root), "fw")
+    kept = llm.AnswerCache(pilot.judge_cache_path(target, image))
+    judge = llm.Scripted(answer)
+    lines = []
+    t = pilot.compare_runs(target, image, gizmo_elf(target), runs[:2], runs[2:], judge, out=lines.append,
+                           sources=[fw], cache=kept)
+    assert (t["functions"], t["judged"], len(judge.asked)) == (8, 8, 16)     # (4 files a run, 4 runs)
+    assert t["means"] == {"a1": 6.5 / 8, "a2": 6 / 8, "b1": 5.5 / 8, "b2": 4.5 / 8}
+    assert t["difference"] == pytest.approx(0.15625) and t["p_runs_means"] == pytest.approx(2 / 6)
+    assert t["least_p"] == pytest.approx(2 / 6) and t["splits"] == 6 and t["every_split"]
+    assert t["by"] == "source files"
+    assert (t["groups_won"], t["groups_lost"], t["groups_even"]) == (3, 0, 1)    # (lib +6, util +1, hw +2, main 0)
+    assert t["groups_p"] == pilot.sign_test(3, 0) and t["p_runs_groups"] == pytest.approx(2 / 6)
+    assert t["majority"][:3] == (3, 0, 1) and t["functions_pooled"] == (16, 7, 3)
+    assert t["pairings"][("a1", "b1")] == {"differ": 6, "wins": 3, "losses": 2, "ties": 1, "p": 1.0, "groups_won": 2,
+                                           "groups_lost": 1, "groups_even": 1, "groups_p": 1.0}
+    assert t["pairings"][("a2", "b1")]["groups_even"] == 2 and t["pairings"][("a2", "b1")]["groups_won"] == 1
+    assert sorted(t["across"]) == [1, 1, 2, 3] and t["alike"] == [0, 1]       # (a1-a2 1:1; b1-b2 2:1)
+    folder = os.path.join(target.build, "pilot", image.name)
+    table = open(os.path.join(folder, "names-replicates.tsv")).read().splitlines()
+    assert table[0] == "address\ttrue\tgroup\ta1\ta1_grounded\ta2\ta2_grounded\tb1\tb1_grounded\tb2\tb2_grounded"
+    assert "0x%x\tclamp\tutil.c\tlimit_meh\tpartly: vague\tclip_ok\tright\tlimit_ok\tright\tbound_bad\twrong: no" % (
+        fns["clamp"].entry) in table and len(table) == 9
+    pairs = open(os.path.join(folder, "names-replicates-pairs.tsv")).read().splitlines()
+    assert len(pairs) == 7 and "a1\tb2\tacross\t6\t5\t1\t0\t0.2188\t3\t0\t1\t0.25" in pairs, pairs
+    assert any("permutation test over runs p = 0.333 (6 splits of the 4 runs; the least p possible 0.33)" in line
+               for line in lines), lines
+    assert any("a against b 4, from +1 to +3 (mean +1.8), 0 beyond chance" in line and
+               "within a setting (the noise floor) 2, from +0 to +1 (mean size 0.5)" in line for line in lines), lines
+    with open(tmp_path / "a1" / "groups.tsv", "w") as f:      # (lib and util one group, hw and main one each)
+        f.write("address\tnow\tgroup\tmembers\n" + "".join("0x%x\t%s\t%d\tk\n" % (
+            fns[n].entry, n, 0 if n in ("memcpy", "strlen", "checksum", "clamp") else 1 if n in ("uart_putc", "gpio_set")
+            else 2) for n in REPLICATES))
+    again = llm.Scripted([])
+    kept = llm.AnswerCache(pilot.judge_cache_path(target, image))
+    lines = []
+    t = pilot.compare_runs(target, image, gizmo_elf(target), runs[:2], runs[2:], again, out=lines.append,
+                           sources=[fw], cache=kept)
+    assert not again.asked and kept.hits == 16                     # (every question answered from before)
+    assert t["by"] == "groups" and (t["groups_won"], t["groups_lost"], t["groups_even"]) == (2, 0, 1)
+    assert t["by_source_files"] == (3, 0, 1, pilot.sign_test(3, 0))
+    assert any("16 answers kept from before" in line for line in lines[:1]), lines
+    assert any(line.startswith("dread pilot --score --vs: by source files over all the pairings: a's names closer in "
+                               "3, b's in 0, even in 1") for line in lines), lines
+
+
+def test_runs_split_every_way_or_drawn():
+    """run_splits: every split of the runs into the sizes compared, the observed one first, or beyond
+    the limit the observed one and the rest drawn with a fixed seed (the same each time)."""
+    every, whole = pilot.run_splits(6, 3)
+    assert whole and len(every) == 20 and every[0] == (0, 1, 2) and len(set(every)) == 20
+    drawn, whole = pilot.run_splits(10, 5, limit=50)
+    assert not whole and len(drawn) == 50 and drawn[0] == tuple(range(5)) and all(len(s) == 5 for s in drawn)
+    assert pilot.run_splits(10, 5, limit=50) == (drawn, False)
+    assert pilot.group_nets([{1: "a", 2: "b"}, {1: "a", 3: "tie"}], {1: "g", 2: "g", 3: "h"}) == {"g": 1}
+    assert pilot.net_sign({"g": 2, "h": -1, "k": 0}) == (1, 1, 1, 1.0)
+
+
+def test_replicate_runs_need_both_sets_and_the_grounded_judge(gizmo, capsys):
+    """--vs needs --against and --grounded; several --against need --vs. Each is refused before any
+    provider is loaded."""
+    target, image, program, flow = gizmo
+    truth = gizmo_elf(target)
+    base = ["--target", target.root, "--task", "name", "--score", truth]
+    assert pilot.main(base + ["--vs", "b.tsv", "--grounded", "nothing"]) == 1
+    assert "--vs needs --against" in capsys.readouterr().err
+    assert pilot.main(base + ["--against", "a.tsv", "--vs", "b.tsv"]) == 1
+    assert "--vs needs --grounded" in capsys.readouterr().err
+    assert pilot.main(base + ["--against", "a.tsv", "a2.tsv", "--grounded", "nothing"]) == 1
+    assert "several --against runs need --vs" in capsys.readouterr().err
+
+
 # ---- the review of existing names (dread.namereview, --task review)
 
 REVIEW_NAMELESS = ("uart_init", "uart_putc", "uart_puts", "uart_getc", "gpio_set", "led_on", "led_off", "delay",

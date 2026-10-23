@@ -329,6 +329,28 @@ a tie), and two more columns give the verdicts: `this_grounded`, `other_grounded
 `address`, `true`, `proposed`, `other`, `closer` (`mine`, `theirs`, `equal`), each pair judged in one
 order, chosen by the address; replaced by `--against`, nothing reads it.
 
+### `BUILD/pilot/IMAGE/names-replicates.tsv`, `names-replicates-pairs.tsv`, `grounded-answers.jsonl`
+
+Written by `dread pilot --task name --score TRUTH --grounded P --against RUN... --vs RUN...` (since
+2026-10-23: two settings compared over replicate runs, dread pilot `compare_runs`; `-passN` before
+`.tsv` with `--upto-pass N`). The runs are named `a1`, `a2`, ... (`--against`, in the order given)
+and `b1`, `b2`, ... (`--vs`). `names-replicates.tsv` has a line per function judged in every run:
+`address`, `true` (the true name), `group` (its group in the grouping counted: groups.tsv's number, or
+the source file; empty for a function outside every group), then for each run its proposal and its
+verdict against the source, `a1`, `a1_grounded`, `a2`, `a2_grounded`, ... (the verdict as in
+`names-pairwise.tsv`: `right`, or `partly: reason`, `wrong: reason`). `names-replicates-pairs.tsv` has
+a line per pairing of two runs: `first`, `second` (labels), `kind` (`across`: a run of each setting;
+`same`: two runs of one), `differ` (the functions whose two names differ), `first_closer`,
+`second_closer`, `ties` (by functions, the better verdict closer), `p` (the sign test over functions),
+`groups_first`, `groups_second`, `groups_even`, `groups_p` (counted by groups, `group_sign`).
+
+`grounded-answers.jsonl` keeps every answer of the grounded judge (`--grounded`, with `--score`,
+`--against` and `--vs`) by its question, a JSON object a line: `key` (a SHA-256 digest of the
+provider's kind and model, the system part, the question's text and the attempt: the n-th asking of
+one question) and `answer` (the text as it came). A question it holds is answered from it and not
+asked (dread.llm AnswerCache); `--no-judge-cache` neither reads nor writes it. Removing the file only
+costs the answers again.
+
 ### `BUILD/pilot/IMAGE/groups.tsv`, `subsystems.tsv`, `names-subsystems.tsv`
 
 Written by `dread pilot --task subsystems` and by `--task name --subsystems` (since 2026-10-22): the

@@ -31,7 +31,11 @@ for a quarter more, the others read it for a tenth): on FreeRTOS GCC -Os (332 fu
 about 270,000 tokens of it) a run judged alone by Sonnet 5.5 cost about $0.80, each run judged with it
 about $0.35 (2026-10-22). Each question is asked on its own, so a verdict does not depend on another
 run's names; it does depend on the other proposals of its batch (the company a judge sees moves its
-verdicts a little), which is the same batch for every run.
+verdicts a little), which is the same batch for every run. Since 2026-10-23 the answers can be kept by
+their question (judge's cache, dread.llm.AnswerCache; dread pilot keeps them in
+BUILD/pilot/IMAGE/grounded-answers.jsonl): a run judged once, in the same batches, is answered from the
+file in any later comparison, which is what makes replicate runs affordable (dread pilot --against
+RUN... --vs RUN...: each run judged once, every pairing counted from those verdicts).
 
 What a verdict does not establish: that the judge read the code right, nor that a person would agree
 (not measured yet). Measured on eight FreeRTOS naming runs (docs/decisions.md, 2026-10-22): two
@@ -376,7 +380,7 @@ def parse(answer, numbers, sentence=True):
     return out
 
 
-def judge(provider, runs, sources, sentence=True, out=print, tries=2, jobs=1):
+def judge(provider, runs, sources, sentence=True, out=print, tries=2, jobs=1, cache=None):
     """{label: {entry: (verdict, why, sentence verdict or None, why)}} of runs ([(label, {entry: (name,
     what)})]) as a provider judges them against sources ({entry: Source}): a batch at a time
     (batches()), every run's question of a batch one after another so that they share its cached
@@ -384,11 +388,16 @@ def judge(provider, runs, sources, sentence=True, out=print, tries=2, jobs=1):
     never read costs a quarter more), a question asked again (up to tries) while verdicts are missing.
     sentence: the proposals' sentences are shown and judged apart (TASK_BOTH), else the names alone
     (TASK_NAME). jobs: batches asked at a time, each thread with a copy of provider whose counts are
-    added to provider's at the end (Provider.spent). A function without a source is not judged."""
+    added to provider's at the end (Provider.spent). A function without a source is not judged.
+    cache: a dread.llm.AnswerCache (or a path for one): a question it holds an answer to (the same
+    sources, the same proposals, the same attempt) is answered from it and not asked, and every answer
+    asked is kept in it; a run's question does not depend on the other runs judged with it, so a run
+    judged once is not paid for again in another comparison of the same batches."""
     import concurrent.futures
     import copy
     import threading
-    from dread.llm import ProviderError
+    from dread.llm import AnswerCache, ProviderError
+    store = AnswerCache(cache) if isinstance(cache, str) else cache
     results = {label: {} for label, _ in runs}
     wanted = set()
     for _, proposals in runs:
@@ -416,13 +425,19 @@ def judge(provider, runs, sources, sentence=True, out=print, tries=2, jobs=1):
             if not numbers:
                 continue
             content = [{"text": first, "cache": shared}, {"text": proposals_part(entries, proposals, sentence)}]
+            messages = [{"role": "user", "content": content}]
             got = {}
-            for _ in range(max(1, tries)):
-                try:
-                    answer = asker().ask(SYSTEM, [{"role": "user", "content": content}])
-                except ProviderError as e:
-                    out("dread pilot --grounded: no verdicts for %s (%s): %s" % (path, label, e))
-                    break
+            for attempt in range(max(1, tries)):
+                key = store.key(provider, SYSTEM, messages, attempt) if store is not None else None
+                answer = store.get(key) if store is not None else None
+                if answer is None:
+                    try:
+                        answer = asker().ask(SYSTEM, messages)
+                    except ProviderError as e:
+                        out("dread pilot --grounded: no verdicts for %s (%s): %s" % (path, label, e))
+                        break
+                    if store is not None:
+                        store.put(key, answer)
                 got.update(parse(answer, [k for k in numbers if k not in got], sentence))
                 if len(got) == len(numbers):
                     break

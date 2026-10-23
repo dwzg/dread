@@ -1012,8 +1012,33 @@ its sources.
   functions), the gate's second pass 27:8 (p 0.002), the groups named first 22:3 and 20:3 by groups
   (p 2e-4, 5e-4) and its variant 19:4 (p 0.003) all hold; two runs with the same settings 25:13 (p
   0.07); the grounded judge's re-measure of the groups 15:6 by groups (p 0.08; 68:34 by functions, p
-  0.001), so their gain in what the names say is not established. Next: a setting compared over
-  replicate runs (three a side cost about $3.50 on FreeRTOS GCC -Os with Haiku 5.5).
+  0.001), so their gain in what the names say was not established then.
+  Replicate runs (2026-10-23, docs/decisions.md): `--against RUN... --vs RUN...` with `--grounded`
+  (pilot.compare_runs) compares two settings over runs made anew: each run judged once against the
+  source (the same batches for every run; the judge's answers kept by question in
+  grounded-answers.jsonl, so that a run judged before costs nothing again: the comparison asked a second
+  time asked nothing and wrote the same bytes), every pairing counted from those verdicts. The runs'
+  means with a permutation test over runs decide (the runs are the independent draws; its least p is
+  2/C(2R, R), 0.10 for three runs a side, 0.008 for five); every run of one setting against every run of
+  the other by groups over all the pairings, and the pairs within a setting (the noise floor), are
+  printed beside them. The groups named first, five runs a side on FreeRTOS GCC -Os (Haiku 5.5 naming,
+  `--no-device`, two runs of each setting at a time; Sonnet 5.5 judging, sentences apart): means 0.795
+  +- 0.012 against 0.735 +- 0.022, +0.060, p 0.008 (the least possible: no other split of the ten runs
+  but its mirror comes as far apart, the next +0.053); right 66 % against 58 %, wrong 7 % against 11 %.
+  By groups over the 25 pairings 22:6 (sign test p 0.004), by source files 28:9 (p 0.003), by functions
+  1,729:820 (ties 3,590). Every one of the 25 pairings across favoured the groups by groups (+4 to +20),
+  14 of them beyond chance; of the 20 within a setting (-9 to +9) one: a single run against one shows
+  this gain about half of the time, which is what the re-measure of 2026-10-22 was. The group count
+  saturates as a statistic over runs (splits of four runs of one setting and one of the other reach as
+  many groups: permutation p 0.095), so the means decide and the groups say where: 22 of 28 groups gain,
+  most in the demo's test code (its main group 0.713 against 0.537, the queue-set test 0.825 against
+  0.583), the kernel's own files little or a little less (tasks.c 0.833 against 0.823, queue.c 0.778
+  against 0.837, stream_buffer.c 0.804 against 0.854; not traced). Two runs of one setting name 43 % of
+  the functions alike, with the groups as without. The default stays. Spent $14.80: naming $10.34 (ten
+  runs, four at a time, 26 minutes a round), judging $4.46 (541 answers, 6 minutes; the 45 pairings judged
+  one by one would have cost about $40). Next: the other open settings of this item over replicates (the
+  runs of the cases where the code says less, the globals between the passes), and on the private
+  real-life test; the first pass judged alone, not done.
 - [ ] **The groups' sensitivity to one dense thing** (found 2026-10-22 when the evidence moved to the
   listing, docs/decisions.md): on FreeRTOS RISC-V GCC -Os the listing sees one array field (the ready
   lists' pxIndex, pxReadyTasksLists[i] + 4) in 11-13 of tasks.c's functions, which the readable C keeps

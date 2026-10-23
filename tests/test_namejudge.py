@@ -130,3 +130,25 @@ def test_a_judge_sees_each_run_with_the_same_cached_sources():
     assert alone["x"] == {0x30: ("right", "", None, "")}        # (a name-only answer: the first had two verdicts)
     assert not one.asked[0][1][0]["content"][0]["cache"]       # (one run alone: nothing to share)
     assert "2." not in namejudge.proposals_part([0x30], {0x30: ("a", "b")}, sentence=False).split("```")[-1]
+
+
+def test_a_run_judged_once_is_answered_from_the_kept_answers(tmp_path):
+    """judge's cache: the answers asked are kept by question, a question asked again because its answer
+    missed verdicts under its own attempt; judged again with the same cache, nothing is asked and the
+    verdicts are the same, the attempts replayed in their order; another run's proposals are asked."""
+    sources = {0x10: namejudge.Source(0x10, "list_add", "/src/list.c", 1, "void list_add(void)\n{\n}"),
+               0x20: namejudge.Source(0x20, "list_remove", "/src/list.c", 5, "void list_remove(void)\n{\n}")}
+    runs = [("x", {0x10: ("list_insert", "Adds."), 0x20: ("list_unlink", "Removes.")})]
+    first = Counting(['```json\n{"1": "right | right"}\n```', '```json\n{"2": "wrong: frees | right"}\n```'])
+    path = str(tmp_path / "answers.jsonl")
+    got = namejudge.judge(first, runs, sources, cache=path)
+    assert got["x"] == {0x10: ("right", "", "right", ""), 0x20: ("wrong", "frees", "right", "")}
+    assert first.used["answers"] == 2
+    kept = llm.AnswerCache(path)
+    again = Counting([])
+    assert namejudge.judge(again, runs, sources, cache=kept, jobs=2) == got
+    assert again.used["answers"] == 0 and kept.hits == 2
+    other = Counting(['```json\n{"1": "partly: vague | right", "2": "right | right"}\n```'])
+    changed = [("x", {0x10: ("list_op", "Does it."), 0x20: ("list_unlink", "Removes.")})]
+    assert namejudge.judge(other, changed, sources, cache=kept)["x"][0x10][0] == "partly"
+    assert other.used["answers"] == 1

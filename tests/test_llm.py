@@ -85,3 +85,28 @@ def test_the_llm_command_lists_and_tries_providers(standin, tmp_path, monkeypatc
     captured = capsys.readouterr()
     assert json.loads(captured.out)["question"] == "S\n\nwhat now" and "here (stand-in)" in captured.err
     assert llm.main(["ask", "--provider", "nowhere", "q"]) == 1
+
+
+def test_answers_are_kept_by_their_question(tmp_path):
+    """AnswerCache: a kept answer comes back for the same question (the provider's kind and model, the
+    system part, the messages' texts and the attempt), from the file in a later process too; a part's
+    cache mark does not change the key, another attempt, model or text does; a line the file cannot
+    parse is skipped."""
+    path = str(tmp_path / "pilot" / "answers.jsonl")
+    one = llm.Scripted([], name="judge")
+    question = [{"role": "user", "content": [{"text": "sources", "cache": True}, {"text": "names"}]}]
+    plain = [{"role": "user", "content": [{"text": "sources"}, {"text": "names"}]}]
+    kept = llm.AnswerCache(path)
+    key = kept.key(one, "system", question)
+    assert key == kept.key(one, "system", plain) and kept.get(key) is None and kept.hits == 0
+    kept.put(key, '{"1": "right"}')
+    assert kept.key(one, "system", question, attempt=1) != key
+    assert kept.key(one, "another system", question) != key
+    other = llm.Scripted([], name="judge")
+    other.model = "another"
+    assert kept.key(other, "system", question) != key
+    with open(path, "a") as f:
+        f.write('{"key": "cut off\n')
+    again = llm.AnswerCache(path)
+    assert again.get(key) == '{"1": "right"}' and again.hits == 1 and len(again.answers) == 1
+    assert llm.AnswerCache(None).get(key) is None

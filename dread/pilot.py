@@ -47,7 +47,15 @@ partly or wrong whatever its style, the sentence judged apart (--names-only: the
 groups (pair_groups: the run's groups.tsv, else the truth's source files; group_sign), which is the
 test to trust between two runs: a run's names hang together within a group, and two FreeRTOS runs
 with the same settings differed by 24:40 functions (sign test p 0.06) where by groups they were
-8:12 (p 0.50). --refine asks again, callers
+8:12 (p 0.50). One run against one still shows only a direction: two settings are compared over
+replicate runs, --against RUN... --vs RUN... with --grounded (compare_runs, since 2026-10-23): each run
+judged once against the source (the judge's answers kept by question in
+BUILD/pilot/IMAGE/grounded-answers.jsonl, so that a run judged before costs nothing again;
+--no-judge-cache asks anew), every run of one setting paired with every run of the other from those
+verdicts and counted by groups over all the pairings (a sign test over groups), the runs' means with a
+permutation test over runs, which decides (the runs are the independent draws), and the pairs within a
+setting beside them as the noise floor. On FreeRTOS, five runs a side settled the groups named first
+(the means 0.795 against 0.735, p 0.008; docs/decisions.md). --refine asks again, callers
 first, for every function with a proposal: its question shows its callers' names and its first one.
 --behaviour shows in each question what the function did in runs of its cases (dread.behaviour: its
 calls, device accesses, writes and results on a few generated inputs). --samples K asks each function K
@@ -142,8 +150,9 @@ stated, while Haiku 5.5 answered the same question.
                 [--task write|input|name|readable|globals|subsystems|device|review] [--no-device] [--jobs N]
                 [--refine] [--behaviour]
                 [--[no-]subsystems] [--samples K] [--temperature T] [--gate C] [--passes N] [--ablate]
-                [--score TRUTH [--judge PROVIDER] [--grounded PROVIDER [--source DIR] [--names-only]]
-                               [--upto-pass N] [--against NAMES_TSV]]
+                [--score TRUTH [--judge PROVIDER] [--grounded PROVIDER [--source DIR] [--names-only]
+                                                   [--no-judge-cache]]
+                               [--upto-pass N] [--against NAMES_TSV... [--vs NAMES_TSV...]]]
                 [--decider PROVIDER] [--margin M] [--rounds N] [--threshold S] [NAME...]
 """
 import argparse
@@ -2659,12 +2668,15 @@ def sign_test(wins, losses):
     return min(1.0, 2 * sum(math.comb(n, i) for i in range(min(wins, losses) + 1)) / 2 ** n)
 
 
-def pair_groups(target, image, truth_path, addresses):
+def pair_groups(target, image, truth_path, addresses, more=()):
     """({address: group}, what the groups are) for the test over groups of a pairwise comparison: the
     image's groups.tsv (the grouping a naming run with --subsystems named, dread groups) when it holds
-    any of addresses, else the truth ELF's source files (dread.groups source_files), else ({}, None)."""
-    path = os.path.join(target.build, "pilot", image.name, "groups.tsv")
-    if os.path.exists(path):
+    any of addresses, else the first of more (other groups.tsv: those beside the runs compared) that
+    does, else the truth ELF's source files (dread.groups source_files), else ({}, None). dread groups
+    uses no name, so every run of one build and one code has the same grouping, whatever its setting."""
+    for path in [os.path.join(target.build, "pilot", image.name, "groups.tsv")] + list(more):
+        if not os.path.exists(path):
+            continue
         got = {}
         with open(path) as f:
             head = f.readline().rstrip("\n").split("\t")
@@ -2692,11 +2704,27 @@ def group_sign(pairs, group):
     Between two runs this is the test to trust: a run's names hang together within a group (its prefix
     and its reading go into all of its functions), so the sign test over functions takes too few
     independent draws for many (2026-10-22: two FreeRTOS runs with the same settings 24:40 by functions,
-    p 0.06; by groups 8:12, p 0.50)."""
+    p 0.06; by groups 8:12, p 0.50). Between two settings, compare replicate runs (compare_runs)."""
+    return net_sign(group_nets([pairs], group))
+
+
+def group_nets(pairings, group):
+    """Counter {group: net} of one or several pairwise comparisons pooled (pairings: [{address: "a" the
+    first side's name closer, "b" the other's, "tie"}]; group: {address: its group}, pair_groups'): per
+    group, the functions in which the first side was closer less those in which the other was, summed
+    over the pairings. A function outside every group is a group of its own; a group with ties alone is
+    not in it, one whose closer names cancel has 0."""
     net = collections.Counter()
-    for a, v in pairs.items():
-        if v in ("a", "b"):
-            net[group.get(a, ("alone", a))] += 1 if v == "a" else -1
+    for pairs in pairings:
+        for a, v in pairs.items():
+            if v in ("a", "b"):
+                net[group.get(a, ("alone", a))] += 1 if v == "a" else -1
+    return net
+
+
+def net_sign(net):
+    """(won, lost, even, p) of group nets (group_nets'): the groups the first side won, those it lost,
+    the even ones, and the sign test over the first two."""
     won = sum(1 for v in net.values() if v > 0)
     lost = sum(1 for v in net.values() if v < 0)
     return won, lost, sum(1 for v in net.values() if v == 0), sign_test(won, lost)
@@ -2744,7 +2772,7 @@ def grounded_line(label, verdicts, of, sentences=True):
 
 
 def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None, grounded=None, sources=(),
-                sentences=True, jobs=1):
+                sentences=True, jobs=1, cache=None):
     """The image's proposals (names.tsv; upto_pass: as they were after that pass) against true names
     (dread.naming.function_truth): prints a line a function into BUILD/pilot/IMAGE/names-score.tsv
     (names-score-passN.tsv) and the totals: the words (exact, the same, shared, overlap, and style:
@@ -2752,7 +2780,8 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
     the true name as well (judge_names); grounded, a provider: its verdicts against each function's
     source (dread.namejudge: the truth ELF's debug information, the files below sources too), right,
     partly or wrong whatever the style, with the sentence judged apart (sentences; else the names
-    alone; jobs: its questions asked at a time). Proposals with a confidence (--samples) get a line
+    alone; jobs: its questions asked at a time; cache: a dread.llm.AnswerCache its answers are taken from
+    and kept in). Proposals with a confidence (--samples) get a line
     per confidence (the calibration: how often names so sure are right); proposals with an ablation
     (--ablate) a line per class: the name depends on the names shown or not, and, where the question
     showed none, the votes' own noise."""
@@ -2767,7 +2796,8 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
         src = grounded_sources(truth_path, sources, out)
         mine = {r["address"]: (r["proposed"], rows[r["address"]]["what"]) for r in scored if r["address"] in src}
         with_source = len(mine)
-        found = namejudge.judge(grounded, [("this", mine)], src, sentence=sentences, out=out, jobs=jobs)["this"]
+        found = namejudge.judge(grounded, [("this", mine)], src, sentence=sentences, out=out, jobs=jobs,
+                                cache=cache)["this"]
     suffix = "-pass%d" % upto_pass if upto_pass is not None else ""
     path = os.path.join(target.build, "pilot", image.name, "names-score%s.tsv" % suffix)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2809,7 +2839,7 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
             pc("judged_different", t["judged"])))
     if grounded is not None:
         out("dread pilot --score: " + grounded_line("against the source, judged by %s" % grounded.label(), found,
-                                                     with_source, sentences) + spent_text(grounded))
+                                                     with_source, sentences) + spent_text(grounded, cache))
 
     def line(label, part):
         b = breakdown(part, verdicts)
@@ -2844,7 +2874,7 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
 
 
 def compare_names(target, image, truth_path, against, judge, out=print, upto_pass=None, grounded=None, sources=(),
-                  sentences=True, jobs=1):
+                  sentences=True, jobs=1, cache=None):
     """This image's proposals (names.tsv; upto_pass: as they were after that pass) against another
     run's (against, a names.tsv of the same image), function by function where the two proposals
     differ (case aside): with judge, judged pairwise (judge_pairs: which of the two is closer to the
@@ -2852,7 +2882,9 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
     both runs' questions of a batch sharing its cached sources), the one with the better verdict
     closer (the same verdict a tie; functions without a source left out). Wins, losses and ties with
     the sign test's p (sign_test), a line a function into BUILD/pilot/IMAGE/names-pairwise.tsv
-    (names-pairwise-passN.tsv). names-score.tsv stays as the last --score wrote it."""
+    (names-pairwise-passN.tsv). names-score.tsv stays as the last --score wrote it. cache: a
+    dread.llm.AnswerCache the grounded judge's answers are taken from and kept in. One run against one
+    shows a direction, no more: two runs of one setting differ as much (compare_runs for settings)."""
     from dread import naming
     rows = last_rows(read_name_rows(names_path(target, image), upto_pass))
     other = last_rows(read_name_rows(against))
@@ -2867,7 +2899,7 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
         items = [it for it in items if it[0] in src]
         runs = [(label, {a: (names[a]["proposed"], names[a]["what"]) for a, _, _, _ in items})
                 for label, names in (("this", rows), ("other", other))]
-        found = namejudge.judge(grounded, runs, src, sentence=sentences, out=out, jobs=jobs)
+        found = namejudge.judge(grounded, runs, src, sentence=sentences, out=out, jobs=jobs, cache=cache)
         pairs = {}
         for a, _, _, _ in items:
             if a in found["this"] and a in found["other"]:
@@ -2901,7 +2933,7 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
     out("dread pilot --score --against %s: %d of %d proposals with a true name differ%s; judged %s, %d: this run's "
         "closer %d, the other's closer %d, ties %d (sign test p = %.3g; %s)%s" % (
             against, len(items), len(both), " and have a source" if found else "", how, len(pairs), wins, losses,
-            ties, t["p"], path, spent_text(judge)))
+            ties, t["p"], path, spent_text(judge, cache if found else None)))
     if by is not None:
         out("dread pilot --score --against: by %s, this run's closer in %d, the other's in %d, even in %d (sign test "
             "p = %.3g; the test to trust between two runs: a run's names hang together within a group)" % (
@@ -2913,15 +2945,256 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
     return t
 
 
-def spent_text(provider):
+REPLICATE_SPLITS = 5000     # splits of the runs a permutation test over runs takes at most: all of them up to this
+                            # many (252 for five runs a side, 924 for six), else this many drawn with a fixed seed
+
+
+def judge_cache_path(target, image):
+    """Where dread pilot keeps the grounded judge's answers by their question (dread.llm.AnswerCache)."""
+    return os.path.join(target.build, "pilot", image.name, "grounded-answers.jsonl")
+
+
+def run_splits(n, k, limit=REPLICATE_SPLITS, seed=0):
+    """(splits, all of them): the first sets of the splits of n runs into k and n - k (sorted tuples of
+    indices), the observed one, range(k), first; every one of the C(n, k) when there are at most limit,
+    else the observed one and limit - 1 drawn at random from a generator with a fixed seed (the same
+    draws each time; a draw may repeat)."""
+    import itertools
+    import math
+    import random
+    if math.comb(n, k) <= limit:
+        return list(itertools.combinations(range(n), k)), True
+    draw = random.Random(seed)
+    return [tuple(range(k))] + [tuple(sorted(draw.sample(range(n), k))) for _ in range(limit - 1)], False
+
+
+def pairing(first, second, value_first, value_second, functions):
+    """{address: "a", "b" or "tie"} of two runs judged against the source (first, second: their names.tsv
+    rows by address; value_*: {address: verdict value}): for each of functions whose two names differ
+    (case aside), "a" where the first run's verdict is the better, "b" where the second's is, "tie"
+    where they are the same (as compare_names counts with --grounded)."""
+    out = {}
+    for a in functions:
+        if first[a]["proposed"].lower() == second[a]["proposed"].lower():
+            continue
+        d = value_first[a] - value_second[a]
+        out[a] = "a" if d > 0 else "b" if d < 0 else "tie"
+    return out
+
+
+def compare_runs(target, image, truth_path, set_a, set_b, grounded, out=print, upto_pass=None, sources=(),
+                 sentences=True, jobs=1, cache=None):
+    """Two settings compared over replicate runs (--against RUN... --vs RUN...): set_a and set_b are the
+    names.tsv of runs of this image, each made anew with one setting (a1, a2, ... and b1, b2, ...). Each
+    run's proposals are judged against the functions' sources once (dread.namejudge, grounded: all runs
+    together, so that their questions of a batch share its cached sources; cache, a dread.llm.AnswerCache:
+    a run judged before in the same batches is answered from it), over the functions with a true name,
+    a source and a proposal in every run. Every comparison below is counted from those verdicts, so
+    adding a run costs one run's judging, not a judging per pairing:
+
+    - each run's mean (right 1, partly 0.5, wrong 0), the two sets' means and their difference, with a
+      permutation test over runs: the share of the splits of all the runs into sets of these sizes
+      (run_splits) whose difference is at least as large. The runs are the independent draws (a run's
+      names hang together within its groups and across them), so this p assumes nothing about functions
+      or groups; it can be no smaller than 2/C(n, k) for sets of one size (0.10 for three runs a side,
+      0.029 for four, 0.008 for five). This one decides;
+    - every run of set_a paired with every run of set_b (pairing(): the functions whose names differ, the
+      better verdict closer), counted by groups over all the pairings at once (group_nets: a group goes
+      to the set whose names were closer in it more often over every pairing), with the sign test over
+      groups and the permutation test over runs of the same count (groups won less groups lost), by
+      pair_groups' grouping (the groups.tsv of this image or beside the runs, else the source files) and
+      by the truth's source files beside it; also each group's majority of the pairings, and the sum by
+      functions (for information: functions are no independent draws, so no test). The group count
+      saturates as a statistic over runs (splits that mix the settings four to one reach as many
+      groups: on FreeRTOS with five runs a side its permutation p was 0.095 where the means' was 0.008),
+      so it says how broad a difference is and does not decide;
+    - the noise floor: every pair of runs of the same set counted alike, beside the pairings across.
+
+    Writes BUILD/pilot/IMAGE/names-replicates.tsv (a line a function: true name, group, each run's
+    proposal and verdict) and names-replicates-pairs.tsv (a line a pairing), -passN with upto_pass.
+    What it does not establish: whether the judge's verdicts are a person's (dread.namejudge), and
+    anything about a build the runs were not made on."""
+    from dread import groups as grouping
+    from dread import namejudge, naming
+    import statistics
+    labels = ["a%d" % (k + 1) for k in range(len(set_a))] + ["b%d" % (k + 1) for k in range(len(set_b))]
+    paths = dict(zip(labels, list(set_a) + list(set_b)))
+    rows = {label: last_rows(read_name_rows(paths[label], upto_pass)) for label in labels}
+    true = naming.function_truth(truth_path)
+    src = grounded_sources(truth_path, sources, out)
+    common = set(true) & set(src)
+    for label in labels:
+        common &= set(rows[label])
+    common = sorted(common)
+    t = {"runs": labels, "functions": len(common), "judged": 0}
+    if not common:
+        out("dread pilot --score --vs: no function with a true name and a source has a proposal in every run")
+        return t
+    found = namejudge.judge(grounded, [(label, {a: (rows[label][a]["proposed"], rows[label][a]["what"])
+                                                for a in common}) for label in labels],
+                            src, sentence=sentences, out=out, jobs=jobs, cache=cache)
+    judged = [a for a in common if all(a in found[label] for label in labels)]
+    t["judged"] = len(judged)
+    if not judged:
+        out("dread pilot --score --vs: no function got a verdict in every run" + spent_text(grounded, cache))
+        return t
+    value = {label: {a: namejudge.VALUE[found[label][a][0]] for a in judged} for label in labels}
+    means = {label: sum(value[label].values()) / len(judged) for label in labels}
+    pairs = {(x, y): pairing(rows[x], rows[y], value[x], value[y], judged)
+             for i, x in enumerate(labels) for y in labels[i + 1:]}
+    more = [os.path.join(os.path.dirname(os.path.abspath(paths[label])), "groups.tsv") for label in labels]
+    group, by = pair_groups(target, image, truth_path, judged, more)
+    groupings = [(by or "functions", group)]
+    if by == "groups":
+        try:
+            files = grouping.source_files(truth_path)
+        except Exception:                   # (no debug information)
+            files = {}
+        if any(a in files for a in judged):
+            groupings.append(("source files", files))
+    n_a = len(set_a)
+    a_labels, b_labels = labels[:n_a], labels[n_a:]
+    across = [(x, y) for x in a_labels for y in b_labels]
+    alike = [(x, y) for (x, y) in pairs if x[0] == y[0]]
+
+    def counted(key):
+        p = pairs[key]
+        wins, losses = sum(1 for v in p.values() if v == "a"), sum(1 for v in p.values() if v == "b")
+        won, lost, even, gp = group_sign(p, group)
+        return {"differ": len(p), "wins": wins, "losses": losses, "ties": len(p) - wins - losses,
+                "p": sign_test(wins, losses), "groups_won": won, "groups_lost": lost, "groups_even": even,
+                "groups_p": gp}
+    single = {key: counted(key) for key in pairs}
+    nets = {key: group_nets([pairs[key]], group) for key in pairs}
+    position = {label: k for k, label in enumerate(labels)}
+
+    def pooled(first):
+        """Group nets of every run of first against every other run, nets pooled (first's side "a")."""
+        net = collections.Counter()
+        for x in first:
+            for y in labels:
+                if y in first:
+                    continue
+                key, sign = ((x, y), 1) if position[x] < position[y] else ((y, x), -1)
+                for g, v in nets[key].items():
+                    net[g] += sign * v
+        return net
+
+    def balance(first):
+        won, lost, _, _ = net_sign(pooled(first))
+        return won - lost
+
+    def difference(first):
+        rest = [label for label in labels if label not in first]
+        return (sum(means[x] for x in first) / len(first) - sum(means[y] for y in rest) / len(rest)
+                if first and rest else 0.0)
+    splits, every = run_splits(len(labels), n_a)
+    seen_balance = balance(a_labels)
+    seen_difference = difference(a_labels)
+    balances = [balance([labels[k] for k in s]) for s in splits]
+    differences = [difference([labels[k] for k in s]) for s in splits]
+    p_balance = sum(1 for v in balances if abs(v) >= abs(seen_balance)) / len(splits)
+    p_difference = sum(1 for v in differences if abs(v) >= abs(seen_difference) - 1e-12) / len(splits)
+    least = (2 if 2 * n_a == len(labels) else 1) / len(splits) if every else None
+    won, lost, even, gp = net_sign(pooled(a_labels))
+    votes = collections.Counter()
+    for key in across:
+        for g, v in nets[key].items():
+            votes[g] += (v > 0) - (v < 0)
+    for g in pooled(a_labels):
+        votes.setdefault(g, 0)
+    m_won, m_lost, m_even, m_p = net_sign(votes)
+    f_wins = sum(single[key]["wins"] for key in across)
+    f_losses = sum(single[key]["losses"] for key in across)
+    f_ties = sum(single[key]["ties"] for key in across)
+
+    def spread(values):
+        return statistics.stdev(values) if len(values) > 1 else 0.0
+    mean_a = sum(means[x] for x in a_labels) / len(a_labels) if a_labels else 0.0
+    mean_b = sum(means[y] for y in b_labels) / len(b_labels) if b_labels else 0.0
+    t.update({"means": means, "mean_a": mean_a, "mean_b": mean_b, "sd_a": spread([means[x] for x in a_labels]),
+              "sd_b": spread([means[y] for y in b_labels]), "difference": seen_difference,
+              "p_runs_means": p_difference, "splits": len(splits), "every_split": every, "least_p": least,
+              "by": groupings[0][0], "groups_won": won, "groups_lost": lost, "groups_even": even, "groups_p": gp,
+              "p_runs_groups": p_balance, "majority": (m_won, m_lost, m_even, m_p),
+              "functions_pooled": (f_wins, f_losses, f_ties), "pairings": single,
+              "across": [single[key]["groups_won"] - single[key]["groups_lost"] for key in across],
+              "alike": [single[key]["groups_won"] - single[key]["groups_lost"] for key in alike]})
+    for name, other in groupings[1:]:
+        t["by_" + name.replace(" ", "_")] = net_sign(group_nets([pairs[key] for key in across], other))
+    suffix = "-pass%d" % upto_pass if upto_pass is not None else ""
+    folder = os.path.join(target.build, "pilot", image.name)
+    os.makedirs(folder, exist_ok=True)
+    table = os.path.join(folder, "names-replicates%s.tsv" % suffix)
+    with open(table, "w") as f:
+        f.write("address\ttrue\tgroup\t" + "\t".join("%s\t%s_grounded" % (x, x) for x in labels) + "\n")
+        for a in judged:
+            g = group.get(a, "")
+            f.write("0x%x\t%s\t%s" % (a, true[a], g if isinstance(g, str) else ""))
+            for label in labels:
+                verdict, why = found[label][a][:2]
+                f.write("\t%s\t%s" % (rows[label][a]["proposed"], ": ".join(filter(None, (verdict, " ".join(
+                    why.split()))))))
+            f.write("\n")
+    with open(os.path.join(folder, "names-replicates-pairs%s.tsv" % suffix), "w") as f:
+        f.write("first\tsecond\tkind\tdiffer\tfirst_closer\tsecond_closer\tties\tp\tgroups_first\tgroups_second\t"
+                "groups_even\tgroups_p\n")
+        for key in across + alike:
+            c = single[key]
+            f.write("%s\t%s\t%s\t%d\t%d\t%d\t%d\t%.4g\t%d\t%d\t%d\t%.4g\n" % (
+                key[0], key[1], "across" if key in across else "same", c["differ"], c["wins"], c["losses"],
+                c["ties"], c["p"], c["groups_won"], c["groups_lost"], c["groups_even"], c["groups_p"]))
+    out("dread pilot --score --against --vs: %d runs against %d (a1-a%d --against, b1-b%d --vs; %s), %d functions "
+        "with a true name and a source in every run, %d judged in every run against the source by %s%s" % (
+            len(a_labels), len(b_labels), len(a_labels), len(b_labels), table, len(common), len(judged),
+            grounded.label(), spent_text(grounded, cache)))
+    for label in labels:
+        count = collections.Counter(found[label][a][0] for a in judged)
+        told = [namejudge.VALUE[found[label][a][2]] for a in judged if found[label][a][2]]
+        out("dread pilot --score --vs: %s mean %.3f (right %d, partly %d, wrong %d%s): %s" % (
+            label, means[label], count["right"], count["partly"], count["wrong"],
+            "; the sentences %.3f" % (sum(told) / len(told)) if told else "", paths[label]))
+    floor = ("; the least p possible %.2g" % least) if least is not None else "; drawn, not all"
+    out("dread pilot --score --vs: the runs' means: a %.3f +- %.3f, b %.3f +- %.3f (standard deviations over the "
+        "runs), difference %+.3f; permutation test over runs p = %.3g (%d splits of the %d runs%s)" % (
+            mean_a, t["sd_a"], mean_b, t["sd_b"], seen_difference, p_difference, len(splits), len(labels), floor))
+    out("dread pilot --score --vs: every a run against every b run (%d pairings), by %s over all of them: a's names "
+        "closer in %d, b's in %d, even in %d (sign test p = %.3g; permutation test over runs p = %.3g); by the "
+        "majority of the pairings in each group %d, %d, %d (p = %.3g); by functions, summed over the pairings "
+        "(no test: they hang together) a %d, b %d, ties %d" % (
+            len(across), groupings[0][0], won, lost, even, gp, p_balance, m_won, m_lost, m_even, m_p, f_wins,
+            f_losses, f_ties))
+    for name, other in groupings[1:]:
+        w, l, e, p = t["by_" + name.replace(" ", "_")]
+        out("dread pilot --score --vs: by %s over all the pairings: a's names closer in %d, b's in %d, even in %d "
+            "(sign test p = %.3g)" % (name, w, l, e, p))
+
+    def summary(keys, signed):
+        if not keys:
+            return "none"
+        values = [single[key]["groups_won"] - single[key]["groups_lost"] for key in keys]
+        beyond = sum(1 for key in keys if single[key]["groups_p"] < 0.05)
+        mean = ("mean %+.1f" % (sum(values) / len(values)) if signed else
+                "mean size %.1f" % (sum(abs(v) for v in values) / len(values)))
+        return "%d, from %+d to %+d (%s), %d beyond chance (p < 0.05)" % (
+            len(keys), min(values), max(values), mean, beyond)
+    out("dread pilot --score --vs: single pairings by %s, the first run's groups won less lost: a against b %s; "
+        "within a setting (the noise floor) %s (names-replicates-pairs%s.tsv)" % (
+            groupings[0][0], summary(across, True), summary(alike, False), suffix))
+    return t
+
+
+def spent_text(provider, kept=None):
     """"; N answers, tokens in (of them read from a cache), out ($cost)" of what a provider object spent
-    (its own answers), for a score's line; empty for one that answered nothing."""
+    (its own answers), for a score's line, and "; N answers kept from before" where an answer cache
+    (kept: a dread.llm.AnswerCache) answered questions; empty for one that answered nothing."""
     sp = provider.spent() if provider is not None else {}
+    hits = "; %d answers kept from before (%s)" % (kept.hits, kept.path) if kept is not None and kept.hits else ""
     if not sp.get("answers"):
-        return ""
-    return "; %d answers, %d tokens in%s, %d out%s" % (
+        return hits
+    return "; %d answers, %d tokens in%s, %d out%s%s" % (
         sp["answers"], sp["input"], " (%d read from the cache)" % sp["cache_read"] if sp.get("cache_read") else "",
-        sp["output"], " ($%.2f)" % sp["cost"] if sp.get("cost") is not None else "")
+        sp["output"], " ($%.2f)" % sp["cost"] if sp.get("cost") is not None else "", hits)
 
 
 # ---- what the image is (--task device) ----
@@ -3245,10 +3518,18 @@ def main(argv=None):
                              "that differs then (names.tsv's hidden and depends)")
     parser.add_argument("--upto-pass", type=int, metavar="N",
                         help="with --score: the proposals as they were after pass N")
-    parser.add_argument("--against", metavar="NAMES_TSV",
-                        help="with --score and --judge: judge pairwise, where they differ, which of this build's "
-                             "proposals and another run's names.tsv is closer to the true name (instead of the "
-                             "absolute verdicts)")
+    parser.add_argument("--against", nargs="+", metavar="NAMES_TSV",
+                        help="with --score and --judge or --grounded: judge, where they differ, which of this "
+                             "build's proposals and another run's names.tsv is closer to the true name (instead "
+                             "of the absolute verdicts); with --vs, the runs of one setting (several names.tsv)")
+    parser.add_argument("--vs", nargs="+", metavar="NAMES_TSV",
+                        help="with --score, --grounded and --against: the runs of another setting. Each run is "
+                             "judged once against the source, every --against run paired with every --vs run, "
+                             "counted by groups over all the pairings, with a permutation test over runs and the "
+                             "pairs within a setting as the noise floor (names-replicates.tsv)")
+    parser.add_argument("--no-judge-cache", action="store_true",
+                        help="with --grounded: ask the judge anew instead of answering from its answers kept in "
+                             "BUILD/pilot/IMAGE/grounded-answers.jsonl, and keep none (to measure its own noise)")
     parser.add_argument("--task", choices=("write", "input", "name", "readable", "globals", "subsystems", "device",
                                            "review"),
                         default="write",
@@ -3287,6 +3568,17 @@ def main(argv=None):
     program = Program(target, image)
     flow = regflow.load(target, image, program)
     if args.task == "name" and args.score:
+        refused = None
+        if args.vs and not args.against:
+            refused = "--vs needs --against: the runs of one setting against those of the other"
+        elif args.vs and not args.grounded:
+            refused = "--vs needs --grounded: each run is judged once against the source, every pairing counted " \
+                      "from those verdicts"
+        elif args.against and len(args.against) > 1 and not args.vs:
+            refused = "several --against runs need --vs (the runs of the setting they are compared with)"
+        if refused:
+            print("dread pilot: " + refused, file=sys.stderr)
+            return 1
         judge = grounded = None
         try:
             judge = llm.load(args.judge) if args.judge else None
@@ -3294,16 +3586,23 @@ def main(argv=None):
         except llm.ProviderError as e:
             print("dread pilot: %s" % e, file=sys.stderr)
             return 1
+        cache = llm.AnswerCache(judge_cache_path(target, image)) if grounded is not None and \
+            not args.no_judge_cache else None
+        if args.vs:
+            return 0 if compare_runs(target, image, args.score, args.against, args.vs, grounded,
+                                     upto_pass=args.upto_pass, sources=args.source, sentences=not args.names_only,
+                                     jobs=args.jobs, cache=cache)["judged"] else 1
         if args.against:
             if judge is None and grounded is None:
                 print("dread pilot: --against needs --grounded or --judge (a provider that judges the pairs)",
                       file=sys.stderr)
                 return 1
-            return 0 if compare_names(target, image, args.score, args.against, judge, upto_pass=args.upto_pass,
+            return 0 if compare_names(target, image, args.score, args.against[0], judge, upto_pass=args.upto_pass,
                                       grounded=grounded, sources=args.source, sentences=not args.names_only,
-                                      jobs=args.jobs)["both"] else 1
+                                      jobs=args.jobs, cache=cache)["both"] else 1
         return 0 if score_names(target, image, args.score, judge=judge, upto_pass=args.upto_pass, grounded=grounded,
-                                sources=args.source, sentences=not args.names_only, jobs=args.jobs)["functions"] else 1
+                                sources=args.source, sentences=not args.names_only, jobs=args.jobs,
+                                cache=cache)["functions"] else 1
     if args.task == "name" and args.gate and args.samples < 2:
         print("dread pilot: --gate needs --samples 2 or more (one question's proposal has no confidence)",
               file=sys.stderr)

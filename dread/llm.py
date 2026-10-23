@@ -69,6 +69,10 @@ question with the same beginning reads it for a tenth of the price, the first wr
 more, Anthropic's list in 2026-10; price_cache_read and price_cache_write override, in US dollars per
 million tokens), the others join the parts into one text (content_text). The ledger's line then gets
 the tokens read from and written to the cache as two more columns.
+
+Apart from a provider's prompt cache, AnswerCache keeps whole answers by their question in a file: a
+caller that asks the same question again (a judge's verdicts on a run judged before) takes the kept
+answer and asks nothing. Only callers that pass one use it (dread pilot's grounded judge).
 """
 import json
 import os
@@ -249,6 +253,56 @@ def content_text(content):
     if isinstance(content, str):
         return content
     return "\n\n".join(part.get("text", "") for part in content or [])
+
+
+class AnswerCache:
+    """Answers kept by their question, in a file of JSON lines ({"key", "answer"}), so that a question
+    asked again is answered from the file and costs nothing: a judge's verdicts on a naming run that
+    another comparison judged before (dread pilot --grounded, since 2026-10-23). The key is a digest of
+    the provider's kind and model, the system part, the messages' texts (parts joined: content_text,
+    whether a part is marked to be cached or not) and the attempt (the n-th asking of the same question:
+    a question asked again because its answer missed something gets its own answer, replayed in the
+    same order). An answer is taken as it was, empty or unusable too; a provider's error is not kept.
+    A line the file cannot parse (a run stopped while writing) is skipped. Replaying a kept answer is
+    deterministic; a measurement of the provider's own noise asks without the cache. Threads may share
+    one (a lock)."""
+
+    def __init__(self, path):
+        import threading
+        self.path, self.lock, self.answers, self.hits = path, threading.Lock(), {}, 0
+        if path and os.path.exists(path):
+            with open(path) as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and isinstance(row.get("key"), str) and isinstance(row.get("answer"), str):
+                        self.answers[row["key"]] = row["answer"]
+
+    @staticmethod
+    def key(provider, system, messages, attempt=0):
+        import hashlib
+        text = json.dumps([provider.kind, provider.model, system,
+                           [[m.get("role"), content_text(m.get("content"))] for m in messages], attempt])
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def get(self, key):
+        """The kept answer to a question's key, or None (counted in hits when found)."""
+        with self.lock:
+            answer = self.answers.get(key)
+            if answer is not None:
+                self.hits += 1
+            return answer
+
+    def put(self, key, answer):
+        """Keep an answer: in memory and as a line of the file (made with its directory when needed)."""
+        with self.lock:
+            self.answers[key] = answer
+            if self.path:
+                os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+                with open(self.path, "a") as f:
+                    f.write(json.dumps({"key": key, "answer": answer}) + "\n")
 
 
 CACHE_READ, CACHE_WRITE = 0.1, 1.25     # Anthropic's prompt cache against its input price (its list, 2026-10)

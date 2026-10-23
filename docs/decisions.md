@@ -9,6 +9,80 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Two settings of the naming compared over replicate runs; the groups named first kept (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** One naming run against one cannot tell two settings apart: two FreeRTOS runs of one
+  setting differed by 24:40 and 37:21 functions in the grounded pairwise judge and by 8:12 and 14:5
+  groups (p 0.50 and 0.06), as much as runs of two settings did. The gain of the groups named first
+  (`--subsystems`, the default since 2026-10-22) in what the names say was left at 15:6 by groups (p
+  0.08): not established. How are two settings compared from now on, and do the groups named first give
+  better function names?
+- **Options.** (a) One run a side, counted by groups, as since 2026-10-22. (b) Replicate runs, every
+  pairing judged with `--against` (R x R pairings across the settings and R(R-1) within, a judging
+  each). (c) Replicate runs, each judged once against the source and every pairing counted from those
+  verdicts, decided at the level of runs. The plan said three runs a side.
+- **Choice.** (c) with five runs a side (`dread pilot --score TRUTH --grounded P --against RUN...
+  --vs RUN...`, pilot.compare_runs), the test fixed before the runs were made: a setting is better when
+  the permutation test over runs of the difference of the runs' means (the grounded verdicts, right 1,
+  partly 0.5, wrong 0, over the functions with a source) gives p < 0.05; beside it, every run of one
+  setting against every run of the other counted by groups over all the pairings (a sign test over
+  groups, and a permutation test over runs of the same count), and the pairs within a setting as the
+  noise floor. From now on settings are compared so: five runs a side (four at least), made side by
+  side from one commit, each on a fresh copy of the build; one run against one (`--against OTHER`)
+  shows where two runs differ, not which setting is better. The groups named first stay the default:
+  their gain is established.
+- **Why.** The runs are the independent draws of a setting: a run's names hang together within its
+  groups (a group's prefix and its reading go into all of its functions) and across them (the names its
+  questions show), so neither a run's functions nor its groups are independent draws; only another run
+  is. A test over runs needs enough of them: with R runs a side the permutation test's least p is
+  2/C(2R, R), 0.10 for three (the plan could not have reached 0.05 whatever the runs said), 0.029 for
+  four, 0.008 for five. Each run judged once instead of once per pairing: the same 54 batches of
+  sources for every run (the company each verdict sees is the same functions), 10 judgings instead of
+  45 (25 pairings across, 20 within: about $40 at a pairing's price), a run's verdicts the same in all of
+  its pairings (the judge's own noise, 8-12 % of the verdicts on a second judging, enters each run
+  once), and the answers kept by question (grounded-answers.jsonl): another comparison of the same runs,
+  a split of them or a run added later costs nothing for the runs judged before. The difference of the
+  means decides because it is the grounded judge's own measure and the permutation over runs assumes
+  nothing about how functions hang together; it also proved the sharper statistic (below). The count by
+  groups says whether a difference is broad or carried by a few groups and is comparable with the single
+  pairings before; its sign test still takes a run's groups for independent draws, so it describes.
+- **Measured** on FreeRTOS GCC -Os (mps2, 366 functions made FUN_address, 332 with a source), Haiku 5.5
+  naming with the defaults and `--no-device` (the build reads as unknown), against `--no-subsystems`,
+  five runs each, made side by side at 7ea8fa2 (two of each setting at a time, the last pair alone);
+  Sonnet 5.5 judging, sentences apart. The runs'
+  means 0.795 +- 0.012 (0.780-0.810) against 0.735 +- 0.022 (0.712-0.764), +0.060, permutation p 0.008:
+  the real split above every other but its mirror (the next, four runs of one setting and one of the
+  other, +0.053); right 66 % against 58 %, wrong 7 % against 11 %; the sentences 0.650 against 0.627 (not
+  tested). By groups over the 25 pairings 22:6 (sign test p 0.004), by source files 28:9 (p 0.003), by
+  functions 1,729:820, ties 3,590. The group count over all pairings saturates as a statistic over runs:
+  splits of four runs of one setting and one of the other reach +6 to +18 groups against the real
+  split's +16 (permutation p 0.095), so it cannot decide with five runs a side where the means can. The
+  noise floor: all 25 pairings across favoured the groups by groups (+4 to +20, mean +10.3), 14 of them
+  beyond chance; the 20 within a setting ran from -9 to +9 (mean size 4.0), one beyond chance; so one run
+  against one establishes this gain about half of the time, and the re-measure of 2026-10-22 (15:6, p
+  0.08) was such a draw. Two runs against three of one setting, counted by groups over their pairings:
+  none of the 20 splits beyond chance (smallest p 0.06); across the settings 160 of 200 (median p 0.013).
+  Two runs of one setting name 43 % of the functions alike, with the groups as without; runs of the two
+  settings 26 %. The gain lies in the demo's test code (22 of 28 groups gain: the demo's main group 0.713
+  against 0.537, the queue-set test 0.825 against 0.583, the message and stream buffer demos 0.778
+  against 0.661); the kernel's own files gain little or lose a little (tasks.c 0.833 against 0.823,
+  queue.c 0.778 against 0.837, stream_buffer.c 0.804 against 0.854), as does the timer demo (0.637
+  against 0.713), not traced. Spent: naming $10.34 (with the groups $1.10-1.13 a run, without $0.94-0.96), judging $4.46
+  (541 answers; 2.5 of their 3.3 million tokens in read from the prompt cache); the comparison asked again
+  asked nothing and wrote the same bytes.
+- **Not established.** The gain on firmware the model does not know (FreeRTOS's assertion texts name its
+  files, and the gain lies where the groups' names say which demo a function belongs to), or with another
+  model naming; the judge against a person (dread.namejudge); after the first pass alone (not judged);
+  why queue.c and stream_buffer.c lose a little. The permutation test takes the runs for exchangeable
+  draws: they were made side by side from one commit within 75 minutes, alternating the settings.
+- **Undo.** Settings: compare one run against one with `--against OTHER`, as before (not recommended:
+  the noise floor above). The groups: `--no-subsystems`, or NAME_SUBSYSTEMS = False.
+- **Status.** In the code (dread/pilot.py compare_runs, run_splits, pairing, group_nets, net_sign,
+  judge_cache_path; dread/namejudge.py judge's cache; dread/llm.py AnswerCache; docs/formats.md). The
+  ten runs and the judge's answers are not kept in the repository.
+
 ## What the system run takes for a wait: registers and memory as at the anchor; one of many culprits (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
@@ -774,7 +848,10 @@ docs/todo.md, Compiler diversity).
   the earlier decisions hold (votes 35:7, the gate 27:8, the groups 22:3 and 20:3), and one does not:
   the grounded judge's gain from the groups, 15:6 by groups (p 0.08).
 - **Undo.** Read the line over functions, which is still printed.
-- **Status.** In the code (dread/pilot.py: pair_groups, group_sign, compare_names).
+- **Status.** In the code (dread/pilot.py: pair_groups, group_sign, compare_names). Between two settings
+  replaced on 2026-10-23 by replicate runs, decided over runs (the entry "Two settings of the naming
+  compared over replicate runs"): one run against one shows where two runs differ, not which setting is
+  better.
 
 ## What the image is, in front of every naming question (2026-10-22)
 
@@ -1019,7 +1096,10 @@ docs/todo.md, Compiler diversity).
 - **Status.** Done (dread/pilot.py name_subsystems, subsystem_question, Namer's SUBSYSTEM_LINE,
   score_subsystems; docs/formats.md). Measured on one build the model knows, whose assertion texts
   name the source files: not confirmed on firmware it does not know (next: the private real-life
-  test, docs/todo.md Function names).
+  test, docs/todo.md Function names). Its gain in what the names say, left open by the grounded judge
+  on 2026-10-22 (15:6 by groups, p 0.08), was established over five replicate runs a side on 2026-10-23
+  (the entry "Two settings of the naming compared over replicate runs"): the runs' mean verdict 0.795
+  against 0.735, permutation test over runs p 0.008.
 
 ## Subsystems: functions grouped by what they share and where they lie, not by calls (2026-10-22)
 
