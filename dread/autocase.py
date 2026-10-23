@@ -694,7 +694,8 @@ class Generator:
         what the loader puts into RAM, and what dread.regflow found in the image (a hung callee's
         stub logs what it reads, a function's float arguments get values): its result, not its
         version, so that a new version that finds the same in an image keeps that image's cases (a
-        version that changed only what ARM's FPU pushes mean regenerated every image's), and the
+        version that changed only what ARM's FPU pushes mean regenerated every image's), of the result
+        what cases read (RegFlow.case_facts: not the registers written on every path), and the
         functions whose stubs answer registers beyond a C result (more), where there are any."""
         if self._environment is None:
             h = hashlib.sha1(bytes(self.payload))
@@ -702,7 +703,8 @@ class Generator:
                 h.update(repr((c.kind, c.run, c.size, c.stored)).encode())
                 h.update(bytes(getattr(c, "data", None) or b""))
             flow = self.flow()
-            found = json.dumps(flow.to_json(), sort_keys=True).encode() if flow else b"none"
+            # (without what no case reads: the registers written on every path, regflow 25)
+            found = json.dumps(flow.case_facts(), sort_keys=True).encode() if flow else b"none"
             h.update(b"regflow " + hashlib.sha1(found).digest())
             if self.stall_part:             # (only where it applies: the other images keep their cases)
                 h.update(b"stall %d" % self.stall_part)

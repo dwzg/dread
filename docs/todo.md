@@ -1363,7 +1363,7 @@ model).
   FreeRTOS builds index from 0, and every static array's base matched its symbol). Test: a gizmo
   function reading `table[id - 1].b` of a structure whose field `a` at offset 0 nothing reads, on
   every gizmo build.
-- [ ] **No argument from a result register the callee always writes.** trim_calls keeps a used
+- [x] **No argument from a result register the callee always writes.** trim_calls keeps a used
   call's result registers as arguments, because a callee that does not write them hands back what
   the caller passed (newlib's lock functions). A callee that writes them on every path gets a
   phantom argument, and the caller's own parameter then looks read, so functions that take nothing
@@ -1375,6 +1375,60 @@ model).
   `u32 uart_getc(u32 r0)`. A second way to a phantom parameter, not this rule: gizmo a32
   print_status(void) prints with four parameters because the push that makes room for its buffer
   stores r0-r3 into it.
+  Done 2026-10-23 (dread.regflow overwritten; dread.tidy trim_calls, params, selects; dread.callconv;
+  docs/decisions.md). regflow finds for every function the registers it overwrites: written on every
+  path to a return (its callees' and tail callees' such writes included; a pop, and a reload regflow
+  pairs with its save around a call, put the caller's value back; a call's clobber list, MSP430's,
+  writes nothing; a write under a condition counts where the condition holds) less those whose value
+  from the caller may reach what the function reads, through a callee that hands it back unwritten on
+  some path. The must-write set alone was not enough: a function that adds 1 to what such a callee
+  hands back writes r0 on every path from its caller's r0, which regflow's reads, ending r0 at the
+  call, do not see (tests/test_regflow.py). A call whose value is read keeps an argument in a result
+  register only where the callee does not overwrite it, and trim_calls runs again after the clean-up,
+  so that an argument kept for a value that then only fed another call's dropped argument goes too
+  (GCC -Os: vPortEnterCritical(r0) in front of vPortExitCritical). Two more ways to the same symptom
+  on the way: params took an if/else whose arms both write a register for one statement that writes it
+  on some path (it reads the entry's value in flat_view's flow now), and selects made an IT block's
+  last two instructions a select before merge_ifs could merge the three, reading r0 where the flow saw
+  the entry's r0 reach it: uart_getc is `u32 uart_getc(void)` on all four gizmo builds. dread callconv
+  checks the set by measuring ("returns from, regflow: own": a function whose result follows its
+  caller's value of the register): none of the 330 functions with cases that regflow says overwrite r0
+  or a0 on the four FreeRTOS builds, none on gizmo. Counted by a script (not in the repository) on the
+  C after the stages of the lifted table's functions: a phantom argument is one past what the callee
+  reads in a register it overwrites, a phantom parameter one of the readable C's parameters named
+  after its register (placeholders aside) that regflow says the function does not read, unless a
+  result it may hand back. Main at 3aaf4db -> this, calls with a phantom argument: gizmo a32 8 -> 0,
+  m3 8 -> 0, m4 9 -> 0, rv32 7 -> 0; FreeRTOS GCC -Os 133 -> 4, clang -O2 144 -> 0, RISC-V GCC -Os 73
+  -> 0, GCC -O0 134 -> 6 (the rest are calls not trimmed at all: one with an argument that loads,
+  vApplicationStackOverflowHook(pxCurrentTCB, ...), and sprintf, one of whose calls passes stack
+  arguments). Functions with a phantom parameter: gizmo a32 5 -> 3, m3 6 -> 3, m4 6 -> 3, rv32 0; GCC
+  -Os 42 -> 33, clang -O2 63 -> 58, RISC-V GCC -Os 83 -> 79, GCC -O0 17 -> 2: what is left comes from
+  elsewhere (the next item). Arguments kept in a result register for a callee that may hand it back:
+  GCC -Os 125 -> 61, GCC -O0 116 -> 52, RISC-V 24 -> 7, clang -O2 14 -> 14 (prvUnlockQueue's r0
+  through vPortEnterCritical and vPortExitCritical to its own result, which the lift check compares).
+  The gate accepts the same functions as before on the eight builds (gizmo a32 35, m3 36, m4 44, rv32
+  31; FreeRTOS GCC -Os 315, clang -O2 275, RISC-V GCC -Os 252, GCC -O0 354; main on the same copies
+  the same); the lifted C is byte for byte as before (gizmo a32, m3, rv32, GCC -Os compared). Time:
+  making every lifted function's readable C in one process on GCC -Os 37.5 s before, 37.8 s after; the
+  check's wall time with cached cases before -> after 307 -> 337 s, 75 -> 54 s, 25 -> 20 s, 120 -> 85
+  s on the four FreeRTOS builds (the machine shared: noise), regflow's analysis 0.1 to 0.2 s more a
+  build (its result is cached).
+- [ ] **No parameters from pushes, system calls and calls that keep every argument.** What still makes
+  a parameter of a register the function does not read (counted as for the item above, 2026-10-23):
+  (1) a push that makes room for locals stores the caller's r0-r3 into the region whose address goes
+  to callees, `stack20.f_0 = r1; ...` (gizmo a32 print_status(void) and main with four parameters;
+  FreeRTOS GCC -Os 54 of the 60 phantom parameters, the tasks that push {r0, r1, r2, ...}); (2) calls
+  of a variadic function or of one that calls one keep all their arguments (readable.variadic_reach:
+  vAssertCalled hands its line on to printf), and each caller passes on its own entry registers in the
+  arguments past its setup: clang -O2 104 of 106, RISC-V GCC -Os 389 of 405 (a2-a7 to vAssertCalled);
+  (3) RISC-V's ecall binds a0-a7 in its asm (vTaskDelay: a1-a7; 14 on that build); (4) calls through a
+  pointer pass all argument registers (newlib's __sflush_r and _fwalk_sglue: r3); (5) a value a callee
+  hands back that goes round a loop into the same call (prvIdleTask's
+  prvCheckTasksWaitingTermination(r0)). For (1): print a push's store of a register the function does
+  not read (regflow: no use) so that it reads no parameter (the slots hold what the caller left, which
+  no correct program reads before writing them; the gate decides), for (2) and (3) pass a variable of
+  no value where the caller's register only flows through (the callee's save area reads it, but
+  nothing the function computed), each keeping what the comparisons see.
 - [ ] **Flags as comparisons, the rest.** After the IT-block work, flags still print as u64 sums with
   carry and zero variables where one compare or subtraction is read by two conditions (borrow, then
   zero), where an add's carry is tested, where a compiler dispatches by successive subtractions

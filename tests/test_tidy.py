@@ -110,7 +110,8 @@ def test_calls_pass_what_their_callees_read():
     """With what regflow measured (a context): g reads r0 and r1, so its call passes two arguments
     and its declaration follows; f's own parameters are its registers, the unread ones gone. A call
     whose value is read keeps its first argument even when the callee reads none: an empty callee
-    leaves it as its result (newlib's lock functions)."""
+    leaves it as its result (newlib's lock functions); not where the callee overwrites r0 (regflow's
+    overwritten: written on every path, the caller's never read)."""
     from dread import readable
     ctx = readable.Context()
     ctx.arg_regs = ["r0", "r1", "r2", "r3"]
@@ -123,6 +124,11 @@ def test_calls_pass_what_their_callees_read():
     ctx.reads = {"g": set(), "f": {"r0"}}
     out = readable.transform("f", SNIPPET, context=ctx)
     assert "r0 = g(r0);" in out and "extern u32 g(u32);" in out, out
+    ctx = readable.Context()
+    ctx.arg_regs = ["r0", "r1", "r2", "r3"]
+    ctx.reads, ctx.overwritten = {"g": set(), "f": {"r0"}}, {"g": {"r0"}}
+    out = readable.transform("f", SNIPPET, context=ctx)
+    assert "r0 = g();" in out and "extern u32 g(void);" in out, out
 
 
 def test_without_z3_no_condition_is_rewritten(monkeypatch):
@@ -422,6 +428,42 @@ def test_a_parameter_whose_value_at_the_entry_nothing_reads_is_none():
     assert "u32 f(u32 r0, u32 a1, u32 r2)" in out, out
     assert "u32 r1;" in out and "u32 r3;" in out and "r1 = r0 + r2;" in out, out
     assert not tidy.params(fn)
+
+
+def test_a_parameter_both_arms_of_an_if_write_before_a_read_is_none():
+    """params reads the entry's value in the flow of flat_view: an if/else whose arms both write r0 ends
+    it, so r0 is no parameter (in a graph of the body's statements the if was one node that wrote r0
+    on some path only)."""
+    text = ("u32 f(u32 a0, u32 a1)\n{\n"
+            "    u32 r0 = a0, r1 = a1;\n"
+            "    if (r1 != 0u) { r0 = 1u; } else { r0 = 2u; }  /* 0: ite ne */\n"
+            "    return r0;  /* 6: bx lr */\n}\n")
+    fn = cparse.parse("typedef unsigned int u32;\n" + text).function("f")
+    assert tidy.params(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "u32 f(u32 a0, u32 r1)" in out and "u32 r0;" in out, out
+
+
+def test_a_select_waits_for_the_merge_of_an_it_block_that_writes_its_variable():
+    """ittte mi; ldrmi r0, [r3]; uxtbmi r0, r0; movpl r0, #-1 (gizmo's uart_getc): the pair of the last
+    two is no select while the block before it on the same condition writes r0, which the select would
+    read; merge_ifs makes the three one if/else, both of whose arms write r0, and the function takes no
+    parameter. Without that block the pair is a select as before."""
+    text = ("u32 f(u32 a0)\n{\n"
+            "    u32 r0 = a0, n;\n"
+            "    n = (*(volatile u32 *)0x40011004u >> 1) & 1u;  /* 0: lsls r2, r2, #0x1e */\n"
+            "    if (n) { r0 = *(volatile u32 *)0x40011000u; }  /* 2: ldrmi r0, [r3] */\n"
+            "    if (n) { r0 = (u32)(u8)r0; }  /* 4: uxtbmi r0, r0 */\n"
+            "    if (!n) { r0 = 0xffffffffu; }  /* 6: movpl.w r0, #-1 */\n"
+            "    return r0;  /* a: bx lr */\n}\n")
+    fn = cparse.parse("typedef unsigned int u32;\ntypedef unsigned char u8;\n" + text).function("f")
+    assert not tidy.selects(fn)
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "u32 f(void)" in out and "?" not in out, out
+    alone = cparse.parse("typedef unsigned int u32;\ntypedef unsigned char u8;\n" + text.replace(
+        "    if (n) { r0 = *(volatile u32 *)0x40011000u; }  /* 2: ldrmi r0, [r3] */\n", "")).function("f")
+    assert tidy.selects(alone) and "r0 = n ? (u32)(u8)r0 : 0xffffffffu;" in cparse.unparse(alone, notes=False)
 
 
 def test_plain_declarations_of_one_type_share_a_line_in_the_order_of_their_names():

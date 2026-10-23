@@ -108,12 +108,15 @@ register a caller keeps, an access count) shows there.
 A compiler that sees the callee may keep a value in a scratch register across a call when the callee
 does not touch it, and hand-written assembly returns values anywhere. `dread regflow` finds, for
 every function, the registers its callers read after it returns; the tests compare them, and C that
-cannot keep them is refused before anyone writes it.
+cannot keep them is refused before anyone writes it. It also finds the registers a function reads at
+its entry and those it overwrites (written on every path to its return, what its caller left there
+never read first): readable C passes a callee only the arguments it can read or hand back.
 
 What regflow reads from the code is checked by measuring: `dread callconv` runs each function's
 cases on the original once more for every register with another value in it at the entry, and lists
 where what the function reads and changes disagrees with regflow (an input regflow missed, a
-register of its caller it reads, one it does not restore). The benchmark runs it on every build.
+register of its caller it reads, one it does not restore, a result that follows a register regflow
+says it overwrites). The benchmark runs it on every build.
 
 ## 8. The whole firmware: `dread sysrun`
 

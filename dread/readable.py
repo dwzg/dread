@@ -53,10 +53,13 @@ STAGES = [("tidy", tidy.tidy), ("structure", structure.structure)]     # (name, 
 
 class Context:
     """What the stages may know beyond the lifted file: the target's argument registers (in order) and
-    the registers each function reads at its entry (dread.regflow). Empty without a target."""
+    result registers, the registers each function reads at its entry and those whose value at its
+    return is its own (dread.regflow reads and overwritten). Empty without a target."""
 
     def __init__(self, target=None, image=None, program=None, flow=None):
         self.arg_regs, self.reads, self.preserved, self.variadic = [], {}, {}, set()
+        self.results = []               # the registers a result comes back in (the target's [abi])
+        self.overwritten = {}           # function -> what it writes on every path, its caller's never read
         self.unread = set()             # functions whose result no caller reads (dread.shapes analyse)
         self.names = {}                 # the image's readable_names table (dread.naming): functions
         self.globals = {}               # and memory at fixed addresses
@@ -78,8 +81,10 @@ class Context:
         program = program or Program(target, image)
         flow = flow or regflow.load(target, image, program)
         self.arg_regs = list(target.abi.arg_regs)
+        self.results = list(target.abi.result)
         self.reads = {fn.name: set(flow.read_regs(fn.name)) for fn in program.functions}
         self.preserved = {fn.name: set(flow.preserved_regs(fn.name)) for fn in program.functions}
+        self.overwritten = {fn.name: set(flow.overwritten_regs(fn.name)) for fn in program.functions}
         result = target.abi.result[0] if target.abi.result else None
         self.unread = {fn.name for fn in program.functions if result not in flow.kept_regs(fn.name)}
         self.variadic = variadic_reach(program)
@@ -114,6 +119,16 @@ class Context:
         if name not in self.reads or self.unknown(name):
             return None
         return max((i + 1 for i, r in enumerate(self.arg_regs) if r in self.reads[name]), default=0)
+
+    def handed_back(self, name, wide=False):
+        """The argument registers in which a call of name may hand back what its caller passed: those of
+        its result registers (the first, both for a 64-bit result) that are not its own at its return
+        (regflow overwritten; all of them where that is not known). Without as many result registers of
+        the target's (a Context made by hand), the first one or two argument registers."""
+        count = 2 if wide else 1
+        results = (self.results if len(self.results) >= count else self.arg_regs)[:count]
+        own = self.overwritten.get(name, set())
+        return [r for r in results if r in self.arg_regs and r not in own]
 
 
 def variadic_reach(program):

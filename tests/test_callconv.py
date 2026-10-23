@@ -76,8 +76,9 @@ class Claims:
 @needs_as
 def test_each_kind_of_disagreement_is_found(tmp_path):
     """A function that reads its caller's r4 and one that leaves r5 changed are found against the
-    real analysis; against answers made wrong (plain reads nothing; clobbers_r3 leaves r3 alone) the
-    other two kinds are found; plain agrees with the real analysis."""
+    real analysis; against answers made wrong (plain reads nothing; clobbers_r3 leaves r3 alone; plain
+    overwrites r0, its own value at the return whatever its caller passed) the other three kinds are
+    found; plain agrees with the real analysis."""
     from test_bench import TARGET
     (tmp_path / "t.s").write_text(ODD_S)
     obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
@@ -103,6 +104,9 @@ def test_each_kind_of_disagreement_is_found(tmp_path):
     run["preserved"] = dict(run["preserved"], clobbers_r3={"r3"})
     assert callconv.measure("plain")[1]["found"] == {"reads, regflow does not": ["r0"]}
     assert callconv.measure("clobbers_r3")[1]["found"] == {"changes, regflow: leaves it": ["r3"]}
+    run["regflow"] = run["regflow"].real
+    run["overwritten"] = dict(run["overwritten"], plain={"r0"})     # (plain's result is r0 + 1)
+    assert callconv.measure("plain")[1]["found"] == {"returns from, regflow: own": ["r0"]}
     assert callconv.variadic_area(prog, prog.by_name["vargs"]) == {"r1", "r2", "r3"}
     assert callconv.variadic_area(prog, prog.by_name["plain"]) == set()
 

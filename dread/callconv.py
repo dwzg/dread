@@ -18,6 +18,9 @@ Listed per function where the measurement and dread.regflow disagree:
                                  regflow does not follow those (the lifter hands them in, dread.lift)
   changes X, regflow: leaves it  a scratch register regflow says the function leaves alone
   changes callee-saved X         not restored at the return: not the standard convention
+  returns from X, regflow: own   the result register, whose value at the return changes with its value
+                                 at the entry where regflow says the function overwrites it (its own
+                                 value on every path: dread readable then passes no argument there)
 
 regflow's reads that no case shows are counted, not listed: a path the cases do not take, or the
 analysis' caution. A read of an unnamed argument kept in a variadic save area is listed apart
@@ -49,7 +52,8 @@ from dread.util.polite import die_with_parent, polite, resident, workers
 MAX_CASES = 12              # cases a function at most: a register an input reads shows in most of them
 VARY = 0x5A5A5A5A           # xor'ed into a register's entry value for its second run
 BASE = 0x3C000000           # entry values of the registers a case does not set: BASE + 0x101 * (index + 1)
-KINDS = ("reads, regflow does not", "reads its caller's", "changes, regflow: leaves it", "changes callee-saved")
+KINDS = ("reads, regflow does not", "reads its caller's", "changes, regflow: leaves it", "changes callee-saved",
+         "returns from, regflow: own")
 
 RUN = {}                    # what the workers need; filled before they are forked
 
@@ -93,8 +97,9 @@ def measure(name):
         return name, None
     regs, arg_regs, saved = RUN["regs"], RUN["arg_regs"], set(RUN["saved"])
     said = set(flow.read_regs(name)) if flow else set()
+    own = RUN.get("overwritten", {}).get(name, set())
     area = variadic_area(prog, fn)
-    reads, changes, ran, touched = set(), set(), 0, 0
+    reads, changes, handed, ran, touched = set(), set(), set(), 0, 0
     for case in cases:
         args = list(case[3])
         base = {r: BASE + 0x101 * (i + 1) for i, r in enumerate(regs)
@@ -104,7 +109,7 @@ def measure(name):
             continue                        # the case does not run on its own: nothing to compare with
         entry = dict(base, **{r: args[arg_regs.index(r)] & 0xFFFFFFFF for r in regs
                               if r in arg_regs and arg_regs.index(r) < len(args)})
-        case_reads, case_changes = set(), set()
+        case_reads, case_changes, case_handed = set(), set(), set()
         for r in regs:
             if r in saved and after.get(r) != entry[r]:
                 case_changes.add(r)
@@ -122,12 +127,15 @@ def measure(name):
                 case_reads.add(r)
                 continue
             differ = {d for d in first.differences(second) if d != ("saved", r)}
+            if "return" in differ and r == RUN["result"] and r in own:
+                case_handed.add(r)          # (its own on every path, regflow says: the return should not follow)
             if "return" in differ and r == RUN["result"] and first.ret & 0xFFFFFFFF == entry[r] and \
                     second.ret & 0xFFFFFFFF == entry[r] ^ VARY:
                 differ.discard("return")    # left as its caller had it (no result): passed through, not read
             if differ:
                 case_reads.add(r)
-        if case_changes or case_reads - said:   # a finding: unless the input made code touch a saved slot
+        # a finding: unless the input made code touch a saved slot
+        if case_changes or case_reads - said or case_handed:
             from dread import runner
             if runner.saves_touched(name, case[1], args, case[4], case[2], (), {}):
                 touched += 1
@@ -135,6 +143,7 @@ def measure(name):
         ran += 1
         reads |= case_reads
         changes |= case_changes
+        handed |= case_handed
     if not ran:
         return name, None
     out = {"cases": ran, "touched": touched,
@@ -150,6 +159,7 @@ def measure(name):
             found["reads, regflow does not"].append(r)
     for r in out["changes"]:
         found["changes callee-saved" if r in saved else "changes, regflow: leaves it"].append(r)
+    found["returns from, regflow: own"] = sorted(handed, key=regs.index)
     out["found"] = {k: v for k, v in found.items() if v}
     out["unshown"] = sorted(said & set(regs) - reads, key=regs.index)     # regflow's reads no case showed
     return name, out
@@ -189,7 +199,8 @@ def prepare(target, image):
     RUN.update(target=target, image=image, program=prog, layout=layout, suite=suite, original=image.payload(),
                regflow=flow, regs=regs, arg_regs=list(target.abi.arg_regs), saved=list(target.abi.callee_saved),
                result=target.abi.result[0],
-               preserved={fn.name: set(flow.preserved_regs(fn.name)) for fn in prog.functions} if flow else {})
+               preserved={fn.name: set(flow.preserved_regs(fn.name)) for fn in prog.functions} if flow else {},
+               overwritten={fn.name: set(flow.overwritten_regs(fn.name)) for fn in prog.functions} if flow else {})
     Machine.entries[(target.file, image.name)] = {fn.entry for fn in prog.functions}
     from dread import runner                # (saves_touched reads the runner's context)
     runner.RUN.update(program=prog, layout=layout, original=image.payload(), isa_of=prog.isa_at)

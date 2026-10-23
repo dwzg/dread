@@ -41,7 +41,9 @@ def test_a_lifted_file_comes_back_readable_or_not_at_all(tmp_path):
 def test_device_registers_by_name_and_their_bits_as_bit_tests(tmp_path):
     """gizmo-m3's UART: the status register's bit tests as such (not the register's own address as a
     bound: io_40011004 << 31 < 0x40011004u), x << 30 >> 31 as a field of x, and the data register's
-    address in r3 carried into the IT block's load (flat_view), which then names it."""
+    address in r3 carried into the IT block's load (flat_view), which then names it; the IT block's
+    three conditional instructions one if/else (selects waits for merge_ifs), whose arms both write r0,
+    so that uart_getc takes no parameter (it took r0, read by a select on the path that wrote it)."""
     from dread import lift, regflow
     from dread.program import Program
     from dread.target import Target
@@ -56,7 +58,8 @@ def test_device_registers_by_name_and_their_bits_as_bit_tests(tmp_path):
     putc = text("uart_putc")
     assert "while (!(io_40011004 & 1));" in putc, putc
     getc = text("uart_getc")
-    assert "(io_40011004 >> 1) & 1u" in getc and "r0 = io_40011000;" in getc, getc
+    assert "(io_40011004 >> 1) & 1u" in getc and "r0 = (u32)(u8)io_40011000;" in getc, getc
+    assert "u32 uart_getc(void)" in getc, getc
     assert "#define io_40011000 (*(volatile u32 *)0x40011000u)" in getc, getc
 
 
@@ -377,3 +380,65 @@ def test_a_check_whose_build_fails_exits_1_and_keeps_the_tables(tmp_path):
     some = build.read_names(image.table("lifted"))[:2]
     assert lift.main(["--target", target.root, "--check"] + some) == 1
     assert open(image.table("lifted")).read() == lifted_before
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),
+                    reason="needs arm-none-eabi binutils")
+def test_no_argument_in_a_result_register_the_callee_overwrites(tmp_path):
+    """A call whose value is read passes no argument in a result register its callee overwrites
+    (regflow's overwritten), and a function whose parameter only such an argument read takes none:
+    gauge_poll stores a getter's value and took the r0 it passed it (FreeRTOS's xTaskGetTickCount(r0)
+    in prvCheckExpectedTimeIsWithinAnAcceptableMargin; gizmo's uart_getc(r0) in read_line), so did a
+    tail call of the getter (gauge_relay). The argument stays where the callee may hand it back: an
+    empty callee (newlib's lock functions), one that writes r0 on one path only, one that pops r0 back,
+    one that adds to what such a callee hands back. An argument kept because the call's value was read
+    goes once the clean-up leaves the value unread (gauge_pair: the empty function's r0 went only into
+    the getter's call, which lost it)."""
+    from dread import lift, regflow
+    from dread.program import Program
+    from test_regflow import gauge_target
+    target = gauge_target(tmp_path)
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.analyse(program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+
+    def text(name):
+        return readable.transform(name, lifter.lift(program.by_name[name]).text, context=context)
+    poll = text("gauge_poll")
+    assert "u32 gauge_poll(void)" in poll and "= gauge_now();" in poll, poll
+    assert "extern u32 gauge_now(void);" in poll, poll
+    since = text("gauge_since")
+    assert "u32 gauge_since(u32 r0)" in since and "return gauge_now() - r0;" in since, since
+    assert "u32 gauge_relay(void)" in text("gauge_relay") and "= gauge_via();" in text("gauge_relay")
+    for name, callee in (("gauge_keep", "gauge_hold"), ("gauge_try", "gauge_maybe"), ("gauge_reback", "gauge_back"),
+                         ("gauge_rebump", "gauge_bump")):
+        c = text(name)
+        assert "u32 %s(u32 r0)" % name in c and "%s(r0);" % callee in c, c
+        assert "extern u32 %s(u32);" % callee in c, c
+    pair = text("gauge_pair")
+    assert "u32 gauge_pair(void)" in pair and "    gauge_hold();" in pair and "= gauge_now();" in pair, pair
+
+
+def test_read_line_calls_uart_getc_without_an_argument(target):
+    """gizmo's read_line (int c = uart_getc();) printed r0 = uart_getc(r0): uart_getc writes its result
+    register on every path, so the call passes nothing, as uart_getc's prototype says; uart_getc's own
+    readable C takes nothing either (on the ARM builds its IT block wrote r0 on either path, but a select
+    read it where the data flow saw the entry's r0 reach it: tidy.selects waits for merge_ifs, and
+    params reads the entry's value in flat_view's flow)."""
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+
+    def text(name):
+        return readable.transform(name, lifter.lift(program.by_name[name]).text, context=context)
+    line = text("read_line")
+    assert "extern u32 uart_getc(void);" in line and "uart_getc(r" not in line, line
+    assert "= uart_getc();" in line, line
+    getc = text("uart_getc")
+    assert "u32 uart_getc(void)" in getc, getc

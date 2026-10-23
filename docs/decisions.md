@@ -9,6 +9,73 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Arguments in result registers: what a callee overwrites, not what it writes on every path (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** dread.tidy trim_calls keeps an argument in a result register wherever some call's
+  value is read, since a callee that does not write the register hands back what its caller passed
+  (newlib's lock functions); a callee that writes it on every path then gets a phantom argument
+  (xTaskGetTickCount(r0), uart_getc(r0)), and the caller's own parameter looks read. The item asked
+  for a must-write set (the registers written on every path to a return) and the argument only for a
+  result register outside it. What exactly may the trimming trust, and how are pushes, pops and
+  indirect calls taken?
+- **Options and choices.**
+  1. The set: (a) written on every path to a return, as asked; (b) that, less the registers whose
+     value from the caller may reach what the function reads (regflow overwritten: _must_write less
+     _reads_first); (c) a taint analysis of every value. **(b)**: (a) alone takes a function that
+     adds 1 to what its callee hands back (int g(int x) { if (c) return 7; return x; }; f calls g and
+     returns its result + 1) for one whose r0 is its own, although it is the caller's r0 + 1 on one
+     path: regflow's reads, which end at a call whatever the callee may write, see no read of r0 in
+     f, and the trimmed call would pass garbage (tests/test_regflow.py, gauge_bump). _reads_first is
+     reads with a call ending only what its callee writes on every path. (c) would follow values
+     through memory too; not needed for what the trimming asks.
+  2. Pops and pushes: a pop takes what it pops out of the set (push {r0, lr}; bl g; pop {r0, pc}
+     hands back its caller's r0), and so does a restore that regflow pairs with its save around a
+     call. A push: (a) a read of what it saves, so that a load of its slot back into the result is
+     seen; (b) no use, as for reads. **(b)**: (a) made every function that pushes r0-r3 to make room
+     for locals (GCC -Os push {r0, r1, r4, lr}) read them, and that ran up through every caller that
+     calls such a function before it writes r0: on FreeRTOS GCC -Os vApplicationTickHook, and through
+     it xTaskIncrementTick, kept r0 for vQueueSetAccessQueueSetFromISR's push. Compiled code reads no
+     pushed slot before it writes it (a push of r0-r3 makes room or keeps the stack aligned; a variadic
+     function's save area is kept from the trimming by readable.Context.unknown); hand-written code that
+     does is not seen, as it is not for the other trimmed arguments, and the gate is there for it.
+  3. A call through a register: (a) reads every argument register; (b) reads nothing, as for reads,
+     and ends only its link register. **(b)**: what the result can take from the caller through such a
+     call still flows (nothing is ended); what a callback reads of an argument is the same unknown
+     that every argument trimmed by reads has (a callee that passes its r0 on to a function pointer
+     reads nothing to regflow), and (a) ran up like the pushes.
+  4. A value read only by arguments that the trimming then drops: trim_calls runs again after the
+     clean-up until it changes nothing (only ever fewer arguments). vPortEnterCritical writes no r0,
+     and its value was read by vPortExitCritical's call behind it until that call lost its arguments
+     in the same round: on FreeRTOS GCC -Os the functions that pass it r0 went from 39 to 10, those
+     that pass vTaskSuspendAll r0 from 14 to 4 (what is left goes on to a result the gate compares).
+  5. Two more ways to the same symptom, found on the way: params read the entry's value in a graph
+     of the body's statements, where an if/else whose arms both write a register is one node that
+     writes it on some path (now flat_view's flow); and selects made an IT block's last two
+     conditional instructions a select before merge_ifs could make the three one if/else, the select
+     reading r0 where the flow saw the entry's r0 reach it (gizmo's uart_getc took r0): selects waits
+     where the block before writes the select's variable and the select reads it.
+  6. The cases' environment (dread.autocase) leaves the new set out (RegFlow.case_facts): it is no
+     input of any case, and with it every image's cases would have been made anew.
+  7. A check by measurement: dread callconv lists a function whose result follows its caller's value
+     of a register regflow says it overwrites ("returns from, regflow: own").
+- **Figures.** (docs/todo.md, the item, has them all.) Calls with a phantom argument, main against
+  this on copies of the eight builds: gizmo a32 8 -> 0, m3 8 -> 0, m4 9 -> 0, rv32 7 -> 0, FreeRTOS
+  GCC -Os 133 -> 4, clang -O2 144 -> 0, RISC-V GCC -Os 73 -> 0, GCC -O0 134 -> 6 (calls not trimmed at
+  all); functions with a phantom parameter 5 -> 3, 6 -> 3, 6 -> 3, 0, 42 -> 33, 63 -> 58, 83 -> 79,
+  17 -> 2, the rest from pushes that make room, calls that keep every argument and RISC-V's ecall (a
+  new item). With options 2(a) and 3(a) together 77 functions of GCC -Os overwrite r0, with (b) 131. The
+  gate accepts the same functions as before on all eight; the lifted C is byte for byte the same;
+  dread callconv finds no result that follows a register regflow says the function overwrites (330
+  functions with cases on the four FreeRTOS builds, every gizmo build). The cases of every image
+  stayed cached.
+- **Undo.** Context.handed_back returning the first one or two argument registers again brings the
+  old trimming back (overwritten left unused); the second trim_calls round is the while loop in
+  tidy._tidy; params' Graph(flat_view(fn)) back to Graph(fn); selects' _merges_first check.
+- **Status.** Done (dread/regflow.py, dread/tidy.py, dread/readable.py, dread/autocase.py,
+  dread/callconv.py; tests/test_regflow.py, test_readable.py, test_tidy.py, test_callconv.py).
+
 ## Where the system run takes an interrupt outside shared code: function entries move the clock, places both images share (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

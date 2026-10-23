@@ -961,3 +961,194 @@ def test_frames_from_the_lifters_states(tmp_path):
     assert flow.read_regs("va_sub") == [], flow.read_regs("va_sub")
     assert flow.read_regs("va_slot") == [], flow.read_regs("va_slot")
     assert flow.read_regs("nsave") == ["r12"], flow.read_regs("nsave")
+
+
+GAUGE_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global gauge_now, gauge_hold, gauge_maybe, gauge_via, gauge_back, gauge_bump, gauge_since, gauge_poll
+    .global gauge_keep, gauge_try, gauge_relay, gauge_reback, gauge_rebump, gauge_pair, gauge_spin, gauge_main
+    .type gauge_now, %function
+    .thumb_func
+gauge_now:                  @ a getter: r0 written on every path, nothing read (xTaskGetTickCount)
+        ldr     r3, =0x20000100
+        ldr     r0, [r3]
+        bx      lr
+    .size gauge_now, . - gauge_now
+    .type gauge_hold, %function
+    .thumb_func
+gauge_hold:                 @ empty: hands back the r0 its caller passed (newlib's lock functions)
+        bx      lr
+    .size gauge_hold, . - gauge_hold
+    .type gauge_maybe, %function
+    .thumb_func
+gauge_maybe:                @ r0 written on one path only
+        ldr     r3, =0x20000104
+        ldr     r3, [r3]
+        cbz     r3, 1f
+        movs    r0, #7
+1:      bx      lr
+    .size gauge_maybe, . - gauge_maybe
+    .type gauge_via, %function
+    .thumb_func
+gauge_via:                  @ the getter as a tail call
+        movs    r1, #2
+        b       gauge_now
+    .size gauge_via, . - gauge_via
+    .type gauge_back, %function
+    .thumb_func
+gauge_back:                 @ r0 pushed and popped around the getter's call: put back
+        push    {r0, lr}
+        bl      gauge_now
+        pop     {r0, pc}
+    .size gauge_back, . - gauge_back
+    .type gauge_bump, %function
+    .thumb_func
+gauge_bump:                 @ writes r0 on every path, from what gauge_maybe may hand back unwritten
+        push    {r4, lr}
+        bl      gauge_maybe
+        adds    r0, #1
+        pop     {r4, pc}
+    .size gauge_bump, . - gauge_bump
+    .type gauge_since, %function
+    .thumb_func
+gauge_since:                @ the getter's value minus the argument
+        push    {r4, lr}
+        mov     r4, r0
+        bl      gauge_now
+        subs    r0, r0, r4
+        pop     {r4, pc}
+    .size gauge_since, . - gauge_since
+    .type gauge_poll, %function
+    .thumb_func
+gauge_poll:                 @ takes nothing: stores the getter's value
+        push    {r4, lr}
+        bl      gauge_now
+        ldr     r3, =0x20000108
+        str     r0, [r3]
+        pop     {r4, pc}
+    .size gauge_poll, . - gauge_poll
+    .type gauge_keep, %function
+    .thumb_func
+gauge_keep:                 @ the same with the empty function
+        push    {r4, lr}
+        bl      gauge_hold
+        ldr     r3, =0x20000108
+        str     r0, [r3]
+        pop     {r4, pc}
+    .size gauge_keep, . - gauge_keep
+    .type gauge_try, %function
+    .thumb_func
+gauge_try:
+        push    {r4, lr}
+        bl      gauge_maybe
+        ldr     r3, =0x20000108
+        str     r0, [r3]
+        pop     {r4, pc}
+    .size gauge_try, . - gauge_try
+    .type gauge_relay, %function
+    .thumb_func
+gauge_relay:
+        push    {r4, lr}
+        bl      gauge_via
+        ldr     r3, =0x20000108
+        str     r0, [r3]
+        pop     {r4, pc}
+    .size gauge_relay, . - gauge_relay
+    .type gauge_reback, %function
+    .thumb_func
+gauge_reback:
+        push    {r4, lr}
+        bl      gauge_back
+        ldr     r3, =0x20000108
+        str     r0, [r3]
+        pop     {r4, pc}
+    .size gauge_reback, . - gauge_reback
+    .type gauge_rebump, %function
+    .thumb_func
+gauge_rebump:
+        push    {r4, lr}
+        bl      gauge_bump
+        ldr     r3, =0x20000108
+        str     r0, [r3]
+        pop     {r4, pc}
+    .size gauge_rebump, . - gauge_rebump
+    .type gauge_pair, %function
+    .thumb_func
+gauge_pair:                 @ the empty function's r0 goes only into the getter's call
+        push    {r4, lr}
+        bl      gauge_hold
+        bl      gauge_now
+        ldr     r3, =0x20000108
+        str     r0, [r3]
+        pop     {r4, pc}
+    .size gauge_pair, . - gauge_pair
+    .type gauge_spin, %function
+    .thumb_func
+gauge_spin:                 @ never returns
+        b       gauge_spin
+    .size gauge_spin, . - gauge_spin
+    .type gauge_main, %function
+    .thumb_func
+gauge_main:
+        push    {r4, lr}
+        bl      gauge_since
+        bl      gauge_poll
+        bl      gauge_keep
+        bl      gauge_try
+        bl      gauge_relay
+        bl      gauge_reback
+        bl      gauge_rebump
+        bl      gauge_pair
+        bl      gauge_spin
+    .size gauge_main, . - gauge_main
+"""
+
+
+def gauge_target(tmp_path):
+    """A Cortex-M3 target of GAUGE_S: getters, an empty function, one that writes r0 on one path only,
+    a tail call, a push and pop of r0, and their callers (dread readable's result arguments)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.target import Target
+    (tmp_path / "t.s").write_text(GAUGE_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "gauge_main", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    return Target.load(str(tmp_path))
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),
+                    reason="needs arm-none-eabi binutils")
+def test_registers_a_function_overwrites(tmp_path):
+    """regflow 25's overwritten: the registers a function writes on every path to its return without
+    reading first what its caller left there, through its callees and tail calls. A getter overwrites
+    r0, and so does a tail call of it; an empty function, one that writes r0 on one path only, and one
+    that pushes r0 and pops it back after a call that writes it do not (each may hand back what its
+    caller passed); nor does one that writes r0 on every path from what such a callee hands back
+    (gauge_bump adds 1 to gauge_maybe's result: regflow's reads, which end r0 at a call that may write
+    it, see no read of r0 there). A function that never returns overwrites what it does not read. The
+    cases' environment does not see the new set (case_facts), so that every image kept its cases."""
+    import json
+    target = gauge_target(tmp_path)
+    flow = regflow.analyse(Program(target))
+    own = {fn: flow.overwritten_regs(fn) for fn in flow.reads}
+    assert "r0" in own["gauge_now"] and flow.read_regs("gauge_now") == [], own["gauge_now"]
+    assert {"r0", "r1"} <= set(own["gauge_via"]), own["gauge_via"]
+    assert "r0" in own["gauge_poll"] and "r0" in own["gauge_relay"], (own["gauge_poll"], own["gauge_relay"])
+    for name in ("gauge_hold", "gauge_maybe", "gauge_back", "gauge_bump", "gauge_keep", "gauge_try", "gauge_reback",
+                 "gauge_rebump", "gauge_since"):
+        assert "r0" not in own[name], (name, own[name])
+    assert flow.read_regs("gauge_bump") == [] and flow.read_regs("gauge_back") == []      # (what reads sees)
+    assert set(own["gauge_spin"]) >= {"r0", "r1", "r2", "r3", "r12"}, own["gauge_spin"]
+    assert "overwritten" in flow.to_json() and "overwritten" not in flow.case_facts()
+    again = regflow.RegFlow.from_json(json.loads(json.dumps(flow.to_json())))
+    assert again.overwritten_regs("gauge_via") == flow.overwritten_regs("gauge_via")
+    assert regflow.RegFlow.from_json(flow.case_facts()).overwritten_regs("gauge_now") == []   # (a cache before 25)

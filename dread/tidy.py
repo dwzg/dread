@@ -462,7 +462,11 @@ def reads_count_stmt(s, name):
 def selects(fn):
     """if (X) { v = A; } if (!X) { v = B; }  ->  v = X ? A : B;  (an IT block's pair of conditional
     moves: X, A and B pure, v not one of X's variables); if (X) { v = A; } else { v = B; } alike (the
-    pair merge_ifs made one if)."""
+    pair merge_ifs made one if). Not a pair behind a conditional block on X or !X that writes v when A
+    or B reads v (ittte mi; ldrmi r0, [r3]; uxtbmi r0, r0; movpl r0, #-1): merge_ifs first makes the
+    three one if, whose arms write v on either path; the select would read v where the data flow sees
+    v's value from the function's entry reach it as well (only through the path on which the condition
+    was false, where the select does not read it), and the function would take v as a parameter."""
     from dread.structure import negate
     body = fn.body.body
     out, changed, k = [], False, 0
@@ -486,7 +490,8 @@ def selects(fn):
                 continue
         a = one(s, s.then) if isinstance(s, C.If) and s.orelse is None else None
         b = one(t, t.then) if isinstance(t, C.If) and t.orelse is None else None
-        if a and b and C.expr_text(negate(a[0])) == C.expr_text(b[0]) and pure(a, b):
+        if a and b and C.expr_text(negate(a[0])) == C.expr_text(b[0]) and pure(a, b) and \
+                not _merges_first(out, a[0], a[1], (a[2], b[2])):
             out.append(C.ExprStmt(C.Assign("=", C.Name(a[1]), C.Cond(a[0], a[2], b[2])), s.addr))
             k += 2
             changed = True
@@ -495,6 +500,20 @@ def selects(fn):
         k += 1
     body[:] = out
     return changed
+
+
+def _merges_first(out, cond, v, values):
+    """Whether the last statement of out (notes aside) is a conditional block on cond or its negation
+    that writes v while one of values reads v (selects)."""
+    from dread.structure import negate
+    prev = next((x for x in reversed(out) if not isinstance(x, (C.Note, C.Empty))), None)
+    if not (isinstance(prev, C.If) and prev.orelse is None and isinstance(prev.then, C.Block)) or \
+            has_effects(prev.cond) or _reads_memory(prev.cond):
+        return False
+    text = C.expr_text(prev.cond)
+    if text not in (C.expr_text(cond), C.expr_text(negate(cond))):
+        return False
+    return v in _written([prev.then]) and any(v in _reads_of(x) for x in values)
 
 
 def empty_arms(fn):
@@ -1947,7 +1966,20 @@ def trim_calls(fn, run):
     the lifters pass them all. Every call of a callee or none, and only calls of the lifters' form (as
     many arguments as the target has argument registers: one with stack arguments stays); the
     callee's extern declaration follows (readable's transform). A callee ignores registers it does
-    not read, so the trimmed call is the same call; the gate checks it all the same."""
+    not read, so the trimmed call is the same call; the gate checks it all the same.
+
+    Where some call's value is read, an argument in a result register stays as far as the callee may
+    hand it back (Context.handed_back): a callee that does not write its result register on some path
+    returns there what its caller passed (newlib's empty lock functions). One that writes it on every
+    path to its return without reading first what its caller left there (regflow's overwritten, on the
+    machine code: its callees and tail callees included, a pop or another restore no write, a callee
+    that may hand a value back unwritten no end of it) returns a value of its own there, which the
+    caller's value cannot reach: the argument would be a phantom (xTaskGetTickCount(r0), whose
+    readable C takes void), and the caller's own parameter would look read (params keeps what an
+    argument reads), so it goes. Safe as far as regflow's facts are (its docstring: a push is no use
+    there, as for every argument trimmed by reads); the gate checks the result all the same. Called again after the clean-up has run (_tidy): an argument it kept
+    because the call's value was read may go once nothing reads that value any more (the lifters'
+    vPortExitCritical(r0, ...) behind vPortEnterCritical read its r0 until it was trimmed itself)."""
     ctx = run.context if run is not None else None
     if ctx is None or not ctx.arg_regs:
         return False
@@ -1961,17 +1993,20 @@ def trim_calls(fn, run):
     changed = False
     for name, calls in by_callee.items():
         n = ctx.arity(name)
-        if n is None or name in run.trimmed:
+        if n is None:
             continue
         if name in used:
             # The call's value is read: what the callee leaves in its result registers is what the
             # caller passed there when it does not write them (newlib's empty lock functions: the lock's
             # address comes back, and __malloc_lock returns it), and the lift check compares a result
-            # whether callers read it or not. So the arguments in the result registers stay.
-            n = max(n, 2 if run.returns.get(name) in ("u64", "s64") else 1)
-        if n >= k:
+            # whether callers read it or not. So the arguments in the result registers stay, but for
+            # those the callee overwrites (regflow: its own value there on every path).
+            for reg in ctx.handed_back(name, run.returns.get(name) in ("u64", "s64")):
+                n = max(n, ctx.arg_regs.index(reg) + 1)
+        have = run.trimmed.get(name, k)     # (trimmed before: a value read then may be read no longer)
+        if n >= have:
             continue
-        if any(len(c.args) != k or any(has_effects(a) for a in c.args[n:]) for c in calls):
+        if any(len(c.args) != have or any(has_effects(a) for a in c.args[n:]) for c in calls):
             continue
         for c in calls:
             del c.args[n:]
@@ -1985,8 +2020,12 @@ def params(fn, run=None):
     a parameter whose value at the entry nothing reads is none: trailing ones go (the callers'
     registers are ignored, as they were), one before a parameter that stays is renamed, and its
     register's variable, when the body uses it, becomes a local of its own (prvAddCurrentTaskTo-
-    DelayedList's r3, written before every read, was a fourth parameter the model named). Only for a
-    plain head (type name(parameters)), which is written anew."""
+    DelayedList's r3, written before every read, was a fourth parameter the model named). The value
+    at the entry is read where it reaches a read in the flow of flat_view (an if/else whose arms both
+    write the register's variable ends its value there; in a graph of the body's statements the if
+    was one node that wrote it on some path only, and gizmo's uart_getc took the r0 it writes on
+    either way of its IT block for a parameter). Only for a plain head (type name(parameters)), which
+    is written anew."""
     import re
     m = re.match(r"^(\w+) (\w+)\((.*)\)$", fn.head.strip())
     if not m or m.group(2) != fn.name:
@@ -2031,7 +2070,7 @@ def params(fn, run=None):
                 used |= {d.name for d in st.items}
     fn.params = new                         # (the graph and the names see the parameters as they are now)
     try:
-        g = Graph(fn)
+        g = Graph(flat_view(fn))            # (an if whose arms both write a variable ends its value)
         reach = g.reaching()
         entry_read = set()
         for n in g.nodes:
@@ -2283,8 +2322,8 @@ def group_declarations(fn):
 
 def tidy(fn, run=None, passes=None, rounds=8):
     """All passes, again until none changes anything (at most rounds times); then the calls' and the
-    function's own arguments (trim_calls, params) and the passes once more. The conditions' answers
-    are kept for the run (_RUN: conditions)."""
+    function's own arguments (trim_calls, params) and the passes once more, the calls' again while
+    that leaves values nobody reads. The conditions' answers are kept for the run (_RUN: conditions)."""
     outer = getattr(_RUN, "memo", None)
     _RUN.memo = {}
     try:
@@ -2304,6 +2343,8 @@ def _tidy(fn, run, passes, rounds):
     settle()
     if passes is None and (trim_calls(fn, run) | params(fn, run)):
         settle()
+        while trim_calls(fn, run):          # (values nobody reads now: only ever fewer arguments)
+            settle()
         params(fn, run)
     if passes is None:
         split_any = False

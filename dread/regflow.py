@@ -13,11 +13,20 @@ pointer in r1 across bl uart_putc.
 
 For every function F this finds:
 
-  kept   the scratch registers and flags some caller reads after a call to F before writing them.
-         F's value of them at the return is behaviour (a result, or a register F must leave as it
-         found it). dread test and dread integration compare them at the return.
-  reads  the scratch registers and flags F reads at its entry before writing them: its register
-         arguments, and anything else its callers have to set up.
+  kept         the scratch registers and flags some caller reads after a call to F before writing
+               them. F's value of them at the return is behaviour (a result, or a register F must
+               leave as it found it). dread test and dread integration compare them at the return.
+  reads        the scratch registers and flags F reads at its entry before writing them: its
+               register arguments, and anything else its callers have to set up.
+  overwritten  the scratch registers F writes on every path from its entry to a return without
+               reading first what its caller left there: what F hands back in them is its own,
+               whatever its caller passed (dread readable passes no argument in a result register of
+               such a callee: tidy.trim_calls). The registers written on every path (_must_write,
+               its callees' and tail callees' included) less those whose value from the caller F may
+               read (_reads_first): reads alone does not do, since a call ends there whatever its
+               callee may write, and a callee that hands its argument back unwritten on some path
+               (int g(int x) { if (c) return 7; return x; }) lets the caller's value through to what
+               F computes from g's result.
 
 Scratch registers are the general registers the target's [abi] does not list as callee-saved (ARM
 with the default ABI: r0-r3 and r12), and the flags.
@@ -38,7 +47,7 @@ indirect call reads, paths through code the function table does not cover, and c
 registers (a function that reads one its caller left: `caller_regs` in the case files).
 
 Output: each function whose kept registers go beyond the first result register, with the call sites
-that read them; with --all every function's reads and kept. Cached in BUILD/regflow/IMAGE.json,
+that read them; with --all every function's reads, kept and overwritten. Cached in BUILD/regflow/IMAGE.json,
 keyed by the image, its tables, its startup copies, the ABI and the source of the analysis (this module,
 dread.switches and the arch layer).
 
@@ -53,7 +62,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 24                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 25                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -114,18 +123,24 @@ VERSION = 24                # 3: entry spills (variadic functions) are no use; 4
                             # sp, a frame pointer, any copy, a frame address loaded back from a slot) instead
                             # of shapes of regflow's own (the layers' sp_copy, base_copy, frame_stores and
                             # frame_slot, sp-relative only); saves and restores pair by depth
+                            # 25: overwritten, the registers a function writes on every path to its return
+                            # without reading what its caller left there first (dread readable passes no
+                            # phantom argument in a result register); kept, reads and preserved as before
 
 
 class RegFlow:
     """The result: kept, reads and preserved per function name, with the call sites behind kept
     (sites: name -> register -> [[caller, address, always]], always: read on every path after the
     call). preserved: the kept registers the function never writes, its callees included: its
-    callers rely on it leaving them alone."""
+    callers rely on it leaving them alone. overwritten: the registers whose value at a return is
+    the function's own, never what its caller left there (the module's docstring); None where the
+    result came from before version 25 (nothing is known overwritten then)."""
 
-    def __init__(self, names, kept, reads, sites, preserved=None):
+    def __init__(self, names, kept, reads, sites, preserved=None, overwritten=None):
         self.names = names                  # register names in bit order
         self.kept, self.reads, self.sites = kept, reads, sites
         self.preserved = preserved or {}
+        self.overwritten = overwritten
 
     def _regs(self, value):
         return [n for i, n in enumerate(self.names) if value >> i & 1]
@@ -138,6 +153,11 @@ class RegFlow:
 
     def preserved_regs(self, name):
         return self._regs(self.preserved.get(name, 0))
+
+    def overwritten_regs(self, name):
+        """The registers whose value at name's return is its own, never its caller's: written on every
+        path to a return, what its caller left there never read first ([] where that is not known)."""
+        return self._regs(self.overwritten.get(name, 0)) if self.overwritten else []
 
     def sites_of(self, name, reg):
         """[(caller, address)] of the calls after which `reg` of `name` is read; a tail call is
@@ -162,12 +182,23 @@ class RegFlow:
         return text
 
     def to_json(self):
-        return {"names": self.names, "kept": self.kept, "reads": self.reads, "sites": self.sites,
-                "preserved": self.preserved}
+        out = {"names": self.names, "kept": self.kept, "reads": self.reads, "sites": self.sites,
+               "preserved": self.preserved}
+        if self.overwritten is not None:
+            out["overwritten"] = self.overwritten
+        return out
 
     @classmethod
     def from_json(cls, data):
-        return cls(data["names"], data["kept"], data["reads"], data["sites"], data.get("preserved"))
+        return cls(data["names"], data["kept"], data["reads"], data["sites"], data.get("preserved"),
+                   data.get("overwritten"))
+
+    def case_facts(self):
+        """What a function's generated cases depend on of the result (dread.autocase's environment):
+        to_json without overwritten, which no case reads, so that version 25 kept every image's cases."""
+        out = self.to_json()
+        out.pop("overwritten", None)
+        return out
 
 
 def argued_path(image):
@@ -506,6 +537,7 @@ class Analysis:
         self.rows = {fn.name: _rows(program, fn, self.mask, entry_name) for fn in program.functions}
         ordered = sorted(fn.entry for fn in program.functions)
         following = {a: b for a, b in zip(ordered, ordered[1:])}
+        self.leaves = {}                    # name -> the rows that may go where the analysis cannot follow
         self.graphs = {fn.name: self._graph(fn, self.rows[fn.name], entry_name,
                                             following.get(fn.entry, program.end(fn)))
                        for fn in program.functions}
@@ -566,11 +598,14 @@ class Analysis:
         """(successors, returns, calls [(index, callee or None)], tails [(index, callee)], unknown):
         the control flow inside one function. unknown: it may go where the analysis cannot follow
         (an indirect call or tail call, a branch into other code). Indirect jumps: see
-        _switch_successors."""
+        _switch_successors. The rows from which the way may leave the function for code the analysis
+        does not follow (a branch into other code, an indirect jump with a target it does not know)
+        go into self.leaves[fn.name] (_must_of counts them as returns)."""
         n = len(code)
         index = {row.address: i for i, row in enumerate(code)}
         succ = [[] for _ in range(n)]
         returns, calls, tails, ijumps, unknown = [], [], [], [], False
+        leaves = self.leaves.setdefault(fn.name, set())
         # a call through a register that holds one function's entry (mov #f, r10; call r10): a call
         # of f, whose result the code behind it may read (gizmo-msp430's parse_uint reads r13 of
         # __mspabi_mpyl so; missed, the multiply was lifted with a 16-bit result and accepted)
@@ -593,6 +628,7 @@ class Analysis:
                     tails.append((i, entry_name(t)))
                 else:
                     unknown = True          # into the middle of other code: passes nothing on
+                    leaves.add(i)
             elif kind == "call":
                 callee = entry_name(target)
                 calls.append((i, callee))   # None: not a function's entry, treated as indirect
@@ -617,13 +653,14 @@ class Analysis:
                     tails.append((i, entry_name(row.address + row.size)))     # falls into the next function
         if ijumps:
             unknown |= self._switch_successors(fn, code, index, ijumps, succ, falls_into, span_end, tails,
-                                               entry_name)
+                                               entry_name, leaves)
         return succ, returns, calls, tails, unknown
 
-    def _switch_successors(self, fn, code, index, ijumps, succ, falls_into, span_end, tails, entry_name):
+    def _switch_successors(self, fn, code, index, ijumps, succ, falls_into, span_end, tails, entry_name,
+                           leaves=None):
         """Give each indirect jump its targets; True when one is left without, or with a target
-        outside the function that is no function's entry (the analysis cannot follow it). In this
-        order:
+        outside the function that is no function's entry (the analysis cannot follow it): those go
+        into leaves (also one given 4.'s roots: the jump may go elsewhere). In this order:
           0. the code in front of the jump run in an emulator (dread.switches), for every index
              value its bound check lets through, or twice for a jump without one: targets in the
              function are a switch's cases, targets elsewhere tail calls (a veneer, a far jump);
@@ -686,6 +723,8 @@ class Analysis:
                         tails.append((i, entry_name(t)))
                     else:
                         lost = True
+                        if leaves is not None:
+                            leaves.add(i)
                 if not targets:
                     continue
             if not targets and insn is not None:
@@ -709,6 +748,8 @@ class Analysis:
                 succ[i].extend(sorted({index[t & ~1] for t in targets if inside(t)}))
             else:
                 left.append(i)
+                if leaves is not None:
+                    leaves.add(i)
         if not left:
             return lost
         seen, roots = set(), []
@@ -964,6 +1005,189 @@ class Analysis:
                     may[name], changed = m, True
         return may
 
+    def _callers(self):
+        """{name: the functions that call it or branch to it}."""
+        callers = collections.defaultdict(set)
+        for name, (_, _, calls, tails, _) in self.graphs.items():
+            for _, callee in calls + tails:
+                if callee:
+                    callers[callee].add(name)
+        return callers
+
+    def _must_write(self):
+        """{name: the registers the function writes on every path from its entry to a return} (the
+        first part of overwritten, the module's docstring), all functions together: each function's
+        own analysis (_must_of) uses its callees' sets at its calls and tail calls, and a function
+        whose set shrank sends its callers back into the queue. Every set starts at everything and only
+        shrinks (a greatest fixpoint): a function that never returns, or only through itself, keeps
+        everything, so that a call of it adds nothing to the paths that would go on behind it."""
+        callers = self._callers()
+        entries = {fn.name: fn.entry for fn in self.program.functions}
+        must = {name: self.everything for name in self.rows}
+        work = collections.deque(self.rows)
+        queued = set(self.rows)
+        while work:
+            name = work.popleft()
+            queued.discard(name)
+            new = self._must_of(name, entries.get(name), must)
+            if new != must[name]:
+                must[name] = new
+                for caller in callers[name]:
+                    if caller not in queued:
+                        queued.add(caller)
+                        work.append(caller)
+        return must
+
+    def _must_of(self, name, entry, must):
+        """What one function writes on every path to a return, given its callees' sets (must): a
+        forward analysis over its rows, what is written on every path to a row being the intersection
+        of what its predecessors pass on (a conditional branch's edge adds what was written under its
+        condition, _edge_masks), the entry's nothing. A row writes what it certainly writes (kills, a
+        conditional write only where the opposite one completes it); a pop instead takes what it pops
+        out of the set (it puts back what was pushed, the caller's own value where the push saved it:
+        push {r0, lr}; bl f; pop {r0, pc} hands back the r0 its caller passed, whatever f wrote), and
+        so does a restore _neutral_saves paired with its save; a call writes its link register (RISC-V's
+        ra) and, when it is not conditional, what its callee writes on every path, not what the layer
+        counts as clobbered (MSP430's r11-r15). What a way out passes on: a return or a branch to
+        another function's code (a tail call, with what that one writes) taken under a condition adds
+        what was written under it (Row.covered); a way the analysis cannot follow (self.leaves) and a
+        row behind which no row follows that it knows (the end of the decoded code) count as returns.
+        What a pop under a condition writes is never counted written under a condition (no compiler's
+        code was seen to pop a scratch register so). A load that reads back a slot a push filled is a
+        write here (as a push is no use to reads): compiled code reads no such slot before it writes it
+        (a push of r0-r3 makes room for locals or keeps the stack aligned, and a variadic function's
+        save area is kept from the trimming, readable.Context.unknown)."""
+        code = self.rows[name]
+        n = len(code)
+        if not n:
+            return 0
+        succ, returns, calls, tails, _ = self.graphs[name]
+        every, link = self.everything, self.link_mask
+        cond_popped = 0
+        for row in code:
+            if row.stack == "pop" and row.conditional:
+                cond_popped |= row.writes
+        gen, out_of = [0] * n, [0] * n         # what a row writes; what it puts back (a restore)
+        for i, row in enumerate(code):
+            if row.kind in ("call", "icall"):
+                g = row.kills & row.writes & link
+            elif row.stack == "pop":
+                g, out_of[i] = 0, row.writes
+            else:
+                g = row.kills & row.writes
+            gen[i] = g & ~cond_popped if row.conditional else g
+        for i, (j, bit) in self.copies.get(name, {}).items():
+            out_of[j] |= bit
+        for i, callee in calls:
+            if callee is not None and not code[i].conditional:
+                gen[i] |= must[callee]
+        edges = self.edges.get(name, {})
+        preds = [[] for _ in range(n)]
+        for i in range(n):
+            for j in succ[i]:
+                preds[j].append(i)
+        start = next((i for i, row in enumerate(code) if row.address == entry), 0)
+        ins, outs = [every] * n, [every] * n
+        changed = True
+        while changed:
+            changed = False
+            for j in range(n):
+                v = 0 if j == start else every
+                if j != start:
+                    for p in preds[j]:
+                        v &= outs[p] | (edges.get((p, j), 0) & ~cond_popped)
+                o = (v & ~out_of[j]) | gen[j]
+                if v != ins[j] or o != outs[j]:
+                    ins[j], outs[j] = v, o
+                    changed = True
+        tail_at = collections.defaultdict(list)
+        for i, callee in tails:
+            tail_at[i].append(callee)
+        returning, leaves = set(returns), self.leaves.get(name, set())
+        result = every
+        for i, row in enumerate(code):
+            here = outs[i]
+            if row.conditional and row.kind in ("return", "jump"):
+                here |= row.covered & ~cond_popped      # (taken where the condition holds)
+            if i in returning:
+                result &= here
+            for callee in tail_at.get(i, ()):
+                result &= here | must[callee]
+            if i in leaves:
+                result &= outs[i]
+            if not succ[i] and i not in returning and i not in tail_at and i not in leaves:
+                result &= outs[i]
+        return result
+
+    def _reads_first(self, must):
+        """{name: the registers whose value from its caller may reach what the function reads}: reads,
+        but where reads ends a value that may still come back, this lets it flow on (overwritten must
+        not take a register the caller's value reaches for the function's own): a call ends only what
+        its callee writes on every path (must) and its link register, so that a value a callee hands
+        back unwritten on some path reaches what the function reads behind the call; a call through a
+        register (or to no function's entry) ends only its link register. As for reads, what a callee
+        reached through a register reads is not known and is no use, and a push is no use (a pop puts
+        a pushed value back, which _must_of sees; a load of a pushed slot, which compiled code does
+        not read before it writes it, would not be seen). All functions together, from nothing up (a
+        least fixpoint, like reads)."""
+        callers = self._callers()
+        entries = {fn.name: fn.entry for fn in self.program.functions}
+        first = {name: 0 for name in self.rows}
+        work = collections.deque(self.rows)
+        queued = set(self.rows)
+        while work:
+            name = work.popleft()
+            queued.discard(name)
+            new = self._first_of(name, entries.get(name), must, first)
+            if new != first[name]:
+                first[name] = new
+                for caller in callers[name]:
+                    if caller not in queued:
+                        queued.add(caller)
+                        work.append(caller)
+        return first
+
+    def _first_of(self, name, entry, must, first):
+        """What one function may read of its caller's registers, given its callees' (first) and what
+        they write on every path (must): the liveness of liveness(own=True) with _reads_first's
+        calls."""
+        code = self.rows[name]
+        n = len(code)
+        if not n:
+            return 0
+        succ, _, calls, tails, _ = self.graphs[name]
+        link = self.link_mask
+        uses = [row.uses for row in code]
+        kills = [row.kills for row in code]
+        exits = [0] * n
+        for i, callee in calls:
+            row = code[i]
+            linked = row.kills & link
+            if callee is not None:
+                uses[i] |= first[callee] & ~row.covered & ~(row.writes & link)
+                kills[i] = linked if row.conditional else linked | must[callee]
+            else:
+                kills[i] = linked
+        for i, callee in tails:
+            exits[i] |= first[callee]
+        edges = self.edges.get(name, {})
+        copies = self.copies.get(name, {})
+        live_in, live_out = [0] * n, [0] * n
+        changed = True
+        while changed:
+            changed = False
+            for i in range(n - 1, -1, -1):
+                o = exits[i]
+                for j in succ[i]:
+                    o |= live_in[j] & ~edges.get((i, j), 0)
+                v = uses[i] | (o & ~kills[i])
+                if i in copies:             # a save: it reads what the restore's readers read (_neutral_saves)
+                    j, bit = copies[i]
+                    v |= live_out[j] & bit
+                if o != live_out[i] or v != live_in[i]:
+                    live_out[i], live_in[i], changed = o, v, True
+        return live_in[next((i for i, row in enumerate(code) if row.address == entry), 0)]
+
     def effects(self, name, own=False):
         """(uses, kills, exits) per instruction of a function with the current solution: calls use
         what the callee reads and end what it may write; returns and tail calls pass on what the
@@ -1060,14 +1284,17 @@ class Analysis:
             for reg, label in labels.items():
                 sites[name][reg].append([label, 0, True])
         preserved = {name: self.kept[name] & ~self.may[name] for name in self.rows if self.kept[name] & ~self.may[name]}
+        must = self._must_write()
+        first = self._reads_first(must)
+        overwritten = {name: must[name] & ~first[name] for name in self.rows}
         return self._folded(self.names, dict(self.kept), dict(self.reads), {k: dict(v) for k, v in sites.items()},
-                            preserved)
+                            preserved, overwritten)
 
-    def _folded(self, names, kept, reads, sites, preserved):
+    def _folded(self, names, kept, reads, sites, preserved, overwritten=None):
         """The RegFlow, with flags followed one by one folded into "flags" (a flag read is the flags
-        read: what the layers and the tools name)."""
+        read: what the layers and the tools name); in overwritten, "flags" only where every flag is."""
         if not any(n.startswith("flags:") for n in names):
-            return RegFlow(names, kept, reads, sites, preserved)
+            return RegFlow(names, kept, reads, sites, preserved, overwritten)
         public = []
         for n in names:
             n = "flags" if n.startswith("flags:") else n
@@ -1092,8 +1319,16 @@ class Analysis:
                     merged[k] = [e[0], e[1], bool(merged[k][2] or e[2])] if k in merged else list(e)
                 regs[key] = list(merged.values())
             folded_sites[callee] = regs
+        flag_bits = sum(1 << i for i, n in enumerate(names) if n.startswith("flags:"))
+
+        def fold_all(m):
+            out = fold(m & ~flag_bits)
+            if m & flag_bits == flag_bits:
+                out |= 1 << public.index("flags")
+            return out
         return RegFlow(public, {k: fold(v) for k, v in kept.items()}, {k: fold(v) for k, v in reads.items()},
-                       folded_sites, {k: fold(v) for k, v in preserved.items() if fold(v)})
+                       folded_sites, {k: fold(v) for k, v in preserved.items() if fold(v)},
+                       None if overwritten is None else {k: fold_all(v) for k, v in overwritten.items()})
 
     def read_always(self, name, start, reg):
         """Whether every path from the instruction behind index `start` reads `reg` before
@@ -1236,7 +1471,9 @@ def main(argv=None):
         extra = [r for r in kept if r != result]
         if not (args.all or args.names or extra):
             continue
-        print("%-28s reads %-16s kept %s" % (name, " ".join(flow.read_regs(name)) or "-", " ".join(kept) or "-"))
+        print("%-28s reads %-16s kept %-12s overwritten %s" % (name, " ".join(flow.read_regs(name)) or "-",
+                                                               " ".join(kept) or "-",
+                                                               " ".join(flow.overwritten_regs(name)) or "-"))
         for reg in extra:
             sites = flow.sites_of(name, reg)
             if analysis is None:
