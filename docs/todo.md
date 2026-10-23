@@ -540,6 +540,10 @@ its sources.
   structure reached from several bases comes out as pieces; dread.shapes still makes an object per
   address, not per structure of static data; a target whose data symbols are complete (an ELF's) could
   let them make structures too (gizmo's g_config), which needs the target to say so.
+  On the private real-life test (2026-10-23) the gate accepted the same functions with the structures
+  of static data as without; about a sixth of its readable C's accesses at fixed addresses became
+  members of them (on FreeRTOS a twentieth), and where its reconstruction has named the fields, the
+  structures found are the blocks it reads as one base with offsets too.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
   Thought 2026-10-21: plain accesses let GCC merge and hoist loads, and a loop that waits for a flag
