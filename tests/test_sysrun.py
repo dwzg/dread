@@ -1723,7 +1723,9 @@ def test_the_record_of_a_scenario(target):
     assert record["runs"][1]["log"][3] == ["write", "uart", 0, 4, 99]
     path = sysrun.write_record(target, image, record)
     try:
-        assert json.load(open(path))["scenario"] == "boot" and list(sysrun.records(target, image)) == ["boot"]
+        # (a lift check of the same build leaves its own, SCENARIO.lift-check: not this test's)
+        found = [k for k in sysrun.records(target, image) if not k.endswith(".lift-check")]
+        assert json.load(open(path))["scenario"] == "boot" and found == ["boot"]
         assert "log" not in sysrun.records(target, image, logs=False)["boot"]["runs"][0]
     finally:
         os.remove(path)
