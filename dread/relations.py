@@ -34,12 +34,19 @@ where the vote alone makes dread pilot --task review challenge it). A function's
 the review's rows say of the name it goes by now (dread.namereview standing: flagged, suspect,
 changed, confirmed, with the reasons and the old name).
 
+What the system run's records saw (dread.sysrun ran: dread sysrun's and the lift check's whole
+image's) adds the transfers no call shows (RAN_HOWS): a call or jump through a pointer (a callback,
+a timer's function: calls-pointer) and a return that went to a function's entry (a task's first run
+from its scheduler: enters), each an edge with how, how often and where, its ends joining the
+neighbourhood as callers and callees; how the core entered a function (an exception, the reset) is
+on its node (entered_by).
+
 Not established: an address the code makes may still be a number (a large constant from a literal
 pool); an indexed access is shown at its base; an address passed as an immediate (MSP430's
-#address) is missed; a call through a pointer is seen only where the address is taken; what runs
-is not looked at. Making readable C costs 0.1-0.5 s a function on a FreeRTOS build (its clean-up,
-dread.tidy; several seconds for the largest): the facts are kept per function (Facts), dread gui
-makes them in the background and fills the graph in.
+#address) is missed; a call through a pointer is seen where the address is taken, and where a
+scenario of the system run made it (only those). Making readable C costs 0.1-0.5 s a function on a
+FreeRTOS build (its clean-up, dread.tidy; several seconds for the largest): the facts are kept per
+function (Facts), dread gui makes them in the background and fills the graph in.
 
 flow_references reads the same kinds of facts from the machine code alone, by following the
 constants its registers hold (a few milliseconds a function): dread groups' evidence by default.
@@ -82,6 +89,33 @@ def call_maps(program, callers=None):
             up.setdefault(callee, {}).setdefault(caller, []).append(address)
             down.setdefault(caller, {}).setdefault(callee, []).append(address)
     return up, down
+
+
+RAN_HOWS = {"pointer": "calls-pointer", "pointer-jump": "calls-pointer", "return": "enters", "falls": "enters"}
+CORE_HOWS = ("exception", "syscall", "reset")   # transfers with no function in front: the core's
+
+
+def ran_maps(ran):
+    """(up, down) of the transfers into functions a system run saw that the listing shows no call for
+    (dread.sysrun ran(): through a pointer, a jump through a pointer, a return that went to a function's
+    entry, code running into the next function: RAN_HOWS), as call_maps gives the calls but with the
+    transfer rows in place of the call addresses: {callee: {caller: [rows]}}, {caller: {callee: [rows]}}."""
+    up, down = {}, {}
+    for row in ran or ():
+        if row.get("how") in RAN_HOWS and row.get("from") and row.get("to") and row["from"] != row["to"]:
+            up.setdefault(row["to"], {}).setdefault(row["from"], []).append(row)
+            down.setdefault(row["from"], {}).setdefault(row["to"], []).append(row)
+    return up, down
+
+
+def merged(a, b):
+    """Two maps of call_maps' shape in one (the keys of both; b's lists behind a's)."""
+    out = {k: dict(v) for k, v in a.items()}
+    for k, v in b.items():
+        mine = out.setdefault(k, {})
+        for other, items in v.items():
+            mine[other] = list(mine.get(other, ())) + list(items)
+    return out
 
 
 def neighbourhood(program, center, depth, up, down, limit=MAX_FUNCTIONS):
@@ -774,19 +808,29 @@ class Names:
 # ---- the graph ----
 
 def graph(program, center, depth=DEPTH, calls=None, facts=None, names=None, extra=None,
-          max_functions=MAX_FUNCTIONS, max_nodes=MAX_NODES):
+          max_functions=MAX_FUNCTIONS, max_nodes=MAX_NODES, ran=None):
     """The neighbourhood of center: {"center", "depth", "nodes", "edges", "missing", "left_out",
     "counts"} (docs/formats.md, "The relations graph"). calls: call_maps(program) (found when None);
     facts: {name: references()}, a function of the neighbourhood without one is listed in "missing"
     and has no data nodes yet; names: a Names; extra: name -> more attributes of a function node
-    (dread gui: its origin)."""
+    (dread gui: its origin); ran: the transfers the system run's records hold (dread.sysrun ran()):
+    what they show beyond the calls (ran_maps: a callback's caller, a task's start) joins the
+    neighbourhood as callers and callees and as edges of its own, and how the core entered a function
+    (an exception) is on its node."""
     if center not in program.by_name:
         raise KeyError(center)
     up, down = calls if calls is not None else call_maps(program)
+    ran_up, ran_down = ran_maps(ran)
+    walk_up, walk_down = (merged(up, ran_up), merged(down, ran_down)) if ran_up else (up, down)
+    core = {}
+    for row in ran or ():
+        if row.get("how") in CORE_HOWS and row.get("to"):
+            core.setdefault(row["to"], []).append({k: row[k] for k in ("how", "exception", "times", "scenarios")
+                                                   if k in row})
     names = names if names is not None else Names(program.target, program.image, program)
     facts = facts if facts is not None else {}
     depth = max(0, min(int(depth), MAX_DEPTH))
-    found, left = neighbourhood(program, center, depth, up, down, max_functions)
+    found, left = neighbourhood(program, center, depth, walk_up, walk_down, max_functions)
     nodes, edges, dropped = {}, {}, set()
 
     def function_node(name, distance, side):
@@ -803,6 +847,8 @@ def graph(program, center, depth=DEPTH, calls=None, facts=None, names=None, extr
             node["confidence"] = about["confidence"]
         if about["review"] is not None:
             node["review"] = about["review"]
+        if name in core:
+            node["entered_by"] = core[name]
         if extra is not None:
             node.update(extra(name))
         nodes[node["id"]] = node
@@ -954,7 +1000,8 @@ def graph(program, center, depth=DEPTH, calls=None, facts=None, names=None, extr
                 e = edge(node_id, s, "holds", offsets=[])
                 e["offsets"].append(offset)
 
-    # the calls between the functions shown, and how many each has beyond them
+    # the calls between the functions shown, and how many each has beyond them; the system run's
+    # transfers that no call shows (calls-pointer, enters), each with how it went, how often and where
     for node_id, node in list(nodes.items()):
         if node["kind"] != "function":
             continue
@@ -962,8 +1009,19 @@ def graph(program, center, depth=DEPTH, calls=None, facts=None, names=None, extr
         for callee, sites in sorted(down.get(name, {}).items()):
             if "f:" + callee in nodes:
                 edge(node_id, "f:" + callee, "calls", sites=sites)
-        node["more"] = {"callers": sum(1 for n in up.get(name, {}) if "f:" + n not in nodes),
-                        "callees": sum(1 for n in down.get(name, {}) if "f:" + n not in nodes)}
+        for callee, rows in sorted(ran_down.get(name, {}).items()):
+            if "f:" + callee not in nodes:
+                continue
+            for row in rows:
+                e = edge(node_id, "f:" + callee, RAN_HOWS[row["how"]], how=[], times=0, sites=[], scenarios=[])
+                if row["how"] not in e["how"]:
+                    e["how"].append(row["how"])
+                e["times"] += row.get("times", 0)
+                if row.get("site") is not None and row["site"] not in e["sites"]:
+                    e["sites"].append(row["site"])
+                e["scenarios"] = sorted(set(e["scenarios"]) | set(row.get("scenarios", ())))
+        node["more"] = {"callers": sum(1 for n in walk_up.get(name, {}) if "f:" + n not in nodes),
+                        "callees": sum(1 for n in walk_down.get(name, {}) if "f:" + n not in nodes)}
     counts = {}
     for node in nodes.values():
         counts[node["kind"]] = counts.get(node["kind"], 0) + 1
@@ -995,6 +1053,9 @@ def text_lines(g):
                 what.append("proposed %s" % node["proposed"]["name"])
             if (node.get("review") or {}).get("mark"):
                 what.append("review: %s" % node["review"]["mark"])
+            for e in node.get("entered_by", ()):
+                what.append("entered by %s %d times in the system run" % (
+                    "exception %d" % e["exception"] if e["how"] == "exception" else e["how"], e["times"]))
         elif node.get("types"):
             what.append(" ".join(node["types"]))
         lines.append("%-30s %s  %s" % (node["name"][:30], where, "  ".join(w for w in what if w)))
@@ -1004,6 +1065,8 @@ def text_lines(g):
             more = " " + " ".join(e["types"]) + (" indexed" if e.get("indexed") else "")
         elif e.get("variables"):
             more = " " + ", ".join(e["variables"])
+        elif e["kind"] in ("calls-pointer", "enters"):
+            more = " (%s, %d times in the system run)" % (", ".join(e["how"]), e["times"])
         lines.append("  %s %s %s%s" % (by_id[e["from"]]["name"], e["kind"], by_id[e["to"]]["name"], more))
     return lines
 
@@ -1033,14 +1096,18 @@ def main(argv=None):
     if fn is None:
         print("dread relations: no function %s" % args.name, file=sys.stderr)
         return 1
+    from dread import sysrun
     calls = call_maps(program)
-    found, _ = neighbourhood(program, fn.name, max(0, min(args.depth, MAX_DEPTH)), *calls)
+    ran = sysrun.ran(program, sysrun.records(target, image))
+    ran_up, ran_down = ran_maps(ran)
+    found, _ = neighbourhood(program, fn.name, max(0, min(args.depth, MAX_DEPTH)), merged(calls[0], ran_up),
+                             merged(calls[1], ran_down))
     try:
         endless = noreturn.find(program)
     except Exception:                       # (an architecture without an emulator yet: the lifter finds none)
         endless = None
     made = Facts(target, image, program, endless=endless)
-    g = graph(program, fn.name, args.depth, calls, {name: made.get(name) for name in found})
+    g = graph(program, fn.name, args.depth, calls, {name: made.get(name) for name in found}, ran=ran)
     if args.json:
         print(json.dumps(g, indent=1, sort_keys=True))
     else:

@@ -378,6 +378,12 @@ limit = 200_000
     assert run.how.startswith("until"), run.how
     assert run.reports["uart"]["sent"] == "aEbTc", run.reports["uart"]["sent"]
     assert run.reports["interrupts"] == {7: 1}, run.reports["interrupts"]
+    # the vector's `j` (no function's entry) hands the trap's mark on to the handler it jumps to
+    from dread.program import Program
+    rows, unexplained = sysrun.transfers(Program(t, image), run.calls)
+    got = {(r["how"], r["to"], r.get("exception")) for r in rows if r["how"] in ("exception", "syscall", "reset")}
+    assert got == {("reset", "_start", None), ("syscall", "sync_trap", None), ("exception", "timer_trap", 7)}, got
+    assert unexplained == 0
 
 
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
@@ -600,7 +606,7 @@ def test_the_c_block_hook_gives_the_python_hooks_outcome(monkeypatch):
                 scenario = dict(scenario, _name=name)
                 system = sysrun.System(t, image, image.payload(), scenario=scenario, built=built)
                 o = system.run(int(scenario.get("limit", sysrun.LIMIT)))
-                out[name, len(built)] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+                out[name, len(built)] = (o.how, o.clock, o.log, o.reports, o.entered, o.order, o.calls, o.where)
                 fast += system.st.fast if system.fast is not None else 0
         return out, fast
     with_c, done_in_c = outcomes()
@@ -634,7 +640,7 @@ def test_the_c_hooks_device_reads_give_the_python_hooks_outcome(target, monkeypa
                 scenario = dict(scenario, _name=name)
                 system = sysrun.System(target, image, image.payload(), scenario=scenario, built=built)
                 o = system.run(int(scenario.get("limit", sysrun.LIMIT)))
-                out[name, len(built)] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+                out[name, len(built)] = (o.how, o.clock, o.log, o.reports, o.entered, o.order, o.calls, o.where)
                 in_c += system.st.io_fast if system.fast is not None else 0
                 reads += sum(e[5] for e in o.log if e[0] == "read")
         return out, in_c, reads
@@ -1273,9 +1279,171 @@ def test_the_chunk_size_changes_nothing(monkeypatch):
                 scenario = dict(scenario, _name=name)
                 o = sysrun.System(t, image, image.payload(), scenario=scenario, built=built).run(
                     int(scenario.get("limit", sysrun.LIMIT)))
-                out[name, len(built)] = (o.how, o.clock, o.log, o.reports, o.entered, o.order)
+                out[name, len(built)] = (o.how, o.clock, o.log, o.reports, o.entered, o.order, o.calls, o.where)
         return out
     monkeypatch.setattr(sysrun, "CHUNK", 13)
     small = outcomes()
     monkeypatch.setattr(sysrun, "CHUNK", 10 ** 9)
     assert small == outcomes()
+
+
+@pytest.mark.compiles
+def test_the_run_keeps_who_entered_whom(target):
+    """The transfers into functions (Outcome.calls, sysrun.transfers): the reset into the image's entry,
+    the timer's interrupt into its handler (through the A profile's vector, which only branches on),
+    and every indirect transfer the listing has in dispatch seen in the run with its target: GCC jumps
+    to cmd_volume through gizmo's table of commands; clang folds the table into a switch (rv32: no
+    pointer there). Each log entry's pc lies in the function that made it, and every transfer is
+    explained by the instruction in front of it."""
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    scenario = {"input": [[40_000, "uart", "3"], [120_000, "uart", "s"]], "until": {"uart": "volume 3"},
+                "limit": 5_000_000}
+    o = sysrun.System(target, image, image.payload(), program=program, scenario=scenario).run(5_000_000)
+    assert o.how.startswith("until"), o.how
+    rows, unexplained = sysrun.transfers(program, o.calls)
+    assert unexplained == 0
+    first = program.by_entry[o.order[0]].name          # (a32: the reset vector only branches to it)
+    assert [(r["how"], r["to"]) for r in rows if r["how"] == "reset"] == [("reset", first)]
+    handlers = {r["to"] for r in rows if r["how"] == "exception"}
+    assert handlers and handlers <= {"TIMER_IRQHandler", "irq_entry", "trap_entry"}, handlers
+    fn = program.by_name["dispatch"]
+    indirect = [a for a in fn.insns if program.arch.flow(program.insn(a))[0] in ("icall", "ijump")]
+    pointers = {(r["from"], r["to"]) for r in rows if r["how"] in ("pointer", "pointer-jump") and r["from"] == "dispatch"}
+    assert pointers == ({("dispatch", "cmd_volume")} if indirect else set()), (pointers, indirect)
+    assert len(o.where) == len(o.log)
+    names, at = sysrun.running(program, o.where)
+    sent = {names[k] for e, k in zip(o.log, at) if e[:2] == ("uart", "sent")}
+    assert sent and sent <= {"uart_putc", "uart_puts"}, sent
+
+
+ENTERED = r"""
+#define UART (*(volatile unsigned *)0x40004000)
+#define ICSR (*(volatile unsigned *)0xE000ED04)
+__attribute__((noinline)) void emit(int c) { UART = c; }
+static volatile int switches;
+unsigned worker_frame[8];
+__attribute__((noinline)) void after_pend(void) { emit('t'); }
+__attribute__((noinline)) void pend_then_call(void) { ICSR = 1u << 28; after_pend(); emit('u'); }
+__attribute__((noinline)) void relay(int c) { emit(c); }
+static void (*volatile hook)(int);
+__attribute__((noinline)) void run_hooks(void) { hook('h'); emit('i'); }
+__attribute__((noreturn)) void worker(void) { emit('w'); for (;;) __asm volatile ("" ::: "memory"); }
+__attribute__((naked)) void pendsv_handler(void) {
+    __asm volatile ("ldr r0, =switches\n ldr r1, [r0]\n adds r2, r1, #1\n str r2, [r0]\n cmp r1, #0\n bne 1f\n bx lr\n"
+                    "1: ldr r0, =worker_frame\n msr psp, r0\n ldr lr, =0xFFFFFFFD\n bx lr\n");
+}
+__attribute__((noreturn)) void body(void) {
+    emit('a');
+    pend_then_call();
+    hook = relay;
+    run_hooks();
+    worker_frame[6] = (unsigned)worker;
+    worker_frame[7] = 0x01000000;
+    ICSR = 1u << 28;
+    for (;;) __asm volatile ("" ::: "memory");
+}
+__attribute__((naked, noreturn)) void reset(void) { __asm volatile ("b body\n"); }
+__attribute__((section(".vectors"), used)) void (*const vectors[16])(void) = {
+    (void (*)(void))0x20004000, reset, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, pendsv_handler, 0 };
+"""
+ENTERED_TABLES = """
+[models.uart]
+kind = "uart"
+base = 0x40004000
+
+[models.nvic]
+kind = "nvic"
+
+[scenarios.tasks]
+until = {uart = "atuhiw"}
+limit = 200_000
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_callback_a_started_task_and_an_interrupt_in_front_of_an_entry(tmp_path, monkeypatch):
+    """A program of the test's own: run_hooks calls relay through a pointer ("pointer"); PendSV, pended
+    just before pend_then_call calls after_pend, comes in front of after_pend's first block, which then
+    runs when the exception returned: the transfer into it is pend_then_call's call (the entry keeps
+    what came before the exception, by its stack pointer), not a return from pendsv_handler; PendSV's
+    second run returns into worker through a frame it made ("return", a task's first run), and the
+    core entered pendsv_handler twice (exception 14). The C hooks and the Python hooks agree; the
+    record keeps the transfers by address and the next reader names them as the tables do."""
+    from dread import fasthooks
+    from dread.program import Program
+    t = _program_target(tmp_path, ENTERED, ENTERED_TABLES)
+    image = t.image()
+    program = Program(t, image)
+
+    def run():
+        o = sysrun.System(t, image, image.payload(), program=program, scenario=t.scenarios["tasks"]).run(200_000)
+        assert o.how.startswith("until") and o.reports["uart"]["sent"] == "atuhiw", (o.how, o.reports)
+        return o
+    o = run()
+    rows, unexplained = sysrun.transfers(program, o.calls)
+    got = {(r["how"], r["from"], r["to"]) for r in rows}
+    assert ("pointer", "run_hooks", "relay") in got
+    assert ("call", "pend_then_call", "after_pend") in got and ("return", "pendsv_handler", "after_pend") not in got
+    assert ("return", "pendsv_handler", "worker") in got
+    assert [(r["how"], r["exception"], r["times"]) for r in rows if r["to"] == "pendsv_handler"] == [("exception", 14, 2)]
+    assert unexplained == 0
+    names, at = sysrun.running(program, o.where)
+    assert {names[k] for e, k in zip(o.log, at) if e[0] == "write"} <= {"emit", "pend_then_call", "body"}
+    assert [names[k] for e, k in zip(o.log, at) if e[0] == "interrupt"] == ["after_pend", "body"]
+    if fasthooks.library() is not None:
+        monkeypatch.setattr(fasthooks, "_LIB", [None])              # as without a C compiler
+        python = run()
+        assert (python.calls, python.where, python.log) == (o.calls, o.where, o.log)
+    record = sysrun.make_record(program, "tasks", t.scenarios["tasks"], [("original", o)], "dread sysrun",
+                                {"original": image.payload()})
+    path = sysrun.write_record(t, image, record)
+    assert path.endswith(os.path.join("sysrun", "main", "tasks.json"))
+    rows = sysrun.ran(program, sysrun.records(t, image))
+    assert {(r["how"], r["from"], r["to"], tuple(r["scenarios"])) for r in rows if r["how"] in ("pointer", "return")} == {
+        ("pointer", "run_hooks", "relay", ("tasks",)), ("return", "pendsv_handler", "worker", ("tasks",))}
+    assert sysrun.records(t, image, payload=image.payload() + b"\0") == {}    # (another image's record: left out)
+
+
+@pytest.mark.compiles
+def test_the_record_of_a_scenario(target):
+    """make_record: both runs with how they ended, their logs, the pc of each entry and the function
+    there, where the logs first differ with compare's lines; a window of `keep` entries around the
+    first difference when the logs are longer; written and read back, of this image's bytes only.
+    dread sysrun writes it."""
+    import copy
+    import json
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    a, b = both(target)
+    record = sysrun.make_record(program, "boot", target.scenarios["boot"], [("original", a), ("rebuilt", b)],
+                                "dread sysrun", {"original": image.payload(), "rebuilt": image.payload()},
+                                built=["clamp"])
+    assert record["differ"] is None and record["first"] == 0 and record["built"] == 1
+    original = record["runs"][0]
+    assert original["log"] == [list(e) for e in a.log] and len(original["at"]) == len(original["in"]) == len(a.log)
+    assert {record["functions"][k] for e, k in zip(original["log"], original["in"]) if e[:2] == ["uart", "sent"]} <= {
+        "uart_putc", "uart_puts"}
+    c = copy.copy(b)
+    c.log = list(b.log)
+    c.log[7] = ("write", "uart", 0, 4, 99)
+    record = sysrun.make_record(program, "boot", target.scenarios["boot"], [("original", a), ("rebuilt", c)],
+                                "dread sysrun", {"original": image.payload(), "rebuilt": b"x"}, keep=6)
+    assert record["differ"]["at"] == 7 and record["differ"]["lines"][0].startswith("device logs differ at entry 7")
+    assert record["first"] == 4 and len(record["runs"][0]["log"]) == 6
+    assert record["runs"][1]["log"][3] == ["write", "uart", 0, 4, 99]
+    path = sysrun.write_record(target, image, record)
+    try:
+        assert json.load(open(path))["scenario"] == "boot" and list(sysrun.records(target, image)) == ["boot"]
+        assert "log" not in sysrun.records(target, image, logs=False)["boot"]["runs"][0]
+    finally:
+        os.remove(path)
+    assert sysrun.main(["--target", target.root, "--scenario", "boot"]) == 0
+    try:
+        kept = sysrun.records(target, image)["boot"]
+        assert kept["by"] == "dread sysrun" and [r["label"] for r in kept["runs"]] == ["original", "rebuilt"]
+        assert kept["differ"] is None and kept["built"] > 0 and kept["runs"][1]["digest"] != kept["runs"][0]["digest"]
+    finally:
+        os.remove(os.path.join(sysrun.record_dir(target, image), "boot.json"))

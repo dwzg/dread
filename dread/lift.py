@@ -57,7 +57,10 @@ functions rebuilt (whole_image): C that behaves otherwise only with other C show
 grew add up on a task's small stack). Where it differs, a smallest set of functions that still makes
 the difference is found by halving (culprits) and dropped, and the rest is run again until the whole
 image agrees (lift-check/IMAGE/whole.txt: the outcome, then what was dropped for it). Until
-2026-10-22 the difference was only reported, and the functions stayed. What stays is written to the
+2026-10-22 the difference was only reported, and the functions stayed. The last whole image's runs
+are kept as the system run's records, one a scenario (BUILD/sysrun/IMAGE/SCENARIO.lift-check.json,
+dread.sysrun: both device logs, the function at each entry, the transfers into functions), which
+dread gui shows. What stays is written to the
 image's lifted table (config/lifted.txt), which dread recon builds from then on (it lifts those
 functions again at every build: the C is not kept). A build that dropping functions cannot mend (the
 sources written by hand do not compile, a header is missing) ends the check with exit 1 and the
@@ -3128,7 +3131,8 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
     for name in accepted:
         verdicts[name] = ("accepted", "by " + by_system[name] if name in by_system else
                           "by loop cases" if name in loops else "", "")
-    whole = whole_image(target, image, program, accepted, out, lifter) if runs and accepted else None
+    last = {}                               # the last whole image's runs (whole_image), kept as records at the end
+    whole = whole_image(target, image, program, accepted, out, lifter, runs=last) if runs and accepted else None
     history = []                            # (names dropped for the whole image, its difference with them)
     if whole:
         # The function-level cases agreed (and for one that never returns, the system run with it
@@ -3142,7 +3146,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
         def differs(names):
             key = tuple(sorted(names))
             if key not in tried:
-                tried[key] = whole_image(target, image, program, list(key), out, lifter) if key else None
+                tried[key] = whole_image(target, image, program, list(key), out, lifter, runs=last) if key else None
             return tried[key]
         while whole:
             out("the whole image: %s" % whole)
@@ -3177,6 +3181,12 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
     with open(os.path.join(work, "whole.txt"), "w") as f:
         f.write((whole or "agrees") + "\n")
         f.writelines("dropped for it: %s; with them alone: %s\n" % (", ".join(names), diff) for names, diff in history)
+    if runs and accepted:
+        if last.get("names") != sorted(accepted):     # (the last run was one of the halving's)
+            whole_image(target, image, program, accepted, out, lifter, runs=last)
+        kept = keep_whole(target, image, program, last)
+        if kept:
+            out("the whole image's runs kept in %s (%s)" % (os.path.relpath(sysrun_dir(target, image)), ", ".join(kept)))
     gone = sum(len(names) for names, _ in history)
     out("dread lift --check: %d accepted after %d rounds (%d by loop cases, %d by the system run, %d of them with "
         "loop cases; %d written by hand, %d refused, %d dropped; the whole image %s), into %s" % (
@@ -3346,11 +3356,37 @@ def culprits(names, differs):
     return found
 
 
-def whole_image(target, image, program, names, out=print, lifter=None, transform=None):
+def sysrun_dir(target, image):
+    from dread import sysrun
+    return sysrun.record_dir(target, image)
+
+
+WHOLE_RECORD = "%s.lift-check"       # the name of the whole image's record of a scenario (keep_whole)
+
+
+def keep_whole(target, image, program, last):
+    """The runs of the last whole image (whole_image's runs) as the system run's records, one a scenario
+    (dread.sysrun make_record, BUILD/sysrun/IMAGE/SCENARIO.lift-check.json, "by" dread lift --check,
+    beside dread sysrun's SCENARIO.json): what dread gui shows of them (the device logs side by side, the
+    transfers into functions). Returns the records' names."""
+    from dread import sysrun
+    done = []
+    for scenario_name, scenario, a, b in last.get("runs", ()):
+        record = sysrun.make_record(program, scenario_name, scenario, [("original", a), ("rebuilt", b)],
+                                    "dread lift --check", {"original": image.payload(), "rebuilt": last["payload"]},
+                                    placement=last["placement"], built=last["built"], name=WHOLE_RECORD % scenario_name)
+        sysrun.write_record(target, image, record)
+        done.append(record["name"])
+    return done
+
+
+def whole_image(target, image, program, names, out=print, lifter=None, transform=None, runs=None):
     """Every scenario on the original and on the image with all of `names` built from lifted C: the
     function-level cases test each function on its own, this the whole (a frame that grew in C can
     overflow a task's small stack). Returns None when they agree, else the first difference.
-    transform: see dread.build.lift_sources (dread readable's check)."""
+    transform: see dread.build.lift_sources (dread readable's check). runs: a dict that gets this call's
+    runs ({"names": sorted, "runs": [(scenario name, scenario, the original's Outcome, the rebuilt
+    one's)], "payload", "placement", "built"}; dread lift --check keeps the last one's, keep_whole)."""
     import json
     from dread import build, overlay, sysrun
     if not names or not target.scenarios:
@@ -3366,11 +3402,17 @@ def whole_image(target, image, program, names, out=print, lifter=None, transform
     built = [n for n, p in placed.items() if p["placement"] != "helper"]
     with open(payload, "rb") as f:
         rebuilt = f.read()
+    if runs is not None:
+        runs.clear()
+        runs.update(names=sorted(names), runs=[], payload=rebuilt, placement=placed, built=built)
     for scenario_name, scenario in sorted(target.scenarios.items()):
         scenario = dict(scenario, _name=scenario_name)
         system = sysrun.System(target, image, image.payload(), program=program, built=built, scenario=scenario)
         a = system.run(int(scenario.get("limit", sysrun.LIMIT)))
-        b = sysrun.run_image(target, image, rebuilt, scenario, placement=placed)
+        b = sysrun.System(target, image, rebuilt, program=program, placement=placed, scenario=scenario).run(
+            int(scenario.get("limit", sysrun.LIMIT)))
+        if runs is not None:
+            runs["runs"].append((scenario_name, scenario, a, b))
         diff = sysrun.compare(a, b)
         if diff:
             return "scenario %s: %s" % (scenario_name, " ".join(diff)[:300])

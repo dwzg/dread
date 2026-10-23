@@ -19,6 +19,13 @@ one had; on clang -Os and GCC -O2 the 3 and 8 asked with other masks (a mask had
 answered otherwise, and the block hook still asks those. Every other access goes to Python
 (System._io_from_c).
 
+The C block hook also keeps what the run keeps of the transfers into functions (dread.sysrun
+System._ran; sys_ran here): every block it does ends where the next transfer comes from (came), and
+at a function's entry the pair is counted (calls, taken by take_calls), from what came before an
+exception that came in front of that entry where its stack pointer says so (suspended: suspend,
+resume). The log entries it makes carry the pc of their access (System.where), and so does every
+access it hands over (io_pc).
+
 The system run's state is SysState here and sys_t in C: a field added to one is added to the other
 (the sizes are compared when the library loads). What the C side keeps for System, the log entries
 it made (SysEntry: reads with their counted repeats, and writes) and the registers whose accesses
@@ -209,18 +216,19 @@ UNKNOWN, VALUE, MEMORY, NO_MODEL, REPEAT = range(5)     # SysReg.kind (reads) an
 
 class SysEntry(ctypes.Structure):
     """A device log entry the C hook made (sysentry_t): a read with the count of its repeats, or a
-    write; model is an index into the run's models, -1 for none."""
+    write; pc the instruction that made it; model is an index into the run's models, -1 for none."""
     _fields_ = [("address", ctypes.c_uint64), ("value", ctypes.c_uint64), ("count", ctypes.c_uint64),
-                ("model", ctypes.c_int32), ("size", ctypes.c_int32), ("write", ctypes.c_int32)]
+                ("pc", ctypes.c_uint64), ("model", ctypes.c_int32), ("size", ctypes.c_int32),
+                ("write", ctypes.c_int32)]
 
 
 # SysEntry's bytes, for reading many at once (struct.iter_unpack: half the time of the fields from
 # eight entries on, more the more there are; below, the copy costs more than it saves)
-SYS_ENTRY = struct.Struct("=QQQiii%dx" % (ctypes.sizeof(SysEntry) - 36))
+SYS_ENTRY = struct.Struct("=QQQQiii%dx" % (ctypes.sizeof(SysEntry) - 44))
 
 
 def sys_entries(state):
-    """The log entries the C hook made (state.log_n of them), as (address, value, count, model,
+    """The log entries the C hook made (state.log_n of them), as (address, value, count, pc, model,
     size, write) tuples."""
     return SYS_ENTRY.iter_unpack(ctypes.string_at(state.log, state.log_n * SYS_ENTRY.size))
 
@@ -264,7 +272,11 @@ class SysState(ctypes.Structure):
                 ("io_index", Set), ("io_regs", ctypes.POINTER(SysReg)), ("io_regs_n", ctypes.c_uint64),
                 ("io_regs_cap", ctypes.c_uint64), ("models_epoch", ctypes.c_int64),
                 ("io_used", ctypes.POINTER(ctypes.c_uint64)), ("io_used_n", ctypes.c_uint64),
-                ("io_fast", ctypes.c_int64), ("writes_fast", ctypes.c_int64)]
+                ("io_fast", ctypes.c_int64), ("writes_fast", ctypes.c_int64),
+                # the transfers into functions (System._ran)
+                ("came", ctypes.c_uint64), ("vector", ctypes.c_int32), ("sp_reg", ctypes.c_int32),
+                ("pc_reg", ctypes.c_int32), ("calls", Set), ("suspended", Set), ("suspended_n", ctypes.c_int64),
+                ("io_pc", ctypes.c_uint64)]
 
 
 class SysHooks:
@@ -283,6 +295,11 @@ class SysHooks:
         lib.dread_sys_entered.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dread_sys_entered.restype = ctypes.c_size_t
         lib.dread_sys_entry.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        lib.dread_sys_calls.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        lib.dread_sys_calls.restype = ctypes.c_size_t
+        lib.dread_sys_suspend.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32]
+        lib.dread_sys_resume.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        lib.dread_sys_resume.restype = ctypes.c_uint32
         lib.dread_sys_reg.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int32, ctypes.c_int32]
         lib.dread_sys_reg.restype = ctypes.c_int64
         lib.dread_sys_free.argtypes = [ctypes.c_void_p]
@@ -360,6 +377,24 @@ class SysHooks:
         keys, vals = (ctypes.c_uint64 * max(n, 1))(), (ctypes.c_uint32 * max(n, 1))()
         n = self.lib.dread_sys_entered(ctypes.byref(self.state), keys, vals)
         return [(keys[i], vals[i]) for i in range(n)]
+
+    def take_calls(self):
+        """[((came, entry address), transfers)] the hook counted since the last call (dread.sysrun
+        System._ran)."""
+        n = self.state.calls.used
+        keys, vals = (ctypes.c_uint64 * max(n, 1))(), (ctypes.c_uint32 * max(n, 1))()
+        n = self.lib.dread_sys_calls(ctypes.byref(self.state), keys, vals)
+        return [((keys[i] >> 32, keys[i] & 0xFFFFFFFF), vals[i]) for i in range(n)]
+
+    def suspend(self, entry, sp, came):
+        """An exception comes in front of the function entry `entry` with stack pointer `sp`: what
+        came before it (System._suspend)."""
+        self.lib.dread_sys_suspend(ctypes.byref(self.state), entry << 32 | (sp & 0xFFFFFFFF), came)
+
+    def resume(self, entry, sp):
+        """What came before the exception that came in front of the entry at that stack pointer,
+        now gone; 0 for none."""
+        return self.lib.dread_sys_resume(ctypes.byref(self.state), entry << 32 | (sp & 0xFFFFFFFF))
 
     def set_memo(self, registers, read):
         """The masked answer holds while these (register, bits) read as now."""

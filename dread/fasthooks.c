@@ -330,6 +330,7 @@ typedef int (*mem_rw_fn)(void *uc, uint64_t address, void *bytes, uint64_t size)
 
 typedef struct {                    /* a device log entry made here (dread_sysio) */
     uint64_t address, value, count; /* count: the reads it stands for (1 for a write) */
+    uint64_t pc;                    /* the instruction that made the access (System.where) */
     int32_t model, size;            /* model: its index in System.models, -1: no model owns it */
     int32_t write;                  /* a write's entry, else a read's */
 } sysentry_t;
@@ -397,6 +398,15 @@ typedef struct {
     uint64_t io_used_n;
     int64_t io_fast;                /* accesses this hook did alone */
     int64_t writes_fast;            /* the writes among them */
+    /* the transfers into functions (System._ran): where the last block that ran ends, or a mark
+       (System's CAME_*), the transfers counted here, and the entries an exception came in front of */
+    uint64_t came;
+    int32_t vector;                 /* the block an exception enters next: no entry, it hands the mark on */
+    int32_t sp_reg, pc_reg;         /* the stack pointer's and the program counter's register ids */
+    set_t calls;                    /* came << 32 | entry -> the transfers counted here */
+    set_t suspended;                /* entry << 32 | sp -> came then; 0: gone (System._suspend) */
+    int64_t suspended_n;            /* those not gone */
+    uint64_t io_pc;                 /* the pc of the access handed to System._io_from_c */
 } sys_t;
 
 static int sys_shared(const sys_t *st, uint64_t address)
@@ -425,6 +435,39 @@ static int sys_masks_hold(void *uc, sys_t *st)
     return 1;
 }
 
+/* A block that runs (System._ran): where it is a function's entry, the entry counted and the transfer
+ * into it, from where the last block that ran ends (or the mark an exception, a system call or the
+ * reset left; an entry an exception came in front of keeps what came before the exception, found by
+ * its stack pointer); then where it ends. The block an exception enters, when it is no entry (a
+ * vector that branches on), hands the exception's mark on. Keep the two alike. */
+static void sys_ran(void *uc, uint64_t address, uint32_t size, sys_t *st)
+{
+    if (set_get(&st->entry_set, address)) {
+        set_put(&st->entered, address, set_get(&st->entered, address) + 1, 0);
+        uint64_t came = st->came;
+        if (st->suspended_n > 0) {
+            uint64_t sp = 0;
+            st->reg_read(uc, st->sp_reg, &sp);
+            uint64_t key = address << 32 | (sp & 0xffffffffULL);
+            uint32_t back = set_get(&st->suspended, key);
+            if (back) {
+                came = back;
+                set_put(&st->suspended, key, 0, 0);
+                st->suspended_n--;
+            }
+        }
+        if (address <= 0xffffffffULL && came <= 0xffffffffULL) {
+            uint64_t key = came << 32 | address;
+            set_put(&st->calls, key, set_get(&st->calls, key) + 1, 0);
+        }
+    } else if (st->vector) {
+        st->vector = 0;
+        return;
+    }
+    st->vector = 0;
+    st->came = address + size;
+}
+
 /* Whether the block at address is entered with the anchor's registers (System._came_round). */
 static int sys_at_anchor(void *uc, uint64_t address, sys_t *st)
 {
@@ -441,7 +484,7 @@ static int sys_at_anchor(void *uc, uint64_t address, sys_t *st)
 
 /* A known block outside shared code: done here (1) when System._stretch would only count it, else
  * left to it (0). Keep the two alike. */
-static int sys_stretch(void *uc, uint64_t address, sys_t *st)
+static int sys_stretch(void *uc, uint64_t address, uint32_t size, sys_t *st)
 {
     if (st->resume == address + 1 && st->frozen) {
         st->resume = 0;             /* the block a stop came in front of, run now */
@@ -462,8 +505,7 @@ static int sys_stretch(void *uc, uint64_t address, sys_t *st)
         }
         st->frozen = (int32_t)n;
     }
-    if (set_get(&st->entry_set, address))
-        set_put(&st->entered, address, set_get(&st->entered, address) + 1, 0);
+    sys_ran(uc, address, size, st);
     st->chunk--;
     st->fast++;
     return 1;
@@ -475,15 +517,14 @@ void dread_sysblock(void *uc, uint64_t address, uint32_t size, sys_t *st)
     if (!st->observers && !st->due && st->chunk > 0) {
         uint32_t known = set_get(&st->known, address);
         int shared = known && size < known && sys_shared(st, address);
-        if (known && size < known && !shared && sys_stretch(uc, address, st))
+        if (known && size < known && !shared && sys_stretch(uc, address, size, st))
             return;
         if (shared) {
             int64_t clock = st->clock + size;
             if ((clock - st->progress < st->spin || clock < st->spin_check)
                     && clock < st->next_event && clock < st->limit
                     && (!st->irq_check || sys_masks_hold(uc, st))) {
-                if (set_get(&st->entry_set, address))
-                    set_put(&st->entered, address, set_get(&st->entered, address) + 1, 0);
+                sys_ran(uc, address, size, st);
                 st->clock = clock;
                 st->frozen = 0;
                 st->chunk--;
@@ -524,6 +565,42 @@ size_t dread_sys_entered(sys_t *st, uint64_t *keys, uint32_t *vals)
 void dread_sys_entry(sys_t *st, uint64_t address)
 {
     set_put(&st->entry_set, address, 1, 1);
+}
+
+/* The transfers counted here, as (came << 32 | entry, count) pairs, and the counts set back to none. */
+size_t dread_sys_calls(sys_t *st, uint64_t *keys, uint32_t *vals)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < st->calls.cap; i++)
+        if (st->calls.keys[i]) {
+            keys[n] = st->calls.keys[i] - 1;
+            vals[n] = st->calls.vals[i];
+            n++;
+        }
+    set_clear(&st->calls);
+    return n;
+}
+
+/* An exception comes in front of the entry `key` >> 32, its stack pointer the key's low half: what
+ * came before it, unless one came in front of it already and the entry has not run since. */
+void dread_sys_suspend(sys_t *st, uint64_t key, uint32_t came)
+{
+    if (!came || set_get(&st->suspended, key))
+        return;
+    set_put(&st->suspended, key, came, 0);
+    st->suspended_n++;
+}
+
+/* What came before the exception that came in front of the entry `key` (as dread_sys_suspend's), now
+ * gone; 0: none. */
+uint32_t dread_sys_resume(sys_t *st, uint64_t key)
+{
+    uint32_t back = set_get(&st->suspended, key);
+    if (back) {
+        set_put(&st->suspended, key, 0, 0);
+        st->suspended_n--;
+    }
+    return back;
 }
 
 /* ---- the system run's device accesses (System._io) ----
@@ -596,9 +673,12 @@ static int sys_read_here(void *uc, uint64_t address, int size, sys_t *st)
             st->tail_extra++;
     } else {
         sysentry_t *r = &st->log[st->log_n++];
+        uint64_t pc = 0;
+        st->reg_read(uc, st->pc_reg, &pc);
         r->address = address;
         r->value = got;
         r->count = 1;
+        r->pc = pc;
         r->model = e->model;
         r->size = size;
         r->write = 0;
@@ -627,7 +707,7 @@ static int sys_read_here(void *uc, uint64_t address, int size, sys_t *st)
  * no plain value to ask again, no next event to schedule, and no interrupt question to raise (what
  * the controllers want did not change, and the masks are compared as before: System.interrupts_changed
  * is not called). Only the clock and the log move, as System._io moves them. */
-static int sys_write_here(uint64_t address, int size, int64_t value, sys_t *st)
+static int sys_write_here(void *uc, uint64_t address, int size, int64_t value, sys_t *st)
 {
     if (st->observers || !st->io_regs_n || size < 1 || size > 8 || st->clock < 0 || st->clock >= st->limit
             || st->access < 0 || st->clock > INT64_MAX - st->access)
@@ -641,9 +721,12 @@ static int sys_write_here(uint64_t address, int size, int64_t value, sys_t *st)
     st->frozen = 0;                 /* the clock moved: a stretch outside shared code ends */
     st->progress = st->last_access = st->clock;
     sysentry_t *r = &st->log[st->log_n++];
+    uint64_t pc = 0;
+    st->reg_read(uc, st->pc_reg, &pc);
     r->address = address;
     r->value = v;
     r->count = 1;
+    r->pc = pc;
     r->model = e->model;
     r->size = size;
     r->write = 1;
@@ -661,9 +744,11 @@ static int sys_write_here(uint64_t address, int size, int64_t value, sys_t *st)
 void dread_sysio(void *uc, int type, uint64_t address, int size, int64_t value, sys_t *st)
 {
     int done = type == UC_MEM_READ ? sys_read_here(uc, address, size, st)
-             : type == UC_MEM_WRITE ? sys_write_here(address, size, value, st) : 0;
-    if (!done)
+             : type == UC_MEM_WRITE ? sys_write_here(uc, address, size, value, st) : 0;
+    if (!done) {
+        st->reg_read(uc, st->pc_reg, &st->io_pc);
         st->io_python(uc, type, address, size, value, NULL);
+    }
     if (st->settle) {               /* as System._on_io's settle_it, on both ways */
         uint32_t v = 0;
         st->reg_read(uc, st->status_reg, &v);
@@ -719,6 +804,8 @@ void dread_sys_free(sys_t *st)
     set_free(&st->known);
     set_free(&st->entry_set);
     set_free(&st->entered);
+    set_free(&st->calls);
+    set_free(&st->suspended);
     set_free(&st->io_index);
     free(st->log);
     free(st->io_regs);

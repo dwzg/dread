@@ -52,10 +52,10 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | Integration run: generated inputs with real callees, also through original callers | done |
 | Register flow across calls: what callers read after a call, compared at the return | done |
 | Recorded cases from Python models of callees (`dread record`) | done |
-| System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick) | done |
+| System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick); each run kept as a record: both device logs with the function behind each entry, and who entered whom (calls through pointers, tasks started by their scheduler, exceptions) | done |
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
 | Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order, the functions in groups found from their code alone, the subsystems a reader would see (`dread groups`: shared memory, texts and devices, neighbours in memory); renaming everywhere at once (`dread rename`) | done |
-| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes | done |
+| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes; the system run's device logs of both images side by side | done |
 | Relations (`dread relations`, and in the browser): a function's callers, callees, memory, texts and structures as a graph, each piece marked by how sure its name is (its vote's agreement, and the name review's suspects); the whole program as a graph of its groups (`dread groups --json`), a group opening into its functions, a search lighting the functions and groups it finds; both laid out by a force simulation as they are drawn | first version |
 | Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
 | Method documentation and a porting guide | done |
@@ -118,7 +118,7 @@ map of the image, the listing with the instructions the cases ran or missed, the
 verdicts and cases, search by name, proposed name, address and text. It changes nothing but names
 (through `dread rename`) and notes (annotations.txt); everything else is the tools' work. Keys: `/`
 search, `j` `k` lines, `Enter` follow, `n` rename, `;` note, `r` relations, `p` the whole program,
-`?` all of them.
+`s` the system run, `?` all of them.
 
 A function's relations are the pieces of the puzzle around it, as a graph:
 - its callers above and callees below, to a depth of 1 to 3;
@@ -143,6 +143,13 @@ texts it shares then joined to the functions that touch them); a program of a fe
 shows all of them at once. A search there lights the functions it finds (by name, proposed name,
 address or text) and the groups that hold them; Enter opens those groups.
 
+The system run (`s`) shows what `dread sysrun` and the lift check's whole image kept of each scenario
+(BUILD/sysrun): how each image's run ended, and both device logs side by side, entry by entry, each
+with the function whose instruction made it; where they first differ is marked (`d` goes there). What
+the run saw beyond the calls joins both graphs and the function's page: who called a function through
+a pointer (a timer's callback, a table of commands), which task the scheduler started by a return, which
+exception entered a handler.
+
 Both graphs lay themselves out as they are drawn: nodes overshoot a little and settle, a change of the
 graph morphs from the picture before, and a dragged node pulls its neighbours along. With reduced
 motion asked for, the settled picture shows at once. Thousands of nodes stay in motion: the whole
@@ -153,6 +160,7 @@ program is drawn on a canvas, its repulsion approximated by Barnes-Hut.
 ![The relations of a function: who writes the global that another one reads](docs/images/gui-relations.webp)
 ![How sure the names of a FreeRTOS build are after a naming run and a review: each function's disc filled as far as its vote agreed, the review's marks, a changed name with its old name and why](docs/images/gui-names.webp)
 ![The whole program of a FreeRTOS build: its functions in the groups dread groups found, one function lit with its callers and callees](docs/images/gui-program.webp)
+![The system run of a FreeRTOS build: the device logs of the original and of the image with 329 functions from lifted C side by side, each entry with the function that made it](docs/images/gui-timeline.webp)
 
 ### With Claude Code
 

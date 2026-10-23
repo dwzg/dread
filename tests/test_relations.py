@@ -287,3 +287,40 @@ def test_every_build(variant, tmp_path):
     config = [a for k, a, n in program.symbols() if n == "g_config"][0]
     assert {n["address"] for n in g["nodes"] if n["kind"] == "global" and ("print_status", "reads", n["name"]) in edges(g)} \
         == {config + 4, config + 8}
+
+
+DIGITS = {"input": [[40_000, "uart", "3"], [120_000, "uart", "s"]], "until": {"uart": "volume 3"}, "limit": 5_000_000}
+
+
+def ran_of(target, program):
+    """What a system run of gizmo saw (a digit key: dispatch jumps to cmd_volume through its table of
+    commands), as dread.sysrun ran() gives it from a record."""
+    from dread import sysrun
+    o = sysrun.System(target, target.image(), target.image().payload(), program=program, scenario=DIGITS).run(5_000_000)
+    rows, _ = sysrun.transfers(program, o.calls)
+    return [dict(r, scenarios=["digits"]) for r in rows]
+
+
+def test_the_system_runs_transfers_join_the_graph(m3):
+    """A call through a pointer that a system run saw (dread.sysrun ran()) is an edge of its own
+    (calls-pointer, with how, how often, where and in which scenarios) and joins the neighbourhood: the
+    only way into cmd_volume is gizmo's table of commands, so without the run it has no caller, with it
+    dispatch is one. How the core entered a function (an exception) is on its node."""
+    target, program, calls, made = m3
+    ran = ran_of(target, program)
+    alone = relations.graph(program, "cmd_volume", 1, calls, {})
+    assert {n["name"] for n in alone["nodes"] if n["kind"] == "function"} == {"cmd_volume"}
+    g = relations.graph(program, "cmd_volume", 1, calls, {}, ran=ran)
+    nodes = by_name(g)
+    assert nodes["dispatch"]["side"] == "caller" and nodes["dispatch"]["distance"] == 1
+    pointer = [e for e in g["edges"] if e["kind"] == "calls-pointer"]
+    assert [(e["from"], e["to"], e["how"], e["times"], e["scenarios"]) for e in pointer] == [
+        ("f:dispatch", "f:cmd_volume", ["pointer-jump"], 1, ["digits"])]
+    assert pointer[0]["sites"] and program.function_at(pointer[0]["sites"][0]).name == "dispatch"
+    g = relations.graph(program, "dispatch", 1, calls, {}, ran=ran)
+    assert by_name(g)["cmd_volume"]["side"] == "callee" and ("dispatch", "calls-pointer", "cmd_volume") in edges(g)
+    g = relations.graph(program, "TIMER_IRQHandler", 1, calls, {}, ran=ran)
+    entered = by_name(g)["TIMER_IRQHandler"]["entered_by"]
+    assert [(x["how"], x["exception"]) for x in entered] == [("exception", 16)] and entered[0]["times"] > 0
+    assert any("calls-pointer cmd_volume (pointer-jump, 1 times in the system run)" in line
+               for line in relations.text_lines(relations.graph(program, "dispatch", 1, calls, {}, ran=ran)))

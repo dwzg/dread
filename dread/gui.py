@@ -27,6 +27,16 @@ the tools know and decided, and runs nothing heavy itself:
   BUILD/groups, so a second look reads them. A search there (/api/program-search) lights the
   functions it finds by name, the name proposed, address or text, and the groups that hold them;
   Enter opens those groups;
+- the system run (#/s, key s): the records dread sysrun and dread lift --check's whole image keep
+  (dread.sysrun, BUILD/sysrun), a scenario at a time: how each image's run ended, its clock, the
+  serial port's text, and both images' device logs side by side, entry by entry, each with the function
+  whose instruction made it (a link to it there); where they first differ marked, with the rows after
+  it that differ too (key d goes there). A virtual list: the page asks for the entries around what is
+  on screen, TIMELINE_ROWS at a time;
+- what the system run saw beyond the calls, in both graphs and on the function's page: who called a
+  function through a pointer (a timer's callback from the timers' task), who started it by a return
+  (a task from its scheduler), how the core entered it (an exception), from the records' transfers
+  (dread.sysrun ran), edges of their own (calls-pointer, enters; dashed in the whole program);
 - how sure each name is, everywhere a function is shown (dread.relations Names: certainty from
   names.tsv's vote, the review's standing from review.tsv): one hue from unsure to sure, a neutral grey
   for a proposal without a vote and an empty disc for none; each function's disc filled as far as its
@@ -44,14 +54,15 @@ the tools know and decided, and runs nothing heavy itself:
 - two kinds of change, made as the command line makes them: rename (dread rename, checked and
   undone when the tree contradicts it) and annotate (annotations.txt).
 It reloads by itself when the tables or the tools' records change (the names' tables alone, names.tsv
-and review.tsv among them, without loading the image again). The analyses that take a while on
-a large image (callers, regflow, never-returning functions, the text index, the relations' readable
-C, the groups) run in the background; the page fills them in when they are ready.
+and review.tsv among them, and the system run's records, without loading the image again). The
+analyses that take a while on a large image (callers, regflow, never-returning functions, the text
+index, the relations' readable C, the groups) run in the background; the page fills them in when they
+are ready.
 
 The answers, JSON, all computed here from the tables and the tools' records (the page computes
 nothing; what the names give is kept until a names table changes):
 - /api/status: {"generation" (a load of the image), "pending" (analyses), "names" (a change of the
-  names' tables)};
+  names' tables), "runs" (a change of the system run's records)};
 - /api/functions: each function's name, entry, size, origin and test record, its "certainty"
   (dread.relations CERTAINTY), "confidence" (its vote's agreement, where there was a vote), "proposed"
   (the name it goes by where the tables have none) and "review" ({"mark", "outcome", "old": the name
@@ -59,13 +70,25 @@ nothing; what the names give is kept until a names table changes):
 - /api/overview: ... and "names": {"counts": {certainty: {"functions", "bytes"}}, "review": the
   flagged, suspects and changed names with their last challenge, the confirmed ones, the groups'
   names challenged, "challenges", "reviews", "stale" (rows about a name no longer in use); null
-  without review.tsv};
+  without review.tsv}; "sysrun": the system run's records as /api/timeline's "scenarios" lists them;
+  "runs" has "sysrun" (when the newest was written);
 - /api/function: ... and "name" (Names.about with the history: the proposal, its vote's answers, and
-  every review row as dread.namereview challenge, those about an older name marked stale);
+  every review row as dread.namereview challenge, those about an older name marked stale); "ran":
+  {"callers", "callees": [{"name", "how", "times", "site", "scenarios"}] of the transfers no call
+  shows (dread.relations RAN_HOWS), "entered_by": [{"how", "exception"?, "times", "scenarios"}],
+  "scenarios": the records}, null without records;
 - /api/graph and /api/program: dread relations' and dread groups' records (docs/formats.md), each
   function with its certainty, confidence and review, each group with its functions' certainties, the
   marks it holds and its own name's certainty and review, and the things functions of two groups
-  touch (the edges down to an open group's functions);
+  touch (the edges down to an open group's functions); both with the system run's transfers (the
+  relations' calls-pointer and enters edges and entered_by, the whole program's "ran");
+- /api/timeline?name=&from=&count=: {"scenarios": [{"name", "scenario", "by", "when", "built", "limit",
+  "runs": [{"label", "how", "clock", "entries", "kept"}], "first", "differ", "transfers", "pointers",
+  "unexplained"}], "name" (the record shown: the one asked for, else the first that differs, else the
+  first), "scenario", "by", "first", "kept", "keep", "differ", "built", "limit", "runs" (each run's
+  record without its log), "start", "rows": {label: {"log", "at", "in": the function names}}} for the
+  entries [from, from + count) (default: a quarter of count before the first difference) that the
+  record kept; {"scenarios": []} without records;
 - /api/search?q=: [{"kind": "address", "name", "proposal" or "text", ...}], at most 40;
 - /api/program-search?q=: {"query", "functions": [{"name", "group", "how": the kinds that found it,
   "text", "proposed"}], "groups": [{"group", "functions": how many found}], "more": left out beyond
@@ -98,6 +121,8 @@ STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js",
           "/sim.js": ("sim.js", "text/javascript; charset=utf-8"), "/app.css": ("app.css", "text/css; charset=utf-8")}
 ORIGINS = ("hand", "pilot", "lifted", "refused", "dropped", "original")
 SEARCH_LIMIT = 5000     # the functions one search lights in the whole program at most
+TIMELINE_ROWS = 400     # device log entries of each image one timeline answer holds by default
+TIMELINE_MAX = 5000     # and at most
 KEYWORDS = {"if", "while", "for", "switch", "return", "sizeof", "do", "else"}
 
 
@@ -207,6 +232,9 @@ class State:
         self.analyses = {}
         self.generation = 0
         self.names_generation = 0           # changes when names.tsv, review.tsv or another names table does
+        self.runs_generation = 0            # changes when a record of the system run does (BUILD/sysrun)
+        self.runs_seen = None               # (the records' stamp, {scenario: record without logs}, transfers)
+        self.timeline_record = None         # ((path, mtime), the record with its logs) last shown
         self.threads = []                   # the analyses' and the facts worker's (close joins them)
         self.refresh()
 
@@ -391,7 +419,9 @@ class State:
 
     def status(self):
         self.name_table()
-        return {"generation": self.generation, "pending": self.pending(), "names": self.names_generation}
+        self.sysruns()
+        return {"generation": self.generation, "pending": self.pending(), "names": self.names_generation,
+                "runs": self.runs_generation}
 
     def name_table(self):
         """The image's dread.relations Names (how sure each name is, what the review said of it), read
@@ -412,7 +442,104 @@ class State:
 
     def runs(self):
         p = self.paths()
-        return {k: mtime(p[f]) or None for k, f in (("recon", "payload"), ("test", "tests"), ("lift_check", "verdicts"))}
+        out = {k: mtime(p[f]) or None for k, f in (("recon", "payload"), ("test", "tests"), ("lift_check", "verdicts"))}
+        stamp = self.sysruns_stamp()
+        out["sysrun"] = max((t for _, t in stamp), default=0) or None
+        return out
+
+    # -- the system run's records (dread sysrun, dread lift --check's whole image: dread.sysrun) --
+
+    def sysruns_stamp(self):
+        from dread import sysrun
+        return tuple((path, mtime(path)) for path in sysrun.record_paths(self.target, self.image))
+
+    def sysruns(self):
+        """({scenario: its record without the logs}, the transfers into functions of them all, merged:
+        dread.sysrun ran), read again where a record changed (runs_generation counts the changes, so
+        that the page shows them anew). Records of other bytes than this image's are left out. Called
+        with the lock held."""
+        from dread import sysrun
+        stamp = self.sysruns_stamp()
+        if self.runs_seen is None or self.runs_seen[0] != stamp:
+            found = sysrun.records(self.target, self.image, payload=self.program.data, logs=False)
+            if self.runs_seen is not None:
+                self.runs_generation += 1
+            self.runs_seen = (stamp, found, sysrun.ran(self.program, found))
+        return self.runs_seen[1], self.runs_seen[2]
+
+    def sysrun_list(self):
+        """The records for the overview and the timeline's choice: each scenario's tool, when, how each
+        image's run ended, its clock and entries, where the logs first differ, the transfers counted."""
+        from dread import sysrun
+        found, _ = self.sysruns()
+        stamps = dict(self.runs_seen[0])
+        out = []
+        for name, record in sorted(found.items()):
+            path = os.path.join(sysrun.record_dir(self.target, self.image), name + ".json")
+            calls = record.get("calls", [])
+            pointers = [t for t in calls if t.get("how") in ("pointer", "pointer-jump")]
+            out.append({"name": name, "scenario": record.get("scenario", name), "by": record.get("by"),
+                        "when": stamps.get(path) or None,
+                        "built": record.get("built", 0), "limit": record.get("limit"),
+                        "runs": [{k: run.get(k) for k in ("label", "how", "clock", "entries", "kept")}
+                                 for run in record["runs"]],
+                        "first": record.get("first", 0), "differ": record.get("differ"),
+                        "transfers": sum(t.get("times", 0) for t in calls),
+                        "pointers": sum(t.get("times", 0) for t in pointers),
+                        "unexplained": record.get("unexplained", 0)})
+        return out
+
+    def timeline(self, name=None, start=None, count=TIMELINE_ROWS):
+        """The device logs of a record side by side (/api/timeline): the records (by name: the scenario's,
+        or SCENARIO.lift-check for the lift check's whole image), the chosen one's runs (how each ended,
+        clock, entries, model reports, interrupts), where the logs first
+        differ (compare's lines) and, from the absolute entry `start` (default: a little before the
+        first difference, else 0), count entries of each run's log with the pc of each and the function
+        it lies in (the original's as the tables name it now, the rebuilt one's as the record does), as
+        far as the record kept them (its window: "first" and "kept")."""
+        from dread import sysrun
+        listed = self.sysrun_list()
+        out = {"scenarios": listed, "status": self.status()}
+        if not listed:
+            return out
+        names = [r["name"] for r in listed]
+        name = name if name in names else next((r["name"] for r in listed if r["differ"]), names[0])
+        path = os.path.join(sysrun.record_dir(self.target, self.image), name + ".json")
+        key = (path, mtime(path))
+        if self.timeline_record is None or self.timeline_record[0] != key:
+            record = sysrun.read_record(path, sysrun.digest(self.program.data))
+            if record is None:
+                return dict(out, name=name, error="the record %s does not read" % name)
+            self.timeline_record = (key, record)
+        record = self.timeline_record[1]
+        first, runs = record.get("first", 0), record["runs"]
+        kept = max((len(r.get("log", ())) for r in runs), default=0)
+        differ = record.get("differ")
+        try:
+            count = max(1, min(int(count), TIMELINE_MAX))
+            start = int(start) if start is not None else max(first, ((differ or {}).get("at") or first) - count // 4)
+        except (TypeError, ValueError):
+            start, count = first, TIMELINE_ROWS
+        lo, hi = max(start, first) - first, min(start + count, first + kept) - first
+        functions = record.get("functions", [])
+        rows = {}
+        for run in runs:
+            log, at, where = run.get("log", []), run.get("at"), run.get("in")
+            got = {"log": log[lo:hi] if hi > lo else []}
+            if at is not None and where is not None:
+                got["at"] = at[lo:hi] if hi > lo else []
+                fns = []
+                for pc, k in zip(got["at"], where[lo:hi]):
+                    fn = self.program.function_at(pc) if run.get("label") == "original" and pc is not None else None
+                    fns.append(fn.name if fn is not None else functions[k] if 0 <= k < len(functions) else None)
+                got["in"] = fns
+            rows[run.get("label")] = got
+        out.update(name=name, scenario=record.get("scenario", name), by=record.get("by"), first=first, kept=kept,
+                   differ=differ, built=record.get("built", 0),
+                   limit=record.get("limit"), keep=record.get("keep"),
+                   runs=[{k: v for k, v in run.items() if k not in ("log", "at", "in")} for run in runs],
+                   start=lo + first, rows=rows)
+        return out
 
     def functions(self):
         names = self.name_table()
@@ -483,7 +610,8 @@ class State:
                           "isa": getattr(img.arch, "isa", None), "base": img.base, "end": img.end,
                           "functions": len(prog.functions)},
                 "counts": counts, "refused": refused, "dropped": dropped, "failing": failing,
-                "uncovered": uncovered, "names": self.names_overview(), "runs": self.runs(), "status": self.status()}
+                "uncovered": uncovered, "names": self.names_overview(), "runs": self.runs(),
+                "sysrun": self.sysrun_list(), "status": self.status()}
 
     def names_overview(self):
         """How sure the names are, for the overview: the functions and bytes of each level of
@@ -554,7 +682,26 @@ class State:
         out["coverage"] = self.coverage(fn)
         out["sources"] = self.c_sources(fn)
         out["cases"] = self.cases_of(name)
+        out["ran"] = self.ran_of(name)
         return out
+
+    def ran_of(self, name):
+        """What the system run's records saw of a function beyond its calls (dread.relations RAN_HOWS:
+        through a pointer, a return to its entry, the code before running into it): its callers and
+        callees so, and how the core entered it (CORE_HOWS: an exception, the reset), each with how,
+        how often, the call's address and the scenarios; None without records."""
+        from dread import relations
+        found, ran = self.sysruns()
+        if not found:
+            return None
+        pick = ("how", "times", "site", "scenarios", "exception")
+        went = [r for r in ran if r["how"] in relations.RAN_HOWS and r.get("from") and r.get("to")
+                and r["from"] != r["to"]]
+        return {"callers": [dict({k: r[k] for k in pick if k in r}, name=r["from"]) for r in went if r["to"] == name],
+                "callees": [dict({k: r[k] for k in pick if k in r}, name=r["to"]) for r in went if r["from"] == name],
+                "entered_by": [{k: r[k] for k in pick if k in r} for r in ran
+                               if r.get("to") == name and r["how"] in relations.CORE_HOWS],
+                "scenarios": sorted(found)}
 
     def coverage(self, fn):
         """Which instructions the cases ran, from the newest record that has the function."""
@@ -647,8 +794,9 @@ class State:
                     "status": self.status()}
         calls, names = self.call_names()
         origin = self.origin
+        _, ran = self.sysruns()
         out = relations.graph(prog, name, depth, calls, self.known, names,
-                              extra=lambda n: {"origin": origin.get(n, "original")})
+                              extra=lambda n: {"origin": origin.get(n, "original")}, ran=ran)
         self.want(out["missing"])
         out["pending"] = out.pop("missing")
         out["status"] = self.status()
@@ -680,11 +828,13 @@ class State:
             return {"error": "dread groups: %s" % self.grouped, "status": self.status()}
         calls, names = self.call_names()
         path = pilot.subsystems_path(self.target, self.image)
-        stamp = (names.stamp, mtime(path))
+        _, ran = self.sysruns()
+        stamp = (names.stamp, mtime(path), self.runs_seen[0])
         if self.whole is None or self.whole[0] != stamp:
             origin = self.origin
             made = groups.program_graph(self.program, self.grouped["groups"], self.grouped["touched"], calls, names,
-                                        pilot.read_subsystems(path), extra=lambda n: {"origin": origin.get(n, "original")})
+                                        pilot.read_subsystems(path),
+                                        extra=lambda n: {"origin": origin.get(n, "original")}, ran=ran)
             self.whole = (stamp, made)
         return dict(self.whole[1], groups_from=self.grouped_from, status=self.status())
 
@@ -940,6 +1090,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, state.program_graph())
                 if url.path == "/api/program-search":
                     return self.reply(200, state.program_search(query.get("q", "")))
+                if url.path == "/api/timeline":
+                    return self.reply(200, state.timeline(query.get("name"), query.get("from"),
+                                                          query.get("count", TIMELINE_ROWS)))
                 if url.path == "/api/status":
                     return self.reply(200, state.status())
         except KeyError as e:

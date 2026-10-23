@@ -416,6 +416,45 @@ outcome (`agrees` or its first difference) on the first line, then one line per 
 dropped for it (`dropped for it: A, B; with them alone: ...`, since 2026-10-22). `dread uncovered`
 reads it (the `missed` column, and the reason's first words for how the function was dropped).
 
+### `BUILD/sysrun/IMAGE/NAME.json` (the system run's record)
+
+Written by `dread sysrun` (since 2026-10-23), one a scenario it runs (NAME the scenario's), and by
+`dread lift --check`, one a scenario of its last whole image (NAME `SCENARIO.lift-check`): dread/sysrun.py
+make_record. One JSON object, `{"version": 1, "name", "scenario", "by" (the tool), "image" (its
+name), "limit" (shared-clock units), "built" (how many functions the original's clock did not count:
+those the rebuilt image has from C), "first", "keep", "runs", "functions", "differ", "calls",
+"unexplained"}`; keys sorted, no wall-clock time (the file's time says when).
+
+- `runs`: the original's run first, then the rebuilt image's where there is one: `label` (`original`,
+  `rebuilt`), `how` (how it ended, as dread sysrun prints it), `clock`, `entries` (its device log's
+  length), `digest` (SHA-1 of the image's bytes it ran), `reports` (the models' reports),
+  `interrupts` (`{number: times taken}`), `log` (the device log's entries `first` to `first + keep`,
+  each as the run compares them: `["read", model, address, size, value, times in a row]`, `["write",
+  model, address, size, value]`, `[model, what, value]` for what a model noted (`sent`, `pins`),
+  `["interrupt", controller, number]`, `["syscall"]`; model `-` where no model owns the register), `at`
+  (the pc of each entry's access: the instruction that made it; for an interrupt where the code it
+  interrupted goes on; null where unknown) and `in` (the function there, an index into `functions`,
+  -1 for none; the rebuilt image's C by its placement.json).
+- `functions`: the names `in` refers to, both runs' (a helper of the rebuilt image's C by its own).
+- `first`, `keep`: the window of the logs kept: at most `keep` entries (KEEP, 100,000), from the start,
+  or, when the logs are longer and differ, around the first difference.
+- `differ`: null when both runs agree (or there is one run), else `{"at": the first entry where the
+  logs differ (null when only the reports or the endings do), "lines": dread.sysrun compare's lines}`.
+- `calls`: who entered whom in the original's run: `[{"to", "entry", "how", "times", "from", "site",
+  "exception"?}]`, one row a way into a function, sorted by entry, how and site; `how` is `call`,
+  `jump` (direct: the listing shows them too), `pointer`, `pointer-jump` (through a register),
+  `return` (a return that went to a function's entry: a task's first run), `falls` (the code in front
+  ran into it), `exception` (with `exception`, the number the run took it as), `syscall`, `reset` or
+  `unknown` (no instruction of the image there); `from` and `site` are the function and the address
+  of the instruction the block in front ended with (null for the marks). `unexplained`: transfers
+  no instruction explained (left out of `calls`; 0 when the record is right).
+
+Readers (`dread gui`, `dread relations`, `dread groups --json`: dread.sysrun records, ran) use a record
+only when its `version` is 1 and its original's `digest` is that of the image's bytes now; they name
+the functions by `entry` and `site` as the tables name them now (`to` and `from` are the names when
+it was written). `ran` merges the rows of every record by entry, how, site and exception, with
+`times` summed and `scenarios` the records' names.
+
 ### Why cases leave code unrun (`dread uncovered --json FILE`)
 
 `{"totals", "table", "forced", "functions"}`, since 2026-10-23. Addresses are hexadecimal strings
@@ -480,7 +519,8 @@ whose facts its worker still makes), `status`, and an `origin` on each function 
   agreed, `unsure` at or below the agreement whose vote alone makes `--task review` challenge it, 0.5;
   `unvoted` without a vote, which memory and structures always are).
   - A function also has `distance` and `side` (`center`, `caller`, `callee`, `both`, or `referred`
-    for one whose address is taken here), `more` (`{"callers", "callees"}` beyond the graph), `facts`
+    for one whose address is taken here; a caller or callee through the system run's transfers is one
+    too), `more` (`{"callers", "callees"}` beyond the graph, those transfers counted), `facts`
     (`readable C`, `listing`, `pending`, or null outside the depth), `why`, `lifted` and `readable`
     (the tables'); since 2026-10-23 `confidence` (names.tsv's, of the proposal it goes by, where a vote
     was taken) and `review` where review.tsv challenged it (dread.namereview `standing`: `mark` of the
@@ -488,7 +528,9 @@ whose facts its worker still makes), `status`, and an `origin` on each function 
     `changed`, `confirmed`, or null when every row is about another name; `last` and `changed`, those
     rows as `challenge()` makes them: `review`, `round`, `score`, `mark`, `reasons` [{`kind`, `weight`,
     `text`}], and the row's other columns where set; `stale`, the rows about another name;
-    `challenges`, all of its rows). Older readers ignore the new fields.
+    `challenges`, all of its rows). Older readers ignore the new fields. Since 2026-10-23
+    `entered_by` where the system run's records saw the core enter it: `[{"how": "exception",
+    "syscall" or "reset", "exception"?, "times", "scenarios"}]`.
   - Memory has `types` (the access types) and `default` (the default name); a table also has `words`
     (how many of its words were read).
   - A text has `text`.
@@ -500,7 +542,12 @@ whose facts its worker still makes), `status`, and an `origin` on each function 
   - `refers-to-text` and `refers-to-function`, from a function or a table;
   - `uses-structure`, with `variables`;
   - `points-to`, from structure to structure, with `offsets`;
-  - `holds`, from a structure to one it holds as a member, with `offsets`.
+  - `holds`, from a structure to one it holds as a member, with `offsets`;
+  - since 2026-10-23, from the system run's records (BUILD/sysrun, dread.sysrun ran): `calls-pointer`
+    (a call or jump through a register) and `enters` (a return that went to its entry, the code in
+    front running into it), from function to function, with `how` (the records' hows: `pointer`,
+    `pointer-jump`; `return`, `falls`), `times` (in all the records), `sites` and `scenarios` (the
+    records' names).
 
 Nodes come in a fixed order (the functions by distance, side and address, then what each touches),
 so the same tables give the same record.
@@ -527,10 +574,11 @@ the last one found. `dread groups --fresh` finds them anew whatever is kept.
 
 ## The whole-program graph (`dread groups --json`, `dread gui`'s `/api/program`)
 
-`{"groups": [...], "between": [...], "functions": [...], "calls": [...], "refers": [...], "counts":
-{"functions", "groups", "calls", "refers", "between"}}` (dread/groups.py program_graph, since
-2026-10-22). The GUI's answer has `groups_from` (`kept`: read from BUILD/groups; `dread groups`: found
-now) and `status`, and an `origin` on each function; while the groups are being found it is
+`{"groups": [...], "between": [...], "functions": [...], "calls": [...], "refers": [...], "shared": [...],
+"ran": [...], "counts": {"functions", "groups", "calls", "refers", "between", "shared", "ran"}}`
+(dread/groups.py program_graph, since 2026-10-22; `shared` and `ran` since 2026-10-23). The GUI's
+answer has `groups_from` (`kept`: read from BUILD/groups; `dread groups`: found now) and `status`, and
+an `origin` on each function; while the groups are being found it is
 `{"waiting": "callers" or "groups", "seconds", "status"}`, and `{"error", "status"}` when dread groups
 failed.
 
@@ -546,14 +594,19 @@ failed.
   `name_certainty` (the certainty of the pilot's name for it by the vote over its prefix, null when it
   is not the pilot's) and `review` (the review's `standing` of that name, as a function's, or null).
 - Between two groups `a` < `b`: `calls` (`[a to b, b to a]`: pairs of a caller and a callee),
-  `refers` (`[a to b, b to a]`: functions whose address the other group's code makes) and `shared`
+  `refers` (`[a to b, b to a]`: functions whose address the other group's code makes), `ran` (since
+  2026-10-23, `[a to b, b to a]`: pairs joined by the system run's transfers no call shows) and `shared`
   (`{kind: how many}` of the things both groups touch, of the kinds the grouping shares, none that more
   than MAX_SHARED functions touch). A pair with none of these is not listed.
 - A function: `name`, `entry`, `size`, `group`, `naming` (as the relations graph's) and `proposed` (the
-  pilot's name) where there is one; since 2026-10-23 `certainty`, and `confidence` and `review` where
-  there are, as the relations graph's.
+  pilot's name) where there is one; since 2026-10-23 `certainty`, and `confidence`, `review` and
+  `entered_by` (without `scenarios`) where there are, as the relations graph's.
 - `calls`: `[caller, callee, call sites]`, `refers`: `[function, function whose address it makes]`,
   each function by its number in `functions` (address order).
+- `ran` (since 2026-10-23): `[function, function it entered, how, times]` of the system run's records'
+  transfers no call shows (`pointer`, `pointer-jump`, `return`, `falls`: the relations graph's
+  `calls-pointer` and `enters`), by number; `counts` has `ran`, how many. A record without it (older,
+  or no system run recorded) has none.
 - `shared` (since 2026-10-23): `[kind, key, [functions]]`, each thing the grouping shares (`global`,
   `device`, `text`, `table`, keyed as BUILD/groups' evidence) that functions of two groups or more
   touch, at most MAX_SHARED of them, with those functions by number: what `between`'s `shared` counts,

@@ -45,7 +45,7 @@ const MARKS = {
 const S = {
   overview: null, functions: [], byName: new Map(), order: [], current: null, sel: -1,
   filter: "", origins: new Set(), certainty: new Set(), sort: "address", showBytes: false, showC: true, by: "bytes",
-  generation: 0, names: null, pending: [], view: null, tab: null, mode: "code", mapBy: "origin",
+  generation: 0, names: null, runs: null, pending: [], view: null, tab: null, mode: "code", mapBy: "origin",
 };
 
 // ---- small helpers ----
@@ -245,9 +245,11 @@ async function route(keep = false) {
   const hash = decodeURIComponent(location.hash.slice(1));
   const m = hash.match(/^\/([fr])\/([^@]+)(?:@(0x[0-9a-f]+))?$/i);
   const p = hash.match(/^\/p(?:\/(.+))?$/);
+  const t = hash.match(/^\/s(?:\/(.+))?$/);
   if (!keep) $("#side").classList.remove("open");
   if (m) await showFunction(m[2], m[3] ? parseInt(m[3], 16) : null, keep, m[1] === "r" ? "relations" : "code");
   else if (p) await showProgram(p[1] || null, keep);
+  else if (t) await showTimeline(t[1] || null, keep);
   else await showOverview(keep);
 }
 
@@ -294,6 +296,11 @@ async function showOverview(keep = false) {
           <a class="button" href="#/p" title="The whole program (p)">Open the graph</a></div>
         <div class="legend-line">its functions in the groups dread groups finds from their code (shared memory, texts, devices,
           neighbours), joined by the calls between them; a group opens into its functions</div>
+      </section>
+      <section class="section">
+        <div class="section-head"><h2>System run</h2><span class="grow"></span>
+          <a class="button" href="#/s" title="The device logs of both images side by side (s)">Open the timeline</a></div>
+        ${sysrunLines(o)}
       </section>
       <section class="section">
         <div class="section-head"><h2>Image map</h2><span class="grow"></span>
@@ -415,8 +422,22 @@ function testsCard(o) {
   return `<div class="card"><h2>Last test run</h2>${body}</div>`;
 }
 
+// What the system run's records hold, a line a scenario: whether the images agree, the entries, the calls
+// through pointers it saw, which tool kept it and when.
+function sysrunLines(o) {
+  const runs = o.sysrun || [];
+  if (!runs.length) return `<div class="legend-line">No run recorded yet: dread sysrun keeps each scenario's runs, dread lift --check its whole image's.</div>`;
+  return runs.map((r) => {
+    const state = r.runs.length < 2 ? "the original alone" : r.differ
+      ? `<span class="bad">the images differ${r.differ.at != null ? " from entry " + commas(r.differ.at) : ""}</span>` : `<span class="good">the images agree</span>`;
+    return `<div class="rowline"><a href="${tlLink(r.name)}">${esc(recordLabel(r))}</a><span class="r">${state} · ${commas(r.runs[0].entries)} log entries · ` +
+      `${commas(r.pointers)} call${r.pointers === 1 ? "" : "s"} through pointers · ${esc(r.by || "")}, ${ago(r.when)}</span></div>`;
+  }).join("");
+}
+
 function runsCard(o) {
-  const rows = [["dread recon", o.runs.recon], ["dread test", o.runs.test], ["dread lift --check", o.runs.lift_check]];
+  const rows = [["dread recon", o.runs.recon], ["dread test", o.runs.test], ["dread lift --check", o.runs.lift_check],
+    ["dread sysrun", o.runs.sysrun]];
   return `<div class="card"><h2>When the tools ran</h2><div class="runs">${rows.map(([k, t]) =>
     `<span class="k">${k}</span><span class="v" title="${esc(when(t))}">${ago(t)}</span>`).join("")}</div></div>`;
 }
@@ -536,6 +557,8 @@ function headerHTML(d, compact = false) {
     `<a href="${fnLink(n, sites[0])}" title="${esc(n)}: ${sites.map(hex).join(", ")}">${nameHTML(S.byName.get(n) || { name: n })}</a>${sites.length > 1 ? `<span class="times">×${sites.length}</span>` : ""}`).join("")
     : "<span class=\"legend-line\">no direct calls</span>"]);
   if (h.calls.length) facts.push(["calls", h.calls.map((n) => `<a href="${fnLink(n)}" title="${esc(n)}">${nameHTML(S.byName.get(n) || { name: n })}</a>`).join("")]);
+  const ran = ranFacts(d.ran);
+  if (ran) facts.push(["system run", ran]);
   if (h.reads) facts.push(["registers", `reads ${h.reads.length ? esc(h.reads.join(", ")) : "nothing"} at its entry; its callers read ${h.kept.length ? esc(h.kept.join(", ")) : "nothing"} after it`]);
   facts.push(...nameFacts(d.name));
   const v = d.verdict;
@@ -568,6 +591,28 @@ function headerHTML(d, compact = false) {
       ${compact ? "" : `<div class="facts">${facts.map(([k, val]) => `<span class="k">${k}</span><span class="v">${val}</span>`).join("")}</div>
       ${notes}`}
     </div>`;
+}
+
+// What the system run's records saw of a function beyond its calls: who called it through a pointer
+// or started it by a return (a task from its scheduler), what it called so, how the core entered it.
+const RAN_WORDS = { pointer: "through a pointer", "pointer-jump": "jumping through a pointer", return: "by a return", falls: "running into it" };
+function ranFacts(r) {
+  if (!r || !(r.callers.length || r.callees.length || r.entered_by.length)) return "";
+  const link = (x) => `<a href="${fnLink(x.name, x.site != null && x.how !== "return" ? x.site : null)}" title="${esc(x.name)} (${esc(RAN_WORDS[x.how] || x.how)}${x.site != null ? " at " + hex(x.site) : ""}; ${esc((x.scenarios || []).join(", "))})">` +
+    `${nameHTML(S.byName.get(x.name) || { name: x.name })}</a><span class="times">×${commas(x.times)}</span>`;
+  const lines = [];
+  for (const [how, words] of [["pointer", "called through a pointer by"], ["pointer-jump", "jumped to through a pointer by"], ["return", "started by a return from"], ["falls", "run into from"]]) {
+    const got = r.callers.filter((x) => x.how === how);
+    if (got.length) lines.push(`${words} ${got.map(link).join("")}`);
+  }
+  for (const [how, words] of [["pointer", "calls through a pointer"], ["pointer-jump", "jumps through a pointer to"], ["return", "starts by a return"], ["falls", "runs into"]]) {
+    const got = r.callees.filter((x) => x.how === how);
+    if (got.length) lines.push(`${words} ${got.map(link).join("")}`);
+  }
+  if (r.entered_by.length) {
+    lines.push("entered by " + r.entered_by.map((x) => `${x.how === "exception" ? "exception " + x.exception : x.how === "reset" ? "the reset" : "a system call"} <span class="times">×${commas(x.times)}</span>`).join(" "));
+  }
+  return lines.join("<br>") + ` <span class="legend-line inline">(<a href="#/s" title="the records: ${esc(r.scenarios.join(", "))}">its timeline</a>)</span>`;
 }
 
 // The name's certainty (and the review's mark) beside the function's name: the proposal it goes by too.
@@ -765,7 +810,8 @@ const LABEL_ZOOM = 1.35;        // and every label from this zoom on
 const SIM = { layer: 120, band: 0.8, spread: 90, repel: 9000, spring: 0.16, pull: 0.12, gravity: 0.004, reach: 420,
   anchor: 0.25 };
 const WOBBLE = { friction: 0.86, decay: 0.028, maxSpeed: 20 };   // the relations' motion (sim.js)
-const REST = { calls: 95, "refers-to-function": 85, access: 52, "refers-to-text": 44, "uses-structure": 60, "points-to": 60 };
+const REST = { calls: 95, "refers-to-function": 85, access: 52, "refers-to-text": 44, "uses-structure": 60, "points-to": 60,
+  "calls-pointer": 95, enters: 95 };
 const DRAG_ALPHA = 0.3;         // the energy held while a node is dragged: its neighbours follow it
 const FOLLOW = 0.16;            // the share of the way to the fitted view the camera goes in a frame
 const SETTLE_TICKS = 1500;      // the most ticks a layout without motion takes to its rest
@@ -865,7 +911,8 @@ function legendHTML() {
   return certaintyLegend() +
     `<div class="lg-row">${sh("global", "RAM")}${sh("register", "register")}${sh("rom", "rom")}${sh("table", "table")}${sh("text", "text")}${sh("structure", "structure")}</div>` +
     `<div class="lg-row">${ln("e-calls", "calls")}${ln("e-refers-to-function", "address taken")}${ln("e-access", "reads")}${ln("e-access w", "writes")}</div>` +
-    `<div class="lg-row">${ln("e-uses", "uses")}${ln("e-refers-to-text", "refers to")}${ln("e-uses-structure", "structure")}</div>`;
+    `<div class="lg-row">${ln("e-uses", "uses")}${ln("e-refers-to-text", "refers to")}${ln("e-uses-structure", "structure")}</div>` +
+    `<div class="lg-row">${ln("e-calls-pointer", "through a pointer")}${ln("e-enters", "started by a return")}<span class="lg">(the system run)</span></div>`;
 }
 
 // Leaving the relations: no more asking the server, no more frames.
@@ -1110,7 +1157,8 @@ function drawGraph() {
   const edges = links.map((l, i) => {
     const cls = l.kind === "access" ? `e-access${l.write ? " w" : ""}${l.uses && !l.read && !l.write ? " e-uses" : ""}` : "e-" + l.kind;
     let start = "", end = "";           // data flows: a read towards the function, a write towards the memory
-    if (l.kind === "calls" || l.kind === "refers-to-function" || l.kind === "points-to" || l.kind === "holds") end = "ah-call";
+    if (l.kind === "calls" || l.kind === "refers-to-function" || l.kind === "points-to" || l.kind === "holds" ||
+        l.kind === "calls-pointer" || l.kind === "enters") end = "ah-call";
     else if (l.kind === "access") { if (l.read) start = "ah-read"; if (l.write) end = "ah-write"; }
     return `<path class="edge ${cls}" data-i="${i}"${start ? ` marker-start="url(#${start})"` : ""}${end ? ` marker-end="url(#${end})"` : ""}/>`;
   }).join("");
@@ -1239,6 +1287,17 @@ function nodeTip(d) {
       : `${d.side === "both" ? "caller and callee" : d.side} ${d.distance} call${d.distance > 1 ? "s" : ""} away`);
     if (d.origin) line("origin", `${dot(d.origin)} ${esc(ORIGINS[d.origin].long)}${d.readable ? ", readable C accepted" : ""}`);
     if (d.more && (d.more.callers || d.more.callees)) line("beyond", `${d.more.callers} more callers, ${d.more.callees} more callees`);
+    const ranLinks = links.filter((l) => (l.kind === "calls-pointer" || l.kind === "enters") && (l.source === d.id || l.target === d.id));
+    for (const l of ranLinks) {
+      const e = l.edges[0], other = byId.get(l.source === d.id ? l.target : l.source);
+      const how = e.how.map((h) => RAN_WORDS[h] || h).join(", ");
+      const words = l.source === d.id ? (l.kind === "enters" ? `starts ${esc(other.name)} (${how})` : `calls ${esc(other.name)} ${how}`)
+        : (l.kind === "enters" ? `started by ${esc(other.name)} (${how})` : `called by ${esc(other.name)} ${how}`);
+      line("system run", `${words}: ${commas(e.times)} times in ${esc(e.scenarios.join(", "))}`);
+    }
+    for (const e of d.entered_by || []) {
+      line("system run", `entered by ${e.how === "exception" ? "exception " + e.exception : e.how === "reset" ? "the reset" : "a system call"}: ${commas(e.times)} times`);
+    }
     if (d.facts === "pending") line("read from", "its C is being read");
     else if (d.facts === "readable C") line("read from", "its readable C");
     else if (d.facts === "listing") line("read from", `its listing only (each address "uses"): ${esc(d.why || "")}`);
@@ -1525,7 +1584,7 @@ function progLegendHTML() {
   const ln = (cls, text) => `<span class="lg"><svg viewBox="0 0 22 8" class="line"><path class="edge ${cls}" d="M1,4H21"/></svg>${text}</span>`;
   return `<div class="lg-row"><span class="lg"><svg viewBox="-9 -9 18 18" class="glyph"><circle class="grp" r="7.5"/><path class="grp-ring" d="M0,-6A6,6 0 1,1 -5.2,3"/></svg>a group: its size the functions, its ring how sure their names are; <span class="mk mk-suspect">?</span>3: suspects it holds</span></div>` +
     certaintyLegend() +
-    `<div class="lg-row">${ln("e-calls", "calls")}${ln("e-refers-to-function", "address taken")}${ln("e-uses-structure", "memory or texts both use")}</div>` +
+    `<div class="lg-row">${ln("e-calls", "calls")}${ln("e-refers-to-function", "address taken")}${ln("e-uses-structure", "memory or texts both use")}${ln("e-calls-pointer", "through a pointer, started (system run)")}</div>` +
     `<div class="lg-row"><span>click a group: its functions · its label: back to one node</span></div>`;
 }
 
@@ -1642,7 +1701,7 @@ function progOptions() {
 }
 
 function linkWeight(l) {
-  return l.calls[0] + l.calls[1] + l.refers[0] + l.refers[1] + l.shared;
+  return l.calls[0] + l.calls[1] + l.refers[0] + l.refers[1] + l.ran[0] + l.ran[1] + l.shared;
 }
 
 // Where each group would rest with every group one node: the start of the groups and of the functions
@@ -1686,7 +1745,7 @@ function buildProgram(alpha) {
   const link = (a, b) => {
     const s = Math.min(a, b), t = Math.max(a, b), key = s * n + t;
     let l = pairs.get(key);
-    if (!l) { l = { s, t, calls: [0, 0], refers: [0, 0], shared: 0, kinds: null }; pairs.set(key, l); links.push(l); }
+    if (!l) { l = { s, t, calls: [0, 0], refers: [0, 0], ran: [0, 0], shared: 0, kinds: null }; pairs.set(key, l); links.push(l); }
     return l;
   };
   for (const [i, j] of d.calls) {
@@ -1696,6 +1755,10 @@ function buildProgram(alpha) {
   for (const [i, j] of d.refers) {
     const a = at(i), b = at(j);
     if (a !== undefined && b !== undefined && a !== b) link(a, b).refers[a < b ? 0 : 1] += 1;
+  }
+  for (const [i, j] of d.ran || []) {      // the system run's: through a pointer, a task's start (dashed)
+    const a = at(i), b = at(j);
+    if (a !== undefined && b !== undefined && a !== b) link(a, b).ran[a < b ? 0 : 1] += 1;
   }
   for (const e of d.between) {         // memory and texts both touch: between closed groups the server's count
     if (P.open.has(e.a) || P.open.has(e.b)) continue;
@@ -1991,6 +2054,7 @@ function drawProgram() {
   const near = (L) => lit && lit.has(L.s) && lit.has(L.t) && (L.s === P.litFrom || L.t === P.litFrom);
   const ofGroup = (L) => nodes[L.s].kind === "group" || nodes[L.t].kind === "group";
   const called = (L) => L.calls[0] + L.calls[1] + L.refers[0] + L.refers[1] > 0;
+  const ranOnly = (L) => !called(L) && L.ran[0] + L.ran[1] > 0;
   const faint = nodes.length > 1500 ? 0.35 : 0.55;
   for (const on of passes) {
     const alpha = lit ? (on ? 1 : 0.12) : faint;
@@ -2006,9 +2070,29 @@ function drawProgram() {
       g.strokeStyle = C.call;
       g.stroke();
     }
+    g.beginPath();                      // the system run's transfers no call shows: through a pointer, a task's start
+    for (const L of links) {
+      if (ofGroup(L) || !ranOnly(L) || (lit && near(L) !== on)) continue;
+      g.moveTo(x[L.s], y[L.s]);
+      g.lineTo(x[L.t], y[L.t]);
+    }
+    g.globalAlpha = alpha;
+    g.lineWidth = 1.1 * px;
+    g.strokeStyle = C.call;
+    g.setLineDash([2.5 * px, 2.5 * px]);
+    g.stroke();
+    g.setLineDash([]);
+    g.beginPath();                      // ... and their arrows
+    for (const L of links) {
+      if (ofGroup(L) || !ranOnly(L) || (lit && near(L) !== on)) continue;
+      if (L.ran[0]) arrow(g, L.s, L.t, px);
+      if (L.ran[1]) arrow(g, L.t, L.s, px);
+    }
+    g.fillStyle = C.call;
+    g.fill();
     g.beginPath();                      // functions of two open groups that touch the same memory or text
     for (const L of links) {
-      if (ofGroup(L) || called(L) || (lit && near(L) !== on)) continue;
+      if (ofGroup(L) || called(L) || ranOnly(L) || (lit && near(L) !== on)) continue;
       g.moveTo(x[L.s], y[L.s]);
       g.lineTo(x[L.t], y[L.t]);
     }
@@ -2032,7 +2116,7 @@ function drawProgram() {
     for (const L of links) {
       if (!ofGroup(L) || (lit && near(L) !== on) || !(L.heavy || (lit && on))) continue;
       const calls = L.calls[0] + L.calls[1] + L.refers[0] + L.refers[1] > 0;
-      const key = (calls ? "c" : "s") + Math.round(2 * Math.min(7, 0.8 + 1.1 * Math.log2(1 + L.w))) / 2;
+      const key = (calls ? "c" : ranOnly(L) ? "r" : "s") + Math.round(2 * Math.min(7, 0.8 + 1.1 * Math.log2(1 + L.w))) / 2;
       if (!buckets.has(key)) buckets.set(key, []);
       buckets.get(key).push(L);
     }
@@ -2041,16 +2125,16 @@ function drawProgram() {
       g.beginPath();
       for (const L of list) { g.moveTo(x[L.s], y[L.s]); g.lineTo(x[L.t], y[L.t]); }
       g.lineWidth = +key.slice(1) * px;
-      g.strokeStyle = key[0] === "c" ? C.call : C.shared;
-      g.setLineDash(key[0] === "c" ? [] : [5 * px, 3 * px]);
+      g.strokeStyle = key[0] === "s" ? C.shared : C.call;
+      g.setLineDash(key[0] === "c" ? [] : key[0] === "r" ? [2.5 * px, 2.5 * px] : [5 * px, 3 * px]);
       g.stroke();
     }
     g.setLineDash([]);
     g.beginPath();
     for (const list of buckets.values()) {
       for (const L of list) {
-        if (L.calls[0] || L.refers[0]) arrow(g, L.s, L.t, px);
-        if (L.calls[1] || L.refers[1]) arrow(g, L.t, L.s, px);
+        if (L.calls[0] || L.refers[0] || L.ran[0]) arrow(g, L.s, L.t, px);
+        if (L.calls[1] || L.refers[1] || L.ran[1]) arrow(g, L.t, L.s, px);
       }
     }
     g.fillStyle = C.call;
@@ -2358,6 +2442,7 @@ function progTip(i) {
     if (out) parts.push(`calls ${out}`);
     if (back) parts.push(`called ${back}`);
     if (L.refers[0] + L.refers[1]) parts.push(`${L.refers[0] + L.refers[1]} taken`);
+    if (L.ran[0] + L.ran[1]) parts.push(`${L.ran[0] + L.ran[1]} through pointers or started (system run)`);
     if (L.shared) parts.push(`${L.shared} shared`);
     return `<span class="mono">${esc(name)}</span> (${parts.join(", ")})`;
   });
@@ -2392,6 +2477,11 @@ function progTip(i) {
     (f.proposed ? `: <span class="mono prop">${esc(f.proposed)}</span>` : ""));
   reviewTip(f.review, line);
   line("calls", `${P.calls.out[node.fi]} functions; called by ${P.calls.in[node.fi]}`);
+  const ranBy = (d.ran || []).filter((r) => r[1] === node.fi), ranTo = (d.ran || []).filter((r) => r[0] === node.fi);
+  const ranName = (i) => esc(d.functions[i].name);
+  if (ranBy.length) line("system run", ranBy.map((r) => `${r[2] === "return" ? "started by" : "called through a pointer by"} <span class="mono">${ranName(r[0])}</span> ×${commas(r[3])}`).join("<br>"));
+  if (ranTo.length) line(ranBy.length ? "" : "system run", ranTo.map((r) => `${r[2] === "return" ? "starts" : "calls through a pointer"} <span class="mono">${ranName(r[1])}</span> ×${commas(r[3])}`).join("<br>"));
+  for (const e of f.entered_by || []) line("entered by", `${e.how === "exception" ? "exception " + e.exception : e.how === "reset" ? "the reset" : "a system call"} ×${commas(e.times)}`);
   if (joined.length) line("joined to", joined.join("<br>"));
   const found = P.found && P.found.functions.find((x) => x.name === f.name);
   if (found) line("found", `by its ${found.how.join(", ")}${found.text ? `: <span class="mono">${esc(found.text)}</span>` : ""}`);
@@ -2623,6 +2713,205 @@ function progFound() {
   progRedraw();
 }
 
+// ---- the system run: both images' device logs side by side (/api/timeline) ----
+//
+// What the system run's records hold (dread sysrun, dread lift --check's whole image; BUILD/sysrun): a
+// scenario's runs on the original and the rebuilt image, their device logs entry by entry, where they
+// first differ, and the function running at each entry where the run kept it. A virtual list: only the
+// rows on screen are drawn, and the server is asked for the entries around them in chunks.
+
+const TL_CHUNK = 400;           // entries one answer brings
+const T = { name: null, data: null, chunks: new Map(), asked: new Set(), first: 0, kept: 0, labels: [], stamp: null };
+const tlLink = (name) => "#/s" + (name ? "/" + encodeURIComponent(name) : "");
+// A record by its scenario, and the tool where it is not dread sysrun's own (the lift check's whole image).
+const recordLabel = (x) => (x.name === x.scenario ? x.scenario
+  : x.scenario + " · " + (x.by === "dread lift --check" ? "lift check" : x.name.slice(x.scenario.length + 1)));
+const NARROW = matchMedia("(max-width: 700px)");
+const tlRowHeight = () => (NARROW.matches && T.labels.length > 1 ? 44 : 23);   // (app.css: .tlrow)
+const commas = (n) => (n == null ? "" : Number(n).toLocaleString("en-US"));
+
+async function showTimeline(name, keep = false) {
+  const mine = ++renders;
+  let d;
+  try {
+    d = await api("/api/timeline", Object.assign({ count: 1 }, name ? { name } : {}));
+  } catch (e) {
+    if (mine === renders) showError(e.message);
+    return;
+  }
+  if (mine !== renders) return;
+  stopRelations();
+  if (P.frame) cancelAnimationFrame(P.frame);
+  P.frame = 0;
+  const main = $("#main");
+  const picked = d.scenarios.find((x) => x.name === d.name);
+  const stamp = picked ? picked.name + "|" + picked.when : null;
+  const again = keep && S.view === "timeline" && T.stamp === stamp && $("#tl-list");
+  const scroll = again ? $("#tl-list").scrollTop : null;
+  S.view = "timeline";
+  S.current = null;
+  renderList();
+  document.title = "System run · DREAD";
+  watch(d.status);
+  if (!d.scenarios.length) {
+    main.innerHTML = `<div class="ov"><h1>System run</h1><div class="none tl-none">No run recorded yet. <span class="mono">dread sysrun</span> keeps
+      each scenario's runs (original and rebuilt image) in BUILD/sysrun, and <span class="mono">dread lift --check</span> its whole image's.</div></div>`;
+    return;
+  }
+  if (!again) { T.chunks = new Map(); T.asked = new Set(); }
+  Object.assign(T, { name: d.name, data: d, first: d.first, kept: d.kept, labels: d.runs.map((r) => r.label), stamp });
+  main.innerHTML = timelineHTML(d);
+  main.scrollTop = 0;
+  sizeTimeline();
+  const list = $("#tl-list");
+  $("#tl-spacer").style.height = T.kept * tlRowHeight() + "px";     // (before a scroll can go there)
+  if (scroll != null) list.scrollTop = scroll;
+  else if (d.differ && d.differ.at != null) tlGo(d.differ.at, false);
+  renderTimeline();
+}
+
+function timelineHTML(d) {
+  const pick = d.scenarios.length > 1
+    ? `<div class="seg" id="tl-pick">${d.scenarios.map((x) => `<button data-s="${esc(x.name)}"${x.name === d.name ? ' class="on"' : ""}` +
+      ` title="${esc(x.scenario)}, ${esc(x.by || "")}: ${x.runs.length < 2 ? "the original alone" : x.differ ? "the logs differ" : "the images agree"}">${esc(recordLabel(x))}${x.differ ? " ≠" : ""}</button>`).join("")}</div>`
+    : `<span class="badge">${esc(recordLabel(d))}</span>`;
+  const picked = d.scenarios.find((x) => x.name === d.name) || {};
+  const texts = d.runs.map((r) => (r.reports && r.reports.uart && r.reports.uart.sent) || "");
+  const same = texts.length > 1 && texts.every((t) => t === texts[0]);
+  const run = (r, k) => {
+    const sent = same && k > 0 ? "" : tail(texts[k], 4, 240);
+    const ints = Object.entries(r.interrupts || {}).map(([n, k]) => `${n}: ${commas(k)}`).join(", ");
+    return `<div class="tl-run"><span class="tl-label">${esc(r.label)}</span><span class="tl-how">${esc(r.how)}</span>` +
+      `<span class="legend-line inline">clock ${commas(r.clock)} · ${commas(r.entries)} entries${ints ? ` · interrupts ${esc(ints)}` : ""}</span>` +
+      (sent ? `<span class="tl-sent" title="what the serial port model was sent${same ? " (the same in both runs)" : ""}">${esc(sent)}</span>` : "") + `</div>`;
+  };
+  let state;
+  if (d.runs.length < 2) state = `<span class="legend-line inline">the original alone (dread sysrun --original-only)</span>`;
+  else if (d.differ) {
+    state = `<span class="bad">The images differ${d.differ.at != null ? ` from entry ${commas(d.differ.at)}` : ""}</span>` +
+      (d.differ.at != null ? ` <button id="tl-go" title="Scroll to the first difference (d)">Show it</button>` : "") +
+      `<pre class="tl-lines">${esc(d.differ.lines.join("\n"))}</pre>`;
+  } else state = `<span class="good">The images agree: every entry of the device logs is the same.</span>`;
+  const window = d.kept < Math.max(...d.runs.map((r) => r.entries))
+    ? `<span class="legend-line inline">the record keeps entries ${commas(d.first)}–${commas(d.first + d.kept - 1)} (${commas(d.keep)} at most)</span>` : "";
+  const clock = d.built ? `<span class="legend-line inline" title="the shared clock counts the code both images share">the original's clock leaves out the code of the ${commas(d.built)} functions the rebuilt image has from C</span>` : "";
+  const cols = d.runs.map((r) => `<span>${esc(r.label)}<span class="sub"> · function · access</span></span>`).join("");
+  return `
+    <div class="fn-head compact">
+      <div class="fn-title"><h1>System run</h1>${pick}<span class="badge" title="${esc(when(picked.when))}">${esc(d.by || "")}, ${ago(picked.when)}</span>
+        <span class="grow"></span></div>
+      <div class="tl-sum">${d.runs.map(run).join("")}<div class="tl-state">${state} ${window} ${clock}</div></div>
+    </div>
+    <section class="tl${d.runs.length < 2 ? " one" : ""}" id="tl">
+      <div class="tl-cols"><span class="ix">entry</span>${cols}</div>
+      <div class="tl-list" id="tl-list"><div class="spacer" id="tl-spacer"></div></div>
+    </section>`;
+}
+
+// The last lines of a text, at most chars of it ("…" where it was cut).
+function tail(text, lines, chars) {
+  const parts = text.replace(/\r/g, "").split("\n");
+  let out = parts.slice(-lines).join("\n");
+  if (out.length > chars) out = out.slice(-chars);
+  return out.length < text.replace(/\r/g, "").length ? "…" + out : out;
+}
+
+function sizeTimeline() {
+  const list = $("#tl-list");
+  if (!list) return;
+  const top = list.getBoundingClientRect().top + $("#main").scrollTop;
+  list.style.height = Math.max(240, Math.floor(window.innerHeight - top - 8)) + "px";
+}
+
+// The rows on screen, from the chunks there are; the missing chunks asked for.
+function renderTimeline() {
+  const list = $("#tl-list"), spacer = $("#tl-spacer");
+  if (!list || !T.data) return;
+  const row = tlRowHeight();
+  spacer.style.height = T.kept * row + "px";
+  const from = Math.max(0, Math.floor(list.scrollTop / row) - 8);
+  const to = Math.min(T.kept, Math.ceil((list.scrollTop + list.clientHeight) / row) + 8);
+  for (let k = Math.floor(from / TL_CHUNK); k <= Math.floor(Math.max(from, to - 1) / TL_CHUNK); k++) askChunk(k);
+  let html = "";
+  for (let i = from; i < to; i++) html += tlRowHTML(i);
+  spacer.innerHTML = html;
+  for (const el of spacer.children) el.style.transform = `translateY(${el.dataset.i * row}px)`;
+}
+
+async function askChunk(k) {
+  if (T.chunks.has(k) || T.asked.has(k) || k * TL_CHUNK >= T.kept) return;
+  T.asked.add(k);
+  const { name, stamp } = T;
+  try {
+    const d = await api("/api/timeline", { name, from: T.first + k * TL_CHUNK, count: TL_CHUNK });
+    if (T.name !== name || T.stamp !== stamp) return;
+    T.chunks.set(k, d.rows);
+    if (S.view === "timeline") renderTimeline();
+  } catch {
+    T.asked.delete(k);                  // (asked again when the rows come back on screen)
+  }
+}
+
+function tlRowHTML(i) {
+  const n = T.first + i, rows = T.chunks.get(Math.floor(i / TL_CHUNK)), at = i % TL_CHUNK;
+  if (!rows) return `<div class="tlrow wait" data-i="${i}"><span class="ix">${commas(n)}</span><span class="cell"><span class="ev">…</span></span></div>`;
+  const entries = T.labels.map((label) => (rows[label] && at < rows[label].log.length ? rows[label].log[at] : null));
+  const differs = T.labels.length === 2 && JSON.stringify(entries[0]) !== JSON.stringify(entries[1]);
+  const first = T.data.differ && T.data.differ.at === n;
+  const cells = T.labels.map((label, k) => tlCell(rows[label], at, entries[k], label, T.labels.length === 2));
+  return `<div class="tlrow${differs ? " differ" : ""}${first ? " first" : ""}" data-i="${i}"><span class="ix">${commas(n)}</span>${cells.join("")}</div>`;
+}
+
+// One image's entry: the function its pc lies in (a link to it, at that instruction where the pc is the
+// listing's: the original's), and the entry.
+function tlCell(r, at, e, label, both) {
+  const tag = both ? `<span class="tl-tag">${esc(label[0])}</span>` : "";
+  if (!e) return `<span class="cell end">${tag}<span class="ev">(its log has ended)</span></span>`;
+  const fn = r.in ? r.in[at] : null, pc = r.at ? r.at[at] : null;
+  const known = fn ? S.byName.get(fn) : null;
+  const listed = pc != null && known && label === "original";
+  const where = fn ? `<a class="fn" href="${fnLink(fn, listed ? pc : null)}" title="${esc(fn)}${pc != null ? " at " + hex(pc) : ""}">${nameHTML(known || { name: fn })}</a>`
+    : pc != null ? `<span class="fn none" title="in no function of the tables">${hex(pc)}</span>` : "";
+  return `<span class="cell">${tag}${where}<span class="ev" title="${esc(JSON.stringify(e))}">${entryHTML(e)}</span></span>`;
+}
+
+// One entry of a device log (dread sysrun's, as compared): a read with its value and how often it was
+// read in a row, a write, an interrupt taken, a system call, what a model noted (a byte sent).
+function entryHTML(e) {
+  const v = (x) => (typeof x === "number" ? hex(x) : esc(String(x)));
+  if (e[0] === "read") return `<b class="ek r">read</b> ${esc(e[1])} <span class="ad">${v(e[2])}</span> → ${v(e[4])}${e[5] > 1 ? ` <span class="ct">×${commas(e[5])}</span>` : ""}`;
+  if (e[0] === "write") return `<b class="ek w">write</b> ${esc(e[1])} <span class="ad">${v(e[2])}</span> ← ${v(e[4])}`;
+  if (e[0] === "interrupt") return `<b class="ek i">interrupt</b> ${esc(e[1])} ${esc(String(e[2]))}`;
+  if (e[0] === "syscall") return `<b class="ek i">system call</b>`;
+  const byte = e[1] === "sent" && typeof e[2] === "number" && e[2] >= 32 && e[2] < 127 ? ` <span class="ch">'${esc(String.fromCharCode(e[2]))}'</span>` : "";
+  return `<b class="ek n">${esc(String(e[0]))} ${esc(String(e[1]))}</b> ${e.slice(2).map(v).join(" ")}${byte}`;
+}
+
+// The list scrolled to an entry (absolute), it in the upper third.
+function tlGo(n, smooth = true) {
+  const list = $("#tl-list");
+  if (!list || n == null) return;
+  const row = tlRowHeight(), i = n - T.first;
+  list.scrollTo({ top: Math.max(0, i * row - list.clientHeight / 3), behavior: smooth && !still() ? "smooth" : "auto" });
+}
+
+function wireTimeline() {
+  const main = $("#main");
+  let ticking = false;                  // (one render a frame while it scrolls)
+  main.addEventListener("scroll", (e) => {
+    if (e.target.id !== "tl-list" || S.view !== "timeline" || ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => { ticking = false; renderTimeline(); });
+  }, true);
+  main.addEventListener("click", (e) => {
+    const b = e.target.closest("#tl-pick button");
+    if (b) { location.hash = tlLink(b.dataset.s); return; }
+    if (e.target.closest("#tl-go") && T.data && T.data.differ) tlGo(T.data.differ.at);
+  });
+  window.addEventListener("resize", () => { if (S.view === "timeline") { sizeTimeline(); renderTimeline(); } });
+  NARROW.addEventListener("change", () => { if (S.view === "timeline") renderTimeline(); });
+}
+
 // ---- search ----
 
 let searchTimer = null, results = [], active = -1, searched = "";
@@ -2754,6 +3043,7 @@ function watch(status) {
   S.pending = status.pending;
   if (!S.generation) S.generation = status.generation;
   if (status.names != null && S.names == null) S.names = status.names;
+  if (status.runs != null && S.runs == null) S.runs = status.runs;
   const busy = $("#busy");
   busy.hidden = !S.pending.length;
   busy.textContent = S.pending.length ? "finding " + S.pending.map((k) => ANALYSES[k]).join(", ") : "";
@@ -2767,9 +3057,11 @@ async function poll() {
     if (status.generation !== S.generation || (status.names != null && status.names !== S.names)) {
       S.generation = status.generation;    // (the tables, or only the names: names.tsv, review.tsv)
       S.names = status.names;
+      S.runs = status.runs;
       await loadFunctions();
       await refreshView();
-    } else if (waited) {
+    } else if (waited || (status.runs != null && status.runs !== S.runs)) {
+      S.runs = status.runs;              // (a new record of the system run: the graphs and the timeline anew)
       await refreshView();
     }
     watch(status);
@@ -2915,6 +3207,8 @@ function wire() {
       r: () => { const n = S.current.header.name; location.hash = S.mode === "relations" ? fnLink(n) : relLink(n); },
       f: () => { if (S.view === "program") progRefit(); else if (S.mode === "relations") refit(); },
       p: () => { location.hash = progLink(S.view === "function" && S.current ? S.current.header.name : null); },
+      s: () => { location.hash = tlLink(S.view === "timeline" ? T.name : null); },
+      d: () => { if (S.view === "timeline" && T.data && T.data.differ) tlGo(T.data.differ.at); },
       "[": () => stepFunction(-1), "]": () => stepFunction(1),
       Escape: () => { selectRow(-1); },
     };
@@ -2922,6 +3216,7 @@ function wire() {
     if (!action) return;
     if (S.view !== "function" && ["j", "k", "ArrowDown", "ArrowUp", "Enter", "n", ";", "Escape", "r"].includes(e.key)) return;
     if (e.key === "f" && S.view !== "program" && !(S.view === "function" && S.mode === "relations")) return;
+    if (e.key === "d" && S.view !== "timeline") return;
     e.preventDefault();
     action();
   });
@@ -2949,6 +3244,7 @@ async function start() {
   wire();
   wireRelations();
   wireProgram();
+  wireTimeline();
   try {
     const o = await api("/api/overview");
     const images = o.image.images;
@@ -2959,6 +3255,7 @@ async function start() {
     if (select) select.addEventListener("change", () => { location.search = "?image=" + encodeURIComponent(select.value); });
     S.generation = o.status.generation;
     S.names = o.status.names;
+    S.runs = o.status.runs;
     await loadFunctions();
   } catch (e) {
     return showError(e.message);

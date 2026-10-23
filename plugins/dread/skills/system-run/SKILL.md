@@ -33,6 +33,11 @@ Write one per behaviour you want covered: boot, each command, each error path a 
    code no case reached before.
 4. `dread lift --check` uses every scenario for the functions no case can call or end (main loops,
    reset and interrupt handlers): accepted when all scenarios agree and run all of their code.
+5. `dread gui`, key `s`: each run is kept (BUILD/sysrun/IMAGE: `SCENARIO.json` from dread sysrun,
+   `SCENARIO.lift-check.json` from the lift check's whole image) with both device logs, the function
+   whose instruction made each entry, and who entered whom. Read a difference there entry by entry
+   (`d` goes to the first); the relations of a callback or a task show who called it through a
+   pointer or started it, which no listing shows.
 
 ## What goes wrong
 

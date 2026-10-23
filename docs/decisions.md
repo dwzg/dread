@@ -9,6 +9,43 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## What the system run keeps of who entered whom, and of its device logs (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** dread gui is to show a task's and a callback's caller and the device logs of both
+  images side by side (docs/todo.md, Browser view, v3). Nothing kept calls with their caller: dread
+  sysrun kept the functions entered, the lift check's whole image whether the logs agree. What does
+  the run keep, how, and where does it go?
+- **Options and choices.**
+  1. How a transfer is seen: (a) the link register at each entry (a call's return address), (b) where
+     the block that ran before an entry ended, the instruction there naming how (call, through a
+     pointer, return), (c) an observer of every block in Python (dread.sysrecord's way). **(b)**, in the
+     C block hook and in Python alike: exact for tail calls and returns, where (a) names the caller's
+     caller or a frame's made-up return address, and as cheap as a store a block, where (c) takes every
+     block out of C. An exception taken in front of an entry keeps what came before it, by entry and
+     stack pointer, until that entry runs again with that stack pointer: without it every interrupt
+     that came there turned the call into a return from the handler.
+  2. When: (a) always, (b) behind an option. **(a)**: on FreeRTOS's GCC -Os demo (its original's run
+     to the limit) the run took about 5 % longer (3.99 s against 3.78 s, the best of six alternating
+     runs on a shared machine), 7 % on DREAD's MSP430 engine, which does every block in Python (the
+     transfers counted inline there except at entries). An option would leave the graphs without the
+     run's callers wherever it was not given. Each log entry's pc is kept always too (the C hook reads
+     it where it makes an entry or hands one over). Undo: an option in System, off for the lift check's
+     system checks, which keep nothing.
+  3. Where: (a) in the outcome only, (b) a record a tool writes, BUILD/sysrun/IMAGE/NAME.json, one a
+     scenario. **(b)**, as the item asks (the page shows the tools' records): dread sysrun writes
+     SCENARIO.json, the lift check its last whole image's SCENARIO.lift-check.json beside it, so that
+     neither overwrites the other (the whole image's original clock leaves the rebuilt functions' code
+     out and runs a different stretch than the original alone).
+  4. How much of the logs: (a) all, (b) a window of KEEP (100,000) entries, from the start or around the
+     first difference. **(b)**: FreeRTOS's original run to its limit has 90,114 entries (4.1 MB, 28 MB in
+     the server); a longer run is not unbounded on disk or in the page's server.
+- **Undo.** The transfers: System._ran, sys_ran and the CAME_* marks (dread/sysrun.py,
+  dread/fasthooks.c); the records: make_record's callers in dread sysrun's main and lift.keep_whole;
+  KEEP is a named constant.
+- **Status.** Done (dread/sysrun.py, dread/fasthooks.c, dread/lift.py, dread/gui.py, the page).
+
 ## The frontier answers: a step after the search, from the cases the lift check runs (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

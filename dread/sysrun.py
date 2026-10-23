@@ -75,6 +75,39 @@ _io. (The same builds: portYIELD's PENDSVSET, written again and again while Pend
 nearly all of their writes; the pair of runs to the limit took half the time on clang -Os and a
 third on GCC -O2 and -O0, where each write also raised that question behind the next shared block.)
 
+What a run keeps besides its log (Outcome, not compared): who entered whom, and the pc of each log
+entry. Every block that runs (not one a stop came in front of: _halt) ends where the next transfer
+into a function comes from (System._ran, in C sys_ran: st.came), and at a function's entry the pair
+(where the block before ended, the entry) is counted; the reset, an exception the run takes and a
+system call it takes alone leave a mark there instead (CAME_*), which the block they enter hands on
+when it is no function's entry (a vector that only branches: the A profile's, RISC-V's vectored
+mode). An exception taken in front of a function's entry (the block has not run) keeps what came
+before it, by the entry and the stack pointer, until that entry runs with that stack pointer again
+(when the exception returned, or the task it interrupted runs again: _suspend), so that the transfer
+counts from the call, not from the exception's return. transfers() names each pair by the
+instruction the block before ended with (the layer's flow): a call or jump the listing shows too, a
+call or jump through a register ("pointer", "pointer-jump": a callback, a timer's function, a table of
+commands), a return that went to an entry ("return": a task's first run from a frame its scheduler
+made), the code before running into it, or the mark (exception, syscall, reset); a pair no
+instruction explains is counted apart ("unexplained"). Addresses are 32 bits on every core the run
+runs, and instructions start at even addresses (the marks are odd). On FreeRTOS's GCC -Os demo the
+original's run to its limit saw every task started from xPortPendSVHandler and the timers' callbacks
+and pended functions called through pointers from prvProcessExpiredTimer and prvTimerTask (101 such
+calls), no transfer unexplained; the run took about 5 % longer than without keeping them (3.99 s
+against 3.78 s, the best of six alternating runs on a shared machine), and 7 % on DREAD's own MSP430
+engine, which does every block in Python (FreeRTOS's MSP430 build). Not established: a call through
+a stub that only branches on (an ARMv4T call_via) is counted from the stub; the rebuilt image's
+transfers are kept but named only where its code is the original's.
+
+Each run's record (make_record, write_record: BUILD/sysrun/IMAGE/NAME.json, docs/formats.md) keeps
+how each image's run ended, its clock, its model reports, its device log (KEEP entries at most: from
+the start, or around the first difference) with the pc of each entry and the function there (the
+rebuilt image's C by its placement), where the two logs first differ with compare's lines, and the
+original's transfers. dread sysrun writes one a scenario it runs (NAME the scenario's), dread lift
+--check one a scenario of its last whole image (SCENARIO.lift-check); dread gui shows them (the
+logs side by side, the transfers in the graphs), and dread relations and dread groups --json read
+them (ran()). A record of other bytes than the image's is not used.
+
 Scenarios are tables of the target's [scenarios] section:
 
     [scenarios.boot]
@@ -84,8 +117,8 @@ Scenarios are tables of the target's [scenarios] section:
     models = ["uart"]                # default: all models of the target
 
 Output: per image how the run ended, the clock, the models' reports and the functions entered;
-for two images the first difference of the device logs with what came before it. Exit status 1 on
-a difference.
+for two images the first difference of the device logs with what came before it; the record kept.
+Exit status 1 on a difference.
 
     dread sysrun [--target DIR] [--image NAME] [--scenario NAME] [--recon PAYLOAD] [--original-only]
                  [--limit N] [--log FILE]
@@ -122,14 +155,27 @@ LIMIT = 20_000_000       # default shared-clock limit
 
 
 class Outcome:
-    """What one run did."""
+    """What one run did. calls: {(came, entry): transfers} (System._ran: where the last block that ran
+    ended, or a CAME_* mark, and the function entry it went to); where: the pc of each log entry's
+    access (the instruction that made it; for an interrupt where the code it interrupted goes on), not
+    compared."""
 
-    def __init__(self, how, clock, log, reports, entered, order):
+    def __init__(self, how, clock, log, reports, entered, order, calls=None, where=None):
         self.how, self.clock, self.log, self.reports, self.entered, self.order = how, clock, log, reports, entered, order
+        self.calls, self.where = calls or {}, where or []
 
 
 NO_EVENT = (1 << 63) - 1    # _State.next_event when nothing is scheduled (as in dread.fasthooks)
 CLOCK_MAX = NO_EVENT - 1    # the state's clock and times stop here (64 bits in C); see System.clock
+# What came before a block (System._ran), where it is not the end of the block that ran last (an even
+# address: instructions start at even addresses on every core the system run runs): odd marks
+CAME_RESET = 1              # the run's first block
+CAME_SYSCALL = 5            # a system call the layer takes alone (RISC-V's ecall)
+
+
+def came_exception(number):
+    """The mark of an exception the run takes (an interrupt, M-profile svc's SVCall): its number."""
+    return number << 2 | 3
 
 
 class _State:
@@ -145,6 +191,7 @@ class _State:
         self.stretch_from, self.loop_max, self.anchor_next = FROZEN, LOOP_MAX, FROZEN
         self.waited = self.anchor = self.resume = self.waiting = 0
         self.io_done = self.last_access = 0     # (the C hook's reads: none here)
+        self.came, self.vector, self.suspended_n = CAME_RESET, 1, 0     # (System._ran)
 
 
 def _inside(address, size, ranges):
@@ -250,6 +297,11 @@ class System:
         self.next_event = None
         self.levels = {}
         self.blocks, self.entered, self.order = {}, collections.Counter(), []    # blocks: address -> size
+        self.calls = collections.Counter()  # (came, block address) -> transfers into functions (_ran)
+        self.where = []                     # the pc of each log entry (Outcome.where)
+        self._suspended = {}                # (entry, sp) -> came: _suspend, where the C hook is not at hand
+        self.halted = False                 # _on_block stopped the run in front of its block (_halt)
+        self._pc = None                     # the pc of the access _io is in (for note())
         self.last_new, self.last_access, self.limit = 0, 0, LIMIT
         self.progress = 0                   # the clock at the last device access, model note, interrupt taken
                                             # or new block of shared code: the same in both images
@@ -261,6 +313,7 @@ class System:
         self.anchor_vals = [0] * len(self.state_regs)   # their values at the anchor (st.anchor + 1)
         if self.fast is not None:
             self.fast.set_state_registers(self.state_regs)
+            self.st.sp_reg, self.st.pc_reg = self.layout.sp, self.layout.pc
         # A stop asked for by a peripheral access, taken where the next block starts: stopped inside a
         # memory hook, Unicorn leaves pc on the accessing instruction (a store done, a load not), and
         # going on from pc would repeat the access (dread.engines)
@@ -407,14 +460,14 @@ class System:
         else:
             self.stuck = True
         st.resume = address + 1
-        uc.emu_stop()
+        self._halt()
 
     # ---- for models ----
 
     def note(self, model, what, value):
         """A model reports something (a byte sent): part of the device log."""
         self.effects += 1
-        self._log((model, what, value))
+        self._log((model, what, value), at=self._pc if self._pc is not None else self.regs.reg_read(self.layout.pc))
         self.last_new = self.progress = self.clock
         until = self.scenario.get("until") or {}
         if model in until:
@@ -426,6 +479,12 @@ class System:
         self.effects += 1
         if self.stop is None:
             self.stop = how
+        self._halt()
+
+    def _halt(self):
+        """Stop the run; in a block hook, in front of its block, which then runs when the run goes on
+        (halted: _on_block counts no transfer into it then, _ran)."""
+        self.halted = True
         self.uc.emu_stop()
 
     def interrupt_level(self, number, level):
@@ -495,6 +554,7 @@ class System:
             uc.emu_stop()                   # this block runs (and counts) when the run goes on
             return
         st.chunk -= 1
+        self.halted = False
         for o in self.observers:
             o.block(addr, size)
         known = self.blocks.get(addr)
@@ -529,9 +589,61 @@ class System:
                     self.request_stop("spins: interrupt %d waits, masked, and nothing new for %d units of shared "
                                       "clock, at 0x%x" % (wanted[1], st.clock - st.progress, addr))
             if st.clock >= st.next_event or st.clock >= st.limit:
-                uc.emu_stop()
+                self._halt()
             if st.irq_check:
                 self._check_interrupts(uc)
+        if not self.halted:                 # (the block runs: _ran, inline where it is no entry)
+            if entry is not None or st.vector:
+                self._ran(addr, size)
+            else:
+                st.came = addr + size
+
+    def _ran(self, addr, size):
+        """A block that runs (in C: sys_ran; keep the two alike): where it is a function's entry, the
+        transfer into it, from where the last block that ran ended (st.came), or the mark the reset, an
+        exception or a system call left; an entry an exception came in front of (_suspend) gets what
+        came before the exception, found by its stack pointer. Then where the block ends. The block an
+        exception enters, when it is no function's entry (a vector that branches on: the A profile's,
+        RISC-V's vectored mode), hands the mark on to the block it goes to."""
+        st = self.st
+        if addr in self.entries:
+            came = st.came
+            if st.suspended_n > 0:
+                back = self._resume(addr, self.regs.reg_read(self.layout.sp))
+                if back:
+                    came = back
+            self.calls[came, addr] += 1
+            if st.vector:
+                st.vector = 0
+        elif st.vector:
+            st.vector = 0
+            return
+        st.came = addr + size
+
+    def _suspend(self, pc):
+        """An exception is about to be taken in front of the block at pc: where that block is a
+        function's entry, what came before it is kept until the entry runs with the stack pointer it has
+        now (when the exception returned, or the task it interrupted runs again), so that the transfer
+        into it is counted from there, not from the exception's return."""
+        address = pc & ~1
+        if address not in self.entries or not self.st.came:
+            return
+        sp = self.regs.reg_read(self.layout.sp)
+        if self.fast is not None:
+            self.fast.suspend(address, sp, self.st.came)
+        elif (address, sp) not in self._suspended:
+            self._suspended[address, sp] = self.st.came
+            self.st.suspended_n += 1
+
+    def _resume(self, address, sp):
+        """What came before the exception that came in front of the entry at this stack pointer (gone
+        then), or 0."""
+        if self.fast is not None:
+            return self.fast.resume(address, sp)
+        back = self._suspended.pop((address, sp), 0)
+        if back:
+            self.st.suspended_n -= 1
+        return back
 
     def _check_interrupts(self, uc):
         """Behind a block where an interrupt may be taken: stop the run for it (deliver) when a
@@ -547,7 +659,7 @@ class System:
                 masks = self._masks(wanted[0])
                 if self._may_take(*wanted, masks=masks):
                     self.deliver, self.irq_waiting = True, None
-                    uc.emu_stop()
+                    self._halt()
                 else:
                     self.irq_waiting = (self.irq_epoch, wanted[0], masks)
                     registers = getattr(self.arch, "mask_registers", None)
@@ -563,7 +675,7 @@ class System:
 
     def _on_io(self, uc, access, addr, size, value, user):
         """A device access, where the C hook is not at hand."""
-        self._io(uc, access, addr, size, value)
+        self._io(uc, access, addr, size, value, self.regs.reg_read(self.layout.pc))
         if self.layout.settle_it:
             self.arch.settle_it(uc)
 
@@ -572,14 +684,16 @@ class System:
         behind it): an exception cannot pass through the C between, so it stops the run and run()
         raises it."""
         try:
-            self._io(self.uc, access, addr, size, value)
+            self._io(self.uc, access, addr, size, value, self.st.io_pc)
         except BaseException as e:          # noqa: B036 (raised again by run())
             if self.callback_error is None:
                 self.callback_error = e
             self.uc.emu_stop()
 
-    def _io(self, uc, access, addr, size, value):
+    def _io(self, uc, access, addr, size, value, pc):
+        """A device access the C hook did not do (or every one, without it); pc: the instruction's."""
         st = self.st
+        self._pc = pc                       # (a model's note() during it is at this pc)
         if st.io_done:                      # the accesses the C hook did came first
             self._take_log()
         model, mask = self._owner(addr), (1 << 8 * size) - 1
@@ -590,7 +704,7 @@ class System:
         quiet = False                       # a write whose model noted nothing, moved no line, stopped nothing
         if access == UC_MEM_WRITE:
             value &= mask
-            self._log(("write", who, addr, size, value))
+            self._log(("write", who, addr, size, value), at=pc)
             self.last_new = self.clock
             effects = self.effects
             if model is not None:
@@ -611,7 +725,7 @@ class System:
             if last is not None and last[:5] == ("read", who, addr, size, got):
                 self.log[-1] = last[:5] + (last[5] + 1,)        # the same read again: one entry, counted
             else:
-                self._log(("read", who, addr, size, got, 1), read=(model, addr, size, got))
+                self._log(("read", who, addr, size, got, 1), read=(model, addr, size, got), at=pc)
                 self.last_new = self.clock
             changed = self.fast is not None and not self._plain(model, addr, size, answer, got)
         if st.clock >= st.next_event or st.clock >= st.limit:
@@ -621,6 +735,7 @@ class System:
                 self._refresh_plain()       # a write to a model, or a read that may have changed one
             if quiet:
                 self._note_write(model, addr, size, value)
+        self._pc = None
 
     # ---- the C hook's accesses (dread.fasthooks, dread_sysio) ----
     #
@@ -633,13 +748,15 @@ class System:
     # it makes until _take_log puts them into the log, which comes first whenever this side adds
     # to the log or uses it; st.tail_* is the log's last entry, for counting repeats as _io does.
 
-    def _log(self, entry, read=None):
+    def _log(self, entry, read=None, at=None):
         """Append to the device log, behind the accesses the C hook did. read: (model, address, size,
-        value) of a read's entry, whose repeats the C hook then counts into it."""
+        value) of a read's entry, whose repeats the C hook then counts into it; at: the pc of the
+        access (Outcome.where)."""
         st = self.st
         if st.io_done:
             self._take_log()
         self.log.append(entry)
+        self.where.append(at)
         if self.fast is not None:
             if read is None:
                 st.tail_read = 0
@@ -661,17 +778,20 @@ class System:
         n = st.log_n
         if n >= 8:                          # many: their bytes at once (sys_entries), half the time
             names = self.model_names
+            made = list(sys_entries(st))
             log.extend(("write", names[model], address, size, value) if write else
                        ("read", names[model], address, size, value, count)
-                       for address, value, count, model, size, write in sys_entries(st))
+                       for address, value, count, _, model, size, write in made)
+            self.where.extend(r[3] for r in made)
         elif n:                             # a few: field by field, which costs less to start
-            names, entries = self.model_names, st.log
+            names, entries, where = self.model_names, st.log, self.where
             for i in range(n):
                 r = entries[i]
                 if r.write:
                     log.append(("write", names[r.model], r.address, r.size, r.value))
                 else:
                     log.append(("read", names[r.model], r.address, r.size, r.value, r.count))
+                where.append(r.pc)
         st.log_n = 0
         if st.last_new >= 0:
             self.last_new, st.last_new = st.last_new, -1
@@ -797,6 +917,7 @@ class System:
         def write_word(address, value):
             uc.mem_write(address, (value & 0xFFFFFFFF).to_bytes(4, "little"))
         pc = arch.reset(uc, word, self.image.entry, self.image.vectors)
+        self.st.came, self.st.vector = CAME_RESET, 1
         self.schedule()
 
         def take(pc):
@@ -807,10 +928,12 @@ class System:
             controller.taken(number)
             self.interrupts[number] += 1
             self.progress, self.frozen = self.clock, 0      # (a stretch outside shared code ends)
-            self._log(("interrupt", controller.name, number))
+            self._log(("interrupt", controller.name, number), at=pc & ~1)
             vectors = controller.vector_base() if hasattr(controller, "vector_base") else self.image.vectors
             cause = controller.core_cause(number) if hasattr(controller, "core_cause") else None
             self._entering(pc)
+            self._suspend(pc)
+            self.st.came, self.st.vector = came_exception(number), 1
             pc = arch.enter_interrupt(uc, number, pc, vectors, word, write_word, cause=cause)
             self.interrupts_changed()
             return pc
@@ -845,8 +968,10 @@ class System:
             pc = arch.resume_address(uc)
             if self.syscall and hasattr(arch, "enter_syscall"):    # a trap the layer takes alone (ecall)
                 self.syscall, self.frozen = False, 0
-                self._log(("syscall",))         # (not its address: code that moved is elsewhere)
+                self._log(("syscall",), at=pc & ~1)     # (not its address: code that moved is elsewhere)
                 self._entering(pc)
+                self._suspend(pc)
+                self.st.came, self.st.vector = CAME_SYSCALL, 1
                 pc = arch.enter_syscall(uc, pc, word, write_word)
             if self.syscall:                    # svc: its exception, taken at once behind it
                 self.syscall = False
@@ -883,13 +1008,19 @@ class System:
                     how = "waits: no device access for %d units of shared clock and nothing scheduled, pc 0x%x" % (
                         self.clock - self.last_access, pc & ~1)
                 break
-        if self.fast is not None:           # the entries the C hook counted
+        if self.fast is not None:           # the entries and transfers the C hook counted
             for address, n in self.fast.take_entered():
                 self.entered[self.entries[address]] += n
+            for key, n in self.fast.take_calls():
+                self.calls[key] += n
         reports = {m.name: m.report() for m in self.models}
         if self.interrupts:
             reports["interrupts"] = dict(sorted(self.interrupts.items()))
-        return Outcome(how, self.clock, list(self.log), reports, dict(self.entered), list(self.order))
+        calls = collections.Counter()
+        for (came, address), n in self.calls.items():
+            calls[came, self.entries.get(address, address)] += n
+        return Outcome(how, self.clock, list(self.log), reports, dict(self.entered), list(self.order), dict(calls),
+                       list(self.where))
 
     def _entering(self, resume):
         """Tell the observers an exception is about to be taken (see observers)."""
@@ -916,13 +1047,20 @@ def run_image(target, image, payload, scenario, placement=None, built=(), limit=
     return system.run(limit or int(scenario.get("limit", LIMIT)))
 
 
-def compare(a, b):
-    """Readable differences of two outcomes (empty when they agree)."""
-    out = []
+def first_difference(a, b):
+    """The index of the first entry where the device logs of two outcomes differ (the shorter one's
+    length when one is the other's start), or None when they are the same."""
     n = min(len(a.log), len(b.log))
     first = next((i for i in range(n) if a.log[i] != b.log[i]), None)
     if first is None and len(a.log) != len(b.log):
         first = n
+    return first
+
+
+def compare(a, b):
+    """Readable differences of two outcomes (empty when they agree)."""
+    out = []
+    first = first_difference(a, b)
     if first is not None:
         out.append("device logs differ at entry %d (of %d and %d):" % (first, len(a.log), len(b.log)))
         for i in range(max(0, first - 3), first):
@@ -938,6 +1076,247 @@ def compare(a, b):
 
 def show(entry):
     return " ".join("0x%x" % x if isinstance(x, int) and x > 9 else str(x) for x in entry)
+
+
+# ---- what a run keeps: the record of a scenario (BUILD/sysrun/IMAGE/SCENARIO.json) ----
+
+RECORD_VERSION = 1
+KEEP = 100_000          # device log entries of each image a record keeps at most: from the start, or
+                        # around the first difference when the logs differ beyond it
+HOWS = ("call", "jump", "pointer", "pointer-jump", "return", "falls", "exception", "syscall", "reset", "unknown")
+
+
+def _site(program, came):
+    """The instruction a block that ended at `came` ended with (its last one, or the branch in front of
+    the delay slot where the layer has one): its address, or None where the image's code has none
+    there (code the image does not describe, the rebuilt image's C)."""
+    end = came - getattr(program.arch, "delay", 0)
+    for size in (2, 4, 6, 8):
+        known = program.code.get(end - size)
+        if known is not None and known[0] == size:
+            return end - size
+    return None
+
+
+def transfers(program, calls):
+    """Who entered whom in a run (Outcome.calls) as the record keeps it (docs/formats.md): one row a
+    way into a function, [{"to", "entry", "how", "times", "from", "site"}, ...] and ("exception") the
+    exception's number; and the transfers no instruction explains (should be none). how (HOWS) comes
+    from the instruction the block before ended with (the layer's flow): "call" and "jump", direct
+    (a call or tail call the listing shows too; a jump to its own entry from inside a function is a
+    loop, not counted), "pointer" (a call through a register), "pointer-jump" (a jump through a
+    register: a tail call through a pointer), "return" (a return that went to a function's entry: a
+    task's first run from a frame its scheduler made, a context switch), "falls" (the code in front of
+    it ran into it); or from the mark the run left: "exception" (taken by the run: an interrupt, svc;
+    from the reset vector too where it only branches on), "syscall" (RISC-V's ecall), "reset"; and
+    "unknown" where the image has no instruction there. from: the function that holds that instruction
+    (None outside every function); site: its address. Sorted by entry, how and site."""
+    rows, unexplained = {}, 0
+    for (came, entry), n in calls.items():
+        fn = program.by_entry.get(entry)
+        site = caller = exception = None
+        if came == CAME_RESET:
+            how = "reset"
+        elif came == CAME_SYSCALL:
+            how = "syscall"
+        elif came & 3 == 3:
+            how, exception = "exception", came >> 2
+        elif came & 1:
+            how = "unknown"
+        else:
+            site = _site(program, came)
+            insn = program.insn(site) if site is not None else None
+            if insn is None:
+                how, site = "unknown", came
+            else:
+                at = program.function_at(site)
+                caller = at.name if at is not None else None
+                kind, target, falls = program.arch.flow(insn)
+                if kind in ("call", "jump") and isinstance(target, int) and target & ~1 == entry:
+                    how = kind
+                elif kind == "icall":
+                    how = "pointer"
+                elif kind == "ijump":
+                    how = "pointer-jump"
+                elif kind == "return":
+                    how = "return"
+                elif came == entry and (kind == "next" or falls):
+                    how = "falls"
+                else:
+                    unexplained += n
+                    continue
+                if at is not None and fn is not None and at is fn and how in ("jump", "pointer-jump", "falls"):
+                    continue                # (a loop back to its own entry)
+        key = (entry, HOWS.index(how), site if site is not None else -1, exception if exception is not None else -1)
+        row = rows.get(key)
+        if row is None:
+            row = rows[key] = {"to": fn.name if fn is not None else None, "entry": entry, "how": how, "times": 0,
+                               "from": caller, "site": site}
+            if exception is not None:
+                row["exception"] = exception
+        row["times"] += n
+    return [rows[k] for k in sorted(rows)], unexplained
+
+
+def running(program, where, placement=None):
+    """(names, indexes): the function each pc of `where` lies in, as an index into names (-1: none),
+    the rebuilt image's C by its placement (placement.json's functions: a function's C, a helper)."""
+    spans = sorted((p["address"], p["address"] + p["c_bytes"], name) for name, p in (placement or {}).items()
+                   if p.get("c_bytes"))
+    starts = [lo for lo, _, _ in spans]
+    names, index, out = [], {}, []
+    for pc in where:
+        name = None
+        if pc is not None:
+            i = bisect.bisect_right(starts, pc) - 1
+            if i >= 0 and pc < spans[i][1]:
+                name = spans[i][2]
+            else:
+                fn = program.function_at(pc)
+                name = fn.name if fn is not None else None
+        if name is None:
+            out.append(-1)
+            continue
+        k = index.get(name)
+        if k is None:
+            k = index[name] = len(names)
+            names.append(name)
+        out.append(k)
+    return names, out
+
+
+def digest(payload):
+    import hashlib
+    return hashlib.sha1(bytes(payload)).hexdigest()
+
+
+def record_dir(target, image):
+    return os.path.join(target.build, "sysrun", image.name)
+
+
+def make_record(program, scenario_name, scenario, runs, by, payloads, placement=None, built=(), keep=KEEP,
+                limit=None, name=None):
+    """The record of one scenario's runs (docs/formats.md, "The system run's record"): runs [(label,
+    Outcome)], the original's first; payloads {label: the image's bytes}; placement: the rebuilt
+    image's (its C, for the functions running at each entry); built: the functions the original's
+    clock did not count. Each run keeps how it ended, its clock, its model reports, its device log (at
+    most keep entries, the same window for both: from the start, or around the first difference), the
+    pc of each entry kept and the function there; the record the first difference with what compare
+    says, and the transfers into functions the original's run saw (transfers()). name: the record's,
+    its file's (default: the scenario's; dread lift --check's whole image: SCENARIO.lift-check)."""
+    first = first_difference(runs[0][1], runs[1][1]) if len(runs) == 2 else None
+    total = max(len(o.log) for _, o in runs)
+    start = 0
+    if total > keep and first is not None:
+        start = max(0, min(first - keep // 2, total - keep))
+    names, index = [], {}
+    kept = []
+    for label, o in runs:
+        got, places = running(program, o.where[start:start + keep], placement if label != "original" else None)
+        remap = []
+        for function in got:
+            if function not in index:
+                index[function] = len(names)
+                names.append(function)
+            remap.append(index[function])
+        reports = {k: v for k, v in o.reports.items() if k != "interrupts"}
+        interrupts = {str(k): v for k, v in sorted(o.reports.get("interrupts", {}).items())}
+        kept.append({"label": label, "how": o.how, "clock": o.clock, "entries": len(o.log),
+                     "digest": digest(payloads[label]), "reports": reports, "interrupts": interrupts,
+                     "log": [list(e) for e in o.log[start:start + keep]],
+                     "at": [pc for pc in o.where[start:start + keep]],
+                     "in": [remap[k] if k >= 0 else -1 for k in places]})
+    calls, unexplained = transfers(program, runs[0][1].calls)
+    record = {"version": RECORD_VERSION, "name": name or scenario_name, "scenario": scenario_name, "by": by,
+              "image": program.image.name,
+              "limit": int(limit or scenario.get("limit", LIMIT)), "built": len(built), "first": start, "keep": keep,
+              "runs": kept, "functions": names, "calls": calls, "unexplained": unexplained,
+              "differ": None}
+    if len(runs) == 2 and (first is not None or compare(runs[0][1], runs[1][1])):
+        record["differ"] = {"at": first, "lines": compare(runs[0][1], runs[1][1])}
+    return record
+
+
+def write_record(target, image, record):
+    """Write a record (make_record) to BUILD/sysrun/IMAGE/NAME.json; returns its path."""
+    import json
+    folder = record_dir(target, image)
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, record["name"] + ".json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(record, f, separators=(",", ":"), sort_keys=True)
+    os.replace(tmp, path)
+    return path
+
+
+def record_paths(target, image):
+    """The image's record files, sorted."""
+    import glob
+    return sorted(glob.glob(os.path.join(record_dir(target, image), "*.json")))
+
+
+def read_record(path, want, logs=True):
+    """The record at path when it is of this version and its original's bytes have the digest `want`,
+    else None (its addresses may not be this image's; a file that does not read is None too); without
+    logs, the runs' log, at and in left out (what is kept of them: "kept", how many)."""
+    import json
+    try:
+        with open(path) as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("version") != RECORD_VERSION or not record.get("runs") or \
+            record["runs"][0].get("digest") != want:
+        return None
+    if not logs:
+        for run in record["runs"]:
+            run["kept"] = len(run.pop("log", ()))
+            run.pop("at", None)
+            run.pop("in", None)
+    return record
+
+
+def records(target, image, payload=None, logs=True):
+    """{name: record} of the image's records (BUILD/sysrun/IMAGE/*.json; the name is the scenario's, or
+    SCENARIO.lift-check for the lift check's whole image) whose original is this
+    image's bytes (payload, default the image's); a record of another version or of other bytes is
+    left out (its addresses may not be this image's), and so is one that does not read. logs: as
+    read_record's."""
+    want = digest(payload if payload is not None else image.payload())
+    out = {}
+    for path in record_paths(target, image):
+        record = read_record(path, want, logs)
+        if record is not None:
+            out[os.path.basename(path)[:-5]] = record
+    return out
+
+
+def ran(program, found):
+    """The transfers into functions of every record (records()), merged over them, named as the program
+    names them now (a record keeps addresses: a function renamed since keeps its rows): [{"to", "entry",
+    "how", "times" (in all of them), "from", "site", "exception"?, "scenarios" (the records' names)}],
+    sorted as transfers()."""
+    rows = {}
+    for scenario, record in sorted(found.items()):
+        for t in record.get("calls", ()):
+            how = t.get("how")
+            if how not in HOWS:
+                continue
+            key = (t["entry"], HOWS.index(how), t.get("site") if t.get("site") is not None else -1,
+                   t.get("exception", -1))
+            row = rows.get(key)
+            if row is None:
+                fn = program.by_entry.get(t["entry"])
+                at = program.function_at(t["site"]) if t.get("site") is not None else None
+                row = rows[key] = {"to": fn.name if fn is not None else t.get("to"), "entry": t["entry"], "how": how,
+                                   "times": 0, "from": at.name if at is not None else t.get("from"),
+                                   "site": t.get("site"), "scenarios": []}
+                if "exception" in t:
+                    row["exception"] = t["exception"]
+            row["times"] += int(t.get("times", 0))
+            row["scenarios"].append(scenario)
+    return [rows[k] for k in sorted(rows)]
 
 
 def main(argv=None):
@@ -975,7 +1354,8 @@ def main(argv=None):
     program = Program(target, image)
     outcomes = []
     for label, payload, placed, built in runs:
-        outcome = run_image(target, image, payload, scenario, placement=placed, built=built, limit=args.limit)
+        system = System(target, image, payload, program=program, placement=placed, built=built, scenario=scenario)
+        outcome = system.run(args.limit or int(scenario.get("limit", LIMIT)))
         outcomes.append(outcome)
         names = [program.name_at(e) or "0x%x" % e for e in outcome.order]
         print("%-8s %s; clock %d; %d device log entries; %d functions entered" % (
@@ -985,6 +1365,13 @@ def main(argv=None):
         if args.log:
             with open(args.log + ("" if label == "original" else "." + label), "w") as f:
                 f.write("\n".join(show(e) for e in outcome.log) + "\n")
+    record = make_record(program, name or "default", scenario, [(r[0], o) for r, o in zip(runs, outcomes)],
+                         "dread sysrun", {r[0]: r[1] for r in runs}, placement=runs[-1][2], built=runs[0][3],
+                         limit=args.limit)
+    path = write_record(target, image, record)
+    print("dread sysrun: kept in %s (%d transfers into functions, %d through pointers)" % (
+        os.path.relpath(path), sum(t["times"] for t in record["calls"]),
+        sum(t["times"] for t in record["calls"] if t["how"] in ("pointer", "pointer-jump"))))
     if len(outcomes) == 2:
         diff = compare(*outcomes)
         for line in diff:

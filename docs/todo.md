@@ -2839,8 +2839,66 @@ tool, the page shows its records; the only changes are the command line's own.
     at 0.8, 34 at 0.6, 4 at 0.4); memory and structures have no vote, so their names are never more than
     unvoted; the shared things between groups are few on FreeRTOS (two), most sharing stays inside a
     group by construction.
-- [ ] v3, next: calls through pointers from the system run's record (who called whom), so that a task's or
-  a callback's caller shows; the system run's timeline (device logs of both images side by side).
+- [x] v3, next, second part (2026-10-23): calls through pointers from the system run's record (who called
+  whom), so that a task's or a callback's caller shows; the system run's timeline (device logs of both
+  images side by side).
+  - What kept calls: nothing. dread sysrun kept the functions entered (counts, the order of first
+    entries), the lift check's whole image only whether the logs agree, dread.sysrecord the calls of
+    chosen functions with their inputs, not their callers. Now the system run keeps who entered whom,
+    in its C block hook (sys_ran) as in Python (System._ran): every block that runs ends where the next
+    transfer into a function comes from, and at an entry the pair (where the block before ended, the
+    entry) is counted; the reset, an exception the run takes and a system call leave a mark instead,
+    which a vector that only branches on (the A profile's, RISC-V's vectored mode) hands on. An
+    exception taken in front of an entry keeps what came before it, by the entry and its stack pointer,
+    until that entry runs with that stack pointer again (the exception returned, or the task it
+    interrupted runs again): the transfer then counts from the call, not from the exception's return (a
+    test program shows it; without the rule the call was a return from PendSV). dread.sysrun transfers
+    names each pair by the instruction in front (the layer's flow): call, jump, pointer, pointer-jump,
+    return (a task's first run), falls, exception, syscall, reset; one no instruction explains is
+    counted apart (none on gizmo's builds and two FreeRTOS builds). Each log entry keeps the pc of its
+    access too (Outcome.where; the C hook's entries and every access it hands over carry it). Neither
+    is compared.
+  - The record (docs/formats.md, BUILD/sysrun/IMAGE/NAME.json): dread sysrun writes one a scenario it
+    runs, dread lift --check one a scenario of its last whole image (SCENARIO.lift-check, beside it):
+    each image's ending, clock and reports, both device logs (100,000 entries at most: from the start,
+    or around the first difference) with each entry's pc and function (the rebuilt image's C by its
+    placement), the first difference with compare's lines, and the original's transfers. Readers use
+    it only for the image's bytes now, and name by address (renames keep the rows); dread relations
+    and dread groups --json read it.
+  - The graphs: what no call shows (a call or jump through a pointer, a return that went to an entry,
+    code running into it) joins a function's relations as callers and callees, as edges of their own
+    (calls-pointer dotted, enters dash-dot, with how, how often, where and the records), and the whole
+    program as `ran` (dashed); how the core entered a function (exception N, the reset) is on its node.
+    The function's page says who called it through a pointer, who started it, which exception entered
+    it.
+  - The timeline (`#/s`, key `s`; the overview's System run): a record at a time (a choice where there
+    are several, the one that differs first), how each image's run ended, the serial port's text (once
+    where both are the same), the first difference with compare's lines; the two logs side by side in a
+    virtual list, each entry with the function whose instruction made it (a link to it there); the
+    first difference marked and the rows after it that differ tinted, `d` goes there. At phone width
+    each row holds both images' entries one under the other.
+  - Measured: FreeRTOS GCC -Os, its original's run to its limit (90,114 log entries): 505,631 transfers
+    in 1,932 rows, none unexplained; 68 tasks started by a return (67 from xPortPendSVHandler, the first
+    from vPortSVCHandler), the timers' callbacks through pointers from prvProcessExpiredTimer (six
+    callbacks, 94 calls) and the pended functions from prvTimerTask (seven), PendSV, SysTick, SVCall and
+    both timers' handlers by their exceptions; on clang -O2, which inlines prvProcessExpiredTimer, the
+    callbacks are plain calls through a pointer from prvTimerTask (99), the same 68 tasks, none
+    unexplained. The GCC -Os run took about 5 % longer than without keeping them (3.99 s against
+    3.78 s, the best of six alternating runs on the shared machine), FreeRTOS's MSP430 build 7 % on
+    DREAD's engine, which does every block in Python; the record 4.1 MB, 0.2 s to read, 28 MB in the
+    server. Its whole image (329 functions from lifted C):
+    6.3 s for the build and both runs, as dread lift --check runs it, the records kept in 0.02 s (249
+    KB, 2,466 entries each). FreeRTOS GCC -Os on RISC-V: the same callbacks, 63 tasks started by mret
+    from the port's restore (its trap handler is no function of the tables, so its exceptions name no
+    handler), none unexplained. gizmo: dispatch's jump through its table of commands on a32, m3 and m4
+    (pointer-jump) and msp430 (a call through a register, as MSP430 GCC makes most of its calls: they
+    show as calls through pointers); clang folds the table into a switch on rv32. The page: a window of
+    400 entries in 1 ms (30-57 KB); headless Chrome on the FreeRTOS copy and gizmo (one with a planted
+    bug, so that the logs differ) light and dark, 400 px wide, no script errors, no horizontal scroll.
+  - Not established: the rebuilt image's transfers are kept but not named (its C is not the listing's);
+    a call through a stub that only branches on (ARMv4T's call_via) counts from the stub; an exception
+    whose handler is no function's entry of the tables names none; the KEEP window shows at most
+    100,000 entries of a longer run.
 
 ## A realistic benchmark: FreeRTOS (asked for by the user, 2026-10-19; before the rest of MSP430)
 

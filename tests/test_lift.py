@@ -220,6 +220,33 @@ def test_a_check_by_name_says_what_left_the_table(tmp_path, capsys):
 
 
 @pytest.mark.compiles
+def test_the_check_keeps_the_whole_images_runs(tmp_path):
+    """The whole image's runs (every scenario on the original and on the image with all accepted
+    functions from C) are kept as the system run's records (dread.sysrun, BUILD/sysrun/IMAGE), one a
+    scenario, SCENARIO.lift-check beside dread sysrun's: what dread gui shows of the device logs and
+    the transfers."""
+    from dread import sysrun
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    for cache in ("autocases", "regflow"):
+        here = os.path.join(gizmo_dir("m3"), "build", cache)
+        if os.path.isdir(here):
+            shutil.copytree(here, copy / "m3" / "build" / cache)
+    assert lift.main(["--target", str(copy / "m3"), "--check", "fmt_dec", "keys_read"]) == 0
+    target = Target.load(str(copy / "m3"))
+    image = target.image()
+    found = sysrun.records(target, image)
+    assert sorted(found) == sorted(lift.WHOLE_RECORD % name for name in target.scenarios)
+    for name, record in found.items():
+        assert record["by"] == "dread lift --check" and record["differ"] is None and record["built"] >= 2
+        assert name == lift.WHOLE_RECORD % record["scenario"]
+        original, rebuilt = record["runs"]
+        assert original["how"].startswith("until") and original["log"] == rebuilt["log"]
+        assert len(original["in"]) == len(original["log"]) and rebuilt["digest"] != original["digest"]
+        assert {(t["how"], t["from"], t["to"]) for t in record["calls"]} >= {("call", "main", "uart_init")}
+
+
+@pytest.mark.compiles
 def test_a_function_without_instructions_is_refused(tmp_path):
     """A function that config/functions.tsv gives no code bytes is refused, and the check goes on (an
     import that took clang 16's RISC-V code for data left 299 such functions, and the check stopped

@@ -227,3 +227,28 @@ def test_the_whole_program_as_a_graph_of_its_groups(m3_copy, capsys):
     assert groups.main(["--target", target.root, "--json"]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["groups"][uart]["label"] == "Serial port" and printed["counts"] == named["counts"]
+
+
+def test_the_system_runs_transfers_in_the_whole_program(m3_copy):
+    """program_graph's "ran": the transfers a system run saw that no call shows, between functions by
+    their numbers (dispatch to cmd_volume through gizmo's table of commands), counted between their
+    groups; how the core entered a function is on the function. Groups made here: cmd_volume alone, the rest."""
+    from dread import sysrun
+    target, program = m3_copy
+    image = target.image()
+    scenario = {"input": [[40_000, "uart", "3"], [120_000, "uart", "s"]], "until": {"uart": "volume 3"}, "limit": 5_000_000}
+    o = sysrun.System(target, image, image.payload(), program=program, scenario=scenario).run(5_000_000)
+    rows, _ = sysrun.transfers(program, o.calls)
+    ran = [dict(r, scenarios=["digits"]) for r in rows]
+    names = [fn.name for fn in sorted(program.functions, key=lambda f: f.entry)]
+    found = [[n for n in names if n != "cmd_volume"], ["cmd_volume"]]
+    g = groups.program_graph(program, found, {}, ran=ran)
+    index = {f["name"]: i for i, f in enumerate(g["functions"])}
+    assert [index["dispatch"], index["cmd_volume"], "pointer-jump", 1] in g["ran"] and g["counts"]["ran"] == len(g["ran"])
+    assert all(how in ("pointer", "pointer-jump", "return", "falls") for _, _, how, _ in g["ran"])
+    a, b = g["functions"][index["dispatch"]]["group"], g["functions"][index["cmd_volume"]]["group"]
+    assert a != b
+    pair = [e for e in g["between"] if (e["a"], e["b"]) == (min(a, b), max(a, b))][0]
+    assert pair["ran"][0 if a < b else 1] >= 1
+    assert [(x["how"], x["exception"]) for x in g["functions"][index["TIMER_IRQHandler"]]["entered_by"]] == [("exception", 16)]
+    assert "ran" in groups.program_graph(program, found, {})       # (without records: none)

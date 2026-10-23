@@ -259,10 +259,12 @@ def test_the_page_draws_the_relations(server):
     assert "prefers-reduced-motion" in script               # (without motion: the layout at rest at once)
     assert "/api/program" in script and "function programHTML" in script and "#/p" in script
     assert "/api/program-search" in script and "function pie(" in script     # (the search, how sure names are)
+    assert "/api/timeline" in script and "function showTimeline" in script and "#/s" in script   # (the system run)
+    assert "calls-pointer" in script and "d.ran" in script                  # (its transfers in both graphs)
     sim = request(srv, "/sim.js")[2].decode()
     assert "export class Sim" in sim and "class Quadtree" in sim and "document" not in sim
     page = request(srv, "/")[2].decode()
-    assert "<kbd>r</kbd>" in page and "relations" in page and "<kbd>p</kbd>" in page
+    assert "<kbd>r</kbd>" in page and "relations" in page and "<kbd>p</kbd>" in page and "<kbd>s</kbd>" in page
 
 
 def program(srv, timeout=300):
@@ -281,8 +283,10 @@ def program(srv, timeout=300):
 def test_the_whole_program(server):
     """/api/program: waits for the groups, which dread groups finds and keeps in BUILD/groups; then
     every function once in its group, the groups labelled (the UART driver's by its prefix), the calls
-    between groups, a group's functions; a second state of the same tables reads the kept groups."""
+    between groups, a group's functions, the transfers of the system run's records; a second state of
+    the same tables reads the kept groups."""
     srv, target = server
+    plant_runs(target)
     status, first = answer(srv, "/api/program")
     assert status == 200 and first.get("waiting") == "groups", first
     g = program(srv)
@@ -293,11 +297,12 @@ def test_the_whole_program(server):
     assert {n for n, f in functions.items() if f["group"] == uart} == {"uart_init", "uart_putc", "uart_puts", "uart_getc"}
     assert g["groups"][uart]["label"] == "uart_" and g["groups"][uart]["functions"] == 4
     assert sum(gr["functions"] for gr in g["groups"]) == len(functions) == g["counts"]["functions"]
-    assert g["between"] and all(e["a"] < e["b"] and (sum(e["calls"]) or sum(e["refers"]) or e["shared"])
+    assert g["between"] and all(e["a"] < e["b"] and (sum(e["calls"]) or sum(e["refers"]) or sum(e["ran"]) or e["shared"])
                                 for e in g["between"])
     index = {f["name"]: i for i, f in enumerate(g["functions"])}
     assert [index["print_status"], index["uart_puts"], 2] in g["calls"] or \
         any(c[:2] == [index["print_status"], index["uart_puts"]] for c in g["calls"])
+    assert [index["dispatch"], index["cmd_volume"], "pointer-jump", 1] in g["ran"]      # (the system run's)
     from dread import groups
     assert g["groups_from"] == "dread groups" and os.path.exists(groups.kept_path(target, target.image()))
     state = gui.State(target, target.image())                       # (the next look reads them: no process)
@@ -496,6 +501,86 @@ def test_names_in_the_graphs_and_the_search_that_lights_the_program(named):
     found = answer(srv, "/api/program-search?q=mode")[1]
     assert any(f["name"] == "print_status" and "text" in f["how"] and f["text"] for f in found["functions"])
     assert answer(srv, "/api/program-search?q=")[1]["functions"] == []
+
+
+DIGITS = {"input": [[40_000, "uart", "3"], [120_000, "uart", "s"]], "until": {"uart": "volume 3"}, "limit": 5_000_000}
+
+
+def plant_runs(target):
+    """Two records of the system run on gizmo-m3, as dread sysrun keeps them: "digits", the original
+    alone (a digit key: dispatch jumps to cmd_volume through its table of commands), and "planted", both
+    images, the rebuilt one's log changed at entry 9 (where they first differ)."""
+    import copy
+    from dread import sysrun
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    o = sysrun.System(target, image, image.payload(), program=program, scenario=DIGITS).run(DIGITS["limit"])
+    sysrun.write_record(target, image, sysrun.make_record(program, "digits", DIGITS, [("original", o)], "dread sysrun",
+                                                          {"original": image.payload()}))
+    boot = target.scenarios["boot"]
+    a = sysrun.System(target, image, image.payload(), program=program, scenario=boot).run(int(boot["limit"]))
+    b = copy.copy(a)
+    b.log = list(a.log)
+    b.log[9] = ("write", "uart", 0, 4, 99)
+    sysrun.write_record(target, image, sysrun.make_record(program, "boot", boot, [("original", a), ("rebuilt", b)],
+                                                          "dread sysrun", {"original": image.payload(), "rebuilt": b"x"},
+                                                          name="planted"))
+    return o
+
+
+def test_the_system_run_in_the_page(server):
+    """The system run's records (BUILD/sysrun): /api/status counts their changes; /api/timeline lists the
+    scenarios, picks the one that differs, and gives windows of both images' device logs with each
+    entry's pc and the function there, the first difference marked by the record; a record of other
+    bytes than the image's is left out. The transfers the run saw reach the relations (dispatch a
+    caller of cmd_volume, through a pointer), the function's page and the overview."""
+    import json as json_
+    from dread import sysrun
+    srv, target = server
+    before = answer(srv, "/api/status")[1]["runs"]
+    status, empty = answer(srv, "/api/timeline")
+    assert status == 200 and empty["scenarios"] == [] and "rows" not in empty
+    assert answer(srv, "/api/function?name=cmd_volume")[1]["ran"] is None
+    plant_runs(target)
+    assert answer(srv, "/api/status")[1]["runs"] == before + 1
+    status, t = answer(srv, "/api/timeline")
+    assert [(s["name"], s["scenario"]) for s in t["scenarios"]] == [("digits", "digits"), ("planted", "boot")]
+    assert t["name"] == "planted" and t["differ"]["at"] == 9 and t["first"] == 0
+    assert t["differ"]["lines"][0].startswith("device logs differ at entry 9")
+    assert [r["label"] for r in t["runs"]] == ["original", "rebuilt"] and t["start"] <= 9 < t["start"] + 400
+    rows, k = t["rows"], 9 - t["start"]
+    assert rows["rebuilt"]["log"][k] == ["write", "uart", 0, 4, 99] and rows["original"]["log"][k] != rows["rebuilt"]["log"][k]
+    assert sum(len(r["log"]) for r in answer(srv, "/api/timeline?count=1")[1]["rows"].values()) == 2
+    status, w = answer(srv, "/api/timeline?name=digits&from=2&count=3")
+    original = w["rows"]["original"]
+    assert w["start"] == 2 and list(w["rows"]) == ["original"] and len(original["log"]) == len(original["in"]) == 3
+    names = {name for e, name in zip(original["log"], original["in"]) if e[:2] == ["uart", "sent"]}
+    assert names <= {"uart_putc"} and all(isinstance(pc, int) for pc in original["at"])
+    status, all_ = answer(srv, "/api/timeline?name=digits&from=0&count=5000")
+    sent = [e[2] for e in all_["rows"]["original"]["log"] if e[:2] == ["uart", "sent"]]
+    assert bytes(sent).decode().endswith("volume 3") and all_["kept"] == len(all_["rows"]["original"]["log"])
+    g = answer(srv, "/api/graph?name=cmd_volume")[1]
+    nodes = {n["name"]: n for n in g["nodes"]}
+    assert nodes["dispatch"]["side"] == "caller"
+    assert [(e["from"], e["to"], e["how"]) for e in g["edges"] if e["kind"] == "calls-pointer"] == [
+        ("f:dispatch", "f:cmd_volume", ["pointer-jump"])]
+    assert answer(srv, "/api/graph?name=TIMER_IRQHandler")[1]["nodes"][0]["entered_by"][0]["exception"] == 16
+    ran = answer(srv, "/api/function?name=cmd_volume")[1]["ran"]
+    assert [(c["name"], c["how"], c["scenarios"]) for c in ran["callers"]] == [("dispatch", "pointer-jump", ["digits"])]
+    assert ran["scenarios"] == ["digits", "planted"]
+    o = answer(srv, "/api/overview")[1]
+    assert [(s["name"], s["pointers"] > 0, bool(s["differ"])) for s in o["sysrun"]] == [("digits", True, False),
+                                                                                      ("planted", True, True)]
+    assert o["runs"]["sysrun"]
+    path = os.path.join(sysrun.record_dir(target, target.image()), "digits.json")
+    record = json_.load(open(path))
+    record["runs"][0]["digest"] = "0" * 40                          # (the record of another image's bytes)
+    with open(path, "w") as f:
+        json_.dump(record, f)
+    os.utime(path, (time.time() + 5, time.time() + 5))
+    assert [s["name"] for s in answer(srv, "/api/timeline")[1]["scenarios"]] == ["planted"]
+    assert answer(srv, "/api/function?name=cmd_volume")[1]["ran"]["callers"] == []
 
 
 C_SAMPLE = r'''/* { a brace in a comment */
