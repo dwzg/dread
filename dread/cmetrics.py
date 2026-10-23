@@ -22,8 +22,11 @@ counting those of raw accesses), raw memory accesses through pointer casts (`*(v
 structure members (`p->f_38`, and `p->f_4.f_8` once, a member of a structure held inside another;
 the frame's object, `stack36.f_4`, apart; a member's address counts as well), memory at fixed addresses
 written as a name (dread.naming's macros: `io_e000ed04`), and the variables, typed ones (a structure or
-a pointer to one) apart; a member of a structure of static data (`g_20000030.f_4`, dread.statics) counts
-as one apart (fixed_members), not as a name of memory at a fixed address.
+a pointer to one) apart; a member of a structure of static data (`g_20000030.f_4`, dread.statics) or an
+element of an array of it (`g_20000c74[1]`, `g_200299f8[r3].f_4`: one each) counts as one apart
+(fixed_members), not as a name of memory at a fixed address; of those, the elements reached with an
+index that is no constant (fixed_indexed); and the addresses of such objects, their fields and
+elements written as such (`&g_20029988`, `&g_x.f_8`, `&g_200299f8[r3]`: fixed_addresses).
 
 The source is taken after preprocessing: what the compiler compiled, macros expanded (FreeRTOS's
 configASSERT is an if and a call, as in the readable C). A function the compiler inlined into the
@@ -145,6 +148,7 @@ def nodes(x):
 
 FIXED = re.compile(r"#define\s+(\w+)\s+\(\*\(volatile\b")          # dread.naming's fixed-address names
 FIXED_STRUCT = re.compile(r"#define\s+(\w+)\s+\(\*\(volatile struct\b")    # (of those, structures of static data)
+FIXED_ARRAY = re.compile(r"#define\s+(\w+)\s+\(\(volatile\b")          # (arrays of static data: a pointer)
 STRUCT_TYPEDEF = re.compile(r"typedef\s+struct\b.*\}\s*(?:__attribute__\s*\(\(.*?\)\)\s*)?(\w+)\s*;\s*$", re.S)
 
 
@@ -153,14 +157,15 @@ def _has_frame_base(e):
 
 
 READABLE = FIGURES + ("casts", "raw", "frame_raw", "members", "frame_members", "fixed", "fixed_members", "variables",
-                      "typed")
+                      "typed", "fixed_indexed", "fixed_addresses")
 
 
 def readable_figures(tree, fn):
     """The figures of one function of a dread.cparse file (count's, and casts, raw, frame_raw,
-    members, frame_members, fixed, fixed_members, variables, typed: see the module's docstring)."""
+    members, frame_members, fixed, fixed_members, variables, typed, fixed_indexed, fixed_addresses:
+    see the module's docstring)."""
     out = count(skeleton(fn.body.body))
-    fixed, statics, structs = set(), set(), set()
+    fixed, statics, structs, arrays = set(), set(), set(), set()
     for item in tree.items if tree is not None else []:
         if isinstance(item, cparse.Raw):
             for line in item.text.splitlines():
@@ -170,17 +175,42 @@ def readable_figures(tree, fn):
                 m = FIXED_STRUCT.match(line.strip())
                 if m:
                     statics.add(m.group(1))
+                m = FIXED_ARRAY.match(line.strip())
+                if m:
+                    arrays.add(m.group(1))
             m = STRUCT_TYPEDEF.match(item.text.strip())
             if m:
                 structs.add(m.group(1))
     raw_casts, inner = set(), set()
-    extra = dict.fromkeys(("casts", "raw", "frame_raw", "members", "frame_members", "fixed", "fixed_members"), 0)
+    extra = dict.fromkeys(("casts", "raw", "frame_raw", "members", "frame_members", "fixed", "fixed_members",
+                           "fixed_indexed", "fixed_addresses"), 0)
+
+    def static(x):
+        """The innermost base of a chain of members and elements (g_x[3].f_4: g_x) and whether an index on
+        the way is no constant, its nodes marked as counted."""
+        indexed = False
+        while isinstance(x, (cparse.Member, cparse.Index)):
+            if isinstance(x, cparse.Index) and not isinstance(x.index, cparse.Num):
+                indexed = True
+            inner.add(id(x))
+            x = x.base
+        return x, indexed
     for n in nodes(fn.body):
         if isinstance(n, cparse.Unary) and n.op == "*" and isinstance(n.e, cparse.Cast) and "*" in n.e.type:
             extra["raw"] += 1
             raw_casts.add(id(n.e))
             if _has_frame_base(n.e.e):
                 extra["frame_raw"] += 1
+        elif isinstance(n, cparse.Unary) and n.op == "&" and id(n.e) not in inner \
+                and isinstance(n.e, (cparse.Name, cparse.Member, cparse.Index)):
+            x = n.e
+            while isinstance(x, (cparse.Member, cparse.Index)):
+                x = x.base
+            if isinstance(x, cparse.Name) and x.id in statics | arrays:
+                static(n.e)
+                inner.add(id(n.e))
+                inner.add(id(x))
+                extra["fixed_addresses"] += 1
         elif isinstance(n, cparse.Member) and id(n) not in inner:
             # (a member of a structure held inside one, p->f_4.f_8, is one member: of a structure behind
             # a pointer when the chain has an arrow, of a structure of static data when its object is one)
@@ -188,11 +218,22 @@ def readable_figures(tree, fn):
             while isinstance(x, cparse.Member):
                 inner.add(id(x))
                 arrow, x = arrow or x.arrow, x.base
-            if not arrow and isinstance(x, cparse.Name) and x.id in statics:
+            if not arrow and isinstance(x, cparse.Index) and isinstance(static(x)[0], cparse.Name) \
+                    and static(x)[0].id in arrays:
+                base, indexed = static(x)   # (an element's field of an array of static data: g_x[3].f_4)
+                inner.add(id(base))
+                extra["fixed_members"] += 1
+                extra["fixed_indexed"] += indexed
+            elif not arrow and isinstance(x, cparse.Name) and x.id in statics:
                 inner.add(id(x))
                 extra["fixed_members"] += 1
             else:
                 extra["members" if arrow else "frame_members"] += 1
+        elif isinstance(n, cparse.Index) and id(n) not in inner and isinstance(n.base, cparse.Name) \
+                and n.base.id in arrays:
+            inner.add(id(n.base))           # (an element of an array of scalars of static data: g_x[1])
+            extra["fixed_members"] += 1
+            extra["fixed_indexed"] += not isinstance(n.index, cparse.Num)
         elif isinstance(n, cparse.Name) and n.id in fixed and id(n) not in inner:
             extra["fixed"] += 1
     extra["casts"] = sum(1 for n in nodes(fn.body) if isinstance(n, cparse.Cast) and id(n) not in raw_casts)

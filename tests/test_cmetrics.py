@@ -129,7 +129,8 @@ def test_what_readable_c_alone_is_measured_for():
     tree = readable_file()
     assert cmetrics.readable_figures(tree, tree.function("g")) == {
         "statements": 8, "depth": 1, "gotos": 1, "labels": 1, "loops": 0, "casts": 2, "raw": 2, "frame_raw": 1, "members": 1,
-        "frame_members": 1, "fixed": 1, "fixed_members": 0, "variables": 5, "typed": 2}
+        "frame_members": 1, "fixed": 1, "fixed_members": 0, "variables": 5, "typed": 2, "fixed_indexed": 0,
+        "fixed_addresses": 0}
 
 
 def test_a_member_of_a_held_structure_is_one_member():

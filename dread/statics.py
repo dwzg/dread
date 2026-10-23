@@ -1,4 +1,4 @@
-"""Structures of static data: memory at fixed addresses grouped into the structures it was declared as.
+"""Structures and arrays of static data: memory at fixed addresses grouped into the objects it was declared as.
 
 Readable C writes memory at a fixed address as a macro per address and type (g_2000004c,
 g_2000a0f1_u8: dread.naming apply_globals). Where the source keeps its data in static structures,
@@ -10,7 +10,8 @@ struct g_20000030_t *)0x20000030u)` and the structure defined above the function
 apply_globals with the plan). Every access stays one volatile access of its width at its address:
 a field is declared only where C puts a member of that type at that offset without packing (each
 naturally aligned, from a base aligned for the widest), an access the structure has no such field
-for stays the macro it was.
+for stays the macro it was (a read of the field's width and the other signedness is cast:
+(s16)g_x.f_4).
 
 The evidence (evidence()): a forward pass over each function's machine code follows the constants
 its registers hold (the arch layer's value_step, as dread.relations flow_references) and, with each,
@@ -37,35 +38,78 @@ with an access below it is none (the object goes on below). Device registers ([m
 out: no structure the source declares, and their names (io_40011004) already say where they are.
 
 The hard part is a section anchor: GCC without -fdata-sections reaches every variable of a source
-file from one base, clang merges a file's globals into one object on RISC-V (and newlib's malloc
-keeps its state so on ARM), and an older compiler may reach a file's data from its section's start.
-Within a function, an anchor's accesses at constant offsets look exactly like a structure's. What
-tells them apart is what the code does next to the base (separate_bases): a compiler that makes a
-base per object reaches the neighbours a function uses together through bases of their own (or
-through RISC-V's gp), while an anchor is the one base its file reaches all of its variables through,
-so the functions that use it reach nothing next to it apart from it. A base counts only where one of
-its functions reaches a place within NEAR bytes in front of it or behind its structure apart from it
-(trust="all" counts every base, for measuring what this keeps out). The data symbols only end
-structures: a symbol at a base would make it count, but one that a person gave the first variable of
-an anchor's run would make the whole run one.
+file from one base, clang merges a file's globals into one object (on RISC-V, and with its global
+merge on ARM; newlib's malloc keeps its state so too), and an older compiler may reach a file's data
+from its section's start. Within a function, an anchor's accesses at constant offsets look exactly
+like a structure's. What tells them apart is what the code does next to the base (separate_bases): a
+compiler that makes a base per object reaches the neighbours a function uses together through bases
+of their own (or through RISC-V's gp), while an anchor is the one base its file reaches all of its
+variables through, so the functions that use it reach nothing next to it apart from it. A base
+counts only where one of its functions reaches a place within NEAR bytes in front of it or behind
+its structure apart from it (trust="all" counts every base, for measuring what this keeps out). The
+data symbols only end structures: a symbol at a base would make it count, but one that a person gave
+the first variable of an anchor's run would make the whole run one.
+
+What callees reach (handed()): where the readable C of a lifted function hands the address of static
+data to a callee for a parameter, dread.shapes' template of that parameter (what the callee and its
+callees reach through it at constant offsets) says what lies at the address: a parameter points into
+one object. Such a base counts without the neighbour test, its structure reaches as far as the
+callee reaches (or its own accesses), ends only where a data symbol, a startup range, an array or
+another such base starts (an address handed out inside it is a member's), and is no evidence for
+other bases' neighbours (GCC makes an anchor's variable's address as a literal of its own, so it
+would let an anchor's run count). A template needs two fields from offset 0 up and none below, and
+memory a walk reached is no structure (dread.shapes Shapes.walked_template: memcpy's buffers, also
+where a function hands its parameter on to it). RISC-V's lists, which their functions reach at no
+constant address, are structures so (vListInitialise(&xDelayedTaskList1) reaches its five words).
+
+Arrays (find_arrays(), from the lifted functions' readable C, whose arithmetic dread.tidy folded):
+a load or store at a constant plus an index times a scale (indexed_accesses: 0x200299f8u + 0x14u *
+r9 + 4, (r1 << 3) + 0x2002990cu, also through a variable that holds the index times the scale,
+scales_of) says that elements of that size lie there, its place a field of one. Accesses of one
+scale less than an element apart are one array; it starts at a data symbol within an element below
+the lowest of them, else at the address the code made them from or handed out there, else at the
+lowest; it counts the elements its accesses reach and, where its start is a base that counts, those
+the code reaches at constant places from it. Its elements' fields are every access inside it at its
+offset in an element, laid out as a structure's and aligned in every element, and what callees reach
+through an element's address. Without readable C (a function that does not lift), a structure whose
+fields are one type one after another, which the machine code reaches with an index of that width,
+is an array of that type (a run of equal fields that the code also indexes). Readable C writes an
+element's field as one (g_200299f8[r9].f_4, g_20000c74[1], the index plus the element its constant
+lies in, g_x[r3 + 1]) through a macro that is a pointer to the first element (#define g_200299f8
+((volatile struct g_200299f8_t *)0x200299f8u)), so that C knows no bound for the index (GCC derives
+loop bounds from one); a variable that held the index times the scale and that nothing reads any
+more goes (straight_facts says where it holds the product). Where the code uses the address of an
+object, a field or an element as a value (an argument, a value assigned or compared, a result), it
+reads as such: (u32)&g_20029988, (u32)&g_20000030.f_8, (u32)&g_200299f8[r8].
 
 Measured against debug information (score(), dread readable --statics --score ELF) on the 39 FreeRTOS
-builds of the benchmark and two built without -fdata-sections (2026-10-23): no structure lies over
-several source variables on any of them; each lies inside one (but two of the Cortex-M4F GCC build,
-where no variable has debug information), and each field that can be checked is a leaf of its
-variable at its offset with its size. FreeRTOS GCC -Os has 15 (11 arrays of scalars, an array of
-structures, 3 structures: xStart, xSuspendedTaskList, xPendingReadyList), clang -O2 13, GCC -O0 5,
-RISC-V GCC none (its scalars are small data near gp, far from the lists, and the lists' functions
-reach no neighbour apart from their bases). Counting every base instead: 23 and 21 structures on GCC
--Os and -O2 without -fdata-sections, 20 on RISC-V clang -Os, one (newlib's malloc state) on thirteen
-ARM builds, each over several source variables, and 385 inside one variable on the 39 builds where
-the evidence keeps 329. What the code alone cannot tell stays as it was: gizmo is built without
--fdata-sections, and its g_config is no structure.
+builds of the benchmark and GCC -Os and -O2 built without -fdata-sections (2026-10-23): no structure
+and no array lies over several source variables on any of them. Structures 585, arrays 594 (with the
+code's own bases alone 331 structures); every array that lies in a source variable has its element
+size (583; the other 11 are tables in ROM at no variable), and 5,414 of 5,526 fields, an element's
+counted in every element, are leaves of their variable at their offset with their size (most of the
+rest lie in GCC 4.9's and 5's function-local static buffers, which the score does not place, and in
+newlib's FILE, whose _flags and _file one store writes as a word). FreeRTOS GCC -Os: 21 structures
+(xStart, the task and timer lists, the static queue, semaphore and event group buffers handed to their
+create functions, newlib's __sglue, and arrays the code reaches only at constant places, such as
+ulLastCycleCounters and xParameters) and 13 arrays (pxReadyTasksLists, xQueueRegistry, ulCycleCounters,
+sCheckVariables, ...); RISC-V GCC -Os 7 structures (its lists, from what vListInitialise and the others
+reach; none before) and 8 arrays; the two builds without -fdata-sections 13 and 14 structures and 12
+arrays each (none before); MSP430 none. Counting every base instead (trust="all", 2026-10-23, before
+the arrays and the callees' reach): 23 and 21 structures on GCC -Os and -O2 without -fdata-sections,
+20 on RISC-V clang -Os, one (newlib's malloc state) on thirteen ARM builds, each over several source
+variables, and 385 inside one variable on the 39 builds where the evidence keeps 329. What the code
+alone cannot tell stays as it was: gizmo is built without -fdata-sections, and its g_config is no
+structure (its callees walk it as bytes).
 
-Not established: whether a structure found is the source's (an array of scalars is one too, and an
-equally spaced structure reads as one); where one source structure is reached from several bases
-(GCC's .word sym+8), it comes out as pieces; a structure whose functions use nothing next to it is
-missed, however the compiler addressed it; MSP430 and MIPS have no value_step yet and get none.
+Not established: whether a structure or an array found is the source's (an array of two words
+reached only at constant places reads as a structure, an equally spaced structure that the code
+indexes as an array, an index into the middle of a structure that holds an array as an array of its
+own); how many elements an array has (the count is what the code reaches); where one source
+structure is reached from several bases (GCC's .word sym+8), it comes out as pieces, and accesses at
+an array's element in a further element than the first through a base of its own (arr[i + 1]) can
+make an array of their own; a structure whose functions use nothing next to it and that no lifted
+function hands to a callee is missed; MSP430 and MIPS have no value_step yet and get none.
 """
 import bisect
 import heapq
@@ -258,17 +302,359 @@ def layout(fields, base):
     return rows
 
 
+# ---- what readable C indexes: the scale, which the machine code's pass does not follow
+
+WORD = 1 << 32
+WIDE = ("u32", "s32", "u64", "s64")     # casts that keep a value modulo 2**32 (narrower ones cut it)
+
+
+def linear(e):
+    """(constant, {key: [coefficient, term]}) of an integer expression of readable C as a constant plus
+    terms times constants, modulo 2**32: sums and differences, a constant times a term, a term shifted
+    left by a constant, a negation, and casts to an integer type of 32 bits or more or to a pointer
+    (which readable C only converts back) looked through; anything else is a term of its own, keyed by
+    its text, so that terms alike add up. 0x200299f8u + (((r2 << 2) + r2) << 2) + 4 is (0x200299fc,
+    {"r2": [20, r2]}). Lifted C computes in 32-bit registers, so the sum modulo 2**32 is the value; a
+    narrower variable promoted to int gives the same value modulo 2**32."""
+    from dread import cparse as C
+    terms = {}
+
+    def add(x, k):
+        k %= WORD
+        if isinstance(x, C.Num) and isinstance(x.value, int):
+            return k * x.value % WORD
+        if isinstance(x, C.Cast) and (x.type.endswith("*") or " ".join(x.type.split()) in WIDE):
+            return add(x.e, k)
+        if isinstance(x, C.Binary) and x.op in ("+", "-"):
+            return (add(x.l, k) + add(x.r, k if x.op == "+" else -k)) % WORD
+        if isinstance(x, C.Binary) and x.op == "*":
+            for a, b in ((x.l, x.r), (x.r, x.l)):
+                c = constant(a)
+                if c is not None:
+                    return add(b, k * c)
+        if isinstance(x, C.Binary) and x.op == "<<":
+            c = constant(x.r)
+            if c is not None and c < 32:
+                return add(x.l, k << c)
+        if isinstance(x, C.Unary) and x.op in ("-", "+"):
+            return add(x.e, -k if x.op == "-" else k)
+        slot = terms.setdefault(C.expr_text(x), [0, x])
+        slot[0] = (slot[0] + k) % WORD
+        return 0
+    const = add(e, 1)
+    return const, {key: slot for key, slot in terms.items() if slot[0]}
+
+
+def constant(e):
+    """The value of a constant expression of readable C modulo 2**32 (linear), None for any other."""
+    const, terms = linear(e)
+    return None if terms else const
+
+
+def scaled(addr, facts=None, used=None):
+    """(constant, scale, index) of an address that is a constant plus one term times a scale from 1 to
+    2**31 - 1, the term the index: 0x200299f8u + 0x14u * r3 + 4 is (0x200299fc, 20, r3). facts:
+    {variable: (k, index, c)} of variables that hold index times k plus c (straight_facts, scales_of):
+    such a variable as the term counts as that (index None where only the scale is known), and goes
+    into used (a set) when given. None for anything else (no term, several, a scale that is negative
+    modulo 2**32)."""
+    from dread import cparse as C
+    const, terms = linear(addr)
+    if len(terms) != 1:
+        return None
+    k, term = next(iter(terms.values()))
+    via = None
+    if facts and isinstance(term, C.Name) and term.id in facts:
+        via = term.id
+        k2, index, c = facts[term.id]
+        const, k, term = (const + k * c) % WORD, k * k2 % WORD, index
+    if not 0 < k < 1 << 31:
+        return None
+    if via is not None and used is not None:
+        used.add(via)
+    return const, k, term
+
+
+def drop_unread(fn, names):
+    """Removes the plain assignments to the variables of names that nothing reads any more (an index
+    times a scale, which the rewrite wrote as the index: r8_3 = 0x14u * r8_2 with g_200299f8[r8_2] in
+    its place), where the value has no effect (no call, no volatile access) and the statement stands in
+    a list of statements; the declaration stays (a names proposal names the variables it was made for)."""
+    from dread import cparse as C
+    from dread.cflow import has_effects, walk_expr
+    from dread.naming import _exprs, _inner
+    if not names:
+        return
+    read = set()
+    for s in _statements(fn):
+        got = _assignment(s)
+        for e in _exprs(s):
+            for x in walk_expr(e.value if got is not None and e is s.e else e):
+                if isinstance(x, C.Name):
+                    read.add(x.id)
+            for x in walk_expr(e):
+                if isinstance(x, C.Assign) and x.op != "=" and isinstance(x.target, C.Name):
+                    read.add(x.target.id)
+    gone = set(names) - read
+
+    def keep(s):
+        got = _assignment(s)
+        return got is None or got[0] not in gone or has_effects(got[1])
+    for s in [fn.body] + _statements(fn):
+        if isinstance(s, C.Block):
+            s.body[:] = [x for x in s.body if keep(x)]
+
+
+def _statements(fn):
+    """Every statement of the function, nested ones too, each before what it holds."""
+    from dread.naming import _inner
+    out, work = [], list(reversed(fn.body.body))
+    while work:
+        s = work.pop()
+        out.append(s)
+        work.extend(reversed(_inner(s)))
+    return out
+
+
+def _written(statements):
+    """(names written, whether a label or case is among them) of statements and what they hold: assigned
+    with any operator, ++ or --, a declaration's initial value, an asm's outputs."""
+    from dread import cparse as C
+    from dread.cflow import walk_expr
+    from dread.naming import _exprs, _inner
+    names, labelled, work = set(), False, list(statements)
+    while work:
+        s = work.pop()
+        if isinstance(s, (C.Label, C.Case)):
+            labelled = True
+        if isinstance(s, C.Decl):
+            names.update(d.name for d in s.items if d.init is not None)
+        if isinstance(s, C.Asm):
+            names.update(x.id for o in s.outputs for x in walk_expr(o.e) if isinstance(x, C.Name))
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Assign) and isinstance(x.target, C.Name):
+                    names.add(x.target.id)
+                elif isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--") and isinstance(x.e, C.Name):
+                    names.add(x.e.id)
+        work.extend(_inner(s))
+    return names, labelled
+
+
+def _unsure(fn, params=True):
+    """The function's variables whose value no assignment tells for sure: their address taken (a
+    callee may write them), an asm's outputs, and with params its parameters (the caller's)."""
+    from dread import cparse as C
+    from dread.cflow import walk_expr
+    from dread.naming import _exprs
+    out = {n for _, n in fn.params} if params else set()
+    for s in _statements(fn):
+        if isinstance(s, C.Asm):
+            out.update(x.id for o in s.outputs for x in walk_expr(o.e) if isinstance(x, C.Name))
+        for e in _exprs(s):
+            out.update(x.e.id for x in walk_expr(e) if isinstance(x, C.Unary) and x.op == "&"
+                       and isinstance(x.e, C.Name))
+    return out
+
+
+def _assignment(s):
+    """(variable, value) of a statement that is a plain assignment to a variable, else None."""
+    from dread import cparse as C
+    if isinstance(s, C.ExprStmt) and isinstance(s.e, C.Assign) and s.e.op == "=" and isinstance(s.e.target, C.Name):
+        return s.e.target.id, s.e.value
+    return None
+
+
+def scales_of(fn):
+    """{variable: (k, None, c)} of the function's variables that hold some index times k plus c wherever
+    they are read (for scaled): each assignment to one gives it k times one term plus c (linear), all
+    the same k and c, the term perhaps another such variable (r8_3 = 0x14u * r8_2; r10 = 0x200299f8u +
+    r8_3), nothing but plain assignment statements write it (no ++, +=, assignment inside an expression
+    or initial value), and it is none of _unsure (a parameter's value is the caller's). What the plan
+    learns the scale of an access through such a variable from."""
+    from dread import cparse as C
+    from dread.cflow import walk_expr
+    from dread.naming import _exprs
+    defs, bad = {}, set(_unsure(fn))
+    for s in _statements(fn):
+        got = _assignment(s)
+        if got is not None:
+            defs.setdefault(got[0], []).append(linear(got[1]))
+        if isinstance(s, C.Decl):
+            bad.update(d.name for d in s.items if d.init is not None)
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Assign) and isinstance(x.target, C.Name) and not (got is not None and x is s.e):
+                    bad.add(x.target.id)
+                elif isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--") and isinstance(x.e, C.Name):
+                    bad.add(x.e.id)
+    facts, undecided = {}, {v for v in defs if v not in bad}
+    for _ in range(4):                      # (a variable made from another: a few levels)
+        changed = False
+        for v in sorted(undecided):
+            got, wait = set(), False
+            for const, terms in defs[v]:
+                if len(terms) != 1:
+                    got = None
+                    break
+                k, term = next(iter(terms.values()))
+                if isinstance(term, C.Name) and term.id in facts:
+                    k2, _, c2 = facts[term.id]
+                    const, k = (const + k * c2) % WORD, k * k2 % WORD
+                elif isinstance(term, C.Name) and term.id in undecided:
+                    wait = True             # (made from a variable not decided yet: the next round)
+                    break
+                got.add((k, const))
+            if wait:
+                continue
+            undecided.discard(v)
+            changed = True
+            if got and len(got) == 1 and 0 < next(iter(got))[0] < 1 << 31:
+                k, c = next(iter(got))
+                facts[v] = (k, None, c)
+        if not changed:
+            break
+    return facts
+
+
+def straight_facts(fn, visit):
+    """Calls visit(statement, facts) for every statement of the function, each before what it holds,
+    facts {variable: (k, index, c)}: the variables that hold an index variable times k plus c all
+    through the statement (for scaled), by an assignment v = k * x + c earlier in the same list of
+    statements or in one around it (k above 1 where c is 0: no copy), and nothing between it and the
+    statement, nor the statement with what it holds, writes v or x, nor is there a label or case
+    between them (a jump could come past the assignment). A variable whose value an assignment does not
+    tell (_unsure) is in none. Where the rewrite of an indexed access may write the index itself
+    (g[r8_2] for 0x200299f8u + r8_3; g[s1].f_4 for a3 + 4 after a3 = 0x80095914u + s1 * 20)."""
+    from dread import cparse as C
+    from dread.naming import _inner, variables
+    unsure = _unsure(fn, params=False)      # (a parameter assigned holds what it was assigned)
+    own = set(variables(fn)) - unsure
+    cache = {}
+
+    def written(s):
+        if id(s) not in cache:
+            cache[id(s)] = _written([s])
+        return cache[id(s)]
+
+    def walk(stmts, facts):
+        for s in stmts:
+            names, labelled = written(s)
+            if labelled:
+                facts = {}
+            facts = {v: f for v, f in facts.items() if v not in names and f[1].id not in names}
+            # (what the statement makes known, taken before visit rewrites it: the index a variable of
+            # the function, never memory, which the use would read again; a scale, not a copy)
+            got, fact = _assignment(s), None
+            if got is not None and got[0] in own:
+                found = scaled(got[1], facts)
+                if found is not None and (found[0] or found[1] > 1) and isinstance(found[2], C.Name) \
+                        and found[2].id != got[0] and found[2].id in own:
+                    fact = (got[0], (found[1], found[2], found[0]))
+            visit(s, facts)
+            for inner in ([s.body] if isinstance(s, C.Block) else [[x] for x in _inner(s)]):
+                walk(inner, facts)  # (an if's arms each alone: they are alternatives)
+            if fact is not None:
+                facts = dict(facts)
+                facts[fact[0]] = fact[1]
+    walk(fn.body.body, {})
+
+
+def indexed_accesses(fn, memory=None):
+    """[(constant, scale, type)] of the function's loads and stores (readable C: *(volatile u32 *)(...))
+    at a constant plus a scaled index (scaled, with the scales of scales_of), the constant an address
+    the plan looks at, the scale at least the access's width: what says that an array of elements of
+    that size lies there. 0x200299f8u + 0x14u * r9_2 + 4 is (0x200299fc, 20, "u32")."""
+    from dread import cparse as C
+    from dread.cflow import walk_expr
+    from dread.naming import ACCESS, _exprs
+    facts = scales_of(fn)
+    out = []
+    for s in _statements(fn):
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                if not (isinstance(x, C.Unary) and x.op == "*" and isinstance(x.e, C.Cast)):
+                    continue
+                m = ACCESS.match(" ".join(x.e.type.split()))
+                if not m or isinstance(x.e.e, C.Num):
+                    continue
+                got = scaled(x.e.e, facts)
+                if got is not None and got[1] >= SIZES.get(m.group(1), 4) and _address(memory, got[0]):
+                    out.append((got[0], got[1], m.group(1)))
+    return out
+
+
+def handed(trees, shapes_, memory=None):
+    """{function: [(address, {offset: {type: count}}, scale or None)]} of the addresses of static data
+    the readable C of the trees ([(tree, fn, macros)]) hands to a callee for a parameter that the callee
+    (and what it calls) reaches at constant offsets: its template in the shapes' summaries (shapes_:
+    dread.shapes analyse, its .summaries {callee: {"params": {i: template}}}) holds at least two fields
+    from offset 0 up (memset and strcmp touch offset 0 of whatever they get), none below (a callee that
+    takes its pointer as one into something larger: a header in front), and describes no memory a walk
+    reached (Shapes.walked_template: a buffer handed on to memcpy, whose unrolled copy reaches words 0
+    to 60 of whatever it gets). A parameter points into one object, so what the callee
+    reaches through it lies in the object at that address (RISC-V's lists, which their functions reach
+    at no constant address: vListInitialise(&xDelayedTaskList1) reaches all five words of it). An
+    address that is a constant plus an index times a scale (scaled: &pxReadyTasksLists[uxPriority]
+    handed to vListInsertEnd) comes with the scale, its constant the address: what the callee reaches
+    lies in an element of an array of that element size."""
+    from dread import cparse as C
+    from dread.cflow import walk_expr
+    from dread.constants import SMALLEST_POINTER
+    from dread.naming import _exprs
+    summaries = shapes_.summaries
+    out = {}
+    for _, fn, _ in trees:
+        facts = None
+        for s in _statements(fn):
+            for e in _exprs(s):
+                for x in walk_expr(e):
+                    if not (isinstance(x, C.Call) and isinstance(x.f, C.Name) and x.f.id in summaries):
+                        continue
+                    params = summaries[x.f.id].get("params", {})
+                    for i, a in enumerate(x.args):
+                        tmpl = params.get(i)
+                        if tmpl is None or tmpl[0] != "copy" or any(rel < 0 for rel in tmpl[1]) \
+                                or shapes_.walked_template(tmpl):
+                            continue
+                        v, k = constant(a), None
+                        if v is None:
+                            if facts is None:
+                                facts = scales_of(fn)
+                            got = scaled(a, facts)
+                            if got is None or got[1] < 2:
+                                continue
+                            v, k = got[0], got[1]
+                        if v < SMALLEST_POINTER or not _address(memory, v):
+                            continue
+                        fields = {rel: {t: 1 for t in types} for rel, (types, _, _) in sorted(tmpl[1].items())
+                                  if types}
+                        if len(fields) >= LEAST_FIELDS:
+                            out.setdefault(fn.name, []).append((v, fields, k))
+    return out
+
+
 NEAR = 64               # bytes around a structure where its neighbours lie (separate_bases)
 
 
-def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidence"):
+def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidence", indexed=None, arrays=None,
+         handed=None):
     """{base: [(offset, type)]} of the structures of static data the evidence ({name: Evidence},
     gather) shows (see the module's docstring). extra: more accesses at fixed addresses {function:
     [(address, type)]} for the fields (the readable C's: an ldm's or stm's words, which the evidence
     knows only by their first, a conditional literal's); symbols: whether the target's data symbols end
     a structure (they never make one: a symbol a person gave the first variable of an anchor's run would
     make the run one); trust: "evidence" (a base counts only where the code reaches its neighbours
-    apart from it: separate_bases), "all" (every base: for measuring what the evidence keeps out)."""
+    apart from it: separate_bases), "all" (every base: for measuring what the evidence keeps out).
+    indexed: the readable C's accesses at a constant plus a scaled index {function: [(constant, scale,
+    type)]} (indexed_accesses); with arrays, a dict, the arrays they show go into it ({start: (element
+    size, count, [(offset in the element, type)])}, find_arrays) and the structures that lie inside one
+    are left out (its elements' fields hold their accesses). handed: what callees reach through the
+    addresses of static data the readable C hands them ({function: [(address, {offset: {type:
+    count}})]}, statics.handed): each such address is a base whose structure reaches as far as the
+    callee does, its fields there too; it counts without separate_bases (a parameter points into one
+    object), ends only where a data symbol, a startup range, an array or another such base starts (an
+    address handed out inside it is a member's), and a structure inside it is left out."""
     memory = program.target.memory
     accesses, starts, reach, below, seen, through = {}, set(), {}, set(), {}, {}
 
@@ -298,25 +684,72 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
         for address, ctype in rows:
             if _address(memory, address):
                 note(fname, address, ctype)
+    owned = {}                              # a handed base -> how far its callees reach
+    for fname, rows in sorted((handed or {}).items()):
+        for a, fields, k in rows:
+            if not _address(memory, a) or k is not None:
+                continue                    # (an element's: find_arrays)
+            for off, types in fields.items():
+                for t, c in types.items():
+                    accesses.setdefault((a + off) & MASK, {}).setdefault(t, 0)
+                    accesses[(a + off) & MASK][t] += c      # (no access of the caller's: not in seen)
+            owned[a] = max([owned.get(a, 0)] + [off + SIZES.get(t, 4) for off, types in fields.items() for t in types])
     data_symbols = {a for kind, a, _ in program.symbols() if kind == "d"} if symbols else set()
     starts |= data_symbols
+    bounds = set(data_symbols)              # (what ends an array: a variable or a startup range starts)
     for c in program.image.startup():       # (an object lies in one of the startup's ranges)
         starts |= {c.run, c.run + c.size}
+        bounds |= {c.run, c.run + c.size}
+    found = {}
+    if indexed:
+        found = find_arrays(indexed, evidence_, accesses, data_symbols, bounds, memory,
+                            [r for _, rows in sorted((handed or {}).items()) for r in rows],
+                            lambda o: trust == "all" or (o in through and separate_bases(
+                                o, o + reach.get(o, 0), through[o], seen, near)))
+        starts |= set(found)
+        if arrays is not None:
+            arrays.update(found)
+    spans = sorted((a, a + k * n) for a, (k, n, _) in found.items())
+    hard = sorted(bounds | set(found) | set(owned))
+    ends = {}                               # a handed base -> where its structure ends
+    for a in sorted(owned):
+        i = bisect.bisect_right(spans, (a, MASK + 1)) - 1
+        if i >= 0 and spans[i][0] <= a < spans[i][1]:
+            continue                        # (an array's element: the array holds it)
+        end = a + max(owned[a], reach.get(a, 0))       # (and the code's own accesses from it)
+        i = bisect.bisect_right(hard, a)
+        if i < len(hard):
+            end = min(end, hard[i])
+        region = memory.region(a) if memory is not None else None
+        if region is not None:
+            end = min(end, region.end)
+        ends[a] = end
+    starts |= set(ends)
+    held = sorted(ends.items())
     order = sorted(starts)
     places = sorted(accesses)
     out = {}
-    for base in sorted(reach):
-        if base in below:
+    for base in sorted(set(reach) | set(ends)):
+        if base in below and base not in ends:
             continue
-        end = base + reach[base]
-        i = bisect.bisect_right(order, base)
-        if i < len(order):
-            end = min(end, order[i])
-        region = memory.region(base) if memory is not None else None
-        if region is not None:
-            end = min(end, region.end)
-        if trust != "all" and not separate_bases(base, end, through[base], seen, near):
-            continue
+        i = bisect.bisect_right(spans, (base, MASK + 1)) - 1
+        if i >= 0 and spans[i][0] <= base < spans[i][1]:
+            continue                        # (inside an array: its elements' fields)
+        i = bisect.bisect_right(held, (base, -1)) - 1
+        if i >= 0 and held[i][0] < base < held[i][1]:
+            continue                        # (inside what a callee reaches from a handed address)
+        if base in ends:
+            end = ends[base]
+        else:
+            end = base + reach[base]
+            i = bisect.bisect_right(order, base)
+            if i < len(order):
+                end = min(end, order[i])
+            region = memory.region(base) if memory is not None else None
+            if region is not None:
+                end = min(end, region.end)
+            if trust != "all" and not separate_bases(base, end, through[base], seen, near):
+                continue
         fields = {}
         for a in places[bisect.bisect_left(places, base):bisect.bisect_left(places, end)]:
             for t, c in accesses[a].items():
@@ -325,7 +758,145 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
         rows = layout(fields, base)
         if len(rows) >= LEAST_FIELDS and any(SIZES[t] > 1 for _, t in rows):
             out[base] = rows
+    if arrays is not None:
+        # A structure that is a run of fields of one type, one after another, which the machine code
+        # also reaches with an index of that width at one of them, is an array of that type (the
+        # readable C shows no scale where its function does not lift).
+        ix = {(a, SIZES.get(t, 4)) for ev in evidence_.values() for a, t, _, i in ev.accesses if i}
+        for base, rows in sorted(out.items()):
+            z = SIZES[rows[0][1]]
+            if all(SIZES[t] == z and off == j * z for j, (off, t) in enumerate(rows)) \
+                    and any((base + off, z) in ix for off, _ in rows):
+                arrays[base] = (z, len(rows), [(0, layout({0: {t: 1 for _, t in rows}}, base)[0][1])])
+                del out[base]
     return out
+
+
+def find_arrays(indexed, evidence_, accesses, data_symbols=(), bounds=(), memory=None, handed=(), trusted=None):
+    """{start: (element size, count, [(offset in the element, type)])} of the arrays that the readable
+    C's indexed accesses show ({function: [(constant, scale, type)]}, indexed_accesses): an access at a
+    constant plus an index times k says that elements of k bytes lie there, the access's place a field
+    of one. Accesses with one scale whose constants lie less than k apart are one array (the fields of
+    one element: pxReadyTasksLists' counts at 0x200299f8 + 20 * i, its indices at 0x200299fc + 20 * i);
+    it starts at the greatest data symbol at most k below the lowest of them, else at the greatest
+    address the code made such an access from (its origin in evidence_) or handed out there, else at
+    the lowest constant. It reaches as far as its accesses' elements and, where its start is a base
+    that counts (trusted(start): plan's separate_bases; not a section anchor nor clang's merged
+    globals, whose next variables lie at further elements' places), the elements the code reaches at
+    constant addresses from its start (xAutoReloadTimers' [0], [19] and [20]: 21 elements, as
+    declared), never past what bounds says starts (a data symbol, a startup range) nor its memory
+    region; arrays of one element size where one goes on from the other are one, and of two that
+    overlap with different sizes the one with fewer accesses goes. An element's fields are every
+    access inside the array at its offset in an element (indexed or at a constant address, through any
+    base), laid out as layout() does and also aligned in every element (the element size a multiple of
+    each field's), none across an element's end; and what callees reach through an element's address
+    handed to them (handed: [(address, {offset: {type: count}}, scale or None)], statics.handed: a
+    constant one inside the array, or an indexed one with the array's element size), at their offsets
+    from that address. What is not established: that the array is the source's (an index into the
+    middle of a structure that holds an array reads as an array of its own) and how many elements it
+    has (the count is what the code reaches at constant places, at least one)."""
+    origins, escapes = {}, set()
+    for ev in evidence_.values():
+        escapes |= ev.escapes
+        for a, t, o, ix in ev.accesses:
+            if ix and o is not None:
+                origins.setdefault((ev.name, a, t), o)
+    by_scale = {}
+    for fname, rows in sorted(indexed.items()):
+        for c0, k, t0 in rows:
+            for c, t in _words(c0, t0):
+                if k % SIZES.get(t, 4) or not _address(memory, c):
+                    continue                # (an element holds every access whole and aligned)
+                by_scale.setdefault(k, []).append((c, t, origins.get((fname, c0, t0))))
+    symbols_ = sorted(data_symbols)
+    candidates = sorted(set(o for rows in by_scale.values() for _, _, o in rows if o is not None) | escapes)
+    ends = sorted(bounds)
+    through = {}                            # origin -> the addresses accessed through it at constant offsets
+    for ev in evidence_.values():
+        for a, t, o, ix in ev.accesses:
+            if not ix and o is not None:
+                through.setdefault(o, set()).add(a)
+    groups = []                             # [element size, start, count, rows]
+    for k, rows in sorted(by_scale.items()):
+        rows.sort(key=lambda r: (r[0], r[1]))
+        run = []
+        for row in rows + [None]:
+            if run and (row is None or row[0] - run[0][0] >= k):
+                lo, hi = run[0][0], run[-1][0]
+                start = _greatest(symbols_, hi - k, lo)
+                if start is None:
+                    start = _greatest(sorted({o for _, _, o in run if o is not None} | set(
+                        candidates[bisect.bisect_right(candidates, hi - k):bisect.bisect_right(candidates, lo)])),
+                        hi - k, lo)
+                if start is None:
+                    start = lo
+                n = max((c - start) // k for c, _, _ in run) + 1
+                if trusted is None or trusted(start):   # (a base of its own: what it reaches is the array's)
+                    n = max([n] + [(a - start) // k + 1 for a in through.get(start, ()) if a >= start])
+                end = start + n * k
+                i = bisect.bisect_right(ends, start)
+                if i < len(ends):
+                    end = min(end, ends[i])
+                region = memory.region(start) if memory is not None else None
+                if region is not None:
+                    end = min(end, region.end)
+                if end - start >= k:
+                    groups.append([k, start, (end - start) // k, list(run)])
+                run = []
+            if row is not None:
+                run.append(row)
+    groups.sort(key=lambda g: (g[1], g[0]))
+    merged = []
+    for g in groups:
+        for m in merged:                    # (one array going on from the other: arr[i] and arr[i + 1])
+            if m[0] == g[0] and (g[1] - m[1]) % g[0] == 0 and m[1] <= g[1] <= m[1] + m[2] * m[0]:
+                m[2] = max(m[2], (g[1] - m[1]) // g[0] + g[2])
+                m[3] += g[3]
+                break
+        else:
+            merged.append(g)
+    kept = []
+    for g in sorted(merged, key=lambda g: (-len(g[3]), g[1], g[0])):
+        if all(g[1] + g[0] * g[2] <= h[1] or h[1] + h[0] * h[2] <= g[1] for h in kept):
+            kept.append(g)
+    places = sorted(accesses)
+    out = {}
+    for k, start, n, run in sorted(kept, key=lambda g: g[1]):
+        fields = {}
+        for c, t, _ in run + [(w, u, o) for (_, a, t), o in sorted(origins.items())
+                              if o == start and start <= a < start + k * n for w, u in _words(a, t)]:
+            fields.setdefault((c - start) % k, {}).setdefault(t, 0)
+            fields[(c - start) % k][t] += 1     # (and the machine code's through its start: scale not shown)
+        for a in places[bisect.bisect_left(places, start):bisect.bisect_left(places, start + k * n)]:
+            for t, count in accesses[a].items():
+                off = (a - start) % k
+                fields.setdefault(off, {}).setdefault(t, 0)
+                fields[off][t] += count
+        for a, reached, scale in handed:    # (what callees reach through an element's address)
+            if scale not in (None, k) or not start <= a < start + k * n:
+                continue
+            for rel, types in reached.items():
+                off = (a - start) % k + rel
+                for t, count in types.items():
+                    if off + SIZES.get(t, 4) <= k:
+                        fields.setdefault(off, {}).setdefault(t, 0)
+                        fields[off][t] += count
+        rows = [(off, t) for off, t in layout(fields, start) if off + SIZES[t] <= k and k % SIZES[t] == 0]
+        if rows:
+            out[start] = (k, n, rows)
+    return out
+
+
+def _words(address, ctype):
+    """[(address, type)] of an access, a 64-bit one as its two words (the lifters write it so; GCC -O2
+    stores both words of a registry entry with one strd, which made the element one u64 field)."""
+    return [(address, "u32"), (address + 4, "u32")] if SIZES.get(ctype, 4) == 8 else [(address, ctype)]
+
+
+def _greatest(values, low, high):
+    """The greatest of the sorted values above low and at most high, or None."""
+    i = bisect.bisect_right(values, high)
+    return values[i - 1] if i and values[i - 1] > low else None
 
 
 def separate_bases(base, end, users, seen, near=NEAR):
@@ -348,23 +919,26 @@ def separate_bases(base, end, users, seen, near=NEAR):
     return False
 
 
-def describe(statics):
-    """Lines saying what the plan holds: per structure its base, its size and its fields."""
+def describe(statics, arrays=None):
+    """Lines saying what the plan holds: per structure its base, its size and its fields; per array
+    (arrays, find_arrays) its start, its elements' count and size and an element's fields."""
     lines = []
     for base, rows in sorted(statics.items()):
         end = max(off + SIZES[t] for off, t in rows)
         lines.append("0x%08x %4d bytes: %s" % (base, end, ", ".join("%x:%s" % r for r in rows)))
+    for base, (k, n, rows) in sorted((arrays or {}).items()):
+        lines.append("0x%08x %4d bytes: %d x %d: %s" % (base, k * n, n, k, ", ".join("%x:%s" % r for r in rows)))
     return lines
 
 
 # ---- against the source (debug information)
 
 def source_objects(elf_path):
-    """[(address, size, name, kind, leaves)] of the variables at fixed addresses in an ELF's debug
-    information (DW_OP_addr, DWARF 5's DW_OP_addrx), sorted: kind "struct", "union", "array of
+    """[(address, size, name, kind, leaves, element)] of the variables at fixed addresses in an ELF's
+    debug information (DW_OP_addr, DWARF 5's DW_OP_addrx), sorted: kind "struct", "union", "array of
     struct", "array of scalar" or "scalar"; leaves {(offset, size)} of what it holds (a structure's
-    members' scalars at their offsets, an array's elements', at most 1024 of them). [] without
-    pyelftools or debug information."""
+    members' scalars at their offsets, an array's elements', at most 1024 of them); element an array's
+    element size (None for the rest). [] without pyelftools or debug information."""
     try:
         from elftools.elf.elffile import ELFFile
     except ImportError:
@@ -472,11 +1046,14 @@ def source_objects(elf_path):
                 into = set()
                 if stored:                      # (a flag the compiler shrank to stored bytes)
                     out.append((address, stored, name.value.decode(errors="replace") if name else "?", "scalar",
-                                frozenset({(0, stored)})))
+                                frozenset({(0, stored)}), None))
                     continue
                 leaves(t, 0, into)
+                bare, element = strip(t), None
+                if bare is not None and bare.tag == "DW_TAG_array_type" and "DW_AT_type" in bare.attributes:
+                    element = size_of(bare.get_DIE_from_attribute("DW_AT_type"))
                 out.append((address, size_of(t) or 0, name.value.decode(errors="replace") if name else "?",
-                            kind_of(t), frozenset(into)))
+                            kind_of(t), frozenset(into), element))
     return sorted(set(out), key=lambda o: (o[0], o[1], o[2]))
 
 
@@ -520,7 +1097,7 @@ def location(v, addr):
     return None
 
 
-def score(statics, elf_path, accesses=()):
+def score(statics, elf_path, accesses=(), arrays=None):
     """The plan's structures against the source's variables (debug information): {"structures": how
     many, "one": those inside one source variable, by its kind ({kind: count}), "several": those over
     several source variables (an anchor or neighbours taken for one structure: wrong), "unknown": those
@@ -529,7 +1106,12 @@ def score(statics, elf_path, accesses=()):
     "rows": [(base, verdict, the variables' names)]}; with accesses [(address, type)] (what the readable
     C or the machine code reaches at fixed addresses) also "reached": the source's structures, unions and
     arrays reached there at two places or more, "grouped": of them those whose places one structure of
-    the plan holds all of, "partly": those it holds some of."""
+    the plan holds all of, "partly": those it holds some of. With arrays (find_arrays) also "arrays": how
+    many, "arrays_one" ({kind: count} of those inside one source variable), "arrays_several",
+    "arrays_unknown", "arrays_size": of those inside one source array, the ones whose element size is
+    its element's, "array_fields" (an element's fields in every element the plan counts) and
+    "array_right" (of them a leaf of the variable at that place with that size); their rows carry the
+    verdict "array: KIND"; and an array holds a reached place where an element's field lies there."""
     objects = source_objects(elf_path)
     starts = [o[0] for o in objects]
 
@@ -542,7 +1124,30 @@ def score(statics, elf_path, accesses=()):
         group = [o for o in objects[bisect.bisect_left(starts, objects[i][0]):i + 1] if a < o[0] + max(o[1], 1)]
         return min(group, key=lambda o: (o[1], o[2])) if group else None
     out = {"structures": 0, "one": {}, "several": 0, "unknown": 0, "fields": 0, "right": 0, "rows": [],
-           "reached": 0, "grouped": 0, "partly": 0}
+           "reached": 0, "grouped": 0, "partly": 0, "arrays": 0, "arrays_one": {}, "arrays_several": 0,
+           "arrays_unknown": 0, "arrays_size": 0, "array_fields": 0, "array_right": 0}
+    for base, (k, n, rows) in sorted((arrays or {}).items()):
+        out["arrays"] += 1
+        places = [(base + j * k + off, SIZES[t]) for j in range(min(n, 1024)) for off, t in rows]
+        inside = {containing(a) for a, _ in places} - {None}
+        out["array_fields"] += len(places)
+        for a, z in places:
+            o = containing(a)
+            if o is not None and (a - o[0], z) in o[4]:
+                out["array_right"] += 1
+        if not inside:
+            out["arrays_unknown"] += 1
+            out["rows"].append((base, "array: unknown", []))
+            continue
+        o = next(iter(inside))
+        if len(inside) == 1 and o[0] <= base and base + k * n <= o[0] + o[1]:
+            out["arrays_one"][o[3]] = out["arrays_one"].get(o[3], 0) + 1
+            if o[5] == k and (base - o[0]) % k == 0:
+                out["arrays_size"] += 1
+            out["rows"].append((base, "array: " + o[3], [o[2]]))
+        else:
+            out["arrays_several"] += 1
+            out["rows"].append((base, "array: several", sorted(x[2] for x in inside)))
     for base, rows in sorted(statics.items()):
         end = max(off + SIZES[t] for off, t in rows)
         inside = {containing(base + off) for off, _ in rows} - {None}
@@ -571,6 +1176,7 @@ def score(statics, elf_path, accesses=()):
             if o is not None and o[3] != "scalar":
                 reached.setdefault(o, set()).add(a)
         order = sorted(statics)
+        spans = sorted((b, b + k * n, k, rows) for b, (k, n, rows) in (arrays or {}).items())
         grouped = partly = 0
         multi = {o: places for o, places in reached.items() if len(places) >= 2}
         for o, places in multi.items():
@@ -581,6 +1187,10 @@ def score(statics, elf_path, accesses=()):
                     b = order[i]
                     if any(b + off == a for off, _ in statics[b]):
                         held.add((b, a))
+                j = bisect.bisect_right(spans, (a, MASK + 1)) - 1
+                if j >= 0 and spans[j][0] <= a < spans[j][1] and \
+                        any((a - spans[j][0]) % spans[j][2] == off for off, _ in spans[j][3]):
+                    held.add((spans[j][0], a))
             bases = {b for b, _ in held}
             if len(held) == len(places) and len(bases) == 1:
                 grouped += 1

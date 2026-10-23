@@ -942,7 +942,7 @@ TABLE_COLUMNS = ("statements", "depth", "gotos", "labels", "loops", "casts", "ra
                  "frame_members", "fixed", "fixed_members", "variables", "typed", "lifted_statements", "lifted_gotos",
                  "kept_lifted",
                  "match", "source", "unit", "src_statements", "src_depth", "src_gotos", "src_loops", "src_inlined",
-                 "ratio", "ratio_inlined", "ratio_depth", "inlined")
+                 "ratio", "ratio_inlined", "ratio_depth", "inlined", "fixed_indexed", "fixed_addresses")
 
 
 def write_readable_table(path, rows):
@@ -1035,24 +1035,29 @@ def readable_report(rows):
     lines = ["", "## Readable C (dread readable --check, figures by dread.cmetrics)", "",
              "Sums over the readable functions, medians per function in parentheses; raw: accesses through a "
              "pointer cast (of them through the frame's base); members: p->f (the frame's object's); fixed-address "
-             "names: dread.naming's macros (members of structures of static data, g_20000030.f_4); typed: "
+             "names: dread.naming's macros (members of structures and elements of arrays of static data, g_20000030.f_4, "
+             "g_20000c74[1]: of them with an index, g_200299f8[r3].f_4; addresses written as such, &g_20029988); typed: "
              "variables of a structure or a pointer to one.", "",
              "| build | lifted | turned readable | readable | stay lifted | gotos left (functions) | labels | "
-             "statements | depth | casts | raw (frame) | members (frame) | fixed-address names (static members) | "
+             "statements | depth | casts | raw (frame) | members (frame) | fixed-address names (static members: "
+             "indexed; addresses) | "
              "typed of variables | "
              "lifted C: statements, gotos | seconds (gate, figures, source) |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for m in measured:
         rd = m["readable"]
         stay = rd.get("stay_lifted", {})
-        lines.append("| %s | %d | %d | %d | %s | %d (%d) | %s | %s | %s (max %d) | %s | %d (%d) | %d (%d) | %d (%d) | %d of %d "
+        lines.append("| %s | %d | %d | %d | %s | %d (%d) | %s | %s | %s (max %d) | %s | %d (%d) | %d (%d) | %d (%d: %d; %d) "
+                     "| %d of %d "
                      "| %d, %d | %s, %s, %s |" % (
                          m["build"], rd["lifted"], rd["turned"], len(rd["accepted"]),
                          "; ".join("%d %s" % (n, k) for k, n in stay.items()) or "-",
                          rd["gotos"]["sum"], rd["gotos"]["functions"], fig(rd, "labels"), fig(rd, "statements", True),
                          "%g" % (rd["depth"]["median"] or 0), rd["depth"]["max"], fig(rd, "casts"),
                          rd["raw"]["sum"], rd["frame_raw"]["sum"], rd["members"]["sum"], rd["frame_members"]["sum"],
-                         rd["fixed"]["sum"], (rd.get("fixed_members") or {}).get("sum", 0), rd["typed"]["sum"],
+                         rd["fixed"]["sum"], (rd.get("fixed_members") or {}).get("sum", 0),
+                         (rd.get("fixed_indexed") or {}).get("sum", 0), (rd.get("fixed_addresses") or {}).get("sum", 0),
+                         rd["typed"]["sum"],
                          rd["variables"]["sum"],
                          rd["lifted_statements"]["sum"], rd["lifted_gotos"]["sum"],
                          "reused" if rd.get("gate") == "reused" else rd.get("seconds_gate", "-"),

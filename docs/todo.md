@@ -544,6 +544,76 @@ its sources.
   of static data as without; about a sixth of its readable C's accesses at fixed addresses became
   members of them (on FreeRTOS a twentieth), and where its reconstruction has named the fields, the
   structures found are the blocks it reads as one base with offsets too.
+  The four left above, done later on 2026-10-23 (docs/decisions.md, "Arrays of static data, addresses
+  as &, and what callees reach"). Arrays (statics.find_arrays): a load or store of the lifted functions'
+  readable C at a constant plus an index times a scale (indexed_accesses; dread.tidy folded the
+  arithmetic: 0x200299f8u + 0x14u * r9 + 4, (((r2 << 2) + r2) << 2) + 0x20029988u, also through a
+  variable that holds the index times the scale) says that elements of that size lie there; accesses
+  of one scale less than an element apart are one array, starting at a data symbol within an element
+  below, else where the code made the address, else at the lowest constant, counting the elements its
+  accesses reach and, through a base that counts (separate_bases), the constant places; its elements'
+  fields are every access inside it. Without readable C (a function that does not lift) a structure
+  whose fields are one type one after another and which the machine code indexes is an array of that
+  type (item 1's rule as written). Readable C: `g_200299f8[r9].f_4`, `g_20000c74[1]`, through a macro
+  that is a pointer to the first element (no bound GCC could derive loop bounds from), the index
+  through a variable that held it times the scale written as the index where straight statements
+  lead from one to the other with nothing writing either (statics.straight_facts; the variable's
+  assignment goes when nothing reads it any more), and so through a variable that holds an element's
+  address. Addresses: where readable C uses the address of an object, a field or an element whole (a
+  call's argument, an assignment's value, an operand of == or !=, a result) it reads as such:
+  `(u32)&g_20029988`, `(volatile struct s_24 *)&g_20029988`, `(u32)&g_200299f8[r7]`; dread.shapes'
+  _uses keeps such variables typed (only the function's own variables' addresses count). What callees
+  reach (statics.handed): the address of static data handed to a callee is a base of what the callee's
+  template of that parameter reaches (dread.shapes), counted without the neighbour test; memory a walk
+  reached (memcpy's, also through the functions that hand it on: Shapes.walked) is none. On the way:
+  dread.shapes took an index into static data for a pointer (r3_3 + 0x200299fcu, r3_3 twenty times a
+  priority: a structure with a pad of 512 MB in vTaskPrioritySet); the plan of static data is made
+  first now and such an offset is no field (Shapes.static_offset); a read of a field's width and the
+  other signedness is a cast ((s16)g_200018de[r6]), structures' too.
+  Against the debug information (`dread readable --statics --score`, which now makes the lifted
+  functions' readable C and shapes too, 2-22 s a build) on the 39 builds and GCC -Os and -O2 without
+  -fdata-sections: no structure and no array over several source variables; structures 331 -> 585,
+  arrays 594; every array that lies in a source variable has its element size (583; 11 are tables in
+  ROM at no variable); 5,414 of 5,526 fields the source's leaves (98 %; most of the rest in GCC 4.9's
+  and 5's function-local static buffers, which the score does not place, and newlib's FILE, whose
+  _flags and _file one store writes as a word); source structures and arrays reached at two places or
+  more: grouped whole 279 -> 335, in part 30 -> 101. Per build, structures before -> after and arrays:
+  GCC -Os 15 -> 21, 13 (the lists and static buffers from what callees reach; pxReadyTasksLists,
+  xQueueRegistry, ulCycleCounters and ten more arrays), GCC -O2 15 -> 21, 13, GCC 4.9 to 14 -Os and 9 to
+  14 -O2 14-15 -> 16-22, 12-18, clang -O2 13 -> 21, 13, clang -Os, 12 to 19 -Os and Cortex-M4F clang -Os
+  4-5 -> 12-15, 23-24,
+  Cortex-M4F GCC -Os 17 -> 23, 13, GCC -O0 5 -> 14, 22, RISC-V GCC (all six) 0 -> 7 (its lists), 8-10,
+  RISC-V clang 0-3 -> 7-10, 13-15, the two without -fdata-sections 0 -> 13 and 14, 12 each, MSP430 none.
+  The readable C of the gate's readable functions (main -> now; dread.cmetrics' new fixed_indexed and
+  fixed_addresses): GCC -Os 12 -> 42 functions with members or addresses of static data, raw accesses
+  280 -> 232, members of static data 55 -> 112 (56 of them indexed), addresses as & 61, fixed-address
+  macro uses 1366 -> 1365, macro definitions 507 -> 554 (19 -> 35 structures, 32 arrays), statements
+  6040 -> 6029; clang -O2 16 -> 41, 332 -> 279, 85 -> 148 (62), 75, 1525 -> 1524, 531 -> 580; GCC -O0 7 ->
+  43, 312 -> 237, 15 -> 97 (81), 52, 1269 -> 1268, 514 -> 572; RISC-V GCC -Os 0 -> 22, 162 -> 152, 0 -> 26
+  (20), 36, 1011 -> 1005, 401 -> 431. Examples, GCC -Os: vTaskSwitchContext `if (*(volatile u32
+  *)(0x200299f8u + r4 * 0x14u) == 0) vAssertCalled(0x10e9u);` ... `r2_2 = r0->f_4;` ... `*(volatile u32
+  *)(0x14u * r4 + 0x200299f8u + 4) = r2_3;` now `if (g_200299f8[r4].f_0 == 0) vAssertCalled(0x10e9u);`
+  ... `r2_2 = g_200299f8[r4].f_4;` ... `g_200299f8[r4].f_4 = r2_3;` (listGET_OWNER_OF_NEXT_ENTRY on
+  pxReadyTasksLists[uxTopPriority]); xTaskResumeAll `r8_3 = 0x14u * r8_2; r10_1 = (volatile struct s_48
+  *)(0x200299f8u + r8_3);` ... `*(volatile u32 *)(0x200299f8u + r8_3) = r1_7 + 1;` now `r1_6 = (volatile
+  struct s_47 *)g_200299f8[r8_2].f_4;` ... `r3->f_14 = (volatile struct s_46 *)&g_200299f8[r8_2];` ...
+  `g_200299f8[r8_2].f_0 = r1_7 + 1;`, and `prvResetNextTaskUnblockTime((u32)&g_200299b4)`;
+  prvAddCurrentTaskToDelayedList `r2_2->f_4.f_10 = (volatile struct s_25 *)0x20029988u;` now `...
+  (volatile struct s_24 *)&g_20029988;`; GCC -O0 `if (g_20029988[s24].f_4 == (u32)&g_20029988[s24].f_8)
+  g_20029988[s24].f_4 = g_20029988[s24].f_c;` (pxIndex against &xListEnd); RISC-V GCC -Os
+  `g_800958b0.f_0 = g_800958b0.f_0 + 1;` (xSuspendedTaskList's count, a list no function reaches next to).
+  The gate accepts the same functions as before on the eight builds (gizmo a32 35, m3 36, m4 44, rv32
+  31, gizmo with arrays on a32 and rv32 now; FreeRTOS GCC -Os 316, clang -O2 275, GCC -O0 353, RISC-V GCC
+  -Os 251); elements and addresses compile to the same loads and stores as the raw accesses on every
+  gizmo build (tests/test_statics.py). The new evidence costs about 0.2 s a FreeRTOS build in the gate.
+  Left: an array's count is what the code reaches, not the source's; accesses at a further element
+  through a base of their own (arr[i + 1]) can make an array of their own; arrays inside structures
+  (an index into a member) are arrays of their own; an index the readable C computes far from the
+  access (a variable assigned on several paths) stays raw; what callees reach is taken only from the
+  lifted functions' calls; a structure reached from several bases comes out as pieces; dread.shapes
+  still makes an object per address, not per structure of static data; the pilot asks for an array's
+  and its elements' fields' names (g_x, g_x[].f_4: the model played in tests/test_statics.py) but no
+  model has answered yet.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
   Thought 2026-10-21: plain accesses let GCC merge and hoist loads, and a loop that waits for a flag

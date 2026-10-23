@@ -104,8 +104,10 @@ class Shapes:
         self.obj_parent = {}            # object -> (parent object, shift): x in obj = x + shift in parent
         self.fields = {}                # object root -> {offset: Field}
         self.conflicts = set()          # object roots seen at two offsets of themselves (arrays, walks)
+        self.walked = set()             # object roots a template of a walked object was copied onto (walked())
         self.count = 0
         self.globals = {}               # address -> object of the memory there
+        self.static_spans = []          # sorted [(start, end)] of static data's objects (dread.statics): no offsets
         self.pending = []               # (kind, a, b, k): relations that wait for a pointer
         self.kind_parent = {}           # object -> (object, shift): what the memory is, as obj_parent
         self.embeds = set()             # (kind, offset, kind, offset): one kind's memory inside another's
@@ -136,6 +138,15 @@ class Shapes:
         while self.tv_parent[key] != root:
             self.tv_parent[key], key = root, self.tv_parent[key]
         return root
+
+    def static_offset(self, k):
+        """Whether an offset added to a value is an address inside an object of static data (the plan's
+        structures and arrays, dread.statics): r3 + 0x200299fcu is an index into an array of lists at
+        0x200299f8, not a field of what r3 points to (it made r3 a pointer to a structure of 512 MB)."""
+        import bisect
+        k &= 0xffffffff
+        i = bisect.bisect_right(self.static_spans, (k, 0xffffffff)) - 1
+        return i >= 0 and self.static_spans[i][0] <= k < self.static_spans[i][1]
 
     def unify(self, a, b):
         work = [(a, b)]
@@ -255,7 +266,20 @@ class Shapes:
                 out.append((g.content, f.content))
         if rb in self.conflicts:
             self.conflicts.add(ra)
+        if rb in self.walked:
+            self.walked.add(ra)
         return out
+
+    def walked_template(self, tmpl):
+        """Whether a template describes memory that a walk reached: its object met itself at two
+        offsets (conflicts: memcpy's buffers) or such a template was copied onto it (instantiate), so
+        that a function that hands its parameter on to memcpy describes a buffer too. Nothing in the
+        shapes reads it; dread.statics handed keeps such parameters out (a string handed through a
+        stream buffer's functions to an unrolled memcpy had made a structure of words 0 to 60)."""
+        if tmpl is None or tmpl[0] != "copy":
+            return False
+        r = self.loc(tmpl[2])[0]
+        return r in self.conflicts or r in self.walked
 
     def field(self, location, ctype=None):
         root, off = self.loc(location)
@@ -333,6 +357,8 @@ class Shapes:
                 o, off = stack[tmpl[1]]
                 self.unify_locations(location, (o, off + tmpl[2]))
         else:
+            if self.walked_template(tmpl):
+                self.walked.add(self.loc(location)[0])
             stack = stack + (location,)
             for rel, (types, child, interior) in tmpl[1].items():
                 f = self.field((location[0], location[1] + rel))
@@ -645,6 +671,9 @@ class Collector:
         if isinstance(x, C.Unary) and x.op == "&" and isinstance(x.e, C.Name) and x.e.id in self.arg_offset:
             return (self.args, self.arg_offset[x.e.id])     # (a parameter's word in the argument area)
         if isinstance(e, C.Binary) and e.op in ("+", "-") and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
+            if e.op == "+" and self.s.static_offset(e.r.value):
+                self.value(e.l)             # (an index into static data: the value is no pointer)
+                return None
             base = self.address(e.l)
             if base is None:
                 return None
@@ -677,6 +706,9 @@ class Collector:
         acc = _access(e)
         if acc is not None:
             base, k, ctype = acc
+            if k and s.static_offset(k):
+                self.value(base)            # (an index into static data: the value is no pointer)
+                return None
             location = self.address(base)
             if location is None:
                 return None
@@ -731,6 +763,8 @@ class Collector:
         if isinstance(e, C.Binary):
             if e.op in ("+", "-") and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
                 base = self.value(e.l)
+                if e.op == "+" and s.static_offset(e.r.value):
+                    return None             # (an index into static data plus its address: no pointer)
                 if base is not None:
                     t = ("tmp", self.fn.name, id(e))
                     k = signed32(e.r.value if e.op == "+" else -e.r.value)
@@ -1017,9 +1051,11 @@ def components(graph):
     return out
 
 
-def analyse(trees, depth=4, share=False, unread=frozenset()):
+def analyse(trees, depth=4, share=False, unread=frozenset(), static_spans=()):
     """Shapes from [(tree, fn, macros)]: every function's readable tree with its macros (name ->
-    (address, type)), callees first; returns the Shapes with .summaries. unread: the functions whose
+    (address, type)), callees first; returns the Shapes with .summaries. static_spans: [(start, end)]
+    of the objects of static data (dread.statics), an address inside one added to a value no offset
+    from a pointer (Shapes.static_offset). unread: the functions whose
     result no caller reads (dread.regflow's kept registers lack the result register): their returns
     stay values of their own instead of one result. Such a function's lifted C hands back whatever its
     result register holds on each path (FreeRTOS's vPortFree, void in the source: its parameter on one
@@ -1027,6 +1063,7 @@ def analyse(trees, depth=4, share=False, unread=frozenset()):
     every structure freed through it got a pointer to itself at the block header's offsets."""
     s = Shapes()
     s.share = share
+    s.static_spans = sorted(static_spans)
     by_name = {fn.name: (tree, fn, macros) for tree, fn, macros in trees}
     graph = {name: callees(fn) & set(by_name) for name, (_, fn, _) in by_name.items()}
     summaries = {}
@@ -1847,11 +1884,12 @@ def field_name(fields, rel):
     return (fields or {}).get(rel) or "f_%x" % rel
 
 
-def struct_text(name, rows, fields=None, pointers=None, embeds=None):
+def struct_text(name, rows, fields=None, pointers=None, embeds=None, size=None):
     """The C definition of a structure with these fields, gaps filled with bytes; fields: their names
     by offset where they have one; pointers: {offset: the name of the structure the field points to},
     such a field declared volatile struct NAME * (a word, as its u32); embeds: {offset: (the name of
-    a structure held there, its size)}, declared struct NAME (defined before this one)."""
+    a structure held there, its size)}, declared struct NAME (defined before this one); size: bytes
+    after the last field up to it (an array's element, as large as its stride)."""
     members = [(rel, ctype, None) for rel, ctype in rows] + \
         [(rel, None, inner) for rel, inner in (embeds or {}).items()]
     lines, pos = ["struct %s" % name, "{"], 0
@@ -1867,6 +1905,8 @@ def struct_text(name, rows, fields=None, pointers=None, embeds=None):
         else:
             lines.append("    %s %s;" % (ctype, field_name(fields, rel)))
         pos = rel + SIZES[ctype]
+    if size is not None and size > pos:
+        lines.append("    u8 pad_%x[%d];" % (pos, size - pos))
     lines.append("};")
     return "\n".join(lines)
 
@@ -1882,13 +1922,15 @@ class Plan:
     out what lies inside its members (the inner's fields are its own). statics: the structures of
     static data at fixed addresses ({address: [(offset, type)]}, dread.statics), which every function
     writes its accesses there through, whatever its digest (an address does not change with the
-    transformations)."""
+    transformations); arrays: the arrays of static data ({address: (element size, count, [(offset in
+    the element, type)])}, dread.statics find_arrays), written so too."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
         self.pointers = {}              # structure -> {offset: the structure the field points to}
         self.embeds = {}                # structure -> {offset: the structure held there as a member}
         self.statics = {}               # address -> [(offset, type)]: structures of static data (dread.statics)
+        self.arrays = {}                # address -> (element size, count, [(offset, type)]): arrays of static data
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -1902,6 +1944,9 @@ class Plan:
                              for n, es in sorted(self.embeds.items()) if es}
         if self.statics:
             out["statics"] = {"0x%x" % a: [list(r) for r in rows] for a, rows in sorted(self.statics.items())}
+        if self.arrays:
+            out["arrays"] = {"0x%x" % a: {"size": k, "count": n, "fields": [list(r) for r in rows]}
+                             for a, (k, n, rows) in sorted(self.arrays.items())}
         return out
 
     @classmethod
@@ -1915,6 +1960,8 @@ class Plan:
         p.embeds = {n: {int(off): t for off, t in es.items() if t in p.structs}     # (a member of a structure
                     for n, es in data.get("embeds", {}).items() if n in p.structs}  # the table lacks: none)
         p.statics = {int(a, 16): [tuple(r) for r in rows] for a, rows in data.get("statics", {}).items()}
+        p.arrays = {int(a, 16): (e["size"], e["count"], [tuple(r) for r in e["fields"]])
+                    for a, e in data.get("arrays", {}).items()}
         return p
 
     def align(self, name, depth=0):
@@ -2162,11 +2209,20 @@ def _fit(p, name, fields):
 def _uses(fn):
     """Variables the rewrite must leave alone: written other than by a plain assignment (+=, ++),
     their address taken, named in asm, declared with an initial value, or given the address of a C
-    variable (a_1 = (u32)&s1: the lifter reads a stack argument and the one after it through it;
-    typed, clang -O2 took the second read as outside s1, and xTaskCreateStatic read unmapped memory)."""
+    variable of the function (a_1 = (u32)&s1: the lifter reads a stack argument and the one after it
+    through it; typed, clang -O2 took the second read as outside s1, and xTaskCreateStatic read unmapped
+    memory). The address of static data at a fixed address (dread.naming's (u32)&g_20029988, a macro's
+    object, no variable of the function) is none: nothing derives an object's size from it."""
     from dread.cflow import walk_expr
-    from dread.naming import _exprs, _inner
+    from dread.naming import _exprs, _inner, variables
     out = set()
+    own = set(variables(fn)) | {"frame", FRAME}
+
+    def local(x):
+        """Whether an address-of's operand is a variable of the function (or a member or an element of one)."""
+        while isinstance(x, (C.Member, C.Index)):
+            x = x.base
+        return not isinstance(x, C.Name) or x.id in own
 
     def visit(st):
         if isinstance(st, C.Decl):
@@ -2179,7 +2235,7 @@ def _uses(fn):
                 if isinstance(x, C.Assign) and x.op != "=" and isinstance(x.target, C.Name):
                     out.add(x.target.id)
                 if isinstance(x, C.Assign) and isinstance(x.target, C.Name) and any(
-                        isinstance(y, C.Unary) and y.op == "&" for y in walk_expr(x.value)):
+                        isinstance(y, C.Unary) and y.op == "&" and local(y.e) for y in walk_expr(x.value)):
                     out.add(x.target.id)
                 if isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--", "&") and isinstance(x.e, C.Name):
                     out.add(x.e.id)
@@ -2269,6 +2325,13 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     def value(e):
         return _rewrite(e, f)
 
+    def as_pointer(k, v):
+        """v as a pointer to structure k: (T *)&g_x for the address of static data ((u32)&g_x: dread.naming),
+        else the cast of its value."""
+        if isinstance(v, C.Cast) and v.type == "u32" and isinstance(v.e, C.Unary) and v.e.op == "&":
+            return C.Cast(ptype[k], v.e)
+        return C.Cast(ptype[k], value(v))
+
     def pointer(e):
         """(structure, expression) of what points to a structure as it is: a typed variable, a field
         that points to one, the address of one held inside another; None for anything else."""
@@ -2287,7 +2350,7 @@ def apply_types(tree, fn, p, made_for=None, names=None):
             for i, a in enumerate(e.args):
                 if i in own:
                     args.append(C.Name(a.id) if isinstance(a, C.Name) and typed.get(a.id) == own[i]
-                                else C.Cast(ptype[own[i]], value(a)))
+                                else as_pointer(own[i], a))
                 else:
                     args.append(value(a))
             return C.Call(C.Name(fn.name), args)
@@ -2303,7 +2366,7 @@ def apply_types(tree, fn, p, made_for=None, names=None):
                     return C.Assign("=", C.Name(e.target.id), mv[0])
                 if hv is not None and hv[0] == k:
                     return C.Assign("=", C.Name(e.target.id), hv[1])
-                return C.Assign("=", C.Name(e.target.id), C.Cast(ptype[k], value(v)))
+                return C.Assign("=", C.Name(e.target.id), as_pointer(k, v))
             m = member(e.target)
             if m is not None:
                 if isinstance(m[1], tuple) and e.op == "=":     # (a field that points to a structure)
@@ -2315,7 +2378,7 @@ def apply_types(tree, fn, p, made_for=None, names=None):
                         return C.Assign("=", m[0], hv[1])
                     if mv is not None and mv[1] == ("ptr", t):  # (a field that points to it too)
                         return C.Assign("=", m[0], mv[0])
-                    return C.Assign("=", m[0], C.Cast(ptype[t], value(v)))
+                    return C.Assign("=", m[0], as_pointer(t, v))
                 return C.Assign(e.op, m[0], value(e.value))
             return None
         m = member(e)

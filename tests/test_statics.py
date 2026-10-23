@@ -4,7 +4,10 @@ their own (GCC with -fdata-sections); GCC's section anchor, the one base a file 
 variables through (without -fdata-sections), is none, and an indexed table behind it is an array that
 starts at its constant part; an address handed out and the target's data symbols end a structure.
 Readable C writes a structure's fields as members of one object (g_20000030.f_4), every access one of
-its width at its address."""
+its width at its address. An access at a constant plus an index times a scale (readable C's) says
+that an array of elements of that size lies there: its elements are written as such (g_x[r3].f_4,
+g_x[1]), also where the index went through a variable that holds it times the scale, and the
+addresses of objects, fields and elements the code uses as values as &-expressions."""
 import re
 import shutil
 import subprocess
@@ -222,15 +225,17 @@ def test_the_figures_count_members_of_static_data_apart():
 
 
 def access_widths(target, obj):
-    """{mnemonic: count} of the loads and stores of an object file's code (the cross objdump)."""
+    """{mnemonic: count} of the loads and stores of an object file's code (the cross objdump), but those
+    of literals and of the stack (a register spilled or saved, which other register use changes)."""
     tool = "llvm-objdump" if target.compiler.kind == "clang" else target.compiler.command("objdump")[0]
     if not shutil.which(tool):
         return None
     text = subprocess.run([tool, "-d", obj], capture_output=True, text=True, check=True).stdout
     found = {}
     for m in re.finditer(r"^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2,8}\s+)+(ldr\w*|str\w*|lw|lhu?|lbu?|sw|sh|sb)\b", text, re.M):
-        if "pc" in text[m.end():text.find("\n", m.end())]:
-            continue                        # (a literal's load: where the addresses come from)
+        rest = text[m.end():text.find("\n", m.end())]
+        if "pc" in rest or "(sp)" in rest or "[sp" in rest:
+            continue                        # (a literal's load: where the addresses come from; the stack)
         found[m.group(1)] = found.get(m.group(1), 0) + 1
     return found
 
@@ -297,3 +302,312 @@ def test_the_pilot_names_a_structure_of_static_data_and_its_fields(tmp_path):
     assert "mode_name(config.mode)" in out and "config.volume" in out, out
     assert "#define config (*(volatile struct config_t *)0x%xu)" % at in out, out
     assert "struct config_t\n{\n    u32 f_0;\n    u32 volume;\n    u32 mode;\n};" in out, out
+
+
+# Arrays: a file of a structure array, a word array and a byte array, each reached with an index, and a
+# function in another file that takes the address of one element
+HERON_A = HEAD + """struct heron_slot { u32 count; u32 head; u16 mark; u16 spare; u32 tail; };
+struct heron_slot heron_slots[4];
+u32 heron_tally[6];
+u8 heron_marks[8];
+u32 heron_misc;
+void heron_link(struct heron_slot *s, u32 v);
+void heron_note(u32 i, u32 v) { heron_slots[i].count++; heron_slots[i].tail = v; heron_tally[i] += v; }
+u32 heron_peek(u32 i) { return heron_slots[i].head + heron_slots[i].mark + heron_marks[i]; }
+void heron_flag(u32 i) { heron_marks[i] = 1; heron_misc++; }
+u32 heron_first(void) { return heron_slots[0].count + heron_slots[1].head + heron_tally[1] + heron_misc; }
+void heron_hand(u32 i) { heron_link(&heron_slots[i], i); heron_link(&heron_slots[2], 0); }
+"""
+HERON_B = HEAD + """struct heron_slot { u32 count; u32 head; u16 mark; u16 spare; u32 tail; };
+void heron_link(struct heron_slot *s, u32 v) { s->head = v; }
+int main(void) { return 0; }
+"""
+
+
+def heron_plan(tmp_path, symbols=False):
+    """(program, the trees of its readable C, structures, arrays) of the heron program built with
+    -fdata-sections and debug information."""
+    from dread import lift, readable, regflow
+    program, _ = built(tmp_path, {"heron_a.c": HERON_A, "heron_b.c": HERON_B}, ["-fdata-sections", "-g"])
+    target, image = program.target, program.image
+    flow = regflow.load(target, image, program)
+    context = readable.Context(target, image, program, flow)
+    trees = readable.analysis_trees(program, context, lift.make_lifter(program, flow),
+                                    [fn.name for fn in program.functions], named=context.globals)
+    found, arrays, _ = readable.static_plan(program, context, trees, flow, symbols=symbols)
+    return program, trees, found, arrays
+
+
+@needs_gcc
+def test_arrays_from_the_indexed_accesses_of_readable_c(tmp_path):
+    """The indexed accesses of the readable C give each array its element size and its elements'
+    fields; the code alone (no data symbols) starts each at the variable, and the debug information
+    agrees: every array inside one variable, its element size the source's, every field a leaf of it.
+    heron_slots counts two elements: the code reaches its second at a constant place."""
+    program, trees, found, arrays = heron_plan(tmp_path)
+    at = data(program)
+    assert arrays == {at["heron_slots"]: (16, 2, [(0, "u32"), (4, "u32"), (8, "u16"), (12, "u32")]),
+                      at["heron_tally"]: (4, 2, [(0, "u32")]), at["heron_marks"]: (1, 1, [(0, "u8")])}, arrays
+    assert found == {}, found
+    described = statics.describe(found, arrays)
+    assert "0x%08x   32 bytes: 2 x 16: 0:u32, 4:u32, 8:u16, c:u32" % at["heron_slots"] in described, described
+    got = statics.score(found, str(tmp_path / "t.elf"), arrays=arrays)
+    if got["rows"]:                         # (without pyelftools: nothing to score against)
+        assert (got["arrays"], got["arrays_one"], got["arrays_size"]) == (
+            3, {"array of scalar": 2, "array of struct": 1}, 3), got
+        assert got["array_fields"] == got["array_right"] == 11, got
+    indexed = {fn.name: statics.indexed_accesses(fn, program.target.memory) for _, fn, _ in trees}
+    assert (at["heron_slots"] + 12, 16, "u32") in indexed["heron_note"], indexed
+
+
+def test_a_run_of_one_type_reached_with_an_index_is_an_array():
+    """Without readable C (a function that does not lift) the machine code's indexed access at a
+    structure whose fields are one type one after another makes it an array of that type; a structure
+    whose fields differ stays one."""
+    class Program:
+        class target:
+            memory = None
+        class image:
+            @staticmethod
+            def startup():
+                return []
+
+        @staticmethod
+        def symbols():
+            return []
+    ev = statics.Evidence("f")
+    ev.accesses = [(0x20000100, "u32", 0x20000100, False), (0x20000104, "u32", 0x20000100, False),
+                   (0x20000108, "u32", 0x20000100, False), (0x20000100, "u32", 0x20000100, True),
+                   (0x20000140, "u32", 0x20000140, False), (0x20000144, "u16", 0x20000140, False),
+                   (0x20000140, "u32", 0x20000140, True)]
+    ev2 = statics.Evidence("g")             # (the neighbours through bases of their own)
+    ev2.accesses = [(0x200000fc, "u32", 0x200000fc, False), (0x2000013c, "u32", 0x2000013c, False)]
+    ev.accesses += ev2.accesses
+    arrays = {}
+    found = statics.plan(Program, {"f": ev}, indexed={}, arrays=arrays)
+    assert arrays == {0x20000100: (4, 3, [(0, "u32")])}, arrays
+    assert found == {0x20000140: [(0, "u32"), (4, "u16")]}, found
+
+
+def test_a_double_word_access_is_two_fields_of_an_element():
+    """An indexed 64-bit access (both words of an element stored at once) gives the element two word
+    fields, not one double word over the fields the other accesses read."""
+    ev = statics.Evidence("f")
+    ev.accesses = [(0x20000100, "u32", 0x20000100, True), (0x20000104, "u32", 0x20000100, True)]
+    indexed = {"f": [(0x20000100, 8, "u64"), (0x20000100, 8, "u32"), (0x20000104, 8, "u32")]}
+    got = statics.find_arrays(indexed, {"f": ev}, {})
+    assert got == {0x20000100: (8, 1, [(0, "u32"), (4, "u32")])}, got
+
+
+def parse_expr(text):
+    return cparse.parse("u32 f(void) { return %s; }" % text).function("f").body.body[0].e
+
+
+def test_linear_forms_and_scaled_indices():
+    """Sums, products with a constant and left shifts become a constant and terms times coefficients
+    modulo 2**32; a narrowing cast is a term of its own, a wide one is looked through."""
+    const, terms = statics.linear(parse_expr("0x200299f8u + ((((r2 << 2) + r2) << 2) + 4)"))
+    assert const == 0x200299fc and {k: v[0] for k, v in terms.items()} == {"r2": 20}
+    assert statics.linear(parse_expr("(u32)r3 - (r3 << 1) + 0x10u"))[1]["r3"][0] == 0xffffffff
+    assert list(statics.linear(parse_expr("0x20u + (u8)r3 * 4"))[1]) == ["(u8)r3"]
+    assert statics.constant(parse_expr("(0x10u << 2) - 4")) == 60 and statics.constant(parse_expr("r0 + 1")) is None
+    c, k, index = statics.scaled(parse_expr("0x200299f8u + 0x14u * r9 + 4"))
+    assert (c, k, cparse.expr_text(index)) == (0x200299fc, 20, "r9")
+    assert statics.scaled(parse_expr("0x20000000u + r1 + r2")) is None          # (two terms)
+    assert statics.scaled(parse_expr("0x20000000u - (r1 << 2)")) is None        # (a scale below 0)
+    facts, used = {"r3": (20, cparse.Name("r8"), 0)}, set()
+    c, k, index = statics.scaled(parse_expr("0x200299f8u + r3"), facts, used)
+    assert (c, k, index.id, used) == (0x200299f8, 20, "r8", {"r3"})
+
+
+FACTS = ("u32 f(u32 r0, u32 r1)\n{\n    u32 r2, r3, r4;\n"
+         "    r3 = r0 << 2;\n"
+         "    r2 = r3;\n"
+         "    if (r1 != 0) r0 = r1;\n"
+         "    r4 = r3 + 1;\n"
+         "    r3 = 0x14u * r1;\n"
+         "    r4 = r3 + 3;\n"
+         "    while (r1 != 0) { r2 = r3 + 2; r1 = r1 - 1; }\n"
+         "    r3 = (u32)*(volatile s16 *)0x20000100u;\n"
+         "    return r3;\n}\n")
+
+
+def test_what_a_variable_holds_as_an_index_times_a_scale():
+    """straight_facts: r3 = r0 << 2 holds up to the statement that writes r0 (the if) and not in it;
+    r3 = 0x14u * r1 holds before the loop but not in it (the loop writes r1); a load from memory or a
+    copy is no index. scales_of: r3's assignments give it different scales, so it has none for the
+    plan; r4 has none either (a copy of what r3 is there)."""
+    fn = cparse.parse(FACTS).function("f")
+    seen = []
+    statics.straight_facts(fn, lambda s, facts: seen.append((cparse.unparse(s, notes=False).splitlines()[0].strip(),
+                                                              {v: (k, x.id) for v, (k, x, _) in facts.items()})))
+    got = dict(seen)
+    assert len(got) == len(seen), seen
+    assert got["r2 = r3;"] == {"r3": (4, "r0")} and got["if (r1 != 0) r0 = r1;"] == {}, got
+    assert got["r4 = r3 + 1;"] == {} and got["r4 = r3 + 3;"] == {"r3": (20, "r1")}, got
+    assert got["while (r1 != 0)"] == got["r2 = r3 + 2;"] == got["return r3;"] == {}, got
+    assert "r3" not in statics.scales_of(fn)
+    one = cparse.parse("u32 g(u32 r0)\n{\n    u32 r3, r5;\n    r3 = r0 << 3;\n    r5 = r3 + 0x20000100u;\n"
+                       "    return *(volatile u32 *)(r5 + 4);\n}\n").function("g")
+    assert statics.scales_of(one) == {"r3": (8, None, 0), "r5": (8, None, 0x20000100)}
+    assert statics.indexed_accesses(one) == [(0x20000104, 8, "u32")]
+
+
+INDEXED = ("/* f at 0x0 */\n#include \"dread.h\"\nextern u32 heron_link(u32, u32);\n"
+           "u32 f(u32 r0, u32 r1)\n{\n    u32 r2, r3, r4;\n"
+           "    r3 = 0x14u * r0;\n"
+           "    r2 = *(volatile u32 *)(0x20000100u + r3);\n"
+           "    *(volatile u32 *)(0x20000104u + r3) = r2 + 1;\n"
+           "    r4 = *(volatile u32 *)(0x20000100u + (((r1 << 2) + r1) << 2) + 12);\n"
+           "    heron_link(0x20000100u + r3, 0x20000114u);\n"
+           "    *(volatile u32 *)(0x20000200u + (r1 << 2)) = *(volatile u32 *)0x20000204u;\n"
+           "    if (*(volatile u32 *)(0x20000110u + r3) == 0x2000010cu) r4 = 0;\n"
+           "    *(volatile u8 *)(0x20000104u + r3) = 1;\n"
+           "    r4 = r4 + (u32)*(volatile s32 *)(0x20000200u + (r0 << 2));\n"
+           "    if (*(volatile u32 *)0x20000300u != 0x20000304u) heron_link(0x20000300u, 0x20000306u);\n"
+           "    return r4;\n}\n"
+           "u32 g(u32 r0)\n{\n    u32 r3;\n"
+           "    r3 = r0 << 2;\n"
+           "    *(volatile u32 *)(0x20000200u + r3) = 0x0u;\n"
+           "    return *(volatile u32 *)(0x20000200u + r3);\n}\n")
+ARRAYS = {0x20000100: (20, 2, [(0, "u32"), (4, "u32"), (12, "u32")]), 0x20000200: (4, 3, [(0, "u32")])}
+STRUCTS = {0x20000300: [(0, "u32"), (4, "u16")]}
+
+
+def indexed_c(arrays=ARRAYS, statics_=STRUCTS):
+    t = cparse.parse(INDEXED)
+    for name in ("f", "g"):
+        naming.apply_globals(t, t.function(name), None, None, statics=statics_, arrays=arrays)
+    return cparse.unparse(t, notes=False)
+
+
+def test_the_elements_of_arrays_of_static_data_are_written_as_such():
+    """An access at an array's constant plus its element size times an index is that element's field
+    (directly or through a variable that holds the index times the size), at a constant address the
+    element's; the addresses of elements, fields and objects that the code passes, assigns or
+    compares are &-expressions; an access of the field's width but the other signedness is a cast when
+    it is read; a byte inside a word field, a place at no field and a byte address inside a field stay
+    as they were. The variable that held the index times the size goes where nothing reads it any more."""
+    out = indexed_c()
+    for line in ("r2 = g_20000100[r0].f_0;", "g_20000100[r0].f_4 = r2 + 1;", "r4 = g_20000100[r1].f_c;",
+                 "heron_link((u32)&g_20000100[r0], (u32)&g_20000100[1]);", "g_20000200[r1] = g_20000200[1];",
+                 "if (*(volatile u32 *)(0x20000110u + r3) == (u32)&g_20000100[0].f_c) r4 = 0;",
+                 "*(volatile u8 *)(0x20000104u + r3) = 1;", "r4 = r4 + (u32)(s32)g_20000200[r0];",
+                 "if (g_20000300.f_0 != (u32)&g_20000300.f_4) heron_link((u32)&g_20000300, 0x20000306u);",
+                 "g_20000200[r0] = 0x0u;", "return g_20000200[r0];",
+                 "#define g_20000100 ((volatile struct g_20000100_t *)0x20000100u)",
+                 "#define g_20000200 ((volatile u32 *)0x20000200u)",
+                 "struct g_20000100_t\n{\n    u32 f_0;\n    u32 f_4;\n    u8 pad_8[4];\n    u32 f_c;\n"
+                 "    u8 pad_10[4];\n};"):
+        assert line in out, (line, out)
+    assert "r3 = 0x14u * r0;" in out and "r3 = r0 << 2;" not in out, out     # (f reads r3 still, g not)
+    assert "u32 r3;" in out, out
+    plain = indexed_c(arrays={}, statics_={})
+    assert "struct" not in plain and "g_20000200" not in plain and "&" not in plain, plain
+
+
+@pytest.mark.compiles
+def test_elements_and_addresses_compile_to_the_same_accesses(variant, tmp_path):
+    """The readable C with arrays and addresses of static data compiles on every gizmo build, and its
+    loads and stores are those of the C without them: each one instruction of its width."""
+    from conftest import gizmo_dir
+    from dread import build
+    from dread.target import Target
+    target = Target.load(gizmo_dir(variant))
+    image = target.image()
+    widths = []
+    for label, text in (("arrays", indexed_c()), ("raw", indexed_c(arrays={}, statics_={}))):
+        src = tmp_path / label
+        src.mkdir()
+        (src / "f.c").write_text(text)
+        objs = build.compile_all(target, image, str(src), str(tmp_path / (label + "-obj")), quiet=True,
+                                 flags=target.compiler.lifted_cflags)
+        assert len(objs) == 1
+        widths.append(access_widths(target, objs[0]))
+    if widths[0] is not None:
+        assert widths[0] == widths[1] and sum(widths[0].values()) == 11, widths
+
+
+def test_an_index_into_static_data_is_no_pointer_for_the_shapes():
+    """r3 + 0x200299fcu, where 0x200299fc lies in an array of static data, adds an index to the array
+    (r3 is twenty times the priority): the shapes make no structure behind r3 of it (it had made one
+    with a field 512 MB in)."""
+    text = ("u32 f(u32 r0)\n{\n    u32 r3, r2;\n    r3 = 0x14u * r0;\n"
+            "    r2 = *(volatile u32 *)(r3 + 0x200299fcu);\n    *(volatile u32 *)(r3 + 0x200299f8u) = r2;\n"
+            "    return *(volatile u32 *)(r2 + 8) + *(volatile u32 *)(r2 + 4);\n}\n")
+    t = cparse.parse(text)
+    trees = [(t, t.function("f"), {})]
+    before = shapes.structures(shapes.analyse(trees))
+    assert any(off == 0x200299fc for rows in before.values() for off, _, _ in rows), before
+    after = shapes.structures(shapes.analyse(trees, static_spans=[(0x200299f8, 0x20029a0c)]))
+    assert not any(off >= 0x1000 for rows in after.values() for off, _, _ in rows), after
+    assert any([o for o, _, _ in rows] == [4, 8] for rows in after.values()), after    # (what r2 points to)
+
+
+def test_the_figures_count_elements_and_addresses_of_static_data():
+    out = indexed_c()
+    t = cparse.parse(re.sub(r"struct g_\w+_t\n\{.*?\n\};\n", "", out, flags=re.S))
+    got = cmetrics.readable_figures(t, t.function("f"))
+    assert (got["fixed_members"], got["fixed_indexed"], got["fixed_addresses"]) == (7, 5, 5), got
+    assert got["fixed"] == 0, got
+
+
+def test_a_plan_keeps_its_arrays_of_static_data():
+    p = shapes.Plan()
+    p.arrays = {0x200299f8: (20, 1, [(0, "u32"), (4, "u32")])}
+    data_ = p.to_json()
+    assert data_["arrays"] == {"0x200299f8": {"size": 20, "count": 1, "fields": [[0, "u32"], [4, "u32"]]}}
+    assert shapes.Plan.from_json(data_).arrays == p.arrays
+    assert "arrays" not in shapes.Plan().to_json() and shapes.Plan.from_json({"structs": {}}).arrays == {}
+
+
+def test_an_array_and_its_elements_fields_take_the_table_s_names():
+    """An array is named under its address ("0x... struct") with its elements' fields by offset; a field
+    without a name there takes the name of its first element's address and type; the readable C reads
+    egret_slots[r0].egret_head, and apply_globals reports the array and its elements' fields under the
+    keys the pilot asks for."""
+    named = {"0x20000100 struct": {"name": "egret_slots", "fields": {"4": "egret_head"}},
+             "0x2000010c u32": {"name": "egret_tail"}, "0x20000200 struct": {"name": "egret_tally"}}
+    t = cparse.parse(INDEXED)
+    chosen = naming.apply_globals(t, t.function("f"), named, None, statics=STRUCTS, arrays=ARRAYS)
+    out = cparse.unparse(t, notes=False)
+    for line in ("r2 = egret_slots[r0].f_0;", "egret_slots[r0].egret_head = r2 + 1;",
+                 "r4 = egret_slots[r1].egret_tail;", "egret_tally[r1] = egret_tally[1];",
+                 "heron_link((u32)&egret_slots[r0], (u32)&egret_slots[1]);",
+                 "#define egret_slots ((volatile struct egret_slots_t *)0x20000100u)"):
+        assert line in out, (line, out)
+    assert chosen["0x20000100 struct"] == "egret_slots", chosen
+    assert chosen["0x20000104 u32"] == "egret_slots[].egret_head", chosen
+    assert chosen["0x20000200 struct"] == "egret_tally" and chosen["0x20000300 u32"] == "g_20000300.f_0", chosen
+
+
+@needs_gcc
+def test_the_pilot_names_an_array_of_static_data_and_its_elements_fields(tmp_path):
+    """dread pilot's globals question, the model played, on the heron program's arrays: the array and
+    each field of its elements are asked apart (g_x and g_x[].f_4), with the lines that use them, and
+    their names come into the readable C (egret_table[r0].egret_tail)."""
+    from dread import lift, llm, pilot, readable, regflow, shapes
+    program, trees, found, arrays = heron_plan(tmp_path)
+    target, image = program.target, program.image
+    at = data(program)["heron_slots"]
+    p = shapes.Plan()
+    p.statics, p.arrays = found, arrays
+    shapes.store_plan(image, p)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+    asked = []
+
+    def answer(messages):
+        asked.append(messages[0]["content"])
+        return ('```json\n{"g_%x": "egret_table", "g_%x[].f_c": "egret_tail", "g_%x[].f_8": "egret_mark"}\n```'
+                % (at, at, at))
+    uses, by_function = pilot.global_uses(program, context, lifter, [f.name for f in program.functions])
+    keys = sorted(by_function["heron_note"])
+    assert "0x%x struct" % at in keys and "0x%x u32" % (at + 12) in keys, keys
+    assert pilot.name_globals(target, image, program, llm.Scripted(answer), keys, uses, out=lambda line: None) >= 2
+    assert "g_%x[].f_c (0x%x, u32, in " % (at, at + 12) in asked[0], asked[0]
+    assert "g_%x[r0].f_c = r1;" % at in asked[0], asked[0]
+    out = readable.transform("heron_note", lifter.lift(program.by_name["heron_note"]).text,
+                             context=readable.Context(target, image, program, flow))
+    assert "egret_table[r0].egret_tail = r1;" in out, out

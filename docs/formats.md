@@ -126,7 +126,10 @@ they need no digest, since an address does not change with the transformations. 
 static data (the readable_types table's `statics`, since 2026-10-23) is named under `"0xADDRESS
 struct"` (its address), optionally with `"fields": {"OFFSET": name}`; a field without a name there
 takes the name of its own address and type (`"0x20000034 u32"`: the pilot asks for each field so,
-written `g_20000030.f_4` in its question), else `f_4`. A name that a global staying a macro has, or
+written `g_20000030.f_4` in its question), else `f_4`. An array of static data (`arrays`, since
+2026-10-23) is named alike under its address, its `fields` an element's by their offset in it; a
+field without one takes the name of the first element's field's address and type (written
+`g_200299f8[].f_4` in the pilot's question). A name that a global staying a macro has, or
 another structure's, is not used for a structure or a field (it would expand inside them). A file
 from before has no such entries: its structures read `g_20000030.f_4`.
 
@@ -163,9 +166,24 @@ addresses (dread.statics): `{"0xADDRESS": [[offset, type], ...]}`, the fields la
 `structs`' are. Every function's access at such a field's address with its type is written as a
 member of the structure's object (`g_20000030.f_4`, one macro `#define g_20000030 (*(volatile struct
 g_20000030_t *)0x20000030u)` and the structure above the function), whatever the function's digest;
-an access of another type stays the macro it was. Made from every function's machine code (and the
-lifted functions' readable C for the fields). A file from before has none: readable C writes a macro
-per address and type, as before.
+an access of another type stays the macro it was (a read of the field's width and the other
+signedness is cast: `(s16)g_20000030.f_4`, since 2026-10-23). Made from every function's machine code
+(and the lifted functions' readable C for the fields, and what callees reach through the addresses
+it hands them). A file from before has none: readable C writes a macro per address and type, as
+before.
+
+`arrays` (left out when empty; since 2026-10-23) lists the arrays of static data (dread.statics
+find_arrays): `{"0xADDRESS": {"size": element size, "count": elements, "fields": [[offset in the
+element, type], ...]}}`, an element's fields laid out as `structs`' are and aligned in every element.
+An access to an element's field is written as one (`g_200299f8[r3].f_4`, `g_20000c74[1]` for an
+array whose elements are one field each), at a constant address inside the counted elements or at
+the array's address plus an index times the element size; the macro is a pointer to the first
+element (`#define g_200299f8 ((volatile struct g_200299f8_t *)0x200299f8u)`, `((volatile u32
+*)0x20000c74u)`), the elements' structure as large as an element. The count is what the code reaches
+at constant places (at least one), not the source's. Where readable C uses the address of a
+structure, an array's element or a field of either as a value (an argument, a value assigned or
+compared, a result), it is written as such (`(u32)&g_20029988`, `(u32)&g_200299f8[r3]`). A file from
+before has none: indexed accesses stay as the lifter's arithmetic.
 
 ### `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
 
@@ -519,8 +537,9 @@ readable step counts the reasons by category (dread.bench readable_reason).
 `dread readable --figures FILE` writes JSON, `{function: {"readable": {...}, "lifted": {...},
 "kept_lifted": bool}}`, for the readable table's functions (or those named): `readable` the figures
 of its readable C as built (dread.cmetrics READABLE: `statements`, `depth`, `gotos`, `labels`,
-`loops`, `casts`, `raw`, `frame_raw`, `members`, `frame_members`, `fixed`, `variables`, `typed`;
-what each counts is in dread.cmetrics' docstring), `lifted` the first five of its lifted C,
+`loops`, `casts`, `raw`, `frame_raw`, `members`, `frame_members`, `fixed`, `fixed_members`,
+`variables`, `typed`, and since 2026-10-23 `fixed_indexed` and `fixed_addresses`; what each counts is
+in dread.cmetrics' docstring), `lifted` the first five of its lifted C,
 `kept_lifted` whether its readable C is its lifted C (fixed registers: no stage ran). A function
 that does not lift or is not the dialect is left out. `dread bench`'s readable step reads it and
 writes `BUILD/work/readable.tsv` in a bench build: one line per readable function, `function` and

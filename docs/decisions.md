@@ -9,6 +9,78 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Arrays of static data, addresses as &, and what callees reach (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** docs/todo.md's "Structures of globals" left four things: arrays of scalars written as
+  arrays, indexed accesses into arrays of structures, the addresses of structures and elements as
+  &-expressions, and structures whose functions touch nothing next to them (gizmo's g_config, RISC-V's
+  lists). What says that an array lies somewhere and how large its elements are, where it starts and
+  how far it goes; how are its elements written so that every access stays one of its width at its
+  address and the C behaves as the lifted C; where is an address written as &; what decides a
+  structure no function reaches next to?
+- **Options and choices.**
+  1. The element size: (a) the machine code's pass follows scaled indices (each arch layer's value_step
+     learns shifts, multiplications and register offsets with a scale), (b) the arithmetic of the lifted
+     functions' readable C, which dread.tidy has folded (0x200299f8u + 0x14u * r9 + 4, (r1 << 3) +
+     0x2002990cu), also through a variable that holds the index times the scale, (c) without a scale:
+     the machine code's indexed access at a structure whose fields are one type one after another (the
+     item's own rule). **(b) and (c)**: no arch layer changes; (c) covers functions that do not lift
+     (FreeRTOS GCC -Os's ulEchoLoopCounters). To undo: plan(indexed=None).
+  2. Where an array starts: **a data symbol within one element below the lowest constant of its
+     accesses, else the address the code made them from or handed out there, else the lowest constant**
+     (never further below than an element: an anchor below is not taken).
+  3. How many elements: (a) up to the next start, as a structure; (b) what its accesses' constants
+     reach, and the constant places the code reaches from its start where the start is a base that
+     counts (separate_bases). **(b)**: a first version extended by the run of constant places through
+     any base and made one array over two variables on five clang -Os builds (clang's global merge on
+     ARM: the base is the merged object's, the next element's places the next variable's); a second
+     wanted the places in one run and cut xAutoReloadTimers ([0], [19], [20]) to one element, now 21,
+     as declared.
+  4. Writing: (a) an array lvalue (`(*(volatile u32 (*)[N])0x...)`) or members of array type, (b) a
+     pointer to the first element (`((volatile u32 *)0x...)`), indexed. **(b)**: C knows no bound, so
+     GCC derives no loop bounds from an index past the end (dread.frames' rule for local buffers); the
+     count stays in the plan. The elements' structure has bytes up to the element size.
+  5. The index through a variable (r8_3 = 0x14u * r8_2 ... 0x200299f8u + r8_3): (a) reaching
+     definitions on the structured tree, (b) a straight-line rule (statics.straight_facts): the
+     assignment earlier in the same list of statements or one around it, nothing between them writes
+     either variable, no label or case between. **(b)**, small and safe; the variable's assignment goes
+     when nothing reads it any more (its declaration stays: a names proposal names it). A first version
+     took the fact after the statement had been rewritten and took a macro (memory) for the index
+     variable, so the index read memory again; the gate turned the function down (prvSemaphoreTest, on
+     three builds), and the index must now be a variable of the function. A variable that holds an
+     element's address (a3 = 0x80095914u + s1 * 20) carries the index to its accesses too.
+  6. Addresses as &: (a) every constant inside an object, (b) a value used whole: a call's argument, an
+     assignment's value, an operand of == or !=, a result; at an object's start &g_x (not &g_x.f_0), at
+     an element's &g_x[3], at a field &g_x.f_8, else the number. **(b)**: arithmetic on addresses (a
+     heap's bounds, end - start) stays numbers. dread.shapes' _uses counted a variable given any
+     address as given a C variable's and left it untyped (the earlier entry's worry); it counts only
+     the function's own variables' addresses now, and apply_types writes (T *)&g_x without a u32 cast
+     between.
+  7. What callees reach: (a) a pass over the machine code that follows each argument register plus a
+     constant (the base registers item's "argument plus a constant"), (b) dread.shapes' templates of
+     each callee's parameters, which already copy what the callees of callees reach. **(b)**, for the
+     lifted functions' calls. A handed address counts without the neighbour test (a parameter points
+     into one object), ends only where a data symbol, a startup range, an array or another handed base
+     starts, and is no evidence for other bases' neighbours (the earlier entry's (d): GCC makes an
+     anchor's variable's address as a literal of its own). A parameter whose memory a walk reached is
+     none: memcpy's own object is marked (dread.shapes' conflicts), and the mark now goes along with the
+     templates copied onto callers (Shapes.walked, which nothing else in the shapes reads); without it a
+     string handed through a stream buffer's functions to an unrolled memcpy made a structure of words
+     0 to 60 in ROM on four clang -Os builds. An element's address handed so gives its array's elements
+     fields.
+  8. An index into static data in the shapes: shapes took r3 + 0x200299fcu (r3 twenty times a
+     priority) for a field 512 MB into what r3 points to. **The plan of static data is made before the
+     shapes, and an address inside one of its objects added to a value is no offset from a pointer**
+     (Shapes.static_offset).
+  9. A read of a field's width and the other signedness: (a) the macro, (b) a cast of the member
+     ((s16)g_200018de[r6]; never for a store or an operand of ++ or --, which a cast cannot be).
+     **(b)**, for structures too.
+- **Undo.** plan(indexed=None, handed=None) gives main's structures; an empty `arrays` in the
+  readable_types table (or none: older files) gives readable C without arrays.
+- **Status.** In the code (branch statics-arrays): docs/todo.md, "Structures of globals".
+
 ## The shared names asked --jobs batches at a time: answers settled in the batches' order (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
@@ -126,7 +198,9 @@ Newest first. "Status" says whether the choice is in the code yet.
   symbols; an empty `statics` in the readable_types table (or none: older files) gives readable C a
   macro per address and type again.
 - **Status.** Done (dread/statics.py, dread.naming apply_globals and static_names, dread readable
-  --check and --statics, dread pilot's globals question): docs/todo.md, "Structures of globals".
+  --check and --statics, dread pilot's globals question): docs/todo.md, "Structures of globals". The
+  arrays, the addresses as & and what callees reach came later the same day ("Arrays of static data,
+  addresses as &, and what callees reach", above).
 
 ## A no-confidence vote on existing names: triggers by code, a candidate, a blind pairwise decision with a margin (2026-10-23)
 

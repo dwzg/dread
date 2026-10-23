@@ -276,7 +276,9 @@ def _rewrite(e, f):
     return e
 
 
-def _rewrite_stmt(s, f):
+def _rewrite_stmt(s, f, inner=True):
+    """The statement's expressions rewritten by f (_rewrite), with inner those of the statements it
+    holds too."""
     if isinstance(s, C.ExprStmt):
         s.e = _rewrite(s.e, f)
     elif isinstance(s, C.Return):
@@ -304,43 +306,65 @@ def _rewrite_stmt(s, f):
     elif isinstance(s, C.Case):
         if s.value is not None:
             s.value = _rewrite(s.value, f)
-    for inner in _inner(s):
-        _rewrite_stmt(inner, f)
+    if inner:
+        for x in _inner(s):
+            _rewrite_stmt(x, f)
 
 
 def static_key(address):
-    """The globals part's key of a structure of static data (dread.statics): its address."""
+    """The globals part's key of a structure or an array of static data (dread.statics): its address."""
     return "0x%x struct" % address
 
 
-def static_names(statics, named=None, memory=None, avoid=()):
-    """{address: (object name, tag, {offset: field name})} for the structures of static data
-    (statics: {address: [(offset, type)]}, dread.statics): the globals part's entry for the structure
-    (static_key: {"name", "fields": {"OFFSET": name}}) where it gives a C name, else default_name of
-    its address as a word (g_20000030); its tag that name with _t; a field's name its entry's, else the
-    name the globals part gives the access at that address and type (a global named before the plan
-    made it a field), else f_<offset>. A name is used only where it is a C identifier, no keyword,
-    unique in its structure, and no macro a file may hold beside it (a structure's object or a global
+def _static_rows(statics, arrays):
+    """{address: (fields [(offset, type)], element size or None, count)} of the structures (element
+    size None) and arrays of static data (an array's fields its elements')."""
+    out = {b: (list(rows), None, 1) for b, rows in (statics or {}).items()}
+    out.update({b: (list(rows), k, n) for b, (k, n, rows) in (arrays or {}).items()})
+    return out
+
+
+def scalar_array(k, rows):
+    """The element type of an array whose elements are one field each (an array of scalars), else None."""
+    from dread.statics import SIZES
+    return rows[0][1] if len(rows) == 1 and rows[0][0] == 0 and SIZES[rows[0][1]] == k else None
+
+
+def static_names(statics, named=None, memory=None, avoid=(), arrays=None):
+    """{address: (object name, tag, {offset: field name})} for the structures of static data (statics:
+    {address: [(offset, type)]}, dread.statics) and the arrays (arrays: {address: (element size,
+    count, [(offset in the element, type)])}): the globals part's entry for the object (static_key:
+    {"name", "fields": {"OFFSET": name}}) where it gives a C name, else default_name of its address as
+    a word (g_20000030); its tag that name with _t (an array's: its elements' structure's; an array of
+    scalars has none, its fields {}); a field's name its entry's, else the name the globals part gives
+    the access at that address and type (a global named before the plan made it a field; an array's:
+    in its first element), else f_<offset>. A name is used only where it is a C identifier, no
+    keyword, unique in its structure, and no macro a file may hold beside it (an object or a global
     that stays a macro: it would expand inside a member or a tag); an object or a tag is none of avoid
     either (the names dread.shapes gives its structures: a tag defined twice, a macro inside one).
-    Names depend on the table and the plan alone, so that a structure reads alike in every function."""
+    Names depend on the table and the plan alone, so that an object reads alike in every function."""
     named = named or {}
-    members = {global_key(b + off, t) for b, rows in statics.items() for off, t in rows}
+    rows_of = _static_rows(statics, arrays)
+    members = {global_key(b + j * (k or 0) + off, t) for b, (rows, k, n) in rows_of.items() for j in range(
+        min(n, 4096) if k else 1) for off, t in rows}
     macros = {e.get("name") for k, e in named.items() if isinstance(e, dict) and k not in members
               and not k.endswith(" struct")}
 
     def good(name, taken=()):
         return isinstance(name, str) and bool(IDENT.match(name)) and name not in KEYWORDS and name not in taken
     objects, avoid = {}, set(avoid)
-    for address in sorted(statics):
+    for address in sorted(rows_of):
         name = (named.get(static_key(address)) or {}).get("name")
         if not good(name, macros | avoid | set(objects.values())):
             name = default_name(address, "u32", memory)
         objects[address] = name
     taken = macros | set(objects.values())
     out, tags = {}, set()
-    for address, rows in sorted(statics.items()):
+    for address, (rows, k, _) in sorted(rows_of.items()):
         name = objects[address]
+        if k and scalar_array(k, rows):
+            out[address] = (name, None, {})
+            continue
         tag = name + "_t" if good(name + "_t", taken | tags | avoid) else "s_%x_t" % address
         tags.add(tag)
         given = (named.get(static_key(address)) or {}).get("fields") or {}
@@ -357,7 +381,7 @@ def static_names(statics, named=None, memory=None, avoid=()):
     return out
 
 
-def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, names=None):
+def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, names=None, arrays=None):
     """The function's accesses to memory at fixed addresses written as names, a macro for each above
     the function (#define g_20029aac (*(volatile u32 *)0x20029aacu)): the table's name (named: the
     globals part) where it has one the file does not use for something else (nor avoid: the names the
@@ -367,28 +391,77 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
     for the structure, its definition above the function (as dread.shapes writes structures: every
     field naturally aligned, gaps of bytes), names from static_names (names: what it returned, made
     once for many functions; a structure's name that the function uses for something else gives way to
-    its default name there, as a global's does). Returns {key: name} of what it named (a structure's
-    fields as "NAME.FIELD")."""
+    its default name there, as a global's does).
+
+    With arrays ({address: (element size, count, [(offset in the element, type)])}, the plan's arrays
+    of static data) an access to an element's field is written as one: at a constant address inside the
+    array (g_20000c74[1], g_2002990c[0].f_4) and at the array's constant plus an index times the
+    element size (*(volatile u32 *)(0x200299f8u + 0x14u * r9 + 4) is g_200299f8[r9].f_4, the index
+    plus the element the constant lies in where that is not the first: g_x[r3 + 1]); the index may
+    come through a variable that holds it times the element size (r8_3 = 0x14u * r8_2 ... 0x200299f8u +
+    r8_3 is g_200299f8[r8_2]: dread.statics straight_facts says where that holds). The array's macro is
+    a pointer to its first element, (#define g_200299f8 ((volatile struct g_200299f8_t *)0x200299f8u),
+    of u32 for an array of scalars), so that C knows no bound for the index (an index past the end
+    is undefined in C, and GCC derives loop bounds from that); the elements' structure is as large as
+    an element. Where the code uses the address of an object or of its fields as a value (a call's
+    argument, the value assigned or compared with == and !=, a result), a constant one inside an object
+    or an array element's (the constant plus a scaled index) is written as that: (u32)&g_20029988,
+    (u32)&g_20000030.f_8, (u32)&g_200299f8[r8_2]; an address inside an object at no field stays the
+    number. Every access stays one volatile access of its width at its address; an access of another
+    type than its field stays the macro it was (a read of the field's width and the other signedness
+    is cast: (s16)g_200018de[r6]). Returns {key: name} of what it named: a structure's fields under
+    their address and type as "NAME.FIELD", an array under static_key as its name and its elements'
+    fields under the address and type of its first element's as "NAME[].FIELD" (what dread pilot asks
+    names for)."""
+    import bisect
+    import copy
+    from dread import statics as st
+    from dread.constants import SMALLEST_POINTER
     named = named or {}
     found = globals_in(fn)
-    if not found:
+    rows_of = _static_rows(statics, arrays)
+    if not found and not rows_of:
         return {}
     busy = other_names(tree, fn) | set(variables(fn)) | set(avoid)
-    members = {}                            # (address, type) -> (the structure's address, offset)
-    if statics:
-        import bisect
-        bases = sorted(statics)
-        for address, ctype in sorted(found):
-            i = bisect.bisect_right(bases, address) - 1
-            if i >= 0 and dict(statics[bases[i]]).get(address - bases[i]) == ctype:
-                members[(address, ctype)] = (bases[i], address - bases[i])
-        if members and names is None:
-            names = static_names(statics, named, memory)
-    objects = {b: names[b] for b, _ in members.values()} if members else {}
-    for b, (name, tag, fields) in sorted(objects.items()):
-        if name in busy:                    # (a callee, a variable, a label of this function: the default here)
-            objects[b] = (default_name(b, "u32", memory), tag, fields)
-    taken_by_objects = {n for n, _, _ in objects.values()}
+    starts = sorted(rows_of)
+    if rows_of and names is None:
+        names = static_names(statics, named, memory, arrays=arrays)
+
+    def inside(address):
+        """(object address, element index, offset in the element or structure) of an address that lies
+        inside an object, or None."""
+        i = bisect.bisect_right(starts, address) - 1
+        if i < 0:
+            return None
+        b = starts[i]
+        rows, k, n = rows_of[b]
+        if k:
+            if address < b + k * n:
+                return b, (address - b) // k, (address - b) % k
+            return None
+        end = max(off + st.SIZES[t] for off, t in rows)
+        return (b, None, address - b) if address < b + end else None
+    members, reads = {}, {}                 # (address, type) -> (object, element index or None, offset)
+    for address, ctype in sorted(found):
+        got = inside(address)
+        field = dict(rows_of[got[0]][0]).get(got[2]) if got is not None else None
+        if field == ctype:
+            members[(address, ctype)] = got
+        elif field is not None and st.SIZES[field] == st.SIZES.get(ctype, 4):
+            reads[(address, ctype)] = got   # (the field's width, the other signedness: a read casts it)
+    objects = {}                            # object -> (name, tag, fields) in this function
+
+    def obj(b):
+        if b not in objects:
+            name, tag, fields = names[b]
+            if name in busy:                # (a callee, a variable, a label of this function: the default here)
+                name = default_name(b, "u32", memory)
+            objects[b] = (name, tag, fields)
+        return objects[b]
+    for b, _, _ in members.values():
+        obj(b)
+    # (every object's names, also those this function reaches only by an address written later)
+    taken_by_objects = {n for n, _, _ in (names or {}).values()} | {default_name(b, "u32", memory) for b in rows_of}
     chosen = {}
     for address, ctype in sorted(found):
         if (address, ctype) in members:
@@ -397,32 +470,162 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
         if (not isinstance(name, str) or not IDENT.match(name) or name in busy or name in KEYWORDS
                 or name in chosen.values() or name in taken_by_objects):
             name = default_name(address, ctype, memory)
-        if name in taken_by_objects:        # (a word at a structure's address it holds no such field for)
+        if name in taken_by_objects:        # (a word at an object's address it holds no such field for)
             name = "%s_%s" % (default_name(address, "u32", memory), ctype)
         chosen[(address, ctype)] = name
+    out = {}
 
-    def f(e):
-        a = fixed_access(e)
-        if a in members:
-            b, off = members[a]
-            return C.Member(C.Name(objects[b][0]), objects[b][2][off], False)
-        return C.Name(chosen[a]) if a in chosen else None
-    for s in fn.body.body:
-        _rewrite_stmt(s, f)
-    k = tree.items.index(fn)
+    def named_as(b, off, j):
+        """Notes in out what an access to field off of object b (element j of an array) went into: a
+        structure's field under its address and type ("NAME.FIELD"); an array under static_key, an
+        element's field under the address and type of the first element's ("NAME[].FIELD")."""
+        name, _, fields = obj(b)
+        rows, k, _ = rows_of[b]
+        if k is None:
+            out[global_key(b + off, dict(rows)[off])] = "%s.%s" % (name, fields[off])
+            return
+        out[static_key(b)] = name
+        if not scalar_array(k, rows):
+            out[global_key(b + off, dict(rows)[off])] = "%s[].%s" % (name, fields[off])
+
+    def element(b, j, off, index=None):
+        """The member expression of field off of element j of object b (j None: a structure's field),
+        index an expression added to j (an indexed access)."""
+        name, tag, fields = obj(b)
+        rows, k, _ = rows_of[b]
+        e = C.Name(name)
+        if k is not None:
+            i = C.Num("%d" % j) if index is None else (index if j == 0 else C.Binary("+", index, C.Num("%d" % j)))
+            e = C.Index(e, i)
+            if scalar_array(k, rows):
+                return e
+        return C.Member(e, fields[off], False)
+
+    via = set()                             # (variables an index went through: r8_3 for g_200299f8[r8_2])
+
+    def indexed(addr, facts):
+        """(object, element index, offset, index expression) of an address that is an array's constant
+        plus an index times its element size, or None."""
+        used = set()
+        got = st.scaled(addr, facts, used)
+        if got is None or got[2] is None:
+            return None
+        const, k, index = got
+        where = inside(const)
+        if where is None or rows_of[where[0]][1] != k:
+            return None
+        via.update(used)
+        return where[0], where[1], where[2], index
+
+    def address_of(e, facts, f):
+        """The address expression ((u32)&g_x.f_8, (u32)&g_x[r3]) of a value e that is an address
+        inside an object at a field or an element, else None."""
+        if isinstance(e, C.Num) and isinstance(e.value, int):
+            if e.value < SMALLEST_POINTER:  # (a small number is a count, not where an object lies)
+                return None
+            where = inside(e.value)
+            index = None
+        else:
+            got = indexed(e, facts) if not isinstance(e, C.Num) else None
+            if got is None:
+                return None
+            where, index = got[:3], _rewrite(copy.deepcopy(got[3]), f)
+        if where is None:
+            return None
+        b, j, off = where
+        rows, k, _ = rows_of[b]
+        if k is None and off == 0:          # (a structure's own address: &g_x, not its first field's)
+            target = C.Name(obj(b)[0])
+        elif k is not None and off == 0:    # (an element's: &g_x[3])
+            name = obj(b)[0]
+            i = C.Num("%d" % j) if index is None else (index if j == 0 else C.Binary("+", index, C.Num("%d" % j)))
+            target = C.Index(C.Name(name), i)
+        elif off in dict(rows) and not (k is not None and scalar_array(k, rows)):
+            target = element(b, j, off, index)
+        else:
+            return None
+        if k is not None or off == 0:
+            out[static_key(b)] = obj(b)[0]
+        else:
+            named_as(b, off, j)
+        return C.Cast("u32", C.Unary("&", target))
+
+    used = set()                            # (the macros the rewritten function still names)
+
+    def make(facts, store=False):
+        """The rewrite of an expression with facts (straight_facts) in front of it; store: what it
+        rewrites is written (an assignment's target, an operand of ++ or --), so no access becomes a
+        cast of a member (no lvalue in C)."""
+        def f(e):
+            a = fixed_access(e)
+            if a is not None:
+                if a in members or (a in reads and not store):
+                    b, j, off = members.get(a) or reads[a]
+                    named_as(b, off, j)
+                    return element(b, j, off) if a in members else C.Cast(a[1], element(b, j, off))
+                used.add(a)
+                return C.Name(chosen[a])
+            if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and arrays:
+                m = ACCESS.match(" ".join(e.e.type.split()))
+                got = indexed(e.e.e, facts) if m else None
+                if got is not None:
+                    b, j, off, index = got
+                    field = dict(rows_of[b][0]).get(off)
+                    if field == m.group(1) or (field is not None and not store
+                                               and st.SIZES[field] == st.SIZES.get(m.group(1), 4)):
+                        named_as(b, off, j)
+                        got = element(b, j, off, _rewrite(copy.deepcopy(index), make(facts)))
+                        return got if field == m.group(1) else C.Cast(m.group(1), got)
+                return None
+            if isinstance(e, C.Call):
+                return C.Call(_rewrite(e.f, f), [address_of(x, facts, f) or _rewrite(x, f) for x in e.args])
+            if isinstance(e, C.Assign):
+                value = (address_of(e.value, facts, f) if e.op == "=" else None) or _rewrite(e.value, make(facts))
+                return C.Assign(e.op, _rewrite(e.target, make(facts, True)), value)
+            if isinstance(e, (C.Post, C.Unary)) and e.op in ("++", "--"):
+                return type(e)(e.op, _rewrite(e.e, make(facts, True)))
+            if isinstance(e, C.Binary) and e.op in ("==", "!="):
+                return C.Binary(e.op, address_of(e.l, facts, f) or _rewrite(e.l, f),
+                                address_of(e.r, facts, f) or _rewrite(e.r, f))
+            return None
+        return f
+
+    if rows_of:
+        def visit(s, facts):
+            f = make(facts)
+            if isinstance(s, C.Return) and s.e is not None:
+                s.e = address_of(s.e, facts, f) or _rewrite(s.e, f)
+            else:
+                _rewrite_stmt(s, f, inner=False)
+        st.straight_facts(fn, visit)
+        st.drop_unread(fn, via)
+    else:
+        f0 = make({})
+        for s in fn.body.body:
+            _rewrite_stmt(s, f0)
+    chosen = {a: n for a, n in chosen.items() if a in used}
+    if not chosen and not objects:
+        return out
+    k_ = tree.items.index(fn)
     lines = ["#define %s (*(volatile %s *)0x%xu)" % (chosen[a], a[1], a[0]) for a in chosen]
-    lines += ["#define %s (*(volatile struct %s *)0x%xu)" % (objects[b][0], objects[b][1], b) for b in objects]
+    for b, (name, tag, _) in objects.items():
+        rows, k, _ = rows_of[b]
+        if k is None:
+            lines.append("#define %s (*(volatile struct %s *)0x%xu)" % (name, tag, b))
+        else:
+            lines.append("#define %s ((volatile %s *)0x%xu)" % (name, scalar_array(k, rows) or "struct " + tag, b))
     lines = sorted(lines, key=lambda line: int(line.rsplit("0x", 1)[1].rstrip("u)"), 16))     # (by address)
-    tree.items.insert(k, C.Raw("\n".join(lines)))
-    if objects:
-        from dread.shapes import struct_text
-        present = {item.text for item in tree.items if isinstance(item, C.Raw)}
-        for b in sorted(objects, reverse=True):
-            text = struct_text(objects[b][1], statics[b], objects[b][2])
-            if text not in present:         # (a file whose other function has it already: C17 forbids a
-                tree.items.insert(k, C.Raw(text))       # second definition)
-    out = {global_key(*a): n for a, n in chosen.items()}
-    out.update({global_key(*a): "%s.%s" % (objects[b][0], objects[b][2][off]) for a, (b, off) in members.items()})
+    tree.items.insert(k_, C.Raw("\n".join(lines)))
+    from dread.shapes import struct_text
+    present = {item.text for item in tree.items if isinstance(item, C.Raw)}
+    for b in sorted(objects, reverse=True):
+        rows, k, _ = rows_of[b]
+        if k is not None and scalar_array(k, rows):
+            continue
+        text = struct_text(objects[b][1], rows, objects[b][2], size=k)
+        if text not in present:             # (a file whose other function has it already: C17 forbids a
+            tree.items.insert(k_, C.Raw(text))      # second definition)
+    out.update({global_key(*a): n for a, n in chosen.items()})
     return out
 
 

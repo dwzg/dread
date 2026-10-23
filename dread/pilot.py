@@ -634,15 +634,18 @@ made from the machine code by tools; memory at a fixed address is written as a n
 where it is: g_ and its address in RAM, io_ and its address for a device register, rom_ and its
 address in read-only memory, with a suffix when it is read or written narrower or wider than a word
 (_u8, _s16). Static data the code reaches as one structure is a structure named so, its fields named
-after their offsets (.f_4: hexadecimal); the structure and each field are shown apart. Each is shown with
+after their offsets (.f_4: hexadecimal); the structure and each field are shown apart. An array is
+written as one too, with an index ([r3], [1]), the fields of its elements so ([r3].f_4), shown
+as the array and each field of an element apart (its name, then [].f_4). Each is shown with
 lines of the image's C that use it, under the name of the function they are in. Give each a name
-that says what it holds (a field: its own name, without the structure's); the functions' names show
-the project's style (its prefixes, its case): follow it.
+that says what it holds (a field: its own name, without the structure's or the array's); the
+functions' names show the project's style (its prefixes, its case): follow it.
 
 Answer with one ```json block mapping the shown names to yours:
 
 ```json
-{"<a name shown>": "<your name>", "<a structure shown>": "<your name>", "<a structure shown>.f_<offset>": "<your name>"}
+{"<a name shown>": "<your name>", "<a structure shown>": "<your name>", "<a structure shown>.f_<offset>": "<your name>",
+ "<an array shown>": "<your name>", "<an array shown>[].f_<offset>": "<your name>"}
 ```
 
 The names in this example are placeholders: answer with the names shown below.
@@ -667,13 +670,17 @@ def _global_uses_one(name):
     bases = _G["bases"]
     chosen = {naming.global_key(*at): gname for gname, at in macros.items()}
     for gname, (address, _) in macros.items():
-        if "." in gname:                    # (a field: its structure too)
+        if "." in gname:                    # (a field: its structure or array too)
             b = bases[bisect.bisect_right(bases, address) - 1]
-            chosen[naming.static_key(b)] = gname.split(".")[0]
+            chosen[naming.static_key(b)] = re.split(r"[.\[]", gname)[0]
     body = cparse.unparse(fn, notes=False, style="readable").splitlines()
     lines = {}
     for key, gname in chosen.items():
-        pattern = re.compile(r"\b%s\b" % re.escape(gname))
+        if "[]" in gname:                   # (an array's elements' field: g_x[r3].f_4, g_x[1].f_4)
+            head, _, field = gname.partition("[].")
+            pattern = re.compile(r"\b%s\[[^\]]*\]\.%s\b" % (re.escape(head), re.escape(field)))
+        else:
+            pattern = re.compile(r"\b%s\b" % re.escape(gname))
         lines[key] = [line.strip()[:160] for line in body if pattern.search(line)][:_G["per"]]
     return chosen, lines
 
@@ -691,7 +698,7 @@ def global_uses(program, context, lifter, names, per=2, jobs=None):
     readable.warm(lifter)                   # (once, before the pool forks: the workers share them)
     context.static_names()
     got = readable.in_pool(_global_uses_one, names, jobs, program=program, context=context, lifter=lifter, per=per,
-                           bases=sorted(context.plan.statics))
+                           bases=sorted(set(context.plan.statics) | set(context.plan.arrays)))
     uses, by_function = {}, {}
     for name, one in zip(names, got):
         if one is None:
