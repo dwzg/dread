@@ -11,10 +11,11 @@ import shutil
 
 import pytest
 
-from dread import build, cparse, readable
+from dread import build, cexpr, cparse, readable
 from conftest import gizmo_dir
 
 needs_gcc = pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+needs_z3 = pytest.mark.skipif(cexpr.z3 is None, reason="needs z3-solver (the extra 'prove')")
 
 
 def lifted_text(target, image, name, tmp_path):
@@ -384,6 +385,233 @@ def test_a_check_whose_build_fails_exits_1_and_keeps_the_tables(tmp_path):
     some = build.read_names(image.table("lifted"))[:2]
     assert lift.main(["--target", target.root, "--check"] + some) == 1
     assert open(image.table("lifted")).read() == lifted_before
+
+
+WIDE_S = """
+    .syntax unified
+    .arch armv4t
+    .arm
+    .text
+    .global udivmod, fits, remainder_of, store_mean, use
+    .type udivmod, %function
+udivmod:                        @ r1 / r0 in r0, r1 % r0 in r1 (unsigned), as a runtime library divides; r0 = 0: 0 and r1
+    mov     r2, r0
+    mov     r0, #0
+    cmp     r2, #0
+    bxeq    lr
+    mov     r3, #32
+    mov     r12, #0
+.Lbit:
+    movs    r1, r1, lsl #1
+    adc     r12, r12, r12
+    cmp     r12, r2
+    subhs   r12, r12, r2
+    adc     r0, r0, r0
+    subs    r3, r3, #1
+    bne     .Lbit
+    mov     r1, r12
+    bx      lr
+    .size udivmod, . - udivmod
+    .type fits, %function
+fits:                           @ whether a header and n records of x bytes fit in 64 KiB: x <= 0xffff / (n + 1)
+    push    {r4, lr}
+    mov     r4, r0
+    add     r0, r1, #1
+    ldr     r1, =0xffff
+    bl      udivmod             @ the quotient alone: the remainder in r1 is not read
+    cmp     r4, r0
+    movls   r0, #1
+    movhi   r0, #0
+    pop     {r4, lr}
+    bx      lr
+    .size fits, . - fits
+    .type remainder_of, %function
+remainder_of:                   @ the remainder: a caller that reads udivmod's second word
+    push    {r4, lr}
+    bl      udivmod
+    mov     r0, r1
+    pop     {r4, lr}
+    bx      lr
+    .size remainder_of, . - remainder_of
+    .type store_mean, %function
+store_mean:                     @ the mean of a sum over n + 1 samples, halved, plus 3, stored to a word
+    push    {r4, lr}
+    mov     r2, r0
+    add     r0, r1, #1
+    mov     r1, r2
+    bl      udivmod
+    mov     r1, r0
+    mov     r1, r1, lsr #1
+    add     r1, r1, #3
+    ldr     r2, =0x40000100
+    str     r1, [r2]
+    mov     r0, #0
+    pop     {r4, lr}
+    bx      lr
+    .size store_mean, . - store_mean
+    .ltorg
+    .type use, %function
+use:
+    push    {r4, lr}
+    mov     r4, r0
+    bl      fits
+    add     r0, r0, r4
+    pop     {r4, lr}
+    bx      lr
+    .size use, . - use
+"""
+WIDE_NAMES = ["fits", "remainder_of", "store_mean", "udivmod", "use"]
+needs_arm = pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-gcc")),
+                               reason="needs arm-none-eabi-as and -gcc")
+
+
+def wide_program(tmp_path):
+    """WIDE_S as a target, its functions lifted (dread lift --check)."""
+    from dread import lift
+    from test_lift_results import arm_program
+    t = arm_program(tmp_path, "a32", WIDE_S)
+    lines = []
+    assert sorted(lift.check(t, t.image(), out=lines.append, jobs=2)) == WIDE_NAMES, lines
+    return t
+
+
+@needs_z3
+@needs_arm
+def test_a_two_word_results_first_word_compared_is_32_bits_and_the_gate_takes_it(tmp_path):
+    """fits compares its argument with the quotient of udivmod, which hands back two words (its
+    remainder in r1, which remainder_of reads: the lifter declares udivmod u64), and store_mean stores
+    a sum of the quotient halved. Their readable C takes the first word, (u32)udivmod(...), and the gate
+    takes them and use, whose cases run fits for real. Until 2026-10-24 the values pass wrote
+    r0 = udivmod(...) for r0 = (u32)udivmod(...), fold wrote that into its reader bare, and the
+    conditions search, which took every call for unsigned int, kept r0 <= udivmod(r1 + 1, 0xffffu):
+    64 bits compared, the remainder as the high word; the store shifted the remainder's bit in. The
+    gate turned fits and store_mean down, and use with them (on a private firmware the same sent back
+    functions that compare or shift a division's quotient, and their callers with them)."""
+    from dread import lift, regflow
+    from dread.program import Program
+    t = wide_program(tmp_path)
+    p = Program(t, t.image())
+    flow = regflow.analyse(p)
+
+    def text(name):
+        return readable.transform(name, lift.make_lifter(p, flow).lift(p.by_name[name]).text,
+                                  context=readable.Context(t, t.image(), p, flow))
+    out = text("fits")
+    assert "extern u64 udivmod(u32, u32);" in out and "return r0 <= (u32)udivmod(r1 + 1, 0xffffu) ?" in out, out
+    out = text("store_mean")
+    assert "((u32)udivmod(r1 + 1, r0) >> 1) + 3;" in out, out
+    lines = []
+    assert readable.check(t, t.image(), out=lines.append, jobs=2) == WIDE_NAMES, lines
+
+
+def off_by_one(name):
+    """A stage that makes every return of function name one more."""
+    def stage(fn, run=None):
+        if fn.name != name:
+            return
+
+        def walk(stmts):
+            for s in stmts:
+                if isinstance(s, cparse.Return) and s.e is not None:
+                    s.e = cparse.Binary("+", s.e, cparse.Num("1"))
+                for child in ("body", "then", "orelse"):
+                    inner = getattr(s, child, None)
+                    if isinstance(inner, cparse.Block):
+                        walk(inner.body)
+                    elif isinstance(inner, cparse.Stmt):
+                        walk([inner])
+        walk(fn.body.body)
+    return stage
+
+
+@needs_arm
+def test_a_caller_of_a_function_that_fails_is_tried_again_with_it_lifted(tmp_path, monkeypatch):
+    """A stage that breaks fits (one more on every return): its cases fail, and so do use's, whose
+    cases run fits for real. use is tried once more with fits from lifted C, passes and is readable;
+    fits stays lifted. Until 2026-10-24 use went back with fits."""
+    t = wide_program(tmp_path)
+    monkeypatch.setattr(readable, "STAGES", readable.STAGES + [("off by one", off_by_one("fits"))])
+    lines = []
+    accepted = readable.check(t, t.image(), out=lines.append, jobs=2)
+    assert accepted == [n for n in WIDE_NAMES if n != "fits"], lines
+    assert any(line.startswith("lifted   fits") and "FAIL fits" in line for line in lines), lines
+    assert any(line.startswith("again    use") and "fits" in line for line in lines), lines
+
+
+VARARG_S = """
+    .syntax unified
+    .arch armv4t
+    .arm
+    .text
+    .global vsum, sum3, use
+    .type vsum, %function
+vsum:                           @ the sum of the n words that follow n (n at most 3), its frame kept as APCS keeps it
+    mov     ip, sp
+    push    {r1, r2, r3}        @ the variadic arguments where a va_list finds them
+    push    {r4, ip, lr}
+    add     r1, sp, #12         @ va_start: the first word after n
+    mov     r2, #0
+    cmp     r0, #3
+    movhi   r0, #3
+.Lloop:
+    subs    r0, r0, #1
+    bmi     .Ldone
+    ldr     r3, [r1], #4
+    add     r2, r2, r3
+    b       .Lloop
+.Ldone:
+    mov     r0, r2
+    pop     {r4, ip, lr}
+    add     sp, sp, #12
+    bx      lr
+    .size vsum, . - vsum
+    .type sum3, %function
+sum3:                           @ a + b + c through vsum
+    push    {r4, lr}
+    mov     r3, r2
+    mov     r2, r1
+    mov     r1, r0
+    mov     r0, #3
+    bl      vsum
+    pop     {r4, lr}
+    bx      lr
+    .size sum3, . - sum3
+    .type use, %function
+use:
+    push    {r4, lr}
+    bl      sum3
+    add     r0, r0, #1
+    pop     {r4, lr}
+    bx      lr
+    .size use, . - use
+"""
+
+
+@needs_arm
+def test_a_save_area_behind_an_apcs_frame_copy_keeps_the_variadic_arguments(tmp_path):
+    """vsum keeps the entry's stack pointer first (mov ip, sp, as an APCS frame does), then pushes its
+    variadic arguments r1-r3 where its va_list (add r1, sp, #12) reads them: a save area
+    (entry_save_areas), though not the first instruction. Its readable C keeps the pushes and takes r1-r3
+    (push_room leaves a save area alone), and sum3's call passes them (regflow sees no use of a pushed
+    register: vsum reads r0 alone). Until 2026-10-24 only a push at the entry counted: sum3 called
+    vsum(3), and vsum read words nothing had written."""
+    from dread import lift, regflow
+    from dread.program import Program
+    from test_lift_results import arm_program
+    t = arm_program(tmp_path, "a32", VARARG_S)
+    p = Program(t, t.image())
+    flow = regflow.analyse(p)
+    assert flow.read_regs("vsum") == ["r0"]
+    context = readable.Context(t, t.image(), p, flow)
+    assert context.save_areas == {"vsum"} and context.arity("vsum") is None
+    lifter = lift.make_lifter(p, flow)
+    vsum = readable.transform("vsum", lifter.lift(p.by_name["vsum"]).text, context=context)
+    assert "u32 vsum(u32 r0, u32 r1, u32 r2, u32 r3)" in vsum and "= r1;" in vsum and "= r3;" in vsum, vsum
+    sum3 = readable.transform("sum3", lifter.lift(p.by_name["sum3"]).text, context=context)
+    assert "return vsum(3, r0, r1, r2);" in sum3, sum3
+    lines = []
+    assert lift.check(t, t.image(), out=lines.append, jobs=2) == ["vsum", "sum3", "use"], lines
+    assert readable.check(t, t.image(), out=lines.append, jobs=2) == ["sum3", "use", "vsum"], lines
 
 
 @pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),

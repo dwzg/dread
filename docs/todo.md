@@ -1653,6 +1653,28 @@ model).
   the entry's straight run (a shrink-wrapped save later is local bytes). Not established: that a callee
   stays inside the object it is given, that an index stays inside its array (the cases and the whole
   image decide, as for every transformation; where the cases see otherwise, whole).
+- [x] **Regressions of 2026-10-23 on a private firmware: two-word results, callers of a function that
+  fails, save areas behind a frame copy.** After the day's readable C changes the readable gate kept
+  many times as many functions of the private real-life test lifted, most of them readable the day
+  before; traced to three causes (docs/decisions.md). (1) A callee declared u64 (two words back: a
+  division's quotient and remainder) whose first word a function compares or shifts: since f6757bd
+  loads_once lets a call be a value's only effect, the values pass writes r0 = f(...) for
+  r0 = (u32)f(...), and fold wrote that into its one reader bare (64 bits, the remainder as the high
+  word), the proofs taking every call for unsigned int. Now the proofs type a call by its declaration
+  (cexpr.Ctx.result_type, the file's declarations through readable.Run.returns and the tidy run) and
+  fold writes a value as its assignment converted it, the cast left out where the reader cannot see
+  it or z3 proves it reads the same (tidy.as_assigned, same_reads). Where no case gave a
+  remainder the gate had accepted such C, and a caller's cases found it. (2) The gate sent back every
+  caller whose cases ran a failing callee for real; a failing function whose code reaches another
+  that fails in the same round now gets the next round with that one from lifted C ("again" in the
+  check's output). (3) A variadic function of an APCS frame (mov ip, sp; push {r1, r2, r3}; ...) was no
+  save area to entry_save_areas, which looked at the first instruction only: its callers' calls were
+  trimmed and push_room took its pushes out; up to SAVE_AREA_LEAD instructions that write neither sp
+  nor an argument register may come first now. Public tests: tests/test_tidy.py (a call abstracted
+  with its declared type; a two-word result compared and shifted, compiled beside the lifted C) and
+  tests/test_readable.py (ARM assembly of our own through both gates: the comparison, a store, a
+  caller tried again, the APCS save area). Not mended: written cases whose stub masks log a register
+  the callee does not read (the private target's carried cases; its decision). Figures in the commit.
 - [ ] **Two-word results that are leftovers.** A function whose callers, or their callers through
   returns, read r1 after it returns is lifted with a u64 result; its readable C reassigns both words
   in every arm, and its callers show `(u32)(f(...) >> 32)`. When the second word is only what a callee

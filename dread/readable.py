@@ -8,7 +8,8 @@ cases the lift check accepted it with, and keeps a function's readable C only wh
 run every instruction of the original, as for lifted C, and when the whole image's scenarios agree;
 a function that fails is built from its lifted C again (one whose frame's objects, dread.frames, its
 cases reject is tried once more first, its frame's region one object: the readable_types table's
-whole). The functions accepted go into the image's
+whole; one whose code reaches another function that fails in the same round is tried once more with
+that one from lifted C, since its cases run their callees for real). The functions accepted go into the image's
 readable table (config/readable.txt), and dread recon builds them from readable C. Names and types
 are left to the pilot (dread pilot).
 
@@ -184,29 +185,43 @@ class Context:
         return [r for r in results if r in self.arg_regs and r not in own]
 
 
+SAVE_AREA_LEAD = 2      # the most instructions in front of a save area's push that write neither sp nor an
+                        # argument register (APCS's mov ip, sp: entry_save_areas)
+
+
 def entry_save_areas(program):
-    """The functions whose first instruction pushes argument registers only, the last of them among
-    them (the arch layer's stack_kind and pushed_registers; the lifter's save_area): a variadic
-    function's save area as GCC's newlib keeps it (printf pushes r0-r3, sprintf r1-r3, before it saves
-    anything else), which variadic_reach does not find (regflow's variadic_save_area leaves pushes to
-    its rows). A call of one keeps all its arguments (Context.arity): trimmed to what regflow says it
-    reads, FreeRTOS's GCC -Os tasks called sprintf(buf, fmt) without the value it prints, and the whole
-    image agreed only as long as the C compiler happened to leave that value in r2 (2026-10-23, when
-    dread.frames changed their frames' layout). Not propagated to their callers' callers as
-    variadic_reach does (a function that hands its arguments on to printf, vAssertCalled, keeps its
-    trimmed calls): empty where the layer has no pushes."""
+    """The functions whose first push stores argument registers only, the last of them among them (the
+    arch layer's stack_kind and pushed_registers; the lifter's save_area): a variadic function's save
+    area as GCC's newlib keeps it (printf pushes r0-r3, sprintf r1-r3, before it saves anything else),
+    which variadic_reach does not find (regflow's variadic_save_area leaves pushes to its rows). The
+    push is the first instruction, or follows at most SAVE_AREA_LEAD instructions that write neither
+    sp nor an argument register and go on to the next: an APCS frame keeps the entry's stack pointer
+    first (mov ip, sp; push {r1, r2, r3}; push {r4, ip, lr}: a variadic function of a private
+    firmware, until 2026-10-24 not found: its callers' calls lost the arguments its va_list reads, and
+    push_room took its pushes out). A call of one keeps all its arguments (Context.arity): trimmed to
+    what regflow says it reads, FreeRTOS's GCC -Os tasks called sprintf(buf, fmt) without the value it
+    prints, and the whole image agreed only as long as the C compiler happened to leave that value in
+    r2 (2026-10-23, when dread.frames changed their frames' layout). Not propagated to their callers'
+    callers as variadic_reach does (a function that hands its arguments on to printf, vAssertCalled,
+    keeps its trimmed calls): empty where the layer has no pushes."""
     arch = program.arch
     if not (hasattr(arch, "stack_kind") and hasattr(arch, "pushed_registers")):
         return set()
     args = list(program.target.abi.arg_regs)
     out = set()
     for fn in program.functions:
-        insn = program.insn(fn.insns[0]) if fn.insns else None
-        if insn is None or arch.stack_kind(insn) != "push":
-            continue
-        regs = [r for r in arch.pushed_registers(insn) if r is not None]
-        if regs and args and set(regs) <= set(args) and args[-1] in regs:
-            out.add(fn.name)
+        for a in fn.insns[:SAVE_AREA_LEAD + 1]:
+            insn = program.insn(a)
+            if insn is None:
+                break
+            if arch.stack_kind(insn) == "push":
+                regs = [r for r in arch.pushed_registers(insn) if r is not None]
+                if regs and args and set(regs) <= set(args) and args[-1] in regs:
+                    out.add(fn.name)
+                break
+            if not hasattr(arch, "reg_effects") or arch.flow(insn)[0] != "next" or \
+                    arch.reg_effects(insn)[1] & (set(args) | {"sp"}):
+                break
     return out
 
 
@@ -1053,6 +1068,24 @@ def check(target, image, names=None, out=print, jobs=None):
         for n in names_:
             out("lifted   %-24s %s" % (n, why[:200]))
             verdicts[n] = ("lifted", why[:300])
+    reach, direct = {}, {}
+
+    def reaches(name):
+        """The functions name's code reaches through direct calls (the original's call graph, as the lift
+        check's call_trees has it), worked out for the functions that fail only."""
+        if name not in reach:
+            seen, todo = set(), [name]
+            while todo:
+                n = todo.pop()
+                if n not in direct:
+                    fn = program.by_name.get(n)
+                    direct[n] = lift.direct_callees(program, fn) if fn is not None else set()
+                for callee in direct[n]:
+                    if callee not in seen:
+                        seen.add(callee)
+                        todo.append(callee)
+            reach[name] = seen - {name}
+        return reach[name]
     while accepted:
         rounds += 1
         try:
@@ -1100,17 +1133,32 @@ def check(target, image, names=None, out=print, jobs=None):
         # which the cases see and the split cannot keep (the readable_types table's whole)
         whole = {n for n in gone if n not in context.plan.whole and n in texts and
                  FRAME_OBJECT.search(readable_texts({n: texts[n]}, context, jobs)[n] or "")}
+        # A function whose code reaches another that went wrong in this round is tried once more with that
+        # one built from lifted C: its cases run its callees for real, so one callee's wrong readable C
+        # fails every caller whose cases reach it (2026-10-24, on a private firmware: one function's
+        # comparison of a two-word result sent its callers back with it, whose own readable C was
+        # right). Not where every function that went wrong reaches another (recursion): then all go,
+        # as before. Every round sends one back at least, so the rounds end.
+        culprits = {n for n in gone if not (reaches(n) & (gone - {n}))}
+        again = {n: sorted(reaches(n) & (gone - {n})) for n in gone - culprits - whole} if culprits else {}
+        told = set()                        # (one line a function tried again, its first failure)
         for text in lines:
             for line in text.splitlines():
                 for name in gone:
                     if line.startswith(("FAIL %s " % name, "UNCOVERED %s:" % name)) and name in accepted:
                         if name in whole:
                             out("whole    %-24s %s" % (name, ("its frame as one object again: " + line)[:200]))
+                        elif name in again:
+                            if name not in told:
+                                told.add(name)
+                                out("again    %-24s %s" % (name, ("with %s from lifted C, which went wrong too: %s" % (
+                                    ", ".join(again[name][:3]) + (", ..." if len(again[name]) > 3 else ""),
+                                    line))[:200]))
                         elif verdicts.get(name, ("",))[0] != "lifted":
                             drop([name], line)
         if whole:
             context.plan.whole |= whole         # (in context_key: the next round's readable C is made anew)
-        accepted = [n for n in accepted if n not in gone - whole]
+        accepted = [n for n in accepted if n not in gone - whole - set(again)]
         if not gone:
             break
     runs = target.scenarios and hasattr(program.arch, "reset")

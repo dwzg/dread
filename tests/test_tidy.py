@@ -148,6 +148,140 @@ def test_a_load_is_abstracted_with_its_own_type():
     assert not cexpr.prove(expr("%s - 1 < 0" % load), expr("0"), c, as_bool=True)
 
 
+@needs_z3
+def test_a_call_is_abstracted_with_its_declared_result_type():
+    """A callee declared to hand back two words (u64: a quotient and its remainder) gives a 64-bit
+    value: its low word compared, x > (u32)f(a), is not the whole call compared. Taken for unsigned int,
+    as every call was until 2026-10-24, the proof held for the wrong semantics. A call through a cast
+    pointer has the cast's result type; a callee the context does not know returns unsigned int."""
+    wide = cexpr.Ctx(types=TYPES, returns={"f": "u64"})
+    low, whole = expr("x > (u32)f(a)"), expr("x > f(a)")
+    assert not cexpr.prove(low, whole, wide, as_bool=True)
+    assert cexpr.prove(low, whole, cexpr.Ctx(types=TYPES, returns={"f": "u32"}), as_bool=True)
+    assert cexpr.prove(low, whole, ctx(), as_bool=True)             # (f not known: unsigned int)
+    assert wide.result_type(expr("f(a)")) == (64, False) and wide.result_type(expr("g(a)")) == (32, False)
+    assert wide.result_type(expr("((u64 (*)(u32, u32))a)(x, b)")) == (64, False)
+    assert wide.result_type(expr("((u32 (*)(u32))a)(x)")) == (32, False)
+
+
+TWO_WORDS = """/* f at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u64 divmod(u32, u32, u32, u32);
+u32 f(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r12 = 0;
+    u32 n = 0, z = 0, c = 0, v = 0;
+    (void)n; (void)z; (void)c; (void)v; (void)r4; (void)r5; (void)r12;
+    r5 = r0;  /* 0: mov r5, r0 */
+    r0 = r1 + 0x1u;  /* 4: add r0, r1, #1 */
+    r1 = 0xffffu;  /* 8: ldr r1, [pc, #0x20] */
+    { u64 t = divmod(r0, r1, r2, r3); r0 = (u32)t; r1 = (u32)(t >> 32); } r2 = r3 = r12 = 0;  /* c: bl divmod */
+%s}
+"""
+LOW_COMPARED = """    { u32 x = r5, y = r0; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 10: cmp r5, r0 */
+    if (!c || z) goto L_20;  /* 14: bls #0x20 */
+    r0 = 0x0u;  /* 18: mov r0, #0 */
+    return r0;  /* 1c: bx lr */
+L_20: ;
+    r0 = 0x1u;  /* 20: mov r0, #1 */
+    return r0;  /* 24: bx lr */
+"""
+LOW_SHIFTED = """    r2 = r0;  /* 10: mov r2, r0 */
+    r0 = r2 >> 1;  /* 14: lsr r0, r2, #1 */
+    r0 = r0 + r5;  /* 18: add r0, r0, r5 */
+    return r0;  /* 1c: bx lr */
+"""
+
+
+@needs_z3
+@pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
+@pytest.mark.parametrize("use", [LOW_COMPARED, LOW_SHIFTED], ids=["compared", "shifted"])
+def test_a_two_word_results_low_word_keeps_its_cast_where_it_is_folded(tmp_path, use):
+    """divmod hands back two words (declared u64), f reads the first only: whether x <= 0xffff / (n + 1),
+    or that quotient halved plus x. The values pass writes r0 = divmod(...) for r0 = (u32)divmod(...)
+    (the assignment converts), and until 2026-10-24 fold then wrote that value into its one reader
+    bare, and the conditions search, which took the call for unsigned int, kept it so: x <= divmod(...)
+    compared 64 bits, the remainder as the high word, and divmod(...) >> 1 shifted the remainder's bit
+    in. Now fold writes the value as the assignment converted it ((u32)divmod(...)) and the proofs take
+    the call for the u64 it is. Cleaned up and compiled with the host's C compiler beside the lifted C,
+    with a divmod whose remainder is not 0, both give the same."""
+    from dread import readable
+    text = TWO_WORDS % use
+    out = readable.transform("f", text)
+    assert "(u32)divmod(" in out, out
+    head = ("typedef unsigned int u32;\ntypedef unsigned long long u64;\ntypedef signed int s32;\n"
+            "u64 divmod(u32 d, u32 x, u32 c, u32 e)\n{\n    (void)c; (void)e;\n"
+            "    return d ? (u64)(x % d) << 32 | x / d : x;\n}\n")
+
+    def own(text, name):
+        lines = [line for line in text.splitlines() if not line.startswith(("#include", "extern "))]
+        return "\n".join(lines).replace(" f(", " %s(" % name, 1) + "\n"
+    source = tmp_path / "two.c"
+    source.write_text(head + own(text, "orig") + own(out, "cleaned"))
+    lib = tmp_path / "two.so"
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(source)], check=True)
+    so = ctypes.CDLL(str(lib))
+    a, b = so.orig, so.cleaned
+    params = [p[1] for p in cparse.parse(out).function("f").params]
+    a.restype, a.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * 4
+    b.restype, b.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * len(params)
+    for count in (1, 3, 6):
+        q = 0xffff // (count + 1)
+        for x in (0, 1, q - 1, q, q + 1, 100000, 0xffffffff):
+            given = {"r0": x, "r1": count}
+            assert a(x, count, 0, 0) == b(*[given.get(p, 0) for p in params]), (count, hex(x), out)
+
+
+IS_FULL = """/* xStreamBufferIsFull at 0xc4bc, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 vAssertCalled(u32, u32, u32, u32);
+extern u32 xStreamBufferSpacesAvailable(u32, u32, u32, u32);
+u32 xStreamBufferIsFull(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0, r11 = 0, r12 = 0, lr = (u32)__builtin_return_address(0);
+    u32 n = 0, z = 0, c = 0, v = 0;
+    u32 frame[1] __attribute__((aligned(8)));
+    u32 sp0 = (u32)&frame[0] + 16;
+    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)lr; (void)sp0;
+    /* c4bc: push {r3, r4, r5, lr} */
+    r5 = r0;  /* c4be: mov r5, r0 */
+    if (r0 != 0) goto L_c4cc;  /* c4c0: cbnz r0, #0xc4cc */
+    r1 = 0x557u;  /* c4c2: movw r1, #0x557 */
+    r0 = 0x10a3u;  /* c4c6: ldr r0, [pc, #0x1c] */
+    r0 = vAssertCalled(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* c4c8: bl #0x17dc */
+L_c4cc: ;
+    r0 = r5;  /* c4cc: mov r0, r5 */
+    r4 = (u32)*(volatile u8 *)((r5 + 28));  /* c4ce: ldrb r4, [r5, #0x1c] */
+    r0 = xStreamBufferSpacesAvailable(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* c4d0: bl #0xc10c */
+    r4 = r4 & 0x1u;  /* c4d4: and r4, r4, #1 */
+    { u32 x = r4; r4 = (x << 2); n = r4 >> 31; z = r4 == 0; c = ((x >> 30) & 1); }  /* c4d8: lsls r4, r4, #2 */
+    { u32 x = r0, y = r4; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* c4da: cmp r0, r4 */
+    /* c4dc: ite hi */
+    if ((c && !z)) { r0 = 0x0u; }  /* c4de: movhi r0, #0 */
+    if ((!c || z)) { r0 = 0x1u; }  /* c4e0: movls r0, #1 */
+    return r0;  /* c4e2: pop {r3, r4, r5, pc} */
+}"""
+
+
+@needs_z3
+def test_a_conversion_no_reader_sees_writes_no_cast(monkeypatch):
+    """FreeRTOS GCC -Os xStreamBufferIsFull (its lifted C, of public code): a byte loaded into r4 before
+    a call, its bit 0 shifted after it. The values pass drops the load's (u32) (r4 = *(volatile u8
+    *)(r5 + 28)), and fold writes the load into its reader where the conversion to r4's type (a byte
+    promoted to int there) changes nothing: z3 proves the reader the same with and without it
+    (same_reads), so no cast goes in, as before 2026-10-24; without the proof (1)
+    `((u32)*(volatile u8 *)(r0 + 28) & 1) << 2`. (The same proof keeps a two-word comparison's carry
+    (r3 >= 5) bare, so it pairs into one 64-bit comparison: prvSanityCheckCreatedQueue.)"""
+    from dread import readable
+    out = readable.transform("xStreamBufferIsFull", IS_FULL)
+    assert "r4 = (*(volatile u8 *)(r0 + 28) & 1) << 2;" in out, out
+    monkeypatch.setattr(tidy, "same_reads", lambda *a, **k: False)
+    monkeypatch.setattr(readable, "_MEMO", {})          # (transform keeps what it made: made anew)
+    out = readable.transform("xStreamBufferIsFull", IS_FULL)
+    assert "r4 = ((u32)*(volatile u8 *)(r0 + 28) & 1) << 2;" in out, out     # (1: correct, and a cast more)
+
+
+
 FRAME = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
 #include "dread.h"
 extern u32 g(u32, u32, u32, u32);

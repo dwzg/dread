@@ -9,6 +9,72 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C's two-word results, callers of a function that fails, save areas behind a frame copy (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), from regressions on the
+private real-life test: after the readable C changes of 2026-10-23 the readable gate kept many times
+as many of its functions lifted as the day before, most of them readable then.
+
+- **Question.** What made those functions fail, and how is each cause mended without taking from what
+  the gate compares? Three causes were found, each traced to the first instruction where the images
+  part (the private target's notes have the functions):
+  1. **A two-word result used as one word.** The lifters declare a callee whose callers read r1 after
+     it u64 (a division routine's quotient and remainder) and take its first word with (u32). Since
+     "flags as comparisons" (f6757bd) loads_once lets a call be a value's only effect, so the values
+     pass writes r0 = f(...) for r0 = (u32)f(...), which is right for the assignment; fold then wrote
+     that value into its one reader as it was (if (x <= f(...)), a store of f(...) >> 1): 64 bits, the
+     remainder as the high word. The proofs that would have noticed took every call for unsigned int
+     (cexpr.abstract), so the conditions search also turned x > (u32)f(...) into x > f(...) by itself.
+     The gate failed such functions where their cases gave a remainder, and with them every caller
+     whose cases ran them for real; where no case did (a comparison with 0 that no case reached with a
+     quotient of 0 and a remainder), it accepted the wrong C, and a caller's cases found it.
+  2. **Every caller of such a function went back with it.** The gate dropped all that failed in a
+     round; the lift check retries a function that failed through a failing callee (RETRY_PASSES),
+     the readable gate did not.
+  3. **A save area behind a frame copy.** A variadic function of an APCS frame keeps the entry's
+     stack pointer first (mov ip, sp; push {r1, r2, r3}; push {r4, ip, lr}); entry_save_areas looked at
+     the first instruction only, so its callers' calls were trimmed to what regflow says it reads (its
+     va_list reads more: the cases logged the third argument), and since 1404c72 push_room took its
+     own pushes out.
+- **Options.** (1) (a) keep the (u32) in the values pass; (b) fold writes a value as its assignment
+  converted it; (c) the proofs type a call by its declaration. (2) (a) as the lift check: drop, and
+  retry bottom-up after a round without failures; (b) keep a failing function whose code reaches
+  another failing one in the next round, with that one from lifted C. (3) (a) regflow counts pushes
+  of argument registers as uses; (b) entry_save_areas looks past a few instructions in front of the
+  push.
+- **Choice: (1) (b) and (c), (2) (b), (3) (b).** (1c) makes the proofs model C, so every rewrite that
+  has a call in it is decided right, not only this one: Ctx.returns holds the file's declarations
+  (readable.Run.returns, handed to the passes through the tidy run: tidy._RUN.returns), a call
+  through a cast pointer has the cast's result type, an unknown callee unsigned int as before. (1b)
+  fold writes the value cast to its variable's type unless C gives it that type already (c_type),
+  every read is one the conversion cannot change (a truth value of a value no wider than the
+  variable, the whole of a return or of an assignment of the variable's type), or z3 proves that the
+  reader gives the same with the bare value (same_reads: an if's condition, an assignment's or a
+  store's value as its target's type has it, a return's value; tidy.as_assigned). (1a) alone would
+  leave fold wrong for any value of another type than its variable (a byte loaded, a comparison's
+  int, a select). Without the proof, a cast went in front of loaded bytes and halfwords that never
+  needed one, and a two-word comparison's carry ((u32)(r3 >= 5)) no longer paired into one 64-bit
+  comparison (FreeRTOS GCC -Os prvSanityCheckCreatedQueue). With it the readable C of seven public
+  builds is byte for byte what it was; on FreeRTOS GCC -O0 two functions get back a conversion fold
+  had dropped, both before and after accepted by the gate (prvTest3_CheckAutoReloadExpireRates:
+  (u8)(s28 - 1), a u8 local's wrap-around; __NVIC_EnableIRQ: (u32)(s8)s9 >> 5, CMSIS's unsigned shift
+  of the IRQ number, where (s8)s9 >> 5 shifted arithmetically: equal only for the non-negative
+  numbers its guard lets through). (2b) costs no round the gate would not run anyway (it runs again
+  after any failure), where (2a) adds at least one; the last round still runs every accepted
+  function's cases with everything as it ends up, so nothing is accepted that the gate did not see
+  agree. Not where every function that failed reaches another (recursion): then all go, as before,
+  and every round sends one back at least. (3b): pushes stay no use to regflow (right for the lifter,
+  which passes every register); the frame copy writes neither sp nor an argument register.
+- **Not mended.** Written cases whose stubs log an argument register their callee does not read (an
+  empty function, the fourth register of a callee that reads three) fail readable C that passes only
+  what the callee reads, wherever the C compiler leaves another value there (it had left the
+  original's before, by chance); the comparison stays (rule 6). On the private target such cases came
+  from its earlier project; their stub masks are the target's to correct.
+- **Undo.** cexpr.Ctx.result_type returning (int_bits, False) takes (1c) back; tidy.as_assigned
+  returning value takes (1b) back; the check's again set staying empty takes (2) back;
+  SAVE_AREA_LEAD = 0 takes (3) back.
+- **Status.** Done (docs/todo.md, the item, with the figures).
+
 ## Readable C's frames: an object at each address handed out, volatile only where an address may escape (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20; the item in docs/todo.md,

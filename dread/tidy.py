@@ -1140,6 +1140,9 @@ def fold(fn):
 
 def _fold(fn, view_of):
     changed = False
+    ctx = context(fn)                       # (the variables' types: as_assigned)
+    head = re.match(r"^\s*(\w+)\s+\w+\s*\(", fn.head or "")
+    result = ctx.ctype(head.group(1)) if head and head.group(1) != "void" else None
     while True:
         view = view_of(fn)
         g = Graph(view)
@@ -1187,6 +1190,7 @@ def _fold(fn, view_of):
             reader = g.nodes[u].stmt
             calls = isinstance(reader, (C.ExprStmt, C.Return)) and _calls(value) and not any(
                 _calls(get()) for get, _ in stmt_exprs(reader))
+            value = as_assigned(value, v, reader, ctx, result)
             for get, put in stmt_exprs(reader):
                 if reads_count(get(), v):
                     put(substitute(get(), v, value))
@@ -1198,6 +1202,104 @@ def _fold(fn, view_of):
         for d, _, _, _ in plans:
             replace(view, g.nodes[d].stmt)
         changed = True
+
+
+def as_assigned(value, v, reader, ctx, result=None):
+    """What a read of variable v in statement reader is when v = value is written into it: value as
+    the assignment converted it to v's type. value itself where C gives it that type (c_type), where
+    every read of v in reader is one the conversion cannot change (a truth value of a value no wider
+    than v; the whole of a return's value, result being the function's result type and v's, or of an
+    assignment to a variable of v's type, which convert alike), or where z3 proves that reader's
+    expressions give with value what they give with the converted value (same_reads); else value cast
+    to v's type. Until 2026-10-24 fold wrote the value in bare: the values pass drops the cast of
+    r0 = (u32)f() (right for the assignment), f declared u64 (two words back), and folded into
+    if (x <= r0) the comparison took the second word too."""
+    ty = ctx.types.get(v)
+    if ty is None:
+        return value
+    have = c_type(value, ctx)
+    if have == ty:
+        return value
+    cast = C.Cast("%s%d" % ("s" if ty[1] else "u", ty[0]), value)
+
+    def whole(e):                           # (e is v alone, converted to v's type by what it is in)
+        return isinstance(e, C.Name) and e.id == v
+    ok = [True]
+
+    def visit(e, truth):
+        if e is None or not ok[0]:
+            return
+        if isinstance(e, C.Name):
+            if e.id == v and not (truth and have is not None and have[0] <= ty[0]):
+                ok[0] = False
+            return
+        if isinstance(e, C.Unary) and e.op == "!":
+            return visit(e.e, True)
+        if isinstance(e, C.Binary) and e.op in ("&&", "||"):
+            visit(e.l, True)
+            return visit(e.r, True)
+        if isinstance(e, C.Cond):
+            visit(e.c, True)
+            visit(e.t, False)
+            return visit(e.f, False)
+        if isinstance(e, C.Assign):
+            if e.op == "=" and isinstance(e.target, C.Name) and whole(e.value) and ctx.types.get(e.target.id) == ty:
+                return
+            if not isinstance(e.target, C.Name):
+                visit(e.target, False)      # (a store's address)
+            return visit(e.value, False)
+        for c in _children(e):
+            visit(c, False)
+    if isinstance(reader, C.Return) and whole(reader.e) and result == ty:
+        return value
+    for get, _ in stmt_exprs(reader):
+        e = get()
+        visit(e, isinstance(reader, C.If) and e is reader.cond)
+    if ok[0] or same_reads(value, cast, v, reader, ctx, result):
+        return value
+    return cast
+
+
+def same_reads(value, cast, v, reader, ctx, result=None):
+    """Whether every expression of reader that reads v gives, with value written for v, what it gives
+    with cast (value converted to v's type), proved by z3 (cexpr.equivalent) as reader uses it: an if's
+    condition as a truth value, an assignment's value as its target's type has it (a variable's, a
+    store's pointee type) and a store's address, a return's value as the function's result type
+    (result) has it. Anything else (a call's argument, a switch) is not tried: False."""
+    if cexpr.z3 is None:
+        return False
+
+    def typed(e, ty):
+        return C.Cast("%s%d" % ("s" if ty[1] else "u", ty[0]), e)
+
+    for get, _ in stmt_exprs(reader):
+        e = get()
+        if not reads_count(e, v):
+            continue
+        with_cast, bare = substitute(e, v, cast), substitute(e, v, value)
+        if isinstance(reader, C.If) and e is reader.cond:
+            pairs = [(with_cast, bare, True)]
+        elif isinstance(e, C.Assign) and e.op == "=":
+            target, pairs = e.target, []
+            if isinstance(target, C.Name):
+                ty = ctx.types.get(target.id)
+            elif isinstance(target, C.Unary) and target.op == "*" and isinstance(target.e, C.Cast):
+                ty = type_of_expr(target, ctx)
+                if reads_count(target, v):          # (the address, as the integer it is cast from)
+                    pairs.append((with_cast.target.e.e, bare.target.e.e, False))
+            else:
+                return False
+            if ty is None:
+                return False
+            pairs.append((typed(with_cast.value, ty), typed(bare.value, ty), False))
+        elif isinstance(reader, C.Return) and e is reader.e and result is not None:
+            pairs = [(typed(with_cast, result), typed(bare, result), False)]
+        else:
+            return False
+        for e1, e2, as_bool in pairs:
+            if not cexpr.equivalent(e1, e2, ctx, as_bool=as_bool):
+                return False
+    return True
 
 
 def _calls(e):
@@ -1452,8 +1554,9 @@ def context(fn):
     variables say so (a parameter, a register r4 or its webs' r4_1, sp0): a u16 variable of the
     readable C's (a 16-bit stack slot of an ARM function) made a whole function 16-bit, and the
     conditions pass then proved a wrong comparison ((u32)(s16)x != 12 as x >= 0, ~12 being 0xfff3 in
-    16 bits)."""
-    ctx = cexpr.Ctx()
+    16 bits). The callees' result types are those of the tidy run under way in this thread (tidy:
+    _RUN.returns), none outside one (a call is then taken to return unsigned int)."""
+    ctx = cexpr.Ctx(returns=getattr(_RUN, "returns", None))
     narrow = any(p[0] == "u16" for p in fn.params) or any(
         isinstance(x, C.Decl) and x.specs == "u16" and any(LIFTER_REGISTER.match(d.name) for d in x.items)
         for x in fn.body.body)
@@ -3545,13 +3648,16 @@ def group_declarations(fn):
 def tidy(fn, run=None, passes=None, rounds=8):
     """All passes, again until none changes anything (at most rounds times); then the calls' and the
     function's own arguments (trim_calls, params) and the passes once more, the calls' again while
-    that leaves values nobody reads. The conditions' answers are kept for the run (_RUN: conditions)."""
-    outer = getattr(_RUN, "memo", None)
+    that leaves values nobody reads. The conditions' answers are kept for the run (_RUN: conditions),
+    and the callees' declared result types (run.returns, the file's declarations) are what the proofs
+    give their calls (_RUN.returns, read by context: cexpr.Ctx.result_type)."""
+    outer, outer_returns = getattr(_RUN, "memo", None), getattr(_RUN, "returns", None)
     _RUN.memo = {}
+    _RUN.returns = dict(getattr(run, "returns", None) or {})
     try:
         return _tidy(fn, run, passes, rounds)
     finally:
-        _RUN.memo = outer
+        _RUN.memo, _RUN.returns = outer, outer_returns
 
 
 def _tidy(fn, run, passes, rounds):

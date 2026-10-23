@@ -9,11 +9,13 @@ range check (x & ~0x20) - 0x41 <= 0x19 passed for x == 0x41 on every value tried
 letter. Without z3 (the optional extra "prove") nothing is proved and equivalent says no.
 
 What cannot be evaluated (a call, a memory access) is abstracted: each distinct such subexpression
-becomes a variable of its own (abstract), so that both expressions see the same value for it.
+becomes a variable of its own (abstract), so that both expressions see the same value for it, of the
+type C gives it (a load its pointee's, a call its callee's declared result: Ctx.returns).
 Undefined behaviour (a shift by the width or more, a division by zero) raises Undefined; such a value
 of the inputs is left out of the comparison when the lifted expression has it.
 """
 import random
+import re
 
 from dread import cparse as C
 
@@ -23,11 +25,30 @@ class Undefined(Exception):
 
 
 class Ctx:
-    """The target's integer widths (ARM and RISC-V: int 32 bits; MSP430: 16) and the variables' types."""
+    """The target's integer widths (ARM and RISC-V: int 32 bits; MSP430: 16), the variables' types and
+    the callees' declared result types (returns: {name: type as written}, the file's declarations)."""
 
-    def __init__(self, int_bits=32, long_bits=32, types=None):
+    def __init__(self, int_bits=32, long_bits=32, types=None, returns=None):
         self.int_bits, self.long_bits = int_bits, long_bits
         self.types = dict(types or {})
+        self.returns = dict(returns or {})
+
+    def result_type(self, call):
+        """(bits, signed) of what a call gives, as C has it: its callee's declared result type (returns;
+        for a call through a cast pointer, the cast's: (u64 (*)(u32, u32))r3), else unsigned int's width
+        (the lifters declare their callees to return a register); None where it is no integer (void, a
+        pointer). Until 2026-10-24 every call was unsigned int's width: a callee declared u64 (two words
+        back, a quotient and its remainder) compared as 32 bits in the proof and as 64 in C, and the
+        conditions search took x > f() for x > (u32)f()."""
+        f, text = call.f, None
+        if isinstance(f, C.Name):
+            text = self.returns.get(f.id)
+        elif isinstance(f, C.Cast):
+            m = re.match(r"^(.+?)\(\s*\*\s*\)\s*\(", f.type)
+            text = m.group(1) if m else ""
+        if text is None:
+            return (self.int_bits, False)
+        return self.ctype(text) if text.strip() else None
 
     def ctype(self, text):
         """(bits, signed) of a type name, or None (a pointer, a struct)."""
@@ -216,22 +237,22 @@ def abstract(exprs, ctx, prefix="__v", mapping=None, into=None):
     those variables; ctx.abstracted: {its text: the variable}). mapping and into: those of an earlier
     call, so that a second expression gets the same variables for the same subexpressions."""
     seen = {} if mapping is None else mapping
-    ctx2 = into if into is not None else Ctx(ctx.int_bits, ctx.long_bits, ctx.types)
+    ctx2 = into if into is not None else Ctx(ctx.int_bits, ctx.long_bits, ctx.types, ctx.returns)
     ctx2.abstracted = seen
 
     def key(x):
         return C.expr_text(x)
 
     def own_type(x):
-        """The C type of what cannot be evaluated: a load's pointee type, a call's (the lifters declare
-        their callees to return a register: unsigned int's width), None for the rest."""
+        """The C type of what cannot be evaluated: a load's pointee type, a call's (Ctx.result_type:
+        its declared result type), None for the rest."""
         if isinstance(x, C.Unary) and x.op == "*" and isinstance(x.e, C.Cast):
             words = x.e.type.split()
             if words.count("*") == 1 and words[-1] == "*":
                 return ctx.ctype(" ".join(w for w in words[:-1] if w not in ("volatile", "const")))
             return None
         if isinstance(x, C.Call):
-            return (ctx.int_bits, False)
+            return ctx.result_type(x)
         return None
 
     def rewrite(x):
