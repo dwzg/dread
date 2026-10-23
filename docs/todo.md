@@ -543,7 +543,9 @@ its sources.
   On the private real-life test (2026-10-23) the gate accepted the same functions with the structures
   of static data as without; about a sixth of its readable C's accesses at fixed addresses became
   members of them (on FreeRTOS a twentieth), and where its reconstruction has named the fields, the
-  structures found are the blocks it reads as one base with offsets too.
+  structures found are the blocks it reads as one base with offsets too. With the arrays (the same
+  day) half as many again became members, a fifth of those indexed, a tenth of the raw accesses went,
+  and some hundreds of addresses read as &; the gate still accepted the same functions.
   The four left above, done later on 2026-10-23 (docs/decisions.md, "Arrays of static data, addresses
   as &, and what callees reach"). Arrays (statics.find_arrays): a load or store of the lifted functions'
   readable C at a constant plus an index times a scale (indexed_accesses; dread.tidy folded the
