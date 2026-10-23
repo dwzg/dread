@@ -19,14 +19,19 @@ device access, an exception) was a computation, however many blocks it took: the
 for it differs, so nothing may depend on its length. One that does not end is a wait the clock
 cannot see (a rebuilt idle loop, a task polling memory, a busy task only an interrupt preempts):
 from FROZEN blocks on the run looks for a loop in it, a block entered again with the core's registers
-as at an earlier entry (System._loops; LOOP_MAX blocks count as one too), and then moves the clock
-to the next scheduled event, in both runs alike. Until 2026-10-22 FROZEN blocks in a row were a
-wait: the rule fell inside a long computation of one image's code and not the other's, and in a loop
-at a block where the core masked the interrupt, which was not asked for again (FreeRTOS on RISC-V
-GCC -Os and Cortex-M clang -O2 differed with lifted C alone). Interrupts are taken behind a block of
-shared code, or, in such a wait, behind the first block in which the core takes them (at once, or
-behind the instruction that unmasks them): the code it interrupts is not shared, so there is no
-common place to wait for. A controller with priorities (dread.models.nvic) decides with the core's
+and memory as at an earlier entry (System._loops: the whole state repeats, so the code repeats for
+ever unless an interrupt comes; LOOP_MAX blocks count as one too, which a busy task that counts in
+memory or in a register needs), and then moves the clock to the next scheduled event, in both runs
+alike. Until 2026-10-22 FROZEN blocks in a row were a wait: the rule fell inside a long computation
+of one image's code and not the other's, and in a loop at a block where the core masked the
+interrupt, which was not asked for again (FreeRTOS on RISC-V GCC -Os and Cortex-M clang -O2 differed
+with lifted C alone). Until 2026-10-23 the registers alone made a loop, and a computation whose
+progress lay in memory while its registers repeated at a block was taken for a wait in one image
+and not in the other (FreeRTOS on RISC-V GCC -Os, the stream-buffer tests' C). Interrupts are taken
+behind a block of shared code, or, in such a wait, behind the first block in which the core takes
+them (at once, or behind the instruction that unmasks them): the code it interrupts is not shared,
+so there is no common place to wait for (where in a wait made only of C that is differs between
+the images: docs/todo.md). A controller with priorities (dread.models.nvic) decides with the core's
 masks whether one is taken (may_take), so a pending one waits while masked and comes behind the
 first shared block after the mask drops, or at once behind the return of the handler that held it
 off. svc raises its exception (Cortex-M: SVCall) at once. The device log, every
@@ -48,11 +53,14 @@ blocks). On Unicorn a hook in C (dread.fasthooks, dread_sysblock) does the block
 clock: a known block of shared code with nothing due, a function entered again (counted there),
 and one behind which the masked interrupt's answer still holds (the registers it depends on read as
 when it was given: the layer's mask_registers); and the known blocks of a stretch outside shared
-code that only count (sys_stretch: before FROZEN, not at the anchor or with other registers there,
-in a wait while the masked answer holds). Every other block goes to System._on_block, which keeps
-the rules; both read and write one state (System.st). Elsewhere (DREAD's own engines) _on_block
-does every block. (FreeRTOS's RISC-V GCC -Os image with every lifted function rebuilt: a run to the
-limit took 20 s with its stretches' blocks in Python, 1.2 s with them in C.)
+code that only count (sys_stretch: before FROZEN, not at the anchor or with other registers or
+memory there, in a wait while the masked answer holds). Every other block goes to System._on_block,
+which keeps the rules; both read and write one state (System.st). Elsewhere (DREAD's own engines)
+_on_block does every block. (FreeRTOS's RISC-V GCC -Os image with every lifted function rebuilt: a
+run to the limit took 20 s with its stretches' blocks in Python, 1.2 s with them in C.) While the
+loop search looks at a stretch, a write hook keeps what it stored since the anchor (System._track;
+in C dread_syswrite), and it is in only then: Unicorn syncs pc before every hooked store, and a hook
+on every store made a FreeRTOS run four tenths slower.
 
 The device accesses are the other hot path, once much of the code is outside shared code and its
 clock stands still: FreeRTOS's Cortex-M port reads ICSR in every critical section, and with the
@@ -133,7 +141,7 @@ import os
 import sys
 
 from unicorn import (UC_HOOK_BLOCK, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_UNMAPPED, UC_HOOK_MEM_WRITE,
-                     UC_MEM_WRITE, UcError)
+                     UC_MEM_WRITE, Uc, UcError)
 
 from dread import models as dmodels
 from dread import target as tgt
@@ -193,6 +201,7 @@ class _State:
         # the stretch outside shared code (System._stretch): see SysState
         self.stretch_from, self.loop_max, self.anchor_next = FROZEN, LOOP_MAX, FROZEN
         self.waited = self.anchor = self.resume = self.waiting = 0
+        self.track = self.lost = self.dirty = 0     # what the stretch stored since the anchor (System._track)
         self.io_done = self.last_access = 0     # (the C hook's reads: none here)
         self.came, self.vector, self.suspended_n = CAME_RESET, 1, 0     # (System._ran)
 
@@ -317,6 +326,13 @@ class System:
         if self.fast is not None:
             self.fast.set_state_registers(self.state_regs)
             self.st.sp_reg, self.st.pc_reg = self.layout.sp, self.layout.pc
+        self._words, self._write_hook = {}, None    # (without the C hook) the words stored to since the
+                                                    # anchor, [then, now], and the write hook while it is in
+        if not self.layout.io and isinstance(uc, Uc):
+            # A write hook put in during the run (_track) sees the stores of code Unicorn translated
+            # while some memory hook was in: without one it emits the TLB's fast path, which calls
+            # no hook. The device hooks are such hooks; without devices, this one is (it never fires).
+            uc.hook_add(UC_HOOK_MEM_WRITE, lambda *args: None, begin=self.layout.sentinel, end=self.layout.sentinel)
         # A stop asked for by a peripheral access, taken where the next block starts: stopped inside a
         # memory hook, Unicorn leaves pc on the accessing instruction (a store done, a load not), and
         # going on from pc would repeat the access (dread.engines)
@@ -402,13 +418,18 @@ class System:
     def _loops(self, address, n):
         """Whether the stretch outside shared code (n blocks so far) has come back to where it was: a
         block entered again with the core's registers (_state_registers) as at an anchor, a block
-        entered earlier in the stretch. The anchor moves to the current block at FROZEN, 2 FROZEN,
-        4 FROZEN ... blocks (Brent's cycle search), so that it comes to lie inside a loop the stretch
-        ends in, and a loop of fewer blocks than the anchor's span is found within one round.
-        Memory is not compared: a loop that counts in memory alone (a busy task's counter) is found as
-        well, and so would be a computation whose progress lies in memory alone while every register
-        repeats (not seen; not confirmed that none exists). A stretch of LOOP_MAX blocks counts as a
-        loop all the same: a busy loop that counts in a register, or a computation too long to tell."""
+        entered earlier in the stretch, and memory as it was then (_came_round). The anchor moves to
+        the current block at FROZEN, 2 FROZEN, 4 FROZEN ... blocks (Brent's cycle search), so that it
+        comes to lie inside a loop the stretch ends in, and a loop of fewer blocks than the anchor's
+        span is found within one round. With the registers and memory both as at the anchor, the
+        code repeats for ever unless an interrupt comes, whichever image's code it is: a computation
+        is never taken for a wait, however its progress is kept. Until 2026-10-23 memory was not
+        compared, and a computation whose progress lay in memory while every register repeated at a
+        block was taken for one (FreeRTOS on RISC-V GCC -Os, the stream-buffer tests' C: the rebuilt
+        run moved the clock on to the tick in the middle of xStreamBufferIsFull's loop, and the whole
+        image differed). A loop that counts in memory alone (a busy task's counter) is no loop so; it
+        and a busy loop that counts in a register count as waits after LOOP_MAX blocks, as does a
+        computation too long to tell. Not compared: registers outside _state_registers (the FPU's)."""
         if n >= LOOP_MAX or self._came_round(address):
             return True
         st = self.st
@@ -418,15 +439,75 @@ class System:
             if self.fast is not None and st.nregs >= 0:     # (the C hook's copy)
                 st.anchor_vals[:len(self.anchor_vals)] = self.anchor_vals
             st.anchor, st.anchor_next = address + 1, 2 * n
+            self._track()
         return False
 
     def _came_round(self, address):
-        """Whether the block at `address` is entered with the anchor's registers (in C:
-        sys_at_anchor)."""
-        if self.st.anchor != address + 1:
+        """Whether the block at `address` is entered with the anchor's registers, and every word the
+        stretch stored to since the anchor holds its value then again (in C: sys_at_anchor)."""
+        st = self.st
+        if st.anchor != address + 1 or st.dirty or st.lost:
             return False
         read = self.regs.reg_read
         return all(read(r) == v for r, v in zip(self.state_regs, self.anchor_vals))
+
+    def _track(self):
+        """The anchor moved: from here the stretch's stores are tracked against memory as it is now,
+        by a write hook that is in only while a stretch is tracked (Unicorn syncs pc before every
+        hooked store: a hook on every store of a run made it four tenths slower). Per 4-byte word
+        stored to: its value at the anchor, read before the first store to it, and its value now;
+        st.dirty counts the words whose two differ, and memory has come round when it is 0. Nothing
+        else writes memory during a stretch: a device access, an exception and a shared block end
+        it, and the models write none. In C: dread_sys_track and dread_syswrite (SysHooks.track),
+        with the C hook; else _on_write. st.lost: a store that could not be tracked (more than 8
+        bytes, or unmapped), after which memory does not count as come round until the next anchor."""
+        st = self.st
+        if self.fast is not None:
+            self.fast.track()
+            return
+        self._words = {}
+        st.dirty = st.lost = 0
+        st.track = 1
+        if self._write_hook is None:
+            self._write_hook = self.uc.hook_add(UC_HOOK_MEM_WRITE, self._on_write)
+
+    def _on_write(self, uc, access, address, size, value, user):
+        """A store while a stretch is tracked, without the C hook (dread_syswrite's rules; called
+        before the store). The hook goes at the next block once the stretch ended (_on_block):
+        Unicorn's binding lets go of a callback it deletes, which this one would be running in.
+        Like every memory hook it clears a stale IT state behind it, on every path (settle_it:
+        without, FreeRTOS's Cortex-M GCC -Os image ran off with a stack pointer gone wrong as soon
+        as a tracked stretch stored behind an IT block)."""
+        self._track_store(uc, address, size, value)
+        if self.layout.settle_it:
+            self.arch.settle_it(uc)
+
+    def _track_store(self, uc, address, size, value):
+        st = self.st
+        if not st.track or not st.frozen:
+            st.track = 0
+            return
+        if st.lost:
+            return
+        if not 1 <= size <= 8:
+            st.lost = 1
+            return
+        end, words = address + size, self._words
+        for w in range(address & ~3, end, 4):
+            e = words.get(w)
+            if e is None:
+                try:
+                    old = int.from_bytes(uc.mem_read(w, 4), "little")
+                except UcError:
+                    st.lost = 1
+                    return
+                e = words[w] = [old, old]
+            now = e[1]
+            for i in range(4):
+                if address <= w + i < end:
+                    now = now & ~(0xFF << 8 * i) | ((value >> 8 * (w + i - address)) & 0xFF) << 8 * i
+            st.dirty += (now != e[0]) - (e[1] != e[0])
+            e[1] = now
 
     def _stretch(self, uc, address):
         """A block outside shared code, where the clock stands still: st.frozen counts the blocks of
@@ -437,7 +518,8 @@ class System:
         idle loop, a task polling memory, a busy task only an interrupt preempts), and behind every
         block from then on: an interrupt a controller asks for is taken when the core takes it
         (behind the instruction that unmasks it, which ends its block); while one waits, masked, the
-        loop goes on until it comes round (or LOOP_MAX blocks) without unmasking it. Then, or with
+        loop goes on until it comes round (its registers and memory as at the anchor again: _came_round)
+        or for LOOP_MAX blocks without unmasking it. Then, or with
         none wanted, the run moves the clock on to the next event (run(): jump) and takes what it
         brings; with nothing scheduled the firmware waits for good (stuck: the run ends)."""
         st = self.st                        # (in C: sys_stretch does the blocks that only count)
@@ -447,7 +529,7 @@ class System:
         st.frozen += 1
         n = st.frozen
         if n == 1:
-            st.waiting, st.anchor, st.resume, st.anchor_next = 0, 0, 0, FROZEN
+            st.waiting, st.anchor, st.resume, st.anchor_next, st.track = 0, 0, 0, FROZEN, 0
         if not st.waiting:
             if n < FROZEN or not self._loops(address, n):
                 return
@@ -552,6 +634,9 @@ class System:
 
     def _on_block(self, uc, addr, size, user):
         st = self.st
+        if self._write_hook is not None and not (st.track and st.frozen):
+            uc.hook_del(self._write_hook)   # (without the C hook) the stretch is no longer tracked
+            self._write_hook = None
         if st.due or st.chunk <= 0:         # a stop asked for, or the chunk's end
             st.due = 0
             uc.emu_stop()                   # this block runs (and counts) when the run goes on

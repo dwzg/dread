@@ -673,6 +673,199 @@ limit = 2_000_000
     assert sysrun.compare(a, b) == [] and a.log == b.log
 
 
+PROGRESS = r'''
+#define UART (*(volatile unsigned *)0x40004000)
+#define T_LOAD (*(volatile unsigned *)0x40000004)
+#define T_CTRL (*(volatile unsigned *)0x40000008)
+#define T_STAT (*(volatile unsigned *)0x4000000c)
+#define NVIC_ISER (*(volatile unsigned *)0xE000E100)
+volatile unsigned ticks;
+__attribute__((used)) volatile unsigned tally, nest, spins;
+void timer_handler(void) { T_STAT = 1; ticks++; }
+/* while (tally < 6000) tally++: one block a round, entered with every register as in the round
+   before (the count is cleared out of r0 before the branch), the progress in memory alone */
+__attribute__((naked, noinline)) void tally_up(void)
+{
+    __asm volatile ("    ldr r1, =tally\n"
+                    "1:  ldr r0, [r1]\n"
+                    "    adds r0, #1\n"
+                    "    str r0, [r1]\n"
+                    "    movw r2, #6000\n"
+                    "    cmp r0, r2\n"
+                    "    movw r0, #0\n"
+                    "    movw r2, #0\n"
+                    "    blo 1b\n"
+                    "    bx lr\n"
+                    "    .ltorg\n");
+}
+/* until ticks: a poll whose stores come round, two words pushed and popped and nest raised in one
+   block and lowered in the next. The raising store ends an IT block, and the flags change behind
+   it: a write hook that left Unicorn's stale IT state (dread.arch.arm.settle_it) would make the
+   next block's load of ticks conditional, skipped, and the poll endless */
+__attribute__((naked, noinline)) void await_tick(void)
+{
+    __asm volatile ("    ldr r1, =nest\n"
+                    "    ldr r3, =ticks\n"
+                    "1:  push {r1, r3}\n"
+                    "    ldr r2, [r1]\n"
+                    "    adds r2, #1\n"
+                    "    cmp r2, #0\n"
+                    "    it ne\n"
+                    "    strne r2, [r1]\n"
+                    "    cmp r2, r2\n"
+                    "    b 2f\n"
+                    "2:  ldr r0, [r3]\n"
+                    "    subs r2, #1\n"
+                    "    str r2, [r1]\n"
+                    "    pop {r1, r3}\n"
+                    "    cmp r0, #0\n"
+                    "    beq 1b\n"
+                    "    bx lr\n"
+                    "    .ltorg\n");
+}
+/* spins++ until the second tick: a busy loop, its registers repeating, its counter in memory */
+__attribute__((naked, noinline)) void spin_until_two(void)
+{
+    __asm volatile ("    ldr r1, =spins\n"
+                    "    ldr r2, =ticks\n"
+                    "1:  ldr r0, [r1]\n"
+                    "    adds r0, #1\n"
+                    "    str r0, [r1]\n"
+                    "    ldr r3, [r2]\n"
+                    "    cmp r3, #2\n"
+                    "    movw r0, #0\n"
+                    "    movw r3, #0\n"
+                    "    blo 1b\n"
+                    "    bx lr\n"
+                    "    .ltorg\n");
+}
+__attribute__((noreturn)) void reset(void) {
+    NVIC_ISER = 1;
+    T_LOAD = 100;
+    T_CTRL = 3;
+    tally_up();
+    UART = '0' + ticks;
+    await_tick();
+    UART = '0' + ticks;
+    spin_until_two();
+    UART = '0' + ticks;
+    for (;;) ;
+}
+__attribute__((section(".vectors"), used)) void (*const vectors[17])(void) = {
+    (void (*)(void))0x20004000, reset, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, timer_handler };
+'''
+
+PROGRESS_C = r'''#include "dread.h"
+#define ticks (*(volatile unsigned *)TICKS)
+#define tally (*(volatile unsigned *)TALLY)
+#define nest (*(volatile unsigned *)NEST)
+#define spins (*(volatile unsigned *)SPINS)
+void tally_up(void)
+{
+    unsigned n = tally;
+    while (n < 6000)
+        tally = ++n;
+}
+void await_tick(void)
+{
+    unsigned t;
+    do {
+        nest++;
+        t = ticks;
+        nest--;
+    } while (!t);
+}
+void spin_until_two(void)
+{
+    while (ticks < 2)
+        spins++;
+}
+'''
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_computation_whose_progress_lies_in_memory_is_no_wait(tmp_path, monkeypatch):
+    """A loop comes round when its registers and memory are both as at the anchor (System._loops).
+    tally_up, await_tick and spin_until_two are rebuilt from C, their code outside shared code in
+    both images, and a periodic timer comes due every 100 units, which only a wait may move the
+    clock on to. tally_up, the original's in assembly, is a computation whose registers repeat at
+    its loop's head every round while its count goes up in memory: no wait (the C keeps the count in
+    a register); until 2026-10-23 its registers made it one, the original took the tick inside it,
+    printed "1" first and differed from the rebuilt image ("012"). await_tick, a poll on what the
+    interrupt sets whose stores come round within a round, is a loop found within a round or two of
+    the anchor. spin_until_two, a busy loop whose counter lies in memory while its registers repeat,
+    is a wait after LOOP_MAX blocks. The C hook and the Python hooks (with their write hooks) decide
+    alike."""
+    from dread import fasthooks
+    from dread.program import Program
+    t = _program_target(tmp_path, PROGRESS, '''
+[models.uart]
+kind = "uart"
+base = 0x40004000
+
+[models.timer]
+kind = "timer"
+base = 0x40000000
+count = 0x0
+load = 0x4
+ctrl = 0x8
+stat = 0xc
+rate = 1
+irq = 0
+periodic = true
+
+[models.nvic]
+kind = "nvic"
+
+[scenarios.run]
+until = {uart = "012"}
+limit = 2_000_000
+''', image="limit = 0x08000400", compiler='cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]')
+    symbols = {line.split()[2]: line.split()[1] for line in (tmp_path / "config" / "symbols.txt").read_text().splitlines()
+               if len(line.split()) == 3}
+    source = PROGRESS_C
+    for name in ("ticks", "tally", "nest", "spins"):
+        source = source.replace(name.upper(), symbols[name])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "c.c").write_text(source)
+    payload = build.build(t, t.image(), src=str(tmp_path / "src"), out=str(tmp_path / "recon"), quiet=True)
+    with open(tmp_path / "recon" / "placement.json") as f:
+        placed = [(p["address"], p["address"] + p["c_bytes"], n) for n, p in json.load(f)["functions"].items()]
+    program = Program(t, t.image())
+    waits = []
+    init, real = sysrun.System.__init__, sysrun.System._loops
+
+    def tagged(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        self.test_rebuilt = kwargs.get("placement") is not None
+
+    def spy(self, address, n):
+        found = real(self, address, n)
+        if found:
+            name = next((c for lo, hi, c in placed if lo <= address < hi), None) if self.test_rebuilt else None
+            waits.append(("rebuilt" if self.test_rebuilt else "original", name or program.function_at(address).name,
+                          "LOOP_MAX" if n >= sysrun.LOOP_MAX else n))
+        return found
+    monkeypatch.setattr(sysrun.System, "__init__", tagged)
+    monkeypatch.setattr(sysrun.System, "_loops", spy)
+
+    def run():
+        del waits[:]
+        a, b = both(t, payload, t.scenarios["run"])
+        return (a.how, a.clock, a.log, a.reports), (b.how, b.clock, b.log, b.reports), list(waits)
+    original, rebuilt, found = run()
+    assert original[0].startswith("until") and rebuilt[0].startswith("until"), (original[0], rebuilt[0])
+    assert original[3]["uart"]["sent"] == "012" and original[3]["interrupts"] == {16: 2}, original[3]
+    assert original[2] == rebuilt[2] and original[3] == rebuilt[3]
+    for run_of in ("original", "rebuilt"):
+        mine = [w[1:] for w in found if w[0] == run_of]
+        assert [w[0] for w in mine] == ["await_tick", "spin_until_two"], found
+        assert mine[0][1] <= sysrun.FROZEN + 4 and mine[1][1] == "LOOP_MAX", found
+    if fasthooks.library() is not None:
+        monkeypatch.setattr(fasthooks, "_LIB", [None])      # as without a C compiler
+        assert run() == (original, rebuilt, found)
+
+
 def test_the_c_block_hook_gives_the_python_hooks_outcome(monkeypatch):
     """On Unicorn the blocks that only move the clock are done in C (dread.fasthooks, dread_sysblock),
     and the blocks of a stretch outside shared code that decide nothing: every outcome is the Python
@@ -847,11 +1040,12 @@ scratch = {base = 0x40100000, size = 0x20000}
 """
 
 
-def _program_target(tmp_path, source, tables, profile="m"):
+def _program_target(tmp_path, source, tables, profile="m", image="", compiler=""):
     """A target in tmp_path of a program of the test's own, `source` built for a Cortex-M3 (profile
     "m": flash at 0x08000000, its vector table first, its entry `reset`) or an ARM7-style core in ARM
     state (profile "a": flash at 0x20000, its exception vectors first and its entry there, RAM at
-    0x40000000, peripherals from 0x80000000); `tables`: its models and scenarios."""
+    0x40000000, peripherals from 0x80000000); `tables`: its models and scenarios; `image` and
+    `compiler`: more lines for [image.main] and [compiler] (a limit, the C's cflags)."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
@@ -874,10 +1068,11 @@ original = "original/t.bin"
 base = 0x%x
 entry = %s
 vectors = 0x%x
-
+%s
 [compiler]
 cross = "arm-none-eabi-"
-''' % (flash, '"reset"' if profile == "m" else entry, flash) + tables)
+%s
+''' % (flash, '"reset"' if profile == "m" else entry, flash, image, compiler) + tables)
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
                            "--write-startup", elf]) == 0
     return Target.load(str(tmp_path))

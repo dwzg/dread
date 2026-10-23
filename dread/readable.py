@@ -719,9 +719,12 @@ def check(target, image, names=None, out=print, jobs=None):
         # (RISC-V GCC -Os: the image printed nothing). Until 2026-10-22 halves of the accepted ones,
         # each tried alone: two that differ only together, one in each half, sent both halves back.
         out("the whole image: %s" % found)
-        guilty = lift.culprits(sorted(accepted), lambda names: whole(names) if names else None)
-        drop(guilty, "the whole image differs with its readable C (found by halving): %s" % found)
-        accepted = [n for n in accepted if n not in guilty]
+        differs = lambda names: whole(names) if names else None    # noqa: E731
+        guilty = lift.culprits(sorted(accepted), differs)
+        one = lift.enough(accepted, guilty, differs, lift.function_bytes(program))
+        drop([one] if one else guilty, "the whole image differs with its readable C%s (found by halving): %s" % (
+            "; without it alone it agrees, of " + ", ".join(guilty) if one else "", found))
+        accepted = [n for n in accepted if n not in ([one] if one else guilty)]
         found = whole(accepted) if accepted else None
     for name in accepted:
         verdicts[name] = ("readable", "")

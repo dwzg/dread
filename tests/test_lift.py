@@ -1458,6 +1458,32 @@ def test_culprits_finds_what_differs_only_together():
     assert heavy(set(got)) and not any(heavy(set(got) - {n}) for n in got), got
 
 
+def test_enough_leaves_out_one_of_many_that_differ_only_all_together():
+    """lift.enough after culprits: a difference that needs every one of a loop's six functions (a wait
+    made only of C, whose interrupt lands where each image's code puts it) goes with any one of them,
+    the smallest first; one that needs only a part of the set, or a pair (LEAVE_ONE_FROM), still sends
+    the set back whole (None); so does a set where no single one is enough (two loops of three)."""
+    names = ["f%02d" % i for i in range(30)]
+    loop = {"f04", "f09", "f13", "f17", "f22", "f26"}
+    size = {n: 100 - int(n[1:]) for n in names}.get        # (f26 the smallest)
+
+    def all_of(group):
+        return lambda subset: group <= set(subset)
+    differs = all_of(loop)
+    guilty = lift.culprits(names, differs)
+    assert sorted(guilty) == sorted(loop)
+    assert lift.enough(names, guilty, differs, size) == "f26"
+    assert lift.enough(names, guilty, differs) == "f04"     # (without sizes: by name)
+    pair = all_of({"f03", "f21"})
+    assert lift.enough(names, lift.culprits(names, pair), pair, size) is None
+
+    def two_loops(subset):
+        s = set(subset)
+        return {"f01", "f02", "f03"} <= s or {"f11", "f12", "f13"} <= s
+    guilty = lift.culprits(names, two_loops)
+    assert len(guilty) == 3 and lift.enough(names, guilty, two_loops, size) is None
+
+
 STACK_RV_C = NOIPA_DEF + r"""
 #define THR (*(volatile unsigned char *)0x10000000)
 #define LSR (*(volatile unsigned char *)0x10000005)

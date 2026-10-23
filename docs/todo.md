@@ -2104,7 +2104,7 @@ undone). Other decisions are taken by the recommended option and written down in
   On the private real-life test (2026-10-23; no whole-image run there): about a hundred more functions
   accepted, a fifth fewer dropped for unrun instructions, and no more disagreements than before.
 
-- [ ] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
+- [x] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
   (found 2026-10-23 with the frontier answers, FreeRTOS RISC-V GCC -Os). With xTaskResumeAll accepted
   (its answers covered it) on top of what was accepted before, the whole image differs: the stream-buffer
   test task runs 8,124 blocks of C in a row (memcpy, memcmp, xStreamBufferSend, xStreamBufferSpacesAvailable,
@@ -2128,6 +2128,58 @@ undone). Other decisions are taken by the recommended option and written down in
   culprit search on -O0 runs the whole 30-million-unit scenario on the original for each probe and was
   still going after half an hour. Two things to look at: the loop test (a memory digest at the anchor? a
   second round?), and leaving out one culprit at a time where that makes the rest agree.
+  Done 2026-10-23 (docs/decisions.md). A loop comes round now when a block is entered with the
+  anchor's registers and memory as at the anchor (System._loops, _came_round; in C sys_at_anchor): the
+  whole state repeats, so the code repeats for ever unless an interrupt comes, in either image's code,
+  and a computation is never taken for a wait. Memory through the stores: from the anchor on, a write
+  hook gives each 4-byte word stored to its value at the anchor and now and counts those whose two
+  differ (dread_syswrite; System._on_write without the C hook), in only while a stretch is tracked (a
+  hook on every store that did nothing made the run 42 % slower: Unicorn syncs pc before every hooked
+  store). On the 269-function image the old rule had taken 73 of the original's 511 waits and 95 of
+  the rebuilt image's 514 with memory not come round: computations (after 2,142 to 12,363 blocks) and
+  the coherence tester's busy loop, whose counter lies in memory. Such a busy task now runs LOOP_MAX
+  blocks before it counts as a wait, as one counting in a register did. The memory test alone left
+  that image differing at entry 1195 (next item), and the lift check accepted 255; the culprit search
+  is still needed, and of a smallest set of three or more it now drops only the smallest function
+  whose leaving out alone makes the whole image agree (lift.enough; dread readable --check the same).
+  The lift check on copies of the six builds with the frontier answers (their cases cached): RISC-V
+  GCC -Os 268 accepted instead of 227, the whole image agreeing once vTaskSuspendAll alone was dropped
+  (of the coherence actor's 14), in 367 s instead of 709; GCC -Os 340, clang -O2 294, the M4F's GCC
+  -Os 349, GCC 4 -Os 323 and GCC -O0 381 as before, their tables the same. The whole images of all 37
+  benchmark builds with scenarios (each build's lifted table) end as with main, log for log; virt-gcc10
+  -Os differs at entry 32 with both (a table from before the culprit search). Gizmo: every scenario's
+  outcome the same (original, rebuilt, and with nearly every function counted as rebuilt), the lift
+  checks the same. The C hook and the Python hooks agree (the tests; RISC-V GCC -Os with 227
+  functions rebuilt, 1.6 s a run against 16 s). The cost is in the RISC-V runs, whose waits between
+  ticks are busy loops that count in memory (72 to 219 LOOP_MAX waits a run where there were 0 to 20):
+  a run of the whole image on an idle machine, main against now, 0.56 -> 1.50 s on clang 18 -Os, 0.95
+  -> 5.71 s on GCC 12 -Os, 1.02 -> 1.89 s on GCC -Os; the Cortex-M runs as before (their waits come
+  round with memory). A variant that tracks nothing (every wait then LOOP_MAX) puts three quarters of
+  that on the busy loops' blocks and a quarter on the tracking, so tracking only from the first
+  register match would gain little. Nor can LOOP_MAX come down much: the longest stretch that ended by
+  itself in those runs took 59,280 blocks (Cortex-M GCC -Os), the next 26,487. A first version's write
+  hooks did not clear Unicorn's stale IT state, as every memory hook must (dread.arch.arm.settle_it):
+  Cortex-M GCC -Os ran off with a broken stack pointer once a tracked stretch stored at the end of an
+  IT block; the test program's poll stores so now.
+
+- [ ] **Where an interrupt comes in a wait made only of C** (found 2026-10-23 behind the item above). In
+  a wait outside shared code the run takes a due interrupt behind the first block in which the core
+  takes it, which is at once where the loop search came round to its anchor (System._stretch): a place
+  each image's code puts elsewhere. On FreeRTOS RISC-V GCC -Os with xTaskResumeAll accepted,
+  prvSpaceAvailableCoherenceActor's loop (it sends to a stream buffer and receives back, its state
+  repeating) is a true wait once it and its 13 callees are C; the original came round in
+  prvWriteBytesToBuffer, where the tick switches tasks at once, the rebuilt image in
+  xStreamBufferReceive with the scheduler suspended, where the tick only pends and xTaskResumeAll
+  yields first (the whole image differs at entry 1195, a syscall against the interrupt). The lift
+  check drops one of the 14 for it now (lift.enough: with any of them the original's code, the loop
+  runs shared code and the tick comes behind a shared block). A place both images share: a function's
+  entry (lifted C keeps the original's calls, so a round enters the same functions in the same order
+  in both images), chosen from the round's sequence of entries whatever block the search came round
+  at (the sequence's least rotation, say, with the entries an old entry's branch repeats collapsed),
+  the interrupt taken there or behind the first unmask after it. Open: a round whose entries repeat
+  inside it (two halves alike, a toggle in memory between them) picks a half by phase again; a wait
+  found by LOOP_MAX has no round; one whose round enters no function (a poll inside one function)
+  would keep today's rule.
 
 - [x] **Code only a dropped case reached** (found 2026-10-22 on a private firmware, DREAD's real-life
   test: its uncovered functions took far longer to generate than those accepted, and most of them

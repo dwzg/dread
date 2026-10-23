@@ -9,6 +9,79 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## What the system run takes for a wait: registers and memory as at the anchor; one of many culprits (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The wait rule of 2026-10-22 (below: a block entered again with the core's registers as
+  at an anchor) takes a computation for a wait as soon as its registers repeat at a block while its
+  progress lies in memory. Seen on FreeRTOS RISC-V GCC -Os with the frontier answers: with
+  xTaskResumeAll accepted, the rebuilt image took xStreamBufferIsFull's loop in the stream-buffer
+  tests' C (8,263 blocks) for one and moved the clock on to the tick inside it; the whole image
+  differed at entry 511, and the culprit search dropped 42 functions (227 accepted of 269).
+  Instrumented, the runs of that image had 73 of 511 and 95 of 514 waits whose memory had not come
+  round: computations (taken after 2,142 to 12,363 blocks) and the coherence tester's busy loop,
+  whose counter lies in memory; most fell alike in both images by chance. How is a wait told from a
+  computation, at what cost, and what does the culprit search do with a large set?
+- **Options and choices.**
+  1. The test: (a) registers alone, as before; (b) registers and memory as at the anchor: the whole
+     state repeats, so the code repeats for ever unless an interrupt comes, whichever image's code it
+     is; (c) as (b), memory through a digest of the stores (it depends on their order, and a
+     collision is a false wait); (d) a count of the stores since the anchor, a wait only without any
+     (a poll that pushes a return address, or raises and lowers a nesting count, never comes round).
+     **(b)**, exactly: per 4-byte word stored to since the anchor, its value then (read before the
+     first store) and now, and the number of words whose two differ; memory has come round when it is
+     0. A busy task that counts in memory is then no loop and becomes a wait after LOOP_MAX blocks,
+     as one counting in a register was already; on 2026-10-22 that cost was the reason against
+     comparing memory, and it is measured below.
+  2. How the stores are seen: (a) a write hook for the whole run; (b) one only while the search looks
+     at a stretch, from its first anchor on; (c) RAM snapshots at the anchor, compared whenever the
+     registers come round (a busy loop's come round every round: all of RAM compared a round);
+     (d) RAM write-protected at the anchor, the first store to a page caught (Unicorn's regions split
+     page by page). **(b)**: Unicorn 2.1.4 syncs pc before every hooked store (cpu_restore_state,
+     about 48 ns), and (a) with a hook that did nothing made the run of that image 42 % slower. A hook
+     put in during a run sees the stores of code translated while some memory hook was in (the device
+     hooks; a hook over the sentinel where a target has no devices), and it takes itself out at the
+     first store after the stretch. In C beside the C block hook (dread_syswrite), in Python on
+     DREAD's own engines and without a C compiler (System._on_write); both clear Unicorn's stale IT
+     state, as every memory hook must (a first version did not, and the Cortex-M GCC -Os run went off
+     with a broken stack pointer once a tracked stretch stored at the end of an IT block).
+  3. Tracking only from the first register match, a few rounds an anchor: a variant that tracks
+     nothing (every wait then a LOOP_MAX wait) puts about three quarters of what the rule costs on the
+     busy loops' blocks and a quarter on the tracking. Not done. Nor a smaller LOOP_MAX: the longest
+     stretch that ended by itself in the benchmark's whole-image runs took 59,280 blocks (Cortex-M
+     GCC -Os), the next 26,487; 200,000 keeps a margin of 3.4.
+  4. The culprit search: (a) as before, the whole smallest set that differs alone; (b) of a set of
+     LEAVE_ONE_FROM (3) or more, the smallest function whose leaving out alone makes the whole image
+     agree, alone (lift.enough; dread readable --check the same); (c) (b) for every size. **(b)**: a
+     difference that needs every one of many together goes with one of them, at the price of up to
+     that many whole images more. A pair still goes whole, as decided on 2026-10-22 for frames that
+     grew on one task's stack (keeping either would leave the smaller margin).
+- **Why the culprit search is still needed.** With the memory test that image still differs, at
+  entry 1195: prvSpaceAvailableCoherenceActor's loop (it sends to a stream buffer and receives back,
+  its state repeating) is a true wait once it and its 13 callees are C, and the tick is taken where
+  each image's code comes round to the anchor: in the original in prvWriteBytesToBuffer, where the
+  tick switches tasks at once, in the rebuilt image in xStreamBufferReceive with the scheduler
+  suspended, where xTaskResumeAll then yields first. With any one of the 14 the original's, the loop
+  runs shared code and the tick comes behind a shared block. Where an interrupt is to come in a wait
+  made only of C is an open item (docs/todo.md).
+- **Undo.** dread/sysrun.py: _came_round's memory test, _track, _on_write and _track_store;
+  dread/fasthooks.c: sys_at_anchor's, dread_syswrite and dread_sys_track (fasthooks.SysHooks.track).
+  dread/lift.py: enough, function_bytes and LEAVE_ONE_FROM (their callers in check and
+  dread/readable.py). tests/test_sysrun.py: test_a_computation_whose_progress_lies_in_memory_is_no_wait;
+  tests/test_lift.py: test_enough_leaves_out_one_of_many_that_differ_only_all_together.
+- **Status.** Done. The lift check on copies of the six builds with the frontier answers (cases
+  cached): RISC-V GCC -Os 268 accepted instead of 227 (vTaskSuspendAll alone dropped for the whole
+  image; 255 with the memory test alone), 367 s instead of 709; the five Cortex-M builds keep their
+  tables (340, 294, 349, 323, 381). The whole images of all 37 benchmark builds with scenarios end
+  as with main, log for log, and on every RISC-V build that runs to its limit the original's and the
+  rebuilt image's runs now find the same waits of each kind (with registers alone they differed on
+  all nine that have waits). Gizmo's scenarios and lift checks give the same outcomes. The cost is
+  in the RISC-V runs, whose time between ticks is spent in busy loops that count in memory (72 to
+  219 LOOP_MAX waits a run, 0 to 20 before): a run of a whole image on an idle machine 0.56 -> 1.50
+  s on clang 18 -Os, 0.95 -> 5.71 s on GCC 12 -Os, 1.02 -> 1.89 s on GCC -Os; the Cortex-M runs as
+  before.
+
 ## What the system run keeps of who entered whom, and of its device logs (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
@@ -1098,7 +1171,9 @@ docs/todo.md, Compiler diversity).
 - **Status.** Done. On copies of the measure-38 builds the lift check drops prvTestMasterTask and
   xEventGroupSetBits on both clang builds (17 and 19 whole-image runs, 28 s each) and their whole
   images agree to the limit (8,218 and 8,165 log entries each; before, they differed at entries 355
-  and 359); gizmo's lift checks keep every function, their whole images agreeing as before.
+  and 359); gizmo's lift checks keep every function, their whole images agreeing as before. Revised
+  2026-10-23 (above): of a set of three or more only one goes where leaving it out alone makes the
+  image agree.
 
 ## Code that only the core enters: the lift check refuses a function holding it (2026-10-22)
 
@@ -1191,7 +1266,8 @@ docs/todo.md, Compiler diversity).
   sys_stretch and sys_at_anchor in dread/fasthooks.c. tests/test_sysrun.py's
   test_a_wait_outside_shared_code_is_a_loop_a_computation_is_not shows what the old rule did.
 - **Status.** Done; the four FreeRTOS builds measured agree with lifted C alone, gizmo's lift checks
-  unchanged.
+  unchanged. Revised 2026-10-23 (above): memory is compared too, since a computation whose progress
+  lay in memory was seen taken for a wait.
 
 ## Readable C against its source: clang's tree of what the compiler preprocessed (2026-10-22)
 

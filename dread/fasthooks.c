@@ -317,11 +317,20 @@ void dread_init(state_t *st)
  * most functions rebuilt, most blocks lie outside shared code instead, in stretches in which the
  * clock stands still (System._stretch): the blocks of a stretch that decide nothing are done here
  * too (sys_stretch). This hook calls the Python hook (System._on_block) for every other block, which
- * keeps the rules in one place; the state both read and write is sys_t. */
+ * keeps the rules in one place; the state both read and write is sys_t. While the loop search
+ * looks at a stretch, a write hook keeps what the stretch stored since the search's anchor
+ * (dread_syswrite), so that a loop comes round only when memory does too. */
 
 typedef void (*block_fn)(void *uc, uint64_t address, uint32_t size, void *user);
 typedef void (*io_fn)(void *uc, int type, uint64_t address, int size, int64_t value, void *user);
 typedef int (*mem_rw_fn)(void *uc, uint64_t address, void *bytes, uint64_t size);
+typedef int (*hook_del_fn)(void *uc, size_t hook);
+
+typedef struct {                    /* a word stored to since the loop search's anchor (dread_syswrite) */
+    uint64_t address;               /* its address, a multiple of 4 */
+    int64_t gen;                    /* sys_t's gen when it was first stored to; another: an empty slot */
+    uint32_t then, now;             /* its value at the anchor (read before that store) and now */
+} sysword_t;
 
 #define SYS_REGS 64
 #define UC_MEM_READ 16              /* Unicorn's uc_mem_type of a load */
@@ -374,6 +383,16 @@ typedef struct {
     int32_t nregs;                  /* registers the loop search compares; -1: more than this hook holds */
     int32_t regs[SYS_REGS];
     uint32_t anchor_vals[SYS_REGS]; /* their values at the anchor */
+    /* what the stretch stored since the anchor (dread_syswrite; System._track, _came_round) */
+    int32_t track;                  /* its stores are tracked: an anchor is set */
+    int32_t lost;                   /* a store could not be tracked: memory never counts as come round */
+    int64_t dirty;                  /* tracked words whose value is not theirs at the anchor */
+    int64_t gen;                    /* the anchor's generation: a word of an older one counts as not stored */
+    uint64_t write_hook;            /* the write hook while it is in (Unicorn's uc_hook), else 0 */
+    hook_del_fn hook_del;           /* Unicorn's uc_hook_del */
+    sysword_t *words;               /* the words stored to since the anchor (open addressing) */
+    uint64_t words_cap, words_used;
+    int64_t tracked;                /* the stores tracked, for information */
     /* the device accesses (dread_sysio, System._io) */
     io_fn io_python;                /* System._io_from_c: every access not done here */
     reg_rw_fn reg_write;
@@ -475,10 +494,11 @@ static void sys_ran(void *uc, uint64_t address, uint32_t size, sys_t *st)
     st->came = address + size;
 }
 
-/* Whether the block at address is entered with the anchor's registers (System._came_round). */
+/* Whether the block at address is entered with the anchor's registers and every word the stretch
+ * stored to since holds its value at the anchor again (System._came_round). */
 static int sys_at_anchor(void *uc, uint64_t address, sys_t *st)
 {
-    if (st->anchor != address + 1)
+    if (st->anchor != address + 1 || st->dirty || st->lost)
         return 0;
     for (int i = 0; i < st->nregs; i++) {
         uint64_t v = 0;
@@ -498,7 +518,7 @@ static int sys_stretch(void *uc, uint64_t address, uint32_t size, sys_t *st)
     } else {
         int64_t n = (int64_t)st->frozen + 1;
         if (n == 1) {
-            st->waiting = 0;
+            st->waiting = st->track = 0;
             st->anchor = st->resume = 0;
             st->anchor_next = st->stretch_from;
         }
@@ -608,6 +628,138 @@ uint32_t dread_sys_resume(sys_t *st, uint64_t key)
         st->suspended_n--;
     }
     return back;
+}
+
+/* ---- what a stretch stores while the loop search looks at it (System._track) ----
+ *
+ * A loop comes round when a block is entered with the anchor's registers and memory as it was
+ * then: the whole state repeats, so the code repeats for ever unless an interrupt comes, in the
+ * original's code and in the C alike (a test on registers alone also took a computation whose
+ * progress lay in memory for a wait, at a block where its registers repeated). Memory is compared
+ * through the stores: from the anchor on, a write hook gives each 4-byte word stored to its value
+ * at the anchor (read before the first store to it) and its value now, and dirty counts the words
+ * whose two differ; memory has come round when dirty is 0. Nothing else writes memory during a
+ * stretch (a device access, an exception or a shared block ends it, and the models write none).
+ * The hook is in only while a stretch is tracked: Unicorn syncs pc before every hooked store
+ * (cpu_restore_state), which cost a run four tenths more when a hook watched every store. Python
+ * puts it in (SysHooks.track); it takes itself out at the first store after the stretch ended or
+ * the tracking stopped (Unicorn frees a deleted hook only when emu_start returns). Every layer is
+ * little-endian: byte i of a store's value goes to its address + i. */
+
+static int sys_words_grow(sys_t *st)
+{
+    uint64_t cap = st->words_cap ? st->words_cap * 2 : 256;
+    sysword_t *words = calloc(cap, sizeof(sysword_t));
+    if (!words)
+        return -1;
+    for (uint64_t i = 0; i < st->words_cap; i++) {
+        sysword_t *e = &st->words[i];
+        if (e->gen != st->gen)
+            continue;
+        uint64_t j = mix(e->address) & (cap - 1);
+        while (words[j].gen == st->gen)
+            j = (j + 1) & (cap - 1);
+        words[j] = *e;
+    }
+    free(st->words);
+    st->words = words;
+    st->words_cap = cap;
+    return 0;
+}
+
+/* The entry of the word at address (a multiple of 4), made with its value now when the stretch
+ * has not stored to it since the anchor; NULL without memory, or when the word cannot be read. A
+ * slot of an older generation is empty: a new anchor drops every entry at once (gen), and no entry
+ * of the current one is ever removed, so a search may stop at the first slot that is not of it. */
+static sysword_t *sys_word(void *uc, sys_t *st, uint64_t address)
+{
+    if ((st->words_used + 1) * 2 > st->words_cap && sys_words_grow(st) != 0)
+        return NULL;
+    uint64_t mask = st->words_cap - 1, i = mix(address) & mask;
+    sysword_t *e;
+    while ((e = &st->words[i])->gen == st->gen) {
+        if (e->address == address)
+            return e;
+        i = (i + 1) & mask;
+    }
+    uint8_t b[4];
+    if (st->mem_read(uc, address, b, 4))
+        return NULL;
+    e->address = address;
+    e->gen = st->gen;
+    e->then = e->now = (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+    st->words_used++;
+    return e;
+}
+
+/* Clear a stale Thumb IT state behind a memory hook, on every path (dread.arch.arm.settle_it): Unicorn
+ * restores the state of the instruction's start for a hooked access, and behind a store that ends
+ * an IT block the restored state survives into the next block, making its first instruction
+ * conditional. */
+static void sys_settle(void *uc, sys_t *st)
+{
+    if (st->settle) {
+        uint32_t v = 0;
+        st->reg_read(uc, st->status_reg, &v);
+        if (v & st->it_mask) {
+            v &= ~st->it_mask;
+            st->reg_write(uc, st->status_reg, &v);
+        }
+    }
+}
+
+static void sys_track_store(void *uc, uint64_t address, int size, int64_t value, sys_t *st)
+{
+    if (!st->track || !st->frozen) {    /* the stretch ended, or a new one has no anchor yet */
+        st->track = 0;
+        if (st->write_hook) {
+            st->hook_del(uc, (size_t)st->write_hook);
+            st->write_hook = 0;
+        }
+        return;
+    }
+    if (st->lost)
+        return;
+    st->tracked++;
+    if (size < 1 || size > 8) {         /* (Unicorn's stores are 1 to 8 bytes) */
+        st->lost = 1;
+        return;
+    }
+    uint64_t v = (uint64_t)value, end = address + (uint64_t)size;
+    for (uint64_t w = address & ~3ULL; w < end; w += 4) {
+        sysword_t *e = sys_word(uc, st, w);
+        if (!e) {
+            st->lost = 1;
+            return;
+        }
+        uint32_t now = e->now;
+        for (int i = 0; i < 4; i++) {
+            uint64_t a = w + (uint64_t)i;
+            if (a >= address && a < end)
+                now = (now & ~(0xFFu << (8 * i))) | ((uint32_t)(v >> (8 * (a - address))) & 0xFFu) << (8 * i);
+        }
+        st->dirty += (int64_t)(now != e->then) - (int64_t)(e->now != e->then);
+        e->now = now;
+    }
+}
+
+/* UC_HOOK_MEM_WRITE over all memory, in while a stretch is tracked; called before the store. */
+void dread_syswrite(void *uc, int type, uint64_t address, int size, int64_t value, sys_t *st)
+{
+    (void)type;
+    sys_track_store(uc, address, size, value, st);
+    sys_settle(uc, st);
+}
+
+/* The loop search's anchor moved (System._track): the stretch's stores are tracked from here,
+ * against memory as it is now. Python puts the write hook in when it is not (write_hook 0). */
+void dread_sys_track(sys_t *st)
+{
+    st->gen++;
+    st->words_used = 0;
+    st->dirty = 0;
+    st->lost = 0;
+    st->track = 1;
 }
 
 /* ---- the system run's device accesses (System._io) ----
@@ -756,14 +908,7 @@ void dread_sysio(void *uc, int type, uint64_t address, int size, int64_t value, 
         st->reg_read(uc, st->pc_reg, &st->io_pc);
         st->io_python(uc, type, address, size, value, NULL);
     }
-    if (st->settle) {               /* as System._on_io's settle_it, on both ways */
-        uint32_t v = 0;
-        st->reg_read(uc, st->status_reg, &v);
-        if (v & st->it_mask) {
-            v &= ~st->it_mask;
-            st->reg_write(uc, st->status_reg, &v);
-        }
-    }
+    sys_settle(uc, st);             /* as System._on_io's settle_it, on both ways */
 }
 
 /* The entry of the register (address, size) of `model`, made when there is none (kind and wkind 0):
@@ -817,8 +962,11 @@ void dread_sys_free(sys_t *st)
     free(st->log);
     free(st->io_regs);
     free(st->io_used);
+    free(st->words);
     st->log = NULL;
     st->io_regs = NULL;
     st->io_used = NULL;
+    st->words = NULL;
     st->log_n = st->log_cap = st->io_regs_n = st->io_regs_cap = st->io_used_n = 0;
+    st->words_cap = st->words_used = 0;
 }

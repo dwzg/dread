@@ -1,6 +1,9 @@
 """The hot emulator hooks in C (fasthooks.c): coverage, load tracing, store tracking and the Thumb IT
 repair without a Python call per event; and the system run's (dread.sysrun): its block hook
-(SysHooks: the blocks that only move the clock or only count) and its device accesses (add_io).
+(SysHooks: the blocks that only move the clock or only count), its device accesses (add_io), and the
+stores of a stretch the loop search looks at (track: a write hook in only while a stretch is
+tracked, which gives each word stored to its value at the search's anchor and now, so that a loop
+comes round only when memory does too; dread.sysrun.System._track).
 
 The device accesses the C hook does alone: the reads of plain registers, from the value the model
 gave last, which System asks for again after every call into the models (dread.models: `plain`);
@@ -259,6 +262,11 @@ class SysState(ctypes.Structure):
                 ("waited", ctypes.c_int64), ("anchor", ctypes.c_uint64), ("resume", ctypes.c_uint64),
                 ("waiting", ctypes.c_int32), ("nregs", ctypes.c_int32),
                 ("regs", ctypes.c_int32 * SYS_REGS), ("anchor_vals", ctypes.c_uint32 * SYS_REGS),
+                # what the stretch stored since the anchor (dread_syswrite)
+                ("track", ctypes.c_int32), ("lost", ctypes.c_int32), ("dirty", ctypes.c_int64),
+                ("gen", ctypes.c_int64), ("write_hook", ctypes.c_uint64), ("hook_del", ctypes.c_void_p),
+                ("words", ctypes.c_void_p), ("words_cap", ctypes.c_uint64), ("words_used", ctypes.c_uint64),
+                ("tracked", ctypes.c_int64),
                 # the device accesses (dread_sysio)
                 ("io_python", ctypes.c_void_p), ("reg_write", ctypes.c_void_p),
                 ("mem_read", ctypes.c_void_p), ("mem_write", ctypes.c_void_p),
@@ -303,9 +311,12 @@ class SysHooks:
         lib.dread_sys_reg.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int32, ctypes.c_int32]
         lib.dread_sys_reg.restype = ctypes.c_int64
         lib.dread_sys_free.argtypes = [ctypes.c_void_p]
+        lib.dread_sys_track.argtypes = [ctypes.c_void_p]
         self.state = s = SysState()
         s.next_event = NO_EVENT
         s.reg_read = ctypes.cast(self.uclib.uc_reg_read, ctypes.c_void_p)
+        s.mem_read = ctypes.cast(self.uclib.uc_mem_read, ctypes.c_void_p)
+        s.hook_del = ctypes.cast(self.uclib.uc_hook_del, ctypes.c_void_p)
         s.last_new = -1
         # The callbacks are kept alive here and given to the state as plain addresses: through a ctypes
         # cast the state kept a reference to them, and through them to the System, which the
@@ -325,6 +336,16 @@ class SysHooks:
                                         ctypes.cast(ctypes.byref(self.state), ctypes.c_void_p), begin, end)
         if status:
             raise OSError("uc_hook_add failed (%d)" % status)
+        return handle.value
+
+    def track(self):
+        """The loop search's anchor moved (System._track): the stretch's stores are tracked from
+        here (dread_sys_track), by the write hook (dread_syswrite), put in when it is not; it takes
+        itself out at the first store after the stretch."""
+        from unicorn import UC_HOOK_MEM_WRITE
+        self.lib.dread_sys_track(ctypes.byref(self.state))
+        if not self.state.write_hook:
+            self.state.write_hook = self._hook(UC_HOOK_MEM_WRITE, self.lib.dread_syswrite, 1, 0)
 
     def add_io(self, ranges, python, access, settle=None):
         """The device accesses of [(lo, hi), ...] through the C hook (dread_sysio): the reads and

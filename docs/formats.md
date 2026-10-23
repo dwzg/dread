@@ -413,8 +413,12 @@ with it, alone or together with the functions its reason names; `by hand`: src d
 (the lifter's or the test run's words), `missed` (for a dropped function, the instructions no case
 ran). `dread gui` reads it; `dread rename` renames in it. Beside it `whole.txt`: the whole image's
 outcome (`agrees` or its first difference) on the first line, then one line per set of functions
-dropped for it (`dropped for it: A, B; with them alone: ...`, since 2026-10-22). `dread uncovered`
-reads it (the `missed` column, and the reason's first words for how the function was dropped).
+dropped for it (`dropped for it: A, B; with them alone: ...`, since 2026-10-22; where leaving out one
+of a smallest set of three or more is enough, only that one goes: `dropped for it: B (leaving it out
+alone is enough; the smallest set that differs: A, B, C); with them alone: ...`, since 2026-10-23,
+and its reason in verdicts.tsv reads `the whole image differs with its lifted C; without it alone it
+agrees (...)`). `dread uncovered` reads it (the `missed` column, and the reason's first words for how
+the function was dropped).
 
 ### `BUILD/sysrun/IMAGE/NAME.json` (the system run's record)
 

@@ -56,7 +56,9 @@ did not; the lifted table marks those). Last, every scenario runs on the image w
 functions rebuilt (whole_image): C that behaves otherwise only with other C shows there (frames that
 grew add up on a task's small stack). Where it differs, a smallest set of functions that still makes
 the difference is found by halving (culprits) and dropped, and the rest is run again until the whole
-image agrees (lift-check/IMAGE/whole.txt: the outcome, then what was dropped for it). Until
+image agrees (lift-check/IMAGE/whole.txt: the outcome, then what was dropped for it). Of a set of
+LEAVE_ONE_FROM functions or more only one goes when leaving it out alone makes the image agree, the
+smallest first (enough: a difference that needs all of them together, since 2026-10-23). Until
 2026-10-22 the difference was only reported, and the functions stayed. The last whole image's runs
 are kept as the system run's records, one a scenario (BUILD/sysrun/IMAGE/SCENARIO.lift-check.json,
 dread.sysrun: both device logs, the function at each entry, the transfers into functions), which
@@ -3133,14 +3135,16 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                           "by loop cases" if name in loops else "", "")
     last = {}                               # the last whole image's runs (whole_image), kept as records at the end
     whole = whole_image(target, image, program, accepted, out, lifter, runs=last) if runs and accepted else None
-    history = []                            # (names dropped for the whole image, its difference with them)
+    history = []                            # (names dropped for the whole image, the smallest set that
+                                            # differed, its difference alone)
     if whole:
         # The function-level cases agreed (and for one that never returns, the system run with it
         # alone), but with all of them built the scenarios differ: C that behaves otherwise only
         # together with other C (frames that grew add up on a task's small stack: FreeRTOS's RISC-V
         # builds with clang printed "Stack overflow in SetB"). A smallest set of functions that still
-        # makes the difference, found by halving (culprits), goes back to the original's code, and
-        # the rest is tried again until the whole image agrees.
+        # makes the difference, found by halving (culprits), goes back to the original's code (or of
+        # many, one whose leaving out alone is enough: enough), and the rest is tried again until the
+        # whole image agrees.
         tried = {tuple(sorted(accepted)): whole}
 
         def differs(names):
@@ -3152,17 +3156,20 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
             out("the whole image: %s" % whole)
             guilty = culprits(sorted(accepted), differs)
             alone = differs(guilty) or whole
-            for name in guilty:
+            one = enough(accepted, guilty, differs, function_bytes(program))
+            going = [one] if one else guilty
+            for name in going:
                 others = [g for g in guilty if g != name]
-                why = "the whole image differs with its lifted C (%s, found by halving): %s" % (
+                why = "the whole image differs with its lifted C%s (%s, found by halving): %s" % (
+                    "; without it alone it agrees" if one else "",
                     "together with " + ", ".join(others) if others else "alone", alone)
                 out("dropped  %-24s %s" % (name, why[:200]))
                 verdicts[name] = ("dropped", why[:300], "")
                 by_system.pop(name, None)
-            history.append((guilty, alone))
-            accepted = [n for n in accepted if n not in guilty]
-            by_loops = [n for n in by_loops if n not in guilty]
-            dropped += len(guilty)
+            history.append((going, guilty, alone))
+            accepted = [n for n in accepted if n not in going]
+            by_loops = [n for n in by_loops if n not in going]
+            dropped += len(going)
             whole = differs(accepted) if accepted else None
     os.makedirs(work, exist_ok=True)
     with open(os.path.join(work, "verdicts.tsv"), "w") as f:
@@ -3180,20 +3187,25 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                         for n in sorted(accepted)))
     with open(os.path.join(work, "whole.txt"), "w") as f:
         f.write((whole or "agrees") + "\n")
-        f.writelines("dropped for it: %s; with them alone: %s\n" % (", ".join(names), diff) for names, diff in history)
+        for names, guilty, diff in history:
+            if names == guilty:
+                f.write("dropped for it: %s; with them alone: %s\n" % (", ".join(names), diff))
+            else:
+                f.write("dropped for it: %s (leaving it out alone is enough; the smallest set that differs: %s); "
+                        "with them alone: %s\n" % (", ".join(names), ", ".join(guilty), diff))
     if runs and accepted:
         if last.get("names") != sorted(accepted):     # (the last run was one of the halving's)
             whole_image(target, image, program, accepted, out, lifter, runs=last)
         kept = keep_whole(target, image, program, last)
         if kept:
             out("the whole image's runs kept in %s (%s)" % (os.path.relpath(sysrun_dir(target, image)), ", ".join(kept)))
-    gone = sum(len(names) for names, _ in history)
+    gone = sum(len(names) for names, _, _ in history)
+    agrees = "agrees once %d %s dropped for it" % (gone, "was" if gone == 1 else "were") if gone else "agrees"
     out("dread lift --check: %d accepted after %d rounds (%d by loop cases, %d by the system run, %d of them with "
         "loop cases; %d written by hand, %d refused, %d dropped; the whole image %s), into %s" % (
             len(accepted), rounds, len(by_loops), len(by_system),
             sum(1 for h in by_system.values() if h != "the system run"), len(by_hand & set(program.by_name)),
-            refused, dropped, "differs" if whole else ("agrees once %d were dropped for it" % gone if gone else "agrees")
-            if runs else "not run", os.path.relpath(path)))
+            refused, dropped, ("differs" if whole else agrees) if runs else "not run", os.path.relpath(path)))
     return accepted
 
 
@@ -3378,6 +3390,37 @@ def keep_whole(target, image, program, last):
         sysrun.write_record(target, image, record)
         done.append(record["name"])
     return done
+
+
+LEAVE_ONE_FROM = 3      # culprits of this many functions or more: leaving out one at a time comes first (enough)
+
+
+def enough(names, guilty, differs, size=None):
+    """The one of `guilty` (culprits' result for `names`) whose leaving out alone makes the image agree
+    (differs(names without it) false), or None; tried only for LEAVE_ONE_FROM functions or more, the
+    smallest first (size(name): its bytes; the least code goes), the first that does going. A
+    difference that needs every one of many together goes as soon as any one of them is the
+    original's code again: a wait made only of C, whose interrupt the system run takes where each
+    image's code puts it (dread.sysrun: FreeRTOS on RISC-V GCC -Os, the stream-buffer coherence
+    task's loop with its 13 callees in C, the tick taken in one image where the scheduler was
+    suspended, in the other where it was not; with any one of them the original's, the loop runs
+    shared code, whose clock decides where the tick comes). Up to len(guilty) whole images more. A
+    pair is still dropped whole (frames that grew add up on one task's stack: keeping either would
+    leave the smaller margin, docs/decisions.md 2026-10-22)."""
+    if len(guilty) < LEAVE_ONE_FROM:
+        return None
+    for name in sorted(guilty, key=lambda n: (size(n) if size else 0, n)):
+        if not differs([n for n in names if n != name]):
+            return name
+    return None
+
+
+def function_bytes(program):
+    """size(name) for enough: a function's bytes from its first instruction to behind its last."""
+    def size(name):
+        fn = program.by_name.get(name)
+        return program.end(fn) - fn.insns[0] if fn is not None and fn.insns else 0
+    return size
 
 
 def whole_image(target, image, program, names, out=print, lifter=None, transform=None, runs=None):
