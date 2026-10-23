@@ -208,6 +208,7 @@ rx_ready = 0x2
 |---|---|
 | `until` | `{model = "text"}`: end when that model's report `sent` contains the text |
 | `limit` | the shared-clock units the run may take (`dread.sysrun`) |
+| `entry` | the shared-clock units a function entered outside shared code takes (default `dread.sysrun.ENTRY`, 56: about what the original's code of such a function runs per entry when shared). The C must make the original's calls to such functions: hand-written C with several rewritten functions in one file is compiled without inlining them into each other (`-fno-inline` in `cflags`, or `noinline` on them), else the rebuilt image enters fewer functions and its clock parts from the original's |
 | `input` | `[[clock, "model", "bytes"], ...]`: input handed to a model at that time |
 | `models` | the models of the run (default: all of `[models]`; `[]` for none) |
 

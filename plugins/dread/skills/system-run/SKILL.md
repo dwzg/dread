@@ -8,8 +8,11 @@ description: Run a whole firmware from reset in DREAD's emulator with device mod
 `dread sysrun` starts both images from reset with the target's device models (`[models.*]` in
 dread.toml: uart, timer, gpio, interrupt controllers, or a class of your own) and compares what they
 do to the devices: every peripheral access in order, what the models note (bytes sent) and how the
-run ends. Time is a shared clock over the code both images have in common, so a model acts at the
-same place in both however many instructions the C takes.
+run ends. Time is a shared clock over the code both images have in common, plus a fixed amount for
+every entry into a rewritten function, so a model acts at the same place in both however many
+instructions the C takes. The C must make the original's calls: C that inlines one rewritten
+function into another (several in one file, compiled without `-fno-inline`) enters fewer functions,
+and the whole image differs.
 
 ## Scenarios
 
@@ -45,6 +48,8 @@ Write one per behaviour you want covered: boot, each command, each error path a 
   the models are the same for both images.
 - A scenario that never reaches some code leaves the functions there unproven: add input that gets
   there rather than lowering the bar.
-- Interrupts are taken behind code both images share, or at once after a wait in code that is not
-  shared (a rewritten idle loop); keep handlers and the code they interrupt on the same side when a
-  difference appears only with interrupts.
+- Interrupts are taken at places both images share: shared code, a rewritten function's entry, the
+  instruction behind an unmask or a barrier (which the C keeps itself), or the place a wait inside
+  one rewritten function comes round. An interrupt the C would let in elsewhere waits for the next
+  such place; when a difference appears only with interrupts, look at what the handler reads that
+  the interrupted C writes before that place.

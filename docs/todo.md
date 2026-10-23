@@ -1589,7 +1589,7 @@ model).
   the clock, 125,000 accesses a million units, nearly all of the clock). Done for the reads
   (2026-10-22, "Performance, third pass": the reads of plain registers in C, 82 s -> 30 s a pair);
   the writes are the next item there.
-- [ ] **An interrupt held off by a mask that code outside shared code lifts waits for the next
+- [x] **An interrupt held off by a mask that code outside shared code lifts waits for the next
   shared block.** FreeRTOS clang -O2 with every lifted function rebuilt: both runs assert in
   GenQTest.c line 683 at 93,560 units ("ASSERT!", then "spins"), where the original alone runs to
   the limit. vTaskResume pends PendSV in its critical section (BASEPRI masks it), vPortExitCritical
@@ -1611,6 +1611,34 @@ model).
   the demo's timing tests assert (lift.system_check's docstring). Not kept: which runs serve the
   comparison better is a question of its own (a run that asserts early compares little; one that
   idles to the limit compares little more).
+  Done 2026-10-23, together with "Where an interrupt comes in a wait made only of C" (Phase 4;
+  docs/decisions.md): both came from one model, outside shared code the clock stood still and no place
+  was common to both images. Now a function entered outside shared code from outside it moves the
+  clock by ENTRY (56) units (System._entry_units; lifted C makes the original's calls, so both images
+  enter the same functions in the same order), the compiler's runtime helpers take none, and outside
+  shared code an interrupt is taken only where both images share the place: a function's entry, a
+  block that starts right behind an instruction at which Unicorn ends its translation block without
+  branching (isb, msr, cps; RISC-V's CSR accesses and fence.i, measured; the C keeps them itself),
+  shared code, and in a wait inside one function as before; one the core would take at once
+  elsewhere waits for the next such place. clang -O2 with every lifted function rebuilt: GenQTest
+  passes, both images run to the limit with 88,216 log entries (the original alone: 88,555; before:
+  the assertion at 94,000 units, 533 entries). The whole images of all 38 benchmark builds with
+  scenarios (each build's lifted table): all run to the limit (main: 29), the Cortex-M ones with 0.93
+  to 1.23 times the original alone's log entries (main: from 0.03 to 28 times: nine asserted, six
+  idled with 2,466 entries, twelve made 1.5 to 2.5 million), the RISC-V ones with 1.03 to 1.07; 36
+  agree (main: 37). virt-gcc10-Os differs as with main (its table is from before the culprit search),
+  and mps2-gcc-O0 now differs at entry 20,356: its table (measure-38) lists prvQueueSetSendingTask,
+  whose lifted C alone makes the image differ at entry 16,085 with main's code as with this one, and
+  which today's lift check drops by its system check; main's run never got that far (906,650 entries
+  of another course). The lift check on copies of the six builds with the frontier answers: the same
+  tables (RISC-V GCC -Os one more, vTaskSuspendAll: next item), the whole image agreeing on all six,
+  in 22 to 104 s (main: 62 to 367). The pairs of runs take 400 s on Cortex-M where main took 199 s
+  spinning or idling (the register-test tasks' busy loops: "LOOP_MAX can come down" below), 11 s on
+  RISC-V where main took 60 s. The 2026-10-22 rule's timing
+  assertions do not come: the kernel takes time again. Taking an interrupt at the next block outside
+  shared code made the images differ on 19 of the 27 Cortex-M builds; deferring every one to the next
+  entry made 20 assert in xEventGroupWaitBits (a task that suspended itself switched only at its next
+  call, the argument already loaded).
 - [x] **Three RISC-V builds' whole images differ with lifted C alone for reasons of their own**
   (the only ones left of the benchmark's 38 once the wait rule was fixed, 2026-10-22; they differed
   at the same entries before): the rebuilt clang -Os and clang 14 images print "Stack overflow in
@@ -2429,7 +2457,7 @@ undone). Other decisions are taken by the recommended option and written down in
   Cortex-M GCC -Os ran off with a broken stack pointer once a tracked stretch stored at the end of an
   IT block; the test program's poll stores so now.
 
-- [ ] **Where an interrupt comes in a wait made only of C** (found 2026-10-23 behind the item above). In
+- [x] **Where an interrupt comes in a wait made only of C** (found 2026-10-23 behind the item above). In
   a wait outside shared code the run takes a due interrupt behind the first block in which the core
   takes it, which is at once where the loop search came round to its anchor (System._stretch): a place
   each image's code puts elsewhere. On FreeRTOS RISC-V GCC -Os with xTaskResumeAll accepted,
@@ -2447,6 +2475,46 @@ undone). Other decisions are taken by the recommended option and written down in
   inside it (two halves alike, a toggle in memory between them) picks a half by phase again; a wait
   found by LOOP_MAX has no round; one whose round enters no function (a poll inside one function)
   would keep today's rule.
+  Done 2026-10-23 (docs/decisions.md; with "An interrupt held off by a mask ..." under Compiler
+  diversity): not by a place chosen in the round but by a clock for such a loop. A function entered
+  outside shared code moves the clock by ENTRY units, so a round that enters functions is no wait,
+  and the tick comes due at an entry, the same in both images
+  (test_a_wait_made_only_of_c_takes_its_interrupt_where_both_images_enter_a_function, and the RISC-V
+  program of test_riscv_interrupts_come_where_both_images_share_the_place: the original's round seven
+  blocks, the C's five; both failed before). The lift check of RISC-V GCC -Os with the frontier
+  answers keeps vTaskSuspendAll: 269 accepted, the whole image agreeing with nothing dropped for it,
+  in 22 s instead of 367 (the culprit search no longer runs). The coherence testers' busy loops call
+  functions too and are no LOOP_MAX waits any more: RISC-V whole images run in 0.5 to 1.2 s instead of
+  up to 7. Left: a loop inside one rebuilt function (no entry in its round) keeps the old rule, its
+  interrupt where the search came round or behind the unmask (not established that this never shows;
+  only what the handler reads that such a loop writes can tell the places apart); one that counts in
+  memory there waits LOOP_MAX blocks (next item).
+
+- [ ] **LOOP_MAX can come down** (measured 2026-10-23 behind the item above). With function entries
+  moving the clock, the longest stretch outside shared code that ended by itself, over the whole
+  images of all 38 benchmark builds with scenarios, is 8,202 blocks (59,280 before, when LOOP_MAX =
+  200,000 was set with a margin of 3.4). On Cortex-M the register-test tasks now get the CPU between
+  ticks as in the original alone, and their busy loops count in memory inside one function: 91 to
+  180 LOOP_MAX waits a run, 18 of the 21.5 million blocks of clang -Os's runs, with the write hook in
+  for the loop search (the rebuilt image's lifted C stores its frame on every round: 54 million
+  stores tracked against the original's 3.9 million), so the rebuilt image's runs take twice the
+  original's. A LOOP_MAX of 30,000 keeps a margin of 3.7. Measure the waits' places and the whole
+  images' outcomes and times before and after.
+
+- [ ] **prvQueueSetSendingTask on Cortex-M GCC -O0** (found 2026-10-23 behind "Where an interrupt
+  comes in a wait made only of C"). Its lifted C alone makes the whole image differ at log entry
+  16,085 (an ICSR read three times against seven: one image enters more critical sections), with
+  main's system run as with the one that times function entries; the lift check drops it by its
+  system check (entry 18,201), but the benchmark's table of measure-38 still lists it, and that
+  table's whole image differs since the runs go that far. Not traced to its instruction.
+
+- [ ] **The culprit search's empty set** (2026-10-23). lift.check and dread readable --check take the
+  image without lifted C for one that agrees (differs([]) is None, never run). Since function entries
+  move the system run's clock, hand-written C that calls otherwise than the original (inlining one
+  rewritten function into another, a helper the layer does not call a runtime helper) makes that
+  image differ on its own, and the search would then drop correct lifted functions one by one. Run
+  the image with the hand-written C alone once where the whole image differs, and report "not
+  decisive" when it differs too, as readable does for lifted C alone.
 
 - [x] **Code only a dropped case reached** (found 2026-10-22 on a private firmware, DREAD's real-life
   test: its uncovered functions took far longer to generate than those accepted, and most of them

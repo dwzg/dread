@@ -741,7 +741,7 @@ __attribute__((naked, noinline)) void spin_until_two(void)
 }
 __attribute__((noreturn)) void reset(void) {
     NVIC_ISER = 1;
-    T_LOAD = 100;
+    T_LOAD = 1000;
     T_CTRL = 3;
     tally_up();
     UART = '0' + ticks;
@@ -787,8 +787,9 @@ void spin_until_two(void)
 def test_a_computation_whose_progress_lies_in_memory_is_no_wait(tmp_path, monkeypatch):
     """A loop comes round when its registers and memory are both as at the anchor (System._loops).
     tally_up, await_tick and spin_until_two are rebuilt from C, their code outside shared code in
-    both images, and a periodic timer comes due every 100 units, which only a wait may move the
-    clock on to. tally_up, the original's in assembly, is a computation whose registers repeat at
+    both images, and a periodic timer comes due every 1,000 units, which only a wait may move the
+    clock on to (the shared code and the three entries, ENTRY units each, take less). tally_up, the
+    original's in assembly, is a computation whose registers repeat at
     its loop's head every round while its count goes up in memory: no wait (the C keeps the count in
     a register); until 2026-10-23 its registers made it one, the original took the tick inside it,
     printed "1" first and differed from the rebuilt image ("012"). await_tick, a poll on what the
@@ -861,6 +862,511 @@ limit = 2_000_000
         mine = [w[1:] for w in found if w[0] == run_of]
         assert [w[0] for w in mine] == ["await_tick", "spin_until_two"], found
         assert mine[0][1] <= sysrun.FROZEN + 4 and mine[1][1] == "LOOP_MAX", found
+    if fasthooks.library() is not None:
+        monkeypatch.setattr(fasthooks, "_LIB", [None])      # as without a C compiler
+        assert run() == (original, rebuilt, found)
+
+
+ALTERNATE = r'''
+#define UART (*(volatile unsigned *)0x40004000)
+#define T_LOAD (*(volatile unsigned *)0x40000004)
+#define T_CTRL (*(volatile unsigned *)0x40000008)
+#define T_STAT (*(volatile unsigned *)0x4000000c)
+#define NVIC_ISER (*(volatile unsigned *)0xE000E100)
+volatile unsigned ticks, phase;
+void timer_handler(void) { T_STAT = 1; UART = '0' + phase; ticks++; }
+__attribute__((noinline)) void mark_one(void) { phase = 1; }
+__attribute__((noinline)) void mark_two(void) { phase = 2; }
+/* while (ticks < 6) { mark_one(); mark_two(); }: seven blocks a round (a branch to the next
+   instruction splits the head), where the C's loop takes five */
+__attribute__((naked, noinline)) void alternate(void)
+{
+    __asm volatile ("    push {r4, lr}\n"
+                    "    ldr r4, =ticks\n"
+                    "1:  ldr r0, [r4]\n"
+                    "    cmp r0, #6\n"
+                    "    bhs 2f\n"
+                    "    b 3f\n"
+                    "3:  bl mark_one\n"
+                    "    bl mark_two\n"
+                    "    b 1b\n"
+                    "2:  pop {r4, pc}\n"
+                    "    .ltorg\n");
+}
+__attribute__((noreturn)) void reset(void) {
+    NVIC_ISER = 1;
+    T_LOAD = 700;
+    T_CTRL = 3;
+    alternate();
+    UART = '.';
+    for (;;) ;
+}
+__attribute__((section(".vectors"), used)) void (*const vectors[17])(void) = {
+    (void (*)(void))0x20004000, reset, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, timer_handler };
+'''
+
+ALTERNATE_C = r'''#include "dread.h"
+#define ticks (*(volatile unsigned *)TICKS)
+#define phase (*(volatile unsigned *)PHASE)
+__attribute__((noinline)) void mark_one(void) { phase = 1; }
+__attribute__((noinline)) void mark_two(void) { phase = 2; }
+void alternate(void)
+{
+    while (ticks < 6) {
+        mark_one();
+        mark_two();
+    }
+}
+'''
+
+
+def _waits_seen(monkeypatch):
+    """A list that gets (image, the wait's block count or "LOOP_MAX") for every wait the loop search
+    finds (System._loops), "original" or "rebuilt" by the System's placement."""
+    seen = []
+    init, real = sysrun.System.__init__, sysrun.System._loops
+
+    def tagged(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        self.test_rebuilt = kwargs.get("placement") is not None
+
+    def spy(self, address, n):
+        found = real(self, address, n)
+        if found:
+            seen.append(("rebuilt" if self.test_rebuilt else "original", "LOOP_MAX" if n >= sysrun.LOOP_MAX else n))
+        return found
+    monkeypatch.setattr(sysrun.System, "__init__", tagged)
+    monkeypatch.setattr(sysrun.System, "_loops", spy)
+    return seen
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_wait_made_only_of_c_takes_its_interrupt_where_both_images_enter_a_function(tmp_path, monkeypatch):
+    """alternate, mark_one and mark_two are rebuilt from C: alternate's loop, which calls the other
+    two until the timer has ticked six times, is made only of code outside shared code, its state
+    repeating every round, and the handler prints where in the round the tick came (phase). Until
+    2026-10-23 the clock stood still there, the loop search took the loop for a wait, and the tick
+    came at the block where the search came round to its anchor: a place each image's code puts
+    elsewhere (the original's round takes seven blocks, the C's five), and the images printed other
+    phases. Now a function entered outside shared code moves the clock (System._entry_units, ENTRY
+    units), so the tick comes due at an entry, the same in both images, and the loop search finds no
+    wait at all. The C hook and the Python hooks decide alike. The C must make the original's calls:
+    compiled so that it inlines mark_one and mark_two, its loop enters neither, and the images
+    differ."""
+    from dread import fasthooks
+    t = _program_target(tmp_path, ALTERNATE, '''
+[models.uart]
+kind = "uart"
+base = 0x40004000
+
+[models.timer]
+kind = "timer"
+base = 0x40000000
+count = 0x0
+load = 0x4
+ctrl = 0x8
+stat = 0xc
+rate = 1
+irq = 0
+periodic = true
+
+[models.nvic]
+kind = "nvic"
+
+[scenarios.run]
+until = {uart = "."}
+limit = 2_000_000
+''', image="limit = 0x08000400", compiler='cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]')
+    symbols = {line.split()[2]: line.split()[1] for line in (tmp_path / "config" / "symbols.txt").read_text().splitlines()
+               if len(line.split()) == 3}
+    (tmp_path / "src").mkdir()
+    source = ALTERNATE_C.replace("TICKS", symbols["ticks"]).replace("PHASE", symbols["phase"])
+    (tmp_path / "src" / "c.c").write_text(source)
+    payload = build.build(t, t.image(), src=str(tmp_path / "src"), out=str(tmp_path / "recon"), quiet=True)
+    waits = _waits_seen(monkeypatch)
+
+    def run():
+        del waits[:]
+        a, b = both(t, payload, t.scenarios["run"])
+        return (a.how, a.clock, a.log, a.reports), (b.how, b.clock, b.log, b.reports), list(waits)
+    original, rebuilt, found = run()
+    assert original[0].startswith("until") and rebuilt[0].startswith("until"), (original[0], rebuilt[0])
+    assert original[3]["uart"]["sent"] == "112222." and original[3]["interrupts"] == {16: 6}, original[3]
+    assert original[2] == rebuilt[2] and original[3] == rebuilt[3] and original[1] == rebuilt[1]
+    assert found == [], found
+    if fasthooks.library() is not None:
+        monkeypatch.setattr(fasthooks, "_LIB", [None])      # as without a C compiler
+        assert run() == (original, rebuilt, found)
+        monkeypatch.undo()
+    # C that calls otherwise than the original (here the compiler inlined both callees into the loop)
+    # enters other functions: its clock is not the original's, and the whole image notices
+    (tmp_path / "src" / "c.c").write_text(source.replace("__attribute__((noinline)) ", ""))
+    payload = build.build(t, t.image(), src=str(tmp_path / "src"), out=str(tmp_path / "inlined"), quiet=True)
+    a, b = both(t, payload, t.scenarios["run"])
+    assert sysrun.compare(a, b), (a.reports, b.reports)
+
+
+CRITICAL_FUNCTIONS = r"""
+#define PENDSVSET (1u << 28)
+static inline void basepri(unsigned v) { __asm volatile ("msr basepri, %0" :: "r" (v) : "memory"); }
+__attribute__((noinline)) void touch(void) { later = pendsvs; }
+/* a yield in a critical section, as FreeRTOS's vTaskResume makes it: PendSV pended while BASEPRI
+   holds it off, taken on the core as soon as the msr lowers BASEPRI */
+__attribute__((noinline)) void resume_task(void) {
+    basepri(0x80);
+    ICSR = PENDSVSET;
+    inside = pendsvs;
+    basepri(0);
+    behind = pendsvs;
+}
+/* portYIELD with nothing holding PendSV off: taken behind the isb on the core */
+__attribute__((noinline)) void yield_now(void) {
+    ICSR = PENDSVSET;
+    __asm volatile ("dsb\n    isb" ::: "memory");
+    inside += pendsvs;
+    touch();
+}
+"""
+
+CRITICAL = r"""
+#define UART (*(volatile unsigned *)0x40004000)
+#define ICSR (*(volatile unsigned *)0xE000ED04)
+#define SHPR3 (*(volatile unsigned *)0xE000ED20)
+volatile unsigned pendsvs, inside, behind, later;
+void pendsv(void) { pendsvs++; }
+""" + CRITICAL_FUNCTIONS + r"""
+__attribute__((noreturn)) void reset(void) {
+    SHPR3 = 0xFFu << 16;
+    resume_task();
+    UART = '0' + inside;
+    UART = '0' + behind;
+    yield_now();
+    UART = '0' + inside;
+    UART = '0' + later;
+    UART = '.';
+    for (;;) ;
+}
+__attribute__((section(".vectors"), used)) void (*const vectors[16])(void) = {
+    (void (*)(void))0x20004000, reset, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, pendsv, 0 };
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_an_interrupt_held_off_by_a_mask_that_rebuilt_code_lifts_comes_behind_the_unmask(tmp_path, monkeypatch):
+    """resume_task pends PendSV inside a critical section and lowers BASEPRI: on the core PendSV runs
+    right behind the msr, so behind sees it ("01" printed, as the image prints with all of it shared).
+    With resume_task counted as rebuilt (its code outside shared code) PendSV waited for the next
+    block of shared code until 2026-10-23, behind the return ("00", in both images alike: FreeRTOS's
+    GenQTest asserted so with the kernel lifted). yield_now pends it with nothing holding it off and
+    then, as portYIELD does, runs dsb and isb: the core takes it behind the isb ("22" with all of it
+    shared); until 2026-10-23 at touch's entry, the next shared block ("1"). Now both come at the
+    block behind the instruction, a place both images share: the emulator ends its translation block
+    behind an msr and an isb (Arm.ends_block), the C keeps both instructions, and the pend lies in
+    the same block as the msr, so the question first comes up behind it (System._behind_block_end).
+    The same with resume_task, yield_now and touch outside shared code, with touch shared, with the
+    C hook and without, and with the functions rebuilt from C (their own source compiled again)."""
+    from dread import fasthooks
+    t = _program_target(tmp_path, CRITICAL, """
+[models.uart]
+kind = "uart"
+base = 0x40004000
+
+[models.nvic]
+kind = "nvic"
+
+[scenarios.run]
+until = {uart = "."}
+limit = 200_000
+""", image="limit = 0x08000400", compiler='cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]')
+    image = t.image()
+    scenario = t.scenarios["run"]
+
+    def sent(built):
+        system = sysrun.System(t, image, image.payload(), scenario=scenario, built=built)
+        o = system.run(scenario["limit"])
+        return o.how.split(":")[0], o.reports["uart"]["sent"], o.reports["interrupts"]
+
+    def outcomes():
+        return [sent(built) for built in ((), ("resume_task", "yield_now", "touch"), ("resume_task", "yield_now"))]
+    got = outcomes()
+    assert got == [("until", "0122.", {14: 2})] * 3, got
+    if fasthooks.library() is not None:
+        monkeypatch.setattr(fasthooks, "_LIB", [None])
+        assert outcomes() == got
+        monkeypatch.undo()
+    symbols = {line.split()[2]: line.split()[1] for line in (tmp_path / "config" / "symbols.txt").read_text().splitlines()
+               if len(line.split()) == 3}
+    source = '#include "dread.h"\n#define ICSR (*(volatile unsigned *)0xE000ED04)\n' + "".join(
+        "#define %s (*(volatile unsigned *)%s)\n" % (n, symbols[n]) for n in ("pendsvs", "inside", "behind", "later"))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "c.c").write_text(source + CRITICAL_FUNCTIONS)
+    payload = build.build(t, image, src=str(tmp_path / "src"), out=str(tmp_path / "recon"), quiet=True)
+    a, b = both(t, payload, scenario)
+    assert a.reports == b.reports and a.log == b.log and a.reports["uart"]["sent"] == "0122.", (a.reports, b.reports)
+
+
+COMPARES = r"""
+#define UART (*(volatile unsigned *)0x40004000)
+#define ICSR (*(volatile unsigned *)0xE000ED04)
+#define SHPR3 (*(volatile unsigned *)0xE000ED20)
+volatile unsigned pendsvs, inside, later;
+void pendsv(void) { pendsvs++; }
+__attribute__((noinline)) void touch(void) { later = pendsvs; }
+/* PendSV pended with nothing holding it off and no barrier, then compares whose branches are not
+   taken: each ends a block, and the next starts where it ended, behind no instruction at which the
+   emulator ends a block */
+__attribute__((naked, noinline)) void pend_then_compare(void)
+{
+    __asm volatile ("    push {r4, lr}\n"
+                    "    ldr r0, =0xE000ED04\n"
+                    "    mov r1, #0x10000000\n"
+                    "    str r1, [r0]\n"
+                    "    movs r2, #0\n"
+                    "    cmp r2, #1\n    beq 9f\n"
+                    "    cmp r2, #2\n    beq 9f\n"
+                    "    cmp r2, #3\n    beq 9f\n"
+                    "    cmp r2, #4\n    beq 9f\n"
+                    "    ldr r0, =pendsvs\n"
+                    "    ldr r0, [r0]\n"
+                    "    ldr r1, =inside\n"
+                    "    str r0, [r1]\n"
+                    "    bl touch\n"
+                    "9:  pop {r4, pc}\n"
+                    "    .ltorg\n");
+}
+__attribute__((noreturn)) void reset(void) {
+    unsigned n;
+    SHPR3 = 0xFFu << 16;
+    for (n = 0; n < 3; n++)
+        pend_then_compare();
+    UART = '0' + inside;
+    UART = '0' + later;
+    UART = '.';
+    for (;;) ;
+}
+__attribute__((section(".vectors"), used)) void (*const vectors[16])(void) = {
+    (void (*)(void))0x20004000, reset, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, pendsv, 0 };
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_deferred_interrupt_passes_blocks_that_a_branch_not_taken_ends(tmp_path, monkeypatch):
+    """pend_then_compare, outside shared code (counted as rebuilt), pends PendSV with nothing holding
+    it off and runs compares whose branches are not taken: each block starts where the one before
+    ended, so the run asks whether an instruction there ended it (System._behind_block_end): no, and
+    the C hook keeps that answer by address and goes on alone, the interrupt waiting for touch's entry
+    ("23": inside read before each PendSV, later behind it). With all of it shared PendSV comes at the
+    block behind the store ("33"). The C hook and the Python hooks decide alike, and the C hook asked
+    Python about each such block once, the one behind the pend at every pend, which raises a new
+    question (a loop of compares and branches handed every block over while an interrupt waited, until
+    the C hook kept the answer: FreeRTOS's register-test task, 47 million times a run)."""
+    from dread import fasthooks
+    t = _program_target(tmp_path, COMPARES, """
+[models.uart]
+kind = "uart"
+base = 0x40004000
+
+[models.nvic]
+kind = "nvic"
+
+[scenarios.run]
+until = {uart = "."}
+limit = 200_000
+""", image="limit = 0x08000400", compiler='cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]')
+    image = t.image()
+    scenario = t.scenarios["run"]
+    asked = []
+    real = sysrun.System._check_interrupts
+
+    def count(self, uc, common=True, address=None):
+        if not common:
+            asked.append(address)
+        return real(self, uc, common=common, address=address)
+    monkeypatch.setattr(sysrun.System, "_check_interrupts", count)
+
+    def outcomes():
+        out = []
+        for built in ((), ("pend_then_compare",)):
+            o = sysrun.System(t, image, image.payload(), scenario=scenario, built=built).run(scenario["limit"])
+            out.append((o.how.split(":")[0], o.reports["uart"]["sent"], o.reports["interrupts"], o.clock, o.log))
+        return out
+    got = outcomes()
+    assert [g[:3] for g in got] == [("until", "33.", {14: 3}), ("until", "23.", {14: 3})], [g[:3] for g in got]
+    if fasthooks.library() is not None:
+        in_c = len(asked)
+        first = asked[0]                # the block behind the pend: a new question at every pend
+        assert asked.count(first) == 3 and all(asked.count(a) == 1 for a in set(asked) - {first}), asked
+        monkeypatch.setattr(fasthooks, "_LIB", [None])
+        del asked[:]
+        assert outcomes() == got
+        assert len(asked) > in_c, (len(asked), in_c)
+
+
+RISCV_PLACES_FUNCTIONS = r"""
+__attribute__((noinline)) void mark_one(void) { phase = 1; }
+__attribute__((noinline)) void mark_two(void) { phase = 2; }
+/* the software interrupt pended while MIE holds it off, taken on the core as soon as csrs sets MIE */
+__attribute__((noinline)) void raise_and_lift(void) {
+    __asm volatile ("csrc mstatus, %0" :: "r"(8) : "memory");
+    MSIP = 1;
+    inside = swis;
+    __asm volatile ("csrs mstatus, %0" :: "r"(8) : "memory");
+    behind = swis;
+}
+"""
+
+RISCV_PLACES = r"""
+#define THR (*(volatile unsigned char *)0x10000000)
+#define LSR (*(volatile unsigned char *)0x10000005)
+#define MSIP (*(volatile unsigned *)0x02000000)
+#define MTIMECMP_LO (*(volatile unsigned *)0x02004000)
+#define MTIMECMP_HI (*(volatile unsigned *)0x02004004)
+#define MTIME_LO (*(volatile unsigned *)0x0200bff8)
+volatile unsigned ticks, phase, swis, inside, behind;
+__attribute__((noinline)) void put(int c) { while (!(LSR & 0x20)) ; THR = c; }
+__attribute__((interrupt("machine"), aligned(4))) void trap(void) {     /* mtvec, direct mode */
+    unsigned cause;
+    __asm volatile ("csrr %0, mcause" : "=r"(cause));
+    if (cause == 0x80000003u) {
+        MSIP = 0;
+        swis++;
+    } else {
+        MTIMECMP_LO = MTIME_LO + 700;
+        put('0' + phase);
+        ticks++;
+    }
+}
+""" + RISCV_PLACES_FUNCTIONS + r"""
+/* while (ticks < 6) { mark_one(); mark_two(); }: seven blocks a round (a jump to the next
+   instruction splits the head), where the C's loop takes five */
+__asm__(".section .text.alternate\n.global alternate\n.type alternate, @function\nalternate:\n"
+        " addi sp, sp, -16\n sw ra, 12(sp)\n"
+        "1: lui a5, %hi(ticks)\n lw a5, %lo(ticks)(a5)\n li a4, 6\n bgeu a5, a4, 2f\n j 3f\n"
+        "3: call mark_one\n call mark_two\n j 1b\n"
+        "2: lw ra, 12(sp)\n addi sp, sp, 16\n ret\n.size alternate, . - alternate\n");
+void alternate(void);
+__attribute__((noreturn)) void cmain(void) {
+    __asm volatile ("csrw mtvec, %0" :: "r"((unsigned)trap));
+    MTIMECMP_HI = 0xffffffff;
+    __asm volatile ("csrs mie, %0" :: "r"(8));
+    __asm volatile ("csrs mstatus, %0" :: "r"(8));
+    raise_and_lift();
+    put('0' + inside);
+    put('0' + behind);
+    MTIMECMP_LO = MTIME_LO + 700;
+    MTIMECMP_HI = 0;
+    __asm volatile ("csrs mie, %0" :: "r"(0x80));
+    alternate();
+    put('.');
+    for (;;) ;
+}
+__asm__(".section .text.start\n.global _start\n.type _start, @function\n_start:\n li sp, 0x80090000\n j cmain\n"
+        ".size _start, . - _start\n");
+"""
+
+RISCV_PLACES_C = r"""#include "dread.h"
+#define MSIP (*(volatile unsigned *)0x02000000)
+#define ticks (*(volatile unsigned *)TICKS)
+#define phase (*(volatile unsigned *)PHASE)
+#define swis (*(volatile unsigned *)SWIS)
+#define inside (*(volatile unsigned *)INSIDE)
+#define behind (*(volatile unsigned *)BEHIND)
+""" + RISCV_PLACES_FUNCTIONS + r"""
+void alternate(void)
+{
+    while (ticks < 6) {
+        mark_one();
+        mark_two();
+    }
+}
+"""
+
+
+@needs_riscv_gcc
+def test_riscv_interrupts_come_where_both_images_share_the_place(tmp_path, monkeypatch):
+    """The two cases of the Cortex-M tests above on RISC-V, raise_and_lift, mark_one, mark_two and
+    alternate rebuilt from C. raise_and_lift sets msip while mstatus.MIE holds the software interrupt
+    off and sets MIE again: on the core the trap comes right behind the csrs, so behind sees it ("01",
+    as with all of it shared; until 2026-10-23 "00" with raise_and_lift outside shared code, the trap
+    waiting for the next shared block); the emulator ends its block behind every CSR access
+    (Riscv.ends_block), so the next block starts behind the csrs in both images. alternate's loop
+    calls mark_one and mark_two until the timer has ticked six times, and the trap handler prints the
+    phase it interrupted: the original's round (assembly) takes seven blocks, the C's five; the tick
+    comes due at a function's entry, the same in both images, and no wait is found. The C hook and
+    the Python hooks decide alike."""
+    import subprocess
+    from dread import elfimport, fasthooks
+    from dread.target import Target
+    (tmp_path / "t.c").write_text(RISCV_PLACES)
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x80000000; .text : { *(.text.start) *(.text*) }\n"
+                                   " . = 0x80080000; .bss : { *(.sbss*) *(.bss*) } }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-O2", "-nostdlib",
+                    "-ffunction-sections", "-T", str(tmp_path / "t.ld"), "-e", "_start", "-o", elf, str(tmp_path / "t.c")],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(riscv_toml('''[target]
+name = "places"
+[arch]
+name = "riscv"
+isa = "rv32"
+extensions = "imac"
+[memory]
+regions = [{name = "rom", base = 0x80000000, size = 0x10000, kind = "rom"},
+           {name = "ram", base = 0x80080000, size = 0x10000}]
+io = [[0x02000000, 0x02010000], [0x10000000, 0x10001000]]
+stack = {top = 0x80090000, size = 0x1000}
+sentinel = 0x7fff0000
+[image.main]
+original = "original/t.bin"
+base = 0x80000000
+entry = "_start"
+limit = 0x80001000
+[compiler]
+cross = "riscv64-elf-"
+cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-O2", "-ffunction-sections"]
+[models.uart]
+kind = "uart"
+base = 0x10000000
+data = 0x0
+status = 0x5
+tx_ready = 0x20
+rx_ready = 0x1
+size = 0x8
+[models.clint]
+kind = "clint"
+base = 0x02000000
+rate = 1
+[scenarios.run]
+until = {uart = "."}
+limit = 200_000
+'''))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    symbols = {line.split()[2]: line.split()[1] for line in (tmp_path / "config" / "symbols.txt").read_text().splitlines()
+               if len(line.split()) == 3}
+    source = RISCV_PLACES_C
+    for name in ("ticks", "phase", "swis", "inside", "behind"):
+        source = source.replace(name.upper(), symbols[name])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "c.c").write_text(source)
+    t = Target.load(str(tmp_path))
+    payload = build.build(t, t.image(), src=str(tmp_path / "src"), out=str(tmp_path / "recon"), quiet=True)
+    image = t.image()
+    scenario = t.scenarios["run"]
+    alone = sysrun.run_image(t, image, image.payload(), scenario)
+    waits = _waits_seen(monkeypatch)
+
+    def run():
+        del waits[:]
+        a, b = both(t, payload, scenario)
+        return (a.how, a.clock, a.log, a.reports), (b.how, b.clock, b.log, b.reports), list(waits)
+    original, rebuilt, found = run()
+    assert alone.reports["uart"]["sent"].startswith("01"), (alone.how, alone.reports)
+    assert original[0].startswith("until") and rebuilt[0].startswith("until"), (original[0], rebuilt[0])
+    assert original[3]["uart"]["sent"] == "01111111." and original[3]["interrupts"] == {3: 1, 7: 6}, original[3]
+    assert original[2] == rebuilt[2] and original[3] == rebuilt[3] and original[1] == rebuilt[1]
+    assert found == [], found
     if fasthooks.library() is not None:
         monkeypatch.setattr(fasthooks, "_LIB", [None])      # as without a C compiler
         assert run() == (original, rebuilt, found)
@@ -1278,7 +1784,9 @@ def test_writes_in_c_follow_the_models(tmp_path, monkeypatch):
     a register its model calls idempotent, and a write no model owns) against the Python hooks on a
     program that tries them: PendSV set again and again while it is pending, masked by BASEPRI, with
     ICSR read between (FreeRTOS's portYIELD; a read behind a write in C is a new entry), taken when
-    the mask drops, after which the same write pends it anew; writes alone while it waits masked,
+    the mask drops (with yields outside shared code too, behind the msr: since 2026-10-23 five times
+    either way, before only once, at the first shared block), after which the same write pends it
+    anew; writes alone while it waits masked,
     longer than SPIN (the spin rule sees each one); set and clear in turn, each repeated, ICSR read
     between; SysTick's CVR written again and again (not idempotent: each write starts the count
     anew, so no tick comes), then RVR (idempotent) while ticks come due; a timer's line enabled with
@@ -1356,7 +1864,7 @@ limit = 3_000_000
     assert with_c == without and wrong == without and undeclared == without
     for (chunk, built), (how, clock, log, reports, _, _) in with_c.items():
         assert how.startswith("waits: no device access for"), (how, reports)
-        assert reports["uart"]["sent"] == ("1" if built else "5") + "4041zxx", reports
+        assert reports["uart"]["sent"] == "54041zxx", reports
     writes = sum(1 for o in with_c.values() for e in o[2] if e[0] == "write")
     unowned = sum(1 for o in with_c.values() for e in o[2] if e[0] == "write" and e[1] == "-")
     assert in_c > writes * 3 // 4 and 0 < memory_writes < unowned, (in_c, writes, memory_writes, unowned)
@@ -1409,9 +1917,10 @@ __attribute__((noinline)) void enables(void) {
     T_CTRL = 3;                                 /* run, interrupt: the line rises every 300 units */
     for (n = 0; n < 200; n++)
         INTC_ENABLE = 1;                        /* the first enables it; the line rises, masked */
-    __asm volatile ("msr cpsr_c, #0x53" ::: "memory");     /* unmasked: taken (rebuilt: behind */
-    for (n = 0; n < 100; n++)                   /* the first block of shared code) */
-        INTC_ENABLE = 1;                        /* and it comes again among these */
+    __asm volatile ("msr cpsr_c, #0x53" ::: "memory");     /* unmasked: taken (rebuilt too: */
+    for (n = 0; n < 100; n++)                   /* behind the msr, which ends its block) */
+        INTC_ENABLE = 1;                        /* and it comes again among these (rebuilt: at the */
+                                                /* return, the next place both images share) */
     T_CTRL = 0;
 }
 __attribute__((noinline)) unsigned pins(void) {
@@ -1492,7 +2001,7 @@ limit = 1_000_000
     assert with_c == without
     for (chunk, built), (how, clock, log, reports, _, _) in with_c.items():
         assert how.startswith("waits") and reports["uart"]["sent"][1:] == "k", (how, reports)
-        assert reports["interrupts"][0] == (1 if built else 11), reports
+        assert reports["interrupts"][0] == (2 if built else 11), reports
         assert [e for e in log if e[0] == "gpio"] == [("gpio", "pins", 1)] * 2, log[-8:]
     writes = sum(1 for o in with_c.values() for e in o[2] if e[0] == "write")
     assert in_c > writes * 3 // 4, (in_c, writes)

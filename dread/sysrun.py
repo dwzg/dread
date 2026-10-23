@@ -12,32 +12,55 @@ the same things to the devices in the same order. Time is the shared clock: the 
 that are the same in both images (the original's code of the functions rewritten in C, and the C
 code with the branches left at moved functions' old entries, do not count), plus ACCESS units for
 every device access (the accesses must be the same in both anyway, and a rewritten function that
-polls a register still lets time pass). So a model that acts after N units acts at the corresponding
-place in both runs, however many instructions the C takes. Code that is not shared runs in stretches
-in which the clock stands still (System._stretch). A stretch that ends by itself (at shared code, a
-device access, an exception) was a computation, however many blocks it took: the two images' code
-for it differs, so nothing may depend on its length. One that does not end is a wait the clock
-cannot see (a rebuilt idle loop, a task polling memory, a busy task only an interrupt preempts):
-from FROZEN blocks on the run looks for a loop in it, a block entered again with the core's registers
-and memory as at an earlier entry (System._loops: the whole state repeats, so the code repeats for
-ever unless an interrupt comes; LOOP_MAX blocks count as one too, which a busy task that counts in
-memory or in a register needs), and then moves the clock to the next scheduled event, in both runs
-alike. Until 2026-10-22 FROZEN blocks in a row were a wait: the rule fell inside a long computation
-of one image's code and not the other's, and in a loop at a block where the core masked the
-interrupt, which was not asked for again (FreeRTOS on RISC-V GCC -Os and Cortex-M clang -O2 differed
-with lifted C alone). Until 2026-10-23 the registers alone made a loop, and a computation whose
-progress lay in memory while its registers repeated at a block was taken for a wait in one image
-and not in the other (FreeRTOS on RISC-V GCC -Os, the stream-buffer tests' C). Interrupts are taken
-behind a block of shared code, or, in such a wait, behind the first block in which the core takes
-them (at once, or behind the instruction that unmasks them): the code it interrupts is not shared,
-so there is no common place to wait for (where in a wait made only of C that is differs between
-the images: docs/todo.md). A controller with priorities (dread.models.nvic) decides with the core's
-masks whether one is taken (may_take), so a pending one waits while masked and comes behind the
-first shared block after the mask drops, or at once behind the return of the handler that held it
-off. svc raises its exception (Cortex-M: SVCall) at once. The device log, every
-peripheral access with its value in order plus what the models note (bytes sent), is what is
-compared; the functions entered are information (a rewritten function enters what it calls in its
-own way).
+polls a register still lets time pass), plus ENTRY units for every entry into a function outside
+shared code from outside it (System._entry_units: the original's code of a function the C replaces,
+or that C, a moved one's at the branch at its old entry; a scenario's `entry` sets the units). The C
+makes the original's calls (lifted and readable C are one function a file, so the compiler inlines
+none into another; hand-written C must not either: C that calls otherwise enters other functions,
+and its clock parts from the original's), so both images enter the same functions in the same order,
+and a kernel rebuilt in C takes about the time it takes as the original's code. The compiler's runtime
+helpers (the layer's runtime_helper: an ABI's arithmetic and shifts, MSP430 GCC's shared epilogues)
+take no time in either image, shared or rebuilt: compiled code calls one where its compiler chose, so
+the C calls them otherwise than the original's code (gizmo-msp430's rewritten parse_uint multiplies
+through __mspabi_mpyl, lifted MSP430 C jumps to other epilogues), which parted the clocks before. Until 2026-10-23 code
+outside shared code took no time: with FreeRTOS's kernel lifted (its own code is half to nine tenths
+of the original's clock when shared) the demo's timing tests asserted or its tasks idled. So a model
+that acts after N units acts at the corresponding place in both runs, however many instructions the
+C takes. Between such entries code that is not shared runs in stretches in which the clock stands
+still (System._stretch). A stretch that ends by itself (at shared code, an entry, a device access, an
+exception) was a computation, however many blocks it took: the two images' code for it differs, so
+nothing may depend on its length. One that does not end is a wait the clock cannot see (a loop inside
+one rebuilt function: a task polling memory, a busy loop only an interrupt preempts): from FROZEN
+blocks on the run looks for a loop in it, a block entered again with the core's registers and memory
+as at an earlier entry (System._loops: the whole state repeats, so the code repeats for ever unless
+an interrupt comes; LOOP_MAX blocks count as one too, which a busy task that counts in memory or in a
+register needs), and then moves the clock to the next scheduled event, in both runs alike. Until
+2026-10-22 FROZEN blocks in a row were a wait: the rule fell inside a long computation of one image's
+code and not the other's, and in a loop at a block where the core masked the interrupt, which was not
+asked for again (FreeRTOS on RISC-V GCC -Os and Cortex-M clang -O2 differed with lifted C alone).
+Until 2026-10-23 the registers alone made a loop, and a computation whose progress lay in memory
+while its registers repeated at a block was taken for a wait in one image and not in the other
+(FreeRTOS on RISC-V GCC -Os, the stream-buffer tests' C).
+
+Interrupts are taken at places both images share: in front of a block of shared code or of a
+function entered outside it (behind the units it adds); outside shared code also at a block that
+starts right behind an instruction at which the emulator ends its translation block without
+branching (the layer's ends_block, as Unicorn 2.1.4 does it: isb, msr and cps on ARM, CSR accesses
+and fence.i on RISC-V; the C keeps these instructions themselves, among the same memory accesses:
+System._behind_block_end), which is where an unmask or a barrier lets the core take one; and in a
+wait at the block where the search came round, or behind the instruction that unmasks it. Elsewhere
+outside shared code one the core would take at once waits for the next such place (deferred: the C's
+blocks end elsewhere than the original's code's, and taking it at the next block made the images
+differ on most of the benchmark's Cortex-M builds). Until 2026-10-23 interrupts came only behind
+shared blocks or in waits: one that code outside shared code unmasked waited for the next shared block
+(FreeRTOS clang -O2 with the kernel lifted asserted in GenQTest), and in a wait made only of C the
+tick came where each image's code came round to the search's anchor (FreeRTOS RISC-V GCC -Os, the
+stream buffers' coherence actor). A controller with priorities (dread.models.nvic) decides with the
+core's masks whether one is taken (may_take), so a pending one waits while masked and comes at the
+first such place after the mask drops, or at once behind the return of the handler that held it off.
+svc raises its exception (Cortex-M: SVCall) at once. The device log, every peripheral access with its
+value in order plus what the models note (bytes sent), is what is compared; the functions entered are
+information (a moved function's old entry and its C both count as entered).
 
 A run ends at its limit (shared-clock units), when the scenario's end condition holds (text a model
 sent; checked at the store that completes it, so both runs stop at the same place), when the
@@ -50,11 +73,14 @@ nothing the clock counts.
 
 The block hook is the run's hot path (a FreeRTOS run of 30 million clock units enters 3.4 million
 blocks). On Unicorn a hook in C (dread.fasthooks, dread_sysblock) does the blocks that only move the
-clock: a known block of shared code with nothing due, a function entered again (counted there),
-and one behind which the masked interrupt's answer still holds (the registers it depends on read as
-when it was given: the layer's mask_registers); and the known blocks of a stretch outside shared
-code that only count (sys_stretch: before FROZEN, not at the anchor or with other registers or
-memory there, in a wait while the masked answer holds). Every other block goes to System._on_block,
+clock: a known block of shared code or a function entered outside it (sys_entry_units) with nothing
+due, a function entered again (counted there), and one behind which the masked interrupt's answer
+still holds (the registers it depends on read as when it was given: the layer's mask_registers); and
+the known blocks of a stretch outside shared code that only count (sys_stretch: before FROZEN, not at
+the anchor or with other registers or memory there, while an interrupt's answer holds, masked or
+deferred, a deferred one handed over where a block starts where the one before ended unless it knows
+that no instruction there ended it (block_ends); in a wait while the masked answer holds). Every other
+block goes to System._on_block,
 which keeps the rules; both read and write one state (System.st). Elsewhere (DREAD's own engines)
 _on_block does every block. (FreeRTOS's RISC-V GCC -Os image with every lifted function rebuilt: a
 run to the limit took 20 s with its stretches' blocks in Python, 1.2 s with them in C.) While the
@@ -62,9 +88,9 @@ loop search looks at a stretch, a write hook keeps what it stored since the anch
 in C dread_syswrite), and it is in only then: Unicorn syncs pc before every hooked store, and a hook
 on every store made a FreeRTOS run four tenths slower.
 
-The device accesses are the other hot path, once much of the code is outside shared code and its
-clock stands still: FreeRTOS's Cortex-M port reads ICSR in every critical section, and with the
-kernel rebuilt (lifted) a run's clock was nearly all accesses, 125,000 a million units. On Unicorn the C hook
+The device accesses are the other hot path, once much of the code is outside shared code:
+FreeRTOS's Cortex-M port reads ICSR in every critical section, and with the kernel rebuilt (lifted)
+and taking no time (until 2026-10-23) a run's clock was nearly all accesses, 125,000 a million units. On Unicorn the C hook
 (dread_sysio) does the reads of plain registers alone: a model names them (dread.models, `plain`:
 no side effect, a value only a call into the models changes), and every register no model owns is
 memory. It answers from the value the model gave at the last read done here (_plain) and keeps the
@@ -162,6 +188,12 @@ FROZEN = 2_000           # blocks in a row outside shared code without a device 
 LOOP_MAX = 200_000       # blocks of such a stretch after which it counts as a wait without a loop found
 SPIN = 1_000_000         # shared-clock units without progress while an interrupt waits, masked: the run spins
 LIMIT = 20_000_000       # default shared-clock limit
+ENTRY = 56               # shared-clock units a function entered outside shared code takes (System._entry_units;
+# a scenario's `entry` overrides it): about what the original's code of such a function runs per entry
+# when shared, so that a kernel rebuilt in C takes the time it takes as the original's code. Measured
+# on the FreeRTOS benchmark's original images run alone: the bytes the lifted functions' own blocks
+# ran, per entry, 54 to 63 at -Os and -O2, 87 at -O0 (each function's size, an alternative, came to
+# 1.2 to 1.5 times that, and its runs to fewer log entries than the original's alone)
 
 
 class Outcome:
@@ -204,6 +236,7 @@ class _State:
         self.track = self.lost = self.dirty = 0     # what the stretch stored since the anchor (System._track)
         self.io_done = self.last_access = 0     # (the C hook's reads: none here)
         self.came, self.vector, self.suspended_n = CAME_RESET, 1, 0     # (System._ran)
+        self.last_block = 0                 # where the block that ran last starts (System._behind_block_end)
 
 
 def _inside(address, size, ranges):
@@ -284,6 +317,7 @@ class System:
             if c.kind == "load":
                 uc.mem_write(c.run, c.data)
         self.scenario = dict(scenario or {})
+        self.entry = int(self.scenario.get("entry", ENTRY))     # (_shared)
         self.effects = 0                    # the models' calls of note, interrupt_level and request_stop
                                             # (_io notes a write as one the C hook may repeat when its
                                             # model made none of them)
@@ -323,6 +357,8 @@ class System:
         self.jump = self.stuck = False      # what _stretch asks run() for: the next event; the end
         self.state_regs = self._state_registers()
         self.anchor_vals = [0] * len(self.state_regs)   # their values at the anchor (st.anchor + 1)
+        self._block_ends = {}               # (start, end) of a block -> whether it ends behind an instruction
+                                            # the emulator ends its block at (_behind_block_end)
         if self.fast is not None:
             self.fast.set_state_registers(self.state_regs)
             self.st.sp_reg, self.st.pc_reg = self.layout.sp, self.layout.pc
@@ -372,9 +408,21 @@ class System:
     # ---- what counts ----
 
     def _shared(self, placement, built):
-        """The code that is not the same in both images, and where functions are entered."""
+        """The code that is not the same in both images, where functions are entered, and the entries
+        that move the clock outside shared code (costs: {address: (units, lo, hi, through)}: the
+        function's code [lo, hi) in this image, the original's for the functions the C replaces, the C
+        in the rebuilt image; through: where the branch at a moved function's old entry ends, else 0).
+        A moved function is entered at its old entry (that branch, which counts: the original's entry
+        counts there too, so that an interrupt in front of it comes behind the same units in both
+        images) or, by the C's own calls, at its C, which counts unless the branch led there."""
         prog = self.program
         self.entries = {fn.entry: fn.entry for fn in prog.functions}
+        self.costs = {}
+        # The compiler's runtime helpers (the layer's runtime_helper: an ABI's arithmetic and shifts,
+        # MSP430 GCC's shared epilogues) take no time in either image: compiled code calls one where
+        # its compiler chose, so the C may call it where the original's code does not, or another one
+        helper = getattr(self.arch, "runtime_helper", None)
+        free = {fn.name for fn in prog.functions if helper is not None and helper(fn.name)}
         excluded = []
         if placement:                       # the rebuilt image: its C code and the branches to it
             for name, p in placement.items():
@@ -383,9 +431,21 @@ class System:
                     excluded.append((p["entry"], p["entry"] + 4))
                 if p["placement"] != "helper" and p["address"] != p["entry"]:
                     self.entries[p["address"]] = p["entry"]
+                if p["placement"] != "helper" and name in prog.by_name and prog.by_name[name].insns and name not in free:
+                    units = self.entry
+                    through = p["entry"] + 4 if p.get("branch") else 0
+                    self.costs[p["address"]] = (units, p["address"], p["address"] + p["c_bytes"], through)
+                    if through:
+                        self.costs[p["entry"]] = (units, p["entry"], through, 0)
         for name in built:                  # the original: the code the C replaces
             fn = prog.by_name.get(name)
             if fn is not None and fn.insns:
+                excluded.append((fn.insns[0], prog.end(fn)))
+                if name not in free:
+                    self.costs[fn.entry] = (self.entry, fn.insns[0], prog.end(fn), 0)
+        for name in sorted(free - set(built) - set(placement or ())):
+            fn = prog.by_name[name]
+            if fn.insns:
                 excluded.append((fn.insns[0], prog.end(fn)))
         self.excluded = sorted(excluded)
         self.excluded_lo = [lo for lo, _ in self.excluded]
@@ -393,6 +453,22 @@ class System:
             self.fast.set_excluded(self.excluded)
             for address in self.entries:
                 self.fast.add_entry(address)
+            self.fast.set_costs(sorted(self.costs.items()))
+
+    def _entry_units(self, address):
+        """The units a block outside shared code moves the clock: its function's (costs) where it is
+        the entry of a function that holds it, entered from outside that function's code (the block
+        that ran before ended outside it, or an exception, a system call or the reset came: an odd
+        mark); else None (a block of a stretch). A jump back to the entry from inside (a loop, a call of
+        itself) is no entry: the original's code and the C may make it or not (a loop's head at the
+        entry, the C's at its first instruction behind the prologue). In C: sys_entry_units."""
+        cost = self.costs.get(address)
+        if cost is None:
+            return None
+        came = self.st.came
+        if not came & 1 and (cost[1] < came <= cost[2] or came == cost[3]):
+            return None
+        return cost[0]
 
     def is_shared(self, address):
         i = bisect.bisect_right(self.excluded_lo, address) - 1
@@ -510,18 +586,26 @@ class System:
             e[1] = now
 
     def _stretch(self, uc, address):
-        """A block outside shared code, where the clock stands still: st.frozen counts the blocks of
-        the stretch (since the clock last moved). A stretch that ends by itself (at shared code, a
-        device access, an exception) was a computation, however long: the two images' code for it
-        differ, so nothing in it may depend on how many blocks it takes. From FROZEN blocks on the
-        run looks for a loop (_loops); found, the stretch is a wait the clock cannot see (a rebuilt
-        idle loop, a task polling memory, a busy task only an interrupt preempts), and behind every
-        block from then on: an interrupt a controller asks for is taken when the core takes it
-        (behind the instruction that unmasks it, which ends its block); while one waits, masked, the
-        loop goes on until it comes round (its registers and memory as at the anchor again: _came_round)
-        or for LOOP_MAX blocks without unmasking it. Then, or with
-        none wanted, the run moves the clock on to the next event (run(): jump) and takes what it
-        brings; with nothing scheduled the firmware waits for good (stuck: the run ends)."""
+        """A block outside shared code that is no function's entry from outside it (_entry_units),
+        where the clock stands still: st.frozen counts the blocks of the stretch (since the clock last
+        moved). A stretch that ends by itself (at shared code, an entry, a device access, an
+        exception) was a computation, however long: the two images' code for it differ, so nothing in
+        it may depend on how many blocks it takes. An interrupt a controller asks for meanwhile is
+        taken only at a place both images share (_check_interrupts, common=False: behind an
+        instruction at which the emulator ends its block, or the masks changed); one the core would
+        take at once otherwise waits for the next such place, an entry, or shared code. From FROZEN
+        blocks on the run looks for a loop (_loops); found, the stretch is a wait the clock cannot
+        see (a loop inside one rebuilt function: a task polling memory, a busy task only an
+        interrupt preempts; a loop that enters functions moves the clock and is none), and behind
+        every block from then on: an interrupt a controller asks for is taken when the core takes it
+        (at once, or behind the instruction that unmasks it); while one waits, masked, the loop goes
+        on until it comes round (its registers and memory as at the anchor again: _came_round) or for
+        LOOP_MAX blocks without unmasking it. Then, or with none wanted, the run moves the clock on to
+        the next event (run(): jump) and takes what it brings; with nothing scheduled the firmware
+        waits for good (stuck: the run ends). Where in such a loop the interrupt comes still depends
+        on each image's code (the block the search came round at): not established that this never
+        shows; a loop made of one function's code polls, and the place matters only to what the
+        handler reads that the loop writes."""
         st = self.st                        # (in C: sys_stretch does the blocks that only count)
         if st.resume == address + 1 and st.frozen:
             st.resume = 0                   # the block a stop came in front of, run now: no second
@@ -532,6 +616,8 @@ class System:
             st.waiting, st.anchor, st.resume, st.anchor_next, st.track = 0, 0, 0, FROZEN, 0
         if not st.waiting:
             if n < FROZEN or not self._loops(address, n):
+                if st.irq_check:            # taken here only at a place both images share
+                    self._check_interrupts(uc, common=False, address=address)
                 return
             st.waiting, st.waited = 1, n
         if st.irq_check:
@@ -658,13 +744,14 @@ class System:
             if not self.entered[entry]:
                 self.order.append(entry)
             self.entered[entry] += 1
-        if not self.is_shared(addr):
+        units = size if self.is_shared(addr) else self._entry_units(addr)
+        if units is None:
             self._stretch(uc, addr)
-        else:
+        else:                               # shared code, or a function entered outside it
             st.frozen = 0
             if fresh:
                 st.progress = st.clock
-            st.clock += size
+            st.clock += units
             if st.clock - st.progress >= SPIN and st.clock >= st.spin_check:
                 # Here, in a block of code both images share, at a clock both have: a check between
                 # the emulator's chunks came at other points in the two images, which then ended with
@@ -684,7 +771,7 @@ class System:
             if entry is not None or st.vector:
                 self._ran(addr, size)
             else:
-                st.came = addr + size
+                st.came, st.last_block = addr + size, addr
 
     def _ran(self, addr, size):
         """A block that runs (in C: sys_ran; keep the two alike): where it is a function's entry, the
@@ -710,7 +797,7 @@ class System:
         elif st.vector:
             st.vector = 0
             return
-        st.came = addr + size
+        st.came, st.last_block = addr + size, addr
 
     def _vector_at(self, pc):
         """The flag for the block an exception or a system call enters at pc (st.vector, _ran):
@@ -759,27 +846,81 @@ class System:
             self.st.suspended_n -= 1
         return back
 
-    def _check_interrupts(self, uc):
-        """Behind a block where an interrupt may be taken: stop the run for it (deliver) when a
-        controller asks for one and the core takes it now."""
+    def _behind_block_end(self, address):
+        """Whether the block at `address` starts right behind an instruction at which the emulator ends
+        its translation block without a branch (the layer's ends_block: on Unicorn 2.1.4 a barrier,
+        a change of the interrupt masks, a CSR access): the block before ended here (st.came) and its
+        last instruction is one. The lifted C keeps such instructions themselves, in their order among
+        the memory accesses (inline assembly with a memory clobber), so the place is the same in both
+        images. Decoded once a block (the block before: st.last_block); the C hook keeps the answer by
+        address, since only the instruction in front of it decides (a conditional branch not taken
+        ends a block too: a loop of compares and branches handed every block over while an interrupt
+        waited, 47 million on the register test of FreeRTOS's Cortex-M clang -O2 image, until the C hook
+        kept it). Code that changes at an address after it was decoded is not followed."""
         st = self.st
+        start = st.last_block
+        if st.came != address or not start < address:
+            return False
+        key = (start, address)
+        found = self._block_ends.get(key)
+        if found is None:
+            found = False
+            ends = getattr(self.arch, "ends_block", None)
+            if ends is not None and address - start <= 4096:
+                last = None
+                try:
+                    code = bytes(self.uc.mem_read(start, address - start))
+                    isa = self.arch.current_isa(self.regs) if hasattr(self.arch, "current_isa") else None
+                    for insn in self.arch.disassembler(isa).disasm(code, start):
+                        last = insn
+                except UcError:
+                    last = None
+                found = last is not None and last.address + last.size == address and bool(ends(last))
+            self._block_ends[key] = found
+            if self.fast is not None:       # (the C hook asks no more: a branch not taken is none)
+                self.fast.block_end(address, found)
+        return found
+
+    def _check_interrupts(self, uc, common=True, address=None):
+        """In front of a block where an interrupt may be taken: stop the run for it (deliver) when a
+        controller asks for one and the core takes it now. common: the block is a place both images
+        share (shared code, a function's entry from outside it, a block of a wait); outside shared code
+        elsewhere (address: the block's) one is taken only at a block that starts right behind an
+        instruction at which the emulator ends its block (_behind_block_end: a barrier, an unmask), or
+        where the core's masks changed since the last answer otherwise (an exception's return in the
+        emulator, which goes back to where the exception came), and one the core would take at once
+        waits for the next such place (deferred: in the rebuilt image the C's blocks end elsewhere than
+        the original's code's). The answer, masked or deferred, holds while the controllers and the
+        masks do (irq_waiting; in C st.memo, 1 masked, 2 deferred: a deferred one holds only where it
+        may not be taken)."""
+        st = self.st
+        if not common and address is not None and self._behind_block_end(address):
+            common = True
         waiting = self.irq_waiting
-        if waiting is None or waiting[0] != self.irq_epoch or waiting[2] != self._masks(waiting[1]):
-            wanted = self._wanted()
-            st.memo = 0
-            if wanted is None:
-                st.irq_check, self.irq_waiting = 0, None
+        changed = False
+        if waiting is not None and waiting[0] == self.irq_epoch:
+            masks = self._masks(waiting[1])
+            if masks == waiting[2]:
+                if waiting[3] or not common:
+                    return
             else:
-                masks = self._masks(wanted[0])
-                if self._may_take(*wanted, masks=masks):
-                    self.deliver, self.irq_waiting = True, None
-                    self._halt()
-                else:
-                    self.irq_waiting = (self.irq_epoch, wanted[0], masks)
-                    registers = getattr(self.arch, "mask_registers", None)
-                    if self.fast is not None and registers is not None:     # (the C hook's copy)
-                        self.fast.set_memo(registers(getattr(wanted[0], "may_take", None) is not None),
-                                           self.regs.reg_read)
+                changed = True
+        wanted = self._wanted()
+        st.memo = 0
+        if wanted is None:
+            st.irq_check, self.irq_waiting = 0, None
+            return
+        masks = self._masks(wanted[0])
+        masked = not self._may_take(*wanted, masks=masks)
+        if not masked and (common or changed):
+            self.deliver, self.irq_waiting = True, None
+            self._halt()
+            return
+        self.irq_waiting = (self.irq_epoch, wanted[0], masks, masked)
+        registers = getattr(self.arch, "mask_registers", None)
+        if self.fast is not None and registers is not None:     # (the C hook's copy)
+            self.fast.set_memo(registers(getattr(wanted[0], "may_take", None) is not None),
+                               self.regs.reg_read, 1 if masked else 2)
 
     def _owner(self, address):
         i = bisect.bisect_right(self.owned_lo, address) - 1

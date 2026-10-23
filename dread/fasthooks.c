@@ -314,9 +314,11 @@ void dread_init(state_t *st)
  * Nearly every block of a system run is a known block of shared code with nothing due: the clock
  * moves on by its size, and that is all (79 % of a FreeRTOS run's 3.4 million blocks; with the
  * entries of functions counted here and the masked interrupt's answer compared here, 99 %). With
- * most functions rebuilt, most blocks lie outside shared code instead, in stretches in which the
- * clock stands still (System._stretch): the blocks of a stretch that decide nothing are done here
- * too (sys_stretch). This hook calls the Python hook (System._on_block) for every other block, which
+ * most functions rebuilt, most blocks lie outside shared code instead: the entry of such a function
+ * from outside it moves the clock by its units (sys_entry_units) as a shared block does by its size,
+ * and the blocks between lie in stretches in which the clock stands still (System._stretch): the
+ * blocks of a stretch that decide nothing are done here too (sys_stretch). This hook calls the
+ * Python hook (System._on_block) for every other block, which
  * keeps the rules in one place; the state both read and write is sys_t. While the loop search
  * looks at a stretch, a write hook keeps what the stretch stored since the search's anchor
  * (dread_syswrite), so that a loop comes round only when memory does too. */
@@ -427,6 +429,14 @@ typedef struct {
     set_t suspended;                /* entry << 32 | sp -> came then; 0: gone (System._suspend) */
     int64_t suspended_n;            /* those not gone */
     uint64_t io_pc;                 /* the pc of the access handed to System._io_from_c */
+    /* the entries that move the clock outside shared code (System._entry_units): entry_set's value
+       2 + i for the i-th, its function's code [cost_lo, cost_hi) in this image, its units, and where
+       the branch at its old entry ends (cost_through, 0: none), from which its C is no entry */
+    const uint64_t *cost_lo, *cost_hi, *cost_through;
+    const int64_t *cost_units;
+    uint64_t last_block;            /* where the block that ran last starts (System._behind_block_end) */
+    set_t block_ends;               /* block address -> 2: it starts right behind an instruction at which the
+                                       emulator ends its block (System._behind_block_end), 1: it does not */
 } sys_t;
 
 static int sys_shared(const sys_t *st, uint64_t address)
@@ -442,9 +452,12 @@ static int sys_shared(const sys_t *st, uint64_t address)
     return lo == 0 || address >= st->excl_hi[lo - 1];
 }
 
-static int sys_masks_hold(void *uc, sys_t *st)
+/* Whether the last interrupt answer still holds (System._check_interrupts): the registers it depends
+ * on read as then. memo 1: masked, holds anywhere; 2: deferred, holds only where it may not be taken
+ * (common 0: a block of a stretch outside shared code, not in a wait). */
+static int sys_masks_hold(void *uc, sys_t *st, int common)
 {
-    if (!st->memo)
+    if (!st->memo || (common && st->memo != 1))
         return 0;
     for (int i = 0; i < st->memo_n; i++) {
         uint64_t v = 0;
@@ -492,6 +505,23 @@ static void sys_ran(void *uc, uint64_t address, uint32_t size, sys_t *st)
     }
     st->vector = 0;
     st->came = address + size;
+    st->last_block = address;
+}
+
+/* The units a known block outside shared code moves the clock (System._entry_units): its function's
+ * where it is the entry of a function that holds it, entered from outside that function's code (the
+ * block before ended outside it, or a mark came: odd) and not through the branch at its old entry;
+ * else -1, a block of a stretch. */
+static int64_t sys_entry_units(sys_t *st, uint64_t address)
+{
+    uint32_t e = set_get(&st->entry_set, address);
+    if (e < 2)
+        return -1;
+    uint64_t i = e - 2, came = st->came;
+    if (!(came & 1) && ((st->cost_lo[i] < came && came <= st->cost_hi[i]) || came == st->cost_through[i]))
+        return -1;                  /* a jump back to the entry from inside the function, or the branch at
+                                       its old entry, which counted */
+    return st->cost_units[i];
 }
 
 /* Whether the block at address is entered with the anchor's registers and every word the stretch
@@ -509,8 +539,12 @@ static int sys_at_anchor(void *uc, uint64_t address, sys_t *st)
     return 1;
 }
 
-/* A known block outside shared code: done here (1) when System._stretch would only count it, else
- * left to it (0). Keep the two alike. */
+/* A known block outside shared code that is no entry (sys_entry_units): done here (1) when
+ * System._stretch would only count it, else left to it (0): from FROZEN blocks on where the loop
+ * search looks, and while an interrupt waits when the answer does not hold (the masks changed, or
+ * none was given since something changed) or a deferred one meets a block that starts where the one
+ * before ended (System._behind_block_end decides whether an instruction there ended the block). Keep
+ * the two alike. */
 static int sys_stretch(void *uc, uint64_t address, uint32_t size, sys_t *st)
 {
     if (st->resume == address + 1 && st->frozen) {
@@ -526,7 +560,12 @@ static int sys_stretch(void *uc, uint64_t address, uint32_t size, sys_t *st)
             if (n >= st->stretch_from && (st->nregs < 0 || n >= st->loop_max || n >= st->anchor_next
                                           || sys_at_anchor(uc, address, st)))
                 return 0;
-        } else if (!st->irq_check || !sys_masks_hold(uc, st) || st->nregs < 0 || n - st->waited >= st->loop_max
+            if (st->irq_check && (!sys_masks_hold(uc, st, 0)
+                                  || (st->memo == 2 && st->came == address && set_get(&st->block_ends, address) != 1)))
+                return 0;           /* the question, the masks changed, or a deferred one at a block that
+                                       starts where the one before ended, behind an instruction that ended it
+                                       or not known yet (System._behind_block_end: a branch not taken is none) */
+        } else if (!st->irq_check || !sys_masks_hold(uc, st, 1) || st->nregs < 0 || n - st->waited >= st->loop_max
                    || (n > st->waited && sys_at_anchor(uc, address, st))) {
             return 0;
         }
@@ -543,14 +582,17 @@ void dread_sysblock(void *uc, uint64_t address, uint32_t size, sys_t *st)
 {
     if (!st->observers && !st->due && st->chunk > 0) {
         uint32_t known = set_get(&st->known, address);
-        int shared = known && size < known && sys_shared(st, address);
-        if (known && size < known && !shared && sys_stretch(uc, address, size, st))
-            return;
-        if (shared) {
-            int64_t clock = st->clock + size;
+        int64_t units = -1;         /* shared code, or a function entered outside it: what it moves the clock */
+        if (known && size < known) {
+            units = sys_shared(st, address) ? (int64_t)size : sys_entry_units(st, address);
+            if (units < 0 && sys_stretch(uc, address, size, st))
+                return;
+        }
+        if (units >= 0) {
+            int64_t clock = st->clock + units;
             if ((clock - st->progress < st->spin || clock < st->spin_check)
                     && clock < st->next_event && clock < st->limit
-                    && (!st->irq_check || sys_masks_hold(uc, st))) {
+                    && (!st->irq_check || sys_masks_hold(uc, st, 1))) {
                 sys_ran(uc, address, size, st);
                 st->clock = clock;
                 st->frozen = 0;
@@ -592,6 +634,20 @@ size_t dread_sys_entered(sys_t *st, uint64_t *keys, uint32_t *vals)
 void dread_sys_entry(sys_t *st, uint64_t address)
 {
     set_put(&st->entry_set, address, 1, 1);
+}
+
+/* Whether the block at address starts right behind an instruction at which the emulator ends its block
+ * (System._behind_block_end decided it: it depends only on the instruction in front of address). */
+void dread_sys_block_end(sys_t *st, uint64_t address, int32_t yes)
+{
+    set_put(&st->block_ends, address, yes ? 2 : 1, 0);
+}
+
+/* The i-th entry that moves the clock outside shared code (System._entry_units; the arrays cost_lo,
+ * cost_hi and cost_units are System's). */
+void dread_sys_cost(sys_t *st, uint64_t address, uint32_t i)
+{
+    set_put(&st->entry_set, address, 2 + i, 0);
 }
 
 /* The transfers counted here, as (came << 32 | entry, count) pairs, and the counts set back to none. */
@@ -959,6 +1015,7 @@ void dread_sys_free(sys_t *st)
     set_free(&st->calls);
     set_free(&st->suspended);
     set_free(&st->io_index);
+    set_free(&st->block_ends);
     free(st->log);
     free(st->io_regs);
     free(st->io_used);

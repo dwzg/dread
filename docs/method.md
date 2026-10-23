@@ -118,12 +118,15 @@ register of its caller it reads, one it does not restore). The benchmark runs it
 ## 8. The whole firmware: `dread sysrun`
 
 Both images start from reset with models of the devices and run a scenario (input at points of time,
-an end condition). Time is a clock over the code both images share, so a device acts at the same
-place in both however many instructions the C takes; interrupts are taken behind shared code. Where
-the firmware waits in code that is not shared (a loop that comes back to the same registers), the
-clock moves on to the next event and the interrupt comes where the core takes it. The device logs
-must agree. This is the test for what no function-level case can call or end: main
-loops, reset and interrupt handlers.
+an end condition). Time is a clock over the code both images share, plus a fixed amount for every
+entry into a function whose code they do not share (the C makes the original's calls, so both enter
+the same functions in the same order), so a device acts at the same place in both however many
+instructions the C takes, and a kernel rebuilt in C takes about its time. Interrupts are taken at
+places both images share: shared code, a function's entry, and the instruction behind an unmask or a
+barrier, which the C keeps itself. Where the firmware waits inside one rebuilt function (a loop that
+comes back to the same registers and memory), the clock moves on to the next event and the interrupt
+comes where the core takes it. The device logs must agree. This is the test for what no
+function-level case can call or end: main loops, reset and interrupt handlers.
 
 ## 9. Lifting: everything that can be C, built from C
 
@@ -196,6 +199,13 @@ Each of these cost time once and is now a check or a rule in a tool:
   image's polling loop and outside the other's (FreeRTOS on RISC-V and clang -O2, with lifted C
   alone). A wait is a loop now, found by its registers: where in a loop the clock moves on does not
   matter, as long as the interrupt comes where the core takes it.
+- Code outside the clock takes no time, and no place in it is common to both images by itself. With
+  FreeRTOS's kernel lifted, half to nine tenths of the original's clock went: timing tests asserted,
+  tasks idled, an interrupt the kernel's C unmasked waited for the next shared code, and a wait made
+  only of C took its tick where each image's code came round. Counting function entries (the C's calls
+  are the original's) and taking interrupts behind the instructions the C keeps itself gave both
+  (2026-10-23); taking them at the next block instead made the images differ, since the C's blocks end
+  elsewhere.
 - Code that only the core enters looks dead to the analysis: a vectored trap table that a function
   table listed as one function was lifted from its first entry (a jump), and the overlay freed the
   other entries; another function's C took the space, and the timer interrupt entered that C in the

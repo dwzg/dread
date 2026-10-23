@@ -743,6 +743,19 @@ class RiscV:
         """mstatus and mie, for a controller that decides itself (dread.models.clint)."""
         return {"mstatus": engine.reg_read(ur.UC_RISCV_REG_MSTATUS), "mie": engine.reg_read(ur.UC_RISCV_REG_MIE)}
 
+    # Instructions behind which Unicorn 2.1.4 ends its translation block though they do not branch,
+    # measured: every CSR instruction (a read too) and fence.i; not fence or wfi. dread.sysrun takes an
+    # interrupt at the block behind one outside shared code (System._behind_block_end): the lifted C
+    # keeps the instruction itself, so the place is shared.
+    BLOCK_ENDS = (cs.riscv.RISCV_INS_CSRRW, cs.riscv.RISCV_INS_CSRRS, cs.riscv.RISCV_INS_CSRRC,
+                  cs.riscv.RISCV_INS_CSRRWI, cs.riscv.RISCV_INS_CSRRSI, cs.riscv.RISCV_INS_CSRRCI,
+                  cs.riscv.RISCV_INS_FENCE_I)
+
+    def ends_block(self, insn):
+        """Whether the emulator ends its translation block behind this instruction though it does not
+        branch (BLOCK_ENDS)."""
+        return insn.id in self.BLOCK_ENDS
+
     def enters_code_vector(self, engine, address):
         """Whether a trap enters a vector made of instructions: mtvec's vectored mode (interrupts at
         base + 4 * cause, the synchronous traps at the base: slots of a table, mostly a j to the

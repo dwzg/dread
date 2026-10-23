@@ -570,7 +570,12 @@ def test_an_msp430_interrupt_wakes_the_core_from_a_low_power_mode():
 def test_gizmo_msp430_system_run(tmp_path):
     """gizmo-msp430 from reset with its models, original against the image with the rewritten C:
     every scenario agrees; in the keys scenario the timer's interrupt (vector 0, through the
-    interrupt controller) moves the key into the ring buffer and the status line follows."""
+    interrupt controller) moves the key into the ring buffer and the status line follows. Both
+    images end every scenario at the same clock: the rewritten parse_uint multiplies through
+    __mspabi_mpyl, which the original's never calls, and the C jumps to other shared epilogues than
+    the original's code; runtime helpers take no time (Msp430.runtime_helper, dread.sysrun), and until
+    2026-10-23, when they did, the rebuilt image's clock ran ahead (the logs agreed by chance)."""
+    import json
     from dread import build, sysrun
     from dread.target import Target
     from test_runner import src_copy
@@ -579,6 +584,15 @@ def test_gizmo_msp430_system_run(tmp_path):
                           quiet=True)
     for name in sorted(target.scenarios):
         assert sysrun.main(["--target", target.root, "--scenario", name, "--recon", payload]) == 0, name
+    with open(tmp_path / "recon" / "placement.json") as f:
+        placed = json.load(f)["functions"]
+    built = [n for n, p in placed.items() if p["placement"] != "helper"]
+    with open(payload, "rb") as f:
+        rebuilt = f.read()
+    for name, scenario in sorted(target.scenarios.items()):
+        a = sysrun.run_image(target, target.image(), target.image().payload(), scenario, built=built)
+        b = sysrun.run_image(target, target.image(), rebuilt, scenario, placement=placed)
+        assert a.log == b.log and a.clock == b.clock, (name, a.clock, b.clock)
     outcome = sysrun.run_image(target, target.image(), target.image().payload(), target.scenarios["keys"])
     assert outcome.reports["interrupts"].get(0) and "mode run volume 7" in outcome.reports["uart"]["sent"], outcome
 

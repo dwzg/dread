@@ -22,6 +22,12 @@ one had; on clang -Os and GCC -O2 the 3 and 8 asked with other masks (a mask had
 answered otherwise, and the block hook still asks those. Every other access goes to Python
 (System._io_from_c).
 
+The C block hook moves the clock at a function entered outside shared code from outside it, by the
+units System gave it for that entry (set_costs; dread.sysrun System._entry_units), as at a block of
+shared code by its size, and keeps an interrupt's answer of either kind: masked, or deferred to a
+place both images share (set_memo's kind), which it hands back at an entry, at shared code, and at a
+block that starts where the one before ended (last_block: System._behind_block_end decides there).
+
 The C block hook also keeps what the run keeps of the transfers into functions (dread.sysrun
 System._ran; sys_ran here): every block it does ends where the next transfer comes from (came), and
 at a function's entry the pair is counted (calls, taken by take_calls), from what came before an
@@ -284,7 +290,11 @@ class SysState(ctypes.Structure):
                 # the transfers into functions (System._ran)
                 ("came", ctypes.c_uint64), ("vector", ctypes.c_int32), ("sp_reg", ctypes.c_int32),
                 ("pc_reg", ctypes.c_int32), ("calls", Set), ("suspended", Set), ("suspended_n", ctypes.c_int64),
-                ("io_pc", ctypes.c_uint64)]
+                ("io_pc", ctypes.c_uint64),
+                # the entries that move the clock outside shared code (System._entry_units, set_costs)
+                ("cost_lo", ctypes.c_void_p), ("cost_hi", ctypes.c_void_p), ("cost_through", ctypes.c_void_p),
+                ("cost_units", ctypes.c_void_p),
+                ("last_block", ctypes.c_uint64), ("block_ends", Set)]
 
 
 class SysHooks:
@@ -303,6 +313,8 @@ class SysHooks:
         lib.dread_sys_entered.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dread_sys_entered.restype = ctypes.c_size_t
         lib.dread_sys_entry.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+        lib.dread_sys_cost.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32]
+        lib.dread_sys_block_end.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int32]
         lib.dread_sys_calls.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         lib.dread_sys_calls.restype = ctypes.c_size_t
         lib.dread_sys_suspend.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32]
@@ -392,6 +404,28 @@ class SysHooks:
     def add_entry(self, address):
         self.lib.dread_sys_entry(ctypes.byref(self.state), address)
 
+    def set_costs(self, costs):
+        """The entries that move the clock outside shared code, [(address, (units, lo, hi, through)),
+        ...] (System._entry_units): after add_entry, whose entries they mark."""
+        n = len(costs)
+        lo = (ctypes.c_uint64 * max(n, 1))(*[c[1] for _, c in costs])
+        hi = (ctypes.c_uint64 * max(n, 1))(*[c[2] for _, c in costs])
+        through = (ctypes.c_uint64 * max(n, 1))(*[c[3] for _, c in costs])
+        units = (ctypes.c_int64 * max(n, 1))(*[c[0] for _, c in costs])
+        self.costs = (lo, hi, through, units)
+        s = self.state
+        s.cost_lo, s.cost_hi = ctypes.cast(lo, ctypes.c_void_p), ctypes.cast(hi, ctypes.c_void_p)
+        s.cost_through = ctypes.cast(through, ctypes.c_void_p)
+        s.cost_units = ctypes.cast(units, ctypes.c_void_p)
+        for i, (address, _) in enumerate(costs):
+            self.lib.dread_sys_cost(ctypes.byref(self.state), address, i)
+
+    def block_end(self, address, yes):
+        """Whether the block at address starts right behind an instruction at which the emulator ends
+        its block (System._behind_block_end): the C hook then hands a deferred interrupt's block over
+        only where one does (a branch not taken ends blocks too, every round of a loop of compares)."""
+        self.lib.dread_sys_block_end(ctypes.byref(self.state), address, 1 if yes else 0)
+
     def take_entered(self):
         """[(entry address, entries)] the hook counted since the last call."""
         n = self.state.entered.used
@@ -417,10 +451,11 @@ class SysHooks:
         now gone; 0 for none."""
         return self.lib.dread_sys_resume(ctypes.byref(self.state), entry << 32 | (sp & 0xFFFFFFFF))
 
-    def set_memo(self, registers, read):
-        """The masked answer holds while these (register, bits) read as now."""
+    def set_memo(self, registers, read, kind=1):
+        """The last answer holds while these (register, bits) read as now: kind 1, masked (anywhere); 2,
+        deferred (System._check_interrupts: only where it may not be taken)."""
         s = self.state
         for i, (reg, bits) in enumerate(registers[:4]):
             s.memo_regs[i], s.memo_bits[i], s.memo_vals[i] = reg, bits, read(reg) & bits
         s.memo_n = min(len(registers), 4)
-        s.memo = 1 if len(registers) <= 4 else 0
+        s.memo = kind if len(registers) <= 4 else 0

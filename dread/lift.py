@@ -3478,11 +3478,15 @@ def system_check(target, image, program, lifter, names, out=print, verdicts=None
     and every scenario of the target runs on the original and on the rebuilt image (dread.sysrun):
     accepted when the device logs, model reports and endings agree and the original's runs executed
     every instruction of it that a path reaches; loop_missed ({name: the instructions its loop cases,
-    which all agreed, left unrun}) lets them count what loop cases ran. Alone, since the clock of a
-    system run counts only code both images share: with every accepted function rebuilt, FreeRTOS's
-    kernel took no time, the demo's timing tests asserted, and the scenarios ran a third of what they
-    run on the original. The checks run in parallel. Returns {name: "the system run" or "loop cases
-    and the system run"}; verdicts, a dict, gets the reason of each one dropped (see check)."""
+    which all agreed, left unrun}) lets them count what loop cases ran. Alone, so that the original's
+    runs, whose coverage counts, are the original's own but for the one function's code: until
+    2026-10-23 code outside shared code took no time, and with every accepted function rebuilt
+    FreeRTOS's kernel took none, the demo's timing tests asserted, and the scenarios ran a third of
+    what they run on the original; since then a function entered outside shared code takes
+    dread.sysrun's ENTRY units, which comes close (the whole image's Cortex-M runs make as many log
+    entries as the original alone, within a tenth), not equal. The checks run in parallel. Returns
+    {name: "the system run" or "loop cases and the system run"}; verdicts, a dict, gets the reason of
+    each one dropped (see check)."""
     import multiprocessing
     from dread.util.polite import die_with_parent, resident, workers
     verdicts = {} if verdicts is None else verdicts
@@ -3562,13 +3566,16 @@ def enough(names, guilty, differs, size=None):
     (differs(names without it) false), or None; tried only for LEAVE_ONE_FROM functions or more, the
     smallest first (size(name): its bytes; the least code goes), the first that does going. A
     difference that needs every one of many together goes as soon as any one of them is the
-    original's code again: a wait made only of C, whose interrupt the system run takes where each
-    image's code puts it (dread.sysrun: FreeRTOS on RISC-V GCC -Os, the stream-buffer coherence
-    task's loop with its 13 callees in C, the tick taken in one image where the scheduler was
-    suspended, in the other where it was not; with any one of them the original's, the loop runs
-    shared code, whose clock decides where the tick comes). Up to len(guilty) whole images more. A
-    pair is still dropped whole (frames that grew add up on one task's stack: keeping either would
-    leave the smaller margin, docs/decisions.md 2026-10-22)."""
+    original's code again. The case that showed it (2026-10-23): a wait made only of C, whose
+    interrupt the system run took where each image's code came round (FreeRTOS on RISC-V GCC -Os, the
+    stream-buffer coherence task's loop with its 13 callees in C, the tick taken in one image where
+    the scheduler was suspended, in the other where it was not; with any one of them the original's,
+    the loop ran shared code, whose clock decided where the tick came). The system run now gives
+    such a loop a clock of its own (a function entered outside shared code moves it: dread.sysrun),
+    and that build's check drops nothing for it; the rule stays for a difference of that shape with
+    another cause (none seen since). Up to len(guilty) whole images more. A pair is still dropped
+    whole (frames that grew add up on one task's stack: keeping either would leave the smaller
+    margin, docs/decisions.md 2026-10-22)."""
     if len(guilty) < LEAVE_ONE_FROM:
         return None
     for name in sorted(guilty, key=lambda n: (size(n) if size else 0, n)):

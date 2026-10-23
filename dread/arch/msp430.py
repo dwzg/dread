@@ -288,6 +288,14 @@ class Msp430:
         these registers as read after every call. () for anything else."""
         base = re.sub(r"_\d+$", "", name)      # the fixed-count shifts: __mspabi_srli_4
         return ABI_RESULTS.get(base, ())
+
+    def runtime_helper(self, name):
+        """Whether `name` is one of the compiler's runtime helpers (the EABI's in ABI_RESULTS, GCC's
+        shared epilogues): compiled code calls one where its compiler chose (a multiplication without
+        a multiplier, the epilogue for the registers it saved), so C and the original's code call
+        them differently. dread.sysrun gives them no time."""
+        return re.sub(r"_\d+$", "", name) in ABI_RESULTS or name.startswith(self.own_epilogues)
+
     veneer_reg = "r11"
     profile = None
     # Instructions that fill a gap and do nothing besides zero bytes (dread.lift's entered_unseen):

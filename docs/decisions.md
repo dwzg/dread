@@ -9,6 +9,127 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Where the system run takes an interrupt outside shared code: function entries move the clock, places both images share (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Outside shared code the clock stood still and no place was common to both images,
+  which showed twice. (1) A wait made only of C took its interrupt where each image's code came round
+  to the loop search's anchor: on FreeRTOS RISC-V GCC -Os the stream buffers' coherence actor, all of
+  it C, came round in prvWriteBytesToBuffer in the original and in xStreamBufferReceive with the
+  scheduler suspended in the rebuilt image, and the lift check dropped vTaskSuspendAll for it
+  (lift.enough). (2) An interrupt held off by a mask that code outside shared code lifts waited for
+  the next shared block: FreeRTOS clang -O2 with every lifted function rebuilt asserted in GenQTest at
+  94,000 units in both images alike, PendSV taken only behind vAssertCalled. A rule tried on
+  2026-10-22 (taken behind the unmask) left the images agreeing but made the demos' timing tests
+  assert elsewhere: the kernel outside the clock takes no time. Measured on the benchmark's original
+  images run alone, the lifted functions' own code is 49 % (RISC-V clang -Os) to 91 % (Cortex-M GCC
+  -Os) of the clock. Main's whole images were far from the original alone accordingly: of the 27
+  Cortex-M builds nine ended in an assertion's spin, six idled to the limit with 2,466 log entries and
+  twelve made 1.5 to 2.5 million log entries, where the original alone makes 85,000 to 97,000.
+- **Options.**
+  1. Where the clock moves outside shared code: (a) nowhere, as before; (b) by a fixed amount at every
+     entry into a function outside shared code from outside that function; (c) by that function's
+     size at every such entry.
+  2. Where an interrupt the core takes is taken outside shared code: (A) only at places both images
+     share, the entries of (b) and the block right behind the instruction that unmasks it (the
+     2026-10-22 rule); (B) at the next block; (A+) as (A), and at any block that starts right behind an
+     instruction at which the emulator ends its translation block without branching.
+  3. For a wait made only of C: (i) the interrupt at the least rotation of the round's sequence of
+     entries (the todo's sketch); (ii) nothing of its own: with (b) a round that enters a function
+     moves the clock and is no wait.
+- **Choice: (b) with 56 units (sysrun.ENTRY; a scenario's `entry` sets it), (A+), (ii), and the
+  compiler's runtime helpers taking no time.**
+  - (b) gives both a common place and time. Lifted C makes the original's calls (one function a file:
+    the compiler inlines none into another; readable C the same), so both images enter the same
+    functions in the same order and their clocks agree at every entry, and a kernel rebuilt in C takes
+    about its time again. 56 is the average of the bytes the lifted functions' own code ran per entry
+    in the original-alone runs (54 to 63 at -Os and -O2, 87 at -O0). (c) needs no constant but counts
+    big functions high (1.2 to 1.5 times on average): its whole images made 58,000 to 85,000 log
+    entries on Cortex-M, and one asserted (TaskNotifyArray.c); (b)'s make 86,000 to 97,000. An entry
+    counts only from outside the function (the block before ended outside its code, or an exception
+    came): a loop back to the entry, or a call of itself, is none, since the original's code may loop
+    through its entry where the C loops behind its prologue. A moved function counts at the branch at
+    its old entry when entered there, at its C only when the C's own calls enter it directly: an
+    interrupt in front of it then comes behind the same units in both images (the first measured
+    version counted only the C, and four RISC-V whole images differed by those 56 units where mret
+    started a task at its old entry).
+  - (A+): taking an interrupt at the next block (B) made the images differ on 19 of the 27 Cortex-M
+    builds (PendSV after a PENDSVSET write: the C's blocks end elsewhere than the original's code's).
+    (A) agreed everywhere on Cortex-M but put context switches late: vTaskSuspend(NULL), lifted,
+    yields with nothing masking PendSV, and the task ran on to its next call with the argument (an
+    event group not yet created, NULL) loaded before it switched; resumed later, it asserted in
+    xEventGroupWaitBits on 20 builds. On the core PendSV comes behind portYIELD's isb. Unicorn 2.1.4
+    ends its translation block behind isb, msr and cps (M profile and ARM state) and behind every CSR
+    access and fence.i (RISC-V), measured; not behind dsb, dmb, mrs, mcr, nop or RISC-V's fence and
+    wfi. Lifted C keeps those instructions themselves (inline assembly with a memory clobber, in their
+    order among the memory accesses), so the block behind one is the same place in both images
+    (System._behind_block_end: the block before ended where this one starts and its last instruction
+    is one of the layer's ends_block). That covers the unmask too, also where the pend and the msr lie
+    in one block, so that the question first comes up behind the msr. An interrupt the core would take
+    at once elsewhere outside shared code waits for the next such place, an entry or shared code:
+    late where a loop inside one rebuilt function makes device accesses and nothing else (gizmo's
+    A-profile write test: 2 interrupts taken where the shared image takes 11).
+  - (ii): with (b) the coherence actor's loop enters a dozen functions a round and moves the clock;
+    the tick comes due at an entry, the same in both images, and the loop search finds no wait there.
+    (i) would have left the stretches as they were and added the round's sequence of entries to the
+    search, with a case it cannot decide (a round whose entries repeat inside it, two halves alike,
+    picks a half by phase again). A loop inside one function (no entry in its round) keeps the old
+    rule: its interrupt comes where the search came round, or behind the unmask (not established that
+    this never shows; it can matter only to what the handler reads that the loop writes).
+  - Runtime helpers: with entries timed, a lift check of gizmo-msp430 with a planted lifter mistake
+    dropped three correct functions for the whole image. The cause was older: gizmo's rewritten
+    parse_uint multiplies through __mspabi_mpyl, which the original's never calls, and compiled C
+    jumps to other shared epilogues than the original's code; their bytes moved only one image's clock
+    (with main's code that configuration ended 1,950 units apart, its device log agreeing by chance).
+    Compiled code calls a runtime helper where its compiler chose, so no rule of the program decides
+    it: the layer's runtime_helper (Arm: the RTABI's, Msp430: the EABI's and GCC's shared epilogues)
+    names them, and they take no time in either image, shared or rebuilt. RISC-V's layer names none
+    (libgcc's helpers there are called alike by both images in every benchmark run; not established
+    beyond).
+- **What it does.** A stretch is now the code between two clock movements, which entries end too;
+  the loop search sees only loops inside one function. The masked-interrupt rule holds outside shared
+  code as everywhere: behind the unmasking instruction. The comparison gains a dependence: C that
+  calls otherwise than the original (hand-written C that inlines one rewritten function into another
+  in the same file) enters other functions, its clock parts from the original's, and the whole image
+  differs (a test shows it); targets compile such C without inlining (docs/target.md). Nothing is
+  compared less (rule 6): the device logs, reports and endings, as before.
+- **Undo.** dread/sysrun.py: ENTRY, System._entry_units and the costs and runtime helpers of _shared,
+  _behind_block_end, the common argument and the deferred answers of _check_interrupts and its call in
+  _stretch; dread/fasthooks.c: sys_entry_units, dread_sys_cost, sys_masks_hold's kinds, last_block,
+  block_ends (dread_sys_block_end) and the conditions in sys_stretch and dread_sysblock;
+  dread/fasthooks.py: set_costs, block_end, set_memo's kind; the layers' ends_block, runtime_helper and
+  Arm.current_isa. tests/test_sysrun.py: the three tests of
+  2026-10-23 (four) and the changed expectations of the write tests and the memory-progress test;
+  tests/test_msp430.py: the system run's clocks.
+- **Status.** Done. FreeRTOS clang -O2 with every lifted function rebuilt: GenQTest passes, both
+  images run to the limit with 88,216 log entries (the original alone 88,555). The whole images of all
+  38 benchmark builds with scenarios (each build's lifted table): all run to the limit (main: 29),
+  with 0.93 to 1.23 times the original alone's log entries on Cortex-M and 1.03 to 1.07 on RISC-V; 36
+  agree (main: 37): virt-gcc10-Os differs as with main (a table from before the culprit search), and
+  mps2-gcc-O0's older table lists prvQueueSetSendingTask, whose C alone makes the image differ with
+  main's run as with this one (the lift check drops it), which main's run never reached. The lift
+  check on copies of the six builds with the frontier answers: RISC-V GCC -Os 269 (vTaskSuspendAll
+  kept, nothing dropped for the whole image; 22 s instead of 367), Cortex-M GCC -Os 340, clang -O2
+  294, M4F GCC -Os 349, GCC 4 -Os 323 and GCC -O0 381, as before, the whole image agreeing on all.
+  Gizmo: every scenario agrees; with nearly every function counted as rebuilt the device logs are as
+  before; ten scenarios of m3, m3cpp, m4 and rv32cpp end three to five entries shorter in both images
+  alike (the boot takes longer, so the main loop's poll sees the scenario's input a tick earlier);
+  gizmo-msp430's images now end at the same clock (before, the rebuilt one ran ahead); the lifted
+  tables are the same. The C hook and the Python hooks agree (the tests; RISC-V GCC -Os and Cortex-M
+  clang -O2 whole images). Times, on a lightly loaded machine, one run of each image: RISC-V clang 18
+  -Os 1.6 + 1.6 s -> 0.5 + 0.5 s, GCC 12 -Os 4.4 + 5.6 -> 0.5 + 0.5, GCC -Os 1.9 + 1.9 -> 0.6 + 0.6
+  (the coherence testers' busy loops call functions and are no LOOP_MAX waits any more); Cortex-M GCC
+  -Os 0.3 + 0.3 s (idling with 2,466 entries) -> 5.0 + 10.2 (95,023), clang -O2 0.06 + 0.06
+  (asserting) -> 4.5 + 8.8, clang -Os 5.8 + 6.1 (1.9 million entries) -> 4.8 + 10.0. The rebuilt
+  image's Cortex-M runs take twice the original's: the register-test tasks' busy loops count in
+  memory inside one function, LOOP_MAX waits with the loop search's write hook in (docs/todo.md,
+  "LOOP_MAX can come down"). The lift checks of the six builds: 22, 74, 88, 75, 101 and 104 s (main:
+  367, 62, 86, 83, 128, 108). A first version handed every block a branch not taken ends to Python
+  while an interrupt was deferred (System._behind_block_end, which decides there): with lift-v3's
+  clang -O2 table the original image's run took 198 s against 5 s now; the C hook keeps the answer
+  by address (test_a_deferred_interrupt_passes_blocks_that_a_branch_not_taken_ends).
+
 ## Results beyond r0:r1: a naked entry hands them back, no groups (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

@@ -194,6 +194,13 @@ class Arm:
         them as read after every call. () for anything else, and for a helper without one."""
         return RTABI_RESULTS.get(name, ())
 
+    def runtime_helper(self, name):
+        """Whether `name` is one of the RTABI's run-time helpers (RTABI_RESULTS, with or without a
+        result): compiled code calls one where its compiler chose (a division without a divide
+        instruction, a 64-bit shift, clang's memclr for a structure), so C and the original's code call
+        them differently. dread.sysrun gives them no time."""
+        return name in RTABI_RESULTS
+
     def abi_stack_args(self, name):
         """0 for a helper of the RTABI, whatever its code does with sp: none takes an argument on
         the stack (libgcc's __aeabi_uldivmod moves sp before it calls __udivmoddi4, which left its
@@ -942,6 +949,23 @@ class Arm:
     # return (8, a branch to EXC_RETURN in handler mode; with an interrupt hook in place Unicorn would
     # go on at the EXC_RETURN address)
     syscall_exception = None                # the exception svc raises (M profile: SVCall)
+
+    # Instructions behind which Unicorn 2.1.4 ends its translation block though they do not branch,
+    # measured: isb, cps and every msr (M profile and ARM state); not dsb, dmb, mrs, mcr, nop or sev
+    # (wfi halts the core). dread.sysrun takes an interrupt at the block behind one outside shared code
+    # (System._behind_block_end): the lifted C keeps the instruction itself, so the place is shared.
+    BLOCK_ENDS = (csarm.ARM_INS_ISB, csarm.ARM_INS_CPS, csarm.ARM_INS_MSR)
+
+    def ends_block(self, insn):
+        """Whether the emulator ends its translation block behind this instruction though it does not
+        branch (BLOCK_ENDS)."""
+        return insn.id in self.BLOCK_ENDS
+
+    def current_isa(self, engine):
+        """The isa the core runs now: Thumb on the M profile, else CPSR's T bit."""
+        if self.profile == "m" or engine.reg_read(ua.UC_ARM_REG_CPSR) & 0x20:
+            return "t32"
+        return "a32"
 
     def enters_code_vector(self, engine, address):
         """Whether an exception the run takes enters a vector made of instructions at `address` (the A
