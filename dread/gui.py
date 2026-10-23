@@ -11,8 +11,11 @@ the tools know and decided, and runs nothing heavy itself:
   function by the name it goes by (dread pilot's proposal, in italics, where the tables have none);
 - one function: the flat listing (dread flat) with calls and branches linked, the instructions the
   cases ran or missed (from the last dread test or dread lift --check), the C (the source of a
-  rewritten function; the lifted C, built or lifted on the spot), its verdict, cases, placement and
-  annotations, its name's proposal and vote, and every challenge of the review with its reasons;
+  rewritten function; else its readable C in the reading form, dread readable --plain: without the
+  instructions' comments, each statement's first instruction in a margin that selects it in the
+  listing, made on the first request; and the lifted C, built or lifted on the spot), its verdict,
+  cases, placement and annotations, its name's proposal and vote, and every challenge of the review
+  with its reasons;
 - one function's relations (dread relations, /api/graph): its callers and callees to a depth of 1 to
   3, the memory its readable C reads and writes, the texts and tables its constants point to, the
   structures of the readable_types plan; a click walks to another function. The functions come at
@@ -89,6 +92,10 @@ nothing; what the names give is kept until a names table changes):
   record without its log), "start", "rows": {label: {"log", "at", "in": the function names}}} for the
   entries [from, from + count) (default: a quarter of count before the first difference) that the
   record kept; {"scenarios": []} without records;
+- /api/reading?name=: {"name", "lines": [[address or null, line]], "accepted": whether the readable
+  table has the function, "why": why there are no lines}, or {"pending": true} while the register
+  analysis runs: dread.readable reading, made outside the lock and kept for the load and the readable
+  C's tables (/api/function's sources announce it as {"kind": "readable", "deferred": true});
 - /api/search?q=: [{"kind": "address", "name", "proposal" or "text", ...}], at most 40;
 - /api/program-search?q=: {"query", "functions": [{"name", "group", "how": the kinds that found it,
   "text", "proposed"}], "groups": [{"group", "functions": how many found}], "more": left out beyond
@@ -254,7 +261,7 @@ class State:
     def watched(self):
         from dread.rename import c_files
         img = self.image
-        files = [img.table(t) for t in ("functions", "symbols", "annotations", "lifted", "code_ranges")]
+        files = [img.table(t) for t in ("functions", "symbols", "annotations", "lifted", "code_ranges", "readable")]
         p = self.paths()
         files += [p[k] for k in ("verdicts", "tests", "placement", "recon_lifted", "check_lifted")]
         files += glob.glob(os.path.join(p["pilot"], "*.c"))
@@ -298,6 +305,9 @@ class State:
                 self.unreached.update({n: list(a) for n, a in data.get("unreached", {}).items()})
                 self.system |= set(data.get("system", ()))
         self.lifted = set(read_names(img.table("lifted")))
+        self.readable = set(read_names(img.table("readable")))     # (what dread readable --check accepted)
+        self.readings = {}                                  # name -> (the tables' stamp, its reading form)
+        self.reading_context = None                         # (the tables' stamp, a dread.readable Context)
         self.pilot = {os.path.basename(f)[:-2] for f in glob.glob(os.path.join(p["pilot"], "*.c"))}
         self.sources = {}                                   # name -> (path, first, last)
         for path in c_files(img):
@@ -721,7 +731,8 @@ class State:
         return None
 
     def c_sources(self, fn):
-        """The C of the function: its source when src defines it, the lifted C (built, or lifted now)."""
+        """The C of the function: its source when src defines it, else its readable C to be asked for
+        (/api/reading: "deferred"), then the lifted C (built, or lifted now)."""
         out = []
         root = self.target.root
         if fn.name in self.sources:
@@ -730,6 +741,8 @@ class State:
                 lines = f.read().splitlines()
             out.append({"kind": "pilot" if fn.name in self.pilot else "source", "path": os.path.relpath(path, root),
                         "first": first, "text": "\n".join(lines[first - 1:last])})
+        else:
+            out.append({"kind": "readable", "deferred": True, "accepted": fn.name in self.readable})
         p = self.paths()
         for key, how in (("recon_c", "built by dread recon"), ("check_c", "built by dread lift --check"),
                          ("lift_c", "written by dread lift")):
@@ -755,6 +768,57 @@ class State:
             except Exception as e:
                 out.append({"kind": "lifted", "path": None, "refused": "the lifter failed: %s" % e})
         return out
+
+    def reading_stamp(self):
+        """What the reading form is made from beside the lifted C: the readable C's tables."""
+        return tuple(mtime(self.image.table(t)) for t in ("readable_types", "readable_names"))
+
+    def reading(self, name):
+        """The function's readable C in the reading form (dread readable --plain: dread.readable
+        reading): {"name", "lines": [[address or None, line]], "accepted": whether the readable table
+        has it (the gate built it from this C and it agreed), "why": why there is none ("lines" then
+        null)}, or {"pending": true} while the register analysis runs. The lift is made under the lock
+        (it may run the program in the emulator), the readable C and its context outside it (0.1-0.5 s
+        a function on a FreeRTOS build, seconds for the largest: the page goes on meanwhile); kept for
+        this load and these tables (reading_stamp)."""
+        from dread import lift, readable
+        with self.lock:
+            fn = self.program.by_name.get(name)
+            if fn is None:
+                raise KeyError(name)
+            if "flow" not in self.analyses or "endless" not in self.analyses:
+                return {"name": name, "pending": True, "status": self.status()}
+            key = (self.generation, self.reading_stamp())
+            got = self.readings.get(name)
+            if got is not None and got[0] == key:
+                return dict(got[1], status=self.status())
+            context = self.reading_context[1] if self.reading_context and self.reading_context[0] == key else None
+            program, flow = self.program, self.ready("flow")
+            out = {"name": name, "lines": None, "accepted": name in self.readable, "why": None}
+            try:
+                if self.lifter is None:
+                    self.lifter = lift.make_lifter(self.program, flow, self.ready("endless"))
+                text = self.lifter.lift(fn).text
+            except lift.Refused as e:
+                text, out["why"] = None, "the lifter refuses it: %s" % e
+            except Exception as e:
+                text, out["why"] = None, "the lifter failed: %s" % e
+        if text is not None:
+            try:
+                if context is None:
+                    context = readable.Context(self.target, self.image, program, flow)
+                lines = readable.reading(name, text, context)
+            except Exception as e:              # (a stage's fault: the page says so)
+                lines, out["why"] = None, "dread readable failed: %s" % e
+            if lines is None and out["why"] is None:
+                out["why"] = "its lifted C is not the dialect dread.cparse reads"
+            out["lines"] = [[a, line] for a, line in lines] if lines is not None else None
+        with self.lock:
+            if self.generation == key[0]:
+                self.readings[name] = (key, out)
+                if context is not None and (self.reading_context is None or self.reading_context[0] != key):
+                    self.reading_context = (key, context)
+            return dict(out, status=self.status())
 
     def cases_of(self, name):
         img, p = self.image, self.paths()
@@ -1075,6 +1139,8 @@ class Handler(BaseHTTPRequestHandler):
         except tgt.TargetError as e:
             return self.reply(404, {"error": str(e)})
         try:
+            if url.path == "/api/reading":          # (makes readable C outside the lock: reading())
+                return self.reply(200, state.reading(query.get("name", "")))
             with state.lock:
                 if url.path == "/api/overview":
                     return self.reply(200, state.overview())

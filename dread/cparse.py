@@ -13,6 +13,10 @@ Goto, Label, Return, While, DoWhile, For, Switch, Case, Break, Continue, Asm, Em
 instruction that left no statement: its comment alone). Each statement has addr (the instruction's
 address and text from its line's comment, or None), line and end_line. Expressions: Name, Num,
 Str, Unary, Post, Cast, Binary, Cond, Assign, Call, Index, Member, Comma, Sizeof, InitList.
+
+What dread.tidy folds into a statement it records in the statement's addr (Addr: the instructions
+absorbed), so that the reading form (unparse_lines, dread readable --plain) can show in a margin
+where each statement begins (first_addresses) instead of the instructions' comments.
 """
 import ast
 import re
@@ -223,6 +227,98 @@ class Stmt(Node):
 
 def _stmt_slots(*names):
     return names + ("addr", "line", "end_line")
+
+
+class Addr(tuple):
+    """A statement's instruction as dread.tidy leaves it: (address, text), the instruction it came from;
+    shown, the instruction its comment names where that is another (the call's in a statement that took
+    a call's result in: take); absorbed, the addresses of the instructions whose statements the clean-up
+    folded or propagated into it (a temporary's load, a constant's move, the compare a condition took
+    in), with those they had absorbed. To everything else a tuple (address, text): it compares and
+    hashes as one, so a statement's equality, the lines the printer groups and the digests of readable
+    C (dread.naming digest: what the readable_types and readable_names tables are made for) do not
+    change. note_text prints shown; first_addresses reads absorbed. The parser makes plain tuples;
+    absorb and take make these."""
+
+    def __new__(cls, addr, absorbed=(), shown=None):
+        self = tuple.__new__(cls, (addr[0], addr[1]))
+        self.absorbed = frozenset(absorbed)
+        self.shown = (shown[0], shown[1]) if shown is not None and tuple(shown) != tuple(self) else None
+        return self
+
+
+def absorbed(addr):
+    """The addresses an instruction's statement absorbed (Addr), none for a plain tuple or None."""
+    return getattr(addr, "absorbed", frozenset())
+
+
+def shown(addr):
+    """The instruction (address, text) a statement's comment names: its Addr's shown, else its own;
+    None for None."""
+    if addr is None:
+        return None
+    return getattr(addr, "shown", None) or (addr[0], addr[1])
+
+
+def absorb(into, other):
+    """Statement into took other's value in (dread.tidy: fold, propagate, spread, addresses): other's
+    instruction and what it had absorbed join into's absorbed. Nothing for a statement without an
+    instruction of its own (a store in an IT block's arm: its if carries the instruction)."""
+    a, b = into.addr, other.addr
+    if a is None or b is None:
+        return
+    got = absorbed(a) | {b[0]} | absorbed(b)
+    if got != absorbed(a):
+        into.addr = Addr(a, got, getattr(a, "shown", None))
+
+
+def take(into, other):
+    """Statement into took other's value in, and its comment names other's instruction (shown: a call
+    folded into the statement that reads its result, return f(); and r4 = f(), names the call, not the
+    bx lr or the mov after it); into keeps its own instruction, other's joins the absorbed."""
+    a, b = into.addr, other.addr
+    if a is None or b is None:
+        return
+    into.addr = Addr(a, absorbed(a) | {b[0]} | absorbed(b), shown(b))
+
+
+def first_addresses(fn):
+    """The margin of the reading form (dread readable --plain): a function from a statement's addr to
+    the address of its first instruction, the lowest of its own (and the one its comment names) and of
+    those it absorbed (Addr) alone: an absorbed instruction counts where no statement or note of fn
+    carries it and no other statement absorbed it (a literal two loads use, a compare two conditions
+    read, belongs to neither; copies of one statement, a tail the structure stage wrote twice, are
+    one). Not established: an instruction the clean-up dropped without folding it anywhere (a value
+    nobody read) belongs to no statement."""
+    addrs, carried = [], set()
+
+    def visit(s):
+        if s.addr is not None:
+            carried.update((s.addr[0], shown(s.addr)[0]))
+            if not isinstance(s, Note):
+                addrs.append(s.addr)
+        for inner in _nested(s):
+            visit(inner)
+    visit(fn.body)
+    count = {}
+    for _, _, _, got in {(a[0], a[1], shown(a), absorbed(a)) for a in addrs}:
+        for x in got - carried:
+            count[x] = count.get(x, 0) + 1
+
+    def first(addr):
+        return min([addr[0], shown(addr)[0]] + [x for x in absorbed(addr) if count.get(x) == 1])
+    return first
+
+
+def _nested(s):
+    """The statements directly inside s."""
+    if isinstance(s, Block):
+        return list(s.body)
+    if isinstance(s, If):
+        return [s.then] + ([s.orelse] if s.orelse is not None else [])
+    if isinstance(s, (While, DoWhile, For, Switch)):
+        return [s.body] if s.body is not None else []
+    return []
 
 
 class Block(Stmt):
@@ -1062,22 +1158,40 @@ def open_if(s):
 
 
 def note_text(addr):
-    return "/* %x: %s */" % addr if addr else ""
+    """The comment of a statement's instruction (the one its Addr shows): /* 1a2c: bl #0x2042c */."""
+    return "/* %x: %s */" % shown(addr) if addr else ""
 
 
 class Printer:
     """unparse's state: lines of text, the current indentation. notes: the instructions' comments
     (the addresses and texts the statements came from), one per line, as the lifters print them.
     style "lifted": the lifters' (a block on one line, an if's arm in braces); "readable": an arm of
-    one statement without braces, else if, a block of more than one statement on lines of its own."""
+    one statement without braces, else if, a block of more than one statement on lines of its own.
+    margin: the reading form's (dread readable --plain), a function from a statement's addr to the
+    address its line shows (first_addresses): at holds it for each line (None where the line shows
+    none: a brace, else, a declaration), a line of several statements of one instruction the lowest
+    of theirs, a do-while's on its while line, where its condition is."""
 
-    def __init__(self, notes=True, indent="    ", style="lifted"):
-        self.notes, self.unit, self.style = notes, indent, style
+    def __init__(self, notes=True, indent="    ", style="lifted", margin=None):
+        self.notes, self.unit, self.style, self.margin = notes, indent, style, margin
         self.lines = []
+        self.at = []
 
-    def emit(self, depth, text, addr=None):
+    def add(self, text, at=None):
+        self.lines.append(text)
+        self.at.append(at)
+
+    def where(self, *addrs):
+        """The margin of a line of statements with these addrs (None without a margin or an addr)."""
+        if self.margin is None:
+            return None
+        got = [self.margin(a) for a in addrs if a is not None]
+        return min(got) if got else None
+
+    def emit(self, depth, text, addr=None, at=None):
         note = note_text(addr) if self.notes and addr else ""
-        self.lines.append((self.unit * depth + text + ("  " + note if note else "")).rstrip())
+        self.add((self.unit * depth + text + ("  " + note if note else "")).rstrip(),
+                 at if at is not None else self.where(addr))
 
     def simple(self, s):
         """The one-line text of a statement without a nested statement list, or None."""
@@ -1125,7 +1239,8 @@ class Printer:
         while i < len(body):
             s = body[i]
             if isinstance(s, Label):
-                self.lines.append("%s: ;" % s.name + ("  " + note_text(s.addr) if self.notes and s.addr else ""))
+                self.add("%s: ;" % s.name + ("  " + note_text(s.addr) if self.notes and s.addr else ""),
+                         self.where(s.addr))
                 i += 1
                 continue
             if isinstance(s, Case):
@@ -1146,7 +1261,7 @@ class Printer:
                         not isinstance(body[j], (Label, Case, Note)) and self.simple(body[j]) is not None:
                     group.append(self.simple(body[j]))
                     j += 1
-                self.emit(depth, " ".join(group), s.addr)
+                self.emit(depth, " ".join(group), s.addr, self.where(*(x.addr for x in body[i:j])))
                 i = j
                 continue
             self.compound(s, depth)
@@ -1185,9 +1300,14 @@ class Printer:
                 self.emit(depth, "while (%s)" % expr_text(s.cond), s.addr)
                 self.body(s.body, depth)
         elif isinstance(s, DoWhile):
-            self.emit(depth, "do", s.addr)
-            self.body(s.body, depth)
-            self.emit(depth, "while (%s);" % expr_text(s.cond))
+            if self.margin is None:
+                self.emit(depth, "do", s.addr)
+                self.body(s.body, depth)
+                self.emit(depth, "while (%s);" % expr_text(s.cond))
+            else:                               # (the margin where the condition is: its branch's)
+                self.emit(depth, "do")
+                self.body(s.body, depth)
+                self.emit(depth, "while (%s);" % expr_text(s.cond), s.addr)
         elif isinstance(s, For):
             self.emit(depth, self.for_head(s), s.addr)
             self.body(s.body, depth)
@@ -1228,3 +1348,15 @@ def unparse(tree, notes=True, verbatim=(), style="lifted"):
         return "\n".join(p.lines)
     p.stmts([tree] if isinstance(tree, Stmt) else list(tree), 0)
     return "\n".join(p.lines)
+
+
+def unparse_lines(fn, style="readable", margin=None):
+    """The reading form of a Function (dread readable --plain): [(address or None, line)], its lines
+    without the instructions' comments and notes, each with the address its margin shows (margin: a
+    function from a statement's addr to it; default first_addresses(fn))."""
+    p = Printer(False, style=style, margin=margin or first_addresses(fn))
+    p.add(fn.head)
+    p.emit(0, "{")
+    p.stmts(fn.body.body, 1)
+    p.emit(0, "}")
+    return list(zip(p.at, p.lines))

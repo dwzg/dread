@@ -39,6 +39,20 @@ readable C sends the guilty functions back to lifted C, found by halving (dread.
 gotos, casts, raw accesses, members, typed variables) in their readable C as built, and their lifted
 C beside it, into a JSON file: what dread bench's readable step compares with the source.
 
+Readable C has three forms. The compiled form (transform, print_file) is what dread.build compiles
+and the gate checks: one file a function, every structure it uses defined in it. The printed form
+(printed: `dread readable NAME`, `--out DIR`) leaves the image's structures, those behind pointers
+and of static data, to one header (HEADER, readable_types.h: header_text, `--header`; `--out` writes
+it beside the files) that it includes instead, names in a comment the members it uses (their types
+and offsets), and keeps what is the function's own: its frame's structure, its extern declarations
+(trimmed to what its calls pass) and its macros (named per function, and not scoped: in a shared
+header they would expand inside other files); compiled with the header beside it, it is the compiled
+form's code. The reading form (reading: `--plain`, dread gui's reading view) is the printed form
+without the instructions' comments, their notes (pushes, pops, stack adjustments) and dread.build's
+lines for the compiler, each statement's first instruction in a margin (dread.cparse
+first_addresses: of its own instruction and those dread.tidy folded into it alone, the lowest).
+Since 2026-10-23; before, every form was the compiled one (docs/decisions.md).
+
 Not yet: functions that never return and were accepted by the system run (they stay lifted).
 """
 import argparse
@@ -423,9 +437,256 @@ def question_trees(program, context, lifter, names, jobs=None):
 
 
 def print_file(tree, fn, stages=None):
+    """The compiled form: the whole file as dread.build compiles it, every structure it uses defined
+    in it (see printed for the form dread readable prints)."""
     others = [f.name for f in tree.items if isinstance(f, cparse.Function) and f.name != fn.name]
     return cparse.unparse(tree, verbatim=others, style="readable" if (STAGES if stages is None else stages)
                           else "lifted")
+
+
+HEADER = "readable_types.h"     # the image's structures, defined once (dread readable --out writes it)
+COMPILE_LINE = "/* dread: "     # dread.build's lines for the compiler (NULL_CHECKS, CALL_SAVED, FIXED)
+LIFTED_LINE = re.compile(r"^/\* (\S+) at 0x([0-9a-fA-F]+), lifted by dread lift: one statement per instruction\. \*/$")
+FORWARD = re.compile(r"^struct (\w+);$")
+OBJECT = re.compile(r"^#define (\w+) \(\*\(volatile struct (\w+) \*\)0x[0-9a-fA-F]+u\)$", re.M)
+ARRAY = re.compile(r"^#define (\w+) \(\(volatile struct (\w+) \*\)0x[0-9a-fA-F]+u\)$", re.M)
+STRUCT_TYPE = re.compile(r"^(?:(?:volatile|const)\s+)*struct\s+(\w+)\s*(\*?)$")
+
+
+class Types:
+    """The image's structures as its readable C defines them: those behind pointers (the readable_types
+    table's structs, dread.shapes) and those of static data (its statics and arrays, dread.statics),
+    named by the readable_names table, each written as dread.shapes apply_types and dread.naming
+    apply_globals write it into the file of every function that uses it (shapes.struct_text with the
+    same arguments). defs: {name: definition} in an order C takes (a structure another holds before
+    it); forward: the structures a pointer field names (declared first); fields: {name: {field:
+    (offset, its type as the definition declares it)}}."""
+
+    def __init__(self, context):
+        from dread import naming, shapes
+        context = context or Context()
+        p = context.plan
+        names = context.struct_names()
+
+        def cname(k):
+            return names.get(k, (k, {}))[0]
+        order = []
+
+        def visit(k, depth=0):              # (as apply_types orders them: a held one before its holder)
+            if k in order or depth > 8:
+                return
+            for inner in sorted(set(p.embeds.get(k, {}).values())):
+                visit(inner, depth + 1)
+            order.append(k)
+        for k in sorted(p.structs):
+            visit(k)
+        self.defs, self.fields = {}, {}
+        for k in order:
+            fields = names.get(k, (k, {}))[1]
+            ptrs = {off: cname(t) for off, t in p.pointers.get(k, {}).items()}
+            embeds = {off: (cname(i), p.size(i)) for off, i in p.embeds.get(k, {}).items()}
+            self.defs[cname(k)] = shapes.struct_text(cname(k), p.structs[k], fields, ptrs, embeds)
+            mine = {shapes.field_name(fields, off): (off, ctype) for off, ctype in p.structs[k]}
+            mine.update({shapes.field_name(fields, off): (off, "volatile struct %s *" % t) for off, t in ptrs.items()})
+            mine.update({shapes.field_name(fields, off): (off, "struct %s" % n) for off, (n, _) in embeds.items()})
+            self.fields[cname(k)] = mine
+        self.forward = sorted({cname(t) for ps in p.pointers.values() for t in ps.values()})
+        rows_of = naming._static_rows(p.statics, p.arrays)
+        statics = context.static_names() if rows_of else {}
+        for b in sorted(rows_of):               # (as apply_globals defines them; an array of scalars has none)
+            rows, k, _ = rows_of[b]
+            if b not in statics or (k is not None and naming.scalar_array(k, rows)):
+                continue
+            _, tag, fields = statics[b]
+            self.defs[tag] = shapes.struct_text(tag, rows, fields, size=k)
+            self.fields[tag] = {shapes.field_name(fields, off): (off, ctype) for off, ctype in rows}
+        self.texts = set(self.defs.values())
+
+    def header(self, image=None):
+        """The header that defines them all (HEADER), or None when the image has none."""
+        if not self.defs:
+            return None
+        lines = ["/* The structures of the readable C%s, behind pointers (dread.shapes) and of static data" % (
+                     " of image %s" % image if image else ""),
+                 " * (dread.statics): its readable_types table, named by its readable_names table. Written by",
+                 " * dread readable; each function's printed form includes it. */",
+                 "#ifndef READABLE_TYPES_H", "#define READABLE_TYPES_H", '#include "dread.h"']
+        lines += ["struct %s;" % n for n in self.forward]
+        lines += list(self.defs.values())
+        lines.append("#endif")
+        return "\n".join(lines) + "\n"
+
+    def image_level(self, item):
+        """Whether a Raw item of a function's file is one of these definitions, or a declaration of
+        one of these structures (what the header holds instead)."""
+        if item.text in self.texts:
+            return True
+        m = FORWARD.match(item.text)
+        return bool(m) and m.group(1) in self.fields
+
+    def members(self, tree, fn):
+        """{structure: {field}} of these structures that fn's expressions reach as members: through a
+        variable or parameter declared a pointer to one, an object or array of static data (its macro),
+        a member that holds one or points to one, a cast to a pointer to one."""
+        env = {}
+
+        def declared(spec, ptr=""):
+            m = STRUCT_TYPE.match(" ".join((spec + " " + ptr).split()) if ptr else " ".join(spec.split()))
+            if m and m.group(1) in self.fields:
+                return ("ptr" if m.group(2) else "obj", m.group(1))
+            return None
+        for t, n in fn.params:
+            env[n] = declared(t)
+        for item in tree.items:
+            if isinstance(item, cparse.Raw):
+                for n, tag in OBJECT.findall(item.text):
+                    env[n] = ("obj", tag) if tag in self.fields else None
+                for n, tag in ARRAY.findall(item.text):
+                    env[n] = ("ptr", tag) if tag in self.fields else None
+        statements = []
+
+        def visit(s):
+            statements.append(s)
+            if isinstance(s, cparse.Decl):
+                for d in s.items:
+                    env[d.name] = declared(s.specs, d.ptr) if not d.dims else None
+            for inner in tidy._inner(s):
+                visit(inner)
+        visit(fn.body)
+        used = {}
+
+        def type_of(e):
+            if isinstance(e, cparse.Name):
+                return env.get(e.id)
+            if isinstance(e, cparse.Cast):
+                return declared(e.type)
+            if isinstance(e, (cparse.Index, cparse.Unary)) and (isinstance(e, cparse.Index) or e.op == "*"):
+                t = type_of(e.base if isinstance(e, cparse.Index) else e.e)
+                return ("obj", t[1]) if t and t[0] == "ptr" else None
+            if isinstance(e, cparse.Member):
+                s = struct_of(e)
+                field = self.fields.get(s, {}).get(e.name) if s else None
+                return declared(field[1]) if field else None
+            return None
+
+        def struct_of(e):
+            t = type_of(e.base)
+            return t[1] if t and t[0] == ("ptr" if e.arrow else "obj") else None
+        from dread.cflow import walk_expr
+        for s in statements:
+            for e in tidy._stmt_all_exprs(s):
+                for x in walk_expr(e):
+                    if isinstance(x, cparse.Member):
+                        k = struct_of(x)
+                        if k is not None and x.name in self.fields[k]:
+                            used.setdefault(k, set()).add(x.name)
+        return used
+
+    def comment(self, used):
+        """The comment lines that name the members a function uses, a structure a line, in the
+        header's order: /* struct NAME: TYPE FIELD at 0xOFFSET, ... */."""
+        out = []
+        for name in self.defs:
+            if name in used:
+                fields = sorted((self.fields[name][f][0], f) for f in used[name])
+                out.append("/* struct %s: %s */" % (name, ", ".join(
+                    "%s%s%s at 0x%x" % (_short(self.fields[name][f][1]),
+                                        "" if self.fields[name][f][1].endswith("*") else " ", f, off)
+                    for off, f in fields)))
+        return out
+
+
+def _short(ctype):
+    """A field's type as the members' comment names it (volatile struct s_9 * as struct s_9 *)."""
+    return " ".join(w for w in ctype.split() if w != "volatile")
+
+
+_TYPES = weakref.WeakKeyDictionary()    # context -> Types (made once a context)
+
+
+def types_of(context):
+    """Types of a context (kept while it lives; a context without a target has none)."""
+    if context is None:
+        return Types(None)
+    if context not in _TYPES:
+        _TYPES[context] = Types(context)
+    return _TYPES[context]
+
+
+def header_text(context, image=None):
+    """The image's header (HEADER): every structure its readable C defines, once; None without any."""
+    return types_of(context).header(image)
+
+
+def _printed_items(name, text, context, plain):
+    """(items of the printed file as (Raw text or a Function), the function, whether stages ran), or
+    None when the lifted C is not the dialect (printed)."""
+    made = _named(name, text, None, context)
+    if made is None:
+        return None
+    tree, fn, stages = made
+    ran = stages is None or bool(stages)
+    types = types_of(context)
+    items, moved = [], False
+    for item in tree.items:
+        if isinstance(item, cparse.Raw):
+            if ran and types.image_level(item):
+                moved = True
+                continue
+            if plain and item.text.startswith(COMPILE_LINE):
+                continue
+            m = LIFTED_LINE.match(item.text) if ran else None
+            items.append("/* %s at 0x%s: readable C from its lifted C (dread readable) */" % m.groups() if m
+                         else item.text)
+        else:
+            items.append(item)
+    if moved:
+        used = types.members(tree, fn)
+        at = next((i + 1 for i, x in enumerate(items) if isinstance(x, str) and x.startswith("#include")), 0)
+        items[at:at] = ['#include "%s"' % HEADER] + types.comment(used)
+    return items, fn, ran
+
+
+def printed(name, text, context=None):
+    """The function's readable C as dread readable prints it: the compiled form (transform) with the
+    image's structures left to the image's header (HEADER: an #include where they were, and a comment
+    a structure that names the members the function uses, with their types and offsets), its first
+    comment saying it is readable C; None when the lifted C is not the dialect. Compiled with the
+    header beside it, it is the compiled form's code (the definitions are the same texts)."""
+    got = _printed_items(name, text, context, plain=False)
+    if got is None:
+        return None
+    items, fn, ran = got
+    others = {f.name for f in items if isinstance(f, cparse.Function) and f is not fn}
+    return "\n".join(x if isinstance(x, str) else x.raw if x.name in others else
+                     cparse.unparse(x, style="readable" if ran else "lifted") for x in items) + "\n"
+
+
+def reading(name, text, context=None):
+    """The reading form (dread readable --plain, dread gui's reading view): [(address or None, line)]
+    of the printed form (printed) without the instructions' comments, their notes (pushes, pops, stack
+    adjustments) and dread.build's lines for the compiler, each statement's line with the address of
+    its first instruction (cparse.first_addresses: its own, or the first of those the clean-up folded
+    into it alone), other lines with None; None when the lifted C is not the dialect. Not C to
+    compile as it stands: its margin."""
+    got = _printed_items(name, text, context, plain=True)
+    if got is None:
+        return None
+    items, fn, ran = got
+    out = []
+    for x in items:
+        if isinstance(x, str):
+            out += [(None, line) for line in x.splitlines()]
+        else:
+            out += cparse.unparse_lines(x, style="readable" if ran and x is fn else "lifted")
+    return out
+
+
+def margin_text(lines):
+    """The reading form as text: each line behind a margin with its address in hex (blank without)."""
+    width = max((len("%x" % a) for a, _ in lines if a is not None), default=0)
+    return "".join(("%-*s  %s" % (width, "%x" % a if a is not None else "", line)).rstrip() + "\n"
+                   for a, line in lines)
 
 
 def _named(name, text, stages, context=None):
@@ -788,7 +1049,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread readable", description=__doc__.split("\n\n")[0])
     tgt.add_arguments(parser)
     parser.add_argument("--check", action="store_true", help="test the readable C and write the readable table")
-    parser.add_argument("--out", help="write NAME.c files there instead of printing")
+    parser.add_argument("--out", help="write NAME.c files there instead of printing, and the image's header "
+                        "(%s) beside them" % HEADER)
+    parser.add_argument("--plain", action="store_true", help="the reading form: no instructions' comments, the "
+                        "address of each statement's first instruction in a margin (not C to compile)")
+    parser.add_argument("--header", action="store_true", help="print the image's header (%s): every structure "
+                        "its readable C defines" % HEADER)
     parser.add_argument("--score", metavar="ELF", help="how close the readable_names table's names come to the "
                         "source's, from ELF's debug information (dread.naming.score); with --shapes, the "
                         "structures' fields too")
@@ -952,8 +1218,18 @@ def main(argv=None):
     flow = regflow.load(target, image, program)
     lifter = lift.make_lifter(program, flow)
     context = Context(target, image, program, flow)
+    header = header_text(context, image.name)
+    if args.header:
+        sys.stdout.write(header or "")
+        return 0
     if args.out:
         os.makedirs(args.out, exist_ok=True)
+        path = os.path.join(args.out, HEADER)
+        if header is not None:
+            with open(path, "w") as f:
+                f.write(header)
+        elif os.path.exists(path):          # (from tables that had structures: no file includes it now)
+            os.remove(path)
     status = 0
     for name in args.names or [fn.name for fn in program.functions]:
         fn = program.by_name.get(name)
@@ -962,10 +1238,15 @@ def main(argv=None):
             status = 1
             continue
         try:
-            text = transform(name, lifter.lift(fn).text, context=context)
+            lifted = lifter.lift(fn).text
         except lift.Refused as e:
             print("dread readable: %s does not lift: %s" % (name, e), file=sys.stderr)
             continue
+        if args.plain:
+            lines = reading(name, lifted, context)
+            text = margin_text(lines) if lines is not None else None
+        else:
+            text = printed(name, lifted, context)
         if text is None:
             print("dread readable: %s: its lifted C is not the dialect dread.cparse reads" % name, file=sys.stderr)
             continue

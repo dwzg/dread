@@ -722,3 +722,30 @@ the columns of dread.bench TABLE_COLUMNS (its figures, its lifted C's statements
 was matched to its source function and that function's figures, the ratios, the functions inlined
 into it), `-` where there is none. Columns may be added at the end; a reader takes them by the
 header's names.
+
+### Printed readable C (`dread readable [--plain] [--out DIR]`) and the header `readable_types.h`
+
+Since 2026-10-23 what `dread readable` prints is not the file the builds compile. The compiled form
+(`BUILD/recon/IMAGE/lifted/NAME.c` for a function of the readable table, `BUILD/readable-check/...`)
+defines in each function's file every structure it uses; the printed form leaves the image's
+structures to one header and includes it:
+
+- `readable_types.h`, written beside the files by `--out DIR` (removed there when the image has no
+  structures) and printed by `--header`: a guard (`READABLE_TYPES_H`), `#include "dread.h"`, a
+  declaration `struct NAME;` for every structure a pointer field names, then every structure of the
+  `readable_types` table, those behind pointers (`structs`, a held one before its holder) and those of
+  static data (`statics` and `arrays`' elements, tag `NAME_t`; none for an array of scalars), named by
+  the `readable_names` table, each definition the same text the compiled form has. Made from the
+  tables when it is written; no tool reads it.
+- `NAME.c` (or the output of `dread readable NAME`): the compiled form with the structures' definitions
+  and declarations taken out, `#include "readable_types.h"` after `#include "dread.h"` where there
+  were any, one comment a structure naming the members the function uses (`/* struct s_9: u32 f_0 at
+  0x0, struct s_24 *f_10 at 0x10 */`), and the first comment saying it is readable C (`/* NAME at
+  0xADDR: readable C from its lifted C (dread readable) */`). Its frame's structure (`stackN_t`), its
+  extern declarations and its macros (`#define g_...`) stay in it. Compiled with the header beside it
+  (and dread.h), it is the compiled form's code.
+- With `--plain`, the reading form: each line behind a margin with an address in hex (blank where the
+  line has none), the instructions' comments and their notes left out, and dread.build's lines for the
+  compiler (`/* dread: ... */`). A statement's address is its first instruction (dread.cparse
+  first_addresses: the lowest of its own and of those whose statements the clean-up folded into it
+  alone); a do-while's is on its `while` line. Not C to compile as it stands (its margin).

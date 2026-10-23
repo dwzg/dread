@@ -129,3 +129,30 @@ def test_what_is_not_the_dialect_is_an_error():
     for source in ("x = ({ int y = 1; y; });", "x = a +;", "if (a) goto;"):
         with pytest.raises(cparse.ParseError):
             statement(source)
+
+
+def test_an_instruction_s_absorbed_ones_ride_along_unseen():
+    """cparse.Addr: a statement's instruction with the instructions folded into it and the one its
+    comment names; a tuple (address, text) to everything else (equality, hashing: the printer's lines
+    and the digests), kept through pickling (the pool's workers) and copies (the structure stage).
+    first_addresses counts an absorbed instruction where one statement alone absorbed it and no
+    statement carries it."""
+    import copy
+    import pickle
+    a = cparse.Addr((0x14, "mov r4, r0"), {4, 8}, (0x10, "bl g"))
+    for b in (pickle.loads(pickle.dumps(a, 4)), copy.deepcopy(a)):
+        assert type(b) is cparse.Addr and tuple(b) == (0x14, "mov r4, r0") and b.absorbed == {4, 8}
+        assert cparse.shown(b) == (0x10, "bl g")
+    assert a == (0x14, "mov r4, r0") and hash(a) == hash((0x14, "mov r4, r0"))
+    assert cparse.note_text(a) == "/* 10: bl g */" and cparse.note_text((0x14, "mov r4, r0")) == "/* 14: mov r4, r0 */"
+    tree = cparse.parse("u32 f(u32 r0)\n{\n    r0 = g(r0);  /* 10: bl g */\n    r0 = h(r0);  /* 14: bl h */\n"
+                        "    return r0;  /* 18: bx lr */\n}\n")
+    first, second, ret = tree.function("f").body.body
+    assert cparse.absorbed(first.addr) == frozenset()
+    first.addr = cparse.Addr(first.addr, {4, 8})        # (8 alone: it counts)
+    second.addr = cparse.Addr(second.addr, {4, 0x10})   # (4 shared, 0x10 carried by the first: neither)
+    at = cparse.first_addresses(tree.function("f"))
+    assert (at(first.addr), at(second.addr), at(ret.addr)) == (8, 0x14, 0x18)
+    assert cparse.unparse_lines(tree.function("f"), style="readable") == [
+        (None, "u32 f(u32 r0)"), (None, "{"), (8, "    r0 = g(r0);"), (0x14, "    r0 = h(r0);"),
+        (0x18, "    return r0;"), (None, "}")]

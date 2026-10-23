@@ -94,6 +94,8 @@ bin/dread sysrecord --target examples/gizmo/m3 --scenario config read_line   # c
 bin/dread lift --target examples/gizmo/m3 --check  # lift every function, keep those whose cases agree
 bin/dread uncovered --target examples/gizmo/m3     # why the cases it dropped leave code unrun: each region's way in, what decides it
 bin/dread readable --target examples/gizmo/m3 --check  # build the lifted functions from readable C where the cases agree
+bin/dread readable --target examples/gizmo/m3 --plain print_status   # to read: no instruction comments, addresses in a margin
+bin/dread readable --target examples/gizmo/m3 --out rc   # every function's readable C, the structures once in rc/readable_types.h
 bin/dread liftfuzz --isa t32                        # the lifter on random instructions, against the emulator
 bin/dread test --target examples/gizmo/rv32         # the same tools on the RISC-V build
 bin/dread bench all freertos                        # a real project built many ways, measured (in ~/dread-bench)
@@ -114,8 +116,9 @@ bin/dread gui --target examples/gizmo/m3 --open               # all of it in the
 
 `dread gui` serves a page on this machine (127.0.0.1:8350) that shows what the tools know and
 decided: where each function stands (written by hand, by the pilot, lifted, refused, original), a
-map of the image, the listing with the instructions the cases ran or missed, the C beside it,
-verdicts and cases, search by name, proposed name, address and text. It changes nothing but names
+map of the image, the listing with the instructions the cases ran or missed, the C beside it (a
+lifted function's readable C to read, each statement's first instruction in a margin that selects it
+in the listing), verdicts and cases, search by name, proposed name, address and text. It changes nothing but names
 (through `dread rename`) and notes (annotations.txt); everything else is the tools' work. Keys: `/`
 search, `j` `k` lines, `Enter` follow, `n` rename, `;` note, `r` relations, `p` the whole program,
 `s` the system run, `?` all of them.

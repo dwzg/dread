@@ -270,6 +270,9 @@ main { overflow: auto; min-width: 0; position: relative; }
 .ln.word > .i, .ln.word > .c { color: var(--faint); }
 .cl { display: grid; grid-template-columns: 3.4em minmax(0, 1fr); column-gap: 14px; white-space: pre; padding-right: 16px; min-width: max-content; }
 .cl .no { color: var(--faint); text-align: right; user-select: none; }
+.code.reading .cl { grid-template-columns: 8ch minmax(0, 1fr); padding-left: 12px; }
+.cl .no a.at { color: var(--faint); cursor: pointer; text-decoration: none; }
+.cl .no a.at:hover { color: var(--accent-strong); text-decoration: underline; }
 .k { color: var(--code-kw); } .t { color: var(--code-type); } .n { color: var(--code-num); }
 .s { color: var(--code-str); } .cm { color: var(--code-com); font-style: italic; } .pp { color: var(--code-type); }
 a.f { color: inherit; text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }

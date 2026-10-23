@@ -1619,23 +1619,70 @@ model).
   what all arms begin or end with. Public example: FreeRTOS mps2-gcc-Os
   prvCheckExpectedTimeIsWithinAnAcceptableMargin (`r4 = r1 + 7;` in both arms; the source computes
   the bound once).
-- [ ] **Structure definitions once per image.** Every function's readable C repeats the full
+- [x] **Structure definitions once per image.** Every function's readable C repeats the full
   definition of each structure it touches. Write them to one header per image (`--out` writes it
   beside the files; the printed form includes it), and print only the members a function uses, as a
   comment, if anything. Public example: FreeRTOS mps2-gcc-O0 prvInitialiseTaskLists (59 lines of
   declarations, six structures, for a 20-line body); 60 of 357 functions of that build and 84 of 329
   of mps2-gcc-Os have more declaration lines than body lines.
+  Done 2026-10-23 (dread.readable Types, printed, header_text; docs/decisions.md, docs/formats.md).
+  What dread readable prints (NAME, `--out DIR`) leaves the image's structures, those behind pointers
+  and of static data, to one header, readable_types.h (`--out` writes it beside the files, `--header`
+  prints it), which the function's file includes, naming in a comment a structure a line the members
+  it uses with their types and offsets (`/* struct s_9: u32 f_0 at 0x0, struct s_24 *f_10 at 0x10
+  */`). Its frame's structure, its extern declarations (trimmed per caller: one prototype for the image
+  would change what compiles) and its macros (named per function, and not scoped: in a header they
+  would expand inside other files) stay with it. What the gate and the builds compile is the compiled
+  form as before, each file defining what it uses; the printed form with the header beside it compiles
+  to the same bytes and relocations, for all 1,679 lifted functions of the eight builds. Measured on
+  copies of the eight builds, every lifted function, main at b98f0d1 -> this (declaration lines: those
+  outside the function's definition, comments and includes among them; body: the definition from its
+  head to its closing brace; the review counted otherwise, its 60 and 84 are not reproduced): functions
+  with more declaration than body lines GCC -Os 55 -> 5 of 329, clang -O2 43 -> 4 of 286, RISC-V GCC
+  -Os 26 -> 0 of 259, GCC -O0 47 -> 2 of 357 (what is left: small functions whose own externs and
+  macros outnumber their lines, fflush 7/5); declaration lines 5,092 -> 2,867, 4,288 -> 2,459, 3,984
+  -> 2,410, 4,982 -> 3,064 (median 9 or 10 -> 7), body lines unchanged; prvInitialiseTaskLists 59 ->
+  12 lines for its 22; the header 694 lines (9,035 bytes), 770 (9,981), 362 (4,676), 593 (7,670).
+  Gizmo's builds have no structure in the gate's plan: unchanged (35 to 44 functions, a median of 3
+  declaration lines).
 - [ ] **Loops in their source shape.** Several exits at a loop's head print as `for (;;) { if (c)
   break; ... }`, a counted loop whose first test holds as a do-while after its initialisation, and
   post-increments as a copy and an add. Make leading breaks the while condition, a do-while whose
   condition holds on entry a for loop, and a use of the copy made before an increment `*p++`. Public
   example: gizmo a32 strncpy (`for (;;) { if (r2 == 0) break; ... if (r12 == 0) break; ...}` for
   `while (n && *src)`; `*(volatile u8 *)r3 = (u8)r12; r3 = r3 + 1;` for `*d++ = *src++`).
-- [ ] **A reading form without the instruction comments.** Every statement carries its instruction,
+- [x] **A reading form without the instruction comments.** Every statement carries its instruction,
   pushes, pops and stack adjustments are comment lines, and a statement made of several instructions
   carries one of them (a call can carry the mov after it). An option (`--plain`, and the GUI's
   reading view) that leaves them out, with the address of each statement's first instruction in a
   margin. Public example: every function (FreeRTOS mps2-gcc-Os xTaskGetTickCount).
+  Done 2026-10-23 (dread.readable reading, margin_text; dread.cparse Addr, first_addresses,
+  unparse_lines; dread.tidy fold, propagate, spread, addresses; dread.gui /api/reading;
+  docs/decisions.md). `dread readable --plain` prints the printed form without the instructions'
+  comments, their notes and dread.build's lines for the compiler, each statement's line behind a
+  margin with the address of its first instruction: the lowest of its own and of those whose
+  statements the clean-up folded or propagated into it alone (recorded in its addr, a cparse.Addr; a
+  literal that two statements' loads share belongs to neither, so the margin does not jump back);
+  a do-while's on its while line. dread gui's function page has a readable tab, first for a function
+  without source: the same lines from /api/reading (made on the first request outside the server's
+  lock: 1.3 to 1.7 s for xQueueGenericSend with the context, then kept), the margin's addresses
+  selecting their instruction in the listing; checked in headless Chrome on gizmo m3 and FreeRTOS GCC
+  -Os (light, dark, phone width: no script errors, no horizontal scroll). The comment a statement
+  carries: one that takes a call's result in (return f(), r4 = f(), a store of it) named the
+  instruction after the call (the mov, the pop, the bx lr); now it shows the call's, its own staying
+  for the printer's lines and the digests (taking the call's for its own changed five functions'
+  digests, and their names in a target's tables would have stopped applying). Such statements naming
+  another instruction, main -> this: gizmo a32 9 -> 0 of 53, m3 4 -> 0 of 54, m4 4 -> 0 of 59, rv32
+  5 -> 0 of 45; FreeRTOS GCC -Os 232 -> 0 of 1,609, clang -O2 113 -> 0 of 1,232, RISC-V GCC -Os 108
+  -> 0 of 1,057, GCC -O0 173 -> 0 of 1,205. Characters of every lifted function's printed form
+  against its reading form (with its margin, without): GCC -Os 554,297 -> 456,046, 386,210 (median a
+  function 0.85 and 0.71), clang -O2 528,128 -> 425,753, 359,519 (0.84, 0.71), RISC-V 511,645 ->
+  409,280, 316,790 (0.82, 0.62), GCC -O0 504,256 -> 416,422, 349,161 (0.82, 0.68); gizmo 0.89 to 0.96
+  and 0.66 to 0.71. The gate accepts the same functions on the eight builds (35, 36, 44, 31; 315, 275,
+  252, 354), compiles the same C but for the comments of 9, 4, 4, 5; 45, 38, 31 and 93 of their
+  files (line for line), and builds the same payloads; every digest is as before. Not established: a
+  statement in an IT block's arm has no instruction of its own (its if carries it), so its line has no
+  address; an instruction the clean-up dropped as dead is no statement's.
 - [ ] **Signed types from signed use.** A variable compared only with signed conditions stays u32
   with `(s32)` at every compare, and -1 compares as 0xffffffffu. Type it s32 when its compares are
   signed (its constants then print signed), and a result signed when its callers compare it signed.

@@ -46,6 +46,7 @@ const S = {
   overview: null, functions: [], byName: new Map(), order: [], current: null, sel: -1,
   filter: "", origins: new Set(), certainty: new Set(), sort: "address", showBytes: false, showC: true, by: "bytes",
   generation: 0, names: null, runs: null, pending: [], view: null, tab: null, mode: "code", mapBy: "origin",
+  reading: null,
 };
 
 // ---- small helpers ----
@@ -694,6 +695,7 @@ function renderC() {
   const s = sources.find((x) => x.kind === S.tab);
   let body;
   if (!s) body = `<div class="placeholder">No C for this function.</div>`;
+  else if (s.kind === "readable") body = readingBody(d);
   else if (s.pending) body = `<div class="placeholder">The lifted C follows when the register analysis is done.</div>`;
   else if (s.refused) body = `<div class="placeholder"><span class="warn">The lifter refuses it:</span> ${esc(s.refused)}</div>`;
   else {
@@ -704,12 +706,52 @@ function renderC() {
   pane.innerHTML = `<div class="pane-head"><span class="title">C</span>${tabs}</div>${body}`;
 }
 
+// The function's readable C in the reading form (dread readable --plain, /api/reading): without the
+// instructions' comments, each statement's line with the address of its first instruction in the
+// margin (a click selects that instruction in the listing). The server makes it on the first request
+// (the page shows a placeholder meanwhile) and keeps it for the load and the readable C's tables.
+function readingBody(d) {
+  const name = d.header.name, r = S.reading;
+  if (!r || r.name !== name || r.generation !== S.generation) {
+    loadReading(name);
+    return `<div class="placeholder">Making its readable C…</div>`;
+  }
+  const a = r.data;
+  if (a.pending) return `<div class="placeholder">The readable C follows when the register analysis is done.</div>`;
+  if (!a.lines) return `<div class="placeholder"><span class="warn">No readable C:</span> ${esc(a.why || "")}</div>`;
+  const how = a.accepted ? "in the readable table: built from this C, its cases agree"
+    : "not in the readable table: made now, not built or tested";
+  return `<div class="pane-sub">dread readable --plain · ${how} · margin: each statement's first instruction</div>` +
+    `<div class="code reading">${codeHTML(a.lines.map((l) => l[1]).join("\n"), 1, a.lines.map((l) => l[0]))}</div>`;
+}
+
+let readingAsked = null;
+async function loadReading(name) {
+  if (readingAsked === name) return;
+  readingAsked = name;
+  const generation = S.generation;
+  let data;
+  try {
+    data = await api("/api/reading", { name });
+  } catch (e) {
+    data = { name, lines: null, why: e.message };
+  }
+  if (readingAsked === name) readingAsked = null;
+  S.reading = { name, generation, data };
+  if (data.pending) {                     // (asked again when the register analysis may be done)
+    setTimeout(() => { if (S.reading && S.reading.data === data) { S.reading = null; renderC(); } }, 1500);
+  }
+  if (S.current && S.current.header.name === name && S.tab === "readable") renderC();
+}
+
 const KEYWORDS = new Set(("if else for while do switch case default break continue return goto sizeof typedef struct union " +
   "enum static inline extern register volatile const asm __asm__ __attribute__ __volatile__").split(" "));
 const TYPES = new Set(("void char short int long unsigned signed float double bool _Bool u8 u16 u32 u64 s8 s16 s32 s64 " +
   "i8 i16 i32 i64 uint8_t uint16_t uint32_t uint64_t int8_t int16_t int32_t int64_t size_t uintptr_t").split(" "));
 
-function codeHTML(text, first = 1) {
+// C as highlighted lines, each with its number (first: the first line's), or with margins (an
+// address or null for each line: the reading form's) a link to that address in the listing.
+function codeHTML(text, first = 1, margins = null) {
   const pattern = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|(^[ \t]*#[^\n]*)|(\b0[xX][0-9a-fA-F]+[uUlL]*\b|\b\d+[uUlL]*\b)|(\b[A-Za-z_]\w*\b)/gm;
   const own = S.current && S.current.header.name;
   let html = "", last = 0, m;
@@ -728,8 +770,12 @@ function codeHTML(text, first = 1) {
     else html += id;
   }
   html += esc(text.slice(last));
-  return html.replace(/\n$/, "").split("\n").map((line, i) =>
-    `<div class="cl"><span class="no">${first + i}</span><span>${line || " "}</span></div>`).join("");
+  return html.replace(/\n$/, "").split("\n").map((line, i) => {
+    const at = margins ? margins[i] : null;
+    const no = !margins ? first + i
+      : at == null ? "" : `<a class="at" data-at="${at}" title="${hex(at)}: select it in the listing">${hex8(at)}</a>`;
+    return `<div class="cl"><span class="no">${no}</span><span>${line || " "}</span></div>`;
+  }).join("");
 }
 
 function rowsOf(kinds = ["insn", "word"]) {
@@ -3157,6 +3203,8 @@ function wire() {
   main.addEventListener("click", (e) => {
     const label = e.target.closest("a[data-label]");
     if (label) { e.preventDefault(); goLabel(+label.dataset.label); return; }
+    const at = e.target.closest("a.at[data-at]");
+    if (at) { e.preventDefault(); selectAddress(+at.dataset.at, true); return; }
     if (e.target.closest("#rename-btn")) return renameCurrent();
     if (e.target.closest("#note-btn")) return noteSelected();
     const tab = e.target.closest(".tab");

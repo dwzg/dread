@@ -1,8 +1,12 @@
 """dread readable: the transformations from lifted C to readable C and the gate that decides which
 functions are built from it. The gate on a copy of gizmo-m3: with the transformations as they are,
 every lifted function is accepted and the build is the one lifted C gives (so far they change no
-code); a stage that breaks one function leaves that one lifted and the others readable."""
+code); a stage that breaks one function leaves that one lifted and the others readable. How it is
+shown: the image's structures once in a header the printed form includes (the compiled form defines
+them in each file: the same code), a call's comment naming the call, and the reading form without
+the instructions' comments, each statement's first instruction in its margin."""
 import os
+import re
 import shutil
 
 import pytest
@@ -442,3 +446,181 @@ def test_read_line_calls_uart_getc_without_an_argument(target):
     assert "= uart_getc();" in line, line
     getc = text("uart_getc")
     assert "u32 uart_getc(void)" in getc, getc
+
+
+# A lifted file of the lifters' dialect: a literal two loads use, a call with a constant argument and
+# one with a loaded one, and the call's result moved into r4 before the return (GCC's mov r4, r0)
+SHARED = """/* f at 0x100, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 g(u32, u32, u32, u32);
+u32 f(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r12 = 0, lr = 0;
+    (void)r12; (void)lr;
+    r4 = 0x20000000u;  /* 100: ldr r4, [pc, #0x20] */
+    r0 = *(volatile u32 *)(r4 + 4);  /* 102: ldr r0, [r4, #4] */
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* 104: bl g */
+    r0 = 0x7u;  /* 108: movs r0, #7 */
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* 10a: bl g */
+    r0 = *(volatile u32 *)(r4 + 8);  /* 10e: ldr r0, [r4, #8] */
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* 110: bl g */
+    r4 = r0;  /* 114: mov r4, r0 */
+    return r4;  /* 116: pop {r4, pc} */
+}
+"""
+
+
+def test_a_call_names_its_call_and_the_reading_form_each_statement_s_first_instruction():
+    """The comment of a statement that takes a call's result in names the call (return g(...) the bl at
+    0x110, not the mov r4, r0 or the pop after it). The reading form (reading) has no instructions'
+    comments and gives each statement the address of its first instruction: the call of 7 its movs
+    (0x108), each load's call its load (0x102, 0x10e), not the literal both loads use (0x100), which
+    belongs to neither."""
+    text = readable.transform("f", SHARED)
+    assert "    return g(g_20000008, 0, 0, 0);  /* 110: bl g */" in text, text
+    lines = readable.reading("f", SHARED)
+    assert not any("/*" in line and ": " in line and "readable C" not in line for _, line in lines), lines
+    at = {line.strip(): a for a, line in lines if a is not None}
+    assert at == {"g(g_20000004, r1, r2, r3);": 0x102, "g(7, 0, 0, 0);": 0x108,
+                  "return g(g_20000008, 0, 0, 0);": 0x10e}, lines
+    assert lines[0] == (None, "/* f at 0x100: readable C from its lifted C (dread readable) */"), lines
+    out = readable.margin_text(lines)
+    assert "\n102  " in "\n" + out and "\n     u32 f(" in "\n" + out, out
+
+
+def test_every_call_names_a_call_and_every_margin_lies_in_its_function(target):
+    """Every function of the build that lifts: in its readable C, a statement holding a call that has an
+    instruction comment names a call or a jump (a tail call); its reading form has no instructions'
+    comments or notes, and every address in its margin is an instruction of its lifted C (the code it
+    branches into outside its range too: a32's __aeabi_uidivmod), at or before the statement's own
+    instruction and the one its comment names. gizmo's print_status starts its last call where the
+    call's argument is loaded, before the call."""
+    from dread import lift, regflow
+    from dread.cflow import is_pure_call, walk_expr
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+    checked = 0
+    for fn_p in program.functions:
+        try:
+            text = lifter.lift(fn_p).text
+        except lift.Refused:
+            continue
+        made = readable._named(fn_p.name, text, None, context)
+        if made is None:
+            continue
+        _, fn, _ = made
+        own = {}
+
+        def visit(s):
+            if s.addr is not None and not isinstance(s, cparse.Note):
+                own[id(s)] = s.addr[0]
+            if isinstance(s, (cparse.ExprStmt, cparse.Return)) and s.addr is not None and s.e is not None and any(
+                    isinstance(x, cparse.Call) and isinstance(x.f, cparse.Name) and not is_pure_call(x)
+                    for x in walk_expr(s.e)):
+                kind = program.arch.flow(program.insn(cparse.shown(s.addr)[0]))[0]
+                assert kind in ("call", "icall", "jump", "ijump"), (fn.name, cparse.unparse(s), cparse.shown(s.addr))
+            for inner in cparse._nested(s):
+                visit(inner)
+        visit(fn.body)
+        first = cparse.first_addresses(fn)
+        insns = {int(a, 16) for a in re.findall(r"/\* ([0-9a-f]+): ", text)}
+
+        def check(s):
+            if s.addr is not None and not isinstance(s, cparse.Note):
+                assert first(s.addr) in insns and first(s.addr) <= min(s.addr[0], cparse.shown(s.addr)[0]), (
+                    fn.name, cparse.unparse(s), s.addr)
+            for inner in cparse._nested(s):
+                check(inner)
+        check(fn.body)
+        lines = readable.reading(fn_p.name, text, context)
+        assert not any(re.search(r"/\* [0-9a-f]+: ", line) for _, line in lines), (fn_p.name, lines)
+        checked += 1
+    assert checked > 30
+    text = lifter.lift(program.by_name["print_status"]).text
+    lines = readable.reading("print_status", text, context)
+    last = [(a, line) for a, line in lines if "uart_puts(" in line][-1]
+    call = [s for s in readable._named("print_status", text, None, context)[1].body.body
+            if "uart_puts(" in cparse.unparse(s)][-1]
+    assert last[0] is not None and last[0] < cparse.shown(call.addr)[0], (last, cparse.shown(call.addr))
+
+
+@needs_gcc
+def test_the_image_s_structures_once_in_a_header_the_printed_form_includes(tmp_path, capsys):
+    """gizmo-m3 with a readable_types plan made over all its functions (the ring behind ring_put's and
+    ring_get's pointer, s_1, and the static ring timer_irq and main hand them): the header defines each
+    structure once; a function's printed form (printed: what dread readable prints and --out writes)
+    includes it instead of defining them, names the members it uses in a comment, and keeps its macros,
+    externs and its frame's structure; the compiled form (transform: what the gate builds) still
+    defines them, and both compile to the same code. dread readable --out writes the header beside the
+    files, --header prints it."""
+    from dread import lift, regflow, shapes
+    from dread.elf import Elf
+    from dread.program import Program
+    target = gizmo_copy(tmp_path)
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+    names = [fn.name for fn in program.functions]
+    digests = {}
+    trees = readable.analysis_trees(program, context, lifter, names, digests=digests)
+    found, arrays, s = readable.static_plan(program, context, trees, flow)
+    p = shapes.plan(s, trees, digests)
+    p.statics, p.arrays = found, arrays
+    shapes.store_plan(image, p)
+    assert p.typed.get("ring_put") and p.statics, (p.typed, p.statics)
+    context = readable.Context(target, image, program, flow)
+    header = readable.header_text(context, image.name)
+    defined = re.findall(r"^struct (\w+)\n\{", header, re.M)
+    assert len(defined) == len(set(defined)) >= 2 and "s_1" in defined, header
+    compiled, shown = tmp_path / "compiled", tmp_path / "printed"
+    compiled.mkdir()
+    shown.mkdir()
+    (shown / readable.HEADER).write_text(header)
+    included = []
+    for name in names:
+        try:
+            text = lifter.lift(program.by_name[name]).text
+        except lift.Refused:
+            continue
+        c, out = readable.transform(name, text, context=context), readable.printed(name, text, context)
+        if c is None:
+            continue
+        assert not re.search(r"^struct \w+\n\{", out, re.M) and not re.search(r"^struct \w+;$", out, re.M), out
+        if re.search(r"^struct \w+\n\{", c, re.M):
+            included.append(name)
+            assert '#include "%s"' % readable.HEADER in out, out
+        (compiled / (name + ".c")).write_text(c)
+        (shown / (name + ".c")).write_text(out)
+    assert {"ring_put", "ring_get", "timer_irq"} <= set(included), included
+    ring = readable.printed("ring_put", lifter.lift(program.by_name["ring_put"]).text, context)
+    assert "/* struct s_1: u32 f_20 at 0x20, u32 f_24 at 0x24 */" in ring, ring
+    irq = readable.printed("timer_irq", lifter.lift(program.by_name["timer_irq"]).text, context)
+    assert "#define g_%x (*(volatile struct g_%x_t *)0x%xu)" % ((min(p.statics),) * 3) in irq, irq
+    assert "extern u32 ring_put(" in irq, irq
+    main = readable.printed("main", lifter.lift(program.by_name["main"]).text, context)
+    assert "} __attribute__((packed, aligned(4))) stack" in main, main   # (its frame: its own)
+    flags = target.compiler.generated_cflags()
+    a = build.compile_all(target, image, str(compiled), str(tmp_path / "obj-a"), quiet=True, flags=flags)
+    b = build.compile_all(target, image, str(shown), str(tmp_path / "obj-b"), quiet=True, flags=flags)
+
+    def code(obj):
+        e = Elf(obj)
+        return {s.name: (e.data(s), [(o, t, e.symbols[k].name, x) for o, t, k, x in e.relocations(i)])
+                for i, s in enumerate(e.sections) if s.flags & 4 and s.size}
+    assert len(a) == len(b) > 30 and all(code(x) == code(y) for x, y in zip(sorted(a), sorted(b)))
+    out = tmp_path / "out"
+    assert readable.main(["--target", target.root, "--out", str(out), "ring_put", "print_status"]) == 0
+    assert (out / readable.HEADER).read_text() == header
+    assert (out / "ring_put.c").read_text() == ring
+    capsys.readouterr()
+    assert readable.main(["--target", target.root, "--header"]) == 0
+    assert capsys.readouterr().out == header
+    assert readable.main(["--target", target.root, "--plain", "ring_put"]) == 0
+    plain = capsys.readouterr().out
+    assert "/* struct s_1: u32 f_20 at 0x20, u32 f_24 at 0x24 */" in plain and ": ldr" not in plain, plain

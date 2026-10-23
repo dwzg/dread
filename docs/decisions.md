@@ -9,6 +9,69 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C as printed: the structures in an image's header, a reading form without the instructions (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Two items of the review against hand-written C (docs/todo.md): every function's
+  readable C repeats the full definition of every structure it touches (FreeRTOS GCC -O0
+  prvInitialiseTaskLists: 59 lines of declarations for a 22-line function), and every statement
+  carries an instruction comment, one of several where it is made of several (a call often the mov or
+  the bx lr after it). What goes into one header per image and what stays with the function, what the
+  gate then compiles, which address a reading form without the comments shows, and where the GUI
+  shows it.
+- **Options and choices.**
+  1. What the gate compiles: (a) every file with the header (the header among the build's sources);
+     (b) the compiled form as it was, each file defining what it uses, the header only in what is
+     printed. **(b)**: dread.build, the gate and dread pilot's checks compile what they compiled. The
+     printed form is checked to be the same code: on the eight builds every lifted function's printed
+     form, compiled with the header beside it, gives the compiled form's bytes and relocations (GCC
+     -Os: 329 of 329).
+  2. The header: (a) the structures of the readable_types table, behind pointers and of static data;
+     (b) the extern declarations too; (c) the macros of static data too. **(a)**. Their tags are one per
+     image by construction (naming.struct_names and static_names: no tag or field takes a macro's
+     name) and their definitions the same text in every file. The externs stay with the function: they
+     are trimmed per caller (trim_calls keeps an argument in a result register where this function
+     reads the call's value), so two functions may declare one callee differently, and one prototype
+     would have to fit every call or change what compiles; they are one line a callee and say what
+     the function calls. The macros stay: a global's macro name gives way to its default name in a
+     function that uses the name for a variable, a label or a callee, and a macro is not scoped, so in
+     a header every file includes it would expand inside every identifier of its name. A frame's
+     structure (stack36_t) stays: it is that function's frame.
+  3. What a function keeps of the structures: (a) the include alone; (b) the include and a comment a
+     structure naming the members it uses with their types and offsets; (c) definitions cut down to
+     those members. **(b)**: (c) is C that contradicts the header; with (a) the reading form, which
+     has no instruction comments, would hide the offsets a reader matches with the listing.
+  4. A call's comment: (a) the reader's instruction, as before, where fold puts a call into the
+     statement that reads its result; (b) the call's where that statement is an expression statement
+     or a return (a condition keeps its branch). **(b)**, as the item asked: 232 of 1,609 such
+     statements on FreeRTOS GCC -Os named the mov or the pop after their call, none now. The call is
+     the instruction the statement's comment shows (cparse.Addr shown); the statement keeps its own.
+     Taking the call's for its own, tried first, regrouped the printer's lines (statements of one
+     instruction share a line), and the digests that the readable_types and readable_names tables are
+     made for come from that text: five functions of the eight builds got another digest (gizmo a32
+     fmt_dec, GCC -Os prvSanityCheckCreatedQueue, clang -O2 vStartCountingSemaphoreTasks, RISC-V
+     ulTaskGenericNotifyTake and xTaskGenericNotifyWait), and a target's names for them would have
+     stopped applying until asked again; with shown, none.
+  5. The margin's address: (a) the statement's own instruction (its comment's); (b) the lowest of the
+     instructions folded or propagated into it; (c) that, counting an absorbed instruction only where
+     no statement carries it and one statement alone absorbed it. **(c)**: the item asks for the first
+     instruction, and (b) gives a literal that two loads share (gizmo's print_status: ldr r4, =base) to
+     both statements, the second one's margin then jumping back before the statement above it.
+     Recorded through the clean-up in the statement's addr as a cparse.Addr (a tuple to everything
+     else, so equality, the printed comments and the digests stay) that fold, propagate, spread and
+     addresses add to.
+  6. The GUI: (a) a switch on the lifted tab; (b) a tab of its own, first for a function without
+     source, asked for when shown. **(b)**: the lifted tab shows what the builds compiled; the reading
+     form is the tool's (dread.readable reading), made on the first request outside the server's lock.
+- **Undo.** dread readable's main prints transform again (printed, reading and Types unused); fold
+  back to `if reader.addr is None` alone (no cparse.take); the GUI's c_sources without the readable
+  entry.
+- **Status.** Done (dread.readable Types, printed, reading; dread.cparse Addr, first_addresses,
+  unparse_lines; dread.tidy fold, propagate, spread, addresses, flat_view; dread.gui reading). Not
+  established: a statement in an IT block's arm has no instruction of its own (its if carries it),
+  so its line has no address; an instruction the clean-up dropped as dead is no statement's.
+
 ## Case keys scoped to a function's call tree (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

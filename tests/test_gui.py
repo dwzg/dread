@@ -1,8 +1,8 @@
 """dread gui on a copy of gizmo: the page and its files, the answers of the API (the whole program by
-groups among them, found by dread groups in a process of its own), how sure each name is and what a
-review said of it (names.tsv and review.tsv written here), the search that lights the whole program,
-the two kinds of change and the refusals (another host name, a change without the page's token); and
-the C reader that finds the definitions."""
+groups among them, found by dread groups in a process of its own; a function's readable C in the
+reading form), how sure each name is and what a review said of it (names.tsv and review.tsv written
+here), the search that lights the whole program, the two kinds of change and the refusals (another
+host name, a change without the page's token); and the C reader that finds the definitions."""
 import json
 import os
 import shutil
@@ -194,6 +194,48 @@ def test_one_function(server):
     source = [s for s in d["sources"] if s["kind"] == "source"][0]
     assert source["text"].lstrip().startswith(("int", "u32", "s32", "unsigned")) and "clamp" in source["text"]
     assert answer(srv, "/api/function?name=nosuch")[0] == 404
+
+
+def test_the_reading_view_of_a_function(server):
+    """A function without source of its own offers its readable C in the reading form (/api/reading,
+    asked for when its tab is shown): the lines and margins dread readable --plain makes (dread.readable
+    reading), without the instructions' comments, each statement's first instruction an address of the
+    function; "pending" while the register analysis runs, "accepted" once the readable table has it (the
+    state loads anew with the table). A function written by hand has none; an unknown name is a 404.
+    The page script asks for it and links the margin to the listing."""
+    from dread import lift, readable, regflow
+    from dread.program import Program
+    srv, target = server
+    status, d = answer(srv, "/api/function?name=print_status")
+    kinds = [s["kind"] for s in d["sources"]]
+    assert kinds == ["readable", "lifted"] and d["sources"][0] == {"kind": "readable", "deferred": True,
+                                                                  "accepted": False}, d["sources"]
+    status, r = answer(srv, "/api/reading?name=print_status")
+    assert status == 200 and r["why"] is None and r["accepted"] is False, r
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    text = lift.make_lifter(program, flow).lift(program.by_name["print_status"]).text
+    made = readable.reading("print_status", text, readable.Context(target, image, program, flow))
+    assert r["lines"] == [[a, line] for a, line in made], r["lines"]
+    assert not any("/* 8" in line for _, line in r["lines"]), r["lines"]       # (no instruction's comment)
+    fn = program.by_name["print_status"]
+    at = [a for a, _ in r["lines"] if a is not None]
+    assert len(at) >= 5 and all(fn.entry <= a < program.end(fn) for a in at), r["lines"]
+    with open(image.table("readable"), "w") as f:
+        f.write("print_status\n")
+    deadline = time.time() + 120
+    while True:                             # (the state loads anew: its analyses run again meanwhile)
+        status, r = answer(srv, "/api/reading?name=print_status")
+        if not r.get("pending") or time.time() > deadline:
+            break
+        time.sleep(0.1)
+    assert status == 200 and r["accepted"] is True and r["lines"] == [[a, line] for a, line in made], r
+    status, d = answer(srv, "/api/function?name=clamp")
+    assert "readable" not in [s["kind"] for s in d["sources"]], d["sources"]
+    assert answer(srv, "/api/reading?name=nosuch")[0] == 404
+    script = request(srv, "/app.js")[2].decode()
+    assert "/api/reading" in script and "function readingBody" in script and "a.at[data-at]" in script
 
 
 def test_search_by_name_address_and_text(server):

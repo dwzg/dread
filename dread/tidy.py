@@ -36,9 +36,13 @@ with the IT instruction's note between. What makes such code one if/else again:
   return's value and statements inside arms (strcmp's r2 - r3).
 
 Statements keep the instruction they came from (their addr); a statement folded into another takes
-its reader's. Functions whose lifted file asks for registers fixed or kept (dread.build's header
-lines) and blocks that bind variables to registers (__asm__("r0")) are left alone: their registers
-are behaviour.
+its reader's, but an expression statement or a return that takes a call's result in names the call
+in its comment (return f(); names the bl, not the bx lr after it: cparse.take, which keeps the
+statement's own instruction, so that the lines the printer groups and the digests stay). What a
+statement took in from others (fold, propagate, spread, addresses) it keeps as absorbed instructions
+(cparse.Addr), where the reading form finds its first instruction (dread readable --plain). Functions
+whose lifted file asks for registers fixed or kept (dread.build's header lines) and blocks that bind
+variables to registers (__asm__("r0")) are left alone: their registers are behaviour.
 """
 import re
 import threading
@@ -443,6 +447,8 @@ def propagate(fn):
                 if reads_count(get(), v):
                     put(substitute(get(), v, value))
                     changed = True
+                    for d in sorted(defs):
+                        C.absorb(s, g.nodes[d].stmt)
     write_back(view)
     return changed
 
@@ -1133,15 +1139,24 @@ def _fold(fn, view_of):
             return changed
         for d, u, v, value in plans:
             reader = g.nodes[u].stmt
+            calls = isinstance(reader, (C.ExprStmt, C.Return)) and _calls(value) and not any(
+                _calls(get()) for get, _ in stmt_exprs(reader))
             for get, put in stmt_exprs(reader):
                 if reads_count(get(), v):
                     put(substitute(get(), v, value))
             if reader.addr is None:
                 reader.addr = g.nodes[d].stmt.addr
+            else:
+                (C.take if calls else C.absorb)(reader, g.nodes[d].stmt)
         write_back(view)                    # (a reader that is a stand-in's condition)
         for d, _, _, _ in plans:
             replace(view, g.nodes[d].stmt)
         changed = True
+
+
+def _calls(e):
+    """Whether expression e makes a call that is not pure (its value's instruction is the call's)."""
+    return e is not None and any(isinstance(x, C.Call) and not is_pure_call(x) for x in walk_expr(e))
 
 
 def spread(fn):
@@ -1172,6 +1187,7 @@ def spread(fn):
             continue
         for m in uses:
             m.stmt.cond = substitute(m.stmt.cond, v, value)
+            C.absorb(m.stmt, s)
         del fn.body.body[n.index]
         return True
     return False
@@ -1267,6 +1283,7 @@ def addresses(fn):
             for get, put in stmt_exprs(m.stmt):
                 if reads_count(get(), v):
                     put(_fold_offsets(substitute(get(), v, value)))
+            C.absorb(m.stmt, s)
         del fn.body.body[n.index]
         return True
     return False
@@ -2137,7 +2154,7 @@ def flat_view(fn):
         elif isinstance(s, C.If) and plain(s) and writes(s):
             count[0] += 1
             then_l, else_l, end_l = ("flat_%s_%d" % (w, count[0]) for w in ("then", "else", "end"))
-            stand_in = C.If(s.cond, C.Goto(then_l))
+            stand_in = C.If(s.cond, C.Goto(then_l), None, s.addr)
             pairs.append((stand_in, s))
             out.extend([stand_in, C.Goto(else_l if s.orelse is not None else end_l), C.Label(then_l)])
             spread(s.then, None)
@@ -2156,9 +2173,12 @@ def flat_view(fn):
 
 
 def write_back(view):
-    """The conditions a pass replaced in a flat_view's stand-in ifs, into the function's own ifs."""
+    """The conditions a pass replaced in a flat_view's stand-in ifs, into the function's own ifs, with
+    the instructions a stand-in absorbed with them (cparse.absorb)."""
     for stand_in, original in view.pairs:
         original.cond = stand_in.cond
+        if original.addr is not None and stand_in.addr is not original.addr:
+            original.addr = stand_in.addr
 
 
 def replace(view, s, new=None):
