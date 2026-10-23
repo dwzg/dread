@@ -9,6 +9,31 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## A build's readable C in a pool, kept in the process by what it is made from (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** A build from readable C made every chosen function's readable C in its own process,
+  one after another (48 s of a 55 s build of FreeRTOS's GCC -Os demo), kept per context object only:
+  the gate paid it once in one process, every dread recon and every build of dread pilot paid it
+  again. Where is it made, and what is kept for whom?
+- **Options and choices.**
+  1. Where: (a) in the building process, (b) in a pool of forked worker processes (dread.readable
+     in_pool, as the analysis trees and the questions already are), (c) spawned workers that load the
+     target again. **(b)**: the workers share the context and the lifted C copy-on-write; nothing but
+     the readable C's text comes back. With another thread running the process does not fork (a lock
+     the thread holds would stay held in the child) and makes them as (a): in_pool checks.
+  2. What is kept: (a) per context object, as before, (b) in the process by the content (a digest of
+     the context's tables, the stages, whether z3 is there, each function's lifted C), the four latest
+     contexts, (c) on disk under BUILD by the same key and DREAD's code. **(b)**: a new context made from
+     the same tables (each build's, the next build of dread pilot) finds them, a table changed in place
+     changes the key; (c) would make repeated dread recon runs fast too, but its key needs every module
+     the stages run (a stale entry builds wrong C without a word), and it is not needed for the rounds.
+  3. Order in the pool: the longest lifted C first, one at a time (the table's order four at a time
+     ended on a few large functions).
+- **To undo.** POOL_MIN at 10 ** 6 makes them in the process again; STORE_KEEP 0 keeps nothing.
+- **Status.** In the code (dread.readable readable_texts, chooser; dread.build lift_sources).
+
 ## Arrays of static data, addresses as &, and what callees reach (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

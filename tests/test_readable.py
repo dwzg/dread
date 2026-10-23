@@ -127,16 +127,23 @@ def test_a_stage_that_breaks_a_function_leaves_it_lifted(tmp_path, monkeypatch):
 
 @pytest.mark.slow
 @needs_gcc
-def test_the_clean_up_passes_the_gate_and_is_shorter(tmp_path):
+def test_the_clean_up_passes_the_gate_and_is_shorter(tmp_path, monkeypatch):
     """With the clean-up (dread.tidy): every lifted function of gizmo-m3 is accepted, the whole image
     agrees, and the readable C has fewer lines than the lifted (the flags, the (void)s, the zeroed
-    registers after calls are gone)."""
+    registers after calls are gone). No function's readable C is made twice from the same lifted C in
+    the whole check: the rounds' builds and the whole image's take what its first pass made
+    (readable_texts)."""
     target = gizmo_copy(tmp_path)
     image = target.image()
     lifted = build.read_names(image.table("lifted"))
+    made, real = [], readable._transform
+    monkeypatch.setattr(readable, "_transform", lambda name, text, *rest: made.append((name, text)) or
+                        real(name, text, *rest))
+    monkeypatch.setattr(readable, "POOL_MIN", 10 ** 6)          # (made in this process, where they are counted)
     lines = []
     accepted = readable.check(target, image, out=lines.append)
     assert accepted == sorted(lifted), lines
+    assert len(made) == len(set(made)) and {n for n, _ in made} == set(lifted), sorted(made)
     before = after = 0
     for name in lifted:
         text = lifted_text(target, image, name, tmp_path)
@@ -189,6 +196,88 @@ def test_the_trees_made_in_a_pool_are_those_made_in_one_process(monkeypatch):
                        for n, got in readable.question_trees(program, context, lifter, names, jobs=jobs).items()})
     assert made[1] == made[3] and len(made[1][0]) > 40 and len(made[1][4]) > 40
     assert sum(not isinstance(got, str) for got in made[1][5].values()) > 40
+
+
+@pytest.mark.slow
+@needs_gcc
+def test_a_build_makes_its_readable_c_in_a_pool_as_in_one_process(tmp_path, monkeypatch):
+    """dread.build makes the readable C of the functions of the readable table in worker processes
+    (POOL_MIN lowered, three workers): byte for byte the files and the image one process makes, and no
+    thread left running. Beside a thread of its own the process does not fork (a lock the thread holds
+    would stay held in the child; the suite takes Python's warning of such a fork for an error): the
+    same files again, made here."""
+    import multiprocessing
+    import threading
+    target = gizmo_copy(tmp_path)
+    image = target.image()
+    lifted = build.read_names(image.table("lifted"))
+    with open(image.table("readable"), "w") as f:
+        f.write("".join(n + "\n" for n in lifted))
+    forks, real = [], multiprocessing.get_context
+    monkeypatch.setattr(multiprocessing, "get_context", lambda *a: forks.append(a) or real(*a))
+    monkeypatch.setenv("DREAD_JOBS", "3")
+    got = {}
+    for way in ("one process", "pool", "beside a thread"):
+        monkeypatch.setattr(readable, "POOL_MIN", 10 ** 6 if way == "one process" else 1)
+        monkeypatch.setattr(readable, "_STORE", {})            # (nothing kept from the builds before)
+        del forks[:]
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, daemon=True) if way == "beside a thread" else None
+        if thread:
+            thread.start()
+        threads = threading.active_count()
+        try:
+            out = tmp_path / way.replace(" ", "-")
+            payload = build.build(target, image, out=str(out), quiet=True)
+            assert threading.active_count() == threads      # (the pool's threads end with it)
+        finally:
+            stop.set()
+            if thread:
+                thread.join()
+        assert bool(forks) == (way == "pool"), (way, forks)
+        got[way] = {p.name: p.read_text() for p in (out / "lifted").glob("*.c")}, open(payload, "rb").read()
+    assert got["pool"] == got["one process"] == got["beside a thread"]
+    assert len(got["pool"][0]) == len(lifted)
+
+
+def test_readable_c_is_made_again_only_where_its_inputs_changed(monkeypatch):
+    """readable_texts keeps what it made by the context's tables (context_key) and each function's
+    lifted C: a new context with the same tables (the next build's, a check's next round) makes
+    nothing again; another lifted C makes that function again; another table all of them, with the
+    new name."""
+    from dread import lift, regflow
+    from dread.program import Program
+    from dread.target import Target
+    target = Target.load(gizmo_dir("m3"))
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    texts = {}
+    for fn in program.functions:
+        try:
+            texts[fn.name] = lifter.lift(fn).text
+        except lift.Refused:
+            pass
+    made, real = [], readable._transform
+    monkeypatch.setattr(readable, "_transform", lambda name, *rest: made.append(name) or real(name, *rest))
+    monkeypatch.setattr(readable, "_STORE", {})
+    monkeypatch.setattr(readable, "POOL_MIN", 10 ** 6)          # (made in this process, where they are counted)
+    first = readable.readable_texts(texts, readable.Context(target, image, program, flow))
+    assert sorted(made) == sorted(texts) and "while (!(io_40011004 & 1));" in first["uart_putc"]
+    del made[:]
+    assert readable.readable_texts(texts, readable.Context(target, image, program, flow)) == first and not made
+    other = dict(texts, uart_putc=texts["uart_putc"].replace("lifted by dread lift", "lifted by hand"))
+    assert other["uart_putc"] != texts["uart_putc"]
+    again = readable.readable_texts(other, readable.Context(target, image, program, flow))
+    assert made == ["uart_putc"] and "lifted by hand" in again["uart_putc"]
+    assert {n: t for n, t in again.items() if n != "uart_putc"} == {n: t for n, t in first.items() if n != "uart_putc"}
+    del made[:]
+    context = readable.Context(target, image, program, flow)
+    context.globals = {"0x40011000 u32": {"name": "UART_DATA"}}
+    named = readable.readable_texts(texts, context)
+    assert sorted(made) == sorted(texts) and "UART_DATA = " in named["uart_putc"], named["uart_putc"]
+    assert readable.context_key(context) != readable.context_key(readable.Context(target, image, program, flow))
 
 
 def test_a_new_context_gets_readable_c_made_with_its_own_tables():

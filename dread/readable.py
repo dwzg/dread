@@ -19,6 +19,15 @@ then the part of the frame that addresses handed out reach becomes one local obj
 structure, stack36.f_4, (u32)&stack36.f_4, with a union where accesses overlap; an array of bytes
 where none is at a constant offset, (u32)stack40).
 
+A build from readable C (dread.build with a chooser: the check's rounds and its whole image, dread
+recon on an image with a readable table, dread pilot's builds) makes the readable C of every chosen
+function at once, before it writes the first file (readable_texts): in a pool of worker processes,
+and kept in this process by the context's tables (context_key), the stages and each function's
+lifted C, so that the check's next round, its whole image and the next build with the same tables
+take it as it was. The check's first pass makes them so too. Until 2026-10-23 each was made in the
+building process, one after another (48 s of a 55 s build of FreeRTOS's GCC -Os demo; 97 % of that
+the clean-up); a build in a process with another thread running still does so (in_pool).
+
 Where the image with lifted C alone already differs from the original in the scenarios (the system
 run's clock on some builds until 2026-10-22; a lifted table the lift check wrote since agrees), the
 scenarios decide nothing and the function-level runs decide alone; elsewhere a difference with
@@ -196,26 +205,29 @@ POOL_MIN = 64       # functions from which the trees are made in a pool of worke
 _G = {}             # what the workers share with the process that forked them (copy-on-write)
 
 
-def in_pool(work, names, jobs=None, **shared):
+def in_pool(work, names, jobs=None, chunksize=4, **shared):
     """[work(name)] for each of names, in order, work a module's function (pickled by its name: of this
     module, or of one that reads this module's _G, as dread.groups and dread.pilot do) that reads shared
-    from _G: in forked worker processes (dread.util.polite.workers(), or jobs), or in this process for
-    fewer than POOL_MIN names or one worker. On a large firmware, making the analysis trees took
-    minutes on one core. The process must have no other thread when it forks (a lock one holds stays
-    held in the child)."""
+    from _G: in forked worker processes (dread.util.polite.workers(), or jobs), names handed out
+    chunksize at a time in their order, or in this process for fewer than POOL_MIN names or one
+    worker. On a large firmware, making the analysis trees took minutes on one core. A process with
+    another thread running makes them all here, one after another: a lock that thread holds at the
+    fork stays held in the child, which may then wait for it forever (checked since 2026-10-23, when
+    builds began to make their readable C in a pool: a build may run where threads do)."""
     import multiprocessing
+    import threading
     from dread.util.polite import die_with_parent, polite, resident, workers
     _G.clear()
     _G.update(shared)
     try:
-        if len(names) < POOL_MIN:
+        if len(names) < POOL_MIN or threading.active_count() > 1:
             return [work(name) for name in names]
         polite()                            # (a bulk run: the pilot's tasks had not lowered theirs)
         n = min(len(names), jobs or workers(memory_each=resident()))     # (a worker may copy all of this one)
         if n <= 1:
             return [work(name) for name in names]
         with multiprocessing.get_context("fork").Pool(n, initializer=die_with_parent) as pool:
-            return pool.map(work, list(names), chunksize=4)
+            return pool.map(work, list(names), chunksize=chunksize)
     finally:
         _G.clear()
 
@@ -441,12 +453,93 @@ def view(name, text, context=None):
                                                  else "lifted")])
 
 
-def chooser(names, context=None):
-    """build.build's transform for the functions of names (the others stay lifted)."""
+STORE_KEEP = 4      # contexts (by their tables) whose readable C readable_texts keeps, the latest used
+_STORE = {}         # (context_key, the stages, whether z3 is there) -> {(name, sha1 of its lifted C): readable C}
+
+
+def context_key(context):
+    """A digest of what the stages and the tables read from a context, as it is now: its tables
+    (regflow's registers, the variadic functions, the readable_names and readable_types tables, the
+    memory map: every attribute not starting with _), whatever object holds them. Two contexts with
+    the same tables have the same key (a build's context made anew from the same tables, the next
+    round's); a table changed in place changes it. "" without a context."""
+    if context is None:
+        return ""
+    import hashlib
+    import json
+
+    def plain(x):
+        if isinstance(x, (set, frozenset)):
+            return sorted(repr(v) for v in x)
+        if hasattr(x, "to_json"):           # (shapes.Plan)
+            return x.to_json()
+        if hasattr(x, "__dict__"):          # (the target's Memory, its regions)
+            return [type(x).__name__, {k: v for k, v in vars(x).items() if not k.startswith("_")}]
+        return repr(x)
+    tables = {k: v for k, v in vars(context).items() if not k.startswith("_")}
+    try:
+        text = json.dumps(tables, sort_keys=True, default=plain).encode()
+    except (TypeError, ValueError):         # (keys that do not sort, or no JSON key: kept apart all the same)
+        import pickle
+        text = pickle.dumps(sorted(tables.items()), protocol=4)
+    return hashlib.sha1(text).hexdigest()
+
+
+def _text_one(name):
+    return _transform(name, _G["texts"][name], None, _G["context"])
+
+
+def readable_texts(texts, context=None, jobs=None):
+    """{name: its readable C, or None where its lifted C is not the dialect} for texts ({name: lifted
+    C}): what transform makes, all at once. Those made before in this process from the same lifted C
+    with a context of the same tables (context_key) and the same stages are taken as they were (a
+    check's next round, its whole image, the next build of the same image: dread pilot builds again
+    and again); the others are made in a pool of worker processes (in_pool, jobs workers at most;
+    in this process for fewer than POOL_MIN). Until 2026-10-23 a build made every function's
+    readable C in its own process, one after another: 48 s of a 55 s build of FreeRTOS's GCC -Os
+    demo, 97 % of it the clean-up (dread.tidy), more than half its conditions pass. Kept for the
+    STORE_KEEP contexts used last."""
+    import hashlib
+    from dread import cexpr
+    key = (context_key(context), tuple(STAGES), cexpr.z3 is not None)
+    store = _STORE.pop(key, None) or {}
+    _STORE[key] = store                     # (the latest used last: dicts keep their order)
+    while len(_STORE) > STORE_KEEP:
+        del _STORE[next(iter(_STORE))]
+    digests = {n: hashlib.sha1(t.encode()).digest() for n, t in texts.items()}
+    # The longest lifted C first, one at a time: a pool that took them in the table's order, four at a
+    # time, ended on a few large functions (FreeRTOS's GCC -Os demo: 7.4 s simulated for its 316 with
+    # eight workers, 6.5 s so, 6.3 s ideal; the largest takes 3.9 s alone)
+    todo = sorted((n for n in texts if (n, digests[n]) not in store), key=lambda n: -len(texts[n]))
+    if todo:
+        if context is not None:             # (once, before the pool forks: the workers share them)
+            context.struct_names()
+            context.static_names()
+        for n, made in zip(todo, in_pool(_text_one, todo, jobs, chunksize=1, texts=texts, context=context)):
+            store[(n, digests[n])] = made
+    return {n: store[(n, digests[n])] for n in texts}
+
+
+def chooser(names, context=None, jobs=None):
+    """build.build's transform for the functions of names (the others stay lifted). dread.build
+    lift_sources hands its prepare every function's lifted C before it writes the first file: the
+    readable C of those of names is then made at once (readable_texts: kept from before, or in a pool
+    of jobs workers at most), and the transform takes it from there."""
     names = set(names)
+    made = {}                               # name -> (its lifted C, its readable C or None)
 
     def change(name, text):
-        return transform(name, text, context=context) if name in names else None
+        if name not in names:
+            return None
+        if name in made and made[name][0] == text:
+            return made[name][1]
+        return transform(name, text, context=context)
+
+    def prepare(texts):
+        chosen = {n: t for n, t in texts.items() if n in names}
+        for n, out in readable_texts(chosen, context, jobs).items():
+            made[n] = (chosen[n], out)
+    change.prepare = prepare
     return change
 
 
@@ -511,7 +604,7 @@ def check(target, image, names=None, out=print, jobs=None):
                                           len(context.plan.statics), len(context.plan.arrays)))
     by_system = build.system_names(image.table("lifted"))
     verdicts = {}                           # name -> (verdict, reason)
-    candidates = []
+    texts = {}                              # name -> its lifted C, None where there is no such function
     for name in names or lifted:
         if name not in lifted:
             verdicts[name] = ("not lifted", "not in the lifted table: dread lift --check first")
@@ -520,13 +613,17 @@ def check(target, image, names=None, out=print, jobs=None):
         else:
             fn = program.by_name.get(name)
             try:
-                result = lifter.lift(fn) if fn is not None else None
+                texts[name] = build.lifted_result(lifter, fn).text if fn is not None else None
             except lift.Refused as e:
                 verdicts[name] = ("lifted", "no longer lifts: %s" % e)
-                continue
-            if result is None or transform(name, result.text, context=context) is None:
-                verdicts[name] = ("lifted", "its lifted C is not the dialect dread.cparse reads")
-                continue
+    # Every candidate's readable C at once, in a pool (readable_texts); the rounds' builds and the whole
+    # image's take it from there as long as the context's tables and the lifted C stay the same.
+    made = readable_texts({n: t for n, t in texts.items() if t is not None}, context, jobs)
+    candidates = []
+    for name, text in texts.items():
+        if text is None or made[name] is None:
+            verdicts[name] = ("lifted", "its lifted C is not the dialect dread.cparse reads")
+        else:
             candidates.append(name)
     accepted, rounds = list(candidates), 0
     # The function-level runs build what the lift check's do: the lifted functions but those the
@@ -543,7 +640,7 @@ def check(target, image, names=None, out=print, jobs=None):
         rounds += 1
         try:
             payload = build.build(target, image, out=work, lifted=base, quiet=True, lifter=lifter,
-                                  transform=chooser(accepted, context))
+                                  transform=chooser(accepted, context, jobs))
         except overlay.OverlayError as e:
             if e.function in accepted:
                 drop([e.function], "the overlay: %s" % e)
@@ -597,7 +694,8 @@ def check(target, image, names=None, out=print, jobs=None):
     def whole(names):
         key = tuple(sorted(names))
         if key not in tried:
-            tried[key] = lift.whole_image(target, image, program, lifted, out, lifter, transform=chooser(key, context))
+            tried[key] = lift.whole_image(target, image, program, lifted, out, lifter,
+                                          transform=chooser(key, context, jobs))
         return tried[key]
     found = whole(accepted) if runs and accepted else None
     baseline = whole([]) if found else None

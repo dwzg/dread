@@ -703,9 +703,35 @@ its sources.
   Found on the way: readable.transform kept its results by the context's id, and a context made where
   one had died got the dead one's results, made with its tables (38 of 50 new contexts in a row on
   gizmo; struct_uses's context of its own could get another's lines); now kept per context, weakly.
-  Builds from readable C in one process lose the reuse that luck gave them (three builds of the GCC -Os
-  build in a row with main's code: 55, 55 and 7 s): a build makes every readable function's C in one
-  process (48 s of the 55), a candidate for a pool. Next: types: the
+  Builds from readable C in one process lost the reuse that luck gave them (three builds of the GCC -Os
+  build in a row with main's code: 55, 55 and 7 s): a build made every readable function's C in one
+  process (48 s of the 55). Since 2026-10-23 (docs/decisions.md) a build makes them all at once in a
+  pool of worker processes, the longest lifted C first, and keeps them in the process by what they are
+  made from: the context's tables, the stages, each function's lifted C (dread.readable readable_texts;
+  dread.build lift_sources lifts every function first and hands the chooser's prepare their lifted C).
+  The gate's first pass makes them so, its rounds and its whole image take them again (they took them
+  from the context's memo before too: the GCC -Os gate made its 316 once, 48.7 s of its 71.6 s; now
+  7.0 s, the rounds nothing), and so does the next build with the same tables (dread pilot builds
+  again and again); a process with another thread running makes them in one process (in_pool).
+  Where the 48 s went (cProfile of one GCC -Os build): the clean-up 97 %, its conditions pass 57 % of
+  it all (every candidate made of copies 20 %, the expressions' sizes walked again and again 9 %, the
+  loads compared for every candidate 8.5 %, the test values 8.5 %, z3's proofs 2.5 %), fold 8 %, values
+  7.5 % (the data-flow graphs of all the passes 15 %); parsing 2 %; the structure, the tables and the
+  frames 1.3 %. Measured with 8 workers (DREAD_JOBS=8), main's code against this, each on a fresh copy
+  of the gate's builds (seconds; the gate's rounds in parentheses):
+      build (readable functions)       dread recon    two builds in one process    dread readable --check
+      FreeRTOS GCC -Os (316)           57.4 -> 14.5   58.7 + 57.3 -> 14.1 + 7.2     74.7 -> 29.7 (1)
+      FreeRTOS clang -O2 (275)         64.1 -> 20.0   63.0 + 61.7 -> 19.6 + 8.6     82.5 -> 38.6 (1)
+      FreeRTOS RISC-V GCC -Os (251)    24.6 ->  5.6   23.7 + 24.0 ->  5.2 + 2.0     36.3 -> 17.1 (1)
+      FreeRTOS GCC -O0 (353)           83.8 -> 22.9   81.5 + 81.4 -> 21.9 + 11.7   121.4 -> 59.5 (2)
+      gizmo a32, m3, m4, rv32 (31-44)  1.5-2.7 -> 1.4-2.6  1.4-2.6 + 1.3-2.4 -> 1.3-2.6 + 0.1-0.3  3.1-5.5 -> 2.9-5.5
+  (gizmo's builds stay below POOL_MIN: made in the process as before, the second build takes them.)
+  The generated files and the images byte for byte main's on all eight builds, the gate the same
+  lists and readable_types tables. Left: lifting is the largest part a build does in one process now
+  (5 of 14 s on GCC -Os, every function one after another), a candidate for the same pool (the
+  workers would send the Lifted results back; the lift check builds through it too); the gate's
+  analysis trees run the clean-up on every function a second time (9.5 of its 28 s on GCC -Os).
+  Next: types: the
   structures behind pointers derived by code (accesses at constant offsets through the same
   pointer, unified across functions), with volatile in the pointer's declaration so that a field
   reads p->f, their names and fields' names proposed the same way.

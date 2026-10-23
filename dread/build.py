@@ -14,6 +14,10 @@ BUILD/recon/IMAGE/payload.bin, with report.tsv, placement.json, recon.ld and rec
 Functions in the image's lifted table (config/lifted.txt, written by `dread lift --check`) are
 built from C that dread.lift makes from the original at every build (BUILD/recon/IMAGE/lifted, not
 kept); a name the src directory defines is left to src. lifted.txt beside the image says which.
+Those of its readable table (config/readable.txt, written by `dread readable --check`) are built
+from readable C made from that lifted C (dread.readable chooser): every one lifted first, then all
+their readable C at once, in a pool of worker processes (dread.readable readable_texts; kept in the
+process for the next build with the same tables and lifted C).
 
     dread recon [--target DIR] [--image NAME] [--src DIR] [--out DIR] [--no-extent]
 """
@@ -182,6 +186,21 @@ def called_functions(objects):
     return {sym.name for obj in objects for sym in Elf(obj).symbols if sym.shndx == 0 and sym.name}
 
 
+def lifted_result(lifter, fn):
+    """lifter.lift(fn), kept in the lifter (lifter.lifted, a refusal too: raised again) for the
+    builds that use it; lift_sources forgets what it kept when the hand-written C's calls change."""
+    from dread import lift
+    kept = lifter.__dict__.setdefault("lifted", {})
+    if fn.name not in kept:
+        try:
+            kept[fn.name] = lifter.lift(fn)
+        except lift.Refused as e:
+            kept[fn.name] = e
+    if isinstance(kept[fn.name], lift.Refused):
+        raise kept[fn.name]
+    return kept[fn.name]
+
+
 def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_calls=None, transform=None):
     """Lifted C for `names` (dread.lift) in outdir, a file each, written only when it changed;
     returns ({name: the instructions no path from its entry reaches}, [the names that never return:
@@ -189,7 +208,10 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
     already made for this image (dread lift --check builds many times with one: what it lifts is kept
     in it, lifter.lifted). src_calls: what the hand-written C calls (dread.lift.Lifter.src_calls).
     transform(name, text): the C to write instead of the lifted text, or None to keep it (dread
-    readable: readable C for the functions of its table)."""
+    readable: readable C for the functions of its table). Every name is lifted first; a transform
+    with a prepare attribute (dread.readable chooser) is handed {name: lifted C} of them all before
+    the first call, to make what it writes at once (readable C in a pool of worker processes, or kept
+    from the round before: dread.readable readable_texts)."""
     from dread import lift, regflow
     from dread.program import Program
     if lifter is None:
@@ -201,20 +223,23 @@ def lift_sources(target, image, names, outdir, quiet=False, lifter=None, src_cal
         lifter.src_calls = frozenset(src_calls)
         kept.clear()                        # what was lifted for other callers
     os.makedirs(outdir, exist_ok=True)
+    texts = {}
+    for name in names:
+        fn = program.by_name.get(name)
+        if fn is not None:
+            try:
+                texts[name] = lifted_result(lifter, fn).text
+            except lift.Refused:
+                pass                        # (reported below, in the names' order)
+    if getattr(transform, "prepare", None) is not None:
+        transform.prepare(texts)
     made, endless, loops, bodies = {}, [], [], {}
     for name in names:
         fn = program.by_name.get(name)
         if fn is None:
             continue
         try:
-            if name not in kept:
-                try:
-                    kept[name] = lifter.lift(fn)
-                except lift.Refused as e:
-                    kept[name] = e
-            if isinstance(kept[name], lift.Refused):
-                raise kept[name]
-            result = kept[name]
+            result = lifted_result(lifter, fn)
             text = result.text
             if transform is not None:
                 text = transform(name, text) or text
