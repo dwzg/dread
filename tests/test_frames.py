@@ -43,7 +43,7 @@ def test_the_region_an_address_leaves_to_is_one_object():
     assert "    volatile stack12_t stack12;" in out, out
     assert cparse.parse(out).function("h") is not None      # (still the dialect: the typedef names a type)
     assert "g(r0, (u32)&stack12.f_0, (u32)&stack12 + 4, " in out, out
-    assert "stack12.f_0 = r1; stack12.f_8 = r3;" in out and "(u32)stack12.f_6" in out, out
+    assert "stack12.f_0 = r1; stack12.f_8 = r3;" in out and "+ stack12.f_6 +" in out, out     # (no cast: dread.polish)
     assert "sp0" not in out and "frame" not in out, out     # (sp0 - 24 a variable, propagated away)
 
 
@@ -58,7 +58,7 @@ def test_two_types_at_one_offset_share_a_union():
     assert ("typedef struct\n{\n    u32 f_0;\n    u8 pad_4[4];\n    union\n    {\n        u32 f_8_u32;\n"
             "        u16 f_8_u16;\n    } __attribute__((packed));\n} __attribute__((packed, aligned(4))) stack12_t;") \
         in out, out
-    assert "stack12.f_0 = r1; stack12.f_8_u32 = r3;" in out and "(u32)stack12.f_8_u16" in out, out
+    assert "stack12.f_0 = r1; stack12.f_8_u32 = r3;" in out and "+ stack12.f_8_u16 +" in out, out
     assert "g(r0, (u32)&stack12.f_0, (u32)&stack12 + 4, " in out, out
     assert cparse.parse(out).function("h") is not None
     _, fn = readable.readable_tree("h", TWO, context=readable.Context())

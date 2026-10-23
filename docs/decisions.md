@@ -9,6 +9,75 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C's constants and casts by their use: a last pass, exact checks, evidence from the function (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20; four items of docs/todo.md,
+"From a review against hand-written C": Negative constants by use, Casts and constants, Characters as
+characters, Radix by use).
+
+- **Question.** The lifters write every constant as its instruction had it (0x2f7u, ~0x1u for mvn r0,
+  #1, (u8)0x0u for a byte store, (u32)((u64)(u32)p + 4 + 0) for an add with its carry), and the stages
+  keep most of it. Where does a rewrite by use run, how is its meaning kept, and where does each rule
+  apply?
+- **Options.** Where: (a) a stage after the structure, before the tables: it changes the digest the
+  readable_names table's entries are made for (every name the pilot gave would stop applying) and the
+  trees dread.shapes and dread.statics analyse; (b) tidy's literals pass: it runs before the names,
+  the structures and the frame's object, so a store into a member, a macro's width, a field's type are
+  unknown there; (c) a pass on the finished tree, last in readable._named (and on the naming questions'
+  trees, after their digest). How the meaning is kept: (d) prove each rewrite with z3 (dread.cexpr):
+  slow over every constant of an image, and z3 is optional; (e) exact rules over C's types: what must
+  stay the same depends on the use (a conversion: the converted value; an operation's operand or a
+  select's arm: the common type and the value in it; a comparison's operand: the set of the other
+  operand's values for which it holds, computed as intervals; a shift's count: the value).
+  Negative numbers: (f) every value near a type's top negative: wrong for masks (x & -33), for a
+  64-bit operand (-1 there is 64 bits of ones) and misleading in unsigned orders (x < -2 holds for
+  almost every x); (g) by use, within NEGATIVE (0x100) of the top. Characters: (h) every byte compared
+  with a printable code: a byte field compared with 32 or 100 would read ' ' or 'd', a fact that is not
+  one; (i) evidence of text in the function itself: values that hold characters (bytes loaded from
+  memory, variables given only those, callees' results stored as bytes) compared with two or more
+  distinct printable or escape codes; (j) evidence from the callers (gizmo's handle_key gets its key
+  from uart_getc in main): an image-wide pass. Radix: (k) decimal by default for every value that is not
+  a mask: on Cortex-M the image starts at 0, so addresses of texts and functions are small numbers
+  (vAssertCalled(0xd3fu) passes a file name), and device registers take bit fields; (l) decimal by use
+  in the function: divisors, multipliers, shift counts, ordered bounds, and the places those make
+  numbers, places counted, places given or compared with two or more distinct plain numbers; (m) by
+  evidence from other functions (a place stored decimal elsewhere): image-wide.
+- **Choice: (c), (e), (g), (i), (l).** dread.polish, called by readable._named after dread.frames and by
+  the naming questions (_question_one). Negatives where a value is one (assigned, stored, returned,
+  passed, a converted select's arm, compared for equality, compared in order only where the comparison
+  is signed, added: x + 0xfffffff8u is x - 8), never in a mask, a byte (0xff), or the compare idiom
+  ((u64)x + (u32)~y + 1 keeps ~y: no other literal keeps its type there, and a negative inside a cast
+  that stays would read worse). Characters with (i), also for a sum with such a value (c - '0'), a
+  constant stored into a byte, a digit's character stored (d + '0'), a variable given only character
+  codes (a letter base); 0 stays 0 ('\0' nowhere: people write buf[n] = 0). Decimal by (l), except for
+  pointers (a counted address), device registers (the target's io regions), constants WIDE (0x10000)
+  or larger or a run of eight ones or more; evidence from values that look like bit patterns or are all
+  printable characters (a pad character's 0x20 and 0x30) counts for nothing; a reciprocal multiplier
+  (x * 0x5556u >> 16) stays hex. Casts: a cast to its operand's type, a cast a conversion implies (the
+  store's width, also a variable's declared one; not the cast that takes a 64-bit value's low word,
+  which says what it does), a chain (T)(U)x as (T)x where U is as wide as T or holds x's values, and
+  the casts that widen a sum's operands where only its low bits count ((u32)((u64)(u32)p + 4 + 0) is p
+  + 4), with the operation kept at a type of that width that cannot overflow. Constant expressions fold
+  where the result is a number, not where they show a mask or a comparison; a select on a constant
+  condition is its arm (the lifters' guard 0xau ? r1 / 10 : 0); x + 0 and the like go where no type
+  changes; x + ~y + 1 is x - y at int's width (unsigned); x = x op y is x op= y, x = x + 1 x++.
+- **Why.** (c) keeps every names table and every analysis as it was (the digests are taken before the
+  pass) and sees the types the tables gave. (e) is cheap (a few walks a function) and exact; the
+  printed forms are tested by compiling random functions both ways on the host (tests/test_polish.py),
+  and the gate checks each function's behaviour as for every stage. (g), (i) and (l) print nothing a
+  reader would take for a fact that is not one, which is what the review asked to fix first; where the
+  function alone gives no evidence, the constant keeps the lifter's form, which is never wrong.
+  What could not be made safe and is left: characters and numbers by evidence from other functions
+  ((j), (m): an image-wide pre-pass like the readable_types plan, worth it only if the review's sample
+  shows such cases often); a negative 64-bit operand's constant (no literal of another type keeps its
+  value); decimal call arguments (a size and an address cannot be told apart by the call alone).
+- **Undo.** Take the polish_tree calls out of readable._named and _question_one: the readable C is as
+  before, byte for byte. Per rule: polish.NEGATIVE = 0 (no negatives), Polisher.text False (no
+  characters), Polisher.number returning False (no decimal beyond 0-9), _increment returning None (no
+  compound assignments).
+- **Status.** Done; the figures (patterns before and after, lines, the gate's counts and time on the
+  eight builds) are in docs/todo.md under the four items.
+
 ## Arguments in result registers: what a callee overwrites, not what it writes on every path (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

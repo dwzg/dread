@@ -17,7 +17,9 @@ data as members of one object (dread.naming apply_globals with the readable_type
 dread.statics: g_20000030.f_4), the structures behind pointers (dread.shapes), the variables' names;
 then the part of the frame that addresses handed out reach becomes one local object (dread.frames: a
 structure, stack36.f_4, (u32)&stack36.f_4, with a union where accesses overlap; an array of bytes
-where none is at a constant offset, (u32)stack40).
+where none is at a constant offset, (u32)stack40). Last, constants and casts are written by their use
+(dread.polish: -1 for ~0x0u returned, ' ' for 0x20u compared with a character, 0 for (u8)0x0u stored
+into a byte, x++); the naming questions' C gets it too, after the digest their names are made for.
 
 A build from readable C (dread.build with a chooser: the check's rounds and its whole image, dread
 recon on an image with a readable table, dread pilot's builds) makes the readable C of every chosen
@@ -322,9 +324,12 @@ def _question_one(name):
         return "its lifted C is not the dialect"
     tree, fn = made
     digest = naming.digest(fn)
+    int_bits = tidy.context(fn).int_bits
     naming.apply_globals(tree, fn, context.globals, context.memory, statics=context.plan.statics,
                          names=context.static_names(), arrays=context.plan.arrays)
     shapes.apply_types(tree, fn, context.plan, digest, names=context.struct_names())
+    if not tidy.fixed_registers(tree):
+        polish_tree(tree, fn, context, int_bits)
     return tree, fn, digest, print_file(tree, fn), cparse.unparse(fn, notes=False, style="readable")
 
 
@@ -431,6 +436,7 @@ def _named(name, text, stages, context=None):
         stages = []
     if STAGES if stages is None else stages:
         made_for = naming.digest(fn)        # (a function's names are made for its C before the globals')
+        int_bits = tidy.context(fn).int_bits    # (while the lifter's register names tell it: polish)
         entry = context.names.get(name) if context is not None else None
         mine = set((entry or {}).get("names", {}).values()) if (entry or {}).get("digest") == made_for else set()
         naming.apply_globals(tree, fn, context.globals if context is not None else None,
@@ -444,8 +450,17 @@ def _named(name, text, stages, context=None):
         if entry:
             naming.apply(tree, fn, entry, made_for)     # (only for the C it was made for: its digest)
         from dread import frames            # (the frame that addresses handed out reach as one object:
-        frames.frame_struct(tree, fn)       # last, on the names the table gave)
+        frames.frame_struct(tree, fn)       # on the names the table gave)
+        polish_tree(tree, fn, context, int_bits)    # (constants and casts by their use: last)
     return tree, fn, stages
+
+
+def polish_tree(tree, fn, context=None, int_bits=None):
+    """dread.polish on the finished tree: constants and casts written by their use (the device regions
+    of the context's memory map keep their registers' constants as they are)."""
+    from dread import polish
+    memory = context.memory if context is not None else None
+    polish.polish(tree, fn, int_bits=int_bits, io=getattr(memory, "io", ()) or ())
 
 
 def _transform(name, text, stages, context=None):

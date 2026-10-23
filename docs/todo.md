@@ -1513,11 +1513,31 @@ model).
   member, not an end), and give a field one name with a cast for the other width or signedness.
   Public example: FreeRTOS mps2-gcc-Os prvSemaphoreTest (`g_200018dc_u16 = (u16)(g_200018dc_s16 +
   1);` for `sNextCheckVariable++`). The early end: none found.
-- [ ] **Negative constants by use.** An mvn immediate prints as `~0xNu` also where the value is a
+- [x] **Negative constants by use.** An mvn immediate prints as `~0xNu` also where the value is a
   negative number. Print `-(N+1)` where it is returned, compared, stored or passed as a value, and
   `~N` where it is a mask (and, bic, eor). Public examples: FreeRTOS mps2-gcc-Os
   xTimerPendFunctionCallFromISR (`stack24.f_0 = ~0x1u;` for tmrCOMMAND_EXECUTE_CALLBACK_FROM_ISR,
   -2); gizmo a32 parse_kv (`~0x0u`, `~0x1u`, `~0x2u` for -1, -2, -3), read_line, cmd_mode.
+  Done 2026-10-23 with the three items below in one pass (dread.polish, the last of readable C:
+  readable._named after dread.frames, and the naming questions after their digest; docs/decisions.md):
+  what must stay the same follows the use (a conversion: the converted value; an operation's operand or
+  a select's arm: the common type and the value in it; a comparison's operand: the set of the other
+  operand's values for which it holds, computed exactly as intervals; a shift's count: the value).
+  Negatives where a value is one: assigned, stored, returned, passed to a prototyped parameter, a
+  converted select's arm, compared for equality, compared in order only where the comparison is signed,
+  added (x + 0xfffffff8u is x - 8); ~N stays in masks (an operand of &, |, ^, ~, a variable only those
+  read), an unsigned byte (0xff), unsigned orders (x < -2 would read wrong) and the compare idiom. The
+  forms named: `stack24.f_0 = -2;`, parse_kv's `= -1;`, `= -2;`, `parse_uint(r0_2, r3) == -1 ? -3 : 0;`,
+  read_line's `= -1;`, cmd_mode's `return !c || z ? 0 : -1;`. Measured on copies of the eight builds
+  (gizmo a32, m3, m4, rv32; FreeRTOS mps2-gcc-Os, mps2-clang-O2, virt-gcc-Os, mps2-gcc-O0; their
+  readable functions, main's code -> this): the gate accepts the same functions (35, 36, 44, 31, 315,
+  275, 252, 354; the same readable tables and readable_types plans); its time 5.2, 5.0, 5.4, 5.2, 776,
+  355, 210, 596 s -> 3.8, 3.5, 4.0, 2.4, 573, 247, 129, 586 s, the whole image's halving most of it and
+  the machine shared (the pass itself: 0.39 s of the 44 s every GCC -Os function's readable C takes in
+  one process); lines the same, characters 1.1-1.9 % fewer (27,603 -> 27,106 on a32, 546,299 -> 539,258
+  on GCC -Os). `~0x` 12, 5, 5, 0, 29, 28, 0, 18 -> 4, 3, 3, 0, 25, 24, 0, 15 (masks and the compare
+  idiom's), negative literals 0 -> 10, 9, 9, 7, 66, 51, 43, 67. Left: the compare idiom's complements
+  ((u64)x + ~0x5fu + 1) go with "Flags as comparisons".
 - [ ] **Extensions and bit fields.** `(s32)(x << 16) >> 16` for a halfword's sign extension, `(x &
   0xffff) << 16 >> 16`, `(u32)((s32)(w & m) >> n)` for a field whose mask clears the sign bit, `(x <<
   2) & 4` for `(x & 1) << 2`, a final mask the bits already satisfy. Fold to `(s16)x`, `(u16)x`, `(w
@@ -1558,23 +1578,61 @@ model).
   signed (its constants then print signed), and a result signed when its callers compare it signed.
   Public examples: FreeRTOS mps2-gcc-Os vPrimaryBlockTimeTestTask (`if ((s32)r2_1 > 4) break;`);
   gizmo a32 read_line (`if ((s32)r0 < 0)` on uart_getc's int result).
-- [ ] **Casts and constants.** `(u8)0x1u` for a byte store of 1, cast chains `(u16)(u32)(s16)x`, `+
+- [x] **Casts and constants.** `(u8)0x1u` for a byte store of 1, cast chains `(u16)(u32)(s16)x`, `+
   0`, `0x0u |`, `((u64)0x0u << 32) | 0x0u`, `x = (u32)(x + 1)`, and 0 and 1 as `0x0u`/`0x1u`. Drop
   the casts a store's width implies, collapse chains, fold `+ 0` and `| 0`, print small values in
   decimal where the type is clear, `x++`/`x += k`. Public examples: FreeRTOS mps2-gcc-O0
   eTaskGetState (`sl9 = (u8)0x0u;` ... `(u8)0x2u`), mps2-gcc-Os xTimerCreate (`+ 4 + 0`), gizmo a32
   strncpy (`(u8)0x0u`).
+  Done 2026-10-23 (dread.polish, with "Negative constants by use"; figures there for the gate): a cast
+  a store or a parameter implies goes (also a variable's declared width; not the cast that takes a
+  64-bit value's low word, which says what it does), so does a cast to its operand's type; a chain
+  (T)(U)x is (T)x where U is as wide as T or holds x's values; where only a sum's low bits count, the
+  casts that widen its operands go ((u32)((u64)(u32)r0_1 + 4 + 0) is `(u32)r0_1 + 4`: xTimerCreate's
+  vListInitialiseItem, uxListRemove(r6 + 4)); constant expressions that are numbers fold ((u8)0x0u,
+  ((u64)0x0u << 32) | 0x0u, vPortFree's `(volatile struct s_20 *)(r0 - 8)`), not those that show a mask
+  or a comparison; x + 0, 0 | x go where no type changes; x + ~y + 1 is x - y (memcpy(..., r2 - r7));
+  a select on a constant condition is its arm (`r5 = r1 / 10;` for 0xau ? r1 / 0xau : 0); 0-9 in
+  decimal; x = x op y is x op= y and x = x + 1 x++ (also a field or an element: g_200017c5[r0_1]++).
+  eTaskGetState: `sl9 = 0;` ... `sl9 = 2;`; strncpy: `*(volatile u8 *)r3 = 0; r3++;`. On the eight
+  builds (a32, m3, m4, rv32, GCC -Os, clang -O2, RISC-V, GCC -O0): `0x0u` 20, 13, 15, 0, 256, 271, 0,
+  250 -> 0, 0, 0, 0, 4, 7, 0, 7 and `0x1u` 13, 9, 9, 5, 180, 241, 115, 185 -> 0, 0, 0, 0, 4, 2, 0, 3 (what
+  is left is ~0x0u and ~0x1u, masks and the compare idiom's, and the lifter's text of variadic functions'
+  bodies, printed as it was written); casts of a literal 3, 5, 5, 1, 90, 113, 6, 48 -> 0, 0, 0, 0, 0, 0, 0, 1; `+ 0` 15, 33, 7 -> 0,
+  1, 3 on GCC -Os, clang -O2, GCC -O0 (variadic bodies); cast chains 0, 3, 3, 1, 63, 22, 7, 62 -> 0, 0,
+  0, 0, 0, 0, 1, 2; `x = x ± k` 26, 29, 32, 26, 155, 169, 132, 153 -> 0, 0, 0, 0, 2, 2, 2, 6 (x++ and
+  x-- 25, 25, 27, 23, 137, 135, 100, 186, other compound assignments 3, 5, 7, 5, 52, 65, 54, 44); value
+  casts 73, 67, 69, 74, 1,475, 1,136, 780, 1,151 -> 46, 39, 42, 47, 1,110, 780, 553, 803. Left: `(u64)0`
+  in the negs idiom (t = (u64)0 + ~x + 1, 54 on GCC -Os) goes with "Flags as comparisons"; x = x + f()
+  with a call stays (the call in plain sight); (u32)(u8)r1 << 5 stored into a byte keeps its inner cast
+  (a shift is no low-bits operation for the pass).
 - [ ] **Names without their type.** DREAD's default names for narrow accesses carry the type
   (g_20001830_u8), and the naming model keeps the suffix in what it proposes. Strip a trailing type
   suffix from a proposed name that has other words (the answer's check), or show the question's
   defaults without it. Public example: the defaults of FreeRTOS mps2-gcc-Os (g_20001830_u8); whether
   the model keeps them on FreeRTOS was not checked (no pilot names in the bench copies).
-- [ ] **Radix by use.** Counts, delays, sizes and line numbers print in hex, and a value compared in
+- [x] **Radix by use.** Counts, delays, sizes and line numbers print in hex, and a value compared in
   decimal can be stored in hex in the same function. Print a constant in decimal where it is a count,
   a multiplier, a size compared with decimal constants or stored beside them, unless it looks like a
   mask (a run of ones, one bit) or an address. Public example: FreeRTOS mps2-gcc-Os
   prvCheckExpectedTimeIsWithinAnAcceptableMargin (`g_200009d0 = 0x2f7u;` for `xErrorOccurred =
   __LINE__`, line 759).
+  Done 2026-10-23 (dread.polish, with "Negative constants by use"; figures there for the gate):
+  decimal where the use is a number: a divisor, a modulus, a multiplier (not a division's reciprocal,
+  x * 0x5556u >> 16), a shift's count, an ordered bound, and the places those make numbers, places
+  counted, places given or compared with two or more distinct plain numbers in the function; never a
+  pointer (a counted address: r6 = 0x908u; *r6; r6++), a device register, a constant of 0x10000 or more
+  or a run of eight ones; evidence from bit patterns (0x55) or from printable characters only (a pad
+  character's 0x20 and 0x30) counts for nothing. prvCheckExpectedTimeIsWithinAnAcceptableMargin:
+  `g_200009d0 = 759;` and `767`, the demos' other __LINE__ stores likewise, errno values 22 and 29,
+  bounds such as `r0_1 <= 21`, `while (r6 != 200)`, `r4_1 - 150 * (r4_1 / 150)`. On the eight builds
+  hex constants of 10 or more 62, 72, 79, 74, 1,739, 1,948, 1,629, 1,679 -> 46, 47, 54, 40, 1,481,
+  1,693, 1,330, 1,482, decimal ones 19, 13, 13, 14, 378, 289, 126, 217 -> 25, 22, 22, 24, 527, 464, 282,
+  324; lines where a hex constant became decimal or a character 14, 15, 15, 14, 165, 200, 143, 110, read
+  against the source on gizmo and FreeRTOS GCC -Os. Left: a place stored once in its function stays
+  hex though other functions store it in decimal (prvControllingTask's line number on GCC -Os: an
+  image-wide pre-pass, like the readable_types plan, would carry the evidence); call arguments (memset's
+  sizes, vAssertCalled's lines) stay hex: a size and an address cannot be told apart by the call alone.
 - [ ] **Addresses of functions and texts by name.** A function's entry (with the Thumb bit) or the
   address of a string in the image passed or stored as a value prints as a number. Print the
   function's name (`&f`) and, for text, a comment with the string or a named constant. Public
@@ -1585,10 +1643,24 @@ model).
   (how some compilers initialise a local array) prints as a do-while over integer pointers. Make it a
   local array with its initialiser read from the image (or a copy helper's call). Public example: none
   found (GCC calls memcpy or copies words); test: gizmo assembly.
-- [ ] **Characters as characters.** Bytes from char loads compared with printable codes print as hex
+- [x] **Characters as characters.** Bytes from char loads compared with printable codes print as hex
   (`0x20u`, `0x3du`, `0xdu`). Print a printable or common-escape constant compared with or stored
   from a char-typed value as a character literal. Public examples: gizmo a32 parse_kv (`0x20u`,
   `0x3du`), read_line (`0xdu`, `0xau`); FreeRTOS mps2-gcc-O0 tiny_print (`0x25u`, `0x2du`, `0x30u`).
+  Done 2026-10-23 (dread.polish, with "Negative constants by use"; figures there for the gate): a
+  printable or common-escape constant is a character literal where the function compares values that
+  hold characters (bytes loaded from memory, variables given only those, callees' results stored as
+  bytes, copies of them) with two or more distinct such codes: compared with such a value, added to it
+  or subtracted from it (`c - '0'`, `(r5 & ~0x20u) - 'A'`), stored into a byte, a digit's character
+  stored (`d + '0'`), given to a variable that gets only character codes (tiny_print's letter base:
+  `r0_2 = 'A';`, `'a'`); 0 stays 0, as gizmo's source writes `buf[n] = 0`. parse_kv: `' '`, `'\t'`,
+  `'='`; read_line: `'\r'`, `'\n'` (on RISC-V through a copy of uart_getc's result); tiny_print:
+  `'%'`, `'-'`, `'0'`, `'c'`, `'d'`, `'u'`, `'x'`, `'X'`. Character literals on the eight builds 0 -> 11,
+  11, 11, 12, 12, 23, 18, 13. Left: a character that arrives as a parameter is a number in its function
+  (gizmo's handle_key: `r0 != 115`, `r3 = r0 - 98`, consistent with the decimal bounds the conditions
+  pass prints there, where the source switches on 's' and 'b': evidence from the callers, an image-wide
+  pass); prints()'s pad character on GCC -O0 (`r8 = 0x20u`, `0x30u`) stays hex: that function compares
+  no characters.
 
 ## Compiler diversity (the user, 2026-10-20: first, on ARM/Cortex-M and RISC-V)
 

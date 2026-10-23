@@ -58,7 +58,7 @@ def test_device_registers_by_name_and_their_bits_as_bit_tests(tmp_path):
     putc = text("uart_putc")
     assert "while (!(io_40011004 & 1));" in putc, putc
     getc = text("uart_getc")
-    assert "(io_40011004 >> 1) & 1u" in getc and "r0 = (u32)(u8)io_40011000;" in getc, getc
+    assert "(io_40011004 >> 1) & 1" in getc and "r0 = (u8)io_40011000;" in getc, getc
     assert "u32 uart_getc(void)" in getc, getc
     assert "#define io_40011000 (*(volatile u32 *)0x40011000u)" in getc, getc
 
