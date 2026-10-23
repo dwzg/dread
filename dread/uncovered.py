@@ -4,7 +4,9 @@
 system run) leave instructions of the original unrun, and lists those instructions in its verdicts
 (BUILD/lift-check/IMAGE/verdicts.tsv, the `missed` column; a function whose case generation failed
 has none, and all of it counts as missed). This tells, for each such function (or those named), why
-each piece of that code went unrun, as far as the code and the cases say.
+each piece of that code went unrun, as far as the code and the cases say. A named function the
+verdicts do not drop so is looked at with what its cached cases leave unrun, run on the original
+(kind "cached cases": cases the lift check refused count there).
 
 The missed instructions are grouped into regions, connected in the function's control flow, the
 lifter's where there is one (switch cases resolved, branches that constants decide followed their one
@@ -81,7 +83,7 @@ Output: a line per region (function, its first address and size, cause and sourc
 instruction, what decides it and the main source), indented under it the other sources, the runs'
 evidence and the search's notes; then the table of causes over all functions (regions, missed
 instructions and functions per cause and source, with an example) and the forced runs' table. --kind
-takes only the functions dropped one way (cases, loop, none); --json FILE writes all of it
+takes only the functions dropped one way (cases, loop, none, cached); --json FILE writes all of it
 (docs/formats.md). Functions and regions come in address order, the tables by instructions, regions,
 then name: the same inputs give the same bytes.
 
@@ -93,7 +95,7 @@ run that went the other way, so its fault may be one a fitting input avoids; the
 a function that never returns is not run again (its frontier may be one no loop case reaches).
 
     dread uncovered [--target DIR] [--image NAME] [--verdicts FILE] [--json FILE] [--no-runs] [--quiet]
-                    [--kind cases|loop|none] [--examples N] [-j N] [NAME...]
+                    [--kind cases|loop|none|cached] [--examples N] [-j N] [NAME...]
 """
 import argparse
 import bisect
@@ -119,7 +121,8 @@ STACK_ARGS = 4              # outgoing stack words looked at for such a pointer
 # first (what the case generator has to set or stub), inner ones last
 SOURCES = ("callee", "device", "field", "global", "local", "argument", "caller", "loop", "system", "unknown",
            "constant")
-KINDS = {"cases": "cases", "loop": "loop cases and the system run", "none": "no cases"}     # --kind
+KINDS = {"cases": "cases", "loop": "loop cases and the system run", "none": "no cases",       # --kind
+         "cached": "cached cases"}
 SENTINEL_SHIFT = 24         # the distinct values registers hold when value_step is asked for an access
 BASES = {"argument": "an argument", "callee": "a callee's result", "global": "a global", "device": "a device",
          "local": "a local", "loop": "a loop's pointer", "field": "a field", "caller": "a caller's register",
@@ -164,22 +167,23 @@ def drop_kind(reason):
 
 
 def selected(verdicts, program, names=()):
-    """{name: (kind, sorted missed addresses, reason)} of the functions to look at: every function the verdicts
-    drop with missed instructions, or without any case (all of it missed); with names, those of them
-    (a named function the verdicts do not drop is left out)."""
+    """{name: (kind, sorted missed addresses, reason)} of the functions to look at: every function the
+    verdicts drop with missed instructions, or without any case (all of it missed); with names, those,
+    and a named function they do not drop so as ("cached cases", None, reason): what its cached cases
+    leave unrun is found by running them (measure)."""
     out = {}
     for name in names or sorted(verdicts):
         fn = program.by_name.get(name)
-        if fn is None or name not in verdicts:
+        if fn is None:
             continue
-        verdict, reason, missed = verdicts[name]
+        verdict, reason, missed = verdicts.get(name, (None, "", []))
         kind = drop_kind(reason)
-        if verdict != "dropped":
-            continue
-        if not missed and kind == "no cases":
+        if verdict == "dropped" and not missed and kind == "no cases":
             missed = list(fn.insns)
-        if missed:
+        if verdict == "dropped" and missed:
             out[name] = (kind, sorted(set(missed)), reason)
+        elif names:
+            out[name] = ("cached cases", None, reason)
     return out
 
 
@@ -1264,13 +1268,18 @@ def measure(name):
     ctx = RUN["ctx"]
     kind, missed, reason = RUN["selected"][name]
     fn = ctx.program.by_name[name]
+    lifter = ctx.lifter
+    loop = kind == "loop cases and the system run" or kind == "cached cases" and lifter is not None and \
+        lifter.never_returns(name) and lifter.handler_kind(fn) is None
+    if missed is None:                      # (named, not dropped for missed instructions: its cached cases)
+        missed = cached_missed(name, fn, loop)
     flow, regions = analyse(ctx, name, missed)
     record = {"kind": kind, "missed": len(missed), "instructions": len(fn.insns), "entry": "0x%x" % fn.entry,
               "reason": reason, "regions": regions}
     notes, runs = {"kind": kind}, None
     if RUN.get("runs"):
         try:
-            cases, notes = case_notes(name, fn, kind == "loop cases and the system run")
+            cases, notes = case_notes(name, fn, loop)
         except Exception as e:
             cases, notes = [], {"failed": "%s: %s" % (type(e).__name__, e)}
         notes["kind"], notes["reason"] = kind, reason
@@ -1300,6 +1309,17 @@ def measure(name):
         region["key"] = [region["cause"], key_of(region, notes)]
         region["forced"] = forced_key(region["ways"][0] if region["ways"] else None)
     return name, record
+
+
+def cached_missed(name, fn, loop):
+    """The instructions of fn its cached cases leave unrun, the cases run on the original (all of them
+    without a case; none without runs, --no-runs)."""
+    if not RUN.get("runs"):
+        return []
+    cases, _ = case_notes(name, fn, loop)
+    if not cases:
+        return list(fn.insns)
+    return sorted(set(fn.insns) - run_cases(name, fn, cases, Flow(RUN["ctx"], fn), [])["covered"])
 
 
 def measure_all(names, jobs=None):
@@ -1380,7 +1400,8 @@ def main(argv=None):
     parser.add_argument("--quiet", action="store_true", help="the table only, no lines per region")
     parser.add_argument("--examples", type=int, default=1, help="examples per row of the table in the JSON")
     parser.add_argument("--kind", choices=sorted(KINDS), help="only the functions dropped so: cases (their cases), "
-                        "loop (a function that never returns: its loop cases and the system run), none (no case)")
+                        "loop (a function that never returns: its loop cases and the system run), none (no case), "
+                        "cached (named, not dropped so: what its cached cases miss)")
     parser.add_argument("-j", "--jobs", type=int)
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
@@ -1400,9 +1421,6 @@ def main(argv=None):
         print("dread uncovered: no function %s" % ", ".join(missing), file=sys.stderr)
         return 2
     chosen = selected(read_verdicts(path), prog, args.names)
-    for n in args.names:
-        if n not in chosen:
-            print("dread uncovered: %s: the verdicts do not drop it for missed instructions" % n, file=sys.stderr)
     if args.kind:
         chosen = {n: v for n, v in chosen.items() if v[0] == KINDS[args.kind]}
     RUN["selected"] = chosen

@@ -424,7 +424,9 @@ instructions, then regions, cause and source), so the same verdicts, image and c
   image`, `not sent`, `no case got there`; regions without one are left out); empty with `--no-runs`.
 - `functions`: `{NAME: {kind, missed, instructions, entry, reason, regions, cases, runs}}`. `kind`:
   `cases` (UNCOVERED by its cases), `loop cases and the system run` (a function that never returns),
-  `no cases` (its generation failed: every instruction counts as missed), `other`; `missed` and
+  `no cases` (its generation failed: every instruction counts as missed), `cached cases` (named, not
+  dropped for missed instructions: what its cached cases leave unrun, run on the original), `other`;
+  `missed` and
   `instructions` are counts; `reason` the verdict's. `cases` (not with `--no-runs`): `cases` (how many
   were found), `stale`, `failed` (a failed generation's message, or why there are none), `stubbed` and
   `stops` (`{callee: cases}`), `polled` (registers), `hang` (cases), `loop`, `refused` (the lift

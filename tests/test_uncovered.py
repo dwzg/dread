@@ -193,6 +193,15 @@ def test_the_command_with_cases_and_a_forced_run(probes, tmp_path, monkeypatch):
     rows = {(r["cause"], r["source"]): r for r in data["table"]}
     assert rows[("branch", "argument")]["regions"] == 1 and rows[("not entered", "generation failed")]["functions"] == 1
     assert data["totals"]["functions"] == 3
+    # named, and accepted by the verdicts: what its cached cases leave unrun, run for it
+    cache_store("%s/autocases/main/on_callee.json" % target.build, {"key": "made elsewhere",
+                                                                   "cases": [{"args": [0, 0, 0, 0], "mem": []}]})
+    out = tmp_path / "named.json"
+    assert uncovered.main(["--target", target.root, "--verdicts", str(verdicts), "--json", str(out), "-j", "1",
+                           "on_callee"]) == 0
+    named = json.loads(out.read_text())["functions"]["on_callee"]
+    assert named["kind"] == "cached cases" and named["missed"] == len(missed_by(gen, "on_callee", {"args": [0]}))
+    assert [r["key"] for r in named["regions"]] == [["branch", "callee, real"]]
 
 
 # ---- on gizmo ----
