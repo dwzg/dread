@@ -264,8 +264,9 @@ def observe(gen, fn, case, flow=None, named=None, index=0, has_callers=True):
     log = m.log
 
     def own_log(*event):                    # (whether the function's own code made the access)
-        marks.append(state["inside"])
-        log(*event)
+        n = len(m.calls)
+        log(*event)                         # (one entry, none when folded, two when a fold ends: dread.emu)
+        marks.extend([state["inside"]] * (len(m.calls) - n))
     m.log = own_log
 
     def on_block(uc, address, size, user):

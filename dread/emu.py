@@ -9,7 +9,13 @@ stubbed functions, and every access to the peripheral ranges, in order.
 Only memory is modelled: the target's regions ([memory] in dread.toml), the image at its base with
 what the startup copies (its `startup` list), the stack, a page for the return sentinel. There are
 no devices: a peripheral register behaves like memory, and every read and write of one is logged
-in order with its value, so the sequence of register accesses is part of what is compared.
+in order with its value, so the sequence of register accesses is part of what is compared. A run's
+first IO_LOGGED accesses are logged one by one; the later ones of each stretch between two other
+entries (a stub call, an svc) are folded into one entry, ("io folded", their number, a digest of
+them), where that stretch ends: two logs are equal exactly when the accesses are (a digest of 128
+bits), and the memory a run takes stays bounded (a long written case that read a device register
+over and over kept every access as a tuple, and one worker of a lift check grew by gigabytes,
+2026-10-23). Result.diff() names the first entry where two logs part (log_difference).
 
 One emulator per image and process (Core), reset between uses: creating an emulator and loading
 an image costs more than most functions take to run. Every hook goes through Machine.hook_add, so
@@ -18,6 +24,7 @@ not depend on the order in which cases run.
 
 Architecture: ARM (A and M profile, ARM state and Thumb) through dread.arch.
 """
+import hashlib
 import struct
 
 from unicorn import (UC_ERR_FETCH_UNMAPPED, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_HOOK_BLOCK,
@@ -30,6 +37,9 @@ UNMAPPED = (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_FETCH_UNMAPPED)
 
 PAGE = 0x1000
 POLL_LOGGED = 2     # reads after a Machine.poll_read stage's start that are still logged one by one
+IO_LOGGED = 100_000 # device accesses of one run logged one by one; later ones folded (the docstring)
+IO_EVENTS = ("io read", "io write")
+FOLD_CHUNK = 4096   # folded accesses hashed together (the digest is the same for the same accesses)
 POISON = 0xA5C3E100 # callee-saved registers start as POISON + 0x11 * (i + 1): no zero byte, so that
                     # a byte cleared in one of them shows
 KEPT_POISON = 0x5AC31E00    # kept scratch registers no argument sets start as KEPT_POISON + 0x11 * (i + 1)
@@ -114,6 +124,16 @@ class Layout:
         return out
 
 
+def log_difference(a, b):
+    """Where two logs of stub calls and device accesses part, for people: the first entry that
+    differs, with the one before it (the whole logs can be long)."""
+    i = next((k for k, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+    before = " after %s" % (a[i - 1],) if i else ""
+    mine = "%s" % (a[i],) if i < len(a) else "the end"
+    theirs = "%s" % (b[i],) if i < len(b) else "the end"
+    return "stub calls differ: entry %d of %d against %d%s: %s vs %s" % (i + 1, len(a), len(b), before, mine, theirs)
+
+
 class Result:
     """What one call did: return value, bytes written outside the stack (address -> value), the
     log of stub calls and peripheral accesses, the callee-saved registers at the return, and the
@@ -183,7 +203,7 @@ class Result:
         if self.ret != other.ret and not both_stack:
             out.append("return value 0x%x vs 0x%x" % (self.ret, other.ret))
         if self.calls != other.calls:
-            out.append("stub calls differ: %s vs %s" % (self.calls, other.calls))
+            out.append(log_difference(self.calls, other.calls))
         if self.saved != other.saved:
             names = self.layout.saved_names if self.layout else ["r%d" % (i + 4) for i in range(len(self.saved))]
             for name, a, b in zip(names, self.saved, other.saved):
@@ -425,6 +445,7 @@ class Machine:
         self.uc = self.core.uc
         self.written_ranges = None  # [(lo, hi), ...] written outside the stack by the last call
         self.stubs, self.calls, self.written = {}, [], set()
+        self._io_logged, self._fold = 0, None
         self.unalias = {}           # address a moved function is stubbed at -> its original entry
         self.wide_result = False    # also compare the second result register
         self.may_hang = False       # running into the instruction limit is a result, not an error
@@ -810,7 +831,31 @@ class Machine:
         self.svc_regs = True
 
     def log(self, *event):
+        """An entry of the run's log (stub calls, device accesses: what is compared in order); device
+        accesses beyond the first IO_LOGGED of the run are folded (the module's docstring)."""
+        if event and event[0] in IO_EVENTS:
+            if self._io_logged >= IO_LOGGED:
+                fold = self._fold
+                if fold is None:
+                    fold = self._fold = [0, hashlib.blake2b(digest_size=16), []]
+                fold[0] += 1
+                fold[2].append(event)
+                if len(fold[2]) >= FOLD_CHUNK:
+                    fold[1].update(repr(fold[2]).encode())
+                    fold[2] = []
+                return
+            self._io_logged += 1
+        elif self._fold is not None:
+            self._end_fold()
         self.calls.append(event)
+
+    def _end_fold(self):
+        """The folded stretch ends: its entry goes into the log where the stretch ends."""
+        fold, self._fold = self._fold, None
+        if fold is not None:
+            if fold[2]:
+                fold[1].update(repr(fold[2]).encode())
+            self.calls.append(("io folded", fold[0], fold[1].hexdigest()))
 
     # ---- memory ----
 
@@ -928,6 +973,7 @@ class Machine:
             if reg is not None and reg not in lay.arg_regs[:len(regs)]:
                 uc.reg_write(reg, KEPT_POISON + 0x11 * (i + 1))
         self.calls, self.written, self.written_ranges = [], set(), None
+        self._io_logged, self._fold = 0, None
         self.timed_out, self.exception, self.self_loop = False, None, None
         if self.core.fast is not None:
             from dread import fasthooks
@@ -988,6 +1034,7 @@ class Machine:
             raise EmuError("%s in a stub or hook at pc=0x%x: %s" % (type(e).__name__, uc.reg_read(lay.pc), e))
         finally:
             self._collect()
+            self._end_fold()
             if fast is not None:
                 self.stalled = bool(fast.state.stalled)
             elif isinstance(uc, Uc):

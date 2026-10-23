@@ -3711,6 +3711,21 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## Scale and robustness
 
+- [x] **A bulk run's memory, item by item** (2026-10-23, found on the private real-life test: one
+  worker of a lift check grew by gigabytes on one function until the run was killed, which the
+  machine's other work felt). `DREAD_ITEMS_LOG=FILE` has every worker of a pool that hands the
+  slowest out first (dread.util.poolorder: the tests', the integration run's and the lift check's
+  case runs) write a line when it starts an item and when it ends one, with its pid and its memory,
+  so the pid that grows names its item; with it a worker writes its Python stack to its stderr on
+  SIGUSR1 (faulthandler), which needs no debugger (ptrace's scope may forbid one). The cause it
+  found: a case run kept every device access of its log as a tuple, and a long written case that read
+  a device register over and over made the log gigabytes. A run now logs its first IO_LOGGED
+  (100,000) accesses one by one and folds the later ones of each stretch between two other entries
+  into one ("io folded", their number, a 128-bit digest of them) where the stretch ends: two logs are
+  equal exactly when the accesses are, so nothing compares less (rule 6), and Result.diff() names the
+  first entry where two logs part instead of printing both whole. There the function's worker stayed
+  within a few hundred MB of where it started, its time a few per cent longer (the digests).
+
 - [ ] An open-source firmware built locally as a large test target (a FreeRTOS or Zephyr demo for
   Cortex-M3, our own build, not committed: a script fetches and builds it; tests skip without it).
   Every tool on it; numbers on speed and coverage.
