@@ -343,6 +343,7 @@ def _question_one(name):
         return "its lifted C is not the dialect"
     tree, fn = made
     digest = naming.digest(fn)
+    ids = naming.identities(fn)
     int_bits = tidy.context(fn).int_bits
     naming.apply_globals(tree, fn, context.globals, context.memory, statics=context.plan.statics,
                          names=context.static_names(), arrays=context.plan.arrays, pointers=context.plan.params,
@@ -352,7 +353,7 @@ def _question_one(name):
     vartypes.apply(tree, fn, context.plan, digest, names=context.struct_names(), int_bits=int_bits)
     if not tidy.fixed_registers(tree):
         polish_tree(tree, fn, context, int_bits)
-    return tree, fn, digest, print_file(tree, fn), cparse.unparse(fn, notes=False, style="readable")
+    return tree, fn, digest, print_file(tree, fn), cparse.unparse(fn, notes=False, style="readable"), ids
 
 
 def _figures_one(name):
@@ -426,12 +427,14 @@ def views(program, context, lifter, names, jobs=None):
 
 
 def question_trees(program, context, lifter, names, jobs=None):
-    """{name: (tree, function, digest, file, code), or why there is none (a text)}: what a question for
-    the names of a function's variables needs (dread pilot --task readable), made in a pool (in_pool)
-    before any question is asked. The tree is the readable C after the stages, digest what a proposal
-    is made for (dread.naming digest, before the names), then the context's globals and structures
-    applied (its tables as they are now); file: the whole file as it compiles without the variables'
-    names (print_file), code: the function as the question shows it. context must not be None."""
+    """{name: (tree, function, digest, file, code, ids), or why there is none (a text)}: what a question
+    for the names of a function's variables needs (dread pilot --task readable), made in a pool
+    (in_pool) before any question is asked. The tree is the readable C after the stages, digest what a
+    proposal is made for (dread.naming digest, before the names), ids its variables' identities there
+    (dread.naming identities: what carries names to C made anew), then the context's globals and
+    structures applied (its tables as they are now); file: the whole file as it compiles without the
+    variables' names (print_file), code: the function as the question shows it. context must not be
+    None."""
     warm(lifter)
     context.struct_names()                  # (once, before the pool forks: the workers share them)
     context.static_names()
@@ -876,6 +879,43 @@ def static_spans(found, arrays):
     return sorted(out + [(b, b + k * n) for b, (k, n, _) in arrays.items()])
 
 
+def carry(target, image, names=None, out=print, jobs=None, program=None, flow=None, lifter=None, context=None,
+          digests=None):
+    """dread readable --carry, and the end of --check: the readable_names table's entries that were
+    made for other C carried to the functions' C as it is now (dread.naming carry_table: each name to
+    the variable of the same identity, kept where the C with them compiles to the same code; no
+    question is asked). names: the functions to look at (default: every function the table names);
+    digests ({name: digest}, the check's) leaves out those whose entry was made for that digest
+    without making their C again. An entry without identities (made before 2026-10-23) is left as it
+    is. Returns {name: the entry carried}."""
+    entries = naming.load(image)
+    names = [n for n in (names or sorted(entries)) if n in entries]
+    if digests is not None:
+        names = [n for n in names if entries[n].get("digest") != digests.get(n)]
+    if not names:
+        return {}
+    from dread import lift, regflow
+    from dread.program import Program
+    program = program or Program(target, image)
+    names = [n for n in names if n in program.by_name]
+    flow = flow or regflow.load(target, image, program)
+    lifter = lifter or lift.make_lifter(program, flow)
+    context = context or Context(target, image, program, flow)
+    made = question_trees(program, context, lifter, names, jobs)
+    other = [n for n in names if not isinstance(made[n], str) and entries[n].get("digest") != made[n][2]]
+    got = naming.carry_table(target, image, made, os.path.join(target.build, "readable-check", image.name, "naming"),
+                             jobs, out)
+    context.names.update(got)
+    out("dread readable --carry: of %d function%s named for other C, %d carried (%d names, %d dropped; %d with "
+        "variables left without a name), %d without identities, %d carried nothing" % (
+            len(other), "s"[len(other) == 1:], len(got), sum(e["carried"]["names"] for e in got.values()),
+            sum(len(e["carried"]["dropped"]) for e in got.values()),
+            sum(1 for e in got.values() if e["carried"]["open"]),
+            sum(1 for n in other if not isinstance(entries[n].get("ids"), dict)),
+            sum(1 for n in other if n not in got and isinstance(entries[n].get("ids"), dict))))
+    return got
+
+
 def check(target, image, names=None, out=print, jobs=None):
     """The acceptance loop for readable C (see the module's docstring); returns the accepted names.
     names: functions of the lifted table to try (default: all of it). A build that dropping functions
@@ -1048,13 +1088,21 @@ def check(target, image, names=None, out=print, jobs=None):
     out("dread readable --check: %d of %d lifted functions readable after %d rounds (%d stay lifted; the whole "
         "image %s), into %s" % (len(kept), len(lifted), rounds, len(lifted) - len(kept),
                                 whole_note if runs and candidates else "not run", os.path.relpath(path)))
+    # The names proposed for C that the transformations have changed since go to this C where their
+    # variables are still there (carry): the check is what runs after the transformations change.
+    carry(target, image, out=out, jobs=jobs, program=program, flow=flow, lifter=lifter, context=context,
+          digests=digests)
     return kept
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="dread readable", description=__doc__.split("\n\n")[0])
     tgt.add_arguments(parser)
-    parser.add_argument("--check", action="store_true", help="test the readable C and write the readable table")
+    parser.add_argument("--check", action="store_true", help="test the readable C and write the readable table "
+                        "(then carry the names, as --carry)")
+    parser.add_argument("--carry", action="store_true", help="carry the readable_names table's names that were made "
+                        "for other C to the variables of the same identity in the C as it is now (dread.naming "
+                        "carry_table: kept where the C still compiles to the same code; no question asked)")
     parser.add_argument("--out", help="write NAME.c files there instead of printing, and the image's header "
                         "(%s) beside them" % HEADER)
     parser.add_argument("--plain", action="store_true", help="the reading form: no instructions' comments, the "
@@ -1093,6 +1141,11 @@ def main(argv=None):
             print("dread readable --check: the build failed (above); the readable table is as it was",
                   file=sys.stderr)
             return 1
+        return 0
+    if args.carry:
+        from dread.util.polite import polite
+        polite()
+        carry(target, image, args.names or None)
         return 0
     if args.statics:
         from dread import build, lift, regflow, statics

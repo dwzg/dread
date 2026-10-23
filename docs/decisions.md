@@ -9,6 +9,97 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Names that survive changes of the C: carried by the variables' definitions (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20; asked for on 2026-10-23
+after the day's six changes of readable C had dropped every variable name of a private firmware).
+
+- **Question.** The readable_names table kept a function's names with a digest of the C they were made
+  for, and applied them only to that C: a name on r4_1 must not land on another variable when the
+  transformations number the webs anew. So every improvement of readable C made every changed
+  function's names wait for a new pilot run, which costs, and whose names differ (two runs on the same
+  C of FreeRTOS's GCC -Os build named 36 % of 786 variables alike, 64 % with a word alike). How can a
+  name follow its variable to C made anew, where that is safe?
+- **Options and choices.**
+  1. A variable's identity: (a) its name (r4_1): the webs are numbered anew whenever one appears or
+     goes (prvBlockingTask's r0_20 is r0_10 today); (b) its uses or the text of its statements, which
+     are what the transformations change; (c) a parameter by its position (the head lists the argument
+     registers in order, dread.tidy params keeps them so), a local by the register or frame slot it
+     lives in (its name without the web numbers: s36 is the slot sp0 - 36) and the instructions that
+     write it (each assigning statement's own instruction, the one dread.tidy keeps when it folds
+     others in; what it absorbed is left out: that changes with every clean-up and is not recorded by
+     code from before the reading form). **(c)**: two locals with the same register and the same
+     definitions hold the same values, whatever the transformations did around them. The register is
+     part of it: one instruction can write two registers (a load with writeback, a chain split into one
+     assignment each), and without it 38 fewer locals matched on the measurement below.
+  2. The match: (a) identical definitions only; (b) the local of the same base whose definitions it
+     shares most, more than a bar (Jaccard), each the other's only best match (a web split in two equal
+     halves gets nothing: which half the name meant is not known). **(b) with the bar at more than half
+     (CARRY_OVERLAP 0.5)**, measured on FreeRTOS's GCC -Os build, every variable of every function whose
+     C changed between an older commit and main, each match judged against the debug information (the
+     source variables whose location list puts them in the register after each definition, until it is
+     written again): from before the six changes (d7a8230) 117 of 329 functions changed, 208 parameters
+     and 825 locals matched at any bar from 0.99 down to 0.5, every local with identical definitions,
+     115 of them renumbered; 240 judged right, none wrong, 585 unknown (no source variable in that
+     register there: temporaries). From the day before (0d18f0b, 211 changed) and from the first named
+     C (9ad5dec, 2026-10-21, 237 changed): 4 partial matches more than half (2 right, 2 unknown). No
+     bar gave a match judged wrong: at least half instead adds 6 partial matches from d7a8230 (all
+     right) and 21 from each of the older two (11 right, 14 unknown), a bar of 0.3 one and nine more. The
+     partial matches are mostly a variable that kept one of its two definitions (the other value no
+     longer kept), which the debug information calls right where it can tell; the stricter bar is
+     kept all the same, since a name dropped costs a question (4) and a name on the wrong variable is
+     what no check catches. Applying the old maps by the variables' names instead puts 9 of 207 judged
+     names on a wrong variable (14 of 303 from 9ad5dec).
+  3. Where: (a) at every application of the table (every build, every view: the compile check would
+     run each time); (b) once, a step that writes the entry anew for the new C. **(b)**: `dread readable
+     --check` carries at its end (the step that runs after the transformations change: its digests tell
+     which entries need it), `--carry` alone, and `dread pilot --task readable` before it asks. Each
+     carried name passes the identifier check again (usable: a name the new C uses otherwise is
+     dropped alone), and the C with them must compile to the same code (same_code; else the entry stays
+     as it was and waits). The entry says it was carried, from which digest, what was dropped and which
+     variables of the new C are open (new, or their name refused); its comment says "carried from
+     earlier C", which the reading form and the GUI show.
+  4. Asking again: (a) never; (b) every carried function; (c) only one whose carry left variables open,
+     its question showing the carried names in its C and asking for the others. **(c)**: the carried
+     names were as close to the source's as a fresh run's (below), (b) costs what a fresh run costs and
+     changes two names of three for nothing, and (a) leaves new variables with register names.
+  5. Every variable's identity in the entry, not only the named ones', one string each ("param 0", "r4
+     0xcad2 0xcadc"): it tells a new variable from one the model left unnamed. The table of the
+     measurement grew from 208 to 266 KB (dictionaries would have made 361 KB and a line per field).
+- **Measured** (a copy of FreeRTOS's GCC -Os build, Haiku 5.5, --jobs 16): every readable function
+  named with the code of d7a8230, before the day's six readable-C changes (315 functions, 1,788 names,
+  $0.18), the identities its C had added to the entries (what the pilot now records), then the table
+  applied with main's code: 204 of 315 entries apply (813 names), 111 wait (975 names). With this, on
+  main's C: `dread readable --carry` (10-14 s, no model) carried 108 of the 111: 814 names, 177
+  parameters and 637 locals, every local with identical definitions, 111 of them now on a variable of
+  another name; 161 names dropped: 154 whose variable is gone (11 parameters no longer read, 143
+  locals holding values no longer kept, such as vTaskDelay's r0_1 and all of main_full's,
+  vApplicationTickHook's and vFullDemoTickHookFunction's, which have no variable left), 7 whose
+  variable kept half its definitions or fewer (one of two, mostly; the debug information calls all
+  seven candidates right: the price of the bar); none refused by a check. 312 of 315 entries apply
+  (1,627 names). Of the 975 names the old maps applied by name would have put 84 on another variable
+  and 188 on none. Against the debug information every judged carry is right: 164 parameters (13
+  unknown) and 225 locals (412 unknown), 62 of them renumbered. Against the source's names (dread
+  readable --score, the changed functions): the old names on the old C 100 of 172 parameters as the
+  source (58 %), 135 with a word of it (78 %), 82 of 711 local names among the source's; carried, 95
+  of 167 (57 %), 134 (80 %), 67 of 558; a fresh run on main's C (315 functions, $0.17), 79 of 169
+  (47 %), 127 (75 %), 57 of 600. Per variable (a local by the source variables in its register):
+  carried 57 exact and 100 alike of 225 judged locals, fresh 50 and 107 of 258. The unchanged
+  functions show the runs' own spread (51 % and 53 % of 203 parameters). The pilot after the carry
+  asked 18 functions (15 with 33 variables open, the three without variables), $0.01 instead of
+  $0.17, 49 s instead of 172; the 15 kept all 158 carried names and named the 33.
+- **Not established.** That a partial match is the same variable (few such matches: 4 above the bar
+  from the oldest C tried, none judged wrong, two unknown); most locals have no source variable to
+  judge them by. Carrying depends on dread.tidy keeping each statement's own instruction: a change of
+  that makes names wait, as before, not land elsewhere. A frame slot whose prefix changes (s36 to
+  sl36, when a name of the function takes s36) loses its names. The structures' names (the table's
+  structs part) still follow their anchors, function:variable pairs whose variables can be renumbered
+  too.
+- **Undo.** Take the carry out of dread readable's check and of dread pilot's readable_jobs; the entries
+  then apply by their digest only, as before (their ids and carried are ignored).
+- **Status.** Built (dread.naming identities, carry_map, carry, carry_table; dread readable --carry and
+  the end of --check; dread pilot --task readable).
+
 ## Pointer and signed types for variables and parameters; externs typed where a file's calls fit them (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20; two items of docs/todo.md,

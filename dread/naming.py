@@ -6,8 +6,20 @@ they hold, and a sentence on what the function does. It is kept in the image's r
 (config/readable_names.json, docs/formats.md) only when it holds: every new name a C identifier that
 is no keyword, no type or macro of dread.h, no callee, no other variable of the function, no two
 alike; and the function's C with the names compiles to the same code as without them (check). With
-it goes a digest of the C it was made for: when the transformations change that C later, the names
-wait for a new proposal instead of landing on other variables (apply).
+it goes a digest of the C it was made for, and the identities of that C's variables (identities: a
+parameter by its position, which is its register; a local by the register or frame slot it lives in
+and the instructions that define it). An entry applies only to the C of its digest (apply). When the
+transformations change that C later, each name goes to the variable of the new C with the same
+identity (carry: a parameter to the one at its position, a local to the local of its register or
+slot whose definitions it shares most, more than CARRY_OVERLAP of them, each the other's only best
+match), checked as a proposal is (the identifiers, and the C with the names compiling to the same
+code: carry_table) and kept as an entry for the new C that says it was carried; a name whose variable
+has no such match is dropped, and an entry from before identities waits for a new proposal, as all
+did until 2026-10-23 (dread readable --check and --carry, and dread pilot --task readable before it
+asks, which asks again only a function whose carry left variables without a name). A carried name is
+on a variable that the same instructions write into the same register or slot; where the definitions
+match only in part, that it is the same value is a measure, not a proof (docs/decisions.md, "Names
+that survive changes of the C").
 
 Memory at fixed addresses (*(volatile u32 *)0x20029aacu) is written as a name: a macro per address
 and type above the function, which is the access itself, so the code cannot change. The name is the
@@ -186,12 +198,19 @@ def load(image, part="functions"):
 
 def store(image, name, entry, part="functions"):
     """Put one function's entry (or one global's: part="globals") into the table (written sorted)."""
+    store_all(image, {name: entry}, part)
+
+
+def store_all(image, entries, part="functions"):
+    """Put entries ({key: entry}) into the table's part at once (written sorted; nothing for none)."""
+    if not entries:
+        return
     path = image.table(TABLE)
     data = {"version": 1, "functions": {}}
     if os.path.exists(path):
         with open(path) as f:
             data = json.load(f)
-    data.setdefault(part, {})[name] = entry
+    data.setdefault(part, {}).update(entries)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path + ".tmp", "w") as f:
         json.dump(data, f, indent=1, sort_keys=True)
@@ -202,16 +221,244 @@ def store(image, name, entry, part="functions"):
 def apply(tree, fn, entry, made_for=None):
     """Apply a table entry to the function when it was made for this C (its digest, or made_for: the
     digest taken before the globals got their names) and still holds; returns whether it was
-    applied. The sentence goes above the function as a comment."""
+    applied. The sentence goes above the function as a comment, which says who proposed the names
+    and whether they were carried over from earlier C (carry_table)."""
     if not entry or entry.get("digest") != (made_for or digest(fn)) or problems(tree, fn, entry.get("names", {})):
         return False
     rename(fn, entry.get("names", {}))
     what = (entry.get("what") or "").strip()
     if what:
         k = tree.items.index(fn)
-        text = "/* %s: %s (names: %s) */" % (fn.name, what.replace("*/", "* /"), entry.get("by", "proposed"))
+        text = "/* %s: %s (names: %s%s) */" % (fn.name, what.replace("*/", "* /"), entry.get("by", "proposed"),
+                                               ", carried from earlier C" if entry.get("carried") else "")
         tree.items.insert(k, C.Raw(text))
     return True
+
+
+ENTRY = "entry"     # a definition at the function's entry: a declaration's initial value (u32 r4 = 0)
+WEB = re.compile(r"^(.+?)((?:_\d+)*)$")
+
+
+def base_of(name):
+    """The register or frame slot a variable of readable C lives in: its name without the numbers
+    dread.tidy gives each further web of it (fresh: r4_1 and r4_1_1 are r4's, s36_2 the frame slot
+    s36's, sp0 - 36). A slot above sp0 (s_8) gives s: every such slot one base, the definitions tell
+    them apart."""
+    return WEB.match(name).group(1)
+
+
+def identities(fn):
+    """{variable: identity} of the function's variables (variables()) in its C as it is now, what a
+    name carries over to C made anew (carry): a parameter "param N", N its position in the head, which
+    is its register (dread.tidy keeps the argument registers in order: trailing unread ones go, earlier
+    ones stay as a placeholder a0); a local "BASE DEF...", BASE its base_of (the register or frame slot
+    it lives in), each DEF ("0x1a2b", in order) an instruction that writes it: the own instruction (the
+    addr: the one it came from, which dread.tidy keeps when it folds others in) of each statement whose
+    expressions assign it, increment it or are an asm's output for it, else the instruction of the
+    statement around it (a store in an IT block's arm: its if's), and ENTRY for a declaration's initial
+    value outside any statement with an instruction. A local nothing writes is its BASE alone. One
+    string a variable: the readable_names table keeps them so (docs/formats.md)."""
+    from dread.cflow import walk_expr
+    params = {name: i for i, (_, name) in enumerate(fn.params)}
+    defs = {}
+
+    def visit(s, outer):
+        here = "0x%x" % s.addr[0] if s.addr is not None else outer
+        if isinstance(s, C.Decl):
+            for d in s.items:
+                if d.init is not None:
+                    defs.setdefault(d.name, set()).add(here or ENTRY)
+        if isinstance(s, C.Asm):
+            for o in s.outputs:
+                if isinstance(o.e, C.Name):
+                    defs.setdefault(o.e.id, set()).add(here or ENTRY)
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                target = x.target if isinstance(x, C.Assign) else x.e if isinstance(x, (C.Post, C.Unary)) and \
+                    x.op in ("++", "--") else None
+                if isinstance(target, C.Name):
+                    defs.setdefault(target.id, set()).add(here or ENTRY)
+        for inner in _inner(s):
+            visit(inner, here)
+        if isinstance(s, C.For) and isinstance(s.init, C.Decl):
+            visit(s.init, here)
+    for s in fn.body.body:
+        visit(s, None)
+    return {v: "param %d" % params[v] if v in params else
+            " ".join([base_of(v)] + sorted(defs.get(v, ()), key=_def_key)) for v in variables(fn)}
+
+
+def _def_key(d):
+    return (-1, "") if d == ENTRY else (int(d, 16), d)
+
+
+def parse_identity(text):
+    """("param", position) of a parameter's identity, (base, [definitions]) of a local's, or None for
+    anything else (an entry written by hand, or by a later DREAD in another form)."""
+    if not isinstance(text, str) or not text.split():
+        return None
+    parts = text.split()
+    if parts[0] == "param":
+        return ("param", int(parts[1])) if len(parts) == 2 and parts[1].isdigit() else None
+    return parts[0], parts[1:]
+
+
+CARRY_OVERLAP = 0.5     # the definitions two locals must share (Jaccard, more than this) to be one variable
+
+
+def overlap(a, b):
+    """How alike two locals' definitions are: the instructions both have over those either has
+    (Jaccard), 1.0 for two locals nothing writes."""
+    a, b = set(a), set(b)
+    return len(a & b) / len(a | b) if a | b else 1.0
+
+
+def carry_map(old, new, bar=CARRY_OVERLAP):
+    """{old variable: new variable} for identities old and new (identities()): a parameter goes to the
+    parameter at its position; a local to the local of the same base whose definitions it shares most
+    (overlap), when that is more than bar, no other local of the new C shares as much with it, and no
+    other local of the old C shares as much with that one (each the other's only best match). A
+    variable without such a match is left out (its name is dropped); so is one whose identity is not
+    in a form parse_identity reads."""
+    old = {v: parse_identity(i) for v, i in old.items()}
+    new = {v: parse_identity(i) for v, i in new.items()}
+    out = {}
+    positions = {i[1]: v for v, i in new.items() if i is not None and i[0] == "param"}
+    for v, i in old.items():
+        if i is not None and i[0] == "param" and i[1] in positions:
+            out[v] = positions[i[1]]
+    by_base = {}
+    for v, i in new.items():
+        if i is not None and i[0] != "param":
+            by_base.setdefault(i[0], []).append((v, i[1]))
+    score = {}
+    for o, i in old.items():
+        if i is not None and i[0] != "param":
+            for n, defs in by_base.get(i[0], ()):
+                s = overlap(i[1], defs)
+                if s > bar:
+                    score[(o, n)] = s
+    best_of_old, best_of_new = {}, {}
+    for (o, n), s in score.items():
+        best_of_old.setdefault(o, []).append((s, n))
+        best_of_new.setdefault(n, []).append((s, o))
+
+    def only(pairs):
+        top = max(s for s, _ in pairs)
+        winners = [x for s, x in pairs if s == top]
+        return winners[0] if len(winners) == 1 else None
+    for o, pairs in best_of_old.items():
+        n = only(pairs)
+        if n is not None and only(best_of_new[n]) == o:
+            out[o] = n
+    return out
+
+
+def usable(tree, fn, names):
+    """The part of names (a map for the function's variables) that problems() finds nothing against,
+    each pair that it would refuse left out: no variable, no C name, taken, given twice (the first
+    kept), another variable's name."""
+    own = set(variables(fn))
+    taken = other_names(tree, fn)
+    kept, seen = {}, set()
+    for old, new in sorted(names.items()):
+        if old in own and isinstance(new, str) and IDENT.match(new) and new not in taken and new not in seen:
+            kept[old] = new
+            seen.add(new)
+    while True:
+        unchanged = own - set(kept)
+        bad = [old for old, new in kept.items() if new in unchanged and new != old]
+        if not bad:
+            return kept
+        for old in bad:
+            del kept[old]
+
+
+def carry(tree, fn, entry, made_for, ids, bar=CARRY_OVERLAP):
+    """The entry for the function's C as it is now (tree, fn: as the names are applied to it; made_for:
+    its digest before the names, ids its identities() there) made from an entry that was made for
+    other C: each name goes to the variable carry_map takes its variable to, of those the problems()
+    check lets through (usable). None when the entry has no identities (a table from before
+    2026-10-23: it waits for a new proposal, as before), was made for this C, or carries no name. The
+    new entry keeps the sentence and who proposed it, has this C's identities, and "carried": {"from":
+    the digest it was made for, "names": how many came over, "dropped": {old variable: name} of those
+    that did not, "open": the variables of this C left without a name that the old C did not have or
+    whose name the check refused here (what a new proposal would name)}. Whether the C with the names
+    still compiles to the same code is the caller's to check (same_code) before it keeps the entry."""
+    old_ids = entry.get("ids") if entry else None
+    if not isinstance(old_ids, dict) or entry.get("digest") == made_for:
+        return None
+    names = entry.get("names") or {}
+    moves = carry_map(old_ids, ids, bar)
+    got = usable(tree, fn, {moves[v]: names[v] for v in moves if v in names})
+    if not got:
+        return None
+    came = {v for v in moves if v in names and moves[v] in got}
+    named_before = {moves[v] for v in moves if v in names}
+    matched = set(moves.values())
+    open_ = sorted(v for v in variables(fn) if v in ids and v not in got and (v not in matched or v in named_before))
+    return {"digest": made_for, "names": got, "ids": ids, "what": entry.get("what", ""),
+            "by": entry.get("by", "proposed"),
+            "carried": {"from": entry.get("digest"), "names": len(got),
+                        "dropped": {v: n for v, n in sorted(names.items()) if v not in came}, "open": open_}}
+
+
+def carry_table(target, image, made, work, jobs=None, out=print):
+    """Carry the image's readable_names entries that were made for other C to the functions' C as it
+    is now: made, {name: dread.readable question_trees' tuple} of the functions to look at. Each entry
+    with identities whose digest is not its function's goes through carry(), and is kept only where the
+    function's C with the carried names compiles to the same code as without them (same_code, a thread
+    a function, jobs at a time, each in a directory of its own under work); the kept ones replace the
+    old entries in the table. An entry that does not carry stays as it was (it waits for a new
+    proposal). Returns {name: the entry carried}."""
+    import concurrent.futures
+    import copy
+    import threading
+    from dread import readable
+    from dread.util.polite import workers
+    table = load(image)
+    todo = []
+    for name, got in made.items():
+        if isinstance(got, str) or name not in table:
+            continue
+        tree, fn, made_for, text, _, ids = got
+        entry = table[name]
+        new = carry(tree, fn, entry, made_for, ids)
+        if new is not None:
+            todo.append((name, tree, fn, text, new))
+        elif isinstance(entry.get("ids"), dict) and entry.get("digest") != made_for:
+            moved = set(carry_map(entry["ids"], ids)) & set(entry.get("names") or {})
+            out("%-24s no names carried: %s" % (name, "the check refused every one (this C uses them otherwise)"
+                                                 if moved else "none has its variable in this C"))
+    if not todo:
+        return {}
+    local, lock, slots = threading.local(), threading.Lock(), []
+
+    def check(job):
+        _, tree, fn, text, new = job
+        if getattr(local, "slot", None) is None:
+            with lock:
+                local.slot = len(slots)
+                slots.append(local.slot)
+        tree2 = copy.deepcopy(tree)
+        fn2 = tree2.function(fn.name)
+        rename(fn2, new["names"])
+        return same_code(target, image, text, readable.print_file(tree2, fn2),
+                         os.path.join(work, "carry-%d" % local.slot))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(jobs or workers(), len(todo)))) as pool:
+        verdicts = list(pool.map(check, todo))
+    kept = {}
+    for (name, _, _, _, new), same in zip(todo, verdicts):
+        if not same:
+            out("%-24s no names carried: with them the C compiles to other code" % name)
+            continue
+        kept[name] = new
+        c = new["carried"]
+        out("%-24s %d names carried, %d dropped%s" % (name, c["names"], len(c["dropped"]), ", %d variable%s without "
+                                                       "a name" % (len(c["open"]), "s"[len(c["open"]) == 1:])
+                                                       if c["open"] else ""))
+    store_all(image, kept)
+    return kept
 
 
 ACCESS = re.compile(r"^volatile (\w+) \*$")

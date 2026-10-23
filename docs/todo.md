@@ -821,6 +821,29 @@ its sources.
   structures behind pointers derived by code (accesses at constant offsets through the same
   pointer, unified across functions), with volatile in the pointer's declaration so that a field
   reads p->f, their names and fields' names proposed the same way.
+- [x] **Names that survive changes of the C** (asked for 2026-10-23: on a private firmware the day's
+  six readable-C changes had made every variable name wait for a new proposal). Done 2026-10-23
+  (dread.naming identities, carry_map, carry, carry_table; dread readable --carry and the end of
+  --check; dread pilot --task readable; docs/decisions.md, docs/formats.md): each entry keeps the
+  identity of every variable of its C (a parameter by its position; a local by its register or slot
+  and the instructions that write it), and when the digest differs each name goes to the variable of
+  the new C with the same identity (a local: the same base, more than half the definitions shared,
+  each the other's only best match), checked again (identifiers, the same code) and kept as an entry
+  for the new C marked carried; a name without its variable is dropped; an entry from before waits
+  by its digest. The pilot asks a carried function again only where variables are left without a
+  name, showing the carried names. Measured on FreeRTOS GCC -Os, every readable function named with
+  the code from before the six changes (315 functions, 1,788 names, $0.18), then main's C: by digest
+  204 of 315 entries applied (813 names); carried, 312 (1,627 names): 814 names of 108 functions
+  came over in 10 s without a model (177 parameters, 637 locals, every local with identical
+  definitions, 111 on a variable of another name now), 161 dropped (154 with their variables, values
+  no longer kept; 7 whose variable kept half its definitions or fewer); none judged wrong against
+  the debug information (389 judged right, 425 unknown), and as close to the source's names as a
+  fresh run (parameters 57 % as the source against 47 %, 80 % and 75 % with a word of it; the runs'
+  own spread about five points). The pilot afterwards asked 18 functions for $0.01 (a fresh run: 315
+  for $0.17); the 15 asked again kept all 158 carried names. Left: the structures' names (the
+  structs part) follow anchors whose variables are renumbered too; a frame slot whose prefix changes
+  loses its names; a partial match (rare: 4 of about 1,250 locals from the oldest C tried) is a
+  measure, not a proof.
 - [ ] **Function names.** `dread pilot --task name` (2026-10-22, docs/decisions.md): a question
   shows a function's readable C (dread.readable view: the tables applied, each constant followed by
   what it points to: text, a function's entry, or a table's first words, such as a localized

@@ -106,14 +106,36 @@ makes, and `dread readable --check` decides again. A name not in the lifted tabl
 ### `readable_names.json` (`readable_names`)
 
 Names for the variables of readable C (dread.naming): `{"version": 1, "functions": {NAME: {"digest",
-"names", "what", "by"}}}`. `names` maps the readable C's variable names (r0, r4, r2_1, s36) to the
-proposed ones, `what` is a sentence on what the function does (a comment above it), `by` the
-provider that proposed them, `digest` a digest of the readable C without names the proposal was made
-for: when the transformations change that C, the entry is not applied (its names would land on
-other variables) until it is asked again. Written by `dread pilot --task readable`, which keeps an
-entry only when every name is a C identifier nothing else in the file uses and the C with the names
+"names", "ids", "what", "by", "carried"}}}`. `names` maps the readable C's variable names (r0, r4,
+r2_1, s36) to the proposed ones, `what` is a sentence on what the function does (a comment above it),
+`by` the provider that proposed them, `digest` a digest of the readable C without names the proposal
+was made for: the entry applies only to that C. Written by `dread pilot --task readable`, which keeps
+an entry only when every name is a C identifier nothing else in the file uses and the C with the names
 compiles to the same code; not edited by hand. `dread readable --score ELF` compares the names with
 the source's (the ELF's debug information).
+
+`ids` (since 2026-10-23) holds the identity of every variable of the C the entry was made for
+(dread.naming identities), one string a variable: a parameter `"param N"`, N its position in the head
+(the head lists the argument registers in order); a local `"BASE DEF..."`, BASE the register or frame
+slot it lives in (its name without the numbers of its webs: r4 for r4_2, s36 for s36_1), each DEF an
+instruction that writes it (`0x1a2b`, in order; `entry` for a declaration's initial value), BASE alone
+for a local nothing writes. When the transformations change the C, the names go to the variables of
+the new C with the same identity (carrying): a parameter's to the parameter at its position, a
+local's to the local of the same base whose definitions it shares most, more than half of all the two
+have (Jaccard, dread.naming CARRY_OVERLAP), where each is the other's only best match. Every carried
+name passes the identifier check again, and the C with them must compile to the same code; a name
+whose variable has no match, or that the check refuses, is dropped. The entry then is one for the new
+C: its digest and `ids`, its `what` and `by` as they were, and `carried`: `{"from": the digest it was
+made for, "names": how many came over, "dropped": {old variable: name}, "open": [the variables of the
+new C left without a name that the old C did not have, or whose name was refused]}`. `dread readable
+--check` carries at its end (the check is what runs after the transformations change), `dread
+readable --carry` alone, and `dread pilot --task readable` before it asks; the pilot asks a function
+with carried names again only where `open` is not empty (its question shows the carried names in its
+C; they stay unless the answer changes one), and its answer's entry has no `carried`. A carried
+entry's comment says so (`(names: haiku (claude-haiku-5-5), carried from earlier C)`). An entry
+without `ids` (a table from before) applies by its digest only and is never carried: it waits for a
+new proposal, as every entry did before; an identity in another form matches nothing. With `ids` the
+table of FreeRTOS's GCC -Os build (315 functions) is 266 KB instead of 208.
 
 Its `globals` part names memory at fixed addresses: `{"0xADDRESS TYPE": {"name", "by"}}` (TYPE the
 access's: u32, u8, ...). dread readable writes such an access as the name, a macro above the

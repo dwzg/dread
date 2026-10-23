@@ -1107,33 +1107,55 @@ def direct_callers(program):
     return {name: sorted(callers) for name, callers in out.items()}
 
 
-def readable_jobs(target, program, context, lifter, names, callers, out=print, device=""):
+def readable_jobs(target, program, context, lifter, names, callers, out=print, device="", image=None):
     """The questions for the variables of names, prepared before any is asked: the readable C, its
     digest and both texts made by dread.readable question_trees (in a pool of workers for many
-    functions), the callers each question names (callers: {name: [callers]}, direct_callers). Returns
-    ([job], {name: entry} of the functions the readable_names table names already for this C: its
-    digest); a function without readable C, or named already, gets its line here, in the order of
-    names. A job: {"name", "tree", "fn", "digest", "file": the C without the variables' names, as it
-    compiles, "user": the question}."""
-    from dread import readable
+    functions), the callers each question names (callers: {name: [callers]}, direct_callers). With
+    image, the readable_names table's entries made for other C are carried to this C first
+    (dread.naming carry_table: code, no question). Returns ([job], {name: entry} of the functions the
+    table names already for this C: its digest); a function without readable C, or named already,
+    gets its line here, in the order of names. A function whose names were carried is named already,
+    unless the carry left variables without a name (new ones, or names the check refused): it is asked
+    again, its question showing the carried names in its C and asking for the others (the answer may
+    change a carried name). A job: {"name", "tree", "fn", "digest", "file": the C without the
+    variables' names, as it compiles, "user": the question, "ids": its variables' identities
+    (dread.naming identities), "carried": the names carried ({variable: name}) or None}."""
+    import copy
+    from dread import cparse, naming, readable
     made = readable.question_trees(program, context, lifter, names)
+    if image is not None:
+        carried = naming.carry_table(target, image, made, os.path.join(target.build, "pilot", image.name, "naming"),
+                                     out=out)
+        context.names.update(carried)
     jobs, known = [], {}
     for name in names:
         got = made[name]
         if isinstance(got, str):
             out("%-24s no readable C: %s" % (name, got))
             continue
-        tree, fn, digest, text, code = got
+        tree, fn, digest, text, code, ids = got
         entry = context.names.get(name)
+        again = None
         if entry and entry.get("digest") == digest:
-            out("%-24s named already" % name)
-            known[name] = entry
-            continue
+            if not (entry.get("carried") or {}).get("open"):
+                out("%-24s named already%s" % (name, " (names carried)" if entry.get("carried") else ""))
+                known[name] = entry
+                continue
+            again = entry                   # (carried, variables left without a name: asked with the names)
+        if again is not None:
+            shown = copy.deepcopy(fn)
+            naming.rename(shown, again["names"])
+            code = cparse.unparse(shown, notes=False, style="readable")
         user = about(device, "The function %s (readable C):\n\n```c\n%s\n```" % (name, code))
+        if again is not None:
+            user += ("\n\nSome of its variables have names already, carried over from an earlier version of this "
+                     "C: %s. Keep them unless one is wrong, and name the others (%s)." % (
+                         ", ".join(sorted(again["names"].values())), ", ".join(again["carried"]["open"])))
         shown_callers = [c for c in callers.get(name, []) if may_show(target, c)][:12]
         if shown_callers:
             user += "\n\nIt is called by: %s." % ", ".join(shown_callers)
-        jobs.append({"name": name, "tree": tree, "fn": fn, "digest": digest, "file": text, "user": user})
+        jobs.append({"name": name, "tree": tree, "fn": fn, "digest": digest, "file": text, "user": user, "ids": ids,
+                     "carried": dict(again["names"]) if again is not None else None})
     return jobs, known
 
 
@@ -1168,6 +1190,9 @@ def ask_readable(target, image, provider, job, tries, work):
             problems = ['no ```json block with "what" (a sentence) and "names" (an object)']
         else:
             what, names = parsed
+            if job.get("carried"):          # (the carried names stay unless the answer changes one, which
+                back = {new: old for old, new in job["carried"].items()}    # it may name by its new name)
+                names = {**job["carried"], **{back.get(k, k): v for k, v in names.items()}}
             problems = naming.problems(tree, fn, names)
             if not problems:
                 tree2 = copy.deepcopy(tree)
@@ -1175,6 +1200,8 @@ def ask_readable(target, image, provider, job, tries, work):
                 naming.rename(fn2, names)
                 if naming.same_code(target, image, job["file"], readable.print_file(tree2, fn2), work):
                     entry = {"digest": job["digest"], "names": names, "what": what, "by": provider.label()}
+                    if job.get("ids") is not None:
+                        entry["ids"] = job["ids"]
                     break
                 problems = ["with these names the C compiles to other code"]
         why = "; ".join(problems)
@@ -1210,7 +1237,7 @@ def name_readable(target, image, program, provider, name, context, lifter, tries
     from dread import readable
     context = context if context is not None else readable.Context()
     jobs, known = readable_jobs(target, program, context, lifter, [name], {name: callers_of(program, name)}, out,
-                                device)
+                                device, image)
     if not jobs:
         return known.get(name)
     folder = os.path.join(target.build, "pilot", image.name)
@@ -1248,9 +1275,12 @@ def name_variables(target, image, program, make_provider, names, context, lifter
     import concurrent.futures
     import threading
     started = time.time()
-    todo, known = readable_jobs(target, program, context, lifter, names, direct_callers(program), out, device)
-    out("dread pilot --task readable: %d functions to ask, %d named already, %d without readable C (prepared "
-        "in %.0f s)" % (len(todo), len(known), len(names) - len(todo) - len(known), time.time() - started))
+    todo, known = readable_jobs(target, program, context, lifter, names, direct_callers(program), out, device, image)
+    out("dread pilot --task readable: %d functions to ask (%d with names carried and variables left without), %d "
+        "named already (%d with names carried), %d without readable C (prepared in %.0f s)" % (
+            len(todo), sum(1 for j in todo if j.get("carried")), len(known),
+            sum(1 for e in known.values() if e.get("carried")), len(names) - len(todo) - len(known),
+            time.time() - started))
     folder = os.path.join(target.build, "pilot", image.name)
     os.makedirs(folder, exist_ok=True)
     local, providers, lock = threading.local(), [], threading.Lock()
