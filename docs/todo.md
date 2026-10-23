@@ -3978,6 +3978,20 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## Scale and robustness
 
+- [ ] **Case keys scoped to a function's call tree.** The generated cases' key holds an image-wide
+  environment (dread.autocase Generator.environment): the image's bytes, what dread.regflow found in
+  the whole image, and since 2026-10-23 the table of functions whose stubs answer registers beyond a C
+  result. So a change of DREAD that changes regflow's findings anywhere, or that table, regenerates
+  every case of the image: on the private real-life test (some thousands of functions) the lift check
+  after the results-beyond-r0:r1 work regenerated everything, most of a day on 8 cores, for a change
+  that concerns the callers of a few dozen functions. Scope the regflow and table parts to what a
+  function's cases depend on: its own facts and those of the functions its runs can reach (its call
+  tree, callees through pointers as the generator resolves them), digested per function; the image's
+  bytes stay whole (a moved literal changes what a function reads). Measure: the keys of FreeRTOS and
+  gizmo unchanged where nothing in a function's tree changed, a test that a change to one callee's
+  regflow facts regenerates its callers' cases and no others, and the time of a check after such a
+  change.
+
 - [x] **A bulk run's memory, item by item** (2026-10-23, found on the private real-life test: one
   worker of a lift check grew by gigabytes on one function until the run was killed, which the
   machine's other work felt). `DREAD_ITEMS_LOG=FILE` has every worker of a pool that hands the
