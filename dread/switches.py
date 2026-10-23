@@ -28,20 +28,23 @@ caller then falls back to decoding a table it recognises (arch.switch_targets) o
 from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_FETCH_UNMAPPED, UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE,
                      UC_HOOK_MEM_WRITE_UNMAPPED, UC_PROT_EXEC, UC_PROT_READ, UcError)
 
+from dread.util.perthread import PerThread
+
 RUN_BACK = 16           # instructions in front of the jump searched for the bound check
 MAX_CASES = 1024        # index values tried at most
 STEPS = 64              # instructions run per value at most
 PAGE = 0x1000
 MAX_PAGES = 64          # zero pages mapped on demand per run at most
 
-_engines = {}           # (id(program), isa) -> (engine, state)
+_engines = PerThread()  # this thread's: (id(program), isa) -> (engine, state, program)
 
 
 def _engine(program, isa):
     """A Unicorn engine with the image and the startup's copies mapped, cached per program and isa."""
     key = (id(program), isa)
-    if key in _engines and _engines[key][2] is program:
-        return _engines[key][:2]
+    engines = _engines.get()
+    if key in engines and engines[key][2] is program:
+        return engines[key][:2]
     arch = program.arch
     uc = arch.new_uc(isa)
     spans = [(program.base, program.base + len(program.data))]
@@ -66,7 +69,7 @@ def _engine(program, isa):
     uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED, _on_unmapped, user_data=state)
     uc.hook_add(UC_HOOK_MEM_WRITE, _on_write, user_data=state)
     uc.hook_add(UC_HOOK_MEM_FETCH_UNMAPPED, lambda *a: False)
-    _engines[key] = (uc, state, program)
+    engines[key] = (uc, state, program)
     return uc, state
 
 

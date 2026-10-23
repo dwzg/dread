@@ -10,25 +10,32 @@ a value from one of the image's tables). A value loaded from RAM differs between
 one. A run that faults or leaves the stretch before reaching the address gives nothing.
 
 Pages outside the image are mapped on demand and filled again before every run, never unmapped
-(Unicorn keeps stale references to unmapped pages; dread.switches learned that the hard way).
+(Unicorn keeps stale references to unmapped pages; dread.switches learned that the hard way). The
+translation cache is flushed at every call: Unicorn decides where a run stops when it translates the
+code, so a block an earlier run translated with another end ran past this one's, and the answer
+depended on what ran before (2026-10-23: gizmo-m3's apply_config lost a literal's text). Each thread
+has engines of its own (dread.util.perthread): two threads in one engine crashed the process.
 
 Used by dread callsites (the arguments at a call) and dread flat.
 """
 from unicorn import (UC_HOOK_MEM_FETCH_UNMAPPED, UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE,
                      UC_HOOK_MEM_WRITE_UNMAPPED, UC_PROT_EXEC, UC_PROT_READ, UcError)
 
+from dread.util.perthread import PerThread
+
 RUN_BACK = 24           # instructions in front of the address that are run at most
 PAGE = 0x1000
 FILLS = (0x5A, 0xA5)    # the two runs' fill bytes (registers get the byte four times)
 MAX_PAGES = 64
 
-_engines = {}
+_engines = PerThread()  # this thread's: (id(program), isa) -> (engine, state, program)
 
 
 def _engine(program, isa):
     key = (id(program), isa)
-    if key in _engines and _engines[key][2] is program:
-        return _engines[key][:2]
+    engines = _engines.get()
+    if key in engines and engines[key][2] is program:
+        return engines[key][:2]
     arch = program.arch
     uc = arch.new_uc(isa)
     spans = [(program.base, program.base + len(program.data))]
@@ -61,7 +68,7 @@ def _engine(program, isa):
 
     uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED, on_unmapped, user_data=state)
     uc.hook_add(UC_HOOK_MEM_FETCH_UNMAPPED, lambda *a: False)
-    _engines[key] = (uc, state, program)
+    engines[key] = (uc, state, program)
     return uc, state
 
 
@@ -137,7 +144,8 @@ def _run(program, first, address, names):
     arch = program.arch
     isa = program.isa_at(address)
     uc, state = _engine(program, isa)
-    results = []
+    uc.ctl_flush_tb()                       # (Unicorn decides where a run stops when it translates the code: a
+    results = []                            # block translated in a run with another end ran past this one's)
     for fill in FILLS:
         state["fill"], state["new"] = fill, 0
         while True:

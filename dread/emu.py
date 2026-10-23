@@ -23,6 +23,9 @@ import struct
 from unicorn import (UC_ERR_FETCH_UNMAPPED, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_HOOK_BLOCK,
                      UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
                      UC_MEM_WRITE, Uc, UcError)
+
+from dread.util.perthread import PerThread
+
 UNMAPPED = (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_FETCH_UNMAPPED)
 
 PAGE = 0x1000
@@ -249,7 +252,7 @@ class Core:
     """One emulator per image, reused for every call. A Machine borrows the Core of its image; the
     Core undoes what the previous Machine left (written pages, hooks, registers)."""
 
-    cores = {}          # (id(layout), id(payload)) -> Core, least recently used first
+    cores = PerThread()  # this thread's: (id(layout), id(payload)) -> Core, least recently used first
     KEEP = 4            # emulators kept (the tests use two); more grow memory without bound
     retired = 0         # cores taken out of use (retire), for reading
 
