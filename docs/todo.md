@@ -731,6 +731,26 @@ its sources.
   (5 of 14 s on GCC -Os, every function one after another), a candidate for the same pool (the
   workers would send the Lifted results back; the lift check builds through it too); the gate's
   analysis trees run the clean-up on every function a second time (9.5 of its 28 s on GCC -Os).
+  The same day the clean-up itself got cheaper, with the same output (dread.tidy): the conditions
+  pass tries candidates that share the condition's subexpressions, their sizes counted, only those
+  smaller than the condition (shared_candidates; made_candidate makes the one taken of copies, as
+  before), makes its test values for the first candidate that reads the condition's loads (the
+  values pass too), and keeps the answers for the tidy run: every round of the passes asks every
+  condition again, and two thirds of the searches on the GCC -Os build were of a condition the run
+  had searched before. Every function's readable C in one process (all that lift; CPU seconds):
+  GCC -Os 77.3 -> 44.4, clang -O2 108.8 -> 58.8, RISC-V GCC -Os 44.9 -> 31.8, GCC -O0 127.0 -> 58.1,
+  gizmo's four 2.1-3.8 -> 1.3-2.2, byte for byte the same on all eight builds. With the pool, 8
+  workers (seconds, the pool alone -> with this):
+      build (readable functions)       dread recon     first build in one process   dread readable --check
+      FreeRTOS GCC -Os (316)           16.2 -> 11.5    14.8 -> 11.2                  29.5 -> 25.1
+      FreeRTOS clang -O2 (275)         22.2 -> 14.1    20.5 -> 14.1                  41.8 -> 28.0
+      FreeRTOS RISC-V GCC -Os (251)     6.7 ->  5.3     6.2 ->  5.0                  19.7 -> 17.6
+      FreeRTOS GCC -O0 (353)           26.5 -> 18.9    25.7 -> 18.5                  69.7 -> 52.3
+      gizmo a32, m3, m4, rv32 (31-44)  1.4-2.7 -> 1.2-2.0   1.3-2.7 -> 1.1-1.9       2.9-5.7 -> 2.4-4.1
+  (The second build in one process takes the readable C as it was, the same time either way; the
+  machine was busier than for the table above, the pool's own figures up to 10 s higher.) The
+  generated files and the images of all eight builds byte for byte the same again, the gate the same
+  lists and readable_types tables.
   Next: types: the
   structures behind pointers derived by code (accesses at constant offsets through the same
   pointer, unified across functions), with volatile in the pointer's declaration so that a field

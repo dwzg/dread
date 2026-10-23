@@ -635,6 +635,38 @@ def test_a_conditional_compare_is_one_condition_and_its_loads_stay_unconditional
     assert "r1 = *(volatile u32 *)(r3 + 4);" in out and "u64" not in out, out
 
 
+@needs_z3
+def test_the_conditions_search_shares_its_candidates_and_searches_once_a_run(monkeypatch):
+    """shared_candidates are candidates() in its order, each size counted as size() walks it, sharing
+    the condition's subexpressions (made_candidate makes the one kept of copies, as candidates()
+    always made them); below leaves out the larger ones. In one tidy run each condition is searched
+    once, the next rounds take its answer: CCMP's five, eleven when every round searches again
+    (tidy._tidy, outside a run), and the clean-up comes out the same."""
+    from dread.cflow import walk_expr
+    e = expr("!(u32)((%s) >> 32) || %s == 0" % (SUB, R))         # (ls: a <= b)
+    c = ctx()
+    shared, made = tidy.shared_candidates(e, c), tidy.candidates(e, c)
+    assert len(shared) > 20 and [cparse.expr_text(x) for _, x, _ in shared] == [cparse.expr_text(x) for x in made]
+    assert all(n == tidy.size(x) for n, x, _ in shared)
+    inside = {id(x) for x in walk_expr(e)}
+    assert all(id(x.l) in inside for _, x, (kind, _, _, _, _) in shared if kind == "plain")
+    assert not any(id(y) in inside for x in made for y in walk_expr(x))
+    limit = tidy.size(e)
+    assert [x for n, x, _ in shared if n < limit] == [x for _, x, _ in tidy.shared_candidates(e, c, below=limit)]
+    searched, real = [], tidy.shared_candidates
+    monkeypatch.setattr(tidy, "shared_candidates", lambda e, ctx, most=10, below=None:
+                        searched.append(cparse.expr_text(e)) or real(e, ctx, most, below))
+    runs = {}
+    for way, run in (("a run", tidy.tidy), ("every round again", lambda fn: tidy._tidy(fn, None, None, 8))):
+        del searched[:]
+        fn = cparse.parse(CCMP).function("f")
+        run(fn)
+        runs[way] = cparse.unparse(fn), list(searched)
+    assert runs["a run"][0] == runs["every round again"][0] and "r0 == r2 + 3 || r4 == r1" in runs["a run"][0]
+    assert len(runs["a run"][1]) == len(set(runs["a run"][1])) == len(set(runs["every round again"][1]))
+    assert len(runs["a run"][1]) < len(runs["every round again"][1])
+
+
 FLAG = """/* f at 0x0, lifted by dread lift: one statement per instruction. */
 #include "dread.h"
 extern u32 g(u32, u32, u32, u32);

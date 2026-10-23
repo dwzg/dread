@@ -41,6 +41,7 @@ lines) and blocks that bind variables to registers (__asm__("r0")) are left alon
 are behaviour.
 """
 import re
+import threading
 
 from dread import cparse as C
 from dread import cexpr
@@ -1460,8 +1461,28 @@ def compared(e):
 def candidates(e, ctx, most=10):
     """Simple conditions to try for e, smallest first: two of its operands compared (equality, then
     unsigned, then signed order), an operand of it against one of its constants or 0, a mask test.
-    Operands: its subexpressions (subexpressions), the most smallest ones."""
+    Operands: its subexpressions (subexpressions), the most smallest ones. Each made of copies of e's
+    subexpressions (made_candidate)."""
+    return [made_candidate(recipe, ctx) for _, _, recipe in shared_candidates(e, ctx, most)]
+
+
+def made_candidate(recipe, ctx):
+    """The candidate of a recipe of shared_candidates, made of copies of e's subexpressions."""
     import copy
+    kind, op, a, b, bits = recipe
+    if kind == "signed":
+        return C.Binary(op, as_signed(copy.deepcopy(a), ctx, bits), as_signed(copy.deepcopy(b), ctx, bits))
+    if kind == "mask":
+        return C.Binary(op, C.Binary("&", copy.deepcopy(a), copy.deepcopy(b)), C.Num("0"))
+    return C.Binary(op, copy.deepcopy(a), copy.deepcopy(b))
+
+
+def shared_candidates(e, ctx, most=10, below=None):
+    """[(size, candidate, recipe)] of candidates(), in its order; each candidate shares e's
+    subexpressions (to try, not to keep: made_candidate makes the one to keep of its recipe), its
+    size counted, not walked. below: only those of fewer nodes. Until 2026-10-23 every candidate was
+    made of copies and walked for its size, most of them larger than e and never tried: the copies
+    alone were a fifth of the readable C's time on FreeRTOS's GCC -Os demo."""
     subs = subexpressions(e)
     # An address a memory access is made at is no operand to compare with (gizmo's uart_putc waited
     # while io_40011004 << 31 < 0x40011004u: true, but the bound was the register's own address).
@@ -1492,23 +1513,35 @@ def candidates(e, ctx, most=10):
     leaves = [x for x in terms if isinstance(x, C.Name) or (isinstance(x, C.Unary) and x.op == "*")]
     pairs = compared(e) + [(a, b) for a in terms for b in consts] + [(a, b) for a in leaves for b in leaves
                                                                      if a is not b]
-    out = []
+    sizes = {}                              # id -> size, of e's subexpressions and consts (alive meanwhile)
+
+    def sz(x):
+        if id(x) not in sizes:
+            sizes[id(x)] = size(x)
+        return sizes[id(x)]
+
+    def signed_size(x, y):                  # (y = as_signed(x): a cast of x, or a constant of its own)
+        return 1 + sz(x) if isinstance(y, C.Cast) and y.e is x else size(y)
 
     def bits_of(x):
         t = type_of_expr(x, ctx)
         return t[0] if t else ctx.int_bits
+    out = []
     for a, b in pairs:
-        for op in ("==", "!="):
-            out.append(C.Binary(op, copy.deepcopy(a), copy.deepcopy(b)))
-        for op in ("<", ">=", ">", "<="):
-            out.append(C.Binary(op, copy.deepcopy(a), copy.deepcopy(b)))
+        n = 1 + sz(a) + sz(b)
+        for op in ("==", "!=", "<", ">=", ">", "<="):
+            out.append((n, C.Binary(op, a, b), ("plain", op, a, b, None)))
         bits = bits_of(a)
+        sa, sb = as_signed(a, ctx, bits), as_signed(b, ctx, bits)
+        n_signed = 1 + signed_size(a, sa) + signed_size(b, sb)
         for op in ("<", ">=", ">", "<="):
-            out.append(C.Binary(op, as_signed(copy.deepcopy(a), ctx, bits), as_signed(copy.deepcopy(b), ctx, bits)))
+            out.append((n_signed, C.Binary(op, sa, sb), ("signed", op, a, b, bits)))
         if isinstance(b, C.Num) and b.value != 0:
             for op in ("==", "!="):
-                out.append(C.Binary(op, C.Binary("&", copy.deepcopy(a), copy.deepcopy(b)), C.Num("0")))
-    out.sort(key=size)
+                out.append((n + 2, C.Binary(op, C.Binary("&", a, b), C.Num("0")), ("mask", op, a, b, None)))
+    if below is not None:
+        out = [c for c in out if c[0] < below]
+    out.sort(key=lambda c: c[0])            # (stable: candidates of one size in the order made)
     return out
 
 
@@ -1532,6 +1565,9 @@ def truth_value(e):
     return (isinstance(e, C.Binary) and e.op in COMPARISONS) or (isinstance(e, C.Unary) and e.op == "!")
 
 
+_RUN = threading.local()    # the tidy run under way in this thread: {condition's key: its answer} (conditions)
+
+
 def conditions(fn):
     """A branch's condition that the lifter computed from flags (a compare's subtraction with its
     carry and overflow) as the comparison it is, when the evaluator (dread.cexpr) finds one that
@@ -1539,19 +1575,44 @@ def conditions(fn):
     statement: a flag's own value (z = (u32)((u64)r0 + (u32)~r3 + 1) == 0 as z = r0 == r3: a flag an
     IT block's ifs read in turn, or one read across other statements, stays a variable), the operands
     of && || ! where the whole has no smaller form (z = r0 == r5 || r4 == r1 from a conditional
-    compare), a select's condition wherever the select is (in a return's value)."""
+    compare), a select's condition wherever the select is (in a return's value). Within one tidy run a
+    condition asked again (every round of the passes asks them all) gets the answer it got, by what the
+    search reads of it: its text, its variables' types, the widths of int and long, whether z3 is there
+    (until 2026-10-23 each round searched again: two thirds of the searches for FreeRTOS's GCC -Os
+    demo were of a condition the same run had searched before). A proof that ran out of time
+    (cexpr.PROOF_MS) so stays a no for the rest of the run."""
+    import copy
     ctx = context(fn)
     changed = False
 
     def simpler(cond):
-        if size(cond) <= 3 or loads_once(cond) is None or cexpr.z3 is None:
+        limit = size(cond)
+        if limit <= 3:
             return None
-        check = cexpr.Checker(cond, ctx, as_bool=True)
-        for cand in candidates(cond, ctx):
-            if size(cand) >= size(cond):
-                return None
-            if same_loads(cond, cand) and check.stands_for(cand):
-                return cand
+        names = sorted({x.id for x in walk_expr(cond) if isinstance(x, C.Name)})
+        key = (C.expr_text(cond), tuple((n, ctx.types.get(n)) for n in names), ctx.int_bits, ctx.long_bits,
+               cexpr.z3 is not None)
+        memo = getattr(_RUN, "memo", None)
+        if memo is not None and key in memo:
+            got = memo[key]
+            return copy.deepcopy(got) if got is not None else None
+        got = _simpler(cond, limit)
+        if memo is not None:
+            memo[key] = copy.deepcopy(got) if got is not None else None
+        return got
+
+    def _simpler(cond, limit):
+        loads = loads_once(cond)
+        if loads is None or cexpr.z3 is None:
+            return None
+        check = None                        # (made for the first candidate that reads cond's loads)
+        for _, cand, recipe in shared_candidates(cond, ctx, below=limit):
+            if loads_once(cand) != loads:   # (same_loads)
+                continue
+            if check is None:
+                check = cexpr.Checker(cond, ctx, as_bool=True)
+            if check.stands_for(cand):
+                return made_candidate(recipe, ctx)
         return None
 
     def truths(e, cond=False):
@@ -1771,16 +1832,21 @@ def values(fn):
             value, target = s.e, result
         else:
             continue
-        if size(value) < 6 or loads_once(value) is None or len(operands(value)) > 3:
+        limit, loads = size(value), loads_once(value)
+        if limit < 6 or loads is None or len(operands(value)) > 3:
             continue
         if target is None or cexpr.z3 is None:
             continue
         cast = "%s%d" % ("s" if target[1] else "u", target[0])
-        check = cexpr.Checker(C.Cast(cast, value), ctx)
+        check = None                        # (made for the first candidate that reads value's loads)
         for cand in sorted(value_candidates(value, ctx), key=size):
-            if size(cand) >= size(value):
+            if size(cand) >= limit:
                 break
-            if same_loads(value, cand) and check.stands_for(C.Cast(cast, cand)):
+            if loads_once(cand) != loads:   # (same_loads)
+                continue
+            if check is None:
+                check = cexpr.Checker(C.Cast(cast, value), ctx)
+            if check.stands_for(C.Cast(cast, cand)):
                 if isinstance(s, C.Return):
                     s.e = cand
                 else:
@@ -2217,7 +2283,17 @@ def group_declarations(fn):
 
 def tidy(fn, run=None, passes=None, rounds=8):
     """All passes, again until none changes anything (at most rounds times); then the calls' and the
-    function's own arguments (trim_calls, params) and the passes once more."""
+    function's own arguments (trim_calls, params) and the passes once more. The conditions' answers
+    are kept for the run (_RUN: conditions)."""
+    outer = getattr(_RUN, "memo", None)
+    _RUN.memo = {}
+    try:
+        return _tidy(fn, run, passes, rounds)
+    finally:
+        _RUN.memo = outer
+
+
+def _tidy(fn, run, passes, rounds):
     def settle():
         for _ in range(rounds):
             changed = False
