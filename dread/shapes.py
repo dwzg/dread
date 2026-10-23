@@ -1932,7 +1932,12 @@ class Plan:
     {function: [result type or None, parameter type or None, ...]} (dread.vartypes: pointers to the
     width a variable is dereferenced at, structure pointers a callee takes, s32 from signed compares;
     the prototypes also hold the structure pointers of typed parameters above), empty where the table
-    has none (made before 2026-10-23's types of variables)."""
+    has none (made before 2026-10-23's types of variables). keeps and returns: {function: [indices of
+    the parameters it may keep]} and {function: [indices of the parameters its result may be]}
+    (dread.frames kept_params: whether an object of the frame handed to it needs volatile), None where
+    the table does not say (made before 2026-10-23's frame objects); whole: the functions whose frame's
+    region dread.frames writes as one object, as before 2026-10-23 (the check puts a function there
+    whose objects the cases rejected)."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
@@ -1943,6 +1948,9 @@ class Plan:
         self.params = None              # function -> [indices of the parameters it uses as a pointer]
         self.variables = {}             # function -> {"digest": ..., "types": {variable: type}} (dread.vartypes)
         self.prototypes = {}            # function -> [result, parameters ...]: types or None (dread.vartypes)
+        self.keeps = None               # function -> [indices of the parameters it may keep] (dread.frames)
+        self.returns = None             # function -> [indices of the parameters its result may be] (dread.frames)
+        self.whole = set()              # functions whose frame's region is one object (dread.frames, the check)
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -1965,6 +1973,12 @@ class Plan:
             out["variables"] = {f: _variables_entry(e) for f, e in sorted(self.variables.items())}
         if self.prototypes:
             out["prototypes"] = {f: list(t) for f, t in sorted(self.prototypes.items())}
+        if self.keeps is not None:
+            out["keeps"] = {f: sorted(ix) for f, ix in sorted(self.keeps.items())}
+        if self.returns is not None:
+            out["returns"] = {f: sorted(ix) for f, ix in sorted(self.returns.items())}
+        if self.whole:
+            out["whole"] = sorted(self.whole)
         return out
 
     @classmethod
@@ -1983,6 +1997,9 @@ class Plan:
         p.params = {f: list(ix) for f, ix in data["params"].items()} if "params" in data else None
         p.variables = {f: _variables_entry(e) for f, e in data.get("variables", {}).items()}
         p.prototypes = {f: list(t) for f, t in data.get("prototypes", {}).items()}
+        p.keeps = {f: list(ix) for f, ix in data["keeps"].items()} if "keeps" in data else None
+        p.returns = {f: list(ix) for f, ix in data["returns"].items()} if "returns" in data else None
+        p.whole = set(data.get("whole", []))
         return p
 
     def align(self, name, depth=0):
@@ -2491,11 +2508,38 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     for k in sorted(moved, reverse=True):
         fn.body.body.insert(0, C.Decl("volatile struct %s" % cname(k), [C.Declarator(n, ptr="*")
                                                                           for n in sorted(moved[k])]))
-    at = next((i + 1 for i, item in enumerate(tree.items)       # (after the #include: before the file's
-               if isinstance(item, C.Raw) and item.text.startswith("#include")), tree.items.index(fn))    # declarations)
-    present = {item.text for item in tree.items if isinstance(item, C.Raw)}     # (a file whose other function
-    for k in reversed(order):                                                   # has them already: C17 forbids
-        text = struct_text(cname(k), p.structs[k], names.get(k, (k, {}))[1],    # a second definition)
+    define(tree, fn, p, set(typed.values()), names)
+    from dread.build import NULL_CHECKS     # (a pointer it dereferences may be 0 and still be compared with 0:
+    tree.items.insert(0, C.Raw(NULL_CHECKS))    # dread.build compiles it so)
+    return sorted(order)
+
+
+def define(tree, fn, p, keys, names=None):
+    """The plan's structures keys defined in fn's file, with those they hold (a held one before its
+    holder) and declarations of those their pointer fields point to, after the file's #include
+    (before its declarations), each only where the file has none yet (a file whose other function
+    has it already: C17 forbids a second definition); what apply_types writes, and dread.frames for
+    an object of the frame a callee's parameter types. Returns the structures in their order."""
+    names = names or {}
+
+    def cname(k):
+        return names.get(k, (k, {}))[0]
+    order = []
+
+    def visit(k, depth=0):
+        if k in order or depth > 8:
+            return
+        for inner in sorted(set(p.embeds.get(k, {}).values())):
+            visit(inner, depth + 1)
+        order.append(k)
+    for k in sorted(set(keys)):
+        visit(k)
+    ptrs = {k: dict(p.pointers.get(k, {})) for k in order}
+    at = next((i + 1 for i, item in enumerate(tree.items)
+               if isinstance(item, C.Raw) and item.text.startswith("#include")), tree.items.index(fn))
+    present = {item.text for item in tree.items if isinstance(item, C.Raw)}
+    for k in reversed(order):
+        text = struct_text(cname(k), p.structs[k], names.get(k, (k, {}))[1],
                            {off: cname(t) for off, t in ptrs[k].items()},
                            {off: (cname(i), p.size(i)) for off, i in p.embeds.get(k, {}).items()})
         if text not in present:
@@ -2503,6 +2547,4 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     for t in sorted({t for ps in ptrs.values() for t in ps.values()}, reverse=True):
         if "struct %s;" % cname(t) not in present:      # (a field may point to a structure defined after it)
             tree.items.insert(at, C.Raw("struct %s;" % cname(t)))
-    from dread.build import NULL_CHECKS     # (a pointer it dereferences may be 0 and still be compared with 0:
-    tree.items.insert(0, C.Raw(NULL_CHECKS))    # dread.build compiles it so)
-    return sorted(order)
+    return order

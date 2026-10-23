@@ -236,6 +236,19 @@ the line `/* dread: overflow wraps */` (dread.build: compiled with -fno-strict-o
 pointers with dread.build's null checks line. A file from before has neither part: readable C is as
 before (a structure pointer's advance by its size is p + 1 all the same).
 
+`keeps` and `returns` (since 2026-10-23; written whenever the check runs, also empty) list, for every
+analysed function, the indices of the parameters it may keep and those whose value its result may be
+(dread.frames kept_params): `{FUNCTION: [0, 2]}`. A parameter is kept where a value derived from it is
+stored into memory or a global, handed to inline assembly, through a pointer, or to a callee that may
+keep it (one not analysed keeps all); an opaque function (a naked entry, a variadic function regflow
+cannot tell) is listed with every index from 0 to 15. dread.frames declares an object of the frame
+whose address goes only to callees that keep nothing without volatile. A file from before has neither
+part: every object of the frame is volatile, as before. `whole` (left out when empty; since
+2026-10-23): `[FUNCTION, ...]`, the functions whose frame's region dread.frames writes as one volatile
+object, as before that day, instead of an object at each address handed out: the check puts a
+function there whose objects its cases rejected (a callee reaching past the object it was given), and
+keeps it there when it is accepted so; the builds read it.
+
 ### `wide_results.txt` (`wide_results`)
 
 Callees whose generic stubs (dread.autocase: a case's `calls`) answer two words: one name per line,

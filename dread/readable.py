@@ -6,7 +6,9 @@ another on the tree of dread.cparse (STAGES), without a language model. None of 
 by construction: `--check` builds every function of the lifted table from its readable C, runs the
 cases the lift check accepted it with, and keeps a function's readable C only when they agree and
 run every instruction of the original, as for lifted C, and when the whole image's scenarios agree;
-a function that fails is built from its lifted C again. The functions accepted go into the image's
+a function that fails is built from its lifted C again (one whose frame's objects, dread.frames, its
+cases reject is tried once more first, its frame's region one object: the readable_types table's
+whole). The functions accepted go into the image's
 readable table (config/readable.txt), and dread recon builds them from readable C. Names and types
 are left to the pilot (dread pilot).
 
@@ -16,9 +18,12 @@ them the tables (_named): memory at fixed addresses as names, the fields of stru
 data as members of one object (dread.naming apply_globals with the readable_types plan's statics,
 dread.statics: g_20000030.f_4), the structures behind pointers (dread.shapes), the types of variables,
 parameters and externs (dread.vartypes: volatile u8 *p, p[1], s32), the variables' names;
-then the part of the frame that addresses handed out reach becomes one local object (dread.frames: a
-structure, stack36.f_4, (u32)&stack36.f_4, with a union where accesses overlap; an array of bytes
-where none is at a constant offset, (u32)stack40). Last, constants and casts are written by their use
+then the part of the frame that addresses handed out reach becomes the function's local objects
+(dread.frames: one at each address handed out, below the words the entry saves its caller's registers
+into; a scalar stack36, an array of bytes u8 stack20[12] or of the width an index or a callee's
+parameter says, stack48[r3], a callee's structure struct s_29 stack32, a structure of its own for
+mixed accesses, stack40.f_4, with a union where accesses overlap; volatile only where an address
+escapes into memory, by the readable_types table's keeps). Last, constants and casts are written by their use
 (dread.polish: -1 for ~0x0u returned, ' ' for 0x20u compared with a character, 0 for (u8)0x0u stored
 into a byte, x++); the naming questions' C gets it too, after the digest their names are made for.
 
@@ -75,6 +80,7 @@ class Context:
 
     def __init__(self, target=None, image=None, program=None, flow=None):
         self.arg_regs, self.reads, self.preserved, self.variadic = [], {}, {}, set()
+        self.save_areas = set()         # functions whose entry pushes argument registers only (entry_save_areas)
         self.results = []               # the registers a result comes back in (the target's [abi])
         self.overwritten = {}           # function -> what it writes on every path, its caller's never read
         self.unread = set()             # functions whose result no caller reads (dread.shapes analyse)
@@ -87,6 +93,8 @@ class Context:
         self.image_spans = None         # where the image keeps static data (dread.statics image_spans)
         self._struct_names = None
         self._static_names = None
+        self._program = None            # the program (its machine code: pushes and the frame's save words,
+        self._saves = {}                # dread.frames; no table, so not in context_key)
         if target is None:
             return
         self.plan = shapes.load_plan(image)
@@ -97,6 +105,7 @@ class Context:
         from dread import regflow, statics
         from dread.program import Program
         program = program or Program(target, image)
+        self._program = program
         flow = flow or regflow.load(target, image, program)
         self.image_spans = statics.image_spans(program)
         self.arg_regs = list(target.abi.arg_regs)
@@ -107,6 +116,7 @@ class Context:
         result = target.abi.result[0] if target.abi.result else None
         self.unread = {fn.name for fn in program.functions if result not in flow.kept_regs(fn.name)}
         self.variadic = variadic_reach(program)
+        self.save_areas = entry_save_areas(program)
 
     def struct_names(self):
         """{s_N: (name, {offset: field name})} for the plan's structures the table names (computed
@@ -125,6 +135,29 @@ class Context:
                                                      arrays=self.plan.arrays)
         return self._static_names
 
+    def saves(self, name):
+        """{offset from sp0 (negative): register} of the frame words a function's entry saves what it keeps
+        for its caller into (dread.frames save_words: its callee-saved registers and the return
+        address), {} without a program or for a function the program does not have; made once a
+        function. They are no local's bytes (dread.frames)."""
+        if name not in self._saves:
+            fn = self._program.by_name.get(name) if self._program is not None else None
+            out = {}
+            if fn is not None:
+                from dread import frames
+                out = {-k: r for k, r in frames.save_words(self._program, fn).items()}
+            self._saves[name] = out
+        return self._saves[name]
+
+    def is_push(self, address):
+        """Whether the instruction at address is a push (the arch layer's stack_kind); False without a
+        program or where it says nothing."""
+        prog = self._program
+        if prog is None or address is None or not hasattr(prog.arch, "stack_kind"):
+            return False
+        insn = prog.insn(address)
+        return insn is not None and prog.arch.stack_kind(insn) == "push"
+
     def unknown(self, name):
         """Whether what a function reads cannot be told from regflow: it is variadic or calls one on
         (regflow counts a variadic function's unnamed argument registers in its save area as no use,
@@ -134,8 +167,9 @@ class Context:
 
     def arity(self, name):
         """How many argument registers a function reads at its entry, counted from the first up to the
-        last it reads; None when it is not known (unknown)."""
-        if name not in self.reads or self.unknown(name):
+        last it reads; None when it is not known (unknown, or its entry keeps argument registers in a
+        save area: entry_save_areas)."""
+        if name not in self.reads or self.unknown(name) or name in self.save_areas:
             return None
         return max((i + 1 for i, r in enumerate(self.arg_regs) if r in self.reads[name]), default=0)
 
@@ -148,6 +182,32 @@ class Context:
         results = (self.results if len(self.results) >= count else self.arg_regs)[:count]
         own = self.overwritten.get(name, set())
         return [r for r in results if r in self.arg_regs and r not in own]
+
+
+def entry_save_areas(program):
+    """The functions whose first instruction pushes argument registers only, the last of them among
+    them (the arch layer's stack_kind and pushed_registers; the lifter's save_area): a variadic
+    function's save area as GCC's newlib keeps it (printf pushes r0-r3, sprintf r1-r3, before it saves
+    anything else), which variadic_reach does not find (regflow's variadic_save_area leaves pushes to
+    its rows). A call of one keeps all its arguments (Context.arity): trimmed to what regflow says it
+    reads, FreeRTOS's GCC -Os tasks called sprintf(buf, fmt) without the value it prints, and the whole
+    image agreed only as long as the C compiler happened to leave that value in r2 (2026-10-23, when
+    dread.frames changed their frames' layout). Not propagated to their callers' callers as
+    variadic_reach does (a function that hands its arguments on to printf, vAssertCalled, keeps its
+    trimmed calls): empty where the layer has no pushes."""
+    arch = program.arch
+    if not (hasattr(arch, "stack_kind") and hasattr(arch, "pushed_registers")):
+        return set()
+    args = list(program.target.abi.arg_regs)
+    out = set()
+    for fn in program.functions:
+        insn = program.insn(fn.insns[0]) if fn.insns else None
+        if insn is None or arch.stack_kind(insn) != "push":
+            continue
+        regs = [r for r in arch.pushed_registers(insn) if r is not None]
+        if regs and args and set(regs) <= set(args) and args[-1] in regs:
+            out.add(fn.name)
+    return out
 
 
 def variadic_reach(program):
@@ -205,6 +265,8 @@ def transform(name, text, stages=None, context=None):
 
 
 EXTERN = re.compile(r"^extern (\w+) (\w+)\(([^)]*)\);$")
+FRAME_OBJECT = re.compile(r"^\s*(?:volatile\s+)?[\w ]+\bstack\d+(?:_\d+)?\b(?:\[\d+\])?"
+                          r"(?:\s+__attribute__[^;]*)?;$", re.M)     # (dread.frames' objects, declared)
 
 
 def readable_tree(name, text, stages=None, context=None):
@@ -698,7 +760,7 @@ def margin_text(lines):
 def _named(name, text, stages, context=None):
     """(tree, function, stages) of the readable C with the tables applied: the globals' names, the
     structures, the variables' names (each only for the C it was made for), then the frame's region
-    that addresses handed out reach as one object (dread.frames); None when the lifted C is not the
+    that addresses handed out reach as the function's objects (dread.frames); None when the lifted C is not the
     dialect. stages: [] when the function keeps fixed registers (left as the lifter wrote it)."""
     made = readable_tree(name, text, stages, context)
     if made is None:
@@ -724,8 +786,8 @@ def _named(name, text, stages, context=None):
             vartypes.apply(tree, fn, context.plan, made_for, names=context.struct_names(), int_bits=int_bits)
         if entry:
             naming.apply(tree, fn, entry, made_for)     # (only for the C it was made for: its digest)
-        from dread import frames            # (the frame that addresses handed out reach as one object:
-        frames.frame_struct(tree, fn)       # on the names the table gave)
+        from dread import frames            # (the frame that addresses handed out reach as its objects:
+        frames.frame_objects(tree, fn, context)     # on the names the table gave)
         polish_tree(tree, fn, context, int_bits)    # (constants and casts by their use: last)
     return tree, fn, stages
 
@@ -916,6 +978,27 @@ def carry(target, image, names=None, out=print, jobs=None, program=None, flow=No
     return got
 
 
+def make_plan(program, context, lifter, names, flow=None, digests=None):
+    """The readable_types table of the functions names (the lifted table's) into context.plan, as the
+    check makes it before any function is checked, and returned: the structures and arrays of static
+    data (dread.statics), then the structures behind pointers (dread.shapes), from every function's
+    readable C (static data first: an index added to an address inside it is no pointer for the
+    shapes); the types of variables and prototypes (dread.vartypes); which parameters a function may
+    keep or return (dread.frames kept_params). The builds read the table too. digests, a dict: filled
+    with each function's digest (what the check's carry of names compares with)."""
+    from dread import frames, shapes, vartypes
+    digests = {} if digests is None else digests
+    trees = analysis_trees(program, context, lifter, names, named=context.globals, digests=digests)
+    found, arrays, s = static_plan(program, context, trees, flow)
+    context.plan = shapes.plan(s, trees, digests)
+    context.plan.statics, context.plan.arrays = found, arrays
+    context.plan.params = shapes.pointer_params(s, trees)
+    context._struct_names = context._static_names = None
+    vartypes.plan(context.plan, trees, digests, context)
+    context.plan.keeps, context.plan.returns = frames.kept_params(trees, context)
+    return context.plan
+
+
 def check(target, image, names=None, out=print, jobs=None):
     """The acceptance loop for readable C (see the module's docstring); returns the accepted names.
     names: functions of the lifted table to try (default: all of it). A build that dropping functions
@@ -929,20 +1012,9 @@ def check(target, image, names=None, out=print, jobs=None):
     context = Context(target, image, program, flow)
     work = os.path.join(target.build, "readable-check", image.name)
     lifted = build.read_names(image.table("lifted"))
-    # The structures and arrays of static data (dread.statics), then the structures behind pointers
-    # (dread.shapes), from every lifted function's readable C before any is checked: the readable_types
-    # table, which the builds read too. Static data first: an index added to an address inside it is
-    # no pointer for the shapes.
     from dread import shapes
     digests = {}
-    trees = analysis_trees(program, context, lifter, lifted, named=context.globals, digests=digests)
-    found, arrays, s = static_plan(program, context, trees, flow)
-    context.plan = shapes.plan(s, trees, digests)
-    context.plan.statics, context.plan.arrays = found, arrays
-    context.plan.params = shapes.pointer_params(s, trees)
-    context._struct_names = context._static_names = None
-    from dread import vartypes                  # (the types of variables and prototypes: dread.vartypes)
-    vartypes.plan(context.plan, trees, digests, context)
+    make_plan(program, context, lifter, lifted, flow, digests=digests)
     shapes.store_plan(image, context.plan)
     out("dread readable --check: %d structures, pointers to them in %d functions; %d structures and %d arrays of "
         "static data (readable_types)" % (len(context.plan.structs), len(context.plan.typed),
@@ -1022,13 +1094,23 @@ def check(target, image, names=None, out=print, jobs=None):
             f.write("\n".join(lines) + "\n")
         failing = {name for name, count, bad in results if bad}
         gone = failing | set(uncovered)
+        # A function whose frame's region readable C split into objects (dread.frames) is tried once more
+        # with the region as one object, as before 2026-10-23: a callee given one of its objects may reach
+        # past it where the original reached the next (a generated case's queue with another item size),
+        # which the cases see and the split cannot keep (the readable_types table's whole)
+        whole = {n for n in gone if n not in context.plan.whole and n in texts and
+                 FRAME_OBJECT.search(readable_texts({n: texts[n]}, context, jobs)[n] or "")}
         for text in lines:
             for line in text.splitlines():
                 for name in gone:
                     if line.startswith(("FAIL %s " % name, "UNCOVERED %s:" % name)) and name in accepted:
-                        if verdicts.get(name, ("",))[0] != "lifted":
+                        if name in whole:
+                            out("whole    %-24s %s" % (name, ("its frame as one object again: " + line)[:200]))
+                        elif verdicts.get(name, ("",))[0] != "lifted":
                             drop([name], line)
-        accepted = [n for n in accepted if n not in gone]
+        if whole:
+            context.plan.whole |= whole         # (in context_key: the next round's readable C is made anew)
+        accepted = [n for n in accepted if n not in gone - whole]
         if not gone:
             break
     runs = target.scenarios and hasattr(program.arch, "reset")
@@ -1073,6 +1155,10 @@ def check(target, image, names=None, out=print, jobs=None):
         found = whole(accepted) if accepted else None
     for name in accepted:
         verdicts[name] = ("readable", "")
+    if context.plan.whole:
+        context.plan.whole &= set(accepted)
+        from dread import shapes
+        shapes.store_plan(image, context.plan)  # (the functions whose frame is one object: the builds read it)
     os.makedirs(work, exist_ok=True)
     with open(os.path.join(work, "verdicts.tsv"), "w") as f:
         f.write("function\tverdict\treason\n")

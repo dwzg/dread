@@ -554,7 +554,7 @@ def test_the_image_s_structures_once_in_a_header_the_printed_form_includes(tmp_p
     ring_get's pointer, s_1, and the static ring timer_irq and main hand them): the header defines each
     structure once; a function's printed form (printed: what dread readable prints and --out writes)
     includes it instead of defining them, names the members it uses in a comment, and keeps its macros,
-    externs and its frame's structure; the compiled form (transform: what the gate builds) still
+    externs and its frame's objects; the compiled form (transform: what the gate builds) still
     defines them, and both compile to the same code. dread readable --out writes the header beside the
     files, --header prints it."""
     from dread import lift, regflow, shapes
@@ -604,7 +604,7 @@ def test_the_image_s_structures_once_in_a_header_the_printed_form_includes(tmp_p
     assert "#define g_%x (*(volatile struct g_%x_t *)0x%xu)" % ((min(p.statics),) * 3) in irq, irq
     assert "extern u32 ring_put(" in irq, irq
     main = readable.printed("main", lifter.lift(program.by_name["main"]).text, context)
-    assert "} __attribute__((packed, aligned(4))) stack" in main, main   # (its frame: its own)
+    assert re.search(r"^    volatile u8 stack\d+\[12\];$", main, re.M), main     # (its frame's buffer: its own)
     flags = target.compiler.generated_cflags()
     a = build.compile_all(target, image, str(compiled), str(tmp_path / "obj-a"), quiet=True, flags=flags)
     b = build.compile_all(target, image, str(shown), str(tmp_path / "obj-b"), quiet=True, flags=flags)

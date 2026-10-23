@@ -798,6 +798,29 @@ def frame_index(e):
     return (k - (1 << 32) if k >= 1 << 31 else k), others
 
 
+def index_sum(e):
+    """(offset, made, terms) of a sum that adds an index to a frame address below sp0 (frame_index):
+    made, the frame addresses written inside it (sp0 - 48 in sp0 - 48 + r3 - 1: what the code computed
+    before it added the index; sp0 alone, as clang's sp0 + r5 - 0x14u has it, is none); terms, the
+    index's terms as [(sign, expression)], as written (casts kept). None for anything else, and for a
+    sum at or above sp0."""
+    got = frame_index(e) if isinstance(e, C.Binary) else None
+    if got is None or got[0] >= 0:
+        return None
+    made = set()
+
+    def visit(x):
+        if frame_address(x):
+            off = frame_offset(x)
+            if off is not None and off < 0:
+                made.add(off)
+        elif isinstance(x, C.Binary) and x.op in ("+", "-"):
+            visit(x.l)
+            visit(x.r)
+    visit(e)
+    return got[0], tuple(sorted(made)), list(got[1])
+
+
 def frame_sums(e, found, inside=False):
     """Into found, the offsets below sp0 of the frame addresses that sums in e add an index to
     (frame_index, each sum whole: not the parts of a longer one). The frame passes count them as
@@ -855,7 +878,9 @@ def frame_locals(fn):
     become variables, and below a word that reaches into what lies above it (region_start); from there
     up the frame stays as it is, since what the address is handed to may reach anything above it
     (dread.frames). Nothing changes
-    when an address that leaves is not a constant offset below sp0. A slot accessed with one size but
+    when an address that leaves is not a constant offset below sp0; an index added to sp0 before the
+    constant (clang's sp0 + r5 - 0x14u, index_sum) is an index added to sp0 - 20, not an address at
+    sp0 that leaves (until 2026-10-23 such a frame stayed raw, every slot of it). A slot accessed with one size but
     both signs (strb, then ldrsb) becomes a variable of the unsigned type, its signed reads cast:
     (s8)s9. A slot that may be read before it is written (what earlier frames left there, a word a
     call through a pointer is handed: the lift check compares such reads apart) stays as it is, the
@@ -880,6 +905,12 @@ def frame_locals(fn):
                 escapes[0] = True
             else:
                 escaped.add(off)
+            return
+        got = index_sum(e)
+        if got is not None:                 # (an index added to a frame address, frame_sums: what the code
+            escaped.update(got[1])          # computed it from leaves too; clang's sp0 + r5 - 0x14u names
+            for _, x in got[2]:             # sp0 alone, which is no address at sp0 that leaves)
+                visit(x)
             return
         if isinstance(e, C.Name) and e.id == "sp0":
             escapes[0] = True
@@ -3072,6 +3103,124 @@ def trim_calls(fn, run):
     return changed
 
 
+def push_room(fn, run=None):
+    """A push's stores into the function's own frame go where no load of the function reads a byte
+    of their words: the words a push makes room for locals with (GCC -Os pushes r0-r3 for an 8- or
+    12-byte local whose address goes to a callee: gizmo's print_status pushes {r0, r1, r2, r3, r4, lr}
+    for its 12-byte buffer), which hold whatever the pushed registers held. A correct program reads a
+    local only after something wrote it, and GCC writes a local's first value with a store of its
+    own, never through such a push (an address-taken parameter: push {r0, r1, r2, lr}; str r0, [sp,
+    #4]), so nothing reads those words before they are written; kept, the stores read the caller's
+    registers, which made phantom parameters (print_status(void) took four, regflow says it reads
+    none: a push is no use there) and the first fields of the frame's objects (dread.frames). Only
+    with the program in the run's context (the arch layer's stack_kind says the instruction is a
+    push), for the body's own statements, not for a variadic function or one that calls one (a save
+    area of arguments the callee reads through a va_list), and only for a word the function loads no
+    byte of directly (a pop loads what it restores; regflow's argument pushed and loaded back stays).
+    A word the function does load goes too where the statements behind the push store every byte of
+    it that is loaded before anything may read one (xQueueGenericSend pushes r1 and stores its fourth
+    argument over it at once). The words may be read by a callee given their address before
+    anything writes them only in a program that reads an uninitialised local; the gate checks every
+    function on its cases."""
+    ctx = run.context if run is not None else None
+    if ctx is None or getattr(ctx, "_program", None) is None or ctx.unknown(fn.name) or \
+            fn.name in getattr(ctx, "save_areas", ()):
+        return False
+    loaded, stores = set(), []
+
+    def access(e):
+        if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and frame_address(e.e.e):
+            off = frame_offset(e.e.e)
+            t = e.e.type.replace("volatile", " ").replace("*", " ").split()
+            if off is not None and len(t) == 1 and t[0] in SLOT_SIZES:
+                return off, SLOT_SIZES[t[0]]
+            return None, None
+        return None
+
+    def visit(e, target=False):
+        if e is None:
+            return
+        got = access(e)
+        if got is not None:
+            off, size = got
+            if off is None:
+                loaded.add(None)                # (an access at no constant offset: it may load any word)
+            elif not target:
+                loaded.update(range(off, off + size))
+            return
+        if isinstance(e, C.Assign):
+            visit(e.target, target=e.op == "=")
+            visit(e.value)
+            return
+        for c in _children(e):
+            visit(c)
+
+    def visit_stmt(st):
+        if isinstance(st, C.Decl):
+            for d in st.items:
+                if d.name != FRAME_BASE:
+                    visit(d.init)
+        elif isinstance(st, C.Asm):
+            for o in st.outputs + st.inputs:
+                visit(o.e)
+        else:
+            for e in _stmt_all_exprs(st):
+                visit(e)
+        for inner in _inner(st):
+            visit_stmt(inner)
+    body = fn.body.body
+    for i, st in enumerate(body):
+        visit_stmt(st)
+        if isinstance(st, C.ExprStmt) and isinstance(st.e, C.Assign) and st.e.op == "=" and st.addr is not None:
+            got = access(st.e.target)
+            if got is not None and got[0] is not None and not has_effects(st.e.value) and ctx.is_push(st.addr[0]):
+                stores.append((i, st, got))
+    if None in loaded:
+        return False
+
+    def overwritten(i, live):
+        """Whether the statements behind body[i] store every byte of live before anything may read
+        one: plain statements without calls, their accesses at constant frame offsets."""
+        for st in body[i + 1:]:
+            if not (isinstance(st, C.ExprStmt) and isinstance(st.e, C.Assign)) or \
+                    any(isinstance(x, C.Call) for x in walk_expr(st.e)):
+                return False
+            reads, writes, other = set(), set(), [False]
+
+            def look(e, target=False):
+                got = access(e)
+                if got is not None:
+                    if got[0] is None:
+                        other[0] = True
+                    else:
+                        (writes if target else reads).update(range(got[0], got[0] + got[1]))
+                    return
+                if isinstance(e, C.Unary) and e.op == "*" or isinstance(e, (C.Index, C.Member)):
+                    other[0] = True         # (memory through another address)
+                if isinstance(e, C.Assign):
+                    look(e.target, target=e.op == "=")
+                    look(e.value)
+                    return
+                for c in _children(e):
+                    look(c)
+            look(st.e)
+            if other[0] or reads & live:
+                return False
+            live = live - writes
+            if not live:
+                return True
+        return False
+    gone = set()
+    for i, st, (off, size) in stores:
+        live = loaded & set(range(off, off + size))
+        if not live or overwritten(i, live):
+            gone.add(id(st))
+    if not gone:
+        return False
+    fn.body.body[:] = [st for st in body if id(st) not in gone]
+    return True
+
+
 def params(fn, run=None):
     """A parameter the body only copies into its register's variable (u32 r0 = a0) is that variable;
     a parameter whose value at the entry nothing reads is none: trailing ones go (the callers'
@@ -3082,11 +3231,13 @@ def params(fn, run=None):
     write the register's variable ends its value there; in a graph of the body's statements the if
     was one node that wrote it on some path only, and gizmo's uart_getc took the r0 it writes on
     either way of its IT block for a parameter). Only for a plain head (type name(parameters)), which
-    is written anew."""
+    is written anew. A push's stores that only make room for locals go first (push_room): they read
+    the caller's registers and made parameters of registers the function does not read."""
     import re
     m = re.match(r"^(\w+) (\w+)\((.*)\)$", fn.head.strip())
     if not m or m.group(2) != fn.name:
         return False
+    pushed = push_room(fn, run)
     names = all_names(fn)
     reads = {}
     for s in fn.body.body:
@@ -3100,7 +3251,7 @@ def params(fn, run=None):
                     for x in walk_expr(e):
                         if isinstance(x, C.Name):
                             reads[x.id] = reads.get(x.id, 0) + 1
-    changed = False
+    changed = pushed
     new = list(fn.params)
     for i, (ptype, pname) in enumerate(fn.params):
         if reads.get(pname, 0) != 1:

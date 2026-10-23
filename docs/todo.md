@@ -1489,6 +1489,13 @@ model).
   no correct program reads before writing them; the gate decides), for (2) and (3) pass a variable of
   no value where the caller's register only flows through (the callee's save area reads it, but
   nothing the function computed), each keeping what the comparisons see.
+  (1) done 2026-10-23 with "Local objects whose address goes to a callee" (dread.tidy push_room: a
+  push's stores into words no load of the function reads, or that it stores over before anything may
+  read them, go): gizmo a32, m3 and m4's print_status and main 4 parameters -> 0 each, FreeRTOS GCC -Os
+  32 fewer in 21 functions. (2) grew on the GCC builds by the same work: newlib's printf and sprintf
+  push their arguments, which variadic_reach did not find, so their calls were trimmed (sprintf(buf,
+  fmt) without its value); now such a call keeps them all (readable.entry_save_areas), and five
+  functions that call one (three on GCC -O0) pass their entry registers on.
 - [x] **Flags as comparisons, the rest.** After the IT-block work, flags still print as u64 sums with
   carry and zero variables where one compare or subtraction is read by two conditions (borrow, then
   zero), where an add's carry is tested, where a compiler dispatches by successive subtractions
@@ -1552,7 +1559,7 @@ model).
   r0_10 == 0) or whose condition has no comparison of the variables left (clang -O2
   xAreTaskNotificationTasksStillRunning: subs r1, r1, r2; cmphi r1, #5, the first compare's hi needs
   the load r2 held); products' high words and the 64-bit counter's words stay 64-bit, as they are.
-- [ ] **Local objects whose address goes to a callee.** A frame region whose address is passed on
+- [x] **Local objects whose address goes to a callee.** A frame region whose address is passed on
   prints as raw accesses through the lifted frame array, or as one packed structure named after its
   offset with word fields over a byte buffer or over separate scalars; a frame array indexed by a loop
   variable stays raw too. Split such a region into locals by its runs of accesses (scalars, `u8
@@ -1561,6 +1568,91 @@ model).
   print_status (`char buf[12]` as `volatile stack20_t stack20` with u32 fields, `(u32)&stack20.f_0`
   to fmt_dec and uart_puts); FreeRTOS mps2-gcc-Os xTimerGenericCommandFromTask (the daemon message as
   a packed `stack40_t`). The raw form (no structure at all): none found in the public builds.
+  Done 2026-10-23 (dread.frames plan, Scan, kept_params, save_words, frame_objects, whole_frame;
+  dread.tidy push_room and index_sum; dread.readable Context.saves, entry_save_areas, make_plan and the
+  check's whole; dread.shapes define and the readable_types table's keeps, returns and whole;
+  docs/decisions.md, "Readable C's frames: an object at each address handed out, volatile only where
+  an address may escape"; docs/formats.md). An object starts at every address handed out (to a callee,
+  into memory, as the result, to assembly; through a variable that holds it; a sum's with an index)
+  and reaches up to the next one, below the words the entry saves its caller's registers into (the
+  callee-saved registers and the return address, through dread.regflow's Frames: no local's bytes,
+  their stores go: RISC-V's lifted C kept `stack20.f_10 = ra;`); objects are joined where an access
+  spans two, where a variable walks downward from an address inside one (printi's print_buf + 11),
+  where an index is added to an address no object starts at (clang's tmp - 1 for tmp[--n]), and over
+  the size of a callee's structure. An object is a scalar where one access fills it (or a callee's
+  parameter types it so), bytes where only bytes or nothing is accessed, an array of the width an index
+  or a callee's parameter says, a callee's structure of dread.shapes where its parameter points to one
+  (each access past it an object of its own: GCC -O0's spilled locals beside the TimeOut_t), else a
+  structure of its own (plain where natural; packed, with unions, where not); an access through an
+  index is an element (stack48[r3]). Volatile only where an address may escape into memory: stored,
+  returned, handed to assembly, through a pointer, or to a callee that may keep it (kept_params over
+  every lifted function, the readable_types table's keeps and returns: a callee not lifted, variadic or
+  naked keeps everything), or accessed by the function through a variable with another type than
+  bytes. A function whose objects its cases reject (a generated case's queue copies another item size
+  than the local holds: clang -O2's prvSendFrontAndBackTest and vPrimaryBlockTimeTestTask) is tried
+  once more with its region as one object, as before (the table's whole). Part (1) of "No parameters
+  from pushes" with it (dread.tidy push_room): a push's stores into words no load of the function
+  reads, or that it stores over before anything may read them, go. The forms: print_status
+  `u32 print_status(void)`, `u8 stack20[12];` (not volatile: fmt_dec and uart_puts keep nothing),
+  `fmt_dec((u32)stack20, ...)`; main `u32 main(void)` with `volatile u8 stack28[12];` (fmt_hex is not
+  lifted: it may keep it); apply_config `u32 stack64; u8 stack60[12]; u8 stack48[40];` (its source's
+  value, key and line; volatile: parse_kv hands value on to parse_uint, which is not lifted) and
+  `stack48[r3] = r2;`; xTimerGenericCommandFromTask `stack40_t stack40;` of `u32 f_0, f_4, f_8; u8
+  pad_c[8];` (plain, not volatile: xQueueGenericSend keeps its queue and its ticks, not the item);
+  xQueueGenericSend `u32 stack36;` and `struct s_29 stack32;` (xTicksToWait, and the TimeOut_t the
+  callees' prototypes type), the push's stores of r1-r3 into them gone. The raw form: clang -O2 adds an
+  index to sp0 before the constant (sp0 + r5 - 0x14u), which frame_locals and dread.frames took for an
+  address at sp0 and left the whole frame raw (prvReceivingTask, prvNonBlockingReceiverTask_53c8,
+  xStreamBufferNextMessageLengthBytes; GCC -Os prvReceivingTask): now prvReceivingTask's cRxBuffer is
+  `u8 stack20[20];` read as `stack20[r5]`, and xStreamBufferNextMessageLengthBytes's length `u32
+  stack24;` that memcpy fills at `(u32)&stack24 + r7`.
+  Found on the way: on the GCC builds newlib's printf and sprintf push their argument registers, which
+  readable.variadic_reach did not find, so their calls were trimmed to what regflow says they read:
+  FreeRTOS GCC -Os's prvNonBlockingSenderTask_4138 and prvReceiverTask_4088 called sprintf(buf, fmt)
+  without the value they print, and the base run's whole image dropped both (it agreed before only by
+  what the C compiler left in r2); entry_save_areas keeps a call of such a function whole (not
+  propagated to their callers' callers: vAssertCalled's calls stay trimmed).
+  Measured on copies of the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2,
+  RISC-V GCC -Os, GCC -O0), main at c145c3d -> this, every lifted function's readable C: the gate
+  accepts every function it accepted (35, 36, 44, 31; 315 -> 317, 275, 252, 354, name by name; GCC
+  -Os gains the two sprintf tasks; clang -O2's prvSendFrontAndBackTest and vPrimaryBlockTimeTestTask
+  with their region whole). Frame objects (functions with any): 5 (5), 5, 5, 5; 56 (56), 50 (50), 45
+  (45), 56 (56) -> 7 (5), 7, 7, 7; 81 (57), 74 (53), 57 (45), 85 (56); of them structures 3, 3, 3, 4;
+  47, 41, 45, 55, all packed -> none on gizmo; 26, 12, 28, 49, of them packed 1, 3, 1, 5 (the whole ones
+  and where accesses overlap), arrays 2, 2, 2, 1; 9, 9, 0, 1 -> 6, 6, 6, 6; 18, 15, 7, 4, scalars 0 ->
+  1, 1, 1, 1; 34, 47, 19, 29, callees' structures 0 -> 0 on gizmo; 3, 0, 3, 3, volatile all -> 5 of 7
+  on each gizmo build; 28 of 81, 56 of 74, 21 of 57, 51 of 85 (where a callee is not lifted, so it may
+  keep the address: gizmo's fmt_hex, strcmp and parse_uint; clang -O2's xQueueGenericSend and
+  xQueueReceive; sprintf, opaque, everywhere), elements through an index 0 -> 2, 2, 2, 0; 1, 1, 0, 0.
+  Raw frame accesses (functions; accesses): GCC -Os 6; 41 -> 5; 36, clang -O2 7; 30 -> 4; 22, RISC-V
+  2; 23 and GCC -O0 6; 25 unchanged, gizmo none: what is left is the wrapped
+  printf and sprintf (the real stack) and the slots a call through a pointer is handed that nothing
+  wrote (_fwalk_sglue, __sflush_r, prvReloadTimer, GCC -O0's prvProcessExpiredTimer), as it must be.
+  Parameters: main and print_status 4 -> 0 on the gizmo ARM builds; GCC -Os 32 fewer in 21 functions
+  (the tasks' pushes), while 5 functions that call printf or sprintf (prvCoreATask, prvCoreBTasks,
+  prvGetRegistersFromStack, vApplicationMallocFailedHook, vApplicationStackOverflowHook; three of them
+  on GCC -O0) now hand their entry registers on to it (the open item's (2), as on clang and RISC-V).
+  Readable C changed in 5, 5, 5, 5; 70, 50, 45, 59 functions (the objects, and the externs where
+  dread.vartypes types a parameter anew); digests (what the names of the readable_names table are
+  made for) in 2, 2, 2, 0; 33, 0, 0, 3 (push_room and the printf and sprintf calls: their names wait
+  for a new proposal). The check's wall time on the warm copies, two runs each alternating main and
+  this, the machine shared with a test run: gizmo 3 to 6 s either way; GCC -Os 277 and 271 -> 44 and 53 s
+  (main halves its whole image to send the two sprintf tasks back; this accepts them), clang -O2 43
+  and 41 -> 51 and 51 s (a second round for the two whole functions, every readable C made anew for
+  the changed table), RISC-V GCC -Os 16 and 20 -> 17 and 22 s, GCC -O0 65 and 69 -> 83 and 72 s;
+  kept_params takes 0.2 s on GCC -Os.
+  Left: the externs keep u32 for a parameter given a frame object (`fmt_dec((u32)stack20, ...)`:
+  dread.vartypes types the externs before the objects exist); an object reaches up to the next
+  address handed out, so slots no address reaches stay fields of the object below them (GCC -O0's
+  spilled locals beside a buffer) unless a callee's structure bounds it: a reach analysis of the
+  callees' parameters (how far their accesses go) would split those and decide volatile where a callee
+  is not lifted from its machine code; an index past an array is undefined in C (as it was past the
+  lifted frame array): the cases decide, no -fno-aggressive-loop-optimizations; the objects' names are
+  the defaults (stackN: the pilot's questions show the frame before dread.frames); printf's and
+  sprintf's callers' callers (vAssertCalled's calls) stay trimmed on the GCC builds; save words only on
+  the entry's straight run (a shrink-wrapped save later is local bytes). Not established: that a callee
+  stays inside the object it is given, that an index stays inside its array (the cases and the whole
+  image decide, as for every transformation; where the cases see otherwise, whole).
 - [ ] **Two-word results that are leftovers.** A function whose callers, or their callers through
   returns, read r1 after it returns is lifted with a u64 result; its readable C reassigns both words
   in every arm, and its callers show `(u32)(f(...) >> 32)`. When the second word is only what a callee
@@ -1671,7 +1763,10 @@ model).
   keeps the item's concern (a wait for a flag an interrupt sets): no volatile on frame objects, and
   none in what the naming question shows. The pointers dread.vartypes types (2026-10-23: `volatile u8
   *p`, `const volatile u16 *q`) are volatile-qualified as dread.shapes' structure pointers are, every
-  access through them the one volatile access it was: this item decides for them too.
+  access through them the one volatile access it was: this item decides for them too. The frame's
+  objects: done 2026-10-23 with "Local objects whose address goes to a callee" (volatile only where an
+  address may escape into memory: dread.frames kept_params; print_status's and
+  xTimerGenericCommandFromTask's are plain now).
 - [ ] **Arrays and members for uniform runs and interior pointers.** An object accessed at constant
   offsets of one element type prints as a structure of numbered fields and padding, walked by integer
   pointer arithmetic; an access through `p + k` stays raw where the structure has a member at k; the

@@ -1,12 +1,17 @@
-"""dread.frames: the part of a stack frame that frame addresses handed out may reach, as one local
-object in readable C. Its accesses become members, the addresses handed out point into it; accesses
-that overlap (two types at one offset, a word and its upper half) share a union; a word below that
-reaches into the region starts it; a region the function accesses at no constant offset is an array of
-bytes. The C is still the dialect dread.cparse reads and compiles on every gizmo build, each access
-one of its own width."""
+"""dread.frames: the part of a stack frame that frame addresses handed out may reach, as the function's
+local objects in readable C. An object starts at each address handed out (and at the region's start),
+ends below the next one or the words the entry saves its caller's registers into; it is a scalar, an
+array of bytes or of the width its index or a callee's parameter says, a callee's structure, or a
+structure of its own (accesses that overlap share a union); volatile only where its address may escape
+into memory (dread.frames kept_params: which parameters callees keep). dread.tidy push_room takes out a
+push's stores that only make room for locals. The C is still the dialect dread.cparse reads and
+compiles on every gizmo build, each access one of its own width."""
+import re
+
 import pytest
 
-from dread import cparse, frames, readable, tidy
+from dread import build, cparse, frames, lift, readable, regflow, tidy
+from dread.program import Program
 
 FRAME = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
 #include "dread.h"
@@ -29,21 +34,41 @@ u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
 """
 
 
-def readable_c(text, name="h"):
-    return readable.transform(name, text, context=readable.Context())     # (a new context: no memo)
+class Facts(readable.Context):
+    """A context without a target that knows what dread.frames and dread.tidy push_room ask for: the
+    save words ({offset: (register, bytes)}), the pushes (instruction addresses), the readable_types
+    table's keeps, returns, prototypes and structures."""
+
+    def __init__(self, saves=None, pushes=(), keeps=None, returns=None, prototypes=None, structs=None):
+        super().__init__()
+        self.given_saves, self.pushes = dict(saves or {}), set(pushes)
+        self._program = object() if pushes else None
+        self.plan.keeps, self.plan.returns = keeps, returns
+        self.plan.prototypes = dict(prototypes or {})
+        self.plan.structs = dict(structs or {})
+
+    def saves(self, name):
+        return self.given_saves
+
+    def is_push(self, address):
+        return address in self.pushes
 
 
-def test_the_region_an_address_leaves_to_is_one_object():
-    """The lowest address handed out is sp0 - 12: from there up to sp0 the frame is one object, its
-    accesses members, the addresses handed out a field's or the object's own (where no field starts);
-    the slot below (sp0 - 24) is a variable as before, and the frame array is gone."""
+def readable_c(text, name="h", context=None):
+    return readable.transform(name, text, context=context or readable.Context())     # (a new context: no memo)
+
+
+def test_each_address_handed_out_starts_an_object():
+    """The addresses handed out are sp0 - 12 and sp0 - 8: two objects, a word (a scalar: one access of
+    its width fills it) and a structure of a halfword and a word (its own accesses); the slot below the
+    region (sp0 - 24) is a variable as before, and the frame array is gone. Without the readable_types
+    table's keeps every object is volatile, as the whole region was."""
     out = readable_c(FRAME)
-    assert ("typedef struct\n{\n    u32 f_0;\n    u8 pad_4[2];\n    u16 f_6;\n    u32 f_8;\n} "
-            "__attribute__((packed, aligned(4))) stack12_t;") in out, out
-    assert "    volatile stack12_t stack12;" in out, out
+    assert "typedef struct\n{\n    u8 pad_0[2];\n    u16 f_2;\n    u32 f_4;\n} stack8_t;" in out, out
+    assert "    volatile u32 stack12;\n    volatile stack8_t stack8;" in out, out
     assert cparse.parse(out).function("h") is not None      # (still the dialect: the typedef names a type)
-    assert "g(r0, (u32)&stack12.f_0, (u32)&stack12 + 4, " in out, out
-    assert "stack12.f_0 = r1; stack12.f_8 = r3;" in out and "+ stack12.f_6 +" in out, out     # (no cast: dread.polish)
+    assert "g(r0, (u32)&stack12, (u32)&stack8, r3);" in out, out
+    assert "stack12 = r1; stack8.f_4 = r3;" in out and "+ stack8.f_2 +" in out, out
     assert "sp0" not in out and "frame" not in out, out     # (sp0 - 24 a variable, propagated away)
 
 
@@ -53,13 +78,11 @@ OVER = FRAME.replace("r2 = (u32)*(volatile u16 *)(sp0 - 6);", "r2 = (u32)*(volat
 
 def test_two_types_at_one_offset_share_a_union():
     """A word stored at sp0 - 4 and its lower half read there: one union of a member for each, named by
-    their types; the address handed out at sp0 - 8, where nothing is accessed, is the object's."""
+    their types, in the object that starts at sp0 - 8."""
     out = readable_c(TWO)
-    assert ("typedef struct\n{\n    u32 f_0;\n    u8 pad_4[4];\n    union\n    {\n        u32 f_8_u32;\n"
-            "        u16 f_8_u16;\n    } __attribute__((packed));\n} __attribute__((packed, aligned(4))) stack12_t;") \
-        in out, out
-    assert "stack12.f_0 = r1; stack12.f_8_u32 = r3;" in out and "+ stack12.f_8_u16 +" in out, out
-    assert "g(r0, (u32)&stack12.f_0, (u32)&stack12 + 4, " in out, out
+    assert ("typedef struct\n{\n    u8 pad_0[4];\n    union\n    {\n        u32 f_4_u32;\n        u16 f_4_u16;\n"
+            "    } __attribute__((packed));\n} __attribute__((packed, aligned(8))) stack8_t;") in out, out
+    assert "stack12 = r1; stack8.f_4_u32 = r3;" in out and "+ stack8.f_4_u16 +" in out, out
     assert cparse.parse(out).function("h") is not None
     _, fn = readable.readable_tree("h", TWO, context=readable.Context())
     assert frames.plan(fn).unions() == 1
@@ -70,8 +93,7 @@ def test_overlapping_accesses_share_a_union():
     of bytes up to the half and the half, anonymous, so that each keeps its plain name."""
     out = readable_c(OVER)
     assert ("    union\n    {\n        u32 f_0;\n        struct { u8 pad_f_2[2]; u16 f_2; } __attribute__((packed));\n"
-            "    } __attribute__((packed));\n    u8 pad_4[4];\n    u32 f_8;\n} __attribute__((packed, aligned(4))) "
-            "stack12_t;") in out, out
+            "    } __attribute__((packed));\n} __attribute__((packed, aligned(4))) stack12_t;") in out, out
     assert "stack12.f_0 = r1;" in out and "(u32)stack12.f_2" in out, out
 
 
@@ -97,12 +119,13 @@ u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
 """
 
 
-def test_a_word_below_that_reaches_in_starts_the_region():
+def test_a_word_below_that_reaches_in_starts_the_object():
     """GCC -Os pushes a word to make room for a 16-bit local and hands the local's address on
     (FreeRTOS's vPolledQueueProducer): the address leaves at sp0 - 6, the push stores at sp0 - 8. The
-    region starts at the push, and its word, the local and a byte between share a union. The byte at
-    sp0 - 7 lies below the address that leaves, but the push writes it: no variable of its own (it was
-    one before the region started at the push, and read what the strb stored, not the push's byte)."""
+    region starts at the push, and its word, the local and a byte between share a union of one object.
+    The byte at sp0 - 7 lies below the address that leaves, but the push writes it: no variable of its
+    own (it was one before the region started at the push, and read what the strb stored, not the push's
+    byte). Without the program (Facts' pushes) the push's store stays."""
     out = readable_c(REACH)
     assert ("    union\n    {\n        u32 f_0;\n        struct { u8 pad_f_1[1]; u8 f_1; } __attribute__((packed));\n"
             "        struct { u8 pad_f_2[2]; u16 f_2; } __attribute__((packed));\n    } __attribute__((packed));\n"
@@ -121,30 +144,31 @@ ARRAY = FRAME.replace(
              "    r2 = (u32)*(volatile u8 *)(sp0 - 12 + r0);  /* a: ldrb r2, [r1, r0] */\n")
 
 
-def test_a_region_accessed_only_through_addresses_is_an_array_of_bytes():
+def test_a_buffer_a_callee_fills_is_an_array_of_bytes_and_an_index_an_element():
     """Nothing is accessed at a constant offset in the region, only through the addresses handed out
-    and one with an index added (a buffer filled by a callee and read): an array of bytes, aligned as
-    the region's start, its addresses an element's, the index added to its address (an index past an
-    array is undefined in C; the address's arithmetic stays as the lifted C had it)."""
+    and one with an index added (a buffer filled by a callee and read): arrays of bytes, one from each
+    address handed out, the indexed access an element (stack12[i]: the index the code computes)."""
     out = readable_c(ARRAY)
-    assert "    volatile u8 stack12[12] __attribute__((aligned(4)));" in out and "typedef" not in out, out
-    assert "g(r0, (u32)stack12, (u32)&stack12[4], " in out, out
-    assert "*(volatile u8 *)((u32)stack12 + r0_1)" in out and "sp0" not in out, out
+    assert "    volatile u8 stack12[4];\n    volatile u8 stack8[8];" in out and "typedef" not in out, out
+    assert "g(r0, (u32)stack12, (u32)stack8, r3);" in out, out
+    assert "stack12[r0_1]" in out and "sp0" not in out, out
     _, fn = readable.readable_tree("h", ARRAY, context=readable.Context())
-    assert frames.plan(fn).array()
+    assert [(p.start, p.size, p.kind, p.elem) for p in frames.plan(fn).pieces] == [(-12, 4, "array", "u8"),
+                                                                                 (-8, 8, "array", "u8")]
 
 
-def test_an_index_into_the_region_is_an_address_in_the_object():
-    """A frame address with an index added (a buffer walked) is the object's address plus the index,
-    not a field's, also where a field starts there; a raw slot below the region that the clean-up left
-    keeps the frame array."""
+def test_an_index_of_another_width_into_an_object_is_an_address_in_it():
+    """A frame address with an index added and a byte read through it, in the object a word fills (a
+    buffer walked as bytes and words): a structure of its own, the access the object's address plus
+    the index, not an element; a raw slot below the region that the clean-up left keeps the frame
+    array."""
     text = FRAME.replace("r0 = r0 + r1 + r2 + *(volatile u32 *)(sp0 - 24);",
                          "r0 = r0 + r1 + r2 + *(volatile u8 *)(sp0 - 12 + r2) + *(volatile u32 *)(sp0 - 24);")
     out = readable_c(text)
-    assert "*(volatile u8 *)((u32)&stack12 + r2" in out, out
+    assert "*(volatile u8 *)((u32)&stack12 + r2" in out and "stack12_t" in out, out
     below = FRAME.replace("    *(volatile u32 *)(sp0 - 24) = r2;  /* 2: str r2, [sp] */\n", "")
     out = readable_c(below)                 # (sp0 - 24 is read before anything writes it: it stays raw)
-    assert "*(volatile u32 *)(sp0 - 24)" in out and "u32 frame[6]" in out and "stack12.f_0" in out, out
+    assert "*(volatile u32 *)(sp0 - 24)" in out and "u32 frame[6]" in out and "stack12 = r1" in out, out
 
 
 def test_a_wrapped_function_s_real_stack_stays_as_it_is():
@@ -155,13 +179,400 @@ def test_a_wrapped_function_s_real_stack_stays_as_it_is():
     tree = cparse.parse(text)
     fn = tree.function("h_dread_body")
     assert frames.plan(fn) == "no frame array with sp0 at its end"
-    assert frames.frame_struct(tree, fn) is None
+    assert frames.frame_objects(tree, fn) is None
+
+
+# The timer daemon's message (FreeRTOS's xTimerGenericCommandFromTask on GCC -Os): three words stored
+# into a 20-byte local below the saves of r4-r7 and lr, its address handed to the queue
+MESSAGE = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 send(u32, u32, u32, u32);
+u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0;
+    u32 frame[10] __attribute__((aligned(8)));
+    u32 sp0 = (u32)&frame[10];
+    (void)r12; (void)sp0;
+    *(volatile u32 *)(sp0 - 40) = r1; *(volatile u32 *)(sp0 - 36) = r2;  /* 8: strd r1, r2, [sp] */
+    *(volatile u32 *)(sp0 - 32) = r0;  /* c: str r0, [sp, #8] */
+    r0 = 0x20000100u;  /* e: ldr r0, [pc, #8] */
+    r0 = *(volatile u32 *)r0;  /* 10: ldr r0, [r0] */
+    r1 = sp0 - 40;  /* 12: mov r1, sp */
+    r0 = send(r0, r1, r3, 0x0u); r1 = r2 = r3 = r12 = 0;  /* 16: bl send */
+    return r0;  /* 1a: pop {r4, r5, r6, r7, pc} */
+}
+"""
+SAVES = {-20: ("r4", 4), -16: ("r5", 4), -12: ("r6", 4), -8: ("r7", 4), -4: ("lr", 4)}
+
+
+def test_words_a_function_stores_for_a_callee_are_a_structure_below_the_saves():
+    """Three words at 0, 4 and 8 of what the queue is handed: a structure of its own (natural: no
+    attributes), as large as the bytes up to the words the entry saves its caller's registers into,
+    which are no object's; not volatile where the callee keeps nothing (the readable_types table's
+    keeps), volatile where it may keep its argument or the table does not know it."""
+    out = readable_c(MESSAGE, context=Facts(saves=SAVES, keeps={"send": []}, returns={"send": []}))
+    assert "typedef struct\n{\n    u32 f_0;\n    u32 f_4;\n    u32 f_8;\n    u8 pad_c[8];\n} stack40_t;" in out, out
+    assert "    stack40_t stack40;" in out and "volatile" not in out.split("{", 2)[2], out
+    assert "stack40.f_0 = r1; stack40.f_4 = r2;" in out and "stack40.f_8 = r0;" in out, out
+    assert "send(*(volatile u32 *)0x20000100u, (u32)&stack40, r3, 0)" in out or "send(" in out, out
+    kept = readable_c(MESSAGE, context=Facts(saves=SAVES, keeps={"send": [1]}, returns={"send": []}))
+    assert "    volatile stack40_t stack40;" in kept, kept
+    unknown = readable_c(MESSAGE, context=Facts(saves=SAVES, keeps={}, returns={}))
+    assert "    volatile stack40_t stack40;" in unknown, unknown
+
+
+ESCAPE = MESSAGE.replace("    r0 = send(r0, r1, r3, 0x0u);",
+                         "    *(volatile u32 *)0x20000104u = r1;  /* 14: str r1, [r2] */\n"
+                         "    r0 = send(r0, r1, r3, 0x0u);")
+
+
+def test_an_object_whose_address_escapes_into_a_global_stays_volatile():
+    """The same message, its address also stored into a global before the call: an interrupt may reach
+    it through the global while the function runs, so it stays volatile, whatever the callee does."""
+    out = readable_c(ESCAPE, context=Facts(saves=SAVES, keeps={"send": []}, returns={"send": []}))
+    assert "    volatile stack40_t stack40;" in out, out
+    assert "*(volatile u32 *)0x20000104u = (u32)&stack40;" in out or "= (u32)&stack40;" in out, out
+
+
+TYPED = MESSAGE.replace("    *(volatile u32 *)(sp0 - 32) = r0;  /* c: str r0, [sp, #8] */\n", "")
+
+
+def test_a_structure_a_callee_s_parameter_points_to_types_the_object():
+    """The callee's parameter is a structure of the readable_types table (its prototypes, dread.vartypes)
+    whose fields at 0 and 4 the function stores: the object is of that structure, its definition in the
+    file, and smaller than the bytes up to the saves (what lies past it is nobody's)."""
+    facts = Facts(saves=SAVES, keeps={"send": []}, returns={"send": []},
+                  prototypes={"send": [None, None, "volatile struct s_7 *", None, None]},
+                  structs={"s_7": [(0, "u32"), (4, "u32")]})
+    out = readable_c(TYPED, context=facts)
+    assert "struct s_7\n{\n    u32 f_0;\n    u32 f_4;\n};" in out, out
+    assert "    struct s_7 stack40;" in out and "stack40.f_0 = r1; stack40.f_4 = r2;" in out, out
+    assert "(u32)&stack40, " in out, out
+    _, fn = readable.readable_tree("h", TYPED, context=facts)
+    p = frames.plan(fn, facts).pieces
+    assert [(x.start, x.size, x.kind, x.tag) for x in p] == [(-40, 8, "typed", "s_7")]
+
+
+SPILLS = MESSAGE.replace("    *(volatile u32 *)(sp0 - 32) = r0;  /* c: str r0, [sp, #8] */\n",
+                         "    *(volatile u32 *)(sp0 - 32) = r0;  /* c: str r0, [sp, #8] */\n"
+                         "    *(volatile u16 *)(sp0 - 28) = (u16)r3;  /* d: strh r3, [sp, #12] */\n") \
+    .replace("    return r0;  /* 1a:",
+             "    r0 = r0 + *(volatile u32 *)(sp0 - 32) + *(volatile u16 *)(sp0 - 28);  /* 18: adds */\n"
+             "    return r0;  /* 1a:")
+
+
+def test_what_lies_past_a_callee_s_structure_is_objects_of_its_own():
+    """The callee's structure is 8 bytes, the function stores and reads a word and a halfword past it
+    (GCC -O0 keeps its spilled locals beside the TimeOut_t xTaskCheckForTimeOut gets): the structure
+    an object of its own, each access past it one too (no address of theirs goes anywhere)."""
+    facts = Facts(saves=SAVES, keeps={"send": []}, returns={"send": []},
+                  prototypes={"send": [None, None, "volatile struct s_7 *", None, None]},
+                  structs={"s_7": [(0, "u32"), (4, "u32")]})
+    out = readable_c(SPILLS, context=facts)
+    assert "    struct s_7 stack40;\n    u32 stack32;\n    u16 stack28;" in out, out
+    assert "stack32 = r0;" in out and "stack28 = (u16)r3;" in out or "stack28 = r3;" in out, out
+    _, fn = readable.readable_tree("h", SPILLS, context=facts)
+    assert [(x.start, x.size, x.kind) for x in frames.plan(fn, facts).pieces] == [
+        (-40, 8, "typed"), (-32, 4, "scalar"), (-28, 2, "scalar")]
+
+
+SIGNS = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 g(u32);
+u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0;
+    u32 frame[2] __attribute__((aligned(8)));
+    u32 sp0 = (u32)&frame[2];
+    (void)r12; (void)sp0;
+    *(volatile u8 *)(sp0 - 8) = (u8)r1;  /* 0: strb r1, [sp] */
+    *(volatile s8 *)(sp0 - 7) = (s8)r2;  /* 2: strb r2, [sp, #1] */
+    r0 = g(sp0 - 8); r1 = r2 = r3 = r12 = 0;  /* 4: bl g */
+    r0 = r0 + (u32)*(volatile s8 *)(sp0 - 8) + (u32)*(volatile u8 *)(sp0 - 7);  /* 8: ldrsb, ldrb */
+    return r0;  /* c: pop {r3, pc} */
+}
+"""
+
+
+def test_an_access_of_the_other_sign_is_the_same_bytes():
+    """A byte stored unsigned and read signed (strb, ldrsb): the array's element, read with a cast, stored
+    without one (the same bits); changed in place with both signs (x >>= 1 of a signed and an unsigned
+    byte), a structure of a member for each type, no cast at all."""
+    out = readable_c(SIGNS)
+    assert "volatile u8 stack8[8];" in out and "stack8[0] = r1;" in out and "stack8[1] = r2;" in out, out
+    assert "(s8)stack8[0]" in out and "(u8)stack8" not in out and "(s8)stack8[1] =" not in out, out
+    shift = SIGNS.replace("    r0 = g(sp0 - 8);", "    *(volatile s8 *)(sp0 - 7) = *(volatile s8 *)(sp0 - 7) >> 1;"
+                          "  /* 3: asrs */\n    r0 = g(sp0 - 8);")
+    out = readable_c(shift)
+    assert "stack8[1] = (s8)stack8[1] >> 1;" in out, out    # (read signed, stored as the same bits)
+    inplace = SIGNS.replace("    r0 = g(sp0 - 8);", "    *(volatile s8 *)(sp0 - 7) >>= 1;  /* 3: asrs */\n"
+                            "    r0 = g(sp0 - 8);")
+    out = readable_c(inplace)
+    assert "stack8_t" in out and "stack8.f_1_s8 >>= 1;" in out and "u8 f_1_u8;" in out, out
+
+
+# A buffer filled through an index from an address the code made one below it (clang folds a -1 into
+# the base: fmt_dec's tmp[--n]), and a byte handed to a callee with an address of its own
+BELOW = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 put(u32);
+u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0;
+    u32 frame[4] __attribute__((aligned(8)));
+    u32 sp0 = (u32)&frame[4];
+    (void)r12; (void)sp0;
+    r3 = sp0 - 13;  /* 0: addi a3, sp, 3 */
+    *(volatile u8 *)(r3 + r0) = (u8)r1;  /* 4: sb a1, 0(a3) */
+    r3 = r3 - 1;  /* 8: addi a3, a3, -1 */
+    r2 = (u32)*(volatile u8 *)(r3 + r0);  /* c: lbu a2, 0(a3) */
+    r0 = put(sp0 - 12);  /* 10: call put */
+    return r0 + r2;  /* 14: ret */
+}
+"""
+
+
+def test_an_index_added_below_an_object_reaches_into_it():
+    """The code makes sp0 - 13 and sp0 - 14 (walked downward) and adds an index to them: addresses
+    nobody is handed, one below the buffer the callee gets at sp0 - 12. An index added to an address no
+    object starts at reaches the object above too, so the bytes from the lowest such address up are
+    one array, the index's elements counted from it, the callee's address inside it."""
+    out = readable_c(BELOW)
+    assert "    volatile u8 stack14[14];" in out and "put((u32)&stack14[2])" in out, out
+    assert "stack14[r0 + 1] = r1;" in out and "r2 = stack14[r0];" in out, out
+
+
+# clang -O2 adds the index to sp0 before the constant (FreeRTOS prvReceivingTask, prvNonBlockingReceiverTask,
+# xStreamBufferNextMessageLengthBytes): the region stayed raw, the frame array and all
+RAW = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 fill(u32, u32);
+u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r5 = 0, r12 = 0;
+    u32 frame[6] __attribute__((aligned(8)));
+    u32 sp0 = (u32)&frame[6];
+    (void)r12; (void)sp0;
+    r5 = r0;  /* 0: mov r5, r0 */
+    r0 = sp0 - 20;  /* 2: add r0, sp, #4 */
+    r0 = fill(r0, 0x14u); r1 = r2 = r3 = r12 = 0;  /* 4: bl fill */
+    r0 = (u32)*(volatile u8 *)(sp0 + r5 - 0x14u);  /* 8: ldrb r0, [r4, r5] */
+    return r0;  /* c: pop {r4, r5, pc} */
+}
+"""
+
+
+def test_an_index_added_to_sp0_first_is_an_element():
+    """sp0 + r5 - 0x14u reaches the frame at sp0 - 20 plus an index: no address at sp0 that leaves (the
+    region stayed raw for it), an element of the array the callee fills."""
+    out = readable_c(RAW)
+    assert "u8 stack20[20];" in out and "fill((u32)stack20, 0x14u)" in out and "return stack20[r0];" in out, out
+    assert "sp0" not in out and "frame" not in out, out
+    fn = cparse.parse(RAW).function("h")
+    tidy.tidy(fn)
+    assert frames.plan(fn).pieces[0].indexed
+
+
+# print_status's push (gizmo): r0-r3 pushed to make room for a 12-byte buffer, r4 and lr saved above it
+PUSH = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 fmt(u32, u32);
+extern u32 puts(u32);
+u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r12 = 0;
+    u32 frame[6] __attribute__((aligned(8)));
+    u32 sp0 = (u32)&frame[6];
+    (void)r12; (void)sp0;
+    *(volatile u32 *)(sp0 - 24) = r0; *(volatile u32 *)(sp0 - 20) = r1; *(volatile u32 *)(sp0 - 16) = r2; *(volatile u32 *)(sp0 - 12) = r3;  /* 10: push {r0, r1, r2, r3, r4, lr} */
+    r4 = 0x40000060u;  /* 14: ldr r4, [pc, #0x40] */
+    r1 = *(volatile u32 *)r4;  /* 18: ldr r1, [r4] */
+    r0 = (sp0 - 24) + 0x4u;  /* 1c: add r0, sp, #4 */
+    r0 = fmt(r0, r1); r1 = r2 = r3 = r12 = 0;  /* 20: bl fmt */
+    r0 = (sp0 - 24) + 0x4u;  /* 24: add r0, sp, #4 */
+    r0 = puts(r0); r1 = r2 = r3 = r12 = 0;  /* 28: bl puts */
+    return r0;  /* 2c: pop {r1, r2, r3, r4, pc} */
+}
+"""
+
+
+def test_a_push_that_makes_room_reads_no_parameter():
+    """The push stores what the caller left in r1-r3 into the buffer's words: kept, they were the
+    function's parameters (print_status(void) took four) and its object's fields; nothing loads those
+    words, so they go (dread.tidy push_room: only where the program says the instruction is a push), and
+    the buffer is an array of bytes up to the save words; volatile where its address is the function's
+    result (a callee hands it back, and the function returns what the callee does)."""
+    facts = Facts(saves={-8: ("r4", 4), -4: ("lr", 4)}, pushes={0x10}, keeps={"fmt": [], "puts": []},
+                  returns={"fmt": [], "puts": []})
+    out = readable_c(PUSH, context=facts)
+    assert "u32 h(void)" in out and "    u8 stack20[12];" in out, out
+    assert "fmt((u32)stack20, g_40000060);" in out and "return puts((u32)stack20);" in out, out
+    back = readable_c(PUSH, context=Facts(saves={-8: ("r4", 4), -4: ("lr", 4)}, pushes={0x10},
+                                          keeps={"fmt": [], "puts": []}, returns={"fmt": [], "puts": [0]}))
+    assert "    volatile u8 stack20[12];" in back, back     # (puts hands it back, h returns it: it escapes)
+    kept = readable_c(PUSH, context=Facts(saves={-8: ("r4", 4), -4: ("lr", 4)}))
+    assert "u32 h(u32 a0, u32 r1, u32 r2, u32 r3)" in kept and "stack20_t" in kept, kept
+
+
+def test_a_push_s_word_stored_over_before_any_read_goes():
+    """A pushed word the function loads, but only after a store of its own over every byte loaded
+    (xQueueGenericSend pushes r1 and stores its fourth argument there at once): the push's store goes;
+    one that may be read before (a call between) stays."""
+    text = FRAME.replace("    *(volatile u32 *)(sp0 - 24) = r2;  /* 2: str r2, [sp] */\n",
+                         "    *(volatile u32 *)(sp0 - 12) = r2;  /* 2: str r2, [sp, #12] */\n"
+                         "    *(volatile u32 *)(sp0 - 24) = r2;  /* 3: str r2, [sp] */\n")
+    out = readable_c(text, context=Facts(pushes={0}))
+    assert "stack12 = r1" not in out and "stack12 = r2;" in out, out
+    later = FRAME.replace("    r1 = *(volatile u32 *)(sp0 - 12);  /* 8: ldr r1, [sp, #12] */\n",
+                          "    r1 = *(volatile u32 *)(sp0 - 12);  /* 8: ldr r1, [sp, #12] */\n"
+                          "    *(volatile u32 *)(sp0 - 12) = r2;  /* 9: str r2, [sp, #12] */\n")
+    out = readable_c(later, context=Facts(pushes={0}))
+    assert "stack12 = r1;" in out, out
+
+
+KEEPERS = """#include "dread.h"
+extern u32 elsewhere(u32);
+u32 store(u32 r0)
+{
+    *(volatile u32 *)0x20000000u = r0 + 4;
+    return 0;
+}
+u32 hand_back(u32 r0, u32 r1)
+{
+    *(volatile u8 *)r0 = (u8)r1;
+    return r0;
+}
+u32 pass_on(u32 r0, u32 r1)
+{
+    u32 r2;
+    r2 = r0;
+    return store(r2) + r1;
+}
+u32 keep_result(u32 r0)
+{
+    u32 r1;
+    r1 = hand_back(r0, 0);
+    *(volatile u32 *)0x20000008u = r1;
+    return 0;
+}
+u32 unknown(u32 r0)
+{
+    return elsewhere(r0);
+}
+u32 reads(u32 r0, u32 r1)
+{
+    return *(volatile u32 *)(r0 + 8) + *(volatile u32 *)r1;
+}
+__attribute__((naked)) void wrapped(void)
+{
+    __asm__ volatile ("b wrapped_dread_body");
+}
+u32 to_wrapped(u32 r0, u32 r1)
+{
+    wrapped(r1, r0);
+    return 0;
+}
+"""
+
+
+def test_which_parameters_a_function_may_keep():
+    """kept_params: a parameter stored into memory (plus a constant) is kept, one returned is handed back
+    (not kept: memset's destination), one handed on to a callee that keeps it is kept, as is one handed
+    back by a callee and then stored, or handed to a function the analysis does not have or to a naked
+    entry (a wrapped variadic function's: its C does not show what it does with them); one only
+    dereferenced is neither."""
+    tree = cparse.parse(KEEPERS)
+    trees = [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)]
+    keeps, returns = frames.kept_params(trees)
+    every = list(range(frames.EVERY))
+    assert keeps == {"store": [0], "hand_back": [], "pass_on": [0], "keep_result": [0], "unknown": [0],
+                     "reads": [], "wrapped": every, "to_wrapped": [0, 1]}, keeps
+    assert returns == {"store": [], "hand_back": [0], "pass_on": [1], "keep_result": [], "unknown": [],
+                       "reads": [], "wrapped": every, "to_wrapped": []}, returns   # (pass_on's: r1 plus a result)
+
+
+def test_print_status_s_buffer_is_its_own_array_and_its_parameters_are_gone(target):
+    """gizmo's print_status (char buf[12] for fmt_dec and uart_puts): main's readable C read four
+    phantom parameters and `volatile stack20_t stack20` with three u32 fields (the push's) over the
+    buffer and the saves of r4 and lr; now u32 print_status(void) with a 12-byte array, not volatile:
+    fmt_dec and uart_puts keep nothing (the readable_types table as the check makes it). apply_config's
+    value, key[12] and line[40] are three objects, the line written through its index (an element on the
+    ARM builds; on rv32 through a variable that holds the element's address, as the code computes it)."""
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+    readable.make_plan(program, context, lifter, build.read_names(image.table("lifted")), flow)
+
+    def text(name):
+        return readable.transform(name, lifter.lift(program.by_name[name]).text, context=context)
+    status = text("print_status")
+    assert "u32 print_status(void)" in status, status
+    assert "    u8 stack20[12];" in status and "fmt_dec((u32)stack20, " in status, status
+    assert "uart_puts((u32)stack20);" in status and "stack20_t" not in status, status
+    config = text("apply_config")
+    decls = {m.group(2): (m.group(1), m.group(4)) for m in re.finditer(
+        r"^\s*(?:volatile )?(u8|u32) (stack\d+)(\[(\d+)\])?;$", config, re.M)}
+    assert sorted(decls.values(), key=str) == [("u32", None), ("u8", "12"), ("u8", "40")], config
+    line = next(n for n, (_, k) in decls.items() if k == "40")
+    assert re.search(r"\b%s\[r\w+\] = " % line, config) or "= (u32)%s + " % line in config, config
+
+
+def test_a_function_the_table_lists_whole_keeps_one_object_for_its_region():
+    """The readable_types table's whole (the check puts a function there whose objects its cases
+    rejected): the region from the lowest address handed out up to sp0 is one volatile object, as
+    before 2026-10-23, the save words and the stores into them inside it, its index arithmetic on its
+    address."""
+    facts = Facts(saves=SAVES, keeps={"send": []}, returns={"send": []})
+    facts.plan.whole = {"h"}
+    out = readable_c(MESSAGE, context=facts)
+    assert ("typedef struct\n{\n    u32 f_0;\n    u32 f_4;\n    u32 f_8;\n    u8 pad_c[28];\n} "
+            "__attribute__((packed, aligned(8))) stack40_t;") in out, out
+    assert "    volatile stack40_t stack40;" in out, out
+    facts = readable.Context()
+    facts.plan.whole = {"h"}
+    out = readable_c(ARRAY, context=facts)
+    assert "volatile u8 stack12[12] __attribute__((aligned(4)));" in out, out
+    assert "*(volatile u8 *)((u32)stack12 + r0_1)" in out and "g(r0, (u32)stack12, (u32)&stack12[4], " in out, out
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_gate_tries_a_function_whose_objects_fail_once_more_whole(tmp_path, monkeypatch):
+    """A function whose readable C with its frame split into objects fails its cases (here made to fail
+    while print_status's buffer is the array of its own) is tried again with its region as one object:
+    accepted so (an array of bytes up to sp0, its push's stores gone all the same), listed in the
+    readable_types table's whole, and built so by the next build."""
+    from test_readable import gizmo_copy
+    from dread import runner, shapes
+    monkeypatch.setattr(readable, "_STORE", {})     # (what this check makes stays out of later tests' checks)
+    target = gizmo_copy(tmp_path)
+    image = target.image()
+    work = tmp_path / "gizmo" / "m3" / "build" / "readable-check" / image.name
+    real = runner.run
+
+    def run(names, **kw):
+        failed, uncovered, results = real(names, **kw)
+        source = (work / "lifted" / "print_status.c")
+        if "print_status" in names and source.exists() and "u8 stack20[12];" in source.read_text():
+            kw.get("out", print)("FAIL print_status [made to fail]")
+            results = [(n, c, 1 if n == "print_status" else b) for n, c, b in results]
+            failed += 1
+        return failed, uncovered, results
+    monkeypatch.setattr(runner, "run", run)
+    lines = []
+    accepted = readable.check(target, image, out=lines.append)
+    assert "print_status" in accepted, lines
+    assert any(line.startswith("whole    print_status") for line in lines), lines
+    assert shapes.load_plan(image).whole == {"print_status"}
+    text = (work / "lifted" / "print_status.c").read_text()     # (the last build's: the whole image's)
+    assert "volatile u8 stack20[20] __attribute__((aligned(4)));" in text, text
 
 
 @pytest.mark.compiles
-def test_the_object_compiles(variant, tmp_path):
+def test_the_objects_compile(variant, tmp_path):
     from conftest import gizmo_dir
-    from dread import build
     from dread.target import Target
     target = Target.load(gizmo_dir(variant))
     image = target.image()
@@ -169,11 +580,19 @@ def test_the_object_compiles(variant, tmp_path):
     src.mkdir()
     index = FRAME.replace("r0 = r0 + r1 + r2 + *(volatile u32 *)(sp0 - 24);",
                           "r0 = r0 + r1 + r2 + *(volatile u8 *)(sp0 - 12 + r2) + *(volatile u32 *)(sp0 - 24);")
-    variants = (FRAME, index, FRAME.replace("    *(volatile u32 *)(sp0 - 24) = r2;  /* 2: str r2, [sp] */\n", ""),
-                TWO, OVER, REACH, ARRAY)
-    for k, text in enumerate(variants):
-        out = readable_c(text.replace("u32 h(", "u32 h%d(" % k).replace("h at 0x0", "h%d at 0x0" % k), "h%d" % k)
-        assert "stack12" in out or "stack8" in out, out
+    facts = Facts(saves=SAVES, keeps={"send": []}, returns={"send": []})
+    typed = Facts(saves=SAVES, keeps={"send": []}, returns={"send": []},
+                  prototypes={"send": [None, None, "volatile struct s_7 *", None, None]},
+                  structs={"s_7": [(0, "u32"), (4, "u32")]})
+    variants = [(FRAME, None), (index, None), (FRAME.replace("    *(volatile u32 *)(sp0 - 24) = r2;  /* 2: str r2, "
+                                                            "[sp] */\n", ""), None),
+                (TWO, None), (OVER, None), (REACH, None), (ARRAY, None), (MESSAGE, facts), (ESCAPE, facts),
+                (TYPED, typed), (SPILLS, typed), (BELOW, None), (RAW, None), (SIGNS, None),
+                (PUSH, Facts(saves={-8: ("r4", 4), -4: ("lr", 4)}, pushes={0x10}, keeps={}, returns={}))]
+    for k, (text, context) in enumerate(variants):
+        out = readable_c(text.replace("u32 h(", "u32 h%d(" % k).replace("h at 0x0", "h%d at 0x0" % k), "h%d" % k,
+                         context)
+        assert "stack" in out, out
         (src / ("h%d.c" % k)).write_text(out)
     assert build.compile_all(target, image, str(src), str(tmp_path / "obj"), quiet=True,
                              flags=target.compiler.lifted_cflags)

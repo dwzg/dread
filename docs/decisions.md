@@ -9,6 +9,84 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C's frames: an object at each address handed out, volatile only where an address may escape (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20; the item in docs/todo.md,
+"From a review against hand-written C": Local objects whose address goes to a callee; with part (1) of
+"No parameters from pushes").
+
+- **Question.** dread.frames wrote the part of a frame that addresses handed out may reach, from the
+  lowest of them up to sp0, as one volatile object: gizmo's print_status (`char buf[12]`) read as
+  `volatile stack20_t stack20` with three u32 fields over the buffer and the saves of r4 and lr behind
+  it, its four phantom parameters the push's stores into those fields. How is the region split into
+  the function's locals, typed, and when may they be plain objects; what becomes of the push's
+  stores and the save words?
+- **Options.**
+  1. Where objects start: (a) one object, as before (no callee is trusted to stay in its piece);
+     (b) at every address handed out (to a callee, into memory, as the result, to assembly; through a
+     variable that holds it; a sum's with an index), up to the next one and below the save words,
+     joined where one access spans two, where a variable walks downward from an address inside one,
+     where an index is added to an address no object starts at, and over a callee structure's size;
+     (c) at every frame address the function uses as a value, also one it only keeps in a variable
+     or compares: tried first, it cut gizmo rv32's fmt_dec at its tmp - 1 (clang indexes tmp[--n]
+     from there), and the cases failed; (d) by the function's own runs of accesses alone: misses
+     separate locals it never accesses itself (apply_config's key and line, filled by callees).
+  2. What an object is: by its accesses (a scalar where one access fills it, bytes where only bytes
+     or nothing is accessed, a structure for mixed ones), the width an index or a callee's parameter
+     (the readable_types table's prototypes) says, a callee's structure where its parameter points to
+     one of dread.shapes; or always a structure of its own.
+  3. An index into an object: (a) an element (stack48[r3]: past the array undefined in C, and GCC
+     derives loop bounds from such accesses); (b) arithmetic on the address, as before.
+  4. Volatile: (a) always, as before; (b) never; (c) only where an address may escape into memory.
+  5. A callee that reaches past the object it was given (a generated case's queue copies another
+     item size than the local holds: clang -O2's prvSendFrontAndBackTest and
+     vPrimaryBlockTimeTestTask, every case different and then refused for the saved registers it
+     reached): (a) never split where a callee's reach is not bounded by its type (most of the demos'
+     locals go to queue and string functions, untyped); (b) split, and where a function's cases
+     reject its objects, try it once more with its region as one object (the readable_types table's
+     whole), then lifted as before.
+- **Choice: 1(b), 2 by accesses, width and callee's structure, 3(a), 4(c), 5(b).** Each object is what
+  C's object model makes of a local whose address a callee gets: the callee may reach that object
+  and no other. The original reached past it only by a fault of its own (a length past a local), or
+  in a state a generated case made up; the cases refuse an input that makes code touch saved
+  registers, and the gate checks every function on its cases (every instruction run) and the whole
+  image, as for every other transformation; where the cases see a callee reach past an object, 5(b)
+  keeps the function readable as it was. 3(a): the lifted C's arithmetic on the frame array is no
+  safer by C's rules (GCC documents that integer arithmetic on a pointer is no way around the
+  undefined behaviour of an index past its object), only on a larger object; whole functions keep the
+  arithmetic. 4(c): an interrupt or another task reaches a local only through its address, so only
+  where the address may escape into memory: the function stores, returns or hands it to assembly or
+  through a pointer, or a callee that may keep it gets it (kept_params over every lifted function:
+  a parameter is kept where a value derived from it is stored, handed to assembly, through a
+  pointer or to a callee that keeps it; one returned is followed into the caller's result, memset's
+  destination; a callee not lifted, variadic or naked keeps everything). Volatile also stays where
+  the function accesses the object through a variable with another type than bytes (strict
+  aliasing: a compiler may carry a member across such a store; bytes alias everything). What a plain
+  object loses (a value kept in a register between calls, accesses no call separates merged, stores
+  after the last call dropped) only another context could see, and none has the address.
+  The push's stores (dread.tidy push_room): a correct program reads a local only after writing it,
+  and GCC writes a local's first value with a store of its own, never through the push that made
+  room (push {r0, r1, r2, lr}; str r0, [sp, #4] for an address-taken parameter); a word the function
+  loads directly stays, unless its statements store over every loaded byte before anything may read
+  it. The save words (the entry's stores of callee-saved registers and the return address before
+  anything writes them, through dread.regflow's Frames): no local's bytes; their stores go (RISC-V's
+  lifted C kept `stack20.f_10 = ra;`), the cases refuse an input that touches them.
+- **Found on the way.** (1) On the GCC builds newlib's printf and sprintf push their argument
+  registers (push {r1, r2, r3} first), which variadic_reach did not find: calls of them were trimmed
+  to what regflow says they read, so FreeRTOS's GCC -Os tasks called sprintf(buf, fmt) without the
+  value, and the whole image had agreed with two of them only by what the C compiler left in r2 (the
+  base run dropped both by halving; dread.readable entry_save_areas: such a call keeps all its
+  arguments, not propagated to the callers' callers: vAssertCalled's stay trimmed). (2) clang -O2 adds
+  an index to sp0 before the constant (sp0 + r5 - 0x14u): frame_locals and dread.frames took the bare
+  sp0 for an address at sp0 and left the whole frame raw (dread.tidy index_sum).
+- **Undo.** dread/frames.py: plan starting objects at the region's start alone and _decide returning a
+  structure or bytes (or whole_frame returning True) gives the one object; _volatile returning at once
+  keeps every object volatile; element returning None keeps the index arithmetic; dread/tidy.py
+  push_room returning False keeps the push's stores; Context.saves returning {} keeps the save words;
+  readable.entry_save_areas returning set() takes (1) back; the check's whole set staying empty drops
+  the fallback.
+- **Status.** Done (docs/todo.md, the item, with the figures).
+
 ## Names that survive changes of the C: carried by the variables' definitions (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20; asked for on 2026-10-23
@@ -2394,7 +2472,9 @@ docs/todo.md, Compiler diversity).
 - **Undo.** dread/frames.py: without "volatile " in the object's declaration for (a); the typedef is
   Region.typedef. The hook is one call in dread.readable._named.
 - **Status.** Done; the gate accepts the same functions as before on the eight builds (docs/todo.md,
-  Variables).
+  Variables). Superseded 2026-10-23 ("an object at each address handed out, volatile only where an
+  address may escape"): the region is one volatile object only for a function whose split the cases
+  reject (the readable_types table's whole).
 
 ## The C standard of DREAD's own C: gnu11 (2026-10-22)
 
