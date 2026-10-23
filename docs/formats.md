@@ -122,7 +122,13 @@ something else, the default name says where it is: `io_40004004` (a device regis
 io`), `rom_c6e4` (a rom region), `g_20029aac` (anything else), with the type for an access other
 than a u32 one (`g_20029aac_u8`). The pilot asks for these before the functions' variables, or
 alone for every function's readable C (`dread pilot --task globals`, with the structures below);
-they need no digest, since an address does not change with the transformations.
+they need no digest, since an address does not change with the transformations. A structure of
+static data (the readable_types table's `statics`, since 2026-10-23) is named under `"0xADDRESS
+struct"` (its address), optionally with `"fields": {"OFFSET": name}`; a field without a name there
+takes the name of its own address and type (`"0x20000034 u32"`: the pilot asks for each field so,
+written `g_20000030.f_4` in its question), else `f_4`. A name that a global staying a macro has, or
+another structure's, is not used for a structure or a field (it would expand inside them). A file
+from before has no such entries: its structures read `g_20000030.f_4`.
 
 Its `structs` part names the structures of the readable_types plan and their fields:
 `{"FUNCTION:VARIABLE": {"name", "fields": {"OFFSET": name}, "anchors": ["FUNCTION:VARIABLE", ...],
@@ -151,6 +157,15 @@ before names (dread.naming): a function whose C changed since gets no types unti
 Written by `dread readable --check` from every lifted function's readable C before it checks any;
 the builds read it. Not edited by hand. A file from before `embeds` has none: its structures are
 flat, as they were written; an `embeds` entry naming a structure the file lacks is left out.
+
+`statics` (left out when empty; since 2026-10-23) lists the structures of static data at fixed
+addresses (dread.statics): `{"0xADDRESS": [[offset, type], ...]}`, the fields laid out as
+`structs`' are. Every function's access at such a field's address with its type is written as a
+member of the structure's object (`g_20000030.f_4`, one macro `#define g_20000030 (*(volatile struct
+g_20000030_t *)0x20000030u)` and the structure above the function), whatever the function's digest;
+an access of another type stays the macro it was. Made from every function's machine code (and the
+lifted functions' readable C for the fields). A file from before has none: readable C writes a macro
+per address and type, as before.
 
 ### `domains.tsv`, `stale_readers.tsv`, `wide_results.txt`, `function_starts.txt`
 

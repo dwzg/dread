@@ -12,9 +12,12 @@ are left to the pilot (dread pilot).
 
 Stages so far: the clean-up (dread.tidy: what only the machine needed out, compares and their
 branches as comparisons), then the structure (dread.structure: gotos as if/else and loops). After
-them and the tables (_named), the part of the frame that addresses handed out reach becomes one local
-object (dread.frames: a structure, stack36.f_4, (u32)&stack36.f_4, with a union where accesses overlap;
-an array of bytes where none is at a constant offset, (u32)stack40).
+them the tables (_named): memory at fixed addresses as names, the fields of structures of static
+data as members of one object (dread.naming apply_globals with the readable_types plan's statics,
+dread.statics: g_20000030.f_4), the structures behind pointers (dread.shapes), the variables' names;
+then the part of the frame that addresses handed out reach becomes one local object (dread.frames: a
+structure, stack36.f_4, (u32)&stack36.f_4, with a union where accesses overlap; an array of bytes
+where none is at a constant offset, (u32)stack40).
 
 Where the image with lifted C alone already differs from the original in the scenarios (the system
 run's clock on some builds until 2026-10-22; a lifted table the lift check wrote since agrees), the
@@ -52,6 +55,7 @@ class Context:
         self.plan = shapes.Plan()       # the image's readable_types table (dread.shapes)
         self.structs = {}               # the readable_names table's structs part
         self._struct_names = None
+        self._static_names = None
         if target is None:
             return
         self.plan = shapes.load_plan(image)
@@ -77,6 +81,14 @@ class Context:
             taken = {e.get("name") for e in self.globals.values() if isinstance(e, dict)}
             self._struct_names = naming.struct_names(self.plan, self.structs, taken)
         return self._struct_names
+
+    def static_names(self):
+        """dread.naming static_names of the plan's structures of static data (computed once; set
+        _static_names to None after the table or the plan changes)."""
+        if self._static_names is None:
+            shaped = set(self.plan.structs) | {n for n, _ in self.struct_names().values()}
+            self._static_names = naming.static_names(self.plan.statics, self.globals, self.memory, avoid=shaped)
+        return self._static_names
 
     def unknown(self, name):
         """Whether what a function reads cannot be told from regflow: it is variadic or calls one on
@@ -217,7 +229,10 @@ def _readable_one(name):
         return None
     tree, fn = made
     digest = naming.digest(fn)
-    chosen = naming.apply_globals(tree, fn, _G["named"], context.memory if context is not None else None)
+    with_statics = _G.get("statics") and context is not None
+    chosen = naming.apply_globals(tree, fn, _G["named"], context.memory if context is not None else None,
+                                  statics=context.plan.statics if with_statics else None,
+                                  names=context.static_names() if with_statics else None)
     return tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}, digest
 
 
@@ -258,7 +273,8 @@ def _question_one(name):
         return "its lifted C is not the dialect"
     tree, fn = made
     digest = naming.digest(fn)
-    naming.apply_globals(tree, fn, context.globals, context.memory)
+    naming.apply_globals(tree, fn, context.globals, context.memory, statics=context.plan.statics,
+                         names=context.static_names())
     shapes.apply_types(tree, fn, context.plan, digest, names=context.struct_names())
     return tree, fn, digest, print_file(tree, fn), cparse.unparse(fn, notes=False, style="readable")
 
@@ -294,10 +310,13 @@ def warm(lifter):
         lifter.never_returns("")
 
 
-def _trees(work, program, context, lifter, names, named, digests, jobs):
+def _trees(work, program, context, lifter, names, named, digests, jobs, statics=False):
     out = []
     warm(lifter)
-    for made in in_pool(work, list(names), jobs, program=program, context=context, lifter=lifter, named=named):
+    if statics and context is not None:
+        context.static_names()              # (once, before the pool forks)
+    for made in in_pool(work, list(names), jobs, program=program, context=context, lifter=lifter, named=named,
+                        statics=statics):
         if made is not None:
             tree, fn, macros, digest = made
             if digests is not None:
@@ -306,13 +325,14 @@ def _trees(work, program, context, lifter, names, named, digests, jobs):
     return out
 
 
-def readable_trees(program, context, lifter, names, named=None, digests=None, jobs=None):
+def readable_trees(program, context, lifter, names, named=None, digests=None, jobs=None, statics=False):
     """[(tree, function, macros)] of the functions' readable C after the stages, their memory at
     fixed addresses written as names (dread.naming apply_globals: named, the table's globals part, or
-    the default names); macros: {name: (address, type)}. Functions that do not lift or are not the
+    the default names); macros: {name: (address, type)}, with statics (the context's plan's structures
+    of static data applied) a field's name OBJECT.FIELD. Functions that do not lift or are not the
     dialect are left out. digests, a dict: filled with each function's digest before the names (what
     the readable_names and readable_types tables are made for). Made in a pool (in_pool)."""
-    return _trees(_readable_one, program, context, lifter, names, named, digests, jobs)
+    return _trees(_readable_one, program, context, lifter, names, named, digests, jobs, statics)
 
 
 def analysis_trees(program, context, lifter, names, named=None, digests=None, jobs=None):
@@ -337,7 +357,8 @@ def question_trees(program, context, lifter, names, jobs=None):
     applied (its tables as they are now); file: the whole file as it compiles without the variables'
     names (print_file), code: the function as the question shows it. context must not be None."""
     warm(lifter)
-    context.struct_names()                  # (once, before the pool forks: the workers share it)
+    context.struct_names()                  # (once, before the pool forks: the workers share them)
+    context.static_names()
     names = list(names)
     return dict(zip(names, in_pool(_question_one, names, jobs, program=program, context=context, lifter=lifter)))
 
@@ -364,7 +385,9 @@ def _named(name, text, stages, context=None):
         entry = context.names.get(name) if context is not None else None
         mine = set((entry or {}).get("names", {}).values()) if (entry or {}).get("digest") == made_for else set()
         naming.apply_globals(tree, fn, context.globals if context is not None else None,
-                             context.memory if context is not None else None, avoid=mine)
+                             context.memory if context is not None else None, avoid=mine,
+                             statics=context.plan.statics if context is not None else None,
+                             names=context.static_names() if context is not None else None)
         if context is not None:
             from dread import shapes
             shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
@@ -423,10 +446,15 @@ def check(target, image, names=None, out=print, jobs=None):
     digests = {}
     trees = analysis_trees(program, context, lifter, lifted, named=context.globals, digests=digests)
     context.plan = shapes.plan(shapes.analyse(trees, unread=context.unread), trees, digests)
-    context._struct_names = None
+    # The structures of static data (dread.statics): from every function's machine code, their fields
+    # also from the lifted functions' readable C (what it accesses at fixed addresses).
+    from dread import statics
+    seen = {fn.name: sorted(set(macros.values())) for _, fn, macros in trees}
+    context.plan.statics = statics.plan(program, statics.gather(program, flow=flow), extra=seen)
+    context._struct_names = context._static_names = None
     shapes.store_plan(image, context.plan)
-    out("dread readable --check: %d structures, pointers to them in %d functions (readable_types)" % (
-        len(context.plan.structs), len(context.plan.typed)))
+    out("dread readable --check: %d structures, pointers to them in %d functions; %d structures of static data "
+        "(readable_types)" % (len(context.plan.structs), len(context.plan.typed), len(context.plan.statics)))
     by_system = build.system_names(image.table("lifted"))
     verdicts = {}                           # name -> (verdict, reason)
     candidates = []
@@ -573,6 +601,12 @@ def main(argv=None):
                         "structures' fields too")
     parser.add_argument("--shapes", action="store_true", help="the structures behind pointers (dread.shapes) of "
                         "the readable functions (or those named), largest first")
+    parser.add_argument("--statics", action="store_true", help="the structures of static data (dread.statics) "
+                        "every function's machine code shows; with --score ELF, against the ELF's variables")
+    parser.add_argument("--no-symbols", action="store_true", help="--statics: the target's data symbols end no "
+                        "structure (what the code alone decides)")
+    parser.add_argument("--every-base", action="store_true", help="--statics: every base, also where the code does "
+                        "not reach its neighbours apart from it (what that evidence keeps out)")
     parser.add_argument("--figures", metavar="FILE", help="write the figures of the readable functions' (or the "
                         "named ones') readable C and lifted C to FILE as JSON (dread.cmetrics: statements, "
                         "depth, gotos, casts, raw accesses, members, typed variables; dread bench's readable step)")
@@ -593,6 +627,28 @@ def main(argv=None):
             print("dread readable --check: the build failed (above); the readable table is as it was",
                   file=sys.stderr)
             return 1
+        return 0
+    if args.statics:
+        from dread import regflow, statics
+        from dread.program import Program
+        program = Program(target, image)
+        evidence = statics.gather(program, flow=regflow.load(target, image, program))
+        found = statics.plan(program, evidence, symbols=not args.no_symbols,
+                             trust="all" if args.every_base else "evidence")
+        if not args.score:
+            for line in statics.describe(found):
+                print(line)
+        else:
+            reached = [(a, t) for ev in evidence.values() for a, t, _, ix in ev.accesses if not ix]
+            s = statics.score(found, args.score, reached)
+            for base, verdict, names in s["rows"]:
+                print("0x%08x %-16s %s" % (base, verdict, ", ".join(names)))
+            print("dread readable --statics --score: %d structures of static data: %d inside one source variable (%s), "
+                  "%d over several, %d at none; %d fields, %d the source's; of %d source structures and arrays "
+                  "reached at two places or more, %d grouped whole, %d in part" % (
+                      s["structures"], sum(s["one"].values()), ", ".join(
+                          "%d %s" % (n, k) for k, n in sorted(s["one"].items())) or "-", s["several"], s["unknown"],
+                      s["fields"], s["right"], s["reached"], s["grouped"], s["partly"]))
         return 0
     if args.figures:
         import json

@@ -22,7 +22,8 @@ counting those of raw accesses), raw memory accesses through pointer casts (`*(v
 structure members (`p->f_38`, and `p->f_4.f_8` once, a member of a structure held inside another;
 the frame's object, `stack36.f_4`, apart; a member's address counts as well), memory at fixed addresses
 written as a name (dread.naming's macros: `io_e000ed04`), and the variables, typed ones (a structure or
-a pointer to one) apart.
+a pointer to one) apart; a member of a structure of static data (`g_20000030.f_4`, dread.statics) counts
+as one apart (fixed_members), not as a name of memory at a fixed address.
 
 The source is taken after preprocessing: what the compiler compiled, macros expanded (FreeRTOS's
 configASSERT is an if and a call, as in the readable C). A function the compiler inlined into the
@@ -143,6 +144,7 @@ def nodes(x):
 
 
 FIXED = re.compile(r"#define\s+(\w+)\s+\(\*\(volatile\b")          # dread.naming's fixed-address names
+FIXED_STRUCT = re.compile(r"#define\s+(\w+)\s+\(\*\(volatile struct\b")    # (of those, structures of static data)
 STRUCT_TYPEDEF = re.compile(r"typedef\s+struct\b.*\}\s*(?:__attribute__\s*\(\(.*?\)\)\s*)?(\w+)\s*;\s*$", re.S)
 
 
@@ -150,25 +152,29 @@ def _has_frame_base(e):
     return any(isinstance(n, cparse.Name) and n.id == "sp0" for n in nodes(e))
 
 
-READABLE = FIGURES + ("casts", "raw", "frame_raw", "members", "frame_members", "fixed", "variables", "typed")
+READABLE = FIGURES + ("casts", "raw", "frame_raw", "members", "frame_members", "fixed", "fixed_members", "variables",
+                      "typed")
 
 
 def readable_figures(tree, fn):
     """The figures of one function of a dread.cparse file (count's, and casts, raw, frame_raw,
-    members, frame_members, fixed, variables, typed: see the module's docstring)."""
+    members, frame_members, fixed, fixed_members, variables, typed: see the module's docstring)."""
     out = count(skeleton(fn.body.body))
-    fixed, structs = set(), set()
+    fixed, statics, structs = set(), set(), set()
     for item in tree.items if tree is not None else []:
         if isinstance(item, cparse.Raw):
             for line in item.text.splitlines():
                 m = FIXED.match(line.strip())
                 if m:
                     fixed.add(m.group(1))
+                m = FIXED_STRUCT.match(line.strip())
+                if m:
+                    statics.add(m.group(1))
             m = STRUCT_TYPEDEF.match(item.text.strip())
             if m:
                 structs.add(m.group(1))
     raw_casts, inner = set(), set()
-    extra = dict.fromkeys(("casts", "raw", "frame_raw", "members", "frame_members", "fixed"), 0)
+    extra = dict.fromkeys(("casts", "raw", "frame_raw", "members", "frame_members", "fixed", "fixed_members"), 0)
     for n in nodes(fn.body):
         if isinstance(n, cparse.Unary) and n.op == "*" and isinstance(n.e, cparse.Cast) and "*" in n.e.type:
             extra["raw"] += 1
@@ -177,13 +183,17 @@ def readable_figures(tree, fn):
                 extra["frame_raw"] += 1
         elif isinstance(n, cparse.Member) and id(n) not in inner:
             # (a member of a structure held inside one, p->f_4.f_8, is one member: of a structure behind
-            # a pointer when the chain has an arrow)
+            # a pointer when the chain has an arrow, of a structure of static data when its object is one)
             arrow, x = n.arrow, n.base
             while isinstance(x, cparse.Member):
                 inner.add(id(x))
                 arrow, x = arrow or x.arrow, x.base
-            extra["members" if arrow else "frame_members"] += 1
-        elif isinstance(n, cparse.Name) and n.id in fixed:
+            if not arrow and isinstance(x, cparse.Name) and x.id in statics:
+                inner.add(id(x))
+                extra["fixed_members"] += 1
+            else:
+                extra["members" if arrow else "frame_members"] += 1
+        elif isinstance(n, cparse.Name) and n.id in fixed and id(n) not in inner:
             extra["fixed"] += 1
     extra["casts"] = sum(1 for n in nodes(fn.body) if isinstance(n, cparse.Cast) and id(n) not in raw_casts)
     out.update(extra)

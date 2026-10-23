@@ -465,7 +465,7 @@ its sources.
   an asm block is one node of the flow graph, every value of a5 in it one (vTaskPrioritySet), which
   made a task block's item value a pointer to a task block, so uxTaskResetEventItemValue's result one
   that holds items, and the event group that met it held an item and its list at 4; not taken further.
-- [ ] **Structures of globals.** Static data reached at fixed addresses, one macro a field
+- [x] **Structures of globals.** Static data reached at fixed addresses, one macro a field
   (g_2000004c_u32, *(volatile u8 *)0x2000a0f1), grouped into the structures it was declared as:
   `g_state.mode` for the fields one base and its offsets reach in several functions. Found on the
   private real-life test (2026-10-23): its compiler keeps most data in static structures and reloads
@@ -476,6 +476,70 @@ its sources.
   gizmo's dispatch table and FreeRTOS's kernel variables) is not a structure; measured against
   FreeRTOS's debug information (which globals are one structure, which are separate variables near
   one another), and the gate keeps every access one volatile access of the same width and address.
+  Done 2026-10-23 (dread/statics.py; the readable_types table's statics, dread.naming apply_globals and
+  static_names; docs/decisions.md). The evidence is the machine code's, of every function: a forward
+  pass follows the constants registers hold and the address each was made from (a literal, movw and
+  movt, lui with addi, then moves and adds); a load or store at such a register plus a constant is an
+  access from that base. A base's structure reaches as far as its accesses over every function and
+  ends where something else starts (another base, an address handed out, an indexed array's start,
+  a data symbol, a startup range, the region's end); its fields are every access inside it, through
+  any base, laid out naturally aligned as dread.shapes lays out a kind; two fields, one wider than a
+  byte. The anchor: a base counts only where one of its functions reaches a neighbour within 64 bytes
+  apart from it (statics.separate_bases): a compiler that makes a base per object reaches neighbours
+  through bases of their own, an anchor is the one base its file reaches everything through. Data
+  symbols only end structures (one at the first variable of an anchor's run would make the run one);
+  RISC-V's gp and upper halves made by lui alone are no bases; device registers are left out. Readable
+  C: `r3_1 = g_200299b4.f_c;`, `#define g_200299b4 (*(volatile struct g_200299b4_t *)0x200299b4u)` and
+  the structure above the function; an access of another type than its field stays the macro it was
+  (a word at a structure's address it holds no word for: g_20000030_u32).
+  Against FreeRTOS's debug information (`dread readable --statics --score ELF [--no-symbols]
+  [--every-base]`, the 39 builds of the benchmark and GCC -Os and -O2 built without -fdata-sections,
+  where GCC's section anchors reach every file's variables): no structure lies over several source
+  variables on any build; each lies inside one (but two of Cortex-M4F GCC -Os, where no variable has
+  debug information), each field that can be checked is a leaf of its variable at its offset with its
+  size. Per build (code alone): GCC -Os 15 (11 arrays of scalars such as ulCycleCounters, an array of
+  structures, xParameters; 3 structures, xStart, xSuspendedTaskList, xPendingReadyList), 33 fields;
+  GCC -O2, GCC 6 to 14 -Os and GCC 10 to 14 -O2 15, GCC 4, 5 -Os and 9 -O2 14, GCC -O0 5, clang -O2 13,
+  clang -Os 4, clang 12 to 19 -Os 5, Cortex-M4F GCC -Os 17, clang -Os 4, RISC-V clang 14 to 18 -Os 3,
+  19 2; RISC-V GCC (all six) and RISC-V clang -Os none, MSP430 none (no value_step). Of the source's
+  structures and arrays that the code reaches at fixed addresses at two places or more, GCC -Os 14 of
+  16 grouped whole, 1 in part; clang -O2 11 of 14, GCC -O0 4 of 6, RISC-V GCC -Os 0 of 16. Counting
+  every base instead (--every-base): 23 and 21 structures on the two builds without -fdata-sections
+  (each a source file's variables), 20 on RISC-V clang -Os (clang merges a file's globals), one on
+  thirteen ARM builds (newlib's malloc state, __malloc_free_list and __malloc_sbrk_start), every one
+  over several source variables; the evidence keeps all of them out, and with them 56 of the 385 that
+  lie inside one variable over the 39 builds (ARM 31 of 349, RISC-V 25 of 36: newlib's FILE array
+  __sf, xQueueRegistry, xCoreBMessageBuffers, RISC-V's lists and xParameters). With the data symbols (the
+  default) the same structures on every build. Readable C of the gate's readable functions (main ->
+  after; dread.cmetrics' new figure fixed_members): GCC -Os 15 structures in 12 functions, uses of
+  fixed-address macros 1421 -> 1366 and 55 members, macro definitions 524 -> 507 (19 of them
+  structures); clang -O2 14 structures (the gate's plan adds the readable C's accesses as fields) in 16
+  functions, 1610 -> 1525 and 85 members, 564 -> 531 (17); GCC -O0 5 in 7 functions, 1284 -> 1269 and
+  15, 517 -> 514 (7); RISC-V GCC -Os none. FreeRTOS reaches its structures mostly through pointers,
+  so the change is small there; the private firmware's code is the case it was made for. Example,
+  GCC -Os prvAddCurrentTaskToDelayedList (listINSERT_END into xSuspendedTaskList inlined), main:
+  `r2_1 = (volatile struct s_9 *)g_2002998c;` ... `g_20029988 = g_20029988 + 1;`, now `r2_1 =
+  (volatile struct s_9 *)g_20029988.f_4;` ... `g_20029988.f_0 = g_20029988.f_0 + 1;` (pxIndex and
+  uxNumberOfItems of one list). The gate accepts the same functions as before on the eight builds
+  (gizmo a32 35, m3 36, m4 44, rv32 31, none of them with a structure: gizmo is built without
+  -fdata-sections and its code alone does not tell g_config from an anchor; FreeRTOS GCC -Os 316,
+  clang -O2 275, RISC-V GCC -Os 251, GCC -O0 353); the members compile to the same loads and stores as
+  the macros on every gizmo build (tests/test_statics.py). The pass takes 0.4-1.6 s a FreeRTOS build.
+  Names: `dread pilot --task globals` (and readable) shows the readable C with the structures; each
+  field is asked as its own global (`g_20000030.f_4`, keyed by its address and type, which
+  static_names takes for the field) and the structure as one more (`"0x20000030 struct"`), so the
+  readable C reads `config.volume` (tests/test_statics.py, the model played). Not measured with a model
+  yet. Left: a structure whose functions use nothing next to it is missed (RISC-V's lists: their
+  callees reach them through a parameter, vListInsertEnd(&xSuspendedTaskList, ...), which would show
+  the object's extent, from an analysis of what a function reaches through its parameters, the base
+  registers item's "argument plus a constant"); the structures' addresses where the code hands them out
+  (`r2_2->f_4.f_10 = (volatile struct s_25 *)0x20029988u;` could be `&g_20029988`: a variable given
+  one then counts as given a C variable's address and loses its type, dread.shapes _uses); arrays of
+  scalars written as arrays (`g_20000c9c[1]`, not `.f_4`) and indexed accesses into arrays of
+  structures (pxReadyTasksLists[uxPriority].pxIndex, `0x200299f8u + 0x14u * r9_2 + 4` now); a
+  structure reached from several bases comes out as pieces; dread.shapes still makes an object per
+  address, not per structure of static data; a target whose data symbols are complete (an ELF's) could
+  let them make structures too (gizmo's g_config), which needs the target to say so.
 - [ ] **Memory.** Plain accesses for RAM and the stack, volatile kept where order is behaviour (the
   peripheral ranges of the target's memory map). Done when the gate and the system runs agree.
   Thought 2026-10-21: plain accesses let GCC merge and hoist loads, and a loop that waits for a flag

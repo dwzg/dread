@@ -621,15 +621,17 @@ that the C still compiles to the same code."""
 GLOBALS_SYSTEM = """You name the global variables and device registers of a binary image. Its C was
 made from the machine code by tools; memory at a fixed address is written as a name that says only
 where it is: g_20029aac (RAM), io_40004004 (a device register), rom_c6e4 (read-only memory), with a
-suffix when it is read or written narrower or wider than a word (g_20029aac_u8). Each is shown with
+suffix when it is read or written narrower or wider than a word (g_20029aac_u8). Static data the code
+reaches as one structure is a structure named so (g_20000030), its fields named after their offsets
+(g_20000030.f_4: hexadecimal); the structure and each field are shown apart. Each is shown with
 lines of the image's C that use it, under the name of the function they are in. Give each a name
-that says what it holds; the functions' names show the project's style (its prefixes, its case):
-follow it.
+that says what it holds (a field: its own name, without the structure's); the functions' names show
+the project's style (its prefixes, its case): follow it.
 
 Answer with one ```json block mapping the shown names to yours:
 
 ```json
-{"g_20029aac": "<name>", "io_40004004": "<name>"}
+{"g_20029aac": "<name>", "io_40004004": "<name>", "g_20000030": "<name>", "g_20000030.f_4": "<name>"}
 ```
 
 A name is a C identifier of at most 48 characters, no C keyword, no function's name, no two alike.
@@ -639,13 +641,22 @@ DEFAULT_GLOBAL = re.compile(r"^(g|io|rom)_[0-9a-f]+(_[us]\d+)?$")
 
 def global_uses(program, context, lifter, names, per=2):
     """What the readable C of the functions names says about its memory at fixed addresses:
-    ({key: {"name": its default name, "functions": [names], "uses": [(function, line)]}},
-    {function: {keys}}), at most per lines a function."""
+    ({key: {"name": its name there, "functions": [names], "uses": [(function, line)]}},
+    {function: {keys}}), at most per lines a function. With the context's structures of static data
+    applied (dread.statics): a field's key is its address and type, its name OBJECT.FIELD, and the
+    structure has a key of its own (dread.naming static_key) with the lines that use any of its
+    fields."""
+    import bisect
     from dread import cparse, naming, readable
     uses, by_function = {}, {}
-    for tree, fn, macros in readable.readable_trees(program, context, lifter, names):
+    bases = sorted(context.plan.statics)
+    for tree, fn, macros in readable.readable_trees(program, context, lifter, names, statics=True):
         name = fn.name
         chosen = {naming.global_key(*at): gname for gname, at in macros.items()}
+        for gname, (address, _) in macros.items():
+            if "." in gname:                # (a field: its structure too)
+                b = bases[bisect.bisect_right(bases, address) - 1]
+                chosen[naming.static_key(b)] = gname.split(".")[0]
         body = cparse.unparse(fn, notes=False, style="readable").splitlines()
         by_function[name] = set(chosen)
         for key, gname in chosen.items():
@@ -756,6 +767,7 @@ def struct_uses(program, context, lifter, names, per=3):
     from dread import lift, readable
     context = copy.copy(context)            # (a context of its own: readable.transform keeps its results
     context.names, context.structs, context._struct_names = {}, {}, None    # by context, names apart)
+    context._static_names = None
     uses = {k: [] for k in context.plan.structs}
     for name in names:
         typed = context.plan.typed.get(name)
@@ -865,7 +877,7 @@ def name_shared(target, image, program, provider, context, lifter, names, everyt
     uses, by_function = global_uses(program, context, lifter, every)
     wanted = sorted(set().union(*(by_function.get(n, set()) for n in names))) if names else []
     named = name_globals(target, image, program, provider, wanted, uses, out=out, shown_as=shown_as, device=device)
-    context.globals = naming.load(image, "globals")
+    context.globals, context._static_names = naming.load(image, "globals"), None
     structs = 0
     if context.plan.structs:                # (then the structures, which the variables' C shows)
         suses = struct_uses(program, context, lifter, every)
@@ -874,6 +886,7 @@ def name_shared(target, image, program, provider, context, lifter, names, everyt
         structs = name_structs(target, image, program, provider, context.plan, suses, swanted, taken, out=out,
                                device=device)
         context.structs, context._struct_names = naming.load(image, "structs"), None
+        context._static_names = None        # (they keep clear of the structures' names)
     return named, structs
 
 

@@ -15,7 +15,10 @@ table's (its globals, proposed for the whole image: dread pilot --task readable 
 the functions' variables, from their uses in every readable function) or a default one that says
 where it is: io_40004004 a device register ([memory] io), rom_c6e4 in a rom region, g_20029aac
 anything else (apply_globals). A function's names are made for its C before the globals' names, so
-naming a global later does not invalidate them.
+naming a global later does not invalidate them. Memory that the readable_types plan puts into a
+structure of static data (dread.statics) is written as a member of one object instead
+(g_20000030.f_4, one macro and the structure's definition above the function), its names from the
+same table (static_names: the structure's entry, else each field's address and type).
 
 No tool can tell whether a name is right; the same code tells that it changed nothing else. How
 close the names come to the source's: score (the bench's builds with debug information).
@@ -305,33 +308,122 @@ def _rewrite_stmt(s, f):
         _rewrite_stmt(inner, f)
 
 
-def apply_globals(tree, fn, named=None, memory=None, avoid=()):
+def static_key(address):
+    """The globals part's key of a structure of static data (dread.statics): its address."""
+    return "0x%x struct" % address
+
+
+def static_names(statics, named=None, memory=None, avoid=()):
+    """{address: (object name, tag, {offset: field name})} for the structures of static data
+    (statics: {address: [(offset, type)]}, dread.statics): the globals part's entry for the structure
+    (static_key: {"name", "fields": {"OFFSET": name}}) where it gives a C name, else default_name of
+    its address as a word (g_20000030); its tag that name with _t; a field's name its entry's, else the
+    name the globals part gives the access at that address and type (a global named before the plan
+    made it a field), else f_<offset>. A name is used only where it is a C identifier, no keyword,
+    unique in its structure, and no macro a file may hold beside it (a structure's object or a global
+    that stays a macro: it would expand inside a member or a tag); an object or a tag is none of avoid
+    either (the names dread.shapes gives its structures: a tag defined twice, a macro inside one).
+    Names depend on the table and the plan alone, so that a structure reads alike in every function."""
+    named = named or {}
+    members = {global_key(b + off, t) for b, rows in statics.items() for off, t in rows}
+    macros = {e.get("name") for k, e in named.items() if isinstance(e, dict) and k not in members
+              and not k.endswith(" struct")}
+
+    def good(name, taken=()):
+        return isinstance(name, str) and bool(IDENT.match(name)) and name not in KEYWORDS and name not in taken
+    objects, avoid = {}, set(avoid)
+    for address in sorted(statics):
+        name = (named.get(static_key(address)) or {}).get("name")
+        if not good(name, macros | avoid | set(objects.values())):
+            name = default_name(address, "u32", memory)
+        objects[address] = name
+    taken = macros | set(objects.values())
+    out, tags = {}, set()
+    for address, rows in sorted(statics.items()):
+        name = objects[address]
+        tag = name + "_t" if good(name + "_t", taken | tags | avoid) else "s_%x_t" % address
+        tags.add(tag)
+        given = (named.get(static_key(address)) or {}).get("fields") or {}
+        fields, seen = {}, set()
+        for off, ctype in rows:
+            choice = given.get(str(off))
+            if not good(choice, taken | seen):
+                choice = (named.get(global_key(address + off, ctype)) or {}).get("name")
+                if not good(choice, taken | seen):
+                    choice = "f_%x" % off
+            fields[off] = choice
+            seen.add(choice)
+        out[address] = (name, tag, fields)
+    return out
+
+
+def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, names=None):
     """The function's accesses to memory at fixed addresses written as names, a macro for each above
     the function (#define g_20029aac (*(volatile u32 *)0x20029aacu)): the table's name (named: the
     globals part) where it has one the file does not use for something else (nor avoid: the names the
-    function's own variables will get), else default_name. Returns {key: name} of what it named."""
+    function's own variables will get), else default_name. With statics ({address: [(offset, type)]},
+    the plan's structures of static data, dread.statics) an access that is a field of one, at its
+    offset with its type, is written as a member of the structure's object (g_20000030.f_4): one macro
+    for the structure, its definition above the function (as dread.shapes writes structures: every
+    field naturally aligned, gaps of bytes), names from static_names (names: what it returned, made
+    once for many functions; a structure's name that the function uses for something else gives way to
+    its default name there, as a global's does). Returns {key: name} of what it named (a structure's
+    fields as "NAME.FIELD")."""
     named = named or {}
     found = globals_in(fn)
     if not found:
         return {}
     busy = other_names(tree, fn) | set(variables(fn)) | set(avoid)
+    members = {}                            # (address, type) -> (the structure's address, offset)
+    if statics:
+        import bisect
+        bases = sorted(statics)
+        for address, ctype in sorted(found):
+            i = bisect.bisect_right(bases, address) - 1
+            if i >= 0 and dict(statics[bases[i]]).get(address - bases[i]) == ctype:
+                members[(address, ctype)] = (bases[i], address - bases[i])
+        if members and names is None:
+            names = static_names(statics, named, memory)
+    objects = {b: names[b] for b, _ in members.values()} if members else {}
+    for b, (name, tag, fields) in sorted(objects.items()):
+        if name in busy:                    # (a callee, a variable, a label of this function: the default here)
+            objects[b] = (default_name(b, "u32", memory), tag, fields)
+    taken_by_objects = {n for n, _, _ in objects.values()}
     chosen = {}
     for address, ctype in sorted(found):
+        if (address, ctype) in members:
+            continue
         name = (named.get(global_key(address, ctype)) or {}).get("name")
         if (not isinstance(name, str) or not IDENT.match(name) or name in busy or name in KEYWORDS
-                or name in chosen.values()):
+                or name in chosen.values() or name in taken_by_objects):
             name = default_name(address, ctype, memory)
+        if name in taken_by_objects:        # (a word at a structure's address it holds no such field for)
+            name = "%s_%s" % (default_name(address, "u32", memory), ctype)
         chosen[(address, ctype)] = name
 
     def f(e):
         a = fixed_access(e)
+        if a in members:
+            b, off = members[a]
+            return C.Member(C.Name(objects[b][0]), objects[b][2][off], False)
         return C.Name(chosen[a]) if a in chosen else None
     for s in fn.body.body:
         _rewrite_stmt(s, f)
     k = tree.items.index(fn)
-    tree.items.insert(k, C.Raw("\n".join("#define %s (*(volatile %s *)0x%xu)" % (chosen[a], a[1], a[0])
-                                         for a in sorted(chosen))))
-    return {global_key(*a): n for a, n in chosen.items()}
+    lines = ["#define %s (*(volatile %s *)0x%xu)" % (chosen[a], a[1], a[0]) for a in chosen]
+    lines += ["#define %s (*(volatile struct %s *)0x%xu)" % (objects[b][0], objects[b][1], b) for b in objects]
+    lines = sorted(lines, key=lambda line: int(line.rsplit("0x", 1)[1].rstrip("u)"), 16))     # (by address)
+    tree.items.insert(k, C.Raw("\n".join(lines)))
+    if objects:
+        from dread.shapes import struct_text
+        present = {item.text for item in tree.items if isinstance(item, C.Raw)}
+        for b in sorted(objects, reverse=True):
+            text = struct_text(objects[b][1], statics[b], objects[b][2])
+            if text not in present:         # (a file whose other function has it already: C17 forbids a
+                tree.items.insert(k, C.Raw(text))       # second definition)
+    out = {global_key(*a): n for a, n in chosen.items()}
+    out.update({global_key(*a): "%s.%s" % (objects[b][0], objects[b][2][off]) for a, (b, off) in members.items()})
+    return out
 
 
 def same_code(target, image, before, after, work):

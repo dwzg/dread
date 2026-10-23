@@ -9,6 +9,53 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Structures of static data: a base counts where the code reaches its neighbours apart from it (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Readable C writes memory at fixed addresses as a macro per address and type. Where the
+  source keeps its data in static structures (the private real-life test), the code reaches their
+  fields from one base plus constant offsets, and readable C should say so (`g_20000030.f_4`, one
+  object). But a section anchor looks the same: GCC without -fdata-sections reaches every variable of
+  a source file from one base, clang merges a file's globals on RISC-V, newlib's malloc keeps its
+  state so. What decides that a base is a structure's, where does a structure end, and how is it
+  written?
+- **Options.** Evidence: (a) every base whose accesses reach several offsets is a structure, ending
+  at the next base, address handed out, array start or data symbol; (b) as (a), with the places one
+  base reaches split where no function's view of them overlaps another's (a file's functions seldom
+  use all of its variables together); (c) as (a), but a base counts only where one of its functions
+  reaches a place next to it (within 64 bytes before it or after its structure) apart from it, through
+  another base or none (gp): a compiler that makes a base per object does so for neighbours a
+  function uses together, an anchor is the one base its file reaches everything through; (d) as (c),
+  counting addresses handed out next to the base, made apart from it, too; (e) a data symbol at the
+  base also makes it count. Writing: (i) a macro per structure, `#define g_20000030 (*(volatile struct
+  g_20000030_t *)0x20000030u)`, with the structure, fields naturally aligned with byte gaps (as
+  dread.shapes' structures), an access of another type than its field left the macro it was; (ii)
+  packed structures with casts for the other types.
+- **Choice: (c) and (i), with data symbols only ending structures.** Measured against debug information
+  on the 39 FreeRTOS builds and two built without -fdata-sections (dread readable --statics --score):
+  (a) made 23 and 21 structures on the two anchor builds, 20 on RISC-V clang -Os and one on thirteen ARM
+  builds (newlib's malloc state), each over several source variables; (b) left 20 of the 23 and cost
+  true structures (one of RISC-V's two lists, GCC -O0's xAutoReloadTimers); (c) keeps all of them out
+  and 329 of the 385 structures (a) finds inside one source variable on the 39 builds (ARM 318 of 349,
+  RISC-V 11 of 36; lost: newlib's FILE array __sf, xQueueRegistry, xCoreBMessageBuffers, RISC-V's lists
+  and xParameters, whose functions use nothing next to them); its window, on the gate's three ARM
+  builds: two structures fewer at 32 bytes, four at 16, none at 64, and one anchor run passes at 256;
+  (d) lets five runs of each anchor build pass (GCC makes a static's address as a literal of its own,
+  .LANCHOR0+20) for one structure gained on RISC-V. (e) would be right with an ELF's complete symbols (gizmo's g_config) and wrong with a person's partial ones, where a
+  symbol at the first variable of an anchor's run makes the run one. (i) keeps every access one of its
+  width at its address by its declaration (a packed word GCC reads in bytes on ARMv4t where it cannot
+  tell the address's alignment, through a pointer; at a constant address it infers it, which is the
+  compiler's choice, not the C's); the compiled members are checked against the macros on every gizmo
+  build. The cost: what
+  the code alone cannot tell stays as it was (gizmo's g_config; RISC-V's lists, whose functions reach
+  no neighbour apart from their base), and accesses of another type than the field stay macros.
+- **Undo.** In dread.statics plan(), trust="all" counts every base, symbols=False leaves out the data
+  symbols; an empty `statics` in the readable_types table (or none: older files) gives readable C a
+  macro per address and type again.
+- **Status.** Done (dread/statics.py, dread.naming apply_globals and static_names, dread readable
+  --check and --statics, dread pilot's globals question): docs/todo.md, "Structures of globals".
+
 ## A no-confidence vote on existing names: triggers by code, a candidate, a blind pairwise decision with a margin (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

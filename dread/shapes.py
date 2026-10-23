@@ -1879,12 +1879,16 @@ class Plan:
     type)]}) and, per function, which variables point to one ({function: {variable: name}}) with the
     digest of the readable C it was made for ({function: digest}: dread.naming.digest). A structure
     held inside another is a member of it (embeds: {outer: {offset: inner}}); the outer's rows leave
-    out what lies inside its members (the inner's fields are its own)."""
+    out what lies inside its members (the inner's fields are its own). statics: the structures of
+    static data at fixed addresses ({address: [(offset, type)]}, dread.statics), which every function
+    writes its accesses there through, whatever its digest (an address does not change with the
+    transformations)."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
         self.pointers = {}              # structure -> {offset: the structure the field points to}
         self.embeds = {}                # structure -> {offset: the structure held there as a member}
+        self.statics = {}               # address -> [(offset, type)]: structures of static data (dread.statics)
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -1896,6 +1900,8 @@ class Plan:
         if any(self.embeds.values()):
             out["embeds"] = {n: {str(off): t for off, t in sorted(es.items())}
                              for n, es in sorted(self.embeds.items()) if es}
+        if self.statics:
+            out["statics"] = {"0x%x" % a: [list(r) for r in rows] for a, rows in sorted(self.statics.items())}
         return out
 
     @classmethod
@@ -1908,6 +1914,7 @@ class Plan:
         p.pointers = {n: {int(off): t for off, t in ps.items()} for n, ps in data.get("pointers", {}).items()}
         p.embeds = {n: {int(off): t for off, t in es.items() if t in p.structs}     # (a member of a structure
                     for n, es in data.get("embeds", {}).items() if n in p.structs}  # the table lacks: none)
+        p.statics = {int(a, 16): [tuple(r) for r in rows] for a, rows in data.get("statics", {}).items()}
         return p
 
     def align(self, name, depth=0):
