@@ -1,7 +1,8 @@
 """dread gui on a copy of gizmo: the page and its files, the answers of the API (the whole program by
-groups among them, found by dread groups in a process of its own), the two kinds of change and the
-refusals (another host name, a change without the page's token); and the C reader that finds the
-definitions."""
+groups among them, found by dread groups in a process of its own), how sure each name is and what a
+review said of it (names.tsv and review.tsv written here), the search that lights the whole program,
+the two kinds of change and the refusals (another host name, a change without the page's token); and
+the C reader that finds the definitions."""
 import json
 import os
 import shutil
@@ -19,21 +20,115 @@ from conftest import GIZMO, gizmo_dir, have
 needs_gcc = pytest.mark.skipif(not have("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 
 
-@pytest.fixture
-def server(tmp_path):
+def gizmo_copy(tmp_path):
     copy = tmp_path / "gizmo"
     shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
     for cache in ("autocases", "regflow"):
         here = os.path.join(gizmo_dir("m3"), "build", cache)
         if os.path.isdir(here):
             shutil.copytree(here, copy / "m3" / "build" / cache)
-    target = Target.load(str(copy / "m3"))
+    return Target.load(str(copy / "m3"))
+
+
+def serving(target):
+    """The page's server for a target, serving in a thread, once the analyses are done."""
     srv = gui.serve(target, target.image(), port=0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    deadline = time.time() + 60
+    deadline = time.time() + 120
     while srv.state.pending() and time.time() < deadline:
         time.sleep(0.05)
+    return srv
+
+
+@pytest.fixture
+def server(tmp_path):
+    target = gizmo_copy(tmp_path)
+    srv = serving(target)
     yield srv, target
+    srv.shutdown()
+    srv.server_close()
+
+
+# A naming run and a review on gizmo-m3 (written here, as dread pilot writes them): these functions made
+# FUN_address in the tables, each proposed for (names.tsv) with a vote's agreement ("": one question)
+NAMELESS = {"fmt_dec": ("format_decimal", "1.00"), "fmt_hex": ("print_hex", "0.40"), "ring_put": ("ring_push", "0.60"),
+            "ring_get": ("ring_pop", "0.40"), "checksum": ("sum_bytes", ""), "mode_name": (None, None)}
+
+
+def plant_names(target):
+    """gizmo-m3 as a naming run and a review leave it: NAMELESS made FUN_address in its tables and
+    proposed for; the review changed fmt_hex's proposal (a new names.tsv row marked , review), kept
+    ring_put's against a candidate (a suspect; its "same" reason's sentence holds "; "), confirmed a name
+    ring_get no longer goes by (stale), flagged print_status (a person's name) and confirmed uart_putc;
+    the UART's group named by the pilot and its name kept by the review. Returns {old name: name now}."""
+    from dread import llm, namereview, pilot
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    now = {n: "FUN_%08x" % program.by_name[n].entry for n in NAMELESS}
+    by_address = {"0x%x" % program.by_name[n].entry: new for n, new in now.items()}
+    path = image.table("functions")
+    rows = [r.split("\t") for r in open(path).read().splitlines()]
+    with open(path, "w") as f:
+        f.write("".join("\t".join([r[0], by_address.get(r[0], r[1])] + r[2:]) + "\n" for r in rows))
+    path = image.table("symbols")
+    lines = open(path).read().splitlines()
+    with open(path, "w") as f:
+        f.write("".join("f %s %s\n" % (l.split()[1], by_address[l.split()[1]]) if l.startswith("f ") and
+                        l.split()[1] in by_address else l + "\n" for l in lines))
+    target = Target.load(target.root)
+    image = target.image()
+    program = Program(target, image)
+    played = llm.Scripted([])
+    for old, (proposed, sure) in NAMELESS.items():
+        if proposed:
+            pilot.keep_proposal(target, image, program.by_name[now[old]], proposed, "does %s" % proposed, played,
+                                "readable", {"confidence": sure, "samples": " ".join([proposed] * 5) if sure else "",
+                                             "pass": "1"})
+    pilot.keep_proposal(target, image, program.by_name[now["fmt_hex"]], "format_hex", "writes a number in hex", played,
+                        "readable" + namereview.REVIEWED, {"confidence": "0.80", "samples": "format_hex " * 4 + "hex_out",
+                                                           "pass": "2"})
+    uart = ["uart_init", "uart_putc", "uart_puts", "uart_getc"]
+    key = pilot.members_key(program, uart)
+    pilot.keep_subsystem(target, image, {"group": "0", "first": "0x%x" % program.by_name["uart_init"].entry,
+                                         "functions": 4, "members": key, "name": "UART driver", "prefix": "uart_",
+                                         "what": "sends and receives bytes", "confidence": "0.40",
+                                         "samples": "uart_ serial_ uart_ tty_ io_"})
+
+    def challenge(function, **values):
+        fn = program.by_name[function]
+        namereview.keep_review(target, image, dict({"review": 1, "round": 1, "kind": "function", "address": "0x%x" % fn.entry,
+                                                    "now": function, "source": "proposal", "score": "1.20"}, **values))
+    namereview.keep_review(target, image, {
+        "review": 1, "round": 1, "kind": "group", "address": "0x%x" % program.by_name["uart_init"].entry,
+        "now": "group 0", "group": key, "source": "proposal", "score": "1.20",
+        "reasons": "vote 1.20: the vote over its prefix agreed 40 % (its answers: uart_ serial_ uart_ tty_ io_)",
+        "old": "UART driver (uart_)", "candidate": "serial port (serial_)", "agreement": "3 of 5", "votes": "new 1, old 1",
+        "outcome": "kept", "name": "UART driver (uart_)", "what": "sends and receives bytes"})
+    challenge(now["fmt_hex"], reasons="vote 1.20: the vote that chose it agreed 40 % (its answers: print_hex)",
+              old="print_hex", candidate="format_hex", agreement="4 of 5", votes="new 2", outcome="changed",
+              name="format_hex", what="writes a number in hex")
+    challenge(now["ring_put"], score="1.80", reasons="vote 0.80: the vote that chose it agreed 60 % (its answers: x); "
+              "same 1.00: another function is named the same: FUN_1 (puts; takes)", old="ring_push",
+              candidate="ring_append", agreement="3 of 5", votes="new 1, old 1", outcome="kept", name="ring_push")
+    challenge(now["ring_get"], reasons="vote 1.20: the vote that chose it agreed 40 % (its answers: x)", old="ring_take",
+              candidate="ring_take", agreement="5 of 5", outcome="confirmed", name="ring_take")
+    challenge("print_status", source="person", score="1.00", reasons="vague 1.00: its name says little",
+              old="print_status", candidate="show_mode_and_volume", agreement="4 of 5", votes="new 2", outcome="flagged",
+              name="print_status")
+    challenge("uart_putc", source="person", round=2, score="1.00", reasons="renamed 1.00: its group was renamed",
+              old="uart_putc", candidate="uart_putc", agreement="5 of 5", outcome="confirmed", name="uart_putc")
+    return now
+
+
+@pytest.fixture
+def named(tmp_path):
+    """The page's server on a gizmo copy with a naming run and a review planted (plant_names)."""
+    target = gizmo_copy(tmp_path)
+    now = plant_names(target)
+    target = Target.load(target.root)
+    srv = serving(target)
+    yield srv, target, now
     srv.shutdown()
     srv.server_close()
 
@@ -163,6 +258,7 @@ def test_the_page_draws_the_relations(server):
     assert 'import { Sim } from "./sim.js"' in script and "requestAnimationFrame" in script
     assert "prefers-reduced-motion" in script               # (without motion: the layout at rest at once)
     assert "/api/program" in script and "function programHTML" in script and "#/p" in script
+    assert "/api/program-search" in script and "function pie(" in script     # (the search, how sure names are)
     sim = request(srv, "/sim.js")[2].decode()
     assert "export class Sim" in sim and "class Quadtree" in sim and "document" not in sim
     page = request(srv, "/")[2].decode()
@@ -271,6 +367,135 @@ def test_refusals(server):
     assert request(srv, "/api/rename", {"old": "beep_on", "new": "x"}, token=False)[0] == 403
     assert request(srv, "/api/rename", {"old": "beep_on", "new": "x"}, kind="text/plain")[0] == 415
     assert "beep_on" in srv.state.program.by_name
+
+
+def test_how_sure_names_are_in_the_list_and_the_overview(named):
+    """/api/functions: each function's certainty (dread.relations certainty: the vote's agreement of
+    the proposal it goes by), the proposal and the review's mark; a challenge of a name the function no
+    longer goes by marks nothing. /api/overview: the functions of each level, and what the review left
+    (flagged, suspects, changed with the old name, confirmed, the group's name, rows no longer about a
+    name in use)."""
+    srv, target, now = named
+    status, functions = answer(srv, "/api/functions")
+    by = {f["name"]: f for f in functions}
+    got = {old: (by[n]["certainty"], by[n].get("confidence"), by[n].get("proposed"), (by[n].get("review") or {}).get("mark"))
+           for old, n in now.items()}
+    assert got == {"fmt_dec": ("sure", 1.0, "format_decimal", None), "fmt_hex": ("likely", 0.8, "format_hex", "changed"),
+                   "ring_put": ("likely", 0.6, "ring_push", "suspect"), "ring_get": ("unsure", 0.4, "ring_pop", None),
+                   "checksum": ("unvoted", None, "sum_bytes", None), "mode_name": ("none", None, None, None)}, got
+    assert by[now["fmt_hex"]]["review"] == {"mark": "changed", "outcome": "changed", "old": "print_hex"}
+    assert by["print_status"]["certainty"] == "named" and by["print_status"]["review"]["mark"] == "flagged"
+    assert by["uart_putc"]["review"]["mark"] == "confirmed" and "review" not in by["uart_puts"]
+    status, o = answer(srv, "/api/overview")
+    counts = {k: v["functions"] for k, v in o["names"]["counts"].items()}
+    assert counts == {"named": len(functions) - 6, "sure": 1, "likely": 2, "unsure": 1, "unvoted": 1, "none": 1}
+    review = o["names"]["review"]
+    assert [i["name"] for i in review["flagged"]] == ["print_status"]
+    assert review["flagged"][0]["last"]["candidate"] == "show_mode_and_volume"
+    assert [i["name"] for i in review["suspect"]] == [now["ring_put"]]
+    assert [(i["name"], i["review"]["old"]) for i in review["changed"]] == [(now["fmt_hex"], "print_hex")]
+    assert [i["name"] for i in review["confirmed"]] == ["uart_putc"]
+    assert [(g["label"], g["mark"]) for g in review["groups"]] == [("UART driver", "suspect")]
+    assert (review["challenges"], review["reviews"], review["stale"]) == (6, 1, 1)
+
+
+def test_a_functions_name_and_what_the_review_said(named):
+    """/api/function's name: the proposal with its vote, and every challenge of the review with its
+    reasons split (a reason's sentence may hold "; "), its outcome and mark; a challenge of a name it
+    no longer goes by kept as history, marked stale."""
+    srv, target, now = named
+    status, d = answer(srv, "/api/function?name=" + now["fmt_hex"])
+    name = d["name"]
+    assert (name["naming"], name["certainty"], name["confidence"], name["proposed"]) == ("proposed", "likely", 0.8,
+                                                                                          "format_hex")
+    assert name["samples"].startswith("format_hex") and name["shown"].endswith(", review")
+    row = name["review"]["rows"][0]
+    assert (row["outcome"], row["mark"], row["old"], row["name"], row["stale"]) == ("changed", "changed", "print_hex",
+                                                                                    "format_hex", False)
+    assert row["reasons"][0]["kind"] == "vote" and row["reasons"][0]["weight"] == pytest.approx(1.2)
+    d = answer(srv, "/api/function?name=" + now["ring_put"])[1]
+    reasons = d["name"]["review"]["last"]["reasons"]
+    assert [r["kind"] for r in reasons] == ["vote", "same"] and reasons[1]["text"].endswith("(puts; takes)")
+    assert d["name"]["review"]["mark"] == "suspect" and d["name"]["review"]["last"]["candidate"] == "ring_append"
+    d = answer(srv, "/api/function?name=" + now["ring_get"])[1]
+    assert d["name"]["review"]["mark"] is None and d["name"]["review"]["stale"] == 1
+    assert d["name"]["review"]["rows"][0]["stale"] is True
+    d = answer(srv, "/api/function?name=print_status")[1]
+    assert d["name"]["certainty"] == "named" and d["name"]["review"]["mark"] == "flagged"
+    assert answer(srv, "/api/function?name=uart_puts")[1]["name"]["review"] is None
+
+
+def test_the_names_reload_when_the_review_changes(named):
+    """A review written after the page loaded: /api/status counts the names' tables anew (the page then
+    reloads its list), and the list shows the new mark."""
+    from dread import namereview
+    srv, target, now = named
+    before = answer(srv, "/api/status")[1]["names"]
+    path = namereview.review_path(target, target.image())
+    with open(path, "a") as f:
+        f.write("\t".join({"review": "2", "round": "1", "kind": "function", "address": "0x%x" % srv.state.program.by_name[
+            "uart_puts"].entry, "now": "uart_puts", "source": "person", "score": "1.00", "reasons": "vague 1.00: says little",
+            "old": "uart_puts", "candidate": "uart_write", "outcome": "kept", "name": "uart_puts"}.get(k, "")
+            for k in namereview.REVIEW_COLUMNS) + "\n")
+    os.utime(path, (time.time() + 5, time.time() + 5))
+    assert answer(srv, "/api/status")[1]["names"] == before + 1
+    by = {f["name"]: f for f in answer(srv, "/api/functions")[1]}
+    assert by["uart_puts"]["review"]["mark"] == "suspect"
+    assert answer(srv, "/api/overview")[1]["names"]["review"]["reviews"] == 2
+
+
+def test_the_search_finds_proposals_too(named):
+    """/api/search: a name dread pilot proposed is found ("proposal"), after the names in the tables."""
+    srv, target, now = named
+    found = answer(srv, "/api/search?q=ring_p")[1]
+    assert [(f["kind"], f["name"], f.get("proposed")) for f in found] == [("proposal", now["ring_get"], "ring_pop"),
+                                                                          ("proposal", now["ring_put"], "ring_push")]
+    found = answer(srv, "/api/search?q=uart")[1]
+    assert [f["kind"] for f in found][:4] == ["name"] * 4
+
+
+@pytest.mark.slow
+def test_names_in_the_graphs_and_the_search_that_lights_the_program(named):
+    """The relations' and the whole program's nodes: each function's certainty, the vote's agreement
+    and the review's mark; a group's functions by certainty, the marks it holds, its own name's
+    certainty and review; the things functions of two groups touch, with those functions (the edges
+    from shared memory down to an open group's functions). /api/program-search: every function a query
+    finds by its name, the name proposed for it, an address in it or a text it refers to, each with its
+    group, and the groups that hold them."""
+    srv, target, now = named
+    status, g = answer(srv, "/api/graph?name=print_status")
+    assert status == 200
+    nodes = {n["name"]: n for n in g["nodes"] if n["kind"] == "function"}
+    assert nodes["print_status"]["certainty"] == "named" and nodes["print_status"]["review"]["mark"] == "flagged"
+    assert (nodes[now["fmt_dec"]]["certainty"], nodes[now["fmt_dec"]]["confidence"]) == ("sure", 1.0)
+    assert nodes[now["mode_name"]]["certainty"] == "none" and "review" not in nodes[now["mode_name"]]
+    p = program(srv)
+    functions = {f["name"]: f for f in p["functions"]}
+    assert functions[now["ring_put"]]["review"]["mark"] == "suspect" and functions[now["ring_put"]]["confidence"] == 0.6
+    assert functions[now["checksum"]]["certainty"] == "unvoted" and "confidence" not in functions[now["checksum"]]
+    uart = p["groups"][functions["uart_putc"]["group"]]
+    assert uart["label"] == "UART driver" and uart["name_certainty"] == "unsure" and uart["review"]["mark"] == "suspect"
+    assert uart["certainty"]["named"] == 4 and uart["marks"] == {"confirmed": 1}
+    assert p["groups"][functions["print_status"]["group"]]["marks"].get("flagged") == 1
+    group_of = [f["group"] for f in p["functions"]]
+    for kind, key, users in p["shared"]:
+        assert kind in ("global", "device", "text", "table") and users == sorted(users)
+        assert len({group_of[i] for i in users}) > 1
+    assert p["counts"]["shared"] == len(p["shared"])
+    found = answer(srv, "/api/program-search?q=ring")[1]
+    how = {f["name"]: f["how"] for f in found["functions"]}
+    assert how[now["ring_put"]] == ["proposal"] and how[now["ring_get"]] == ["proposal"]
+    assert all(f["group"] == functions[f["name"]]["group"] for f in found["functions"])
+    counted = {}
+    for f in found["functions"]:
+        counted[f["group"]] = counted.get(f["group"], 0) + 1
+    assert {g["group"]: g["functions"] for g in found["groups"]} == counted and found["more"] == 0
+    entry = srv.state.program.by_name["uart_putc"].entry
+    found = answer(srv, "/api/program-search?q=0x%x" % (entry + 2))[1]
+    assert [(f["name"], f["how"]) for f in found["functions"]] == [("uart_putc", ["address"])]
+    found = answer(srv, "/api/program-search?q=mode")[1]
+    assert any(f["name"] == "print_status" and "text" in f["how"] and f["text"] for f in found["functions"])
+    assert answer(srv, "/api/program-search?q=")[1]["functions"] == []
 
 
 C_SAMPLE = r'''/* { a brace in a comment */

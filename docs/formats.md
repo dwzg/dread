@@ -359,6 +359,14 @@ every reader takes; this table says why. Columns, by the header line:
 
 The conversations are in `review/NAME.md` beside it (`review/group-N.md` for a group), appended.
 
+Readers (dread.namereview `standing`, since 2026-10-23: `dread relations --json`, `dread groups
+--json`, `dread gui`) take a function's rows by `address` and a group's by `group`, and of them only
+those whose `name` is the name the function or group goes by now: a later naming pass, or a person
+renaming the function, leaves the earlier rows about another name. The last of them gives the mark:
+`flagged`; `suspect` after `kept` or `no candidate`; `changed` after `changed` or `general`, and also
+after a `confirmed` of a name an earlier review gave; else `confirmed`. `reasons` is split where a
+reason's kind and weight begin (a sentence may hold `; `).
+
 ### `BUILD/pilot/IMAGE/device.tsv`
 
 Written by `dread pilot --task device` (since 2026-10-22): what kind of device the image runs on, as
@@ -407,11 +415,21 @@ whose facts its worker still makes), `status`, and an `origin` on each function 
 - A node: `id` (`f:NAME`, `m:0xADDRESS`, `t:0xADDRESS`, `s:s_N`), `kind` (`function`, `global`,
   `register`, `rom`, `table`, `text`, `structure`), `name`, `address` (null for a structure),
   `size` (null where unknown), `naming` (`named`, `proposed`, `unnamed`; null for a text) and
-  `proposed` (`{"name", "what"}`) where the pilot proposed one.
+  `proposed` (`{"name", "what"}`) where the pilot proposed one, and since 2026-10-23 `certainty`
+  (none for a text): how sure its name is, dread.relations `certainty()`, one of `none`, `unvoted`,
+  `unsure`, `likely`, `sure`, `named` (a proposal by its vote's agreement: `sure` where every answer
+  agreed, `unsure` at or below the agreement whose vote alone makes `--task review` challenge it, 0.5;
+  `unvoted` without a vote, which memory and structures always are).
   - A function also has `distance` and `side` (`center`, `caller`, `callee`, `both`, or `referred`
     for one whose address is taken here), `more` (`{"callers", "callees"}` beyond the graph), `facts`
     (`readable C`, `listing`, `pending`, or null outside the depth), `why`, `lifted` and `readable`
-    (the tables').
+    (the tables'); since 2026-10-23 `confidence` (names.tsv's, of the proposal it goes by, where a vote
+    was taken) and `review` where review.tsv challenged it (dread.namereview `standing`: `mark` of the
+    last row about the name it goes by now, `flagged`, `suspect` for one kept or without a candidate,
+    `changed`, `confirmed`, or null when every row is about another name; `last` and `changed`, those
+    rows as `challenge()` makes them: `review`, `round`, `score`, `mark`, `reasons` [{`kind`, `weight`,
+    `text`}], and the row's other columns where set; `stale`, the rows about another name;
+    `challenges`, all of its rows). Older readers ignore the new fields.
   - Memory has `types` (the access types) and `default` (the default name); a table also has `words`
     (how many of its words were read).
   - A text has `text`.
@@ -427,6 +445,10 @@ whose facts its worker still makes), `status`, and an `origin` on each function 
 
 Nodes come in a fixed order (the functions by distance, side and address, then what each touches),
 so the same tables give the same record.
+
+The GUI's other answers (`/api/functions`, `/api/overview`'s `names`, `/api/function`'s `name`,
+`/api/program-search`, `/api/status`'s `names`) are described in dread/gui.py's docstring; they are
+read by the page only.
 
 ### `BUILD/groups/IMAGE.json`
 
@@ -459,15 +481,25 @@ failed.
   only function; `number`, `group N`), `name`, `prefix`, `what` and `confidence` (the pilot's, else
   null; `prefix` is the shared prefix where the pilot gave none), `common` (`{"prefix", "functions"}`
   or null), `functions` (how many), `bytes`, `first` and `last` (entries), `members` (the key) and
-  `naming` (`{"named", "proposed", "unnamed"}`: how many of its functions each).
+  `naming` (`{"named", "proposed", "unnamed"}`: how many of its functions each); since 2026-10-23
+  `certainty` (`{level: how many of its functions}`, every level of the relations graph's
+  `certainty`), `marks` (`{mark: how many of its functions}`, the review's marks they carry),
+  `name_certainty` (the certainty of the pilot's name for it by the vote over its prefix, null when it
+  is not the pilot's) and `review` (the review's `standing` of that name, as a function's, or null).
 - Between two groups `a` < `b`: `calls` (`[a to b, b to a]`: pairs of a caller and a callee),
   `refers` (`[a to b, b to a]`: functions whose address the other group's code makes) and `shared`
   (`{kind: how many}` of the things both groups touch, of the kinds the grouping shares, none that more
   than MAX_SHARED functions touch). A pair with none of these is not listed.
 - A function: `name`, `entry`, `size`, `group`, `naming` (as the relations graph's) and `proposed` (the
-  pilot's name) where there is one.
+  pilot's name) where there is one; since 2026-10-23 `certainty`, and `confidence` and `review` where
+  there are, as the relations graph's.
 - `calls`: `[caller, callee, call sites]`, `refers`: `[function, function whose address it makes]`,
   each function by its number in `functions` (address order).
+- `shared` (since 2026-10-23): `[kind, key, [functions]]`, each thing the grouping shares (`global`,
+  `device`, `text`, `table`, keyed as BUILD/groups' evidence) that functions of two groups or more
+  touch, at most MAX_SHARED of them, with those functions by number: what `between`'s `shared` counts,
+  down to the functions (dread gui joins an open group's functions to them). `counts` has `shared`, how
+  many. A record without it (older) has only the counts between groups.
 
 Everything is in a fixed order (groups by number, functions by address, pairs by their numbers), so
 the same tables give the same record.

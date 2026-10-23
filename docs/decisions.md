@@ -9,6 +9,48 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## How sure names are, in dread gui: levels from the vote, a disc filled by it, the review's marks (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** docs/todo.md's v3-next asked for colours from name confidence rather than name status,
+  and the review's suspects marked, readable in light and dark and not by colour alone. Which levels,
+  from which numbers; what says it besides the colour; which review rows mark a name; what a function
+  without a name in the tables shows.
+- **Options and choices.**
+  1. Levels: (a) the vote's agreement as a continuous colour, (b) a few levels. **(b)** for the colour
+     (an ordinal ramp needs steps a reader tells apart), with the agreement itself as the disc's fill,
+     so 0.6 and 0.8 still differ. The thresholds come from the review's own model: sure where every
+     answer agreed (any agreement below 1 is a reason the review weighs, and such names were judged
+     wrong 22 % of the time against 9 % of all, "A no-confidence vote on existing names" below);
+     unsure at or below the agreement whose vote alone reaches the review's threshold (1 - THRESHOLD /
+     WEIGHTS["vote"], 0.5); likely between; unvoted for a proposal without a vote (one question; memory
+     and structures, which the pilot asks once; a review's more general name). To undo or tune:
+     dread.relations SURE and unsure_at().
+  2. Besides the colour: (a) an outline style a level, (b) a disc filled as far as the vote agreed, (c)
+     a mark a level. **(b)**: how full says how sure in grey too, and carries the agreement itself; a
+     dashed outline for no vote, an empty disc for none. In the page's text the disc is an inline SVG:
+     the page's Content-Security-Policy (style-src 'self') keeps style attributes out, which first
+     dropped the bar's widths and the discs' fill silently.
+  3. Colours: one hue (the page's steel blue) from light to dark, checked as an ordinal ramp in both
+     themes with the dataviz skill's validator (monotone lightness, steps apart, the light end above
+     2:1 on the panel). A diverging amber-to-blue scale, to make unsure stand out, was left: the
+     review's marks do that with a glyph, and amber and red stay for states (refused, dropped).
+  4. Which rows mark a name: only those whose name after the challenge is the name the function or
+     group goes by now (a later naming pass, or a person renaming it, makes them history, "stale"); the
+     last of them gives the mark: flagged; suspect after kept or no candidate; changed after changed or
+     general, also when a later review confirmed that name; else confirmed. Confirmed shows quietly in
+     the list and the pages, not in the graphs.
+  5. A function without a name in the tables goes by its proposal in the list, the graphs' labels and
+     the function's links, in italics; its FUN_ name stays in titles, the page's heading and the
+     address bar. Before, the list and the whole program showed FUN_address only, which tells nothing
+     on a stripped image. To undo: shownName() and labelOf() in app.js.
+  6. The memory and texts an open group shares: (a) a link for each pair of nodes whose functions touch
+     a shared thing, as the closed groups have, (b) each shared thing a node of its own. **(a)**, the
+     picture's vocabulary unchanged, bounded by 4,000 pairs (a thing many functions of two open groups
+     touch makes a pair for each; things fewer functions touch go first, the rest is counted).
+- **Status.** In the code (branch gui-confidence).
+
 ## Structures of static data: a base counts where the code reaches its neighbours apart from it (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

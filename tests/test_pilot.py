@@ -1340,6 +1340,15 @@ def test_a_challenged_name_changes_only_when_its_candidate_wins_both_orders(gizm
     assert "do_work" in open(image.table("functions")).read() and program.by_name["do_work"].entry not in names
     subsystems = pilot.read_subsystems(pilot.subsystems_path(target, image))
     assert subsystems[group["group"]]["prefix"] == "uart_"
+    from dread import relations                 # (what dread gui shows of it: namereview.standing, certainty)
+    names_now = relations.Names(target, image, program)
+    about = {n: names_now.about(program.by_name[now.get(n, n)]) for n in ("gpio_set", "uart_init", "delay", "led_off",
+                                                                             "led_on", "do_work")}
+    assert {n: (a["certainty"], (a["review"] or {}).get("mark")) for n, a in about.items()} == {
+        "gpio_set": ("likely", "suspect"), "uart_init": ("sure", "changed"), "delay": ("unvoted", "changed"),
+        "led_off": ("sure", "confirmed"), "led_on": ("sure", "changed"), "do_work": ("named", "flagged")}
+    assert about["led_on"]["review"]["last"]["old"] == "led_switch" and about["led_on"]["confidence"] == 1.0
+    assert names_now.group_review(group["group"], subsystems[group["group"]])["mark"] == "changed"
     decisions = [q for q in seen if "\n\nThe two names:\n" in q and "The function %s," % now["led_on"] in q]
     assert len(decisions) == 2 and "\nA: led_switch: " in decisions[0] and "\nA: led_turn_on: " in decisions[1]
     puts = [q for q in seen if "The function %s," % now["uart_puts"] in q and "The two names" not in q]
@@ -1364,6 +1373,26 @@ def test_a_challenged_name_changes_only_when_its_candidate_wins_both_orders(gizm
                        "--samples", "3"]) == 0
     assert "dread pilot --task review: 0 rounds; groups: none; functions: none" in capsys.readouterr().out
     assert loaded[:2] == ["p", "d"] and seen == []
+
+
+def test_what_the_review_says_of_the_name_a_function_has_now():
+    """namereview.standing: the last row about the name a function goes by gives its mark; a name an
+    earlier review gave stays "changed" when a later one confirms it; rows about another name are stale;
+    the reasons split where a kind and a weight begin, not at every "; "."""
+    from dread import namereview
+    rows = [{"review": "1", "round": "1", "outcome": "changed", "old": "a", "name": "b", "reasons": "vote 1.20: x; y"},
+            {"review": "2", "round": "1", "outcome": "confirmed", "old": "b", "name": "b",
+             "reasons": "same 1.00: p; q; vague 1.00: z"}]
+    got = namereview.standing(rows, "b")
+    assert got["mark"] == "changed" and got["changed"]["old"] == "a" and got["last"]["outcome"] == "confirmed"
+    assert [r["kind"] for r in got["last"]["reasons"]] == ["same", "vague"] and got["last"]["reasons"][0]["text"] == "p; q"
+    assert [r["text"] for r in got["changed"]["reasons"]] == ["x; y"] and got["challenges"] == 2
+    assert namereview.standing(rows, "c") == {"mark": None, "last": None, "changed": None, "stale": 2, "challenges": 2}
+    assert namereview.standing(rows + [dict(rows[1], outcome="kept", review="3")], "b")["mark"] == "suspect"
+    assert namereview.standing([dict(rows[0], outcome="flagged", name="a")], "a")["mark"] == "flagged"
+    history = namereview.standing(rows, "a", history=True)["rows"]
+    assert [r["stale"] for r in history] == [True, True] and history[0]["review"] == 1
+    assert namereview.standing([], "b") is None
 
 
 def test_a_decision_takes_both_orders_and_a_margin():

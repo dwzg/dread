@@ -158,6 +158,17 @@ def test_names_proposed_and_structures(m3, tmp_path):
             os.remove(path)
 
 
+def test_how_sure_a_name_is():
+    """certainty(): a name in the tables, none, and a proposal by its vote's agreement: every answer
+    agreed (sure), at most where dread.namereview's vote trigger alone challenges it (unsure: 0.5 by its
+    weights), between (likely), no vote taken (unvoted)."""
+    assert relations.unsure_at() == pytest.approx(0.5)
+    assert [relations.certainty("proposed", v) for v in (1.0, 0.8, 0.6, 0.5, 0.4, 0.2, None)] == [
+        "sure", "likely", "likely", "unsure", "unsure", "unsure", "unvoted"]
+    assert [relations.certainty(n, 0.2) for n in ("named", "unnamed", None)] == ["named", "none", "none"]
+    assert relations.CERTAINTY[0] == "none" and relations.CERTAINTY[-1] == "named"
+
+
 def test_numbers_are_not_addresses():
     """In the C: an access at a constant address always counts; an indexed access and a named constant
     only when the machine code makes their constant as an address (anchored); masks, comparisons,

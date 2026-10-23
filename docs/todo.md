@@ -2526,12 +2526,48 @@ tool, the page shows its records; the only changes are the command line's own.
       pair, 0.55 % from the exact forces; at 10,000 nodes 16 ms.
     Not measured: a browser with its GPU, and an image of thousands of real functions; the layout is
     the same however long the frames take, but how it reads at that size is not established.
-- [ ] v3, next: colours from name confidence rather than name status, and the pilot's no-confidence vote's
-  suspects marked (review.tsv's challenges and flagged names, since 2026-10-23); calls through
-  pointers from the system run's record (who called whom), so that a task's or a callback's caller
-  shows; the system run's timeline (device logs of both images side by side); in the whole program, a
-  search that lights functions, and the groups' edges from shared memory down to the functions once a
-  group is open (now only between closed groups).
+- [x] v3, next, first part (2026-10-23): how sure each name is and the name review's suspects, wherever a
+  function shows; in the whole program, a search that lights functions and the groups that hold them,
+  and the shared memory and texts down to an open group's functions.
+  - The tools compute, the page draws. dread.relations certainty (CERTAINTY: none, unvoted, unsure,
+    likely, sure, named): a proposal's from names.tsv's confidence, sure where every answer agreed,
+    unsure at or below the agreement whose vote alone makes the review challenge it (0.5 by its
+    weights). dread.namereview standing: the mark of the last review.tsv row about the name a function
+    or group goes by now (flagged; suspect after kept or no candidate; changed; confirmed), rows about
+    an older name stale. Both reach `dread relations --json`, `dread groups --json` and the GUI through
+    relations.Names; the whole-program record gains each group's certainties and marks, its own name's
+    certainty and review, and `shared` (each thing functions of two groups touch, with them). Kept until
+    a names table changes; /api/status counts those changes and the page reloads its list without
+    loading the image again (docs/formats.md, dread/gui.py; docs/decisions.md, 2026-10-23).
+  - The page: one hue from unsure to sure (an ordinal ramp checked in both themes: monotone lightness,
+    its light end 2.05:1 on white and 2.66:1 on the dark panel), a neutral grey for no vote, an empty
+    disc for none; each function's disc filled as far as its vote agreed (whole for a name in the
+    tables), dashed without a vote, so the scale reads without the colour. Marks: `?` suspect, `!`
+    flagged, a turn for changed (a quiet check for confirmed, in the list and the pages only). In the
+    list (chips filter by level and mark), the overview (a bar of the levels, the map by names, a review
+    card), the function's page (its proposal, vote and every challenge with its reasons), the relations
+    and the whole program (a group's ring by level, the suspects a closed group holds counted).
+    Functions without a name in the tables go by their proposal, in italics; the search finds proposals.
+  - Whole program: a Light box; /api/program-search finds by name, proposed name, address or text, each
+    function with its group, and the groups that hold them; the finds are ringed and lit, a closed group
+    counts its finds, Enter opens those groups. An open group's functions are joined to the memory and
+    texts they share with another group (its node, or its functions where it is open too): at most 4,000
+    such pairs, things fewer functions touch first, what is left out counted in the note.
+  - Checked in headless Chrome on gizmo (names and a review planted) and on a FreeRTOS GCC -Os copy after
+    a naming run and a review (366 functions: 285 sure, 77 likely, 4 unsure; 17 changed, 10 suspects):
+    light and dark, 400 px wide, no script errors, no horizontal scroll; at rest the relations of
+    queue_peek (57 nodes) after 3.6 s (11.7 s the first time, while the worker read their C) and the
+    whole program after 3-4 s, no frames after; "queue" lights
+    61 functions in 13 groups, Enter opens them (166 functions) and they settle in 2.7 s; reduced motion
+    draws no frames. The synthetic 5,000 functions (software raster): groups 57 fps at 2.0 ms of JS a
+    frame (1.7 before), all functions 18 fps at 14.8 ms (20 fps at 14.2 before; drawing a disc filled
+    whole as one path took it from 16.5).
+  - Not established: whether the levels fit other naming runs (one FreeRTOS run's votes: 285 at 1.0, 43
+    at 0.8, 34 at 0.6, 4 at 0.4); memory and structures have no vote, so their names are never more than
+    unvoted; the shared things between groups are few on FreeRTOS (two), most sharing stays inside a
+    group by construction.
+- [ ] v3, next: calls through pointers from the system run's record (who called whom), so that a task's or
+  a callback's caller shows; the system run's timeline (device logs of both images side by side).
 
 ## A realistic benchmark: FreeRTOS (asked for by the user, 2026-10-19; before the rest of MSP430)
 

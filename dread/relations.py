@@ -27,7 +27,12 @@ code makes, each only "uses".
 
 Each node says how sure its name is: named (a symbol: a person's or the ELF's; a function's own name
 unless it is FUN_ and the like, dread.samecode.UNNAMED), proposed (dread pilot's: names.tsv for
-functions, the readable_names table for memory and structures) or unnamed (FUN_..., g_..., s_N).
+functions, the readable_names table for memory and structures) or unnamed (FUN_..., g_..., s_N); and
+its certainty (certainty(), CERTAINTY: from none through unvoted, unsure, likely and sure to named), a
+proposal's from its vote's agreement (names.tsv's confidence: sure where every answer agreed, unsure
+where the vote alone makes dread pilot --task review challenge it). A function's node also says what
+the review's rows say of the name it goes by now (dread.namereview standing: flagged, suspect,
+changed, confirmed, with the reasons and the old name).
 
 Not established: an address the code makes may still be a number (a large constant from a literal
 pool); an indexed access is shown at its base; an address passed as an immediate (MSP430's
@@ -625,11 +630,45 @@ def mtime(path):
         return 0
 
 
+# How sure a name is, from unsure to sure (certainty()): the levels in that order, and the vote's
+# agreement (names.tsv's confidence) they begin at. A proposal is "sure" where every answer agreed
+# with it, "unsure" where its vote alone makes dread pilot --task review challenge it (agreement at
+# most 1 - THRESHOLD / WEIGHTS["vote"]: 0.5 by the review's weights; with five questions 0.2 and 0.4),
+# "likely" between (0.6 and 0.8 of five). Names with a vote below 1 were judged wrong 22 % of the
+# time on FreeRTOS, against 9 % of all names (docs/decisions.md, 2026-10-23).
+CERTAINTY = ("none", "unvoted", "unsure", "likely", "sure", "named")
+SURE = 1.0
+
+
+def unsure_at():
+    """The agreement at or below which a vote leaves a name unsure: where dread.namereview's vote
+    trigger alone reaches its threshold."""
+    from dread import namereview
+    return 1 - namereview.THRESHOLD / namereview.WEIGHTS["vote"]
+
+
+def certainty(naming, confidence=None):
+    """The level of CERTAINTY of a name: "named" (a name in the tables: a person's, the ELF's),
+    "none" (no name yet), and for a proposal by its vote's agreement (confidence, 0 to 1): "sure",
+    "likely", "unsure", or "unvoted" where no vote was taken (one question; a memory's or a
+    structure's name, which dread pilot asks once; a review's more general name)."""
+    if naming == "named":
+        return "named"
+    if naming != "proposed":
+        return "none"
+    if confidence is None:
+        return "unvoted"
+    if confidence >= SURE - 1e-9:
+        return "sure"
+    return "unsure" if confidence <= unsure_at() + 1e-9 else "likely"
+
+
 class Names:
     """What the tables say about names, read again when one of their files changes: the pilot's
-    proposals for functions (names.tsv), the readable_names table's globals and structures, the
-    readable_types plan, the lifted and readable tables, and the symbols' data names (the program's:
-    it is made anew when symbols.txt changes)."""
+    proposals for functions (names.tsv: the last line of each address, with its vote), the review's
+    challenges (review.tsv, dread.namereview standing), the readable_names table's globals and
+    structures, the readable_types plan, the lifted and readable tables, and the symbols' data names
+    (the program's: it is made anew when symbols.txt changes)."""
 
     def __init__(self, target, image, program):
         self.target, self.image, self.program = target, image, program
@@ -638,20 +677,31 @@ class Names:
         self.refresh()
 
     def files(self):
+        from dread.namereview import review_path
         from dread.pilot import names_path
         img = self.image
-        return [names_path(self.target, img)] + [img.table(t) for t in ("readable_names", "readable_types",
-                                                                         "readable", "lifted")]
+        return [names_path(self.target, img), review_path(self.target, img)] + \
+            [img.table(t) for t in ("readable_names", "readable_types", "readable", "lifted")]
 
     def refresh(self):
         stamp = tuple(mtime(f) for f in self.files())
         if stamp == self.stamp:
             return self
-        from dread import naming, shapes
+        from dread import naming, namereview, pilot, shapes
         from dread.build import read_names
-        from dread.pilot import read_proposals
         img = self.image
-        self.proposals = read_proposals(self.target, img)
+        self.rows = pilot.last_rows(pilot.read_name_rows(pilot.names_path(self.target, img)))
+        self.proposals = {a: (r["proposed"], r["what"]) for a, r in self.rows.items()}
+        self.reviewed, self.reviewed_groups = {}, {}     # entry, members key -> review.tsv rows in order
+        for r in namereview.read_review(namereview.review_path(self.target, img)):
+            if r["kind"] == "group":
+                if r["group"]:
+                    self.reviewed_groups.setdefault(r["group"], []).append(r)
+            else:
+                try:
+                    self.reviewed.setdefault(int(r["address"], 16), []).append(r)
+                except ValueError:
+                    continue
         self.globals = naming.load(img, "globals")
         self.plan = shapes.load_plan(img)
         taken = {e.get("name") for e in self.globals.values() if isinstance(e, dict)}
@@ -659,6 +709,7 @@ class Names:
         self.lifted = set(read_names(img.table("lifted")))
         self.readable = set(read_names(img.table("readable")))
         self.stamp = stamp
+        self.made = {}                      # (entry, name, history) -> about()
         return self
 
     def function(self, fn):
@@ -668,6 +719,37 @@ class Names:
         if not UNNAMED.match(fn.name):
             return "named", proposal
         return ("proposed" if proposal else "unnamed"), proposal
+
+    def about(self, fn, history=False):
+        """How sure a function's name is and what the review said of it: {"naming", "certainty"
+        (certainty()), "confidence" (the vote's agreement behind the proposal it goes by, or None),
+        "review" (dread.namereview standing of the name it goes by, or None)}; history adds the
+        proposal's "proposed", "what", "samples" (the vote's answers), "provider", "shown" and the
+        review's every row. Kept until a table changes."""
+        key = (fn.entry, fn.name, history)
+        if key in self.made:
+            return self.made[key]
+        from dread import namereview, pilot
+        naming_, proposal = self.function(fn)
+        row = self.rows.get(fn.entry)
+        confidence = pilot.confidence(row) if naming_ == "proposed" and row is not None else None
+        now = fn.name if naming_ == "named" else proposal[0] if proposal else None
+        out = {"naming": naming_, "certainty": certainty(naming_, confidence), "confidence": confidence,
+               "review": namereview.standing(self.reviewed.get(fn.entry), now, history)}
+        if history and row is not None:
+            out.update(proposed=row["proposed"], what=row["what"], samples=row.get("samples") or None,
+                       provider=row.get("provider") or None, shown=row.get("shown") or None,
+                       proposal_confidence=pilot.confidence(row))
+        self.made[key] = out
+        return out
+
+    def group_review(self, key, row):
+        """dread.namereview standing of a group's name (its subsystems.tsv row) by its members key, or
+        None."""
+        from dread import namereview
+        if row is None or key not in self.reviewed_groups:
+            return None
+        return namereview.standing(self.reviewed_groups[key], namereview.group_label(row))
 
     def memory(self, address, types):
         """(name, naming, default name, proposed name or None) of memory at an address accessed with
@@ -710,11 +792,17 @@ def graph(program, center, depth=DEPTH, calls=None, facts=None, names=None, extr
     def function_node(name, distance, side):
         fn = program.by_name[name]
         naming_, proposal = names.function(fn)
+        about = names.about(fn)
         node = {"id": "f:" + name, "kind": "function", "name": name, "address": fn.entry,
-                "size": program.end(fn) - fn.entry, "naming": naming_, "distance": distance, "side": side,
-                "lifted": name in names.lifted, "readable": name in names.readable, "facts": None}
+                "size": program.end(fn) - fn.entry, "naming": naming_, "certainty": about["certainty"],
+                "distance": distance, "side": side, "lifted": name in names.lifted,
+                "readable": name in names.readable, "facts": None}
         if proposal:
             node["proposed"] = {"name": proposal[0], "what": proposal[1]}
+        if about["confidence"] is not None:
+            node["confidence"] = about["confidence"]
+        if about["review"] is not None:
+            node["review"] = about["review"]
         if extra is not None:
             node.update(extra(name))
         nodes[node["id"]] = node
@@ -818,7 +906,8 @@ def graph(program, center, depth=DEPTH, calls=None, facts=None, names=None, extr
     for node_id, types in memory_types.items():
         node = nodes[node_id]
         name, naming_, default, proposed = names.memory(node["address"], types)
-        node.update({"name": name, "naming": naming_, "default": default, "types": sorted(types)})
+        node.update({"name": name, "naming": naming_, "certainty": certainty(naming_), "default": default,
+                     "types": sorted(types)})
         if proposed:
             node["proposed"] = {"name": proposed}
         node["size"] = None if node["kind"] == "table" else max((SIZES.get(t, 4) for t in types), default=None)
@@ -836,8 +925,9 @@ def graph(program, center, depth=DEPTH, calls=None, facts=None, names=None, extr
             held = plan.embeds.get(k, {})       # (a structure held inside it: struct NAME, its size)
             rows = [(off, t if off not in held else "struct " + names.structs.get(held[off], (held[off], {}))[0],
                      SIZES.get(t, 4) if off not in held else plan.size(held[off])) for off, t in plan.members(k)]
+            naming_ = "proposed" if label != k else "unnamed"
             nodes[node_id] = {"id": node_id, "kind": "structure", "name": label, "plan": k,
-                              "naming": "proposed" if label != k else "unnamed", "address": None,
+                              "naming": naming_, "certainty": certainty(naming_), "address": None,
                               "size": max((off + z for off, _, z in rows), default=0),
                               "fields": [[off, t, field_name(fields, off)] for off, t, _ in rows]}
         return node_id
@@ -895,11 +985,16 @@ def text_lines(g):
     for node in g["nodes"]:
         where = "0x%08x" % node["address"] if node.get("address") is not None else " " * 10
         what = [node["kind"], node.get("naming") or ""]
+        if node.get("naming") == "proposed" and node.get("certainty"):
+            what.append(node["certainty"] + (" %.2f" % node["confidence"] if node.get("confidence") is not None
+                                             else ""))
         if node["kind"] == "function":
             what.append("%s %d" % (node["side"], node["distance"]) if node["side"] != "center" else "center")
             what.append("from its %s" % node["facts"] if node.get("facts") else "")
             if node.get("proposed"):
                 what.append("proposed %s" % node["proposed"]["name"])
+            if (node.get("review") or {}).get("mark"):
+                what.append("review: %s" % node["review"]["mark"])
         elif node.get("types"):
             what.append(" ".join(node["types"]))
         lines.append("%-30s %s  %s" % (node["name"][:30], where, "  ".join(w for w in what if w)))

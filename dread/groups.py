@@ -63,10 +63,13 @@ command; from the readable C 7-23 s with no facts kept and 1-5 s with them (each
 --json prints the whole program as a graph of its groups (program_graph(), docs/formats.md, "The
 whole-program graph"): each group with a label (the pilot's subsystem name for exactly these
 functions, else the name prefix a third of its functions share where no other group's is the same,
-the name of a group's only function, or "group N") and the naming status of its functions; between
-two groups the calls each way, the addresses of functions taken each way, and the things both touch
-(as the grouping counts them: none that more than MAX_SHARED functions touch); every function with
-its group, and the calls and taken addresses between functions. dread gui draws it (/api/program).
+the name of a group's only function, or "group N") and the naming status of its functions, how sure
+their names are (dread.relations certainty) and the marks the name review left on them, and what the
+review said of the group's own name; between two groups the calls each way, the addresses of
+functions taken each way, and the things both touch (as the grouping counts them: none that more than
+MAX_SHARED functions touch); every function with its group, how sure its name is and the review's
+word on it, the calls and taken addresses between functions, and each thing functions of two groups
+touch with those functions. dread gui draws it (/api/program).
 
     dread groups [--target DIR] [--image NAME] [--resolution R] [--jobs N] [--score ELF] [--brief]
                  [--json] [--fresh] [--evidence listing|readable]
@@ -395,14 +398,16 @@ def common_prefix(names, share=PREFIX_SHARE):
 def program_graph(program, found, touched, calls=None, names=None, subsystems=None, extra=None,
                   max_shared=MAX_SHARED):
     """The whole program by groups (docs/formats.md, "The whole-program graph"): {"groups",
-    "between", "functions", "calls", "refers", "counts"}. found: find()'s groups; touched: evidence();
-    calls: dread.relations call_maps(program) (made here when None); names: a dread.relations Names
-    (each function's naming); subsystems: {members key: dread.pilot subsystems.tsv row}
+    "between", "functions", "calls", "refers", "shared", "counts"}. found: find()'s groups; touched:
+    evidence(); calls: dread.relations call_maps(program) (made here when None); names: a
+    dread.relations Names (each function's naming, how sure its name is and what the review said of
+    it, and the review of a group's name); subsystems: {members key: dread.pilot subsystems.tsv row}
     (read_subsystems), a group's name where its key is there; extra: name -> more attributes of a
-    function (dread gui: its origin). Functions are numbered in address order; "calls" and "refers"
-    name them by their number."""
+    function (dread gui: its origin). Functions are numbered in address order; "calls", "refers" and
+    "shared" (the things functions of two groups or more touch, with the functions that do) name them
+    by their number."""
     from dread import relations
-    from dread.pilot import members_key
+    from dread.pilot import confidence, members_key
     _, down = calls if calls is not None else relations.call_maps(program)
     names = names if names is not None else relations.Names(program.target, program.image, program)
     order = sorted(program.functions, key=lambda f: f.entry)
@@ -410,17 +415,26 @@ def program_graph(program, found, touched, calls=None, names=None, subsystems=No
     by_entry = {fn.entry: i for i, fn in enumerate(order)}
     member = membership(found)
     functions, naming = [], [collections.Counter() for _ in found]
+    sureness, marked = [collections.Counter() for _ in found], [collections.Counter() for _ in found]
     for fn in order:
         status, proposal = names.function(fn)
+        about = names.about(fn)
         node = {"name": fn.name, "entry": fn.entry, "size": program.end(fn) - fn.entry,
-                "group": member.get(fn.name), "naming": status}
+                "group": member.get(fn.name), "naming": status, "certainty": about["certainty"]}
         if proposal:
             node["proposed"] = proposal[0]
+        if about["confidence"] is not None:
+            node["confidence"] = about["confidence"]
+        if about["review"] is not None:
+            node["review"] = about["review"]
         if extra is not None:
             node.update(extra(fn.name))
         functions.append(node)
         if node["group"] is not None:
             naming[node["group"]][status] += 1
+            sureness[node["group"]][about["certainty"]] += 1
+            if about["review"] is not None and about["review"]["mark"]:
+                marked[node["group"]][about["review"]["mark"]] += 1
     edges = sorted({(index[a], index[b], len(sites)) for a, callees in down.items() if a in index
                     for b, sites in callees.items() if b in index})
     refers = sorted({(index[n], by_entry[key]) for n, things in touched.items() if n in index
@@ -443,6 +457,7 @@ def program_graph(program, found, touched, calls=None, names=None, subsystems=No
         for kind, key in things:
             if kind in SHARED and n in member:
                 users.setdefault((kind, key), set()).add(n)
+    shared = []
     for (kind, key), who in sorted(users.items()):
         if len(who) > max_shared:
             continue
@@ -451,6 +466,8 @@ def program_graph(program, found, touched, calls=None, names=None, subsystems=No
             for y in range(x + 1, len(gs)):
                 rec, _ = pair(gs[x], gs[y])
                 rec["shared"][kind] = rec["shared"].get(kind, 0) + 1
+        if len(gs) > 1:
+            shared.append([kind, key, sorted(index[n] for n in who if n in index)])
     groups = []
     commons = [common_prefix(group) for group in found]
     labels = collections.Counter(c[0] for c in commons if c)      # (a prefix of several groups tells none apart)
@@ -472,15 +489,19 @@ def program_graph(program, found, touched, calls=None, names=None, subsystems=No
                        "prefix": (row.get("prefix") or None) if row else (common[0] if common else None),
                        "what": (row.get("what") or None) if row else None,
                        "confidence": (row.get("confidence") or None) if row else None,
+                       "name_certainty": relations.certainty("proposed", confidence(row)) if source == "pilot" else None,
                        "common": {"prefix": common[0], "functions": common[1]} if common else None,
                        "functions": len(group), "bytes": sum(program.end(program.by_name[n]) - program.by_name[n].entry
                                                              for n in group),
                        "first": first.entry, "last": last.entry,
-                       "naming": {s: naming[k][s] for s in ("named", "proposed", "unnamed")}})
+                       "naming": {s: naming[k][s] for s in ("named", "proposed", "unnamed")},
+                       "certainty": {s: sureness[k][s] for s in relations.CERTAINTY},
+                       "marks": dict(sorted(marked[k].items())),
+                       "review": names.group_review(key, row) if row and row.get("name") else None})
     return {"groups": groups, "between": [pairs[k] for k in sorted(pairs)], "functions": functions,
-            "calls": [list(e) for e in edges], "refers": [list(r) for r in refers],
+            "calls": [list(e) for e in edges], "refers": [list(r) for r in refers], "shared": shared,
             "counts": {"functions": len(functions), "groups": len(groups), "calls": len(edges), "refers": len(refers),
-                       "between": len(pairs)}}
+                       "between": len(pairs), "shared": len(shared)}}
 
 
 def source_files(elf_path):

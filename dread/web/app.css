@@ -9,9 +9,14 @@
   --ran: #8fb0d0; --missed: #c4514d; --unreached: #c3cad1;
   --code-kw: #3d6590; --code-type: #5c7c99; --code-num: #8a5a2b; --code-str: #4b744b; --code-com: #8d97a1;
   --shadow: 0 1px 2px rgba(20, 30, 40, .06), 0 8px 24px rgba(20, 30, 40, .08);
-  --g-named: #3f6d99; --g-named-line: #2b5279; --g-proposed: #a9c8e6; --g-proposed-line: #5B7FA5;
   --g-unnamed: #eef1f4; --g-unnamed-line: #8e99a4; --g-text: #e4eee1; --g-text-line: #6d966a;
   --g-call: #8b97a3; --g-read: #5B7FA5; --g-write: #b5763c; --g-weak: #a9b2bb; --g-struct: #6f9494;
+  /* how sure a name is: one hue from unsure to sure (an ordinal ramp: monotone lightness, its light end
+     2.05:1 on the panel), a neutral grey for a proposal without a vote, an empty disc for none */
+  --c-named: #24486f; --c-sure: #3f6d99; --c-likely: #6b90b8; --c-unsure: #9bb8d6; --c-unvoted: #b9c1c9;
+  --c-named-line: #142d47; --c-sure-line: #24486f; --c-likely-line: #3f6d99; --c-unsure-line: #5f84ab;
+  --c-unvoted-line: #66727e; --c-none-line: #8e99a4; --c-empty: #f4f6f8;
+  --mk-suspect: #d9a640; --mk-flagged: #c4514d; --mk-changed: #5B7FA5; --mk-ink: #1b252f; --mk-ink-on: #ffffff;
   --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color-scheme: light;
@@ -27,9 +32,12 @@
     --ran: #48698a; --missed: #d0605b; --unreached: #363f48;
     --code-kw: #9cc2e6; --code-type: #8badc9; --code-num: #d4a570; --code-str: #9cc49a; --code-com: #66717c;
     --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .4);
-    --g-named: #9cc2e6; --g-named-line: #d3e5f5; --g-proposed: #3e6185; --g-proposed-line: #87acd1;
     --g-unnamed: #232a31; --g-unnamed-line: #66727e; --g-text: #1f2c21; --g-text-line: #8db88a;
     --g-call: #6f7c88; --g-read: #87acd1; --g-write: #d39c5f; --g-weak: #4f5a65; --g-struct: #7fabab;
+    --c-named: #d0e4f6; --c-sure: #93badf; --c-likely: #5f87af; --c-unsure: #3f5f80; --c-unvoted: #46505b;
+    --c-named-line: #eef5fb; --c-sure-line: #c4dcf1; --c-likely-line: #8fb3d6; --c-unsure-line: #6f93b8;
+    --c-unvoted-line: #8a95a1; --c-none-line: #66727e; --c-empty: #1b2128;
+    --mk-suspect: #d9a640; --mk-flagged: #d0605b; --mk-changed: #87acd1; --mk-ink: #0e1215; --mk-ink-on: #0e1215;
     color-scheme: dark;
   }
 }
@@ -43,9 +51,12 @@
   --ran: #48698a; --missed: #d0605b; --unreached: #363f48;
   --code-kw: #9cc2e6; --code-type: #8badc9; --code-num: #d4a570; --code-str: #9cc49a; --code-com: #66717c;
   --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .4);
-  --g-named: #9cc2e6; --g-named-line: #d3e5f5; --g-proposed: #3e6185; --g-proposed-line: #87acd1;
   --g-unnamed: #232a31; --g-unnamed-line: #66727e; --g-text: #1f2c21; --g-text-line: #8db88a;
   --g-call: #6f7c88; --g-read: #87acd1; --g-write: #d39c5f; --g-weak: #4f5a65; --g-struct: #7fabab;
+  --c-named: #d0e4f6; --c-sure: #93badf; --c-likely: #5f87af; --c-unsure: #3f5f80; --c-unvoted: #46505b;
+  --c-named-line: #eef5fb; --c-sure-line: #c4dcf1; --c-likely-line: #8fb3d6; --c-unsure-line: #6f93b8;
+  --c-unvoted-line: #8a95a1; --c-none-line: #66727e; --c-empty: #1b2128;
+  --mk-suspect: #d9a640; --mk-flagged: #d0605b; --mk-changed: #87acd1; --mk-ink: #0e1215; --mk-ink-on: #0e1215;
   color-scheme: dark;
 }
 
@@ -144,10 +155,12 @@ kbd {
 .list { flex: 1; overflow: auto; position: relative; }
 .spacer { position: relative; }
 .fnrow {
-  position: absolute; left: 0; right: 0; top: 0; height: 24px; padding: 0 10px; gap: 8px; align-items: center;
-  display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; cursor: pointer; white-space: nowrap;
+  position: absolute; left: 0; right: 0; top: 0; height: 24px; padding: 0 10px; gap: 7px; align-items: center;
+  display: grid; grid-template-columns: 8px 10px minmax(0, 1fr) auto auto; cursor: pointer; white-space: nowrap;
   font: 12px var(--mono);
 }
+.fnrow .nm.prop, .prop { font-style: italic; }
+.fnrow .mk { margin-left: -3px; }
 .fnrow:hover { background: var(--panel-2); }
 .fnrow.current { background: var(--sel); }
 .fnrow .nm { overflow: hidden; text-overflow: ellipsis; }
@@ -158,6 +171,27 @@ kbd {
 .o-refused { --o: var(--o-refused); } .o-dropped { --o: var(--o-dropped); } .o-original { --o: var(--o-original); }
 .dot[class*="o-"] { background: var(--o); }
 .dot.o-original { box-shadow: inset 0 0 0 1px var(--line-strong); }
+/* how sure a name is: a disc filled as far as the vote agreed (full for a name in the tables), its outline
+   dashed where no vote was taken, empty where there is no name: the fill says it without the colour */
+svg.disc { display: inline-block; flex: none; width: 11px; height: 11px; vertical-align: -1.5px; overflow: visible; }
+.disc .disc-bg { fill: var(--c-empty); stroke: var(--pl); stroke-width: 1.3; }
+.disc .pie { fill: var(--pf); }
+.disc.c-unvoted .disc-bg { stroke-dasharray: 2.2 1.5; }
+.fnrow svg.disc, .legend .item svg.disc, .result svg.disc { width: 10px; height: 10px; }
+.c-named { --pf: var(--c-named); --pl: var(--c-named-line); }
+.c-sure { --pf: var(--c-sure); --pl: var(--c-sure-line); }
+.c-likely { --pf: var(--c-likely); --pl: var(--c-likely-line); }
+.c-unsure { --pf: var(--c-unsure); --pl: var(--c-unsure-line); }
+.c-unvoted { --pf: var(--c-unvoted); --pl: var(--c-unvoted-line); }
+.c-none { --pf: var(--c-empty); --pl: var(--c-none-line); }
+/* the review's mark: a glyph in a disc, never the colour alone */
+.mk {
+  display: inline-grid; place-items: center; flex: none; width: 13px; height: 13px; border-radius: 50%;
+  font: 700 9.5px/1 var(--sans); color: var(--mk-ink-on); background: var(--mk-changed);
+}
+.mk.mk-suspect { background: var(--mk-suspect); color: var(--mk-ink); }
+.mk.mk-flagged { background: var(--mk-flagged); }
+.mk.mk-confirmed { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-strong); }
 main { overflow: auto; min-width: 0; position: relative; }
 
 /* function view */
@@ -177,6 +211,13 @@ main { overflow: auto; min-width: 0; position: relative; }
 .facts .v { min-width: 0; overflow-wrap: anywhere; }
 .facts .v a { font-family: var(--mono); font-size: 12px; margin-right: 10px; }
 .facts .v .times { color: var(--faint); font-size: 11px; margin-left: -7px; margin-right: 10px; }
+.facts .v .mono { font-family: var(--mono); font-size: 12px; }
+.facts .v .mk { vertical-align: -2px; }
+.legend-line.inline { display: inline; }
+.reasons { margin: 2px 0 0; padding-left: 18px; color: var(--muted); }
+.reasons li { margin: 1px 0; }
+.badge .disc { width: 10px; height: 10px; }
+.badge .mk { width: 12px; height: 12px; font-size: 9px; }
 .warn { color: var(--o-refused); }
 .bad { color: var(--missed); }
 .good { color: var(--accent-strong); }
@@ -253,6 +294,15 @@ a.f:hover { color: var(--accent-strong); text-decoration-color: var(--accent); }
 .stack { display: flex; height: 12px; border-radius: 4px; overflow: hidden; background: var(--o-original); }
 .stack > div { height: 100%; min-width: 0; }
 .stack > div + div { box-shadow: inset 1px 0 0 var(--panel); }
+.stack > div[class*="c-"] { background: var(--pf); }
+#name-stack { background: var(--c-empty); box-shadow: inset 0 0 0 1px var(--line); }
+.sub-head { margin: 10px 0 2px; font-size: 11.5px; color: var(--muted); }
+.card h2 + .sub-head { margin-top: 0; }
+.review-card .rowline { align-items: center; }
+.review-card .rowline .r { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+.review-card .rowline a { white-space: nowrap; max-width: 46%; overflow: hidden; text-overflow: ellipsis; flex: none; }
+.review-card .legend-line { margin-top: 10px; }
+.rowline .mono, .tip .mono { font-family: var(--mono); font-size: 12px; }
 .legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 12px; }
 .legend .item { display: grid; grid-template-columns: 9px 1fr; gap: 2px 8px; align-items: center; cursor: pointer; }
 .legend .item .dot { width: 9px; height: 9px; }
@@ -302,12 +352,25 @@ canvas.map { display: block; width: 100%; cursor: pointer; }
 .graph .node { cursor: pointer; }
 .glyph .shape, .graph .shape { stroke-width: 1.3; fill: var(--g-unnamed); stroke: var(--g-unnamed-line); }
 .glyph .inner, .graph .inner { fill: none; stroke: var(--g-unnamed-line); stroke-width: .9; }
-.n-named .shape { fill: var(--g-named); stroke: var(--g-named-line); }
-.n-proposed .shape { fill: var(--g-proposed); stroke: var(--g-proposed-line); }
-.n-unnamed .shape { fill: var(--g-unnamed); stroke: var(--g-unnamed-line); }
+/* how sure a piece's name is (the c- classes): memory and structures filled whole (named, or proposed
+   without a vote: outlined dashed), a function's disc filled by its pie as far as its vote agreed */
+.graph .node[class*=" c-"] .shape, .glyph[class*=" c-"] .shape { fill: var(--pf); stroke: var(--pl); }
+.graph .node.c-none .shape, .glyph.c-none .shape { fill: var(--c-empty); }
+.graph .node.c-unvoted .shape { stroke-dasharray: 2.4 1.6; }
+.graph .node.k-function .shape { fill: var(--c-empty); }
+.graph .node .pie { fill: var(--pf); stroke: none; }
+.graph .mk-g circle { fill: var(--mk-changed); stroke: var(--panel); stroke-width: 1.2; }
+.graph .mk-g.mk-suspect circle { fill: var(--mk-suspect); }
+.graph .mk-g.mk-flagged circle { fill: var(--mk-flagged); }
+.graph .node .mk-g text {
+  display: block; font: 700 7px var(--sans); fill: var(--mk-ink-on); stroke: none; text-anchor: middle;
+  dominant-baseline: central; pointer-events: none;
+}
+.graph .node .mk-g.mk-suspect text { fill: var(--mk-ink); }
+.graph .node text .prop { font-style: italic; }
 .k-text .shape, .glyph.k-text .shape { fill: var(--g-text); stroke: var(--g-text-line); }
 .k-rom .shape { stroke-dasharray: 2.5 1.5; }
-.graph .center .shape { stroke: var(--accent-strong); stroke-width: 3; }
+.graph .node.center .shape { stroke: var(--accent-strong); stroke-width: 3; stroke-dasharray: none; }
 .graph .node text {
   display: none; font: 11px var(--mono); fill: var(--text); paint-order: stroke; stroke: var(--panel); stroke-width: 3.5px;
   stroke-linejoin: round; pointer-events: none;
@@ -344,7 +407,16 @@ canvas.map { display: block; width: 100%; cursor: pointer; }
 /* the whole program (a canvas: its colours come from the variables above) */
 .fn-title .seg + button { margin-left: 2px; }
 .glyph .grp { fill: var(--accent-bg); stroke: var(--accent-soft); stroke-width: 1.2; }
-.glyph .grp-ring { fill: none; stroke: var(--g-named); stroke-width: 2.4; }
+.glyph .grp-ring { fill: none; stroke: var(--c-sure); stroke-width: 2.4; }
+.light-search {
+  width: min(280px, 100%); height: 26px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 6px;
+  background: var(--panel);
+}
+.light-search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.rel-legend .disc { width: 10px; height: 10px; }
+.rel-legend .mk { width: 12px; height: 12px; font-size: 8.5px; }
+.chip .disc { width: 10px; height: 10px; }
+.chip .mk { width: 12px; height: 12px; font-size: 8.5px; }
 a.button {
   border: 1px solid var(--line-strong); background: var(--panel); border-radius: 6px; padding: 3px 11px; color: var(--text);
   font-size: 12.5px;

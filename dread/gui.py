@@ -3,37 +3,73 @@
 A small web server on this machine and one page without a framework or a build step. It shows what
 the tools know and decided, and runs nothing heavy itself:
 - the overview: the functions by origin (written by hand, by dread pilot, lifted, refused or dropped
-  by the lift check, original) in counts and bytes, a map of the image, the refusal reasons grouped,
-  the failures of the last test run, when the tools last ran;
-- the function list, filtered and sorted;
+  by the lift check, original) in counts and bytes, the functions by how sure their names are, a map
+  of the image (by origin or by names), what the name reviews left (flagged, suspects, changed, the
+  groups' names), the refusal reasons grouped, the failures of the last test run, when the tools last
+  ran;
+- the function list, filtered (origin, how sure the name is, the review's mark) and sorted, each
+  function by the name it goes by (dread pilot's proposal, in italics, where the tables have none);
 - one function: the flat listing (dread flat) with calls and branches linked, the instructions the
   cases ran or missed (from the last dread test or dread lift --check), the C (the source of a
   rewritten function; the lifted C, built or lifted on the spot), its verdict, cases, placement and
-  annotations;
+  annotations, its name's proposal and vote, and every challenge of the review with its reasons;
 - one function's relations (dread relations, /api/graph): its callers and callees to a depth of 1 to
   3, the memory its readable C reads and writes, the texts and tables its constants point to, the
-  structures of the readable_types plan, each piece coloured by how sure its name is (named, proposed
-  by dread pilot, none yet); a click walks to another function. The functions come at once; the
-  memory, texts and structures follow as a worker reads each function's C, nearest first (kept per
-  function in BUILD/relations, so a second look costs a lift);
+  structures of the readable_types plan; a click walks to another function. The functions come at
+  once; the memory, texts and structures follow as a worker reads each function's C, nearest first
+  (kept per function in BUILD/relations, so a second look costs a lift);
 - the whole program (dread groups --json, /api/program): each group of functions dread groups finds
   one node, named by the pilot where it named that group, joined by the calls, taken addresses and
-  shared memory between their functions; a group opens into its functions in place, and a small
+  shared memory between their functions; a group opens into its functions in place (the memory and
+  texts it shares with other groups then joined to the functions that touch them), and a small
   program shows all its functions at once. The groups are found on the first request, by dread groups
   in a process of its own (its pool forks, which this threaded server must not), and kept in
-  BUILD/groups, so a second look reads them;
+  BUILD/groups, so a second look reads them. A search there (/api/program-search) lights the
+  functions it finds by name, the name proposed, address or text, and the groups that hold them;
+  Enter opens those groups;
+- how sure each name is, everywhere a function is shown (dread.relations Names: certainty from
+  names.tsv's vote, the review's standing from review.tsv): one hue from unsure to sure, a neutral grey
+  for a proposal without a vote and an empty disc for none; each function's disc filled as far as its
+  vote agreed (whole for a name in the tables), its outline dashed without a vote, so the scale reads
+  without the colour; the review's suspects marked with a glyph (? kept without a confirmation, !
+  a person's name the decision went against, a turn for a name the review changed), its reasons and
+  the old name on hover and in the function's page;
 - both graphs lay themselves out as the page draws them: a force simulation with velocities and
   friction runs over the animation frames, so that nodes overshoot a little and settle, starts from
   the last positions when the graph changes, keeps running while a node is dragged (its neighbours
   follow; released, it settles again) and stops when the layout is at rest. With prefers-reduced-motion
   the page shows the settled layout without the motion. The whole program is drawn on a canvas, its
   repulsion approximated by Barnes-Hut beyond a few hundred nodes (dread/web/sim.js);
-- search by name, by address and by the text a function refers to;
+- search by name, by the name dread pilot proposed, by address and by the text a function refers to;
 - two kinds of change, made as the command line makes them: rename (dread rename, checked and
   undone when the tree contradicts it) and annotate (annotations.txt).
-It reloads by itself when the tables or the tools' records change. The analyses that take a while on
+It reloads by itself when the tables or the tools' records change (the names' tables alone, names.tsv
+and review.tsv among them, without loading the image again). The analyses that take a while on
 a large image (callers, regflow, never-returning functions, the text index, the relations' readable
 C, the groups) run in the background; the page fills them in when they are ready.
+
+The answers, JSON, all computed here from the tables and the tools' records (the page computes
+nothing; what the names give is kept until a names table changes):
+- /api/status: {"generation" (a load of the image), "pending" (analyses), "names" (a change of the
+  names' tables)};
+- /api/functions: each function's name, entry, size, origin and test record, its "certainty"
+  (dread.relations CERTAINTY), "confidence" (its vote's agreement, where there was a vote), "proposed"
+  (the name it goes by where the tables have none) and "review" ({"mark", "outcome", "old": the name
+  before where the review changed it}, where the review left a mark);
+- /api/overview: ... and "names": {"counts": {certainty: {"functions", "bytes"}}, "review": the
+  flagged, suspects and changed names with their last challenge, the confirmed ones, the groups'
+  names challenged, "challenges", "reviews", "stale" (rows about a name no longer in use); null
+  without review.tsv};
+- /api/function: ... and "name" (Names.about with the history: the proposal, its vote's answers, and
+  every review row as dread.namereview challenge, those about an older name marked stale);
+- /api/graph and /api/program: dread relations' and dread groups' records (docs/formats.md), each
+  function with its certainty, confidence and review, each group with its functions' certainties, the
+  marks it holds and its own name's certainty and review, and the things functions of two groups
+  touch (the edges down to an open group's functions);
+- /api/search?q=: [{"kind": "address", "name", "proposal" or "text", ...}], at most 40;
+- /api/program-search?q=: {"query", "functions": [{"name", "group", "how": the kinds that found it,
+  "text", "proposed"}], "groups": [{"group", "functions": how many found}], "more": left out beyond
+  SEARCH_LIMIT}, or what /api/program says while the groups are found.
 
 Safety: the server listens on 127.0.0.1 unless told otherwise, answers only requests addressed to
 that host name (no DNS rebinding), and a change needs the token of the page it served (no other web
@@ -61,6 +97,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))      # (dread
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           "/sim.js": ("sim.js", "text/javascript; charset=utf-8"), "/app.css": ("app.css", "text/css; charset=utf-8")}
 ORIGINS = ("hand", "pilot", "lifted", "refused", "dropped", "original")
+SEARCH_LIMIT = 5000     # the functions one search lights in the whole program at most
 KEYWORDS = {"if", "while", "for", "switch", "return", "sizeof", "do", "else"}
 
 
@@ -152,6 +189,14 @@ def addresses(text):
     return [int(a, 16) for a in (text or "").split() if a.startswith("0x")]
 
 
+def number(text):
+    """A number written in a table (0x... or decimal), or -1."""
+    try:
+        return int(text, 0)
+    except (TypeError, ValueError):
+        return -1
+
+
 class State:
     """What the page shows of one image, reloaded when the files it comes from change."""
 
@@ -161,6 +206,7 @@ class State:
         self.stamp = None
         self.analyses = {}
         self.generation = 0
+        self.names_generation = 0           # changes when names.tsv, review.tsv or another names table does
         self.threads = []                   # the analyses' and the facts worker's (close joins them)
         self.refresh()
 
@@ -200,6 +246,7 @@ class State:
             return self
 
     def load(self):
+        from dread import relations
         from dread.build import read_names
         from dread.program import Program
         from dread.rename import c_files
@@ -249,7 +296,10 @@ class State:
         self.suite = None
         self.lifter = None                                  # one per load: it keeps what it learns
         self.analyses = {}
-        self.relations = None                               # (call maps, Names) for the graph
+        self.names = relations.Names(self.target, img, self.program)     # how sure each name is (name_table)
+        self.names_stamp = self.names.stamp
+        self.made = {}                                      # what is made from the names: key -> (stamp, value)
+        self.relations = None                               # the call maps for the graphs (call_names)
         self.known = {}                                     # name -> its facts (dread.relations), made
         self.wanted, self.worker = [], None                 # what the facts worker makes next
         self.grouped = None                                 # dread groups' record (load()), or why not
@@ -340,13 +390,38 @@ class State:
     # -- answers --
 
     def status(self):
-        return {"generation": self.generation, "pending": self.pending()}
+        self.name_table()
+        return {"generation": self.generation, "pending": self.pending(), "names": self.names_generation}
+
+    def name_table(self):
+        """The image's dread.relations Names (how sure each name is, what the review said of it), read
+        again where one of its tables changed; names_generation counts the changes, so that the page
+        reloads what it shows of the names. Called with the lock held."""
+        names = self.names.refresh()
+        if names.stamp != self.names_stamp:
+            self.names_stamp = names.stamp
+            self.names_generation += 1
+        return names
+
+    def cached(self, key, stamp, make):
+        """What make() returns, kept until stamp changes (the names' and the tables' records)."""
+        got = self.made.get(key)
+        if got is None or got[0] != stamp:
+            got = self.made[key] = (stamp, make())
+        return got[1]
 
     def runs(self):
         p = self.paths()
         return {k: mtime(p[f]) or None for k, f in (("recon", "payload"), ("test", "tests"), ("lift_check", "verdicts"))}
 
     def functions(self):
+        names = self.name_table()
+        return self.cached("functions", names.stamp, lambda: self.make_functions(names))
+
+    def make_functions(self, names):
+        """The function list: each function's place in the image, origin and test record, and how sure
+        its name is (Names.about: its certainty, the vote's agreement, the proposal it goes by, the
+        review's mark with the outcome, and the old name where the review changed it)."""
         prog = self.program
         out = []
         for fn in prog.functions:
@@ -355,9 +430,30 @@ class State:
             verdict = self.verdicts.get(name, {})
             missed = bool(test.get("missed")) if test else \
                 verdict.get("verdict") == "dropped" and bool(verdict.get("missed"))
-            out.append({"name": name, "entry": fn.entry, "size": prog.end(fn) - fn.entry, "origin": self.origin[name],
-                        "system": name in self.system, "failed": bool(test and int(test.get("failed") or 0)),
-                        "missed": missed})
+            row = {"name": name, "entry": fn.entry, "size": prog.end(fn) - fn.entry, "origin": self.origin[name],
+                   "system": name in self.system, "failed": bool(test and int(test.get("failed") or 0)),
+                   "missed": missed}
+            row.update(self.name_brief(names, fn))
+            out.append(row)
+        return out
+
+    def name_brief(self, names, fn):
+        """A function's certainty, the vote's agreement and the proposal it goes by, and the review's
+        mark (with its outcome, and the old name where it changed the name): the list's and the
+        overview's share of Names.about."""
+        about = names.about(fn)
+        out = {"certainty": about["certainty"]}
+        naming_, proposal = names.function(fn)
+        if naming_ == "proposed":
+            out["proposed"] = proposal[0]
+        if about["confidence"] is not None:
+            out["confidence"] = about["confidence"]
+        review = about["review"]
+        if review and review["mark"]:
+            made = review["changed"] or review["last"]
+            out["review"] = {"mark": review["mark"], "outcome": review["last"].get("outcome")}
+            if review["mark"] == "changed" and made.get("old"):
+                out["review"]["old"] = made["old"]
         return out
 
     def overview(self):
@@ -387,7 +483,59 @@ class State:
                           "isa": getattr(img.arch, "isa", None), "base": img.base, "end": img.end,
                           "functions": len(prog.functions)},
                 "counts": counts, "refused": refused, "dropped": dropped, "failing": failing,
-                "uncovered": uncovered, "runs": self.runs(), "status": self.status()}
+                "uncovered": uncovered, "names": self.names_overview(), "runs": self.runs(), "status": self.status()}
+
+    def names_overview(self):
+        """How sure the names are, for the overview: the functions and bytes of each level of
+        dread.relations CERTAINTY, and what the reviews said (review.tsv, dread.namereview standing):
+        the names they flagged, the suspects they left, the names they changed (the old name and why),
+        how many they confirmed, the groups' names they challenged, and how many rows speak of a name
+        no longer in use ("stale")."""
+        from dread import pilot
+        names = self.name_table()
+        path = pilot.subsystems_path(self.target, self.image)
+        return self.cached("names", (names.stamp, mtime(path)), lambda: self.make_names_overview(names, path))
+
+    def make_names_overview(self, names, path):
+        from dread import namereview, pilot, relations
+        prog = self.program
+        counts = {c: {"functions": 0, "bytes": 0} for c in relations.CERTAINTY}
+        review = {"flagged": [], "suspect": [], "changed": [], "confirmed": [], "groups": [], "stale": 0,
+                  "challenges": 0, "reviews": 0}
+        numbers = set()
+        for fn in prog.functions:
+            about = names.about(fn)
+            c = counts[about["certainty"]]
+            c["functions"] += 1
+            c["bytes"] += prog.end(fn) - fn.entry
+            got = about["review"]
+            if got is None:
+                continue
+            review["stale"] += got["stale"]
+            review["challenges"] += got["challenges"]
+            numbers |= {r.get("review") for r in names.reviewed.get(fn.entry, [])}
+            if got["mark"]:
+                item = dict(self.name_brief(names, fn), name=fn.name, entry=fn.entry, last=got["last"])
+                if got["changed"]:
+                    item["changed"] = got["changed"]
+                review[got["mark"]].append(item)
+        rows = pilot.read_subsystems(path)
+        for key, challenged in sorted(names.reviewed_groups.items(), key=lambda kv: (number(kv[1][0].get("address")),
+                                                                                        kv[0])):
+            numbers |= {r.get("review") for r in challenged}
+            row = rows.get(key)
+            got = namereview.standing(challenged, namereview.group_label(row) if row else None)
+            review["challenges"] += got["challenges"]
+            review["stale"] += got["stale"]
+            if got["mark"]:
+                review["groups"].append({"members": key, "label": row.get("name") if row else None,
+                                         "prefix": row.get("prefix") if row else None, "mark": got["mark"],
+                                         "last": got["last"], "changed": got["changed"]})
+        review["reviews"] = len(numbers - {None, ""})
+        for k in ("flagged", "suspect", "changed"):
+            review[k].sort(key=lambda item: (-(item["last"].get("score") or 0), item["entry"]))
+        review["confirmed"] = [{"name": i["name"], "proposed": i.get("proposed")} for i in review["confirmed"]]
+        return {"counts": counts, "review": review if review["challenges"] else None}
 
     def function(self, name):
         from dread import flat
@@ -399,6 +547,7 @@ class State:
         header["callers"] = [{"name": n, "address": a} for n, a in header["callers"]]
         out = {"header": header, "rows": rows, "origin": self.origin[name], "system": name in self.system,
                "size": prog.end(fn) - fn.entry, "status": self.status()}
+        out["name"] = self.name_table().about(fn, history=True)
         out["verdict"] = self.verdicts.get(name)
         out["test"] = self.tests.get(name)
         out["placement"] = self.placement.get(name)
@@ -510,11 +659,8 @@ class State:
         found. Called with the lock held."""
         from dread import relations
         if self.relations is None:
-            names = relations.Names(self.target, self.image, self.program)
-            self.relations = (relations.call_maps(self.program, self.ready("callers") or {}), names)
-        calls, names = self.relations
-        names.refresh()
-        return calls, names
+            self.relations = relations.call_maps(self.program, self.ready("callers") or {})
+        return self.relations, self.name_table()
 
     def program_graph(self):
         """The whole program by groups (dread.groups program_graph, docs/formats.md), once the callers
@@ -621,6 +767,10 @@ class State:
                 self.known[name] = facts
 
     def search(self, query, limit=40):
+        """[{"kind", "name", "origin", ...}] of the functions a query finds, at most limit (None: all):
+        the one an address is in ("address"), the names that hold it ("name"; the best first), the
+        names dread pilot proposed that hold it ("proposal", with "proposed"), the texts that hold it
+        ("text", with the address that refers to it, once the text index is made)."""
         prog = self.program
         query = query.strip()
         if not query:
@@ -628,7 +778,7 @@ class State:
         out, seen = [], set()
 
         def add(kind, name, **more):
-            if (kind, name, more.get("address")) not in seen and len(out) < limit:
+            if (kind, name, more.get("address")) not in seen and (limit is None or len(out) < limit):
                 seen.add((kind, name, more.get("address")))
                 out.append(dict(kind=kind, name=name, origin=self.origin.get(name), **more))
 
@@ -640,16 +790,57 @@ class State:
         except ValueError:
             pass
         low = query.lower()
-        names = [fn for fn in prog.functions if low in fn.name.lower()]
-        names.sort(key=lambda fn: (fn.name.lower() != low, not fn.name.lower().startswith(low), len(fn.name),
-                                   fn.name))
-        for fn in names:
+
+        def best(fns, of):
+            return sorted(fns, key=lambda fn: (of(fn).lower() != low, not of(fn).lower().startswith(low), len(of(fn)),
+                                               of(fn), fn.entry))
+        for fn in best([fn for fn in prog.functions if low in fn.name.lower()], lambda fn: fn.name):
             add("name", fn.name, entry=fn.entry)
+        names = self.name_table()
+        proposed = {}
+        for fn in prog.functions:
+            naming_, proposal = names.function(fn)
+            if proposal and naming_ == "proposed" and low in proposal[0].lower():
+                proposed[fn.name] = proposal[0]
+        for fn in best([prog.by_name[n] for n in proposed], lambda fn: proposed[fn.name]):
+            add("proposal", fn.name, entry=fn.entry, proposed=proposed[fn.name])
         texts = self.ready("texts") or []
         for text, name, address in texts:
             if low in text.lower():
                 add("text", name, address=address, text=text[:120])
         return out
+
+    def program_search(self, query):
+        """What a search lights in the whole program (/api/program-search): every function the query
+        finds (search(): by its address, its name, the name proposed for it, the texts it refers to),
+        each once with its group and how it was found, and the groups that hold them with how many
+        each; SEARCH_LIMIT functions at most ("more": how many were left out). Waits like
+        program_graph for the groups."""
+        graph = self.program_graph()
+        if "groups" not in graph:
+            return graph
+        group_of = {f["name"]: f["group"] for f in graph["functions"]}
+        found, order, left = {}, [], set()
+        for r in self.search(query, limit=None):
+            item = found.get(r["name"])
+            if item is None:
+                if len(order) >= SEARCH_LIMIT:
+                    left.add(r["name"])
+                    continue
+                item = found[r["name"]] = {"name": r["name"], "group": group_of.get(r["name"]), "how": []}
+                order.append(item)
+            if r["kind"] not in item["how"]:
+                item["how"].append(r["kind"])
+            if r["kind"] == "text" and "text" not in item:
+                item["text"] = r["text"]
+            if r["kind"] == "proposal":
+                item["proposed"] = r["proposed"]
+        groups = {}
+        for item in order:
+            if item["group"] is not None:
+                groups[item["group"]] = groups.get(item["group"], 0) + 1
+        return {"query": query.strip(), "functions": order, "more": len(left),
+                "groups": [{"group": g, "functions": n} for g, n in sorted(groups.items())], "status": self.status()}
 
     # -- changes --
 
@@ -747,6 +938,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, state.graph(query.get("name", ""), query.get("depth", "1")))
                 if url.path == "/api/program":
                     return self.reply(200, state.program_graph())
+                if url.path == "/api/program-search":
+                    return self.reply(200, state.program_search(query.get("q", "")))
                 if url.path == "/api/status":
                     return self.reply(200, state.status())
         except KeyError as e:

@@ -44,7 +44,9 @@ reason, and puts a new one down only when it wins against the old one by a margi
    REVIEWED) or of subsystems.tsv (a group's), so every reader takes it; --upto-pass with the last
    naming pass gives the names before the review. A name people gave is never changed: a challenge it
    loses is logged as "flagged", with the name preferred, for a person to look at. The conversations
-   go to BUILD/pilot/IMAGE/review/.
+   go to BUILD/pilot/IMAGE/review/. Readers take a name's standing from the rows (standing(): the mark
+   of the last row about the name it goes by now, MARKS); dread relations, dread groups and dread gui
+   show it.
 4. Rounds: after a round the triggers are computed again with the names it changed. A function or a
    group changes at most once in a review (names that depend on each other could oscillate), and a
    name challenged before, in this review or an earlier one (review.tsv's reason_keys), is challenged
@@ -759,6 +761,75 @@ def read_review(path):
     """The rows of a review.tsv as {column: text} (REVIEW_COLUMNS; a column a file lacks empty)."""
     from dread import pilot
     return pilot.read_table(path, REVIEW_COLUMNS)
+
+
+# What a review's last word on a name marks it as (standing): a challenge it lost but for the margin, or
+# without an answer, leaves it a suspect; a person's name the decision went against is flagged.
+MARKS = {"flagged": "flagged", "kept": "suspect", "no candidate": "suspect", "changed": "changed",
+         "general": "changed", "confirmed": "confirmed"}
+
+
+def split_reasons(text):
+    """review.tsv's reasons ("kind weight: sentence; ...", reasons_text) as [(kind, weight, sentence)];
+    a sentence may hold "; " itself (another function's sentence in a "same" reason), so a reason
+    begins only where a kind of WEIGHTS and a weight follow."""
+    kinds = "|".join(sorted(map(re.escape, WEIGHTS), key=len, reverse=True))
+    out = []
+    for part in re.split(r"; (?=(?:%s) -?\d+(?:\.\d+)?: )" % kinds, text or ""):
+        m = re.match(r"(%s) (-?\d+(?:\.\d+)?): (.*)$" % kinds, part, re.S)
+        if m:
+            out.append((m.group(1), float(m.group(2)), m.group(3)))
+        elif part.strip():
+            out.append(("", 0.0, part.strip()))
+    return out
+
+
+def challenge(row):
+    """One review.tsv row as a record for readers (dread gui): the numbers as numbers, the mark its
+    outcome gives (MARKS), the reasons split (split_reasons: [{"kind", "weight", "text"}]); a field the
+    row leaves empty is left out."""
+    def number(text, kind):
+        try:
+            return kind(text)
+        except (TypeError, ValueError):
+            return None
+    out = {"review": number(row.get("review"), int), "round": number(row.get("round"), int),
+           "score": number(row.get("score"), float), "mark": MARKS.get(row.get("outcome")),
+           "reasons": [{"kind": k, "weight": w, "text": t} for k, w, t in split_reasons(row.get("reasons"))]}
+    for k in ("kind", "source", "old", "old_what", "candidate", "candidate_what", "agreement", "votes", "outcome",
+              "name", "what", "provider", "decider"):
+        if row.get(k):
+            out[k] = row[k]
+    return out
+
+
+def standing(rows, name, history=False):
+    """What review.tsv says of the name a function or a group has now. rows: the function's or group's
+    rows in file order (read_review); name: the name it has now (a function's proposal, or its name in
+    the tables; a group's "name (prefix)", group_label). Only a row whose name after the challenge is
+    that name speaks of it: a later naming pass, or a person renaming it, leaves the earlier rows about
+    another name (counted in "stale"). Returns None without rows, else {"mark": MARKS of the last row
+    that speaks of it ("flagged", "suspect", "changed", "confirmed"; "changed" too where that row
+    confirmed a name an earlier review had changed it to) or None, "last": challenge() of that row,
+    "changed": challenge() of the row that changed it to this name (when not the last), "stale",
+    "challenges": how many rows}; history adds "rows": every row's challenge(), with "stale" on those
+    about another name."""
+    if not rows:
+        return None
+    applies = [r for r in rows if r.get("name") == name]
+    out = {"mark": None, "last": None, "changed": None, "stale": len(rows) - len(applies), "challenges": len(rows)}
+    if applies:
+        last = applies[-1]
+        mark = MARKS.get(last.get("outcome"))
+        made = [r for r in applies if MARKS.get(r.get("outcome")) == "changed"]
+        if mark == "confirmed" and made:
+            mark = "changed"
+        out.update(mark=mark, last=challenge(last))
+        if made and made[-1] is not last:
+            out["changed"] = challenge(made[-1])
+    if history:
+        out["rows"] = [dict(challenge(r), stale=r.get("name") != name) for r in rows]
+    return out
 
 
 def keep_review(target, image, values):

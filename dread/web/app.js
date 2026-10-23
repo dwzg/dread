@@ -24,11 +24,28 @@ const ORIGINS = {
   original: { short: "original", long: "original machine code" },
 };
 const ANALYSES = { callers: "callers", endless: "returns", flow: "registers", texts: "texts" };
+// How sure a name is (dread.relations certainty, sent by the server), from sure to none: the order of
+// the legends and of the overview's bar.
+const CERTAINTY = {
+  named: { short: "named", long: "a name in the tables (a person's or the ELF's)" },
+  sure: { short: "sure", long: "proposed by dread pilot; every answer of its vote agreed" },
+  likely: { short: "likely", long: "proposed by dread pilot; most answers of its vote agreed" },
+  unsure: { short: "unsure", long: "proposed by dread pilot; half of its vote's answers or fewer agreed (the review challenges it for that alone)" },
+  unvoted: { short: "no vote", long: "proposed without a vote (one answer)" },
+  none: { short: "no name", long: "no name yet" },
+};
+// The review's mark on a name (dread.namereview standing, sent by the server).
+const MARKS = {
+  flagged: { glyph: "!", short: "flagged", long: "a person's name the review's decision went against: left for a person to look at" },
+  suspect: { glyph: "?", short: "suspect", long: "challenged by the review and kept without being confirmed" },
+  changed: { glyph: "↻", short: "changed", long: "a name the review gave in place of an older one" },
+  confirmed: { glyph: "✓", short: "confirmed", long: "challenged by the review and confirmed" },
+};
 
 const S = {
   overview: null, functions: [], byName: new Map(), order: [], current: null, sel: -1,
-  filter: "", origins: new Set(), sort: "address", showBytes: false, showC: true, by: "bytes",
-  generation: 0, pending: [], view: null, tab: null, mode: "code",
+  filter: "", origins: new Set(), certainty: new Set(), sort: "address", showBytes: false, showC: true, by: "bytes",
+  generation: 0, names: null, pending: [], view: null, tab: null, mode: "code", mapBy: "origin",
 };
 
 // ---- small helpers ----
@@ -91,6 +108,44 @@ function dot(origin) {
   return `<span class="dot o-${origin}"></span>`;
 }
 
+// The share of a name's disc that is filled: the vote's agreement for a proposal, all of it for a
+// name in the tables or a proposal without a vote (its outline is dashed), none without a name.
+function filled(certainty, confidence) {
+  if (certainty === "none") return 0;
+  if (certainty === "named" || certainty === "unvoted" || confidence == null) return 1;
+  return Math.max(0, Math.min(1, confidence));
+}
+
+function certaintyWords(certainty, confidence) {
+  const c = CERTAINTY[certainty] || CERTAINTY.none;
+  return confidence != null && certainty !== "named" ? `${c.short}: its vote agreed ${Math.round(100 * confidence)} %` : c.short;
+}
+
+// A name's disc in the page's text (the list, the legends, the tips): an SVG, since the page's
+// Content-Security-Policy keeps style attributes out; the same disc as the graphs draw.
+function pie(certainty, confidence, title = true) {
+  const level = certainty || "none", f = filled(level, confidence);
+  const tip = title ? `<title>${esc(certaintyWords(level, confidence))}</title>` : "";
+  return `<svg class="disc c-${level}" viewBox="-6 -6 12 12"${title ? "" : ' aria-hidden="true"'}>${tip}<circle class="disc-bg" r="5.2"/>${piePath(4.55, f)}</svg>`;
+}
+
+function markHTML(review, title = true) {
+  if (!review || !review.mark || !MARKS[review.mark]) return "";
+  const m = MARKS[review.mark];
+  const tip = title ? ` title="${esc(m.short + ": " + m.long + (review.old ? ` (before: ${review.old})` : ""))}"` : "";
+  return `<span class="mk mk-${review.mark}"${tip}>${m.glyph}</span>`;
+}
+
+// The name a function goes by on the page: its name in the tables, or the name dread pilot proposed
+// (in italics: a proposal, not a name of the tables) where it has none.
+function shownName(fn) {
+  return fn.proposed ? fn.proposed : fn.name;
+}
+
+function nameHTML(fn) {
+  return fn.proposed ? `<span class="prop">${esc(fn.proposed)}</span>` : esc(fn.name);
+}
+
 // ---- theme ----
 
 function applyTheme() {
@@ -113,13 +168,26 @@ function cycleTheme() {
 function renderChips() {
   $("#chips").innerHTML = Object.entries(ORIGINS).map(([key, o]) =>
     `<span class="chip${S.origins.has(key) ? " on" : ""}" data-origin="${key}" title="${esc(o.long)}">${dot(key)}${o.short}</span>`).join("");
+  // how sure the names are, and the review's marks where a review left any
+  const marks = new Set(S.functions.map((fn) => fn.review && fn.review.mark).filter(Boolean));
+  const sample = { likely: 0.6, unsure: 0.4 };
+  $("#name-chips").innerHTML = Object.entries(CERTAINTY).map(([key, c]) =>
+    `<span class="chip${S.certainty.has(key) ? " on" : ""}" data-certainty="${key}" title="${esc(c.long)}">${pie(key, sample[key], false)}${c.short}</span>`).join("") +
+    Object.entries(MARKS).filter(([key]) => marks.has(key)).map(([key, m]) =>
+      `<span class="chip${S.certainty.has(key) ? " on" : ""}" data-certainty="${key}" title="${esc(m.long)}">${markHTML({ mark: key }, false)}${m.short}</span>`).join("");
+}
+
+// Whether a function passes the names filter: one of the certainties or marks chosen (any of them).
+function namesPass(fn) {
+  return !S.certainty.size || S.certainty.has(fn.certainty) || (fn.review && S.certainty.has(fn.review.mark));
 }
 
 function applyFilter() {
   const f = S.filter.trim().toLowerCase();
-  const list = S.functions.filter((fn) => (!S.origins.size || S.origins.has(fn.origin)) &&
-    (!f || fn.name.toLowerCase().includes(f) || hex8(fn.entry).includes(f.replace(/^0x/, ""))));
-  if (S.sort === "name") list.sort((a, b) => a.name.localeCompare(b.name));
+  const list = S.functions.filter((fn) => (!S.origins.size || S.origins.has(fn.origin)) && namesPass(fn) &&
+    (!f || fn.name.toLowerCase().includes(f) || (fn.proposed && fn.proposed.toLowerCase().includes(f)) ||
+      hex8(fn.entry).includes(f.replace(/^0x/, ""))));
+  if (S.sort === "name") list.sort((a, b) => shownName(a).localeCompare(shownName(b)));
   else if (S.sort === "size") list.sort((a, b) => b.size - a.size || a.entry - b.entry);
   else list.sort((a, b) => a.entry - b.entry);
   S.order = list;
@@ -137,11 +205,14 @@ function renderList() {
   let html = "";
   for (let i = from; i < to; i++) {
     const fn = S.order[i];
-    const flags = fn.failed ? " failed" : "";
-    const title = `${fn.name} · ${hex(fn.entry)} · ${fn.size} bytes · ${ORIGINS[fn.origin].long}` +
-      (fn.failed ? " · cases fail" : "") + (fn.missed ? " · instructions never ran" : "");
+    const flags = (fn.failed ? " failed" : "") + (fn.proposed ? " prop" : "");
+    const review = fn.review ? ` · ${MARKS[fn.review.mark].short} by the review` + (fn.review.old ? ` (before: ${fn.review.old})` : "") : "";
+    const title = `${fn.name}${fn.proposed ? ` (proposed: ${fn.proposed})` : ""} · ${hex(fn.entry)} · ${fn.size} bytes · ${ORIGINS[fn.origin].long}` +
+      (fn.failed ? " · cases fail" : "") + (fn.missed ? " · instructions never ran" : "") +
+      ` · name ${certaintyWords(fn.certainty, fn.confidence)}` + review;
     html += `<div class="fnrow${fn.name === current ? " current" : ""}" data-i="${i}" data-name="${esc(fn.name)}" title="${esc(title)}">` +
-      `${dot(fn.origin)}<span class="nm${flags}">${esc(fn.name)}</span><span class="size">${fn.size}</span></div>`;
+      `${dot(fn.origin)}${pie(fn.certainty, fn.confidence, false)}<span class="nm${flags}">${esc(shownName(fn))}</span>` +
+      `${markHTML(fn.review, false) || "<span></span>"}<span class="size">${fn.size}</span></div>`;
   }
   spacer.innerHTML = html;
   for (const row of spacer.children) row.style.transform = `translateY(${row.dataset.i * ROW}px)`;
@@ -160,6 +231,7 @@ function revealInList(name) {
 async function loadFunctions() {
   S.functions = await api("/api/functions");
   S.byName = new Map(S.functions.map((fn) => [fn.name, fn]));
+  renderChips();
   applyFilter();
 }
 
@@ -212,6 +284,12 @@ async function showOverview(keep = false) {
         <div class="legend" id="legend"></div>
       </section>
       <section class="section">
+        <div class="section-head"><h2>Names</h2><span class="grow"></span>
+          <span class="legend-line">how sure each function's name is: filled as far as its vote agreed</span></div>
+        <div class="stack" id="name-stack"></div>
+        <div class="legend" id="name-legend"></div>
+      </section>
+      <section class="section">
         <div class="section-head"><h2>Whole program</h2><span class="grow"></span>
           <a class="button" href="#/p" title="The whole program (p)">Open the graph</a></div>
         <div class="legend-line">its functions in the groups dread groups finds from their code (shared memory, texts, devices,
@@ -219,14 +297,16 @@ async function showOverview(keep = false) {
       </section>
       <section class="section">
         <div class="section-head"><h2>Image map</h2><span class="grow"></span>
-          <span class="legend-line">point at a function to name it, click to open it</span></div>
+          <span class="legend-line">point at a function to name it, click to open it</span>
+          <div class="seg" id="map-by"><button data-map="origin" title="Coloured by origin, as the Origins above">origin</button><button data-map="names" title="Coloured by how sure the names are, as the Names above">names</button></div></div>
         <canvas class="map" id="map"></canvas>
         <div class="map-scale"><span>${hex(img.base)}</span><span>${hex(img.end)}</span></div>
       </section>
-      <div class="cards">${refusedCard(o)}${testsCard(o)}${droppedCard(o)}${runsCard(o)}</div>
+      <div class="cards">${reviewCard(o)}${refusedCard(o)}${testsCard(o)}${droppedCard(o)}${runsCard(o)}</div>
     </div>`;
   main.scrollTop = again ? scroll : 0;
   renderOrigins();
+  renderNames();
   drawMap();
   watch(o.status);
 }
@@ -251,6 +331,60 @@ function renderOrigins() {
       `<span class="num">${c.functions} · ${size(c.bytes)} · ${pct}%</span></div>`;
   }).join("");
   for (const b of $("#by").children) b.classList.toggle("on", b.dataset.by === by);
+}
+
+// How sure the names are: a bar of the functions by certainty, a legend whose items filter the list.
+function renderNames() {
+  const counts = S.overview.names.counts;
+  const total = Object.values(counts).reduce((t, c) => t + c.functions, 0) || 1;
+  const stack = $("#name-stack"), legend = $("#name-legend");
+  stack.innerHTML = "";
+  for (const key of Object.keys(CERTAINTY)) {
+    const part = document.createElement("div");
+    part.className = "c-" + key;
+    part.style.width = (100 * counts[key].functions / total) + "%";
+    part.title = `${CERTAINTY[key].long}: ${counts[key].functions} functions`;
+    stack.appendChild(part);
+  }
+  const sample = { likely: 0.6, unsure: 0.4 };
+  legend.innerHTML = Object.entries(CERTAINTY).map(([key, c]) => {
+    const n = counts[key].functions, pct = (100 * n / total).toFixed(n && 100 * n / total < 1 ? 1 : 0);
+    return `<div class="item" data-certainty="${key}" title="${esc(c.long)}; show only these in the list">${pie(key, sample[key], false)}<span class="label">${esc(c.short)}</span>` +
+      `<span class="num">${n} · ${size(counts[key].bytes)} · ${pct}%</span></div>`;
+  }).join("");
+  for (const b of $("#map-by").children) b.classList.toggle("on", b.dataset.map === S.mapBy);
+}
+
+const REVIEW_SHOWN = 30;        // the names of each kind the review card lists at most
+
+// What the reviews said (dread pilot --task review, review.tsv): the names they flagged, the suspects
+// they left, the names they changed, with the reasons; the groups' names; how many they confirmed.
+function reviewCard(o) {
+  const r = o.names.review;
+  if (!r) return `<div class="card"><h2>Name review</h2><div class="none">No review recorded yet (dread pilot --task review writes it).</div></div>`;
+  const reasons = (last) => (last.reasons || []).map((x) => x.text).join("; ");
+  const fnLine = (item) => {
+    const last = item.last, made = item.changed || last;
+    const what = item.review && item.review.mark === "changed"
+      ? `was <span class="mono">${esc(made.old || "")}</span>: ${esc(reasons(made))}${made.agreement ? ` · candidate ${esc(made.agreement)}` : ""}${made.votes ? `, decided ${esc(made.votes)}` : ""}`
+      : `${esc(reasons(last))}${last.agreement ? ` · candidate ${esc(last.candidate || "")} ${esc(last.agreement)}` : ""}${last.votes ? `, decided ${esc(last.votes)}` : ""}`;
+    return `<div class="rowline">${markHTML(item.review)}${pie(item.certainty, item.confidence)}<a href="${fnLink(item.name)}" title="${esc(item.name)}">${nameHTML(item)}</a>` +
+      `<span class="r" title="${esc(reasons(last))}">${what}</span></div>`;
+  };
+  const groupLine = (g) => `<div class="rowline">${markHTML(g)}<span class="mono">${esc(g.label || g.members)}${g.prefix ? ` (${esc(g.prefix)})` : ""}</span>` +
+    `<span class="r" title="${esc(reasons(g.last))}">${esc(g.last.outcome || "")}: ${esc(reasons(g.last))}</span></div>`;
+  const parts = [];
+  const head = (text) => `<div class="sub-head">${text}</div>`;
+  const some = (list, line) => list.slice(0, REVIEW_SHOWN).map(line).join("") +
+    (list.length > REVIEW_SHOWN ? `<div class="legend-line">and ${list.length - REVIEW_SHOWN} more</div>` : "");
+  if (r.flagged.length) parts.push(head(`flagged: names people gave that lost · ${r.flagged.length}`) + some(r.flagged, fnLine));
+  if (r.suspect.length) parts.push(head(`suspects: challenged, kept without a confirmation · ${r.suspect.length}`) + some(r.suspect, fnLine));
+  if (r.changed.length) parts.push(head(`changed by the review · ${r.changed.length}`) + some(r.changed, fnLine));
+  if (r.groups.length) parts.push(head(`groups' names · ${r.groups.length}`) + some(r.groups, groupLine));
+  const foot = [`${r.confirmed.length} confirmed`, `${r.challenges} challenges in ${r.reviews} review${r.reviews === 1 ? "" : "s"}`];
+  if (r.stale) foot.push(`${r.stale} about names no longer in use`);
+  return `<div class="card review-card"><h2>Name review · ${r.flagged.length + r.suspect.length} to look at</h2>${parts.join("")}` +
+    `<div class="legend-line">${foot.join(" · ")}</div></div>`;
 }
 
 function refusedCard(o) {
@@ -307,10 +441,12 @@ function drawMap() {
   g.clearRect(0, 0, width, height);
   g.fillStyle = cssVar("--panel-2");
   for (let r = 0; r < rows; r++) g.fillRect(0, r * (rowHeight + gap), r === rows - 1 ? Math.ceil((span - r * perPixel * width) / perPixel) : width, rowHeight);
-  const colors = Object.fromEntries(Object.keys(ORIGINS).map((k) => [k, cssVar("--o-" + k)]));
+  const byNames = S.mapBy === "names";
+  const colors = byNames ? Object.fromEntries(Object.keys(CERTAINTY).map((k) => [k, cssVar(k === "none" ? "--c-empty" : "--c-" + k)]))
+    : Object.fromEntries(Object.keys(ORIGINS).map((k) => [k, cssVar("--o-" + k)]));
   const sorted = [...S.functions].sort((a, b) => a.entry - b.entry);
   for (const fn of sorted) {
-    g.fillStyle = colors[fn.origin];
+    g.fillStyle = colors[byNames ? fn.certainty : fn.origin];
     let from = (fn.entry - img.base) / perPixel, to = (fn.entry + fn.size - img.base) / perPixel;
     const wide = to - from >= 4;
     while (from < to) {
@@ -397,10 +533,11 @@ function headerHTML(d, compact = false) {
   for (const c of h.callers) callers.set(c.name, [...(callers.get(c.name) || []), c.address]);
   if (S.pending.includes("callers") && !h.callers.length) facts.push(["called by", "<span class=\"legend-line\">being found</span>"]);
   else facts.push(["called by", callers.size ? [...callers].map(([n, sites]) =>
-    `<a href="${fnLink(n, sites[0])}" title="${sites.map(hex).join(", ")}">${esc(n)}</a>${sites.length > 1 ? `<span class="times">×${sites.length}</span>` : ""}`).join("")
+    `<a href="${fnLink(n, sites[0])}" title="${esc(n)}: ${sites.map(hex).join(", ")}">${nameHTML(S.byName.get(n) || { name: n })}</a>${sites.length > 1 ? `<span class="times">×${sites.length}</span>` : ""}`).join("")
     : "<span class=\"legend-line\">no direct calls</span>"]);
-  if (h.calls.length) facts.push(["calls", h.calls.map((n) => `<a href="${fnLink(n)}">${esc(n)}</a>`).join("")]);
+  if (h.calls.length) facts.push(["calls", h.calls.map((n) => `<a href="${fnLink(n)}" title="${esc(n)}">${nameHTML(S.byName.get(n) || { name: n })}</a>`).join("")]);
   if (h.reads) facts.push(["registers", `reads ${h.reads.length ? esc(h.reads.join(", ")) : "nothing"} at its entry; its callers read ${h.kept.length ? esc(h.kept.join(", ")) : "nothing"} after it`]);
+  facts.push(...nameFacts(d.name));
   const v = d.verdict;
   if (d.origin === "hand") facts.push(["origin", "written by hand" + (v && v.verdict !== "by hand" ? "" : "")]);
   else if (d.origin === "pilot") facts.push(["origin", "<span class=\"warn\">written by dread pilot and checked by the tools; read by nobody yet</span>"]);
@@ -422,7 +559,7 @@ function headerHTML(d, compact = false) {
   return `
     <div class="fn-head${compact ? " compact" : ""}">
       <div class="fn-title"><h1>${esc(h.name)}</h1>
-        <span class="badge">${dot(d.origin)}${esc(ORIGINS[d.origin].long)}</span>${d.system ? "<span class=\"badge\">tested by the system run</span>" : ""}
+        <span class="badge">${dot(d.origin)}${esc(ORIGINS[d.origin].long)}</span>${nameBadge(d.name)}${d.system ? "<span class=\"badge\">tested by the system run</span>" : ""}
         <span class="grow"></span>
         ${modes}
         <button id="note-btn" title="Note on the selected line (;)">Note</button>
@@ -431,6 +568,44 @@ function headerHTML(d, compact = false) {
       ${compact ? "" : `<div class="facts">${facts.map(([k, val]) => `<span class="k">${k}</span><span class="v">${val}</span>`).join("")}</div>
       ${notes}`}
     </div>`;
+}
+
+// The name's certainty (and the review's mark) beside the function's name: the proposal it goes by too.
+function nameBadge(n) {
+  if (!n) return "";
+  const shown = n.naming === "proposed" && n.proposed ? ` <span class="prop">${esc(n.proposed)}</span>` : "";
+  const review = n.review && n.review.mark ? { mark: n.review.mark } : null;
+  return `<span class="badge" title="${esc(CERTAINTY[n.certainty].long)}">${pie(n.certainty, n.confidence, false)}${esc(certaintyWords(n.certainty, n.confidence))}${shown}${review ? " " + markHTML(review) : ""}</span>`;
+}
+
+// What names.tsv and review.tsv say of the function's name, for the facts under its title: the
+// proposal with its vote, and every challenge of the review with its reasons and outcome.
+function nameFacts(n) {
+  if (!n) return [];
+  const out = [];
+  if (n.proposed) {
+    const answers = n.samples ? ` <span class="legend-line inline" title="the answers of its vote, in the order asked">answers: ${esc(n.samples)}</span>` : "";
+    const vote = n.proposal_confidence != null ? `its vote agreed ${Math.round(100 * n.proposal_confidence)} %` : "one answer, no vote";
+    const who = n.naming === "named" ? "dread pilot proposed" : "proposed by dread pilot:";
+    out.push(["name", `${who} <span class="mono prop">${esc(n.proposed)}</span>${n.what ? " — " + esc(n.what) : ""} <span class="legend-line inline">${vote}${n.provider ? ", " + esc(n.provider) : ""}</span>${answers}`]);
+  }
+  const r = n.review;
+  if (r && r.rows) {
+    for (const row of r.rows) {
+      const reasons = (row.reasons || []).map((x) => `<li>${esc(x.text)} <span class="legend-line inline">${esc(x.kind)} ${x.weight.toFixed(2)}</span></li>`).join("");
+      let outcome = esc(row.outcome || "");
+      if (row.outcome === "changed" || row.outcome === "general") outcome = `changed from <span class="mono">${esc(row.old || "")}</span> to <span class="mono">${esc(row.name || "")}</span>${row.what ? " — " + esc(row.what) : ""}`;
+      else if (row.outcome === "flagged") outcome = `flagged: the decision preferred <span class="mono">${esc(row.candidate || "")}</span>${row.candidate_what ? " — " + esc(row.candidate_what) : ""}; a person's name, never changed`;
+      else if (row.outcome === "kept") outcome = `kept: <span class="mono">${esc(row.candidate || "")}</span> did not win by the margin`;
+      else if (row.outcome === "confirmed") outcome = `confirmed: the candidate had its words`;
+      else if (row.outcome === "no candidate") outcome = `no candidate came back: the reasons stand`;
+      const votes = [row.agreement ? `candidate ${esc(row.agreement)}` : "", row.votes ? `decided ${esc(row.votes)}` : ""].filter(Boolean).join(", ");
+      out.push([`review ${row.review ?? ""}`, `${row.mark && !row.stale ? markHTML({ mark: row.mark }) + " " : ""}` +
+        `${row.stale ? `<span class="legend-line inline">about an earlier name, ${esc(row.name || "")}:</span> ` : ""}${outcome}${votes ? ` <span class="legend-line inline">${votes}</span>` : ""}` +
+        `<ul class="reasons" title="round ${row.round ?? ""}, score ${row.score ?? ""}">${reasons}</ul>`]);
+    }
+  }
+  return out;
 }
 
 function coverageLegend(d) {
@@ -584,7 +759,6 @@ const GROUPS = [["function", "functions"], ["memory", "memory"], ["text", "texts
 const GROUP_TITLE = { function: "the callers, callees and functions whose address is taken",
   memory: "globals, device registers, data in rom and tables of pointers", text: "the texts the code points to",
   structure: "the structures its variables point to (readable_types)" };
-const NAMING = { named: "named", proposed: "name proposed", unnamed: "no name yet" };
 const LABELS_ALL = 60;          // up to this many nodes every label shows; beyond, LABELS_SOME and on hover
 const LABELS_SOME = 28;         // the labels a larger graph shows: the function, then the best-joined near pieces
 const LABEL_ZOOM = 1.35;        // and every label from this zoom on
@@ -625,6 +799,32 @@ function shapePath(kind, center = false) {
   return `<rect class="shape" x="-5.5" y="-5.5" width="11" height="11" rx="${kind === "rom" ? 0 : 2}"/>`;
 }
 
+// A function's disc in the relations: its outline, and inside it the share filled that its name's
+// vote agreed (filled()), a wedge from twelve o'clock clockwise.
+function piePath(r, f) {
+  if (f <= 0) return "";
+  if (f >= 0.999) return `<circle class="pie" r="${r}"/>`;
+  const a = 2 * Math.PI * f, x = (r * Math.sin(a)).toFixed(2), y = (-r * Math.cos(a)).toFixed(2);
+  return `<path class="pie" d="M0,0V${-r}A${r},${r} 0 ${f > 0.5 ? 1 : 0},1 ${x},${y}Z"/>`;
+}
+
+function functionShape(d, center) {
+  const r = center ? 10 : 6.5;
+  return `<circle class="shape" r="${r}"/>${piePath(center ? 8.5 : 5.85, filled(d.certainty, d.confidence))}`;
+}
+
+// The review's mark on a node: a glyph in a small disc at its upper right (not for a confirmed name).
+function markBadge(review, r) {
+  if (!review || !review.mark || review.mark === "confirmed" || !MARKS[review.mark]) return "";
+  const at = (r * 0.78 + 1).toFixed(1);
+  return `<g class="mk-g mk-${review.mark}" transform="translate(${at},-${at})"><circle r="4.8"/><text>${MARKS[review.mark].glyph}</text></g>`;
+}
+
+// What a node is called on the page: a function without a name in the tables by its proposal.
+function labelOf(d) {
+  return d.kind === "function" && d.naming === "proposed" && d.proposed ? d.proposed.name : d.name;
+}
+
 function radius(d) {
   return d.kind === "function" ? (d.id === "f:" + R.center ? 11 : 7) : d.kind === "text" || d.kind === "table" ? 8 : 7;
 }
@@ -650,11 +850,19 @@ function relationsHTML() {
     </section>`;
 }
 
+// The scale of how sure names are, and the review's marks: the legends of both graphs.
+function certaintyLegend() {
+  const sample = { likely: 0.6, unsure: 0.4 };
+  return `<div class="lg-row">${Object.entries(CERTAINTY).map(([k, c]) =>
+    `<span class="lg" title="${esc(c.long)}">${pie(k, sample[k], false)}${esc(c.short)}</span>`).join("")}</div>` +
+    `<div class="lg-row">${["flagged", "suspect", "changed"].map((k) =>
+      `<span class="lg" title="${esc(MARKS[k].long)}">${markHTML({ mark: k }, false)}${esc(MARKS[k].short)}</span>`).join("")}<span class="lg">filled as far as the vote agreed</span></div>`;
+}
+
 function legendHTML() {
-  const sw = (cls, text) => `<span class="lg"><svg viewBox="-9 -9 18 18" class="glyph ${cls}">${shapePath("function")}</svg>${text}</span>`;
-  const sh = (kind, text) => `<span class="lg"><svg viewBox="-9 -9 18 18" class="glyph k-${kind} n-unnamed">${shapePath(kind)}</svg>${text}</span>`;
+  const sh = (kind, text) => `<span class="lg"><svg viewBox="-9 -9 18 18" class="glyph k-${kind} c-none">${shapePath(kind)}</svg>${text}</span>`;
   const ln = (cls, text) => `<span class="lg"><svg viewBox="0 0 22 8" class="line"><path class="edge ${cls}" d="M1,4H21"/></svg>${text}</span>`;
-  return `<div class="lg-row">${sw("n-named", "named")}${sw("n-proposed", "name proposed")}${sw("n-unnamed", "no name yet")}</div>` +
+  return certaintyLegend() +
     `<div class="lg-row">${sh("global", "RAM")}${sh("register", "register")}${sh("rom", "rom")}${sh("table", "table")}${sh("text", "text")}${sh("structure", "structure")}</div>` +
     `<div class="lg-row">${ln("e-calls", "calls")}${ln("e-refers-to-function", "address taken")}${ln("e-access", "reads")}${ln("e-access w", "writes")}</div>` +
     `<div class="lg-row">${ln("e-uses", "uses")}${ln("e-refers-to-text", "refers to")}${ln("e-uses-structure", "structure")}</div>`;
@@ -881,9 +1089,10 @@ function homeCenter() {
 }
 
 function nodeLabel(d) {
-  const name = d.kind === "text" ? (d.name.length > 30 ? d.name.slice(0, 28) + "…\"" : d.name) : d.name;
+  const name = d.kind === "text" ? (d.name.length > 30 ? d.name.slice(0, 28) + "…\"" : d.name) : labelOf(d);
   const more = d.more ? d.more.callers + d.more.callees : 0;
-  return esc(name) + (more ? `<tspan class="more" dx="4">+${more}</tspan>` : "");
+  const shown = d.kind === "function" && d.naming === "proposed" && d.proposed ? `<tspan class="prop">${esc(name)}</tspan>` : esc(name);
+  return shown + (more ? `<tspan class="more" dx="4">+${more}</tspan>` : "");
 }
 
 function drawGraph() {
@@ -911,10 +1120,11 @@ function drawGraph() {
   const labelled = new Set([center, ...ranked.slice(0, LABELS_SOME).map((d) => d.id)]);
   const body = nodes.map((d) => {
     const major = !many || labelled.has(d.id);
-    const naming = d.kind === "text" ? "n-none" : "n-" + (d.naming || "unnamed");
-    const r = radius(d);
-    return `<g class="node k-${d.kind} ${naming}${d.id === center ? " center" : ""}${major ? " major" : ""}" data-id="${esc(d.id)}">` +
-      `${shapePath(d.kind, d.id === center)}<text x="${r + 3}" y="4">${nodeLabel(d)}</text></g>`;
+    const sure = d.kind === "text" ? "" : " c-" + (d.certainty || "none");
+    const r = radius(d), mid = d.id === center;
+    const shape = d.kind === "function" ? functionShape(d, mid) : shapePath(d.kind, mid);
+    return `<g class="node k-${d.kind}${sure}${mid ? " center" : ""}${major ? " major" : ""}" data-id="${esc(d.id)}">` +
+      `${shape}${markBadge(d.review, mid ? 10 : 6.5)}<text x="${r + 3}" y="4">${nodeLabel(d)}</text></g>`;
   }).join("");
   svg.innerHTML = `${defs}<g id="rel-view"><g class="edges">${edges}</g><g class="nodes">${body}</g></g>`;
   svg.classList.remove("focus");        // (a pointer still on a node lights it again when it moves)
@@ -964,7 +1174,7 @@ function fitTarget() {
   let ex = 40, ey = 40;
   R.shown.nodes.forEach((d, i) => {
     const p = R.slots[i];
-    const label = Math.min(d.name.length, 30) * 6.6 + 16;
+    const label = Math.min(labelOf(d).length, 30) * 6.6 + 16;
     ex = Math.max(ex, Math.abs(p.x) + (p.x >= 0 ? label : 14));
     ey = Math.max(ey, Math.abs(p.y) + 14);
   });
@@ -1054,14 +1264,29 @@ function nodeTip(d) {
     if (d.kind === "table") line("holds", others((l) => l.source === d.id, (l) => l.target).join(", ") + (d.words ? ` (its first ${d.words} words read)` : ""));
   }
   if (d.naming) {
-    let v = NAMING[d.naming];
-    if (d.proposed) v += `: <span class="mono">${esc(d.proposed.name)}</span>${d.proposed.what ? " — " + esc(d.proposed.what) : ""}`;
+    let v = `${pie(d.certainty, d.confidence, false)} ${esc(certaintyWords(d.certainty, d.confidence))}`;
+    if (d.proposed) v += `: <span class="mono prop">${esc(d.proposed.name)}</span>${d.proposed.what ? " — " + esc(d.proposed.what) : ""}`;
     line("name", v);
   }
+  reviewTip(d.review, line);
   const hint = d.kind !== "function" ? "click: keep it lit" : d.id === "f:" + R.graph.center
     ? "double-click or Shift+click: its code · drag: move it" : "click: its relations · Shift+click: its code · drag: move it";
   return `<div class="tip-h">${esc(d.name)} <span class="sub">${esc(KIND_LONG[d.kind] || d.kind)}</span></div>` +
     `<div class="tip-g">${rows.join("")}</div><div class="tip-hint">${hint}</div>`;
+}
+
+// The review's word on a name in a tooltip: its mark, the outcome, the old name where it changed it,
+// and the reasons of its last challenge.
+function reviewTip(review, line) {
+  if (!review || !review.mark || !review.last) return;
+  const last = review.last, made = review.changed || last;
+  let v = `${markHTML(review, false)} ${esc(MARKS[review.mark].short)}`;
+  if (review.mark === "changed") v += `: was <span class="mono">${esc(made.old || "")}</span>`;
+  else if (review.mark === "flagged") v += `: the decision preferred <span class="mono">${esc(last.candidate || "")}</span>`;
+  else if (review.mark === "suspect") v += `: ${esc(last.outcome || "")}${last.candidate ? `, against <span class="mono">${esc(last.candidate)}</span>` : ""}`;
+  line(`review ${last.review ?? ""}`, v);
+  const reasons = (review.mark === "changed" ? made : last).reasons || [];
+  if (reasons.length) line("why", reasons.map((x) => esc(x.text)).join("<br>"));
 }
 
 function showTip(event, html) {
@@ -1264,12 +1489,14 @@ const PROGRAM = {
   labelZoom: 1.1,
   maxLabels: 400,       // labels drawn in one frame at most
   heavy: 400,           // a group's links drawn by weight, with arrows: the heaviest this many; the rest as hairlines
+  sharedPairs: 4000,    // links from memory and texts two groups share down to an open group's functions, at most
 };
 const P = {
   data: null, stamp: null, open: new Set(), sim: null, nodes: [], links: [], index: new Map(), adj: [], pos: new Map(),
   slots: [], home: [], members: [], groupOf: new Int32Array(0), fnIndex: new Map(), calls: null, view: null,
   touched: false, hover: -1, sticky: null, lit: null, drag: null, frame: 0, last: 0, acc: 0, timer: null,
-  colors: null, labels: [], hullOf: new Map(), settling: false,
+  colors: null, labels: [], hullOf: new Map(), settling: false, sharedLeft: 0,
+  query: "", found: null, foundGroups: new Map(), foundNodes: null, searchTimer: null,
 };
 
 const progLink = (name) => "#/p" + (name ? "/" + encodeURIComponent(name) : "");
@@ -1283,7 +1510,10 @@ function programHTML() {
         <button id="prog-fit" title="Fit the graph (f)">Fit</button></div>
     </div>
     <section class="rel" id="prog">
-      <div class="rel-bar"><span class="rel-note" id="prog-note"></span></div>
+      <div class="rel-bar">
+        <input id="prog-search" class="light-search" type="search" placeholder="Light: name, address or text" autocomplete="off"
+          spellcheck="false" aria-label="Light the functions a search finds" value="${esc(P.query)}">
+        <span class="rel-note" id="prog-found"></span><span class="grow"></span><span class="rel-note" id="prog-note"></span></div>
       <div class="rel-stage" id="prog-stage">
         <canvas class="graph" id="prog-canvas" role="img" aria-label="The whole program: its groups of functions and the calls between them"></canvas>
         <div class="rel-legend" id="prog-legend">${progLegendHTML()}</div>
@@ -1292,10 +1522,9 @@ function programHTML() {
 }
 
 function progLegendHTML() {
-  const sw = (cls, text) => `<span class="lg"><svg viewBox="-9 -9 18 18" class="glyph ${cls}">${shapePath("function")}</svg>${text}</span>`;
   const ln = (cls, text) => `<span class="lg"><svg viewBox="0 0 22 8" class="line"><path class="edge ${cls}" d="M1,4H21"/></svg>${text}</span>`;
-  return `<div class="lg-row"><span class="lg"><svg viewBox="-9 -9 18 18" class="glyph"><circle class="grp" r="7.5"/><path class="grp-ring" d="M0,-6A6,6 0 1,1 -5.2,3"/></svg>a group: its size the functions, its ring how many are named</span></div>` +
-    `<div class="lg-row">${sw("n-named", "named")}${sw("n-proposed", "name proposed")}${sw("n-unnamed", "no name yet")}</div>` +
+  return `<div class="lg-row"><span class="lg"><svg viewBox="-9 -9 18 18" class="glyph"><circle class="grp" r="7.5"/><path class="grp-ring" d="M0,-6A6,6 0 1,1 -5.2,3"/></svg>a group: its size the functions, its ring how sure their names are; <span class="mk mk-suspect">?</span>3: suspects it holds</span></div>` +
+    certaintyLegend() +
     `<div class="lg-row">${ln("e-calls", "calls")}${ln("e-refers-to-function", "address taken")}${ln("e-uses-structure", "memory or texts both use")}</div>` +
     `<div class="lg-row"><span>click a group: its functions · its label: back to one node</span></div>`;
 }
@@ -1310,6 +1539,7 @@ function progNote(html) {
   box.innerHTML = `${d.counts.functions} functions in ${d.counts.groups} groups · ${d.counts.calls} calls` +
     ` · showing ${P.nodes.length - functions} group${P.nodes.length - functions === 1 ? "" : "s"}` +
     (open ? ` and ${functions} function${functions === 1 ? "" : "s"} of ${open} open` : "") +
+    (P.sharedLeft ? ` · <span class="warn" title="PROGRAM.sharedPairs: links from shared memory and texts down to the functions">${P.sharedLeft} shared links left out</span>` : "") +
     (P.settling ? ` · <span class="busy-dot"></span>settling` : "");
 }
 
@@ -1358,6 +1588,7 @@ async function loadProgram(mine) {
     P.stamp = stamp;
   } else {
     P.data = d;                         // (the names may have changed, not the groups)
+    P.marked = d.functions.some((f) => f.review && f.review.mark && f.review.mark !== "confirmed");
   }
   P.colors = progColors();
   P.sticky = null;
@@ -1373,6 +1604,8 @@ async function loadProgram(mine) {
   if (fresh || !P.sim) buildProgram(P.pos.size ? 0.6 : 1);
   else if (!P.sim.rested) progKick();
   progMarkMode();
+  markFound();
+  if (P.query) progSearch(P.query);     // (the names it finds by may have changed)
   litFrom(stickyIndex());
   if (!P.view) progFit();
   if (still()) progSettle();
@@ -1388,6 +1621,7 @@ function prepareProgram(d) {
     if (f.group != null && P.members[f.group]) { P.groupOf[i] = f.group; P.members[f.group].push(i); }
   });
   P.fnIndex = new Map(d.functions.map((f, i) => [f.name, i]));
+  P.marked = d.functions.some((f) => f.review && f.review.mark && f.review.mark !== "confirmed");
   const calls = { out: new Int32Array(d.functions.length), in: new Int32Array(d.functions.length) };
   for (const [i, j] of d.calls) { calls.out[i] += 1; calls.in[j] += 1; }
   P.calls = calls;
@@ -1463,13 +1697,35 @@ function buildProgram(alpha) {
     const a = at(i), b = at(j);
     if (a !== undefined && b !== undefined && a !== b) link(a, b).refers[a < b ? 0 : 1] += 1;
   }
-  for (const e of d.between) {
+  for (const e of d.between) {         // memory and texts both touch: between closed groups the server's count
     if (P.open.has(e.a) || P.open.has(e.b)) continue;
     const total = Object.values(e.shared).reduce((t, v) => t + v, 0);
     if (!total) continue;
     const l = link(index.get("g:" + e.a), index.get("g:" + e.b));
     l.shared = total;
-    l.kinds = e.shared;
+    l.kinds = Object.assign({}, e.shared);
+  }
+  // ... and down to the functions of an open group: each thing functions of two groups touch (the
+  // server's "shared"), between the nodes its functions are now in, one more for each pair of them in
+  // two groups; things touched by fewer functions first, PROGRAM.sharedPairs pairs at most
+  let budget = PROGRAM.sharedPairs;
+  P.sharedLeft = 0;
+  const things = (d.shared || []).map((t, k) => [t, k]).sort((a, b) => a[0][2].length - b[0][2].length || a[1] - b[1]);
+  for (const [[kind, , users]] of things) {
+    const ends = [...new Set(users.map(at).filter((a) => a !== undefined))];
+    if (!ends.some((a) => nodes[a].kind === "function")) continue;      // (closed groups only: counted above)
+    for (let x = 0; x < ends.length; x++) {
+      for (let y = x + 1; y < ends.length; y++) {
+        const a = ends[x], b = ends[y];
+        if (nodes[a].g === nodes[b].g || (nodes[a].kind === "group" && nodes[b].kind === "group")) continue;
+        if (budget <= 0) { P.sharedLeft += 1; continue; }
+        budget -= 1;
+        const l = link(a, b);
+        l.shared += 1;
+        l.kinds = l.kinds || {};
+        l.kinds[kind] = (l.kinds[kind] || 0) + 1;
+      }
+    }
   }
   P.adj = nodes.map(() => []);
   links.forEach((l, i) => { P.adj[l.s].push(i); P.adj[l.t].push(i); l.w = linkWeight(l); });
@@ -1651,11 +1907,16 @@ function progFollow() {
 
 function progColors() {
   const v = (name) => cssVar(name);
-  return { named: v("--g-named"), namedLine: v("--g-named-line"), proposed: v("--g-proposed"), proposedLine: v("--g-proposed-line"),
-    unnamed: v("--g-unnamed"), unnamedLine: v("--g-unnamed-line"), call: v("--g-call"), shared: v("--g-struct"),
-    refer: v("--g-weak"), text: v("--text"), muted: v("--muted"), faint: v("--faint"), panel: v("--panel"),
-    group: v("--accent-bg"), groupLine: v("--accent-soft"), hull: v("--panel-2"), hullLine: v("--line-strong"),
-    strong: v("--accent-strong"), mono: v("--mono") };
+  const out = { call: v("--g-call"), shared: v("--g-struct"), refer: v("--g-weak"), text: v("--text"), muted: v("--muted"),
+    faint: v("--faint"), panel: v("--panel"), group: v("--accent-bg"), groupLine: v("--accent-soft"), hull: v("--panel-2"),
+    hullLine: v("--line-strong"), strong: v("--accent-strong"), mono: v("--mono"), sans: v("--sans"), empty: v("--c-empty"),
+    mk: { suspect: v("--mk-suspect"), flagged: v("--mk-flagged"), changed: v("--mk-changed") },
+    mkInk: { suspect: v("--mk-ink"), flagged: v("--mk-ink-on"), changed: v("--mk-ink-on") }, fill: {}, line: {} };
+  for (const k of Object.keys(CERTAINTY)) {
+    out.fill[k] = k === "none" ? out.empty : v("--c-" + k);
+    out.line[k] = v("--c-" + k + "-line");
+  }
+  return out;
 }
 
 // The points' convex hull (Andrew's monotone chain) over node numbers, sorted in place by position.
@@ -1729,13 +1990,14 @@ function drawProgram() {
   // the links
   const near = (L) => lit && lit.has(L.s) && lit.has(L.t) && (L.s === P.litFrom || L.t === P.litFrom);
   const ofGroup = (L) => nodes[L.s].kind === "group" || nodes[L.t].kind === "group";
+  const called = (L) => L.calls[0] + L.calls[1] + L.refers[0] + L.refers[1] > 0;
   const faint = nodes.length > 1500 ? 0.35 : 0.55;
   for (const on of passes) {
     const alpha = lit ? (on ? 1 : 0.12) : faint;
     for (const inside of [false, true]) {
       g.beginPath();
       for (const L of links) {
-        if (ofGroup(L) || (nodes[L.s].g === nodes[L.t].g) !== inside || (lit && near(L) !== on)) continue;
+        if (ofGroup(L) || !called(L) || (nodes[L.s].g === nodes[L.t].g) !== inside || (lit && near(L) !== on)) continue;
         g.moveTo(x[L.s], y[L.s]);
         g.lineTo(x[L.t], y[L.t]);
       }
@@ -1744,6 +2006,18 @@ function drawProgram() {
       g.strokeStyle = C.call;
       g.stroke();
     }
+    g.beginPath();                      // functions of two open groups that touch the same memory or text
+    for (const L of links) {
+      if (ofGroup(L) || called(L) || (lit && near(L) !== on)) continue;
+      g.moveTo(x[L.s], y[L.s]);
+      g.lineTo(x[L.t], y[L.t]);
+    }
+    g.globalAlpha = alpha * 0.6;
+    g.lineWidth = 0.8 * px;
+    g.strokeStyle = C.shared;
+    g.setLineDash([4 * px, 3 * px]);
+    g.stroke();
+    g.setLineDash([]);
     g.beginPath();                      // a group's lighter links, beyond the heaviest: hairlines
     for (const L of links) {
       if (!ofGroup(L) || L.heavy || (lit && near(L) !== on) || (lit && on)) continue;
@@ -1782,29 +2056,56 @@ function drawProgram() {
     g.fillStyle = C.call;
     g.fill();
   }
-  // the functions, a path for each naming
+  // the functions by how sure their names are, bucketed in one pass: a disc filled whole (a name in the
+  // tables, a vote every answer agreed with, a proposal without a vote) is one path a level, filled and
+  // outlined; one filled in part is its empty disc outlined, then the wedge its vote agreed (from twelve
+  // o'clock, inside the outline); outlines dashed without a vote
+  const levels = Object.keys(CERTAINTY);
   for (const on of passes) {
     g.globalAlpha = on ? 1 : 0.2;
-    for (const status of ["unnamed", "proposed", "named"]) {
-      g.beginPath();
-      let any = false;
-      for (let i = 0; i < nodes.length; i++) {
-        const node = nodes[i];
-        if (node.kind !== "function" || d.functions[node.fi].naming !== status || !shown(on, lit && lit.has(i))) continue;
-        if (!seen(i, node.r)) continue;
-        g.moveTo(x[i] + node.r, y[i]);
-        g.arc(x[i], y[i], node.r, 0, 2 * Math.PI);
-        any = true;
-      }
-      if (!any) continue;
-      g.fillStyle = C[status];
-      g.fill();
-      g.lineWidth = 1.1 * px;
-      g.strokeStyle = C[status + "Line"];
-      g.stroke();
+    const whole = levels.map(() => []), part = levels.map(() => []);
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      if (node.kind !== "function" || !shown(on, lit && lit.has(i)) || !seen(i, node.r)) continue;
+      const f = d.functions[node.fi], level = levels.indexOf(f.certainty || "none");
+      const share = filled(levels[level], f.confidence);
+      (share >= 0.999 ? whole : part)[level].push(i);
     }
+    const discs = (list) => {
+      g.beginPath();
+      for (const i of list) { g.moveTo(x[i] + nodes[i].r, y[i]); g.arc(x[i], y[i], nodes[i].r, 0, 2 * Math.PI); }
+    };
+    g.lineWidth = 1.1 * px;
+    levels.forEach((level, k) => {
+      if (!whole[k].length && !part[k].length) return;
+      g.setLineDash(level === "unvoted" ? [2.2 * px, 1.6 * px] : []);
+      g.strokeStyle = C.line[level];
+      if (whole[k].length) {
+        discs(whole[k]);
+        g.fillStyle = C.fill[level];
+        g.fill();
+        g.stroke();
+      }
+      if (part[k].length) {
+        discs(part[k]);
+        g.fillStyle = C.empty;
+        g.fill();
+        g.stroke();
+        g.beginPath();
+        for (const i of part[k]) {
+          const f = d.functions[nodes[i].fi], share = filled(level, f.confidence), r = nodes[i].r - 0.55 * px;
+          if (share <= 0 || r <= 0) continue;
+          g.moveTo(x[i], y[i]);
+          g.arc(x[i], y[i], r, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * share);
+          g.closePath();
+        }
+        g.fillStyle = C.fill[level];
+        g.fill();
+      }
+    });
+    g.setLineDash([]);
   }
-  // the groups: their discs, then a ring of the share of their functions named and proposed
+  // the groups: their discs, then a ring of their functions by how sure their names are
   for (const on of passes) {
     const mine = [];
     for (let i = 0; i < nodes.length; i++) {
@@ -1819,24 +2120,44 @@ function drawProgram() {
     g.lineWidth = 1.2 * px;
     g.strokeStyle = C.groupLine;
     g.stroke();
-    for (const status of ["named", "proposed"]) {
+    const arcs = mine.map((i) => {         // (each ring's pieces, the surest first, from twelve o'clock)
+      const grp = d.groups[nodes[i].g], counts = groupCertainty(grp), total = Math.max(1, grp.functions);
+      let at = -Math.PI / 2;
+      return RING.map((level) => {
+        const n = counts[level] || 0, a0 = at;
+        at += 2 * Math.PI * n / total;
+        return n ? [a0, at] : null;
+      });
+    });
+    for (const [k, level] of RING.entries()) {
       g.beginPath();
-      for (const i of mine) {
-        const grp = d.groups[nodes[i].g], r = nodes[i].r, ring = Math.min(r * 0.45, Math.max(2.5 * px, r * 0.22));
-        const share = grp.naming[status] / Math.max(1, grp.functions);
-        if (!share) continue;
-        const a0 = -Math.PI / 2 + (status === "named" ? 0 : 2 * Math.PI * grp.naming.named / Math.max(1, grp.functions));
-        const a1 = a0 + share * 2 * Math.PI, outer = r - 0.6 * px, inner = Math.max(0, outer - ring);
-        g.moveTo(x[i] + outer * Math.cos(a0), y[i] + outer * Math.sin(a0));
-        g.arc(x[i], y[i], outer, a0, a1);
-        g.arc(x[i], y[i], inner, a1, a0, true);
+      mine.forEach((i, j) => {
+        const arc = arcs[j][k];
+        if (!arc) return;
+        const r = nodes[i].r, ring = Math.min(r * 0.45, Math.max(2.5 * px, r * 0.22));
+        const outer = r - 0.6 * px, inner = Math.max(0, outer - ring);
+        g.moveTo(x[i] + outer * Math.cos(arc[0]), y[i] + outer * Math.sin(arc[0]));
+        g.arc(x[i], y[i], outer, arc[0], arc[1]);
+        g.arc(x[i], y[i], inner, arc[1], arc[0], true);
         g.closePath();
-      }
-      g.fillStyle = C[status];
+      });
+      g.fillStyle = C.fill[level];
       g.fill();
     }
   }
   g.globalAlpha = 1;
+  if (P.foundNodes) {                   // what the search lights: a ring round each
+    g.beginPath();
+    for (const i of P.foundNodes) {
+      if (!nodes[i] || !seen(i, nodes[i].r + 4 * px)) continue;
+      const r = nodes[i].r + (nodes[i].kind === "group" ? 3 : 2.5) * px;
+      g.moveTo(x[i] + r, y[i]);
+      g.arc(x[i], y[i], r, 0, 2 * Math.PI);
+    }
+    g.lineWidth = 2 * px;
+    g.strokeStyle = C.strong;
+    g.stroke();
+  }
   if (P.hover >= 0 && P.nodes[P.hover]) {
     const i = P.hover, r = P.nodes[i].r;
     g.beginPath();
@@ -1846,6 +2167,13 @@ function drawProgram() {
     g.stroke();
   }
   drawLabels(g, ratio, hulls, seen, pad);
+}
+
+// A group's ring: its functions by how sure their names are, the surest first (an older record without
+// certainties: its named and proposed functions).
+const RING = ["named", "sure", "likely", "unsure", "unvoted"];
+function groupCertainty(grp) {
+  return grp.certainty || { named: grp.naming.named, unvoted: grp.naming.proposed };
 }
 
 // An arrowhead at the edge of a node, as a piece of the path being made.
@@ -1892,7 +2220,7 @@ function drawLabels(g, ratio, hulls, seen, pad) {
     cx /= members.length;
     const on = lit && members.some((i) => lit.has(i));
     if (many && (x1 - x0 + 2 * pad) * v.k < 70 && !on) continue;
-    const grp = d.groups[gid], label = `${grp.label}  ${grp.functions}  ×`;
+    const grp = d.groups[gid], label = `${grp.label}${groupMarkText(grp)}  ${grp.functions}  ×`;
     const tx = cx * v.k + v.tx, ty = (top - pad) * v.k + v.ty - 9;
     if (tx < -200 || tx > g.canvas.width / ratio + 200 || ty < -20 || ty > g.canvas.height / ratio + 20) continue;
     g.font = bold;
@@ -1909,34 +2237,87 @@ function drawLabels(g, ratio, hulls, seen, pad) {
   for (const i of closed) {
     const node = nodes[i];
     if (many && node.r * v.k < 9 && !(lit && lit.has(i)) && i !== P.hover) continue;
-    const grp = d.groups[node.g], label = grp.label.length > 26 ? grp.label.slice(0, 25) + "…" : grp.label;
+    const grp = d.groups[node.g], label = (grp.label.length > 26 ? grp.label.slice(0, 25) + "…" : grp.label) + groupMarkText(grp);
     g.font = bold;
     const width = g.measureText(label).width, ty = sy(i) + node.r * v.k + 10;
     if (!free(sx(i) - width / 2 - 2, ty - 8, sx(i) + width / 2 + 2, ty + 20) && i !== P.hover) continue;
     g.globalAlpha = lit && !lit.has(i) ? 0.3 : 1;
     text(label, sx(i) - width / 2, ty, C.text, bold);
-    const count = String(grp.functions);
+    const hits = P.found && P.foundGroups.get(node.g);
+    const count = hits ? `${grp.functions} · ${hits} found` : String(grp.functions);
     g.font = small;
-    text(count, sx(i) - g.measureText(count).width / 2, ty + 13, C.muted, small);
+    text(count, sx(i) - g.measureText(count).width / 2, ty + 13, hits ? C.strong : C.muted, small);
   }
   const functions = nodes.length - nodes.filter((n) => n.kind === "group").length;
   const every = functions <= PROGRAM.labels || v.k >= PROGRAM.labelZoom;
   const first = [P.litFrom, P.hover].filter((i) => i >= 0 && nodes[i] && nodes[i].kind === "function");
   const order = [...new Set([...first, ...(lit ? [...lit] : []), ...(every ? nodes.keys() : [])])];
   let drawn = 0;
+  const italic = `italic 11px ${C.mono}`;
   for (const i of order) {                  // (the lit node's own label first, then its neighbours', then the rest)
     const node = nodes[i];
     if (drawn >= PROGRAM.maxLabels) break;
     if (node.kind !== "function" || !seen(i, node.r)) continue;
     const on = lit && lit.has(i);
-    const name = d.functions[node.fi].name, lx = sx(i) + node.r * v.k + 4;
-    g.font = small;
+    const f = d.functions[node.fi], proposed = f.naming === "proposed" && f.proposed;
+    const name = proposed ? f.proposed : f.name, lx = sx(i) + node.r * v.k + 4, font = proposed ? italic : small;
+    g.font = font;
     if (!free(lx, sy(i) - 7, lx + g.measureText(name).width, sy(i) + 7) && !first.includes(i)) continue;
     g.globalAlpha = lit && !on ? 0.25 : 1;
-    text(name, lx, sy(i), i === P.litFrom ? C.strong : C.text, small);
+    text(name, lx, sy(i), i === P.litFrom ? C.strong : C.text, font);
     drawn += 1;
   }
   g.globalAlpha = 1;
+  if (P.marked) drawMarks(g, seen);
+}
+
+// A group's own name's mark from the review, after its label (its name, not its functions').
+function groupMarkText(grp) {
+  const m = grp.review && grp.review.mark;
+  return m && m !== "confirmed" && MARKS[m] ? " " + MARKS[m].glyph : "";
+}
+
+// The review's marks in screen pixels: on each function shown that has one (not a confirmed name), at
+// its upper right; on a closed group, the suspects and flagged names it holds, counted.
+function drawMarks(g, seen) {
+  const C = P.colors, v = P.view, { x, y } = P.sim, nodes = P.nodes, d = P.data, lit = P.lit;
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  const badge = (cx, cy, r, kind, label) => {
+    g.font = `700 ${Math.round(r * 1.55)}px ${C.sans}`;
+    const w = label.length > 1 ? Math.max(2 * r, g.measureText(label).width + r) : 2 * r;
+    g.beginPath();
+    g.roundRect(cx - w / 2, cy - r, w, 2 * r, r);
+    g.fillStyle = C.mk[kind];
+    g.fill();
+    g.lineWidth = 1.2;
+    g.strokeStyle = C.panel;
+    g.stroke();
+    g.fillStyle = C.mkInk[kind];
+    g.fillText(label, cx, cy + 0.5);
+  };
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i], rs = node.r * v.k;
+    if (!seen(i, node.r)) continue;
+    g.globalAlpha = lit && !lit.has(i) ? 0.3 : 1;
+    if (node.kind === "function") {
+      const m = (d.functions[node.fi].review || {}).mark;
+      if (!m || m === "confirmed" || !MARKS[m]) continue;
+      const r = Math.max(3.5, Math.min(5.5, rs * 0.75)), at = rs * 0.72 + r * 0.45;
+      badge(x[i] * v.k + v.tx + at, y[i] * v.k + v.ty - at, r, m, MARKS[m].glyph);
+    } else {
+      const marks = d.groups[node.g].marks || {};
+      let dx = rs * 0.72;
+      for (const m of ["flagged", "suspect"]) {
+        if (!marks[m]) continue;
+        const label = MARKS[m].glyph + marks[m];
+        badge(x[i] * v.k + v.tx + dx + 6, y[i] * v.k + v.ty - rs * 0.72, 6, m, label);
+        dx += 18;
+      }
+    }
+  }
+  g.globalAlpha = 1;
+  g.textAlign = "start";
 }
 
 // What a pointer is on: an open group's label, a node, or nothing.
@@ -1956,9 +2337,10 @@ function progHit(event) {
 
 const stickyIndex = () => (P.sticky && P.index.has(P.sticky) ? P.index.get(P.sticky) : -1);
 
-// A node and its neighbours lit, the rest dimmed (-1: none).
+// A node and its neighbours lit, the rest dimmed (-1: none, or what the search found).
 function litFrom(i) {
   P.litFrom = i;
+  if ((i < 0 || !P.nodes[i]) && P.foundNodes) { P.lit = P.foundNodes; return; }
   if (i < 0 || !P.nodes[i]) { P.lit = null; return; }
   const lit = new Set([i]);
   for (const l of P.adj[i]) { lit.add(P.links[l].s); lit.add(P.links[l].t); }
@@ -1984,13 +2366,21 @@ function progTip(i) {
     const largest = P.members[node.g].slice().sort((a, b) => d.functions[b].size - d.functions[a].size).slice(0, 6)
       .map((fi) => esc(d.functions[fi].name));
     line("functions", `${g.functions} · ${size(g.bytes)} · <span class="mono">${hex(g.first)}–${hex(g.last)}</span>`);
-    line("names", `${g.naming.named} named, ${g.naming.proposed} proposed, ${g.naming.unnamed} without`);
-    if (g.from === "pilot") line("named", `by dread pilot${g.prefix ? `, prefix <span class="mono">${esc(g.prefix)}</span>` : ""}${g.what ? ": " + esc(g.what) : ""}`);
+    const counts = groupCertainty(g);
+    line("names", Object.keys(CERTAINTY).filter((k) => counts[k]).map((k) => `${pie(k, { likely: 0.6, unsure: 0.4 }[k], false)} ${counts[k]} ${esc(CERTAINTY[k].short)}`).join(", ") || "none");
+    const marks = g.marks || {};
+    const held = ["flagged", "suspect", "changed"].filter((k) => marks[k]).map((k) => `${markHTML({ mark: k }, false)} ${marks[k]} ${MARKS[k].short}`);
+    if (held.length) line("review", held.join(", "));
+    if (g.from === "pilot") line("named", `by dread pilot${g.prefix ? `, prefix <span class="mono">${esc(g.prefix)}</span>` : ""}${g.what ? ": " + esc(g.what) : ""}` +
+      (g.name_certainty ? ` <span class="sub">(${esc(certaintyWords(g.name_certainty, g.confidence != null ? +g.confidence : null))})</span>` : ""));
     else if (g.from === "prefix") line("named", `by the prefix ${g.common.functions} of its functions share`);
     else if (g.from === "function") line("named", "by its only function");
     else line("named", "not yet: no prefix most of its functions share, no name from dread pilot");
+    if (g.review) reviewTip(g.review, line);
     line("largest", `<span class="mono">${largest.join(", ")}</span>`);
     if (joined.length) line("joined to", joined.join("<br>"));
+    const hits = P.found && P.foundGroups.get(node.g);
+    if (hits) line("found", `${hits} of its functions`);
     return `<div class="tip-h">${esc(g.label)} <span class="sub">group ${g.group}</span></div><div class="tip-g">${rows.join("")}</div>` +
       `<div class="tip-hint">click: its functions · drag: move it</div>`;
   }
@@ -1998,9 +2388,13 @@ function progTip(i) {
   line("address", `<span class="mono">${hex(f.entry)}</span> · ${f.size} bytes`);
   line("group", `${esc(g.label)} <span class="sub">(group ${g.group}, ${g.functions} functions)</span>`);
   if (f.origin) line("origin", `${dot(f.origin)} ${esc(ORIGINS[f.origin].long)}`);
-  line("name", NAMING[f.naming] + (f.proposed ? `: <span class="mono">${esc(f.proposed)}</span>` : ""));
+  line("name", `${pie(f.certainty || "none", f.confidence, false)} ${esc(certaintyWords(f.certainty || "none", f.confidence))}` +
+    (f.proposed ? `: <span class="mono prop">${esc(f.proposed)}</span>` : ""));
+  reviewTip(f.review, line);
   line("calls", `${P.calls.out[node.fi]} functions; called by ${P.calls.in[node.fi]}`);
   if (joined.length) line("joined to", joined.join("<br>"));
+  const found = P.found && P.found.functions.find((x) => x.name === f.name);
+  if (found) line("found", `by its ${found.how.join(", ")}${found.text ? `: <span class="mono">${esc(found.text)}</span>` : ""}`);
   return `<div class="tip-h">${esc(f.name)} <span class="sub">function</span></div><div class="tip-g">${rows.join("")}</div>` +
     `<div class="tip-hint">click: its relations · Shift+click: its code · drag: move it</div>`;
 }
@@ -2015,6 +2409,7 @@ function progMarkMode() {
 // Groups opened or closed: the graph built anew from where its nodes are, moving on from there.
 function progRegroup() {
   buildProgram(0.55);
+  if (P.found) progFound();
   progMarkMode();
   litFrom(stickyIndex());
   progNote();
@@ -2141,6 +2536,22 @@ function wireProgram() {
   main.addEventListener("mouseleave", () => {
     if (S.view === "program" && P.hover >= 0) { P.hover = -1; litFrom(stickyIndex()); progRedraw(); }
   });
+  main.addEventListener("input", (e) => {
+    if (e.target.id !== "prog-search") return;
+    clearTimeout(P.searchTimer);
+    const q = e.target.value;
+    P.searchTimer = setTimeout(() => progSearch(q), 160);
+  });
+  main.addEventListener("keydown", (e) => {
+    if (e.target.id !== "prog-search") return;
+    if (e.key === "Escape") { e.target.value = ""; progSearch(""); e.target.blur(); }
+    else if (e.key === "Enter" && P.found && P.found.groups.length) {
+      e.preventDefault();
+      for (const g of P.found.groups) P.open.add(g.group);
+      P.touched = false;
+      progRegroup();
+    }
+  });
   main.addEventListener("click", (e) => {
     const mode = e.target.closest("#prog-mode button");
     if (mode && P.data) {
@@ -2161,6 +2572,55 @@ function wireProgram() {
 function progRefit() {
   P.touched = false;
   if (still()) progFit(); else progKick();
+}
+
+// The search of the whole program (/api/program-search: the server finds the functions by name, the
+// name proposed, address or text, and the groups that hold them): the functions shown lit, and each
+// closed group holding some, with how many; Enter opens those groups, Escape ends it.
+async function progSearch(q) {
+  P.query = q;
+  if (!q.trim()) { P.found = null; progFound(); return; }
+  let found;
+  try {
+    found = await api("/api/program-search", { q });
+  } catch (e) {
+    $("#prog-found").innerHTML = `<span class="bad">${esc(e.message)}</span>`;
+    return;
+  }
+  const box = $("#prog-search");
+  if (S.view !== "program" || !box || box.value !== q || found.waiting) return;
+  P.found = found;
+  progFound();
+}
+
+// What the search found, on the nodes shown now (a function of an open group, else its group).
+function markFound() {
+  P.foundGroups = new Map();
+  P.foundNodes = null;
+  if (!P.found) return;
+  const lit = new Set();
+  for (const g of P.found.groups) P.foundGroups.set(g.group, g.functions);
+  for (const f of P.found.functions) {
+    const i = P.index.has("f:" + f.name) ? P.index.get("f:" + f.name) : P.index.get("g:" + f.group);
+    if (i !== undefined) lit.add(i);
+  }
+  P.foundNodes = lit;
+}
+
+function progFound() {
+  markFound();
+  const box = $("#prog-found"), f = P.found;
+  if (box) {
+    if (!f) box.textContent = "";
+    else if (!f.functions.length) box.textContent = "nothing found";
+    else {
+      const closed = f.groups.filter((g) => !P.open.has(g.group)).length;
+      box.innerHTML = `${f.functions.length}${f.more ? "+" : ""} function${f.functions.length === 1 ? "" : "s"} in ${f.groups.length} group${f.groups.length === 1 ? "" : "s"}` +
+        (closed ? ` · <span class="legend-line inline">Enter: open ${closed === 1 ? "it" : "them"}</span>` : "");
+    }
+  }
+  litFrom(P.hover >= 0 ? P.hover : stickyIndex());
+  progRedraw();
 }
 
 // ---- search ----
@@ -2189,9 +2649,11 @@ function renderResults() {
     return;
   }
   box.innerHTML = results.map((r, i) => {
-    const sub = r.kind === "text" ? `"${esc(r.text)}" at ${hex(r.address)}` : r.kind === "address" ? `${hex(r.address)} is in it` : hex(r.entry);
-    return `<div class="result${i === active ? " active" : ""}" data-i="${i}">${dot(r.origin || "original")}<span class="nm">${esc(r.name)}</span>` +
-      `<span class="kind">${r.kind}</span><span class="sub sub-line">${sub}</span></div>`;
+    const sub = r.kind === "text" ? `"${esc(r.text)}" at ${hex(r.address)}` : r.kind === "address" ? `${hex(r.address)} is in it`
+      : r.kind === "proposal" ? `${esc(r.name)} · ${hex(r.entry)}` : hex(r.entry);
+    const name = r.kind === "proposal" ? `<span class="prop">${esc(r.proposed)}</span>` : esc(r.name);
+    return `<div class="result${i === active ? " active" : ""}" data-i="${i}">${dot(r.origin || "original")}<span class="nm">${name}</span>` +
+      `<span class="kind">${r.kind === "proposal" ? "proposed" : r.kind}</span><span class="sub sub-line">${sub}</span></div>`;
   }).join("");
 }
 
@@ -2200,7 +2662,7 @@ function openResult(i) {
   if (!r) return;
   $("#results").hidden = true;
   $("#search").blur();
-  location.hash = r.kind === "name" ? modeLink(r.name) : fnLink(r.name, r.address);
+  location.hash = r.kind === "name" || r.kind === "proposal" ? modeLink(r.name) : fnLink(r.name, r.address);
 }
 
 // ---- changes ----
@@ -2291,6 +2753,7 @@ function watch(status) {
   if (!status) return;
   S.pending = status.pending;
   if (!S.generation) S.generation = status.generation;
+  if (status.names != null && S.names == null) S.names = status.names;
   const busy = $("#busy");
   busy.hidden = !S.pending.length;
   busy.textContent = S.pending.length ? "finding " + S.pending.map((k) => ANALYSES[k]).join(", ") : "";
@@ -2301,8 +2764,9 @@ async function poll() {
   try {
     const status = await api("/api/status");
     const waited = S.pending.length && !status.pending.length;
-    if (status.generation !== S.generation) {
-      S.generation = status.generation;
+    if (status.generation !== S.generation || (status.names != null && status.names !== S.names)) {
+      S.generation = status.generation;    // (the tables, or only the names: names.tsv, review.tsv)
+      S.names = status.names;
       await loadFunctions();
       await refreshView();
     } else if (waited) {
@@ -2335,6 +2799,14 @@ function wire() {
     if (!chip) return;
     const o = chip.dataset.origin;
     if (S.origins.has(o)) S.origins.delete(o); else S.origins.add(o);
+    renderChips();
+    applyFilter();
+  });
+  $("#name-chips").addEventListener("click", (e) => {
+    const chip = e.target.closest(".chip");
+    if (!chip) return;
+    const c = chip.dataset.certainty;
+    if (S.certainty.has(c)) S.certainty.delete(c); else S.certainty.add(c);
     renderChips();
     applyFilter();
   });
@@ -2400,7 +2872,10 @@ function wire() {
     const by = e.target.closest("#by button");
     if (by) { S.by = by.dataset.by; prefs.set("by", S.by); renderOrigins(); return; }
     const item = e.target.closest(".legend .item");
+    if (item && item.dataset.certainty) { S.certainty = new Set([item.dataset.certainty]); renderChips(); applyFilter(); $("#side").classList.add("open"); return; }
     if (item) { S.origins = new Set([item.dataset.origin]); renderChips(); applyFilter(); $("#side").classList.add("open"); return; }
+    const mapBy = e.target.closest("#map-by button");
+    if (mapBy) { S.mapBy = mapBy.dataset.map; prefs.set("map-by", S.mapBy); renderNames(); drawMap(); return; }
     const head = e.target.closest(".group .head");
     if (head) { const names = head.parentElement.querySelector(".names"); names.hidden = !names.hidden; return; }
     const row = e.target.closest(".ln");
@@ -2412,7 +2887,7 @@ function wire() {
     if (e.target.id !== "map") { tip.hidden = true; return; }
     const fn = mapHit(e);
     if (!fn) { tip.hidden = true; return; }
-    tip.innerHTML = `${esc(fn.name)} <span class="sub">${hex(fn.entry)} · ${fn.size} bytes · ${esc(ORIGINS[fn.origin].long)}</span>`;
+    tip.innerHTML = `${esc(fn.name)}${fn.proposed ? ` <span class="prop">${esc(fn.proposed)}</span>` : ""} <span class="sub">${hex(fn.entry)} · ${fn.size} bytes · ${esc(ORIGINS[fn.origin].long)} · name ${esc(certaintyWords(fn.certainty, fn.confidence))}</span>`;
     tip.classList.remove("wide");
     tip.hidden = false;
     const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
@@ -2464,6 +2939,7 @@ async function start() {
   S.showBytes = prefs.get("bytes", false);
   S.showC = prefs.get("c", true);
   S.by = prefs.get("by", "bytes");
+  S.mapBy = prefs.get("map-by", "origin") === "names" ? "names" : "origin";
   R.depth = [1, 2, 3].includes(prefs.get("rel-depth", 1)) ? prefs.get("rel-depth", 1) : 1;
   const groups = prefs.get("rel-groups", null);
   if (Array.isArray(groups)) R.groups = new Set(groups.filter((k) => GROUPS.some(([g]) => g === k)));
@@ -2482,6 +2958,7 @@ async function start() {
     const select = $("#image-select");
     if (select) select.addEventListener("change", () => { location.search = "?image=" + encodeURIComponent(select.value); });
     S.generation = o.status.generation;
+    S.names = o.status.names;
     await loadFunctions();
   } catch (e) {
     return showError(e.message);
