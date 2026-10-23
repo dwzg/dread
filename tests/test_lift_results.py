@@ -526,7 +526,8 @@ def test_a_stub_of_a_four_word_function_answers_the_extra_words(tmp_path):
     it sets answers those too, derived from its answer as a wide_results callee's r1 is: quad_sum_reader
     with quad_pair_split stubbed adds the stub's r2 and r3, not what was in them before the call (a
     lifted caller's C has 0 there behind an earlier C call, where the original has what that callee
-    left). Images with such functions get case keys of their own."""
+    left). The functions whose runs reach such a function get case keys of their own (dread.autocase's
+    scopes: the stub's answers are a fact of the function stubbed)."""
     from dread.autocase import Generator
     t = arm_program(tmp_path, "t2")
     g = Generator(t, t.image())
@@ -541,7 +542,7 @@ def test_a_stub_of_a_four_word_function_answers_the_extra_words(tmp_path):
     assert r.ret == (7 + 2 * 5 + 4 * word(2) + 8 * word(3)) & 0xFFFFFFFF      # (r1 as passed: no wide_results row)
     plain = Generator(t, t.image())
     plain._more = {}
-    assert plain.environment() != g.environment()
+    assert plain.environment("quad_sum_reader") != g.environment("quad_sum_reader")
 
 
 QUAD_RV_S = """

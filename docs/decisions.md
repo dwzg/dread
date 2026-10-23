@@ -9,6 +9,88 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Case keys scoped to a function's call tree (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The key of a function's generated cases held one environment for the whole image: its
+  bytes, the startup copies, the memory map, what dread.regflow found in the whole image (its case
+  facts since this morning) and the table of stubs that answer registers beyond a C result (more). A
+  change of regflow's findings or of that table anywhere made every case of the image anew: on the
+  private real-life test most of a day on 8 cores, for a change that concerned the callers of a few
+  dozen functions. What may a function's key leave out, and how are calls through pointers taken?
+- **Options and choices.**
+  1. What is scoped: (a) nothing; (b) what belongs to one function: its entries in regflow's case
+     facts, its stub's answers beyond a C result, and (new in any key) its wide_results row and its
+     rows of the domains table, for the functions its runs can reach; (c) everything per function.
+     **(b)**: the image's bytes, the startup copies and the memory map cannot be scoped (a run reads
+     memory, not functions: a moved literal changes what a function reads), nor can the stall cut
+     (the engine's) or the learned pointers' slots (the scratch's).
+  2. What a run can reach (dread.autocase reaches): its calls, tail calls and branches into another
+     function's code; the fall behind its last instruction (a call there whose stub returns falls
+     through); the calls the layer marks (a stub that jumps through a register, a switch helper); the
+     callees the layer finds held in a register (MSP430); the targets outside the function that a
+     run of an indirect jump's dispatch finds (dread.switches: a table of functions, a veneer), where
+     the table is in the image (a case's inputs never set it). Everything else is an open transfer:
+     a call through a register, an indirect jump no run resolves, one in code that runs outside the
+     image or whose targets are words the startup copies put there (memory a case may set), a target
+     at 0, code no function holds.
+  3. A tree with an open transfer: (a) the callees through pointers as the generator resolves them;
+     (b) every function whose address the image takes, with their trees; (c) every function.
+     **(c)**: the generator resolves nothing there, a run calls whatever value the pointer holds (an
+     input, a word of the image, an address its code forms). (b) needs the addresses the code forms:
+     on FreeRTOS's RISC-V builds no function's address is a word of the image (lui and addi make
+     every one), so the image's words alone would miss every task; it would take an analysis per
+     architecture (dread.relations' flow_references, a few milliseconds a function). And where the
+     words do find them, their closure is most of the image: 96 to 100 per cent of the functions on
+     GCC's ARM builds (the vector table's reset handler reaches main and every task creator), 45 on
+     clang's. (b) could gain only within the trees that are open: 5 to 6 per cent of the functions on
+     FreeRTOS's ARM builds, 1.2 to 3.5 on RISC-V, 19 on the MSP430.
+  4. Transfers that are none: a system call (svc, ecall: dread.emu runs it as a logged no-op; the
+     layers' is_syscall, new); an indirect jump through a register a call leaves its return address
+     in (the layer's link_regs), where the function writes it nowhere and every direct transfer into
+     the function is a call that leaves it there: GCC's millicode (jal t0, __riscv_save_N; jr t0).
+     Without that rule the trees of four RISC-V builds were a seventh open.
+  5. Names: (a) in each function's facts; (b) left out (entries only). **(a)**: names decide what the
+     generator does (the string routines it never stubs, those whose calls it never answers, the
+     domains rows), and a rename now renews the keys of the trees that hold the function only;
+     before, regflow's image-wide digest held every name, and any rename renewed every key.
+  6. Also whole, new in the key: the layout of the code (the code ranges, every function's entry, size
+     and instruction set, without names: whether a load is one of code depends on every function's
+     extent, dread.emu trace_reads; before, a table change reached the key only through regflow's
+     findings), the devices, the stack, the sentinel, the scratch's place, the image's limit, the
+     calling convention, the fixed registers and the core. None was in a key, each changes runs, and
+     the key's format changes once anyway.
+  7. regflow's result is read through RegFlow.case_facts (what cases read: to_json without
+     overwritten): a table by function name per function, any other field image-wide. A field
+     regflow adds there is covered without a change in dread.autocase; one it leaves out changes no
+     key (overwritten: a test).
+  8. Digests per strongly connected component of the call graph, bottom up (each of its members'
+     facts and the digests of the components it calls): linear in the graph; a closure per function
+     is quadratic (synthetic graphs: 5,000 functions 0.035 s against 5.2 s, 20,000 0.15 s).
+  9. Made once per process, in dread.runner's and dread.uncovered's prepare, before the workers fork.
+- **Figures.** A change of one function's regflow facts (a call site added behind its r0), keys kept:
+  FreeRTOS GCC -Os on the MPS2 (366 functions, 19 with an open transfer in their tree) vListInsertEnd
+  321, xQueueGenericSend 304, memcpy 176, vPortEnterCritical 98, prvIdleTask 346, main 347; on RISC-V
+  GCC -Os (316, 8 open) vListInsertEnd 283, xQueueGenericSend 266, memcpy 142, prvIdleTask 307, main
+  306; before, none. Each time the new keys were exactly the trees that hold the function and the open
+  ones. The lift check after that change of vListInsertEnd's on the MPS2 build made 43 of its 362
+  cache entries anew (319 kept) in 135 s, against 68 s with everything cached (main's code, the same
+  change on its own copy: 359 of 362 anew in 678 s; the other three are generations that fail within a
+  second, which no check caches); same table, same verdicts. The first check after this change makes
+  every entry anew once, and the cases come out byte for byte main's: the MPS2 build's 362 entries
+  (341 accepted by both, 792 s beside main's 763 s), RISC-V's 308 (272 accepted, 600 s beside 597 s);
+  gizmo's seven tables unchanged. The keys' time on the 39 bench builds: their environment 0.03 to 0.6
+  s a build (the reach, the facts, the components; main's under 0.01 s), the case keys of every
+  function 0.2 to 2.7 s (main's 0.15 to 2.1), on a machine loaded by the lift checks; synthetic call
+  graphs (4 calls a function, cycles): the components of 20,000 functions 0.15 s, where a closure per
+  function took 5.2 s at 5,000.
+- **Undo.** scopes() returning everything() for every function brings back the image-wide scope of
+  regflow and more; the new whole parts are lines of Generator.whole(); a revert of the commit
+  renews every key once more.
+- **Status.** Done (dread/autocase.py, dread/arch/arm.py, riscv.py, mips.py, dread/runner.py,
+  dread/uncovered.py, dread/integration.py; tests/test_autocase.py, test_lift_results.py).
+
 ## Array bases where the code indexes them, and no address for a plain value (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

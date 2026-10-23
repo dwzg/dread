@@ -88,7 +88,12 @@ case like any other (marked "answer"), compared under its stubs in both images; 
 that the run would not take as an input (a local, the image). Bounded by ANSWER_RUNS runs a function.
 
 Generated cases are cached per function (BUILD/autocases/IMAGE/NAME.json), keyed by the function's
-bytes, the generator VERSION and the options. A change that alters what the generator produces
+bytes, the generator VERSION, the options and the environment (Generator.environment): what does not
+belong to one function (the image's bytes, the startup copies, the memory map, the code's layout, the
+convention) whole, and what does (what dread.regflow found of it, its stub's answers beyond a C result,
+its domains) for the functions its runs can reach only: its call tree (reaches), or every function where
+the tree calls through a pointer. A change of one function's facts makes the cases of the functions whose
+trees hold it anew, not the image's (since 2026-10-23). A change that alters what the generator produces
 needs a VERSION bump; SEED stays, so that a bump does not reshuffle every function's search. What
 is added to a generation afterwards has a version of its own instead and is added to cached cases
 without making them anew: the firm-up (FIRM, Generator.firm_up), and the frontier answers (ANSWERS:
@@ -286,7 +291,10 @@ class Generator:
         self._endless = None                # dread.noreturn, when a run hangs in a callee
         self._switches = None               # {name: entry} of the functions that switch stacks
         self._reaching = None               # {name: the stack switches its calls reach}
-        self._environment = None            # see environment()
+        self._whole = None                  # see whole()
+        self._facts = None                  # see facts()
+        self._scopes = None                 # see scopes()
+        self._everything = None             # see everything()
         self._stall_part = None             # see stall_part
         self.wild_pins = None               # see drop_wild
         self.loop = False                   # generating loop cases (generate(loop=True))
@@ -353,8 +361,10 @@ class Generator:
 
     def _domains(self):
         """The image's domains table: {address: (bytes, values)}, rows NAME:rN+OFF (pointer
-        domains), NAME:rN (argument domains) and NAME:ret (stub answers); docs/formats.md."""
+        domains), NAME:rN (argument domains) and NAME:ret (stub answers); docs/formats.md. The rows as
+        written stay in domain_rows ({NAME: rows}, the address rows under ""), for the cache key."""
         self.domains, self.pointer_domains, self.argument_domains, self.result_domains = {}, {}, {}, {}
+        self.domain_rows = {}
         path = self.image.table("domains")
         if not os.path.exists(path):
             return
@@ -363,6 +373,8 @@ class Generator:
                 fields = line.rstrip("\n").split("\t")
                 if line.startswith("#") or len(fields) < 4:
                     continue
+                self.domain_rows.setdefault(fields[0].split(":")[0] if ":" in fields[0] else "", []).append(
+                    line.rstrip("\n"))
                 values = (tuple(int(x, 0) for x in fields[2].split(",")) if "," in fields[2] or fields[3].strip() == "-"
                           else range(int(fields[2], 0), int(fields[3], 0) + 1))
                 where, size = fields[0], int(fields[1])
@@ -686,37 +698,157 @@ class Generator:
             a += POINTER_STEP
         return out or [self.scratch]
 
-    def environment(self):
-        """A digest of what a function's cases depend on besides its own instructions: the whole
-        image (a literal pool holds the addresses of globals and callees: a rebuild that moved the
-        data left a function's instructions alike and its cases stale, setting cells nobody reads),
-        the memory map (what an input may reach),
-        what the loader puts into RAM, and what dread.regflow found in the image (a hung callee's
-        stub logs what it reads, a function's float arguments get values): its result, not its
-        version, so that a new version that finds the same in an image keeps that image's cases (a
-        version that changed only what ARM's FPU pushes mean regenerated every image's), of the result
-        what cases read (RegFlow.case_facts: not the registers written on every path), and the
-        functions whose stubs answer registers beyond a C result (more), where there are any."""
-        if self._environment is None:
+    def environment(self, name=None):
+        """A digest of what a function's cases depend on besides its own instructions (case_key): the part
+        no call tree scopes (whole()) and, for the function `name`, the facts of every function its runs
+        can reach (scopes(): its call tree), so that a change of one function's facts (what dread.regflow
+        finds of it, its stub's answers) gives new keys to the functions whose trees hold it and keeps the
+        others' (since 2026-10-23: until then one digest of the whole image's regflow and more, and a
+        change anywhere made every case of the image anew, most of a day on a private firmware for a
+        change that concerned the callers of a few dozen functions). With no name, or one the function
+        table lacks, every function's facts (everything()): what a key held before."""
+        part = self.scopes().get(name) if name is not None else None
+        h = hashlib.sha1(b"environment 2\0" + self.whole().encode() + b"\0")
+        h.update((part or self.everything()).encode())
+        return h.hexdigest()
+
+    def whole(self):
+        """The part of the environment no call tree scopes, the same for every function of the image: the
+        whole image (a literal pool holds the addresses of globals and callees: a rebuild that moved the
+        data left a function's instructions alike and its cases stale, setting cells nobody reads; a run
+        may load from anywhere in it), what the loader puts into RAM, the memory map (what an input may
+        reach: the regions, and since 2026-10-23 the devices, the stack, the sentinel, the scratch and the
+        image's limit), the stall cut and the learned pointers' slots where they apply, what dread.regflow
+        found that belongs to no function (its register names; entries under names the function table
+        lacks), and since 2026-10-23 the layout of the code (the code ranges and every function's entry,
+        size and instruction set, without names: whether a load is one of code depends on every
+        function's extent, dread.emu trace_reads; until then a table change rode on regflow's image-wide
+        digest, which held every name, and a size change that left regflow's findings alike was in no
+        key), the calling convention, the registers fixed in the whole program, the core, and the
+        domains table's rows for addresses (a run may read any). None of it can be scoped to a call tree:
+        a run reads memory, not functions."""
+        if self._whole is None:
             h = hashlib.sha1(bytes(self.payload))
             for c in self.image.startup():
                 h.update(repr((c.kind, c.run, c.size, c.stored)).encode())
                 h.update(bytes(getattr(c, "data", None) or b""))
-            flow = self.flow()
-            # (without what no case reads: the registers written on every path, regflow 25)
-            found = json.dumps(flow.case_facts(), sort_keys=True).encode() if flow else b"none"
-            h.update(b"regflow " + hashlib.sha1(found).digest())
-            if self.stall_part:             # (only where it applies: the other images keep their cases)
+            h.update(b"regflow " + self._flow_parts()[0].encode())
+            if self.stall_part:             # (only where it applies)
                 h.update(b"stall %d" % self.stall_part)
-            if self.more():                 # (the stubs' answers beyond a C result: likewise)
-                h.update(b"more " + repr(sorted(self.more().items())).encode())
             if self.pointer_slots != [self.scratch + POINTER_BASE + POINTER_STEP * k for k in range(POINTER_SLOTS)]:
                 h.update(b"pointer slots " + repr(self.pointer_slots).encode())     # (a small scratch only)
             # the memory map: what an input may reach (the lab's page at address 0 let a probe's null
             # path end, which cases cached before it kept unseen)
-            h.update(b"memory " + repr([(r.name, r.base, r.size, r.kind) for r in self.target.memory.regions]).encode())
-            self._environment = h.hexdigest()
-        return self._environment
+            mem = self.target.memory
+            h.update(b"memory " + repr([(r.name, r.base, r.size, r.kind) for r in mem.regions]).encode())
+            h.update(repr((sorted(tuple(r) for r in mem.io), mem.stack_top, mem.stack_size, mem.sentinel,
+                           mem.scratch_base, mem.scratch_size, self.image.base, self.image.limit)).encode())
+            prog = self.program
+            h.update(b"code " + repr([tuple(r) for r in prog.ranges]).encode())
+            h.update(b"functions " + repr([(f.entry, f.size, f.isa) for f in prog.functions]).encode())
+            abi = self.target.abi
+            h.update(b"abi " + repr((list(abi.arg_regs), list(abi.result), list(abi.callee_saved),
+                                     list(abi.fp_arg_regs), sorted(abi.stack_args.items()),
+                                     sorted(self.image.fixed.items()), self.arch.describe())).encode())
+            h.update(b"domains " + repr(self.domain_rows.get("", [])).encode())
+            self._whole = h.hexdigest()
+        return self._whole
+
+    def _flow_parts(self):
+        """(image-wide, {name: {field: its entry}}) of what dread.regflow found that cases read: its case
+        facts (RegFlow.case_facts: the result's JSON without what no case reads, such as the registers a
+        function writes on every path, overwritten, since regflow 25). A field that is a table by function
+        name gives each function its entry (kept, reads, sites, preserved); any other field, and the entries
+        under names the function table lacks, are image-wide (a JSON text; "none" without regflow). So a
+        field regflow adds to its case facts is in the key without a change here: by function where it is a
+        table by function name, image-wide otherwise; one it leaves out is in no key."""
+        got = self.__dict__.get("_flow_split")
+        if got is None:
+            flow = self.flow()
+            if not flow:
+                got = ("none", {})
+            else:
+                names, whole, per = self.program.by_name, {}, {}
+                for field, value in flow.case_facts().items():
+                    if not isinstance(value, dict):
+                        whole[field] = value
+                        continue
+                    rest = {k: v for k, v in value.items() if k not in names}
+                    for k, v in value.items():
+                        if k in names:
+                            per.setdefault(k, {})[field] = v
+                    if rest or not value:
+                        whole[field] = rest
+                got = (json.dumps(whole, sort_keys=True), per)
+            self.__dict__["_flow_split"] = got
+        return got
+
+    def facts(self):
+        """{name: digest} of what each function adds to the key of every function whose runs reach it
+        (scopes()): its name and entry; its part of what dread.regflow found (_flow_parts: the registers its
+        callers read after it and those it reads, the call sites behind them, those it leaves alone, and
+        whatever table by function name the analysis adds); the registers beyond a C result its stub
+        answers (more); whether its stub answers two words (the wide_results table, in no key before
+        2026-10-23); its rows of the domains table (its stub's answers, NAME:ret, and its arguments; in no
+        key before either). A stub logs what its callee reads, answers what its callers read, a function's
+        float arguments get values: each of these is a fact of the function a run runs or stubs, and the
+        lifter's and dread.uncovered's analyses the generator asks (frames, stack arguments, what decides a
+        branch) read those of the function and its callees. Found once."""
+        if self._facts is None:
+            _, per = self._flow_parts()
+            more = self.more()
+            self._facts = {}
+            for fn in self.program.functions:
+                data = {"name": fn.name, "entry": fn.entry, "regflow": per.get(fn.name, {}),
+                        "more": list(more.get(fn.entry, ())), "wide": fn.entry in self.wide,
+                        "domains": self.domain_rows.get(fn.name, [])}
+                self._facts[fn.name] = hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()
+        return self._facts
+
+    def everything(self):
+        """A digest of every function's facts (facts()): the scope of a run that may reach any function."""
+        if self._everything is None:
+            h = hashlib.sha1(b"every function\0")
+            for name, digest in sorted(self.facts().items()):
+                h.update(digest.encode())
+            self._everything = h.hexdigest()
+        return self._everything
+
+    def scopes(self):
+        """{name: digest}: each function's part of the environment, the facts (facts()) of every function
+        its runs can reach (reaches(): its call tree, transitively, through tail calls and the dispatches
+        whose targets dread.switches finds), digested bottom up over the call graph's strongly connected
+        components: one digest a component, of its members' facts and the digests of the components they
+        transfer to, so that the image costs one pass over its functions however deep the trees are. A
+        component with an open transfer (a call through a function pointer: reaches) adds every function's
+        facts (everything()): such a call may reach any function whose address a run can make, which the
+        image's words alone do not tell (RISC-V forms an address with lui and addi), and on a Cortex-M a
+        small pointer reads the vector table, whose reset handler reaches main and all it calls: on
+        FreeRTOS's GCC builds the functions whose address the image holds reach every function. So a
+        change of one function's facts gives new keys to the functions whose trees hold it and to the open
+        ones: on FreeRTOS's builds 94 to 95 per cent of the functions have no open transfer in their tree
+        on the ARM, 96 to 99 on RISC-V, 81 on the MSP430 (calls through a register the layer does not
+        resolve). Found once (dread.runner and dread.uncovered find them before their workers fork)."""
+        if self._scopes is None:
+            try:
+                graph = reaches(self.program)
+            except Exception:               # (a layer the analysis cannot read: every scope is everything)
+                graph = {fn.name: (set(), True) for fn in self.program.functions}
+            facts, every = self.facts(), self.everything().encode()
+            edges = {name: callees for name, (callees, _) in graph.items()}
+            at, done = {}, []
+            for k, members in enumerate(components(edges)):
+                h = hashlib.sha1(b"scope\0")
+                for name in members:
+                    at[name] = k
+                    h.update(facts[name].encode())
+                for digest in sorted({done[at[c]] for name in members for c in edges[name] if at[c] != k}):
+                    h.update(digest)
+                if any(graph[name][1] for name in members):
+                    h.update(b"open\0" + every)
+                done.append(h.digest())
+            self._scopes = {name: done[at[name]].hex() for name in graph}
+        return self._scopes
 
     @property
     def stall_part(self):
@@ -2821,11 +2953,201 @@ def resolve_calls(generator, calls):
     return out
 
 
+def reaches(program):
+    """{name: (callees, open)} for every function of a program: what a run of the function can enter
+    besides itself, as far as the cache key of its generated cases goes (Generator.scopes).
+
+    callees: the functions its instructions transfer to directly: calls, jumps to another function's
+    instructions (a tail call, a branch into shared code), the last instruction's fall to the code behind
+    it (a call there whose stub returns, a hung callee's, falls through), a call the layer marks as one
+    through a stub or of a switch helper (Arm.mark_call), the callees the layer finds held in a register
+    (register_call_targets: MSP430), and the targets outside the function of an indirect jump whose
+    dispatch dread.switches runs (a table of functions in the image, a veneer).
+
+    open: a transfer may go where none of that tells: a call through a register (a function pointer, a
+    virtual method), an indirect jump whose targets no run of its dispatch finds, a transfer to code no
+    function holds (also the fall behind the last instruction), an indirect jump in code that runs outside
+    the image or whose targets are words the startup copies put outside it (a table a case may set: a
+    run's reads outside the image are inputs), a target at address 0 (what a dispatch through memory
+    that holds nothing finds). A system call is no transfer (the layer's is_syscall: dread.emu runs it as
+    a logged no-op), nor is an indirect jump through a register a call leaves its return address in (the
+    layer's link_regs) when the function writes that register nowhere and every direct transfer into it
+    is a call that leaves its return address there: GCC's millicode, entered with jal t0, __riscv_save_N,
+    returns with jr t0 behind its call (on four of FreeRTOS's RISC-V builds, open, it opened a seventh of
+    the trees).
+
+    Not seen: a return address a run overwrote (a stub's generated fill reaching over the frame), which
+    may send it anywhere; a dispatch that adds a base to a word it read outside the image."""
+    from dread import switches
+    arch = program.arch
+    links = set(getattr(arch, "link_regs", ()) or ())
+    if getattr(arch, "link_reg", None):
+        links.add(arch.link_reg)
+    syscall = getattr(arch, "is_syscall", None)
+    through = getattr(arch, "register_call_targets", None)
+    lo, hi = program.base, program.base + len(program.data)
+    entered = {}                            # name -> [(how, address, the link registers the transfer writes)]
+    out, jumps = {}, []
+    copied = []                             # (the words the startup copies put outside the image, once)
+
+    def holder(address):
+        return program.by_entry.get(address) or program.function_at(address)
+
+    def enter(fn, callees, g, how, address, written=frozenset()):
+        if g is not fn:
+            callees.add(g.name)
+            entered.setdefault(g.name, []).append((how, address, written))
+
+    def dispatched(fn, address, callees):
+        """Whether the indirect jump at address goes only where runs of its dispatch land (dread.switches),
+        its targets outside fn entered; False when it may go elsewhere."""
+        if not lo <= address < hi:
+            return False
+        try:
+            found = switches.resolve(program, fn, address)
+        except Exception:
+            return False
+        if not found or not (found[0] or found[1]):
+            return False
+        if not copied:
+            copied.append(_copied_words(program))
+        if any(t in copied[0] or t | 1 in copied[0] for t in list(found[0]) + list(found[1])):
+            return False
+        for t in found[1]:
+            g = holder(t & ~1)
+            if g is None or not t & ~1:
+                return False
+            enter(fn, callees, g, "jump", t & ~1)
+        return True
+
+    for fn in program.functions:
+        own, callees, opened, last = set(fn.insns), set(), False, None
+        held = {}
+        if through is not None:
+            try:
+                held = through(program, fn) or {}
+            except Exception:
+                held = {}
+        for a in fn.insns:
+            insn = program.insn(a)
+            if insn is None:
+                continue
+            last = insn
+            kind, target, falls = arch.flow(insn)
+            direct = arch.target(insn)      # (also a bl the layer marks as a call through a stub)
+            if direct is not None and direct & ~1 not in own:
+                g = holder(direct & ~1)
+                if g is None:
+                    opened = True
+                else:
+                    written = frozenset(arch.reg_effects(insn)[1]) & links if links else frozenset()
+                    enter(fn, callees, g, "call" if written else "jump", direct & ~1, written)
+            if kind == "icall":
+                if held.get(a):
+                    for t in held[a]:
+                        g = program.by_entry.get(t)
+                        if g is None:
+                            opened = True
+                        else:
+                            enter(fn, callees, g, "call", t)
+                elif syscall is None or not syscall(insn):
+                    opened = True
+            elif kind == "ijump":
+                jumps.append((fn, a, target, callees))
+        if last is not None:
+            kind, _, falls = arch.flow(last)
+            before = program.insn(fn.insns[-2]) if len(fn.insns) > 1 else None
+            if before is not None and getattr(arch, "delay_slot", None) and arch.delay_slot(before) and \
+                    not arch.flow(before)[2]:
+                kind, falls = "slot", False  # (the delay slot of a jump or return that does not fall through)
+            if kind == "next" or falls:
+                g = holder(last.address + last.size)
+                if g is None:
+                    opened = True
+                else:
+                    enter(fn, callees, g, "fall", last.address + last.size)
+        out[fn.name] = [callees, opened]
+    returning = []
+    for fn, a, target, callees in jumps:
+        if isinstance(target, str) and target in links:
+            returning.append((fn, target))  # (decided below, when every transfer into a function is known)
+        elif not out[fn.name][1] and not dispatched(fn, a, callees):
+            out[fn.name][1] = True
+    for fn, reg in returning:
+        if out[fn.name][1]:
+            continue
+        writes = any(insn is not None and reg in arch.reg_effects(insn)[1] for insn in program.instructions(fn))
+        if writes or any(how != "call" or address != fn.entry or reg not in written
+                         for how, address, written in entered.get(fn.name, ())):
+            out[fn.name][1] = True
+    return {name: (callees, opened) for name, (callees, opened) in out.items()}
+
+
+def _copied_words(program):
+    """The values of the aligned words the startup's copies put outside the image (reaches: memory a run
+    reads there is an input a case may set)."""
+    size = program.arch.word
+    lo, hi = program.base, program.base + len(program.data)
+    out = set()
+    for c in program.image.startup():
+        if c.kind == "zero" or lo <= c.run < hi:
+            continue
+        data = bytes(c.data or b"") if c.kind == "load" else bytes(program.data[c.stored - lo:c.stored - lo + c.size])
+        skip = -c.run % size
+        n = (len(data) - skip) // size if len(data) > skip else 0
+        if n:
+            out.update(struct.unpack_from("<%d%s" % (n, "I" if size == 4 else "H"), data, skip))
+    return out
+
+
+def components(graph):
+    """The strongly connected components of a graph ({node: successors}), each a sorted list, in the order
+    Tarjan's algorithm closes them: every component after all the components it reaches. Iterative (a
+    call tree may be deep) and deterministic (nodes and successors taken in sorted order)."""
+    index, low, on, stack, out = {}, {}, set(), [], []
+    for root in sorted(graph):
+        if root in index:
+            continue
+        index[root] = low[root] = len(index)
+        stack.append(root)
+        on.add(root)
+        work = [(root, iter(sorted(graph[root])))]
+        while work:
+            node, successors = work[-1]
+            for nxt in successors:
+                if nxt not in graph:
+                    continue
+                if nxt not in index:
+                    index[nxt] = low[nxt] = len(index)
+                    stack.append(nxt)
+                    on.add(nxt)
+                    work.append((nxt, iter(sorted(graph[nxt]))))
+                    break
+                if nxt in on:
+                    low[node] = min(low[node], index[nxt])
+            else:
+                work.pop()
+                if work:
+                    parent = work[-1][0]
+                    low[parent] = min(low[parent], low[node])
+                if low[node] == index[node]:
+                    members = []
+                    while True:
+                        w = stack.pop()
+                        on.discard(w)
+                        members.append(w)
+                        if w == node:
+                            break
+                    out.append(sorted(members))
+    return out
+
+
 def cache_key(payload, base, words, sizes, entry, options, arch=None, environment=""):
     """The key of a function's cached cases: its bytes, VERSION, the options, the architecture
     layer's generator_version when it is not 0 (what the generator learns from that architecture's
     code: changing it renews only that architecture's caches) and the environment (the generator's
-    environment(): the image as a whole)."""
+    environment(NAME): the image as a whole, and the facts of the functions the function's runs can
+    reach)."""
     blob = b"".join(payload[a - base:a - base + sizes[a]] for a in words if 0 <= a - base < len(payload))
     version = VERSION
     if arch is not None and getattr(arch, "generator_version", 0):
@@ -2951,7 +3273,8 @@ def case_key(gen, name, fn, options, calls, frame):
     tails = gen.pointer_tails_reached(fn.insns)
     if tails:                               # (only those: tail calls through a pointer count with the
         keyed["pointer_tails"] = tails      # calls through a register since 2026-10-21, drop_wild)
-    return cache_key(gen.payload, gen.image.base, fn.insns, sizes, fn.entry, keyed, prog.arch, gen.environment()), calls
+    return cache_key(gen.payload, gen.image.base, fn.insns, sizes, fn.entry, keyed, prog.arch,
+                     gen.environment(name)), calls
 
 
 def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True):

@@ -128,7 +128,7 @@ def inputs_for(name):
     fn = prog.by_name[name]
     path = os.path.join(G["target"].build, "autocases", image.name, "integration-" + name + ".json")
     key = autocase.cache_key(gen.payload, image.base, fn.insns, {a: prog.insn_size(a) for a in fn.insns}, fn.entry,
-                             {"integration": True, "seconds": GENERATE_SECONDS}, prog.arch, gen.environment())
+                             {"integration": True, "seconds": GENERATE_SECONDS}, prog.arch, gen.environment(name))
     cached = autocase.cache_load(path)
     if not cached or cached.get("key") != key:
         try:

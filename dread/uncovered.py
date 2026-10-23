@@ -920,9 +920,10 @@ def prepare(target, image, verdicts_file=None, runs=True):
         suite = Suite(target, image, prog, layout).load()
         RUN.update(layout=layout, suite=suite, original=image.payload(), refusals=refusals(RUN["work"]))
         Machine.entries[(target.file, image.name)] = {fn.entry for fn in prog.functions}
-        gen = autocase.generator_for(RUN)   # (its whole-image digests too, for the cases' keys)
-        try:
-            gen.environment()
+        gen = autocase.generator_for(RUN)   # (its digests too, for the cases' keys: found once here,
+        try:                                # not in every worker)
+            gen.whole()
+            gen.scopes()
             gen.stack_switches()
         except Exception:
             pass

@@ -367,6 +367,14 @@ def prepare(target, image, recon_path, keep_failing=False):
                recon=recon, aliases=aliases, built=built, keep_failing=keep_failing,
                isa_of=prog.isa_at, code=prog.instruction_halves(), owners=prog.extent_owners(), regflow=flow,
                kept_argued=kept_argued)
+    if suite.auto:                          # the generated cases' keys (dread.autocase's environment): their
+        from dread import autocase          # digests found once here, before the workers fork, not in each
+        try:
+            gen = autocase.generator_for(RUN)
+            gen.whole()
+            gen.scopes()
+        except Exception:                   # (the workers meet it again where it matters)
+            pass
     return suite
 
 

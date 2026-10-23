@@ -4167,19 +4167,27 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## Scale and robustness
 
-- [ ] **Case keys scoped to a function's call tree.** The generated cases' key holds an image-wide
-  environment (dread.autocase Generator.environment): the image's bytes, what dread.regflow found in
-  the whole image, and since 2026-10-23 the table of functions whose stubs answer registers beyond a C
-  result. So a change of DREAD that changes regflow's findings anywhere, or that table, regenerates
-  every case of the image: on the private real-life test (some thousands of functions) the lift check
-  after the results-beyond-r0:r1 work regenerated everything, most of a day on 8 cores, for a change
-  that concerns the callers of a few dozen functions. Scope the regflow and table parts to what a
-  function's cases depend on: its own facts and those of the functions its runs can reach (its call
-  tree, callees through pointers as the generator resolves them), digested per function; the image's
-  bytes stay whole (a moved literal changes what a function reads). Measure: the keys of FreeRTOS and
-  gizmo unchanged where nothing in a function's tree changed, a test that a change to one callee's
-  regflow facts regenerates its callers' cases and no others, and the time of a check after such a
-  change.
+- [x] **Case keys scoped to a function's call tree** (2026-10-23; docs/decisions.md). The generated
+  cases' key held one environment for the whole image (dread.autocase Generator.environment): a change
+  of what dread.regflow found anywhere, or of the stubs' answers beyond a C result, made every case of
+  the image anew (on the private real-life test most of a day on 8 cores, for a change that concerned
+  the callers of a few dozen functions). Now it has two parts (docs/formats.md, "the key"): whole,
+  what no call tree scopes (the image's bytes, the startup copies, the memory map, and, in no key
+  before, the code's layout, the devices, stack, sentinel and scratch, the calling convention, the
+  fixed registers, the core, the domains' address rows); and the facts of every function the
+  function's runs can reach (dread.autocase reaches: calls, tail calls, the fall behind the last
+  instruction, the targets a run of an indirect jump's dispatch finds; every function's where the tree
+  calls through a pointer): its name, its entries in regflow's case facts, its stub's answers beyond a
+  C result, and, in no key before, its wide_results row and domains rows, digested once per strongly
+  connected component. A change of one function's facts on FreeRTOS GCC -Os (MPS2, 366 functions)
+  keeps 321 keys for vListInsertEnd, 304 for xQueueGenericSend, 98 for vPortEnterCritical, 347 for
+  main (before: none); the lift check after the change of vListInsertEnd's made 43 of 362 entries anew
+  in 135 s (68 s cached; main's code made 359 anew in 678 s). 5 to 6 per cent of the functions of
+  FreeRTOS's ARM builds have a transfer that no table tells (a call through a pointer, mostly) in
+  their tree, 1.2 to 3.5 on RISC-V, 19 on the MSP430. The keys of a FreeRTOS build take 0.2 to 2.7 s
+  (the scoped part 0.03 to 0.6). Every image's cases were made anew once, byte for byte as before
+  (MPS2 GCC -Os and RISC-V GCC -Os: the same cases, the same 341 and 272 functions accepted; gizmo's
+  tables unchanged).
 
 - [x] **A bulk run's memory, item by item** (2026-10-23, found on the private real-life test: one
   worker of a lift check grew by gigabytes on one function until the run was killed, which the

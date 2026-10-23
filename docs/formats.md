@@ -207,14 +207,16 @@ register). The lifter takes a function's width from dread.regflow, not from here
 the stubs'. A function whose callers read registers beyond the C result that it sets (dread.lift's
 more_results: r2, r3, r12 on ARM, a2-a7 and t0-t6 on RISC-V) needs no row: since 2026-10-23 its stub
 answers those as well, the k-th of them (from 0) `(answer * 0x9E3779B1 + 0x7F4A7C15 * (k + 2)) &
-0xFFFFFFFF`, and the images that have such functions get new case keys (dread.autocase environment),
-the others keep theirs.
+0xFFFFFFFF`. Both are facts of the function stubbed in the generated cases' keys: since 2026-10-23
+(below, "the key") a row added or removed, or registers more found or lost, give new keys to the
+functions whose runs reach that function, the others keep theirs.
 
 ### `domains.tsv`, `stale_readers.tsv`, `function_starts.txt`
 
 Described with the tools that use them, as those tools arrive in DREAD (no tool reads
 `stale_readers.tsv`: the lifter finds the registers a callee reads of its caller itself,
-dread.lift's leaves).
+dread.lift's leaves). The rows of `domains.tsv` are in the generated cases' keys since 2026-10-23: a
+function's rows (`NAME:...`) in the facts of that function, an address's row in every key.
 
 ## The rebuilt image (`BUILD/recon/IMAGE/`)
 
@@ -291,6 +293,32 @@ kept and written cases of the function: `{"key", "cases", "seconds"}`, the key a
 entry's key, its `firm`, dread.autocase.ANSWERS and those kept and written cases; under another key
 they are made anew and the generated cases stay. Readers that take `cases` only see the cases without
 the answers.
+
+The entry's `key` (dread.autocase case_key) is a digest of the function's instruction bytes, the
+generator's VERSION (with the architecture layer's generator_version where it is not 0), its auto()
+options (with the calls, the frame and what the key names besides: the stack switches reached, the
+sweep's cap, the loop's calls, the tail calls through a pointer) and the environment
+(Generator.environment). Since 2026-10-23 the environment is scoped to the function's call tree:
+
+- whole, the same in every key of the image: the image's bytes, the startup copies, the memory map
+  (regions, devices, stack, sentinel, scratch, the image's limit), the layout of the code (the code
+  ranges, every function's entry, size and instruction set, no names), the calling convention, the
+  registers fixed in the whole program, the core, the stall cut and the learned pointers' slots where
+  they apply, the domains table's rows for addresses, and what dread.regflow's case facts
+  (RegFlow.case_facts) hold that is not a table by function name (the register names);
+- by function, the facts of every function the function's runs can reach (dread.autocase reaches: its
+  calls, tail calls, the fall behind its last instruction, the targets a run of an indirect jump's
+  dispatch finds, transitively): its name and entry, its entries in regflow's case facts (kept, reads,
+  sites, preserved, and any table by function name regflow adds there; not `overwritten`, which no case
+  reads), the registers beyond a C result its stub answers, its `wide_results` row and its domains
+  rows. Where a tree has a transfer no table and no run of its dispatch tells (a call through a
+  function pointer), the facts of every function. They are digested once per strongly connected
+  component of the call graph, bottom up.
+
+So a change of one function's facts makes anew only the cases of the functions whose trees hold it,
+and of those whose trees call through a pointer; a change of anything whole, every case of the image.
+An entry made before 2026-10-23 has a key that matches no key made since: every image's cases were
+made anew once, unchanged (the search is the same; only the key differs).
 
 ### `argued.tsv` (beside the cases directory)
 

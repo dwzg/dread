@@ -8,7 +8,7 @@ import pytest
 from dread.autocase import Generator
 from dread.target import Target
 from conftest import NOIPA_DEF
-from conftest import gizmo_dir
+from conftest import gizmo_dir, needs_riscv_gcc
 
 
 @pytest.fixture
@@ -179,7 +179,8 @@ def test_a_hook_deeper_down_stubs_the_callee_it_was_reached_by(tmp_path):
 def test_cached_cases_follow_the_whole_image(target):
     """A rebuild that moves data leaves a function's instructions alike while its literal pool (or
     any global it reads) changes: its cached cases set cells nobody reads any more (FreeRTOS's ARM
-    builds failed on the original after a configuration change). The key covers the whole image."""
+    builds failed on the original after a configuration change). The key covers the whole image, and
+    the layout of its code (whether a load is one of code depends on every function's extent)."""
     from dread.autocase import cache_key
     image = target.image()
     g1 = Generator(target, image)
@@ -190,28 +191,387 @@ def test_cached_cases_follow_the_whole_image(target):
     assert not any(a <= image.base + at < a + sizes[a] for a in fn.insns)
     payload[at] ^= 0xFF
     g2 = Generator(target, image, payload=bytes(payload))
-    keys = [cache_key(g.payload, image.base, fn.insns, sizes, fn.entry, {}, g.program.arch, g.environment())
+    keys = [cache_key(g.payload, image.base, fn.insns, sizes, fn.entry, {}, g.program.arch, g.environment("parse_kv"))
             for g in (g1, g2)]
     assert keys[0] != keys[1]
-    assert cache_key(g1.payload, image.base, fn.insns, sizes, fn.entry, {}, g1.program.arch, g1.environment()) == keys[0]
+    assert cache_key(g1.payload, image.base, fn.insns, sizes, fn.entry, {}, g1.program.arch,
+                     g1.environment("parse_kv")) == keys[0]
+    g3 = Generator(target, image)
+    g3.program.by_name["checksum"].size += 2    # (a function far from parse_kv's tree, its extent longer)
+    assert g3.environment("parse_kv") != g1.environment("parse_kv")
 
 
 def test_cached_cases_follow_what_regflow_finds_not_its_version(target, monkeypatch):
     """Cases depend on what dread.regflow finds in the image (a stub logs the registers a callee
     reads), so the key holds its result, not its version: a version that finds the same keeps the
     cached cases (version 11 changed only what ARM's FPU pushes mean and regenerated every image's
-    cases), a different finding does not."""
+    cases), a different finding of the function does not."""
     from dread import regflow
     image = target.image()
     g = Generator(target, image)
-    flow, before = g.flow(), g.environment()
+    flow, before = g.flow(), g.environment("parse_kv")
     monkeypatch.setattr(regflow, "VERSION", regflow.VERSION + 100)
     monkeypatch.setattr(regflow, "load", lambda *a, **k: flow)
-    assert Generator(target, image).environment() == before
+    assert Generator(target, image).environment("parse_kv") == before
     changed = regflow.RegFlow.from_json(flow.to_json())
-    changed.reads[sorted(changed.reads)[0]] ^= 1
+    changed.reads["parse_kv"] = changed.reads.get("parse_kv", 0) ^ 1
     monkeypatch.setattr(regflow, "load", lambda *a, **k: changed)
-    assert Generator(target, image).environment() != before
+    assert Generator(target, image).environment("parse_kv") != before
+
+
+REGFLOW_LOAD = __import__("dread.regflow", fromlist=["load"]).load     # (before any test patches it)
+
+
+def scoped_keys(target, monkeypatch, change=None, tweak=None):
+    """{name: Generator.environment(name)} of every function of a target: with what dread.regflow found
+    changed by change(flow) (on a copy) and the generator changed by tweak(generator) before the keys are
+    made, when given."""
+    from dread import regflow
+    image = target.image()
+    flow = REGFLOW_LOAD(target, image)
+    if change is not None:
+        flow = regflow.RegFlow.from_json(json.loads(json.dumps(flow.to_json())))
+        change(flow)
+    monkeypatch.setattr(regflow, "load", lambda *a, **k: flow)
+    g = Generator(target, image)
+    if tweak is not None:
+        tweak(g)
+    return {fn.name: g.environment(fn.name) for fn in g.program.functions}
+
+
+def holding(program, name):
+    """The functions whose call trees (dread.autocase.reaches) hold name or a function with an open
+    transfer: those whose keys a change of name's facts renews."""
+    from dread.autocase import reaches
+    graph = reaches(program)
+    marked = {name} | {n for n, (_, opened) in graph.items() if opened}
+    out = set()
+    for start in graph:
+        seen, work = {start}, [start]
+        while work:
+            for c in graph[work.pop()][0]:
+                if c not in seen:
+                    seen.add(c)
+                    work.append(c)
+        if seen & marked:
+            out.add(start)
+    return out
+
+
+def flip_reads(name):
+    """A change of what regflow found of one function: one more (or one fewer) register it reads."""
+    def change(flow):
+        flow.reads[name] = flow.reads.get(name, 0) ^ 1
+    return change
+
+
+def changed(before, after):
+    return {n for n in before if after[n] != before[n]}
+
+
+def test_case_keys_follow_the_call_tree(target, monkeypatch):
+    """A function's cases depend on what dread.regflow finds of the functions its runs reach (a stub logs
+    the registers its callee reads and answers those its callers read beyond a C result), not of the
+    others: the key holds the facts of its call tree only (Generator.scopes), so that a change of one
+    function's facts makes the cases of the functions whose trees hold it anew and keeps the others'
+    (until 2026-10-23 one digest of the whole image's findings: a change concerning the callers of a few
+    dozen functions made every case of a private firmware anew). gpio_set lies in the trees of led_on (a
+    tail call on the M3 and RISC-V builds), handle_key and main, not in parse_kv's or checksum's; so do
+    its stub's answers beyond a C result (more), its two-word answers (wide_results) and its rows of the
+    domains table. The same image gives the same keys."""
+    from dread.program import Program
+    trees = holding(Program(target), "gpio_set")
+    assert {"gpio_set", "led_on", "handle_key", "main"} <= trees and not trees & {"parse_kv", "checksum"}
+    before = scoped_keys(target, monkeypatch)
+    assert scoped_keys(target, monkeypatch) == before
+    reg = target.abi.arg_regs[-1]
+    for after in (scoped_keys(target, monkeypatch, change=flip_reads("gpio_set")),
+                  scoped_keys(target, monkeypatch, tweak=lambda g: g.more().update(
+                      {g.program.by_name["gpio_set"].entry: [reg]})),
+                  scoped_keys(target, monkeypatch, tweak=lambda g: g.wide.add(g.program.by_name["gpio_set"].entry)),
+                  scoped_keys(target, monkeypatch, tweak=lambda g: g.domain_rows.setdefault("gpio_set", []).append(
+                      "gpio_set:ret\t4\t0\t1"))):
+        assert changed(before, after) == trees
+    after = scoped_keys(target, monkeypatch, tweak=lambda g: g.domain_rows.setdefault("", []).append(
+        "0x20000000\t4\t0\t1"))                  # (a domain of an address: any run may read it)
+    assert changed(before, after) == set(before)
+
+
+def test_case_keys_through_a_tail_call_and_a_table_of_functions(monkeypatch):
+    """On the M3 build led_on ends in a tail call of gpio_set (b), and dispatch jumps through a table of
+    functions (commands[cmd](arg) behind its bound check: bx r3, the targets found by running the
+    dispatch, dread.switches). Both are in the key: gpio_set's facts in led_on's, cmd_volume's in
+    dispatch's and in those of its callers, not in cmd_mode's or apply_config's."""
+    from dread.program import Program
+    t = Target.load(gizmo_dir("m3"))
+    prog = Program(t)
+    gpio_set, led_on, dispatch = (prog.by_name[n] for n in ("gpio_set", "led_on", "dispatch"))
+    assert ("jump", gpio_set.entry) in [prog.arch.flow(prog.insn(a))[:2] for a in led_on.insns]
+    assert "ijump" in [prog.arch.flow(prog.insn(a))[0] for a in dispatch.insns]
+    before = scoped_keys(t, monkeypatch)
+    got = changed(before, scoped_keys(t, monkeypatch, change=flip_reads("gpio_set")))
+    assert "led_on" in got and "parse_kv" not in got and got == holding(prog, "gpio_set")
+    got = changed(before, scoped_keys(t, monkeypatch, change=flip_reads("cmd_volume")))
+    assert {"cmd_volume", "dispatch", "handle_key", "main"} <= got and not got & {"cmd_mode", "apply_config", "led_on"}
+    assert got == holding(prog, "cmd_volume")
+
+
+def test_a_call_through_a_pointer_takes_every_functions_facts(monkeypatch):
+    """measure calls area() and sides() through the object's vtable (gizmo's C++ build): where such a
+    call goes no table and no run of the code tells, and a run may reach any function whose address it
+    can make, so the key of measure, and of shapes_demo, which calls it, holds every function's facts;
+    parse_kv, which calls through no pointer, keeps its key when a function outside its tree changes."""
+    from dread.autocase import reaches
+    from dread.program import Program
+    t = Target.load(gizmo_dir("m3cpp"))
+    prog = Program(t)
+    measure = "_ZL7measurePK5Shape"
+    graph = reaches(prog)
+    assert graph[measure][1] and "checksum" not in graph[measure][0] and not graph["parse_kv"][1]
+    before = scoped_keys(t, monkeypatch)
+    got = changed(before, scoped_keys(t, monkeypatch, change=flip_reads("checksum")))
+    assert {measure, "shapes_demo", "checksum"} <= got and "parse_kv" not in got
+    assert got == holding(prog, "checksum")
+
+
+def test_case_keys_cover_what_regflow_adds(target, monkeypatch):
+    """The key reads regflow's findings through their case facts (RegFlow.case_facts: the result's JSON
+    without what no case reads), whatever fields they have: a table by function name added later is in
+    each function's facts, so gpio_set's entry renews the keys of the trees that hold it; a field that
+    is no such table is image-wide and renews every key."""
+    from dread.program import Program
+
+    def adding(extra):
+        def change(flow):
+            base = flow.to_json
+            flow.to_json = lambda: dict(base(), **extra)
+        return change
+    before = scoped_keys(target, monkeypatch)
+    got = changed(before, scoped_keys(target, monkeypatch, change=adding({"must_write": {"gpio_set": 3}})))
+    assert got == holding(Program(target), "gpio_set")
+    got = changed(before, scoped_keys(target, monkeypatch, change=adding({"must_write": {"0x1234": 3}})))
+    assert got == set(before)
+
+
+def test_case_keys_leave_out_what_no_case_reads(target, monkeypatch):
+    """regflow's overwritten (since version 25: the registers a function writes on every path, which the
+    readable C reads for its arguments) is no case fact (RegFlow.case_facts), and a change of it alone
+    renews no key, of gpio_set's trees or any other; the same change in reads renews those trees'."""
+    from dread.program import Program
+
+    def overwriting(name):
+        def change(flow):
+            flow.overwritten = dict(flow.overwritten or {})
+            flow.overwritten[name] = flow.overwritten.get(name, 0) ^ 1
+        return change
+
+    def all_overwritten(flow):
+        flow.overwritten = {name: 0xF for name in flow.reads}
+    before = scoped_keys(target, monkeypatch)
+    assert scoped_keys(target, monkeypatch, change=overwriting("gpio_set")) == before
+    assert scoped_keys(target, monkeypatch, change=all_overwritten) == before
+    got = changed(before, scoped_keys(target, monkeypatch, change=flip_reads("gpio_set")))
+    assert got and got == holding(Program(target), "gpio_set")
+
+
+def test_components_of_a_call_graph():
+    """Tarjan's components, each after every component it reaches (a scope is digested from those below
+    it), cycles and self-calls one component each."""
+    from dread.autocase import components
+    graph = {"a": {"b"}, "b": {"c", "a"}, "c": set(), "d": {"c", "e"}, "e": {"d", "x"}, "f": {"f"}}
+    got = components(graph)
+    assert sorted(got) == [["a", "b"], ["c"], ["d", "e"], ["f"]] and got == components(dict(graph))
+    order = {n: k for k, members in enumerate(got) for n in members}
+    assert order["c"] < order["a"] and order["c"] < order["d"]
+    chain = {"n%05d" % i: {"n%05d" % (i + 1)} for i in range(20000)}     # (deep: no recursion)
+    chain["n20000"] = set()
+    assert len(components(chain)) == 20001
+
+
+TREE_T2_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global leaf, other, call_leaf, tail_other, via_pointer, via_svc, use
+    .type leaf, %function
+    .thumb_func
+leaf:
+    adds    r0, r0, #1
+    bx      lr
+    .size leaf, . - leaf
+    .type other, %function
+    .thumb_func
+other:
+    adds    r0, r0, #2
+    bx      lr
+    .size other, . - other
+    .type call_leaf, %function
+    .thumb_func
+call_leaf:
+    push    {r4, lr}
+    bl      leaf
+    pop     {r4, pc}
+    .size call_leaf, . - call_leaf
+    .type tail_other, %function
+    .thumb_func
+tail_other:
+    b.w     other
+    .size tail_other, . - tail_other
+    .type via_pointer, %function
+    .thumb_func
+via_pointer:
+    push    {r4, lr}
+    blx     r1
+    pop     {r4, pc}
+    .size via_pointer, . - via_pointer
+    .type via_svc, %function
+    .thumb_func
+via_svc:
+    svc     #0
+    bx      lr
+    .size via_svc, . - via_svc
+    .type use, %function
+    .thumb_func
+use:
+    push    {r4, lr}
+    bl      call_leaf
+    bl      tail_other
+    bl      via_pointer
+    bl      via_svc
+    pop     {r4, pc}
+    .size use, . - use
+"""
+
+
+@pytest.mark.skipif(not (__import__("shutil").which("arm-none-eabi-as") and __import__("shutil").which("arm-none-eabi-gcc")),
+                    reason="needs arm-none-eabi-as and -gcc")
+def test_case_keys_of_calls_tail_calls_pointers_and_system_calls_on_arm(tmp_path, monkeypatch):
+    """A call (bl leaf) and a tail call (b.w other) bring their callee's facts into the key; a call through
+    a register (blx r1) takes every function's; a system call (svc, a logged no-op in a case's run)
+    reaches no function, and leaves via_svc's key alone."""
+    from dread.autocase import reaches
+    from dread.program import Program
+    from test_lift_results import arm_program
+    t = arm_program(tmp_path, "t2", source=TREE_T2_S)
+    graph = reaches(Program(t))
+    assert graph["call_leaf"] == ({"leaf"}, False) and graph["tail_other"] == ({"other"}, False)
+    assert graph["via_pointer"][1] and graph["via_svc"] == (set(), False)
+    before = scoped_keys(t, monkeypatch)
+    assert changed(before, scoped_keys(t, monkeypatch, change=flip_reads("leaf"))) == \
+        {"leaf", "call_leaf", "via_pointer", "use"}
+    assert changed(before, scoped_keys(t, monkeypatch, change=flip_reads("other"))) == \
+        {"other", "tail_other", "via_pointer", "use"}
+
+
+TREE_RV_S = """
+    .option norelax
+    .text
+    .global leaf, other, saver, via_millicode, odd_saver, via_odd, tail_other, via_pointer, via_ecall, use
+    .type leaf, @function
+leaf:
+    addi    a0, a0, 1
+    ret
+    .size leaf, . - leaf
+    .type other, @function
+other:
+    addi    a0, a0, 2
+    ret
+    .size other, . - other
+    .type saver, @function
+saver:                          # GCC's millicode: entered with jal t0, back through t0
+    addi    sp, sp, -16
+    sw      ra, 12(sp)
+    jr      t0
+    .size saver, . - saver
+    .type via_millicode, @function
+via_millicode:
+    jal     t0, saver
+    call    leaf
+    lw      ra, 12(sp)
+    addi    sp, sp, 16
+    ret
+    .size via_millicode, . - via_millicode
+    .type odd_saver, @function
+odd_saver:                      # back through t0, but called with ra: t0 holds what the caller left
+    jr      t0
+    .size odd_saver, . - odd_saver
+    .type via_odd, @function
+via_odd:
+    addi    sp, sp, -16
+    sw      ra, 12(sp)
+    call    odd_saver
+    lw      ra, 12(sp)
+    addi    sp, sp, 16
+    ret
+    .size via_odd, . - via_odd
+    .type tail_other, @function
+tail_other:
+    tail    other
+    .size tail_other, . - tail_other
+    .type via_pointer, @function
+via_pointer:
+    addi    sp, sp, -16
+    sw      ra, 12(sp)
+    jalr    a1
+    lw      ra, 12(sp)
+    addi    sp, sp, 16
+    ret
+    .size via_pointer, . - via_pointer
+    .type via_ecall, @function
+via_ecall:
+    ecall
+    ret
+    .size via_ecall, . - via_ecall
+    .type use, @function
+use:
+    addi    sp, sp, -16
+    sw      ra, 12(sp)
+    call    via_millicode
+    call    via_odd
+    call    tail_other
+    call    via_pointer
+    call    via_ecall
+    lw      ra, 12(sp)
+    addi    sp, sp, 16
+    ret
+    .size use, . - use
+"""
+
+
+@needs_riscv_gcc
+def test_case_keys_of_millicode_and_system_calls_on_risc_v(tmp_path, monkeypatch):
+    """GCC's millicode (-msave-restore) is entered with jal t0, __riscv_save_N and goes back with jr t0:
+    a jump through a register, but through the one every call of it leaves its return address in, and
+    that it never writes, so it returns behind the call and opens nothing (open, it opened a seventh of
+    the trees of four FreeRTOS builds). The same jump in a function called with ra goes where t0 happens
+    to point: open. ecall (a logged no-op in a case's run) reaches no function; a tail call (tail other:
+    auipc and jr) brings its callee's facts in; jalr a1 takes every function's."""
+    import subprocess
+    from dread import elfimport
+    from dread.autocase import reaches
+    from dread.program import Program
+    from conftest import RISCV_CROSS, RISCV_MARCH, riscv_toml
+    from test_lift_results import RV_GCC, RV_TOML
+    (tmp_path / "t.s").write_text(TREE_RV_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-c", "-o", obj, str(tmp_path / "t.s")],
+                   check=True)
+    subprocess.run([RISCV_CROSS + "ld", "-m", "elf32lriscv", "-Ttext=0x20000000", "-e", "use", "-o", elf, obj],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(riscv_toml(RV_TOML + RV_GCC))
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    graph = reaches(Program(t))
+    assert graph["saver"] == (set(), False) and graph["via_millicode"] == ({"saver", "leaf"}, False)
+    assert graph["odd_saver"][1] and graph["via_pointer"][1]
+    assert graph["via_ecall"] == (set(), False) and graph["tail_other"] == ({"other"}, False)
+    before = scoped_keys(t, monkeypatch)
+    assert changed(before, scoped_keys(t, monkeypatch, change=flip_reads("leaf"))) == \
+        {"leaf", "via_millicode", "odd_saver", "via_odd", "via_pointer", "use"}
+    assert changed(before, scoped_keys(t, monkeypatch, change=flip_reads("other"))) == \
+        {"other", "tail_other", "odd_saver", "via_odd", "via_pointer", "use"}
 
 
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")

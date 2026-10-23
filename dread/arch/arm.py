@@ -560,6 +560,11 @@ class Arm:
         """bl or blx (direct or through a register)."""
         return insn.id in CALLS
 
+    def is_syscall(self, insn):
+        """svc: a system call (flow() calls it an indirect call; dread.emu runs it as a logged no-op in
+        a case's run, so it enters no function there: dread.autocase's reaches)."""
+        return insn.id == csarm.ARM_INS_SVC
+
     def is_conditional(self, insn):
         return insn.cc not in (csarm.ARM_CC_AL, csarm.ARM_CC_INVALID)
 

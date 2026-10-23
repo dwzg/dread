@@ -343,6 +343,11 @@ class Mips:
     def is_call(self, insn):
         return self.flow(insn)[0] in ("call", "icall")
 
+    def is_syscall(self, insn):
+        """syscall: a system call (flow() calls it an indirect call; a case's run enters no function by
+        it: dread.autocase's reaches)."""
+        return fields(insn).op == "syscall"
+
     def is_conditional(self, insn):
         """No predicated instructions (movz and movn write or keep their register: reg_effects reads
         it)."""

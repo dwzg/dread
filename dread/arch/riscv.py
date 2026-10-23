@@ -362,6 +362,11 @@ class RiscV:
     def is_call(self, insn):
         return self.flow(insn)[0] in ("call", "icall")
 
+    def is_syscall(self, insn):
+        """ecall: a system call (flow() calls it an indirect call; dread.emu runs it as a logged no-op in
+        a case's run, so it enters no function there: dread.autocase's reaches)."""
+        return fields(insn).op == "ecall"
+
     def is_conditional(self, insn):
         """No predicated instructions on RISC-V (a branch is a conditional jump: flow's falls)."""
         return False
