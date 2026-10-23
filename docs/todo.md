@@ -904,9 +904,14 @@ its sources.
   (--decider), not the default. Left: what the tables do not show stays unchallenged (half of the
   wrong names had no reason against them: a misreading of the code, swapped siblings, a misread group
   without texts or described devices); a trigger from the code itself that tells siblings apart (a
-  random audit of names without a reason would at least count the misses) not tried; the private
-  firmware (its people's names flagged, its misread driver) not tried; the review's spread between two
-  runs of itself not measured (one decision went both ways in two trials).
+  random audit of names without a reason would at least count the misses) not tried; the review's
+  spread between two runs of itself not measured (one decision went both ways in two trials).
+  On the private real-life test (2026-10-23, after a naming run with the device line): it challenged
+  two fifths of the functions (FreeRTOS: a fifth) and changed about a tenth of them; the changed names
+  were judged closer to the true ones somewhat more often than the old ones, by functions and by
+  groups, but not beyond chance; it changed only one group's name, the device line having fixed the
+  misread groups already. On the way it crashed the process in Unicorn (eight threads in one engine of
+  dread.constants: engines are per thread since). Its people's names not tried there.
 - [x] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
   Done 2026-10-22: `dread bench measure RECIPE [BUILD...] --steps readable`, one of the default steps,
