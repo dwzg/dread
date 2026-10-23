@@ -622,6 +622,25 @@ its sources.
   an interrupt sets in RAM would no longer see it change; the original's accesses all happen. The
   types item gets readable accesses without that: volatile in the pointer's declaration, p->f at the
   use. This item waits until that is done and it is clear what is left.
+  Where it stands (2026-10-23, the structures behind pointers, of static data and its arrays done):
+  volatile now sits in declarations and macros (a struct pointer's type, g_x's definition), where it
+  does not get in a reader's way; what still shows it is the raw accesses, *(volatile u32 *)(r3 + 8),
+  some hundreds on a FreeRTOS build and thousands on the private firmware, which plain accesses
+  would shorten by a word each. Against that, plain accesses let the compiler merge and hoist loads (a
+  wait for a flag an interrupt sets would spin forever) and the gate's per-access identity no longer
+  holds. Not now: the raw accesses are better served by more of them becoming members (structures,
+  arrays) than by losing their volatile.
+- [ ] **Results in r2 and r3, and registers a caller leaves.** A function whose callers read r2 or r3
+  after the call (an old ARM compiler's __value_in_regs: a structure of up to four words returned in
+  r0-r3) is refused while any original caller reads them, since C under the AAPCS returns at most
+  r0:r1; so is one that reads registers its caller left (the stale readers). On the private real-life
+  test that is about a hundred functions, many of them the RTOS's service calls, which its
+  reconstruction rewrote by hand together with their callers. A way: lift such a function with all
+  of its callers as one group, the extra results handed between the group's C functions through a
+  structure (their ABI among themselves is free), refused while a caller stays machine code; or a
+  thin asm wrapper that loads r2 and r3 from that structure for callers that stay machine code.
+  Measured on what a public build has of it first (gizmo or a test program with __value_in_regs-like
+  returns in asm), then on the private firmware's refusals.
 - [ ] **The pilot on the draft.** Names for the readable C: the model proposes a map of names and a
   sentence, code applies it (docs/decisions.md). Built 2026-10-21: dread/naming.py (the
   readable_names table, applied by digest, a map kept only when its names are C identifiers nothing
