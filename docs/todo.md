@@ -1466,7 +1466,7 @@ model).
   no correct program reads before writing them; the gate decides), for (2) and (3) pass a variable of
   no value where the caller's register only flows through (the callee's save area reads it, but
   nothing the function computed), each keeping what the comparisons see.
-- [ ] **Flags as comparisons, the rest.** After the IT-block work, flags still print as u64 sums with
+- [x] **Flags as comparisons, the rest.** After the IT-block work, flags still print as u64 sums with
   carry and zero variables where one compare or subtraction is read by two conditions (borrow, then
   zero), where an add's carry is tested, where a compiler dispatches by successive subtractions
   (`subs #1; blo; beq; subs #2; beq; ...`) and in carry chains of multi-word arithmetic. Fold a
@@ -1478,6 +1478,57 @@ model).
   0xffffffffu)` for the wake time's overflow test); mps2-gcc-O0 vPortFree (`(u32)((u64)0x0u +
   (u32)~0x8u + 1) + r0` for `r0 - 8`). The successive-subtraction dispatch: none found in GCC builds;
   test with hand-written ARM-state code (gizmo assembly) or a unit test of the conditions pass.
+  Done 2026-10-23 (dread.tidy flags, sums, pairs, FlagFlow; conditions in calls and stores; cexpr.Checker;
+  docs/decisions.md): a truth value whose variables have one definition each that reaches it with its
+  value unchanged (flags, 64-bit temporaries, their 32-bit results, a variable plus a constant) is
+  searched for in terms of what those definitions read and proved by z3, at each reader: cmd_mode's ls
+  is r0 <= 7 in its store and in its result's select; prvAddCurrentTaskToDelayedList's wake-time test
+  is r5_1 = r5 + r0; if (r5 > r5_1), as its source writes it; a dispatch by successive subtractions
+  compares its first variable with what the constants come to (tests/test_flags.py: subs r0, #1; blo;
+  beq; subs r0, #2; beq; cmp r0, #5; beq, ARM-state assembly of our own, as r0 == 0, 1, 3, 8, through
+  the lift check and the gate); a conditional compare's two flags are one condition of two comparisons
+  at each reader (parse_kv: r5 == 0x5fu || lr_1 <= 0x19u, r5 != 0x5fu && lr_1 > 0x19u; strcmp's while
+  (r2 != 0 && r2 == r3)); a condition read where what it compared has changed is computed where its
+  flags are set (gizmo-m3 fmt_dec: cc_1 = r1 > 9; ... while (cc_1)); rsbs/adcs is x == 0
+  (prvCheckExpectedState(xStreamBufferSpacesAvailable(r0) == 0x1eu)); a sum through 64 bits whose carry
+  nobody reads is the 32-bit sum anywhere in a statement (vPortFree's s12 = r0 - 8; uxListRemove(r6 +
+  4)); adds/adc is one 64-bit sum (t_7 = ((u64)r2_2 << 32 | r3_2) + 1; r3 = (u32)t_7; r2 = (u32)(t_7 >>
+  32)) and cmp/sbcs one 64-bit comparison (((u64)r2 << 32 | r3) >= 5). Found on the way: webs lost a
+  declaration's initial value read at a loop's head (fixed; the eight builds accept the same functions
+  with the fix); cexpr.Checker evaluates lazily and tries first the value that refuted the last proposal
+  (the same verdicts).
+  Measured on fresh copies of the eight builds (no readable tables in them), the lifted table's
+  functions as dread readable prints them, main at b98f0d1 -> this (gizmo a32, m3, m4, rv32; FreeRTOS GCC
+  -Os, clang -O2, RISC-V GCC -Os, GCC -O0): conditions with a 64-bit sum (the lifters' carry arithmetic:
+  a + or - of a (u64) cast, or a 64-bit temporary read) 0, 1 -> 0, 1 -> 0, 0; 23 -> 0, 16 -> 4, 0, 15 ->
+  0; statements with one 9 -> 0, 5 -> 0, 5 -> 0, 0; 170 -> 6, 104 -> 22, 0, 56 -> 6; flag variables
+  (n, z, c, v and their webs' parts) 7 -> 1, 2 -> 0, 2 -> 0, 0; 18 -> 6, 18 -> 5, 0, 4 -> 0; 64-bit
+  temporaries 3 -> 0, 2 -> 0, 2 -> 0, 0; 70 -> 2, 21 -> 6, 0, 7 -> 2; functions with any of these 3 ->
+  1, 2 -> 0, 2 -> 0, 0; 29 -> 6, 24 -> 5, 0, 10 -> 1; lines 610 -> 597, 603 -> 599, 717 -> 713, 709 ->
+  709; 9543 -> 9405, 9119 -> 9102, 8461 -> 8458, 8695 -> 8682. The 64-bit sums left are
+  prvSanityCheckCreatedQueue's 64-bit counter, now written as one (its temporaries, and clang -O2's
+  four loop conditions that read them); the flag variables left are comparisons kept as variables
+  (below). The gate accepts the same functions as main on the same copies, the same
+  sets (gizmo a32 35, m3 36, m4 44, rv32 31; FreeRTOS GCC -Os 315, clang -O2 275, RISC-V GCC -Os 252,
+  GCC -O0 354). Time, on a machine shared with other work (load 10-20): the check's wall time on warm
+  copies, two runs each alternating main and this, GCC -Os 441 and 312 -> 396 and 357 s, clang -O2 46
+  and 45 -> 66 and 66 s, RISC-V 19 and 21 -> 24 and 19 s, GCC -O0 77 and 83 -> 82 and 76 s, gizmo 3 to
+  10 s either way; making every lifted function's readable C in a pool of eight, CPU summed over the
+  functions, three rounds interleaved: clang -O2 45.3 -> 55.1 s (wall 8.9 -> 10.7 s), RISC-V 27.8 ->
+  30.7 s; GCC -Os, two rounds, 42-45 -> 46-50 s. The flags pass costs about a tenth of the clean-up's
+  time per function (its flow is made anew each round); the Checker's change pays part of it back
+  (30 of the random functions: 16.5-19.9 s of CPU with main's Checker, 8.6-10.4 s with this one, the
+  same output).
+  Left: truth variables that hold a load or a call read by two statements (z = *(volatile u8 *)(r4_1 +
+  84) == 2; they must stay variables: the load is made once); a comparison whose operand a conditional
+  block between its readers writes (gizmo a32 parse_kv: z_1 = r0_1 == 0; if (z_1) r0_1 = ~0x0u; if
+  (!z_1) ...: the second reader cannot read r0_1 == 0, and such a flag goes into all its readers or
+  none); clang -O2 prvInterruptTriggerLevelTest's c && !z_1 (not traced); a branch two paths with different
+  compares share (vPeriodicEventGroupsProcessing: z = r0 == 1 on one, z = r0 == 0x12 on the other);
+  a conditional compare whose flags read memory (vStartTimerDemoTask: z = g_20001818 == 0; if (!z) z =
+  r0_10 == 0) or whose condition has no comparison of the variables left (clang -O2
+  xAreTaskNotificationTasksStillRunning: subs r1, r1, r2; cmphi r1, #5, the first compare's hi needs
+  the load r2 held); products' high words and the 64-bit counter's words stay 64-bit, as they are.
 - [ ] **Local objects whose address goes to a callee.** A frame region whose address is passed on
   prints as raw accesses through the lifted frame array, or as one packed structure named after its
   offset with word fields over a byte buffer or over separate scalars; a frame array indexed by a loop

@@ -35,6 +35,21 @@ with the IT instruction's note between. What makes such code one if/else again:
   operands themselves (cmp r0, r5 after adds r5, r2, #3: r0 == r2 + 3); values also rewrites a
   return's value and statements inside arms (strcmp's r2 - r3).
 
+Flags read through variables, and the lifters' carry arithmetic around them (docs/decisions.md, "Flags
+as comparisons"):
+
+- flags: a truth value that reads flags, 64-bit temporaries or a chain of subtractions, each variable
+  with one definition that reaches it unchanged (FlagFlow), as the comparison z3 proves it to be in
+  terms of what those definitions read: a compare read by several statements (cmd_mode's ls, an if's
+  and a select's), an add's carry away from its add (the sum below an operand), a chain of
+  subtractions (x == 8 for x - 1 - 2 == 5), a conditional compare's two flags (FlagFlow.chosen: one
+  condition of two comparisons), a borrow added back (r1 == 0); a condition whose operands change
+  before it is read is computed where its flags are set (cc_1 = r1 > 9);
+- sums: a sum through 64 bits whose carry nobody reads, anywhere in a statement, as the 32-bit sum it
+  is (r0 - 8, uxListRemove(r6 + 4));
+- pairs: a two-word addition (adds; adc) as one 64-bit sum, its words read as the halves of it; a
+  two-word compare (cmp; sbcs) is one 64-bit comparison among conditions' candidates (chained).
+
 Statements keep the instruction they came from (their addr); a statement folded into another takes
 its reader's, but an expression statement or a return that takes a call's result in names the call
 in its comment (return f(); names the bl, not the bx lr after it: cparse.take, which keeps the
@@ -192,8 +207,8 @@ def declarations(fn):
     return out
 
 
-def type_of(fn, name):
-    found = declarations(fn).get(name)
+def type_of(fn, name, decls=None):
+    found = (declarations(fn) if decls is None else decls).get(name)
     if found:
         decl, d = found
         if d.ptr or d.dims:
@@ -1413,8 +1428,9 @@ def context(fn):
         for x in fn.body.body)
     if narrow:
         ctx.int_bits, ctx.long_bits = 16, 32
+    decls = declarations(fn)                # (once: per name it made context quadratic in the body)
     for name in all_names(fn):
-        t = type_of(fn, name)
+        t = type_of(fn, name, decls)
         ty = ctx.ctype(t) if t else None
         if ty is not None:
             ctx.types[name] = ty
@@ -1494,6 +1510,75 @@ def compared(e):
     return out
 
 
+def _sum_terms(e):
+    """The terms of a sum (a + b + c as [a, b, c]), or [e]."""
+    if isinstance(e, C.Binary) and e.op == "+":
+        return _sum_terms(e.l) + _sum_terms(e.r)
+    return [e]
+
+
+def _is_carry(x):
+    """Whether x is a carry the lifters add in: (u32)(t >> 32), or a comparison (a carry the flags
+    pass has written as one, r3 >= 5)."""
+    return (isinstance(x, C.Cast) and x.type == "u32" and isinstance(x.e, C.Binary) and x.e.op == ">>" and
+            isinstance(x.e.r, C.Num) and x.e.r.value == 32) or (isinstance(x, C.Binary) and x.op in COMPARISONS)
+
+
+def _word_sum(e):
+    """(a, b, kind, k) of the lifters' flag-setting addition or subtraction through 64 bits: (u64)a + b
+    + k is ("add"), (u64)a + (u32)~b + k ("sub"); b None where it is a constant (then summed into k for
+    an addition) or left out; k the constants' sum (a Num) or a carry term (_is_carry: the carry of
+    another such sum). None for anything else."""
+    terms = _sum_terms(e)
+    if not terms or not (isinstance(terms[0], C.Cast) and terms[0].type == "u64"):
+        return None
+    a, rest = terms[0].e, terms[1:]
+    carries = [x for x in rest if _is_carry(x)]
+    nums = [x for x in rest if isinstance(x, C.Num) and isinstance(x.value, int)]
+    others = [x for x in rest if not any(x is y for y in carries + nums)]
+    if len(others) > 1 or len(carries) > 1 or (carries and nums and sum(x.value for x in nums)):
+        return None
+    k = carries[0] if carries else C.Num(str(sum(x.value for x in nums)))
+    if not others:
+        return a, None, "add", k
+    b = others[0]
+    if isinstance(b, C.Cast) and b.type == "u32" and isinstance(b.e, C.Unary) and b.e.op == "~":
+        return a, b.e.e, "sub", k
+    return a, b, "add", k
+
+
+def wide_pair(hi, lo):
+    """(u64)hi << 32 | lo, a constant where both are."""
+    if isinstance(hi, C.Num) and isinstance(lo, C.Num) and isinstance(hi.value, int) and isinstance(lo.value, int):
+        v = ((hi.value & 0xffffffff) << 32) | (lo.value & 0xffffffff)
+        return C.Num("%d" % v if v < 10 else "0x%xull" % v)
+    return C.Binary("|", C.Binary("<<", C.Cast("u64", hi), C.Num("32")), lo)
+
+
+def chained(e):
+    """[(x, y)] of the lifters' two-word compares in e (cmp a0, b0; sbcs a1, b1: the high words'
+    subtraction takes the low words' carry, (u64)a1 + (u32)~b1 + (u32)(((u64)a0 + (u32)~b0 + 1) >> 32)),
+    as the 64-bit values compared ((u64)a1 << 32 | a0 against (u64)b1 << 32 | b0); additions alike."""
+    out = []
+    for x in walk_expr(e):
+        if not (isinstance(x, C.Binary) and x.op == "+"):
+            continue
+        high = _word_sum(x)
+        if high is None or isinstance(high[3], C.Num):
+            continue
+        if isinstance(high[3], C.Binary) and high[3].op == ">=" and high[2] == "sub":
+            low = (high[3].l, high[3].r, "sub", C.Num("1"))      # (the low words' carry already a comparison)
+        else:
+            low = _word_sum(high[3].e.l) if isinstance(high[3], C.Cast) and isinstance(high[3].e, C.Binary) else None
+        if low is None or low[2] != high[2] or not isinstance(low[3], C.Num) or \
+                low[3].value != (1 if low[2] == "sub" else 0):
+            continue
+        zero = C.Num("0")
+        out.append((wide_pair(high[0], low[0]), wide_pair(high[1] if high[1] is not None else zero,
+                                                           low[1] if low[1] is not None else zero)))
+    return out
+
+
 def candidates(e, ctx, most=10):
     """Simple conditions to try for e, smallest first: two of its operands compared (equality, then
     unsigned, then signed order), an operand of it against one of its constants or 0, a mask test.
@@ -1513,12 +1598,15 @@ def made_candidate(recipe, ctx):
     return C.Binary(op, copy.deepcopy(a), copy.deepcopy(b))
 
 
-def shared_candidates(e, ctx, most=10, below=None):
+def shared_candidates(e, ctx, most=10, below=None, terms=(), numbers=()):
     """[(size, candidate, recipe)] of candidates(), in its order; each candidate shares e's
     subexpressions (to try, not to keep: made_candidate makes the one to keep of its recipe), its
     size counted, not walked. below: only those of fewer nodes. Until 2026-10-23 every candidate was
     made of copies and walked for its size, most of them larger than e and never tried: the copies
-    alone were a fifth of the readable C's time on FreeRTOS's GCC -Os demo."""
+    alone were a fifth of the readable C's time on FreeRTOS's GCC -Os demo. terms: operands beyond
+    e's own (the flags pass: a variable that holds the 32 bits of a sum whose carry e tests), compared
+    with e's leaves and constants, after e's own; numbers: constants beyond e's (the flags pass: what a
+    chain of subtractions comes to, x - 1 - 2 == 5 as x == 8)."""
     subs = subexpressions(e)
     # An address a memory access is made at is no operand to compare with (gizmo's uart_putc waited
     # while io_40011004 << 31 < 0x40011004u: true, but the bound was the register's own address).
@@ -1545,10 +1633,14 @@ def shared_candidates(e, ctx, most=10, below=None):
                 if d not in seen:
                     seen.add(d)
                     consts.append(C.Num("0x%xu" % d if d > 9 else "%du" % d))
-    terms = [x for x in subs if not isinstance(x, C.Num)][:most]
-    leaves = [x for x in terms if isinstance(x, C.Name) or (isinstance(x, C.Unary) and x.op == "*")]
-    pairs = compared(e) + [(a, b) for a in terms for b in consts] + [(a, b) for a in leaves for b in leaves
-                                                                     if a is not b]
+    for d in numbers:
+        if d not in seen:
+            seen.add(d)
+            consts.append(C.Num("0x%xu" % d if d > 9 else "%du" % d))
+    own = [x for x in subs if not isinstance(x, C.Num)][:most]
+    leaves = [x for x in own if isinstance(x, C.Name) or (isinstance(x, C.Unary) and x.op == "*")] + list(terms)
+    pairs = compared(e) + chained(e) + [(a, b) for a in own + list(terms) for b in consts] + [
+        (a, b) for a in leaves for b in leaves if a is not b]
     sizes = {}                              # id -> size, of e's subexpressions and consts (alive meanwhile)
 
     def sz(x):
@@ -1561,10 +1653,18 @@ def shared_candidates(e, ctx, most=10, below=None):
 
     def bits_of(x):
         t = type_of_expr(x, ctx)
-        return t[0] if t else ctx.int_bits
+        return t[0] if t else (width(x, ctx) or ctx.int_bits)
+    zero = C.Num("0")
+
+    def unsigned(x):
+        t = type_of_expr(x, ctx) or c_type(x, ctx)
+        return t is not None and not t[1]
     out = []
     for a, b in pairs:
         n = 1 + sz(a) + sz(b)
+        if isinstance(b, C.Num) and b.value == 1 and unsigned(a):
+            for op in ("==", "!="):         # (x < 1 of an unsigned x: x == 0, tried first; a borrow of x - 1)
+                out.append((n - sz(b) + 1, C.Binary(op, a, zero), ("plain", op, a, zero, None)))
         for op in ("==", "!=", "<", ">=", ">", "<="):
             out.append((n, C.Binary(op, a, b), ("plain", op, a, b, None)))
         bits = bits_of(a)
@@ -1611,7 +1711,9 @@ def conditions(fn):
     statement: a flag's own value (z = (u32)((u64)r0 + (u32)~r3 + 1) == 0 as z = r0 == r3: a flag an
     IT block's ifs read in turn, or one read across other statements, stays a variable), the operands
     of && || ! where the whole has no smaller form (z = r0 == r5 || r4 == r1 from a conditional
-    compare), a select's condition wherever the select is (in a return's value). Within one tidy run a
+    compare), a select's condition wherever the select is (in a return's value, a call's argument, a
+    value stored; until 2026-10-23 not in calls and stores: prvCheckExpectedState(!(u32)(((u64)r7 +
+    (u32)~r0_1 + 1) >> 32) ? 0x0u : 0x1u) on FreeRTOS GCC -Os). Within one tidy run a
     condition asked again (every round of the passes asks them all) gets the answer it got, by what the
     search reads of it: its text, its variables' types, the widths of int and long, whether z3 is there
     (until 2026-10-23 each round searched again: two thirds of the searches for FreeRTOS's GCC -Os
@@ -1670,12 +1772,18 @@ def conditions(fn):
             return C.Cast(e.type, truths(e.e))
         if isinstance(e, C.Unary) and e.op not in ("*", "&"):
             return C.Unary(e.op, truths(e.e))
+        if isinstance(e, C.Call):                   # (a select or a comparison passed on)
+            return C.Call(e.f, [truths(a) for a in e.args])
+        if isinstance(e, C.Assign):                 # (one stored)
+            return C.Assign(e.op, e.target, truths(e.value))
         return e
     for s in with_arms(fn.body.body):
         if isinstance(s, C.If):                     # (a branch's, a conditional block's)
             parts = [(lambda s=s: s.cond, lambda v, s=s: setattr(s, "cond", v), True)]
         elif is_assign(s):                          # (a select's, a flag's: 0 or 1 either way)
             parts = [(lambda s=s: s.e.value, lambda v, s=s: setattr(s.e, "value", v), False)]
+        elif isinstance(s, C.ExprStmt):             # (a call's arguments, a store's value)
+            parts = [(lambda s=s: s.e, lambda v, s=s: setattr(s, "e", v), False)]
         elif isinstance(s, C.Return) and s.e is not None:
             parts = [(lambda s=s: s.e, lambda v, s=s: setattr(s, "e", v), False)]
         else:
@@ -1686,6 +1794,928 @@ def conditions(fn):
             if C.expr_text(after) != before:
                 put(after)
                 changed = True
+    return changed
+
+
+# --- flags read through variables: a compare's flags read by several statements, an add's carry ---
+
+FLAG = re.compile(r"^[nzcv](?:_\d+)?$")    # the lifters' flags (and the webs' parts of them, z_1)
+EXPAND_NODES = 160      # the most nodes of a truth value with its variables written as their values
+EXPAND_VARIABLES = 12   # the most variables written into one truth value (a compare's flags and its
+                        # temporary: three; a chain of subtractions: two a step)
+EXTRA_NUMBERS = 8       # the most constants a chain of subtractions adds to a search (flag_numbers)
+
+
+def _wide(ctx, name):
+    t = ctx.types.get(name)
+    return t is not None and t[0] > 32
+
+
+def _pure_but_loads(e):
+    """Whether e's only effects are loads (no call, no assignment, no increment): its value may stand
+    where it is known to be the same in a proof, the loads as what they loaded there; it is never
+    evaluated anew there (a candidate that reads such a load is not taken)."""
+    for x in walk_expr(e):
+        if isinstance(x, C.Call) and not is_pure_call(x):
+            return False
+        if isinstance(x, (C.Assign, C.Post)) or (isinstance(x, C.Unary) and x.op in ("++", "--")):
+            return False
+    return True
+
+
+def _loads(e):
+    """The texts of e's memory reads."""
+    return [C.expr_text(x) for x in walk_expr(e) if (isinstance(x, C.Unary) and x.op == "*") or
+            isinstance(x, (C.Index, C.Member))]
+
+
+def offset_form(e):
+    """(variable, k) when e's 32 bits are one variable plus the constant k (mod 2**32): r0 - 1, the
+    lifters' (u32)((u64)r0 + (u32)~0x2u + 1), a chain of them; else None."""
+    def lin(x):
+        if isinstance(x, C.Num):
+            return None if isinstance(x.value, float) else (None, x.value)
+        if isinstance(x, C.Name):
+            return (x.id, 0)
+        if isinstance(x, C.Cast):
+            t = cexpr.Ctx().ctype(x.type)
+            return lin(x.e) if t is not None and t[0] >= 32 else False
+        if isinstance(x, C.Unary) and x.op in ("~", "-"):
+            inner = lin(x.e)
+            if not inner or inner[0] is not None:
+                return False
+            return (None, ~inner[1] if x.op == "~" else -inner[1])
+        if isinstance(x, C.Binary) and x.op in ("+", "-"):
+            a, b = lin(x.l), lin(x.r)
+            if not a or not b or b[0] is not None and (x.op == "-" or a[0] is not None):
+                return False
+            if x.op == "-":
+                return (a[0], a[1] - b[1])
+            return (a[0] or b[0], a[1] + b[1])
+        return False
+    got = lin(e)
+    if not got or got[0] is None:
+        return None
+    return got[0], got[1] & 0xffffffff
+
+
+def flag_numbers(e):
+    """Constants beyond e's own that a comparison in e may hold for a variable it reads plus a constant:
+    m - k for each constant m of e (and 0) and each k a subexpression adds to one variable
+    (offset_form), so that a chain of subtractions compares its first variable (x - 1 - 2 == 5 as
+    x == 8; subs r0, #1; beq; subs r0, #2; beq as r0 == 1, r0 == 3). At most EXTRA_NUMBERS, those of
+    the outermost sums (a whole chain's) first."""
+    ks = sorted({x.value & 0xffffffff for x in walk_expr(e) if isinstance(x, C.Num) and isinstance(x.value, int)} | {0})
+    offs = []
+    for x in walk_expr(e):
+        got = offset_form(x) if not isinstance(x, (C.Name, C.Num)) else None
+        if got and got[1] and got[1] not in offs:
+            offs.append(got[1])
+    out = []
+    for k in offs:
+        for m in ks:
+            d = (m - k) & 0xffffffff
+            if d not in out and d not in ks:
+                out.append(d)
+    return out[:EXTRA_NUMBERS]
+
+
+class FlagFlow:
+    """What the flags pass knows of a flat_view's flow: its graph, the reaching definitions, and for a
+    variable read at a place the one definition of it that reaches there, its value still what it was
+    (definition). A place is a node, where its statement reads, or just after it (after: what the
+    node writes counts). A variable's definition reaches a place alone when every way to it passes the
+    definition and nothing on the way writes the variable; its value is the same there when nothing on
+    a way from the definition to the place (not through the definition again) writes what it reads
+    (region)."""
+
+    def __init__(self, view, ctx):
+        self.g = Graph(view)
+        self.reach = self.g.reaching()
+        self.ctx = ctx
+        self.regions = {}
+        self.casts = {}                     # wide variable -> [(node, variable)] of variable = (u32)wide
+        for node in self.g.nodes:
+            s = node.stmt
+            if is_assign(s) and isinstance(s.e.value, C.Cast) and s.e.value.type == "u32" and \
+                    isinstance(s.e.value.e, C.Name) and _wide(ctx, s.e.value.e.id):
+                self.casts.setdefault(s.e.value.e.id, []).append((node.index, s.e.target.id))
+        self.arms = {}                      # node -> (its conditional block's stand-in, "then" or "else")
+        index = {id(x): i for i, x in enumerate(self.g.body)}
+        for st, _ in getattr(view, "pairs", ()):            # (outer blocks first: an inner one overwrites)
+            m = index.get(id(st))
+            number = st.then.label.rsplit("_", 1)[1] if m is not None else None
+            if number is None or "flat_end_%s" % number not in self.g.labels:
+                continue
+            then_i, end_i = self.g.labels[st.then.label], self.g.labels["flat_end_%s" % number]
+            else_i = self.g.labels.get("flat_else_%s" % number)
+            for k in range(then_i + 1, else_i if else_i is not None else end_i):
+                self.arms[k] = (m, "then")
+            if else_i is not None:
+                for k in range(else_i + 1, end_i):
+                    self.arms[k] = (m, "else")
+
+    def reaches_avoiding(self, a, n, m):
+        """Whether a way leads from node a to node n that does not pass node m."""
+        seen, stack = set(), [k for k in self.g.nodes[a].succ if k < len(self.g.nodes)]
+        while stack:
+            k = stack.pop()
+            if k == m or k in seen:
+                continue
+            if k == n:
+                return True
+            seen.add(k)
+            stack.extend(x for x in self.g.nodes[k].succ if x < len(self.g.nodes))
+        return False
+
+    def select(self, n, v, after=False):
+        """(m, then, else) where v has two definitions reaching place n that a conditional block m
+        chooses between (a conditional compare: z = r5 == 0x5f; if (!z) { z = lr == 0x19; }): one in
+        its then arm, the other in its else arm or the one that reaches m, and every way from that one
+        to n passes m; else None. v's value at n is m's condition (as at m) ? then's : else's."""
+        defs = self.reaching(n, v, after)
+        if not defs or len(defs) != 2 or min(defs) < 0:
+            return None
+        a, b = sorted(defs)
+        for d_then, d_else in ((a, b), (b, a)):
+            arm = self.arms.get(d_then)
+            if arm is None or arm[1] != "then":
+                continue
+            m = arm[0]
+            if self.arms.get(n, (None,))[0] == m:
+                continue
+            other = self.arms.get(d_else)
+            if other == (m, "else") or (self.reach[m].get(v) == {d_else} and
+                                         not self.reaches_avoiding(d_else, n, m)):
+                return m, d_then, d_else
+        return None
+
+    def region(self, d, n, barriers=()):
+        """The nodes on a way from node d to node n that does not pass d again, nor a node of
+        barriers (n among them only where a way leaves n and comes back to it)."""
+        key = (d, n, tuple(sorted(barriers)))
+        if key not in self.regions:
+            nodes = self.g.nodes
+            stop = {d} | set(barriers)
+            fwd, stack = set(), [k for k in nodes[d].succ if k < len(nodes)]
+            while stack:
+                k = stack.pop()
+                if k not in stop and k not in fwd:
+                    fwd.add(k)
+                    stack.extend(x for x in nodes[k].succ if x < len(nodes))
+            bwd, stack = set(), list(nodes[n].pred)
+            while stack:
+                k = stack.pop()
+                if k not in stop and k not in bwd:
+                    bwd.add(k)
+                    stack.extend(nodes[k].pred)
+            self.regions[key] = fwd & bwd
+        return self.regions[key]
+
+    def unchanged(self, d, n, names, after=False, barriers=()):
+        """Whether nothing on a way from node d to place n (not through barriers: the other
+        definitions of a variable whose value d gives on the ways it arrives) writes names (after:
+        node n's writes too, unless n is d)."""
+        if not names or (after and d == n):
+            return True
+        if after and self.g.nodes[n].writes & names:
+            return False
+        return not any(self.g.nodes[k].writes & names for k in self.region(d, n, barriers))
+
+    def reaching(self, n, v, after=False):
+        """The definitions of v that reach place n (after: node n's own write of v is the one)."""
+        if after and v in self.g.nodes[n].writes:
+            return {n} if v in self.g.nodes[n].kills else None
+        return self.reach[n].get(v)
+
+    def expandable(self, v, value, deep=True):
+        """Whether the flags pass writes v's value into a reader: a flag (n, z, c, v), a 64-bit
+        temporary (the lifters' carry arithmetic); deep, also a 32-bit result of one (r0_1 = (u32)t_1)
+        or a variable plus a constant (a chain of subtractions)."""
+        if FLAG.match(v) or _wide(self.ctx, v):
+            return True
+        if not deep:
+            return False
+        t = self.ctx.types.get(v)
+        if t is None or t[0] != 32:
+            return False
+        if isinstance(value, C.Cast) and isinstance(value.e, C.Name) and _wide(self.ctx, value.e.id):
+            return True
+        return offset_form(value) is not None
+
+    def definition(self, n, v, deep=True, after=False):
+        """(node, value) of the one definition of v that reaches place n, when it is v = value with no
+        effect but loads, not reading v, of a kind expandable takes (deep), and nothing it reads is
+        written on a way from it to n; else None."""
+        defs = self.reaching(n, v, after)
+        if not defs or len(defs) != 1:
+            return None
+        d = next(iter(defs))
+        if d < 0:
+            return None
+        s = self.g.nodes[d].stmt
+        if not is_assign(s) or s.e.target.id != v:
+            return None
+        value = s.e.value
+        if not self.expandable(v, value, deep) or not _pure_but_loads(value) or reads_count(value, v) or \
+                not self.unchanged(d, n, _reads_of(value), after):
+            return None
+        return d, value
+
+    def expand(self, n, e, deep=True, after=False):
+        """(e with the variables it reads written as their values at place n, recursively, where
+        definition allows (deep: expandable's), or chosen; {variable: (its definitions, its written
+        value)}), or None when none was written or the result has more than EXPAND_NODES nodes. A load in
+        a value stands for what it loaded at its definition: a value with a load whose text e itself or
+        another value written reads too stays its variable, so that in the proof one text is one
+        load."""
+        owner = {t: -2 for t in _loads(e)}
+        done = {}
+
+        def value_of(v):
+            if v in done:
+                return done[v]
+            done[v] = None                  # (a variable whose value reads it, through others)
+            if sum(1 for x in done.values() if x is not None) >= EXPAND_VARIABLES:
+                return None
+            got = self.definition(n, v, deep, after)
+            if got is None:
+                done[v] = self.chosen(n, v, deep, after)
+                return done[v]
+            d, value = got
+            texts = _loads(value)
+            if any(owner.get(t, d) != d for t in texts):
+                return None
+            for t in texts:
+                owner[t] = d
+            done[v] = ((d,), sub(value))
+            return done[v]
+
+        def sub(x):
+            for v in sorted({y.id for y in walk_expr(x) if isinstance(y, C.Name)}):
+                got = value_of(v)
+                if got is not None:
+                    x = substitute(x, v, got[1])
+            return x
+        out = sub(e)
+        used = {v: got for v, got in done.items() if got is not None}
+        if not used or size(out) > EXPAND_NODES:
+            return None
+        return out, used
+
+    def chosen(self, n, v, deep=True, after=False):
+        """((then, else), Cond) for a variable a conditional block chooses the value of (select): its
+        condition and both values written as at their own places (expand), none of them reading memory
+        or changed on the way to place n; None otherwise."""
+        got = self.select(n, v, after)
+        if got is None:
+            return None
+        m, d_then, d_else = got
+        parts = [(m, self.g.nodes[m].stmt.cond)]
+        for d in (d_then, d_else):
+            st = self.g.nodes[d].stmt
+            if not (is_assign(st) and st.e.target.id == v and self.expandable(v, st.e.value, deep)) or \
+                    reads_count(st.e.value, v):
+                return None
+            parts.append((d, st.e.value))
+        out = []
+        for place, e in parts:
+            if not _pure_but_loads(e) or _reads_memory(e):
+                return None
+            full = self.expand(place, e, deep)
+            full = full[0] if full is not None else e
+            if _reads_memory(full) or not self.unchanged(place, n, _reads_of(full), after,
+                                                         () if place == m else (d_then, d_else)):
+                return None
+            out.append(full)
+        return (d_then, d_else), C.Cond(*out)
+
+    def results(self, n, used, after=False):
+        """{R: (u32) of the value used writes for t} for the variables R = (u32)t of used's 64-bit
+        temporaries t whose definition reaches place n alone, t's definition reaching R's and not on a
+        way from R's to n: R holds the 32 bits of the sum whose carry a truth value tests (a term for
+        its candidates, sum < operand)."""
+        import copy
+        out = {}
+        for t, (defs, value) in sorted(used.items()):
+            if not _wide(self.ctx, t) or len(defs) != 1:
+                continue
+            d = defs[0]
+            for k, r in self.casts.get(t, ()):
+                if r in used or r in out or self.reaching(n, r, after) != {k} or self.reach[k].get(t) != {d} or \
+                        (k != n and d in self.region(k, n)) or (after and k != n and d == n):
+                    continue
+                out[r] = C.Cast("u32", copy.deepcopy(value))
+        return out
+
+
+SPLIT_NODES = 12        # the most nodes of a truth value made of two comparisons (_split_search)
+
+
+def flag_search(e, ctx, kind, loads, below, terms=None, cast="u32", split_below=None):
+    """A smaller expression for e (a truth value or a value with its variables written as their values,
+    FlagFlow.expand) made of its own operands, of terms ({name: what it stands for}: FlagFlow.results)
+    and of the constants flag_numbers adds, that reads the loads loads (each once: the reader's own)
+    and no other, proved to stand for e. kind "truth": a comparison (shared_candidates) of e's truth;
+    "flag": a comparison of e's value as type cast has it (a flag, 0 or 1); "value": a simple value
+    (value_candidates) of e's value as cast has it. None when there is none of fewer than below
+    nodes; for a truth value whose selects choose by one condition (FlagFlow.chosen), then one of
+    two comparisons of fewer than split_below nodes (_split_search)."""
+    terms = terms or {}
+    names = [C.Name(r) for r in sorted(terms)]
+    if kind == "value":
+        found = sorted(((size(c), c, None) for c in value_candidates(e, ctx, names)), key=lambda x: x[0])
+    else:
+        found = shared_candidates(e, ctx, below=below, terms=names, numbers=flag_numbers(e))
+    as_bool = kind == "truth"
+    check = None
+    for n, cand, recipe in found:
+        if n >= below:
+            break
+        if loads_once(cand) != loads:
+            continue
+        if check is None:
+            check = cexpr.Checker(e if as_bool else C.Cast(cast, e), ctx, as_bool=as_bool)
+            if not check.ok:
+                return None
+        made = made_candidate(recipe, ctx) if recipe is not None else cand
+        full = made
+        for r, value in terms.items():
+            full = substitute(full, r, value)
+        if check.stands_for(full if as_bool else C.Cast(cast, full)):
+            return made
+    if kind == "truth" and split_below is not None:
+        return _split_search(e, ctx, loads, split_below, terms)
+    return None
+
+
+def _choose(e, arm):
+    """e with each select (c ? a : b) written as its arm a (arm "then") or b."""
+    import copy
+    if isinstance(e, C.Cond):
+        return _choose(copy.deepcopy(e.t if arm == "then" else e.f), arm)
+    out = copy.copy(e)
+    for slot in type(e).__slots__:
+        v = getattr(e, slot, None)
+        if isinstance(v, C.Expr):
+            setattr(out, slot, _choose(v, arm))
+        elif isinstance(v, list):
+            setattr(out, slot, [_choose(y, arm) if isinstance(y, C.Expr) else y for y in v])
+    return out
+
+
+def _split_search(e, ctx, loads, below, terms):
+    """A truth value for e whose selects all choose by one condition p (a conditional compare's flags:
+    FlagFlow.chosen) made of p's comparison and those of e on either way: p && t, !p || t, p || f,
+    !p && f, smallest first, proved to stand for e. None where none is."""
+    from dread.structure import negate
+    conds = [x for x in walk_expr(e) if isinstance(x, C.Cond)]
+    if not conds or len({C.expr_text(x.c) for x in conds}) != 1:
+        return None
+    p = _remembered(conds[0].c, ctx, [], size(conds[0].c), None)
+    if p is None:
+        p = conds[0].c if truth_value(conds[0].c) and size(conds[0].c) <= 5 else None
+    if p is None:
+        return None
+    sides = {}
+    for arm in ("then", "else"):
+        way = _choose(e, arm)
+        sides[arm] = way if size(way) <= 5 and truth_value(way) else _remembered(way, ctx, loads, size(way), terms)
+    forms = []
+    if sides["then"] is not None:
+        forms += [C.Binary("&&", p, sides["then"]), C.Binary("||", negate(p), sides["then"])]
+    if sides["else"] is not None:
+        forms += [C.Binary("||", p, sides["else"]), C.Binary("&&", negate(p), sides["else"])]
+    check = cexpr.Checker(e, ctx, as_bool=True)
+    for f in sorted(forms, key=size):
+        if size(f) >= below or loads_once(f) != loads:
+            continue
+        full = f
+        for r, value in (terms or {}).items():
+            full = substitute(full, r, value)
+        if check.stands_for(full):
+            import copy
+            return copy.deepcopy(f)
+    return None
+
+
+def _remembered(e, ctx, loads, below, terms):
+    """flag_search of a truth value, its answer kept for the tidy run (_RUN, as conditions keeps its)."""
+    import copy
+    memo = getattr(_RUN, "memo", None)
+    key = _flag_key(e, "truth", loads, below, terms or {}, ctx, "u32") + (None,)
+    if memo is not None and key in memo:
+        got = memo[key]
+    else:
+        got = flag_search(e, ctx, "truth", loads, below, terms, split_below=None)
+        if memo is not None:
+            memo[key] = got
+    return copy.deepcopy(got) if got is not None else None
+
+
+def _flag_key(full, kind, loads, below, terms, ctx, cast):
+    names = {x.id for x in walk_expr(full) if isinstance(x, C.Name)} | set(terms)
+    return ("flags", C.expr_text(full), kind, cast, tuple(loads), below,
+            tuple(sorted((r, C.expr_text(x)) for r, x in terms.items())),
+            tuple((n, ctx.types.get(n)) for n in sorted(names)), ctx.int_bits, ctx.long_bits)
+
+
+def c_type(e, ctx):
+    """(bits, signed) of e's C type (the usual conversions, cexpr's), or None where it cannot be told."""
+    try:
+        (a,), ctx2 = cexpr.abstract([e], ctx)
+        names = {x.id for x in walk_expr(a) if isinstance(x, C.Name)}
+        return cexpr.compile_expr(a, ctx2)({n: 1 for n in names})[1]
+    except (cexpr.Undefined, KeyError):
+        return None
+
+
+TRANSPARENT = ("u32", "s32", "u64", "s64")      # casts a sum taken mod 2**32 passes through
+
+
+def wide_sum(e):
+    """The 32-bit value of e, a cast to u32 of a sum through 64 bits (a carry nobody reads: the lifters'
+    adds without its flags, (u32)((u64)r6 + 4 + 0); a subtraction, (u64)a + (u32)~b + 1), written as
+    the 32-bit sum it is: its terms with their signs, ~b + 1 as -b, the constants summed (a - 8, not
+    + 0xfffffff8u), its 64-bit casts and casts to 32 bits gone; None when e is no such sum (another
+    operation inside: a product's high word, a carry taken with >> 32). Exact mod 2**32; flags_values
+    proves it all the same."""
+    if not (isinstance(e, C.Cast) and e.type == "u32" and
+            any(isinstance(x, C.Cast) and x.type in ("u64", "s64") for x in walk_expr(e.e))):
+        return None
+    terms, k = [], [0]
+
+    def visit(x, sign):
+        if isinstance(x, C.Binary) and x.op in ("+", "-"):
+            visit(x.l, sign)
+            visit(x.r, sign if x.op == "+" else -sign)
+            return True
+        if isinstance(x, C.Cast) and x.type in TRANSPARENT:
+            return visit(x.e, sign)
+        if isinstance(x, C.Num) and isinstance(x.value, int):
+            k[0] += sign * x.value
+            return True
+        if isinstance(x, C.Unary) and x.op == "~":     # (~b is -b - 1)
+            k[0] -= sign
+            return visit(x.e, -sign)
+        if isinstance(x, C.Unary) and x.op == "-":
+            return visit(x.e, -sign)
+        if isinstance(x, C.Name) or (isinstance(x, C.Unary) and x.op == "*") or isinstance(x, (C.Index, C.Member, C.Call)):
+            terms.append((sign, x))
+            return True
+        terms.append(None)
+        return False
+    visit(e.e, 1)
+    if None in terms:
+        return None
+    k = k[0] & 0xffffffff
+    if not terms:
+        return C.Num("0x%xu" % k if k > 9 else "%du" % k)
+    import copy
+    terms.sort(key=lambda t: -t[0])                 # (what is added first)
+    out = None
+    for sign, x in terms:
+        x = copy.deepcopy(x)
+        if out is None:
+            out = x if sign > 0 else C.Unary("-", x)
+        else:
+            out = C.Binary("+" if sign > 0 else "-", out, x)
+    if k:
+        out = C.Binary("+", out, C.Num("%d" % k if k < 10 else "0x%xu" % k)) if k < 0x80000000 else \
+            C.Binary("-", out, C.Num("%d" % (0x100000000 - k) if 0x100000000 - k < 10 else "0x%xu" % (0x100000000 - k)))
+    return out
+
+
+def _wide_anywhere(fn):
+    """Whether any statement of fn has a 64-bit cast in it, or a 64-bit variable is declared (what
+    sums, pairs and flags look for first, before they make the types or a flow)."""
+    for st in fn.body.body:
+        if isinstance(st, C.Decl) and st.specs.split()[-1:] in (["u64"], ["s64"]):
+            return True
+        for x in _flat(st):
+            for e in _stmt_all_exprs(x):
+                if any(isinstance(y, C.Cast) and y.type in ("u64", "s64") for y in walk_expr(e)):
+                    return True
+    return False
+
+
+def sums(fn):
+    """Sums through 64 bits whose carry nobody reads, anywhere in a statement (a call's argument, a
+    value stored, a condition's operand: uxListRemove((u32)((u64)r6 + 4 + 0)) as uxListRemove(r6 +
+    4); vPortFree's (u32)((u64)0x0u + (u32)~0x8u + 1) + r0 as r0 - 8), as the 32-bit sums they are
+    (wide_sum), proved by z3 to have the same value as the cast to u32 has it and kept as a u32 (a cast
+    where the sum's own type is not: a byte loaded is promoted to int). values rewrites whole values
+    the same way, by a search; until 2026-10-23 the sums folded into an argument before it ran
+    stayed. After conditions in each round: a compare's own sum (cmp r0, r5: (u32)((u64)r0 +
+    (u32)~r5 + 1) == 0) is its comparison there (r0 == r5), as r0 - r5 == 0 it would not be."""
+    if cexpr.z3 is None or not _wide_anywhere(fn):
+        return False
+    ctx = context(fn)
+    memo = getattr(_RUN, "memo", None)
+    changed = False
+
+    def fix(e):
+        nonlocal changed
+        got = wide_sum(e)
+        if got is not None and loads_once(e) is not None and loads_once(got) == loads_once(e):
+            key = ("sums", C.expr_text(e), tuple((n, ctx.types.get(n)) for n in sorted(
+                {x.id for x in walk_expr(e) if isinstance(x, C.Name)})), ctx.int_bits)
+            if memo is not None and key in memo:
+                good = memo[key]
+            else:
+                if c_type(got, ctx) != (32, False):
+                    got = C.Cast("u32", got)
+                good = got if cexpr.Checker(e, ctx).stands_for(got) else None
+                if memo is not None:
+                    memo[key] = good
+            if good is not None:
+                import copy
+                changed = True
+                return copy.deepcopy(good)
+        if isinstance(e, C.Binary):
+            return C.Binary(e.op, fix(e.l), fix(e.r))
+        if isinstance(e, C.Cast):
+            return C.Cast(e.type, fix(e.e))
+        if isinstance(e, C.Unary):
+            return C.Unary(e.op, fix(e.e))
+        if isinstance(e, C.Cond):
+            return C.Cond(fix(e.c), fix(e.t), fix(e.f))
+        if isinstance(e, C.Call):
+            return C.Call(e.f, [fix(a) for a in e.args])
+        if isinstance(e, C.Assign):
+            return C.Assign(e.op, e.target if isinstance(e.target, C.Name) else fix(e.target), fix(e.value))
+        return e
+
+    def visit(st):
+        for get, put in stmt_exprs(st):
+            before = C.expr_text(get())
+            after = fix(get())
+            if C.expr_text(after) != before:
+                put(after)
+        for inner in _inner(st):
+            visit(inner)
+    for st in fn.body.body:
+        if not isinstance(st, C.Decl):
+            visit(st)
+    return changed
+
+
+def pairs(fn):
+    """A two-word addition or subtraction (adds lo; adc hi: t = (u64)a + b + 0; lo = (u32)t; hi =
+    (u32)((u64)c + d + (u32)(t >> 32))) as the one 64-bit sum it is: t = ((u64)c << 32 | a) + ((u64)d <<
+    32 | b); lo = (u32)t; hi = (u32)(t >> 32) (subs and sbc alike, as a difference). Only where t is read
+    but as its low word and by the high word's carry (directly, or through a flag the high word alone
+    reads), the high words' operands read no memory and keep their values from t's definition to the
+    high word, and z3 proves both words the same. The high word's carry read through the flag is left
+    to dead."""
+    if cexpr.z3 is None or not any(isinstance(st, C.Decl) and st.specs.split()[-1:] in (["u64"], ["s64"])
+                                   for st in fn.body.body):
+        return False
+    import copy
+    ctx = context(fn)
+    view = flat_view(fn)
+    flow = None
+    changed = False
+    for d, s in enumerate(view.body.body):
+        if not (is_assign(s) and _wide(ctx, s.e.target.id)):
+            continue
+        low = _word_sum(s.e.value)
+        if low is None or not isinstance(low[3], C.Num) or (low[2] == "sub" and low[3].value != 1):
+            continue
+        t = s.e.target.id
+        if flow is None:
+            flow = FlagFlow(view, ctx)
+        carry = C.Cast("u32", C.Binary(">>", C.Name(t), C.Num("32")))
+        readers = [m for m in flow.g.nodes if t in m.reads and d in (flow.reach[m.index].get(t) or ())]
+        flags = {}                          # flag -> its node, where it is t's carry and read by one node
+        high = None
+        for m in readers:
+            st = m.stmt
+            texts = [C.expr_text(get()) for get, _ in stmt_exprs(st)]
+            if is_assign(st) and FLAG.match(st.e.target.id) and C.expr_text(st.e.value) == C.expr_text(carry):
+                flags[st.e.target.id] = m.index
+                continue
+            plain = sum(len(re.findall(r"\(u32\)%s\b" % re.escape(t), x)) for x in texts)
+            if sum(reads_count(get(), t) for get, _ in stmt_exprs(st)) == plain and plain:
+                continue                    # (lo = (u32)t)
+            if high is not None:
+                high = False
+            else:
+                high = m.index
+        names = [carry] + [C.Name(f) for f in flags]
+        if not high:
+            if high is False or not flags:
+                continue
+        for f, k in flags.items():
+            users = [m for m in flow.g.nodes if f in m.reads and k in (flow.reach[m.index].get(f) or ())]
+            if len(users) != 1 or (high and users[0].index != high):
+                break
+            high = users[0].index
+        else:
+            if not high:
+                continue
+            h = flow.g.nodes[high].stmt
+            found = []
+            for get, put in stmt_exprs(h):
+                for x in walk_expr(get()):
+                    if isinstance(x, C.Cast) and x.type == "u32":
+                        hs = _word_sum(x.e)
+                        if hs is not None and hs[2] == low[2] and any(C.expr_text(hs[3]) == C.expr_text(n) for n in names):
+                            found.append((get, put, x, hs))
+            if len(found) != 1:
+                continue
+            get, put, x, hs = found[0]
+            a, b, kind = low[0], low[1], low[2]
+            c, dd = hs[0], hs[1]
+            zero = C.Num("0")
+            if any(not _pure_but_loads(y) for y in (c, dd) if y is not None) or \
+                    not flow.unchanged(d, high, _reads_of(c) | (_reads_of(dd) if dd is not None else set())) or \
+                    (any(_reads_memory(y) for y in (c, dd) if y is not None) and
+                     not _straight(flow.g, d, high, C.Binary("+", c, dd if dd is not None else zero))):
+                continue                    # (a load of the high word made where the low word's is: nothing between)
+            left = wide_pair(copy.deepcopy(c), copy.deepcopy(a))
+            right = wide_pair(copy.deepcopy(dd) if dd is not None else zero, copy.deepcopy(b) if b is not None else zero)
+            value = C.Binary("-" if kind == "sub" else "+", left, right)
+            if isinstance(right, C.Num) and right.value == 0:
+                value = left
+            if kind == "add" and low[3].value:
+                value = C.Binary("+", value, C.Num(str(low[3].value)))
+            old_high = copy.deepcopy(x)
+            for f in flags:
+                old_high = substitute(old_high, f, carry)
+            old_high = substitute(old_high, t, s.e.value)
+            new_high = C.Cast("u32", C.Binary(">>", copy.deepcopy(value), C.Num("32")))
+            if not (cexpr.prove(C.Cast("u32", s.e.value), C.Cast("u32", value), ctx) and
+                    cexpr.prove(old_high, new_high, ctx)):
+                continue
+            s.e.value = value
+            new = copy.deepcopy(carry)
+            put(_replace_node(get(), x, new))
+            changed = True
+    write_back(view)
+    return changed
+
+
+def _replace_node(e, old, new):
+    """e with its subexpression old (that very node) replaced by new."""
+    if e is old:
+        return new
+    for slot in type(e).__slots__:
+        v = getattr(e, slot, None)
+        if isinstance(v, C.Expr):
+            setattr(e, slot, _replace_node(v, old, new))
+        elif isinstance(v, list):
+            setattr(e, slot, [_replace_node(y, old, new) if isinstance(y, C.Expr) else y for y in v])
+    return e
+
+
+SINK = "cc"         # the name (with a number) of a condition the flags pass computes where its flags are set
+
+
+def flags(fn):
+    """Flags read through variables as the comparisons they stand for. fold writes a compare's flags
+    into the one condition that reads them, and conditions makes a comparison of that; a flag that two
+    statements read (cmd_mode's ls: an if's and a select's), a carry tested away from its add (adds;
+    str; blo), a chain of subtractions (subs r0, #1; beq; subs r0, #2; beq), a borrow added back
+    (rsbs r0, r1, #0; adcs r0, r1: r1 == 0) stayed carry arithmetic in variables. Here a truth value
+    whose variables have one definition each that reaches it with its value unchanged
+    (FlagFlow.definition) is searched for in terms of what those definitions read (FlagFlow.expand):
+    first the flags and the 64-bit temporaries alone, then their 32-bit results and the variables
+    that are another plus a constant too (a chain of subtractions compares its first variable with
+    what the constants come to, x == 8 for x - 1 - 2 == 5); its operands, and the variables that hold
+    the 32 bits of a sum it tests the carry of (sum < operand: adds r5, r5, r0; blo as r5_1 >= r5). A
+    candidate is taken when z3 proves it (as conditions does), it reads no load of a definition (a
+    load is not made anew where it was not; a variable that holds what it loaded may stand), and it
+    is no larger than the truth value or, where that read a flag or a 64-bit temporary, of at most
+    five nodes (an atomic comparison: r0 == r1 for z). Truth values: conditions, the conditions of
+    selects anywhere in a statement, comparisons and logical operations, the value of an assignment to
+    a flag (c = r1 >= 0x2710u: a flag that a reader past a write of what it compares needs as a
+    variable); values through a 64-bit temporary (value_candidates). A condition whose flags are read
+    where what they compare has changed (cmp r1, #9; mov r1, r5; bhi) is computed where they are set,
+    into a variable of its own (SINK: cc_1 = r1 > 9u; ... while (cc_1)), when it has a comparison
+    there and reads a flag that is not one already. The conditions of conditional blocks (an IT
+    block's ifs, before merge_ifs has made them one) that read one flag's definition are rewritten
+    all or none, as is every reader of a flag that is a comparison already: merge_ifs joins ifs by
+    the text of their conditions, and a flag that stays for one reader would only be written twice.
+    The definitions no reader needs any more go in dead."""
+    if cexpr.z3 is None:
+        return False
+    import copy
+    wide = {d.name for st in fn.body.body if isinstance(st, C.Decl) and st.specs.split()[-1:] in (["u64"], ["s64"])
+            for d in st.items}
+    offsets = set()                         # (variables some assignment makes another plus a constant)
+    for st in fn.body.body:
+        for x in _flat(st):
+            if is_assign(x) and (offset_form(x.e.value) is not None or (
+                    isinstance(x.e.value, C.Cast) and isinstance(x.e.value.e, C.Name) and x.e.value.e.id in wide)):
+                offsets.add(x.e.target.id)
+    look = {v for v in all_names(fn) if FLAG.match(v)} | wide | offsets
+    if not look:
+        return False
+    view = flat_view(fn)
+    if not any(_reads_of(get()) & look for st in view.body.body if isinstance(st, (C.ExprStmt, C.Return, C.If, C.Switch))
+               for get, _ in stmt_exprs(st)):
+        return False
+    ctx = context(fn)
+    flow = None
+    memo = getattr(_RUN, "memo", None)
+    stand_ins = {id(st): orig for st, orig in view.pairs}
+    proposals = {}                  # node -> ([(put, new expression)], {(variable, definition) gone}, {sunk})
+    sunk = {}                       # (node, text of the comparison) -> (the variable that holds it, comparison)
+    taken = None
+
+    def interesting(v):
+        return bool(FLAG.match(v)) or _wide(ctx, v)
+
+    def value_type(e):
+        t = type_of_expr(e, ctx)
+        return "%s%d" % ("s" if t[1] else "u", t[0]) if t is not None and t[0] <= 32 else None
+
+    def wide_arithmetic(e):
+        return any(isinstance(x, C.Cast) and x.type in ("u64", "s64") for x in walk_expr(e))
+
+    def search(full, kind, loads, limit, terms, cast, split=False):
+        split_below = max(limit + 1, SPLIT_NODES) if split else None
+        key = _flag_key(full, kind, loads, limit + 1, terms, ctx, cast) + (split_below,)
+        if memo is not None and key in memo:
+            return memo[key]
+        found = flag_search(full, ctx, kind, loads, limit + 1, terms, cast, split_below)
+        if memo is not None:
+            memo[key] = found
+        return found
+    for k, s in enumerate(view.body.body):
+        if not isinstance(s, (C.ExprStmt, C.Return, C.If, C.Switch)) or not stmt_exprs(s) or \
+                not any(_reads_of(get()) & look for get, _ in stmt_exprs(s)):
+            continue
+        orig = stand_ins.get(id(s))
+        if orig is not None and _written([orig.then] + ([orig.orelse] if orig.orelse is not None else [])) & \
+                _reads_of(s.cond):
+            continue                        # (if (!z) { z = ...; }: chains makes it z = A || B)
+        if flow is None:
+            flow = FlagFlow(view, ctx)
+        gone, sinks, choosers = set(), set(), set()
+
+        def attempt(e, kind, cast="u32", top=False):
+            """e as flag_search finds it at this node: as it is (a flag's value or a value with carry
+            arithmetic of its own), with the flags and 64-bit temporaries written as their values,
+            then with their 32-bit results and the variables plus constants too (deep); a condition
+            (top) sunk where its flags are set; None where nothing is found."""
+            reads = _reads_of(e)
+            loads = loads_once(e)
+            if loads is None:
+                return None
+            if kind != "truth" and wide_arithmetic(e):
+                found = search(e, kind, loads, size(e) - 1, {}, cast)
+                if found is not None:
+                    return copy.deepcopy(found)
+            for deep in (False, True):
+                if not deep and not any(interesting(v) for v in reads):
+                    continue
+                if deep and not any(v in offsets and flow.definition(k, v) is not None for v in reads):
+                    continue
+                got = flow.expand(k, e, deep)
+                if got is None:
+                    continue
+                full, used = got
+                mine = {v for v in used if v in reads}
+                limit = size(e)
+                if any(interesting(v) for v in mine):
+                    limit = max(limit, 5)
+                terms = flow.results(k, used)
+                chose = any(len(used[v][0]) > 1 for v in used)
+                found = search(full, kind, loads, limit, terms, cast, split=chose and kind == "truth")
+                if found is not None:
+                    gone.update((v, d) for v in mine if v not in _reads_of(found) for d in used[v][0])
+                    choosers.update(flow.arms[used[v][0][0]][0] for v in used if len(used[v][0]) > 1)
+                    return copy.deepcopy(found)
+            if top and kind == "truth" and not loads:
+                return sink(e, reads)
+            return None
+
+        def sink(e, reads):
+            """The condition e of this node computed into a variable where its flags are set (the
+            last definition of what it reads, every other reaching there too and nothing written on
+            the way to this node), when it is a comparison there; the variable, or None."""
+            nonlocal taken
+            defs = {}
+            for v in reads:
+                r = flow.reach[k].get(v)
+                if not r or len(r) != 1 or min(r) < 0:
+                    return None
+                defs[v] = min(r)
+            plain = [v for v in reads if FLAG.match(v) and is_assign(flow.g.nodes[defs[v]].stmt) and
+                     truth_value(flow.g.nodes[defs[v]].stmt.e.value)]
+            if not any(interesting(v) for v in reads) or len(plain) == len(reads) == 1:
+                return None                 # (z = r0 == r1 read alone: the flag is its comparison)
+            p = max(defs.values())
+            if not is_assign(flow.g.nodes[p].stmt) or \
+                    any(d != p and flow.reaching(p, v, True) != {d} for v, d in defs.items()) or \
+                    not flow.unchanged(p, k, reads):
+                return None
+            got = flow.expand(p, e, True, after=True)
+            if got is None:
+                return None
+            full, used = got
+            found = search(full, "truth", [], max(size(e), 5), flow.results(p, used, True), "u32")
+            if found is None or reads & _reads_of(found):
+                return None
+            key = (p, C.expr_text(found))
+            if key not in sunk:
+                if taken is None:
+                    taken = all_names(fn)
+                sunk[key] = (fresh(fn, SINK, taken), copy.deepcopy(found))
+            sinks.add(key)
+            gone.update((v, d) for v, d in defs.items())
+            return C.Name(sunk[key][0])
+
+        def truths(e, cond=False):
+            if cond or truth_value(e):
+                got = attempt(e, "truth", top=cond)
+                if got is not None:
+                    return got
+            elif size(e) > 3 and any(_wide(ctx, v) for v in _reads_of(e)) and value_type(e):
+                got = attempt(e, "value", value_type(e))    # (rsbs; adcs: a value through a carry)
+                if got is not None:
+                    return got
+            if isinstance(e, C.Binary) and e.op in ("&&", "||"):
+                return C.Binary(e.op, truths(e.l, True), truths(e.r, True))
+            if isinstance(e, C.Unary) and e.op == "!":
+                return C.Unary("!", truths(e.e, True))
+            if isinstance(e, C.Cond):
+                return C.Cond(truths(e.c, True), truths(e.t), truths(e.f))
+            if isinstance(e, C.Binary):
+                return C.Binary(e.op, truths(e.l), truths(e.r))
+            if isinstance(e, C.Cast):
+                return C.Cast(e.type, truths(e.e))
+            if isinstance(e, C.Unary) and e.op not in ("*", "&"):
+                return C.Unary(e.op, truths(e.e))
+            if isinstance(e, C.Call):
+                return C.Call(e.f, [truths(a) for a in e.args])
+            if isinstance(e, C.Assign):
+                target = e.target if isinstance(e.target, C.Name) else truths(e.target)
+                if isinstance(e.target, C.Name) and FLAG.match(e.target.id) and e.op == "=" and \
+                        not truth_value(e.value):
+                    got = attempt(e.value, "flag")  # (c = (u32)(t_1 >> 32): a flag's value, 0 or 1)
+                    if got is not None:
+                        return C.Assign(e.op, target, got)
+                return C.Assign(e.op, target, truths(e.value))
+            return e
+        puts = []
+        for get, put in stmt_exprs(s):
+            before = C.expr_text(get())
+            after = truths(get(), isinstance(s, C.If) and get() is s.cond)
+            if C.expr_text(after) != before:
+                puts.append((put, after))
+        if puts:
+            proposals[k] = (puts, gone, sinks, choosers)
+    if not proposals:
+        return False
+    # All or none: the conditional blocks that read one flag's definition (an IT block's, before
+    # merge_ifs has made them one), and every reader of a flag whose value is a comparison already
+    # (z = r0 == r1: rewriting some of its readers would only write the comparison twice); a
+    # conditional compare's own condition aside where its flag was chosen through it (its block and
+    # the read go once nothing needs what it chooses).
+    readers = {}                            # (variable, definition) -> nodes that read it
+
+    def readers_of(v, d):
+        if (v, d) not in readers:
+            readers[(v, d)] = [m.index for m in flow.g.nodes if v in m.reads and d in (flow.reach[m.index].get(v) or ())]
+        return readers[(v, d)]
+    blocked, more = set(), True
+    while more:                             # (a reader blocked blocks the others of its flag)
+        more = False
+        for k, (_, gone, _, choosers) in proposals.items():
+            if k in blocked:
+                continue
+            block = id(view.body.body[k]) in stand_ins
+            for v, d in gone:
+                plain = FLAG.match(v) and is_assign(flow.g.nodes[d].stmt) and truth_value(flow.g.nodes[d].stmt.e.value)
+                if any(m != k and m not in choosers and (plain or (block and id(view.body.body[m]) in stand_ins)) and
+                       (m in blocked or (v, d) not in proposals.get(m, ((), ()))[1]) for m in readers_of(v, d)):
+                    blocked.add(k)
+                    more = True
+                    break
+    changed, used = False, set()
+    for k, (puts, _, sinks, _) in proposals.items():
+        if k in blocked:
+            continue
+        for put, after in puts:
+            put(after)
+            changed = True
+        used |= sinks
+    declare = []
+    for key in sorted(used, key=lambda key: sunk[key][0]):
+        p, (name, value) = key[0], sunk[key]
+        at = view.body.body[p]
+        home = view.homes[id(at)]
+        home.insert(next(i for i, x in enumerate(home) if x is at) + 1,
+                    C.ExprStmt(C.Assign("=", C.Name(name), value), at.addr))
+        declare.append(name)
+    write_back(view)
+    if declare:
+        body = fn.body.body
+        last = max((i for i, x in enumerate(body) if isinstance(x, C.Decl)), default=-1)
+        body[last + 1:last + 1] = [C.Decl("u32", [C.Declarator(name)]) for name in sorted(set(declare))]
     return changed
 
 
@@ -1813,33 +2843,43 @@ def tidy_expressions(fn):
 VALUE_OPS = ("+", "-", "&", "|", "^", "*")
 
 
-def value_candidates(e, ctx):
-    """Simple values to try for e: an operand alone, two of them combined by one operator."""
+def value_candidates(e, ctx, terms=()):
+    """Simple values to try for e: an operand alone or negated, two of them combined by one operator or
+    compared (a carry or a borrow; rsbs r0, r1, #0; adcs r0, r1 is r1 == 0). terms: operands beyond
+    e's own (the flags pass: a variable that holds the 32 bits of a sum)."""
     import copy
-    ops = operands(e)
+    ops = operands(e) + [t for t in terms if C.expr_text(t) not in {C.expr_text(x) for x in operands(e)}]
     out = [copy.deepcopy(a) for a in ops if not isinstance(a, C.Num)]
+    out += [C.Unary("-", copy.deepcopy(a)) for a in ops if not isinstance(a, C.Num)]
     for a in ops:
         for b in ops:
             if a is b or isinstance(a, C.Num):
                 continue
             for op in VALUE_OPS:
                 out.append(C.Binary(op, copy.deepcopy(a), copy.deepcopy(b)))
-            for op in ("<", ">=", ">", "<="):       # (a carry or a borrow)
+            for op in ("==", "!=", "<", ">=", ">", "<="):     # (equality; a carry or a borrow)
                 out.append(C.Binary(op, copy.deepcopy(a), copy.deepcopy(b)))
     return out
 
 
 def loads_once(e):
     """The texts of e's volatile loads when e's only effects are such loads, each read once: a
-    rewrite that reads each of them once again keeps them (None when e has other effects)."""
-    texts = []
+    rewrite that reads each of them once again keeps them (None when e has other effects). A call is
+    such an effect too where it is e's only one (no load, no other call, none in its arguments): a
+    rewrite that makes it once keeps it, and with nothing else to happen there is no order to keep
+    (f() - 0x1eu == 0 as f() == 0x1eu; until 2026-10-23 nothing with a call was rewritten)."""
+    texts, calls = [], []
     for x in walk_expr(e):
         if isinstance(x, C.Call) and not is_pure_call(x):
+            calls.append(x)
+        elif isinstance(x, (C.Assign, C.Post)) or (isinstance(x, C.Unary) and x.op in ("++", "--")):
             return None
-        if isinstance(x, (C.Assign, C.Post)) or (isinstance(x, C.Unary) and x.op in ("++", "--")):
-            return None
-        if is_volatile_access(x):
+        elif is_volatile_access(x):
             texts.append(C.expr_text(x))
+    if calls:
+        if len(calls) > 1 or texts or any(has_effects(a) for a in calls[0].args):
+            return None
+        texts.append(C.expr_text(calls[0]))
     if len(set(texts)) != len(texts):
         return None
     return sorted(texts)
@@ -1957,8 +2997,8 @@ PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("dead", d
           ("selects", selects), ("merge", merge_ifs), ("chains", chains), ("fold", fold), ("arms", empty_arms), ("spread", spread),
           ("addresses", addresses),
           ("expressions", tidy_expressions),
-          ("values", values),
-          ("conditions", conditions), ("literals", literals),
+          ("pairs", pairs), ("values", values), ("flags", flags),
+          ("conditions", conditions), ("sums", sums), ("literals", literals),
           ("declarations", tidy_declarations)]
 
 
@@ -2238,11 +3278,22 @@ def webs(fn):
     changed = False
     taken = all_names(fn)
     decls = declarations(fn)
+    initialised = {}                        # variable -> the declaration that gives it a value (u32 r0 = a0)
+    for n in g.nodes:
+        if isinstance(n.stmt, C.Decl):
+            for d in n.stmt.items:
+                if d.init is not None:
+                    initialised[d.name] = n.index
     for v in sorted(candidates):
         classes = {}
         for d in top_writes[v]:
             classes.setdefault(find((v, d)), []).append(d)
         entry = find((v, -1))
+        if v in initialised and find((v, initialised[v])) in classes:
+            # (its declaration's value is the entry's: the web it belongs to keeps the name the
+            # declaration has; until 2026-10-23 a web with a smaller first definition did, and the
+            # declaration's value was lost to the reads renamed away from it, at a loop's head)
+            entry = find((v, initialised[v]))
         for (u, node), defs in uses.items():
             if u == v and defs:
                 classes.setdefault(find((v, defs[0])), [])

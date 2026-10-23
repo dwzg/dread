@@ -349,8 +349,11 @@ def tested(e1, e2, ctx, as_bool=False, count=400):
 
 
 class Checker:
-    """tested for many proposals against one expression: the expression evaluated once on its test
-    values, each proposal dropped at its first disagreement (most at the first few values)."""
+    """tested for many proposals against one expression: the expression evaluated once on each of its
+    test values, when a proposal first needs it (most proposals are dropped at their first
+    disagreement, at one of the first few values: until 2026-10-23 the expression was evaluated on
+    all of them first, thousands for two variables, and that was most of a failed search's time),
+    each proposal dropped at its first disagreement."""
 
     def __init__(self, e1, ctx, as_bool=False, count=400):
         from dread.cflow import walk_expr
@@ -364,16 +367,23 @@ class Checker:
         if any(n not in self.ctx.types for n in self.names):
             return
         try:
-            f1 = compile_expr(a1, self.ctx)
+            self.f1 = compile_expr(a1, self.ctx)
         except Undefined:
             return
-        self.values = []
-        for env in vectors(self.names, self.ctx, count, extra=interesting([a1])):
-            try:
-                self.values.append((env, f1(env)[0]))
-            except Undefined:
-                continue
+        self.values = [[env, None] for env in vectors(self.names, self.ctx, count, extra=interesting([a1]))]
         self.ok = bool(self.values)
+
+    UNDEFINED = object()                    # (e1's value where it is undefined: a value left out)
+
+    def value(self, k):
+        """e1's value on test value k (UNDEFINED where e1 is undefined there)."""
+        entry = self.values[k]
+        if entry[1] is None:
+            try:
+                entry[1] = self.f1(entry[0])[0]
+            except Undefined:
+                entry[1] = Checker.UNDEFINED
+        return entry[1]
 
     def agrees(self, e2):
         """Whether e2 gives e1's values (as_bool: truths) on every test value (no proof)."""
@@ -390,14 +400,29 @@ class Checker:
             f2 = compile_expr(a2, self.ctx)
         except Undefined:
             return False
-        for env, v1 in self.values:
+        defined = False
+        for k in range(len(self.values)):
+            v1 = self.value(k)
+            if v1 is Checker.UNDEFINED:
+                continue
+            defined = True
             try:
-                v2 = f2(env)[0]
+                v2 = f2(self.values[k][0])[0]
             except (Undefined, KeyError):
+                self._first(k)
                 return False
             if (bool(v1) != bool(v2)) if self.as_bool else (v1 != v2):
+                self._first(k)
                 return False
-        return True
+        return defined
+
+    def _first(self, k):
+        """The test value that refuted a proposal first for the next (a proposal near another, r0 < 7
+        after r0 <= 7, fails where the last one did; until 2026-10-23 each walked the values from the
+        start, and a search of the flags pass's long proposals spent most of its time so). The verdict
+        is the same in any order: every value is tried before a proposal agrees."""
+        if k:
+            self.values.insert(0, self.values.pop(k))
 
     def stands_for(self, e2):
         """agrees, then proved (prove)."""

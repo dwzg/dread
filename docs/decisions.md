@@ -9,6 +9,111 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Flags as comparisons: a flag read through variables, proved where it is read (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** After the IT-block work, flags still printed as 64-bit sums with carry and zero
+  variables: where one compare is read by two statements (gizmo's cmd_mode, its ls by a conditional
+  store and by the result's select), where an add's carry is tested away from the add (FreeRTOS's
+  wake-time overflow test), where a compiler dispatches by successive subtractions, where a
+  conditional compare's two flags are read later (gizmo's parse_kv), in two-word arithmetic, and as
+  sums through 64 bits whose carry nobody reads (vPortFree's r0 - 8). fold writes a temporary into
+  its one reader, and conditions makes a comparison of what it finds there; neither sees a flag that
+  two statements read, or one read past a write of what it compares. How to read them, keeping the
+  exact semantics (unsigned and signed overflow, ARM's carry on a subtraction, RISC-V without flags,
+  the 64-bit sum's top bit)?
+- **Options.** (a) Rules per pattern (ls is <=, hi is >, the carry of an add is sum < operand, ...)
+  written into the readers. (b) At each reader, write the flags' definitions into the truth value
+  (each variable with one definition that reaches it, its value unchanged on every way there) and
+  search for the comparison it is, proved by z3, as conditions does for one reader. (c) Rewrite the
+  flags' definitions into comparisons (z = r0 == r3) and leave their readers reading variables.
+- **Choice: (b), with (c) where a reader must keep a variable.** (a) would repeat for each pattern what
+  the search with proof already does for every combination of flags, and the problem was where the
+  flags are read, not what they combine to; the proof decides each rewrite, so no rule has to be
+  argued case by case. (c) alone leaves z = r0 == r1 beside if (z): one name more to read, and the
+  carry arithmetic of ls (two flags) has no one variable. The pieces, each argued:
+  1. **Writing a definition into a reader** (dread.tidy FlagFlow): v's value at node n is its
+     definition's value when that definition is the only one reaching n (every way to n passes it and
+     no other writes v) and nothing on a way from it to n writes what the value reads (the region: the
+     nodes on ways from the definition to n that pass neither it again nor another definition of v).
+     Equal sets of reaching definitions, the test propagate uses for copies, is not enough in a loop:
+     a way may pass a write of what the value reads and come round to the same set. Flags, 64-bit
+     temporaries and, at a second level, their 32-bit results and variables that are another plus a
+     constant are written (a chain of subtractions). A load in a definition stands for what it loaded
+     there (one text, one load, in the proof); a candidate that reads it is not taken (it would load
+     anew where nothing loaded), but a variable that holds what it loaded may stand: the sum of an add
+     whose carry is tested (adds r5, r5, r0; str r5; blo as r5_1 >= r5) or the difference of a
+     subtraction from memory (subs r8, r1, [r0, #8]; movlo r8, r1 as if (r1 < r8) r8 = r1).
+  2. **The proof** is conditions': z3 proves that wherever the written truth value is defined, the
+     candidate is and has its truth (a flag's value or a value: its value, as the target's type has
+     it). The lifters' flags are what z3 sees, so the carry's meaning is the lifter's: ARM's subtract
+     sets c when there is no borrow, and `(u32)(((u64)x + (u32)~y + 1) >> 32)` is exactly x >= y
+     unsigned; n and v are the sign and overflow of the 32-bit result, and the signed comparisons z3
+     proves against them are those of the two's complement values. RISC-V has no flags: its
+     comparisons are sltu and kin, which the lifter writes as comparisons; the passes find nothing
+     there (no flag variable or 64-bit sum on the RISC-V builds before or after).
+  3. **The sum below an operand.** The carry of a + b (32 bits) is exactly (a + b) mod 2**32 < a;
+     with a carry in, <=. Proved per reader all the same.
+  4. **A chain of subtractions.** x - k1 - k2 == m is x == m + k1 + k2 (mod 2**32): subtraction of a
+     constant is a bijection. An order comparison is not (it wraps), so the constants it would take
+     are only offered to the search (flag_numbers) and kept where z3 proves them.
+  5. **Two words.** adds lo; adc hi is the 64-bit sum (c:a) + (d:b) + k exactly: its low word is the
+     low sum's, its high word c + d + the low sum's carry (pairs; both words proved per instance). The
+     high words' operands are read where the low word's sum is, so they must keep their values on the
+     way (and a load of them be made where nothing happens between). cmp; sbcs is the 64-bit
+     comparison: no borrow out of the high words with the low words' borrow in is (a1:a0) >= (b1:b0);
+     such pairs are offered to conditions' search (chained) and proved.
+  6. **A conditional compare's two flags** (cmp r5, #0x5f; it ne; cmpne lr, #0x19; read by a select
+     and a branch): each flag has two definitions, one in the conditional block's arm; its value at a
+     reader is the block's condition ? the arm's : the other's, each part written where it is defined
+     and unchanged up to the reader, none reading memory (FlagFlow.chosen). The search then tries
+     p && t, !p || t, p || f, !p && f from the comparisons of the condition and of either way
+     (_split_search): r5 == 0x5f || lr_1 <= 0x19 for ls, r5 != 0x5f && lr_1 > 0x19 for hi.
+  7. **Sinking.** A condition whose operands change before it is read (cmp r1, #9; mov r1, r5; bhi,
+     a loop's variable) is computed where its flags are set into a variable of its own, cc_1 = r1 > 9,
+     read where the flags were: every way to the reader passes the last of the flags' definitions,
+     and nothing writes them between. Only where the condition reads a flag that is not a comparison
+     already (z = r0 == r1 read alone would only be copied).
+  8. **Sums whose carry nobody reads** (sums): (u32)((u64)a + b + k) is a + b + k (mod 2**32) for
+     32-bit operands; ~b + 1 is -b. Proved per instance with C's types, and kept a u32 (a cast where
+     the sum's own type is not: a loaded byte is promoted to int). After conditions, which reads a
+     compare's own sum better (r0 == r5, not r0 - r5 == 0).
+  9. **Which readers.** A reader takes a candidate no larger than its truth value, or of at most five
+     nodes where it read a flag or a 64-bit temporary (an atomic comparison: r0 == r1 for z). Two
+     rules keep the result readable, not correct (the proof does that): the conditional blocks that
+     read one flag's definition (an IT block's, before merge_ifs has made them one) are rewritten all
+     or none, since merge_ifs joins ifs by the texts of their conditions; and a flag whose value is a
+     comparison already is written into all its readers or none (else the comparison is written twice
+     and the flag stays), a conditional compare's own condition aside.
+  10. **Also.** conditions looks into calls' arguments and stored values (prvCheckExpectedState(r7 <
+     r0_1 ? 0 : 1)); a call that is a condition's only effect counts as one read once (f() - 0x1e == 0
+     as f() == 0x1e); value candidates include a negation and equalities (rsbs r0, r1, #0; adcs r0, r1
+     is r1 == 0); an unsigned x < 1 is tried as x == 0 first.
+- **Found on the way.** dread.tidy webs lost a declaration's initial value (r0 = a0, a parameter read
+  elsewhere too) where the value is read at a loop's head that the loop's end reaches as well: the web
+  with the smaller first definition kept the name, the declaration's did not and was renamed away from
+  its reads. The gate refuses such a function (the eight builds accept the same functions with the fix
+  as without it); the random functions of tests/test_flags.py found it. cexpr.Checker evaluated its
+  expression on all its test values before the first proposal (thousands for two variables) and tried
+  each proposal from the first value: it now evaluates lazily and tries first the value that refuted
+  the last proposal (the verdicts are the same in any order): 30 of the random functions took 8.6-10.4
+  s of CPU instead of 16.5-19.9 s with the old Checker, the same output. context() made the
+  declarations once per name (quadratic in the body); once now.
+- **Figures.** (docs/todo.md, the item, has them all.) On fresh copies of the eight builds, main ->
+  this: conditions with a 64-bit sum FreeRTOS GCC -Os 23 -> 0, clang -O2 16 -> 4, GCC -O0 15 -> 0,
+  gizmo m3 and m4 1 -> 0 (RISC-V and gizmo a32, rv32: none either way); flag variables gizmo a32 7 -> 1,
+  m3 and m4 2 -> 0, GCC -Os 18 -> 6, clang -O2 18 -> 5, GCC -O0 4 -> 0; 64-bit temporaries 70 -> 2,
+  21 -> 6, 7 -> 2 (what is left on these builds is a 64-bit counter, written as one now); lines down in
+  every build with flags. The gate accepts the same functions as main on all eight builds, the same
+  sets. Making the readable C costs about a tenth more CPU (clang -O2 45.3 -> 55.1 s summed over the
+  functions); the check's wall time moved within the noise of a shared machine except clang -O2's (45
+  -> 66 s, two runs each).
+- **Undo.** Take ("pairs", pairs), ("flags", flags) and ("sums", sums) out of tidy.PASSES; conditions'
+  ExprStmt branch and Call/Assign recursion; value_candidates' negation and equalities; loads_once's
+  call; shared_candidates' terms, numbers, chained and the equality with 0.
+- **Status.** Done (dread/tidy.py, dread/cexpr.py; tests/test_flags.py, tests/test_tidy.py).
+
 ## Readable C as printed: the structures in an image's header, a reading form without the instructions (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

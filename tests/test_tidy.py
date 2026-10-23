@@ -671,10 +671,13 @@ def test_a_conditional_compare_is_one_condition_and_its_loads_stay_unconditional
     """cmp r0, r5; it ne; cmpne r4, r1 leaves z = r0 == r5 || r4 == r1: the compare's block inside the
     if is flattened like any other, and z = A; if (!z) z = B; is z = A || B. The second word was
     loaded before the compare on every path: it is not folded into the right of the ||, where it
-    would be loaded only when r0 != r5."""
+    would be loaded only when r0 != r5. Since 2026-10-23 the select that reads z reads the
+    conditional compare's two ways (tidy.flags, FlagFlow.chosen), its negation taken in: r0 != r2 + 3
+    && r4 != r1 (before, !(r0 == r2 + 3 || r4 == r1))."""
     out = tidy_text(CCMP)
-    assert "r0 == r2 + 3 || r4 == r1" in out, out
+    assert "r0 != r2 + 3 && r4 != r1" in out, out
     assert "r1 = *(volatile u32 *)(r3 + 4);" in out and "u64" not in out, out
+    assert out.index("r1 = *(volatile u32 *)(r3 + 4);") < out.index("&&"), out
 
 
 @needs_z3
@@ -696,15 +699,15 @@ def test_the_conditions_search_shares_its_candidates_and_searches_once_a_run(mon
     limit = tidy.size(e)
     assert [x for n, x, _ in shared if n < limit] == [x for _, x, _ in tidy.shared_candidates(e, c, below=limit)]
     searched, real = [], tidy.shared_candidates
-    monkeypatch.setattr(tidy, "shared_candidates", lambda e, ctx, most=10, below=None:
-                        searched.append(cparse.expr_text(e)) or real(e, ctx, most, below))
+    monkeypatch.setattr(tidy, "shared_candidates", lambda e, ctx, most=10, below=None, **more:
+                        searched.append(cparse.expr_text(e)) or real(e, ctx, most, below, **more))
     runs = {}
     for way, run in (("a run", tidy.tidy), ("every round again", lambda fn: tidy._tidy(fn, None, None, 8))):
         del searched[:]
         fn = cparse.parse(CCMP).function("f")
         run(fn)
         runs[way] = cparse.unparse(fn), list(searched)
-    assert runs["a run"][0] == runs["every round again"][0] and "r0 == r2 + 3 || r4 == r1" in runs["a run"][0]
+    assert runs["a run"][0] == runs["every round again"][0] and "r0 != r2 + 3 && r4 != r1" in runs["a run"][0]
     assert len(runs["a run"][1]) == len(set(runs["a run"][1])) == len(set(runs["every round again"][1]))
     assert len(runs["a run"][1]) < len(runs["every round again"][1])
 
