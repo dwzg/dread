@@ -631,10 +631,10 @@ that the C still compiles to the same code."""
 
 GLOBALS_SYSTEM = """You name the global variables and device registers of a binary image. Its C was
 made from the machine code by tools; memory at a fixed address is written as a name that says only
-where it is: g_20029aac (RAM), io_40004004 (a device register), rom_c6e4 (read-only memory), with a
-suffix when it is read or written narrower or wider than a word (g_20029aac_u8). Static data the code
-reaches as one structure is a structure named so (g_20000030), its fields named after their offsets
-(g_20000030.f_4: hexadecimal); the structure and each field are shown apart. Each is shown with
+where it is: g_ and its address in RAM, io_ and its address for a device register, rom_ and its
+address in read-only memory, with a suffix when it is read or written narrower or wider than a word
+(_u8, _s16). Static data the code reaches as one structure is a structure named so, its fields named
+after their offsets (.f_4: hexadecimal); the structure and each field are shown apart. Each is shown with
 lines of the image's C that use it, under the name of the function they are in. Give each a name
 that says what it holds (a field: its own name, without the structure's); the functions' names show
 the project's style (its prefixes, its case): follow it.
@@ -642,8 +642,10 @@ the project's style (its prefixes, its case): follow it.
 Answer with one ```json block mapping the shown names to yours:
 
 ```json
-{"g_20029aac": "<name>", "io_40004004": "<name>", "g_20000030": "<name>", "g_20000030.f_4": "<name>"}
+{"<a name shown>": "<your name>", "<a structure shown>": "<your name>", "<a structure shown>.f_<offset>": "<your name>"}
 ```
+
+The names in this example are placeholders: answer with the names shown below.
 
 A name is a C identifier of at most 48 characters, no C keyword, no function's name, no two alike.
 Leave out one you cannot name."""
@@ -877,8 +879,10 @@ case): follow it.
 Answer with one ```json block:
 
 ```json
-{"s_1": {"name": "<name>", "fields": {"f_0": "<name>", "f_4": "<name>"}}}
+{"<a structure shown>": {"name": "<your name>", "fields": {"<one of its fields>": "<your name>"}}}
 ```
+
+The names in this example are placeholders: answer with the structures and fields shown below.
 
 A name is a C identifier of at most 48 characters, no C keyword; no two structures alike, no two
 fields of one structure alike. Leave out what you cannot name."""

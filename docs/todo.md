@@ -623,8 +623,11 @@ its sources.
   listing" and an empty block; or a first block with the example names and a corrected second one,
   which the pilot does not read); in main's run that was the batch of the kernel's globals
   (xYieldPending, pxCurrentTimerList: names the model knows from FreeRTOS), in the --jobs 16 run one of
-  the demo's; the --jobs 1 run had none. Left to do: example names in GLOBALS_SYSTEM (and
-  STRUCTS_SYSTEM) that cannot be taken for the image's, placeholders, measured before and after.
+  the demo's; the --jobs 1 run had none. Done the same day: GLOBALS_SYSTEM and
+  STRUCTS_SYSTEM show the answer's form with placeholders ("<a name shown>"); three runs each with
+  --jobs 16: with the example names 242, 310 and 316 globals named, 3 of 27 batches answering the
+  examples (4, 4 and 0 names: "None of the four names in the template appears in your listing"), with
+  placeholders 313, 323 and 315, none.
   Found on the way: readable.transform kept its results by the context's id, and a context made where
   one had died got the dead one's results, made with its tables (38 of 50 new contexts in a row on
   gizmo; struct_uses's context of its own could get another's lines); now kept per context, weakly.

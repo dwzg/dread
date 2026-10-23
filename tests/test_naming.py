@@ -590,3 +590,16 @@ def test_the_variables_questions_begin_with_what_the_image_is(tmp_path):
     assert with_line[0]["user"] == line + "\n\n" + without[0]["user"], with_line[0]["user"][:200]
     assert without[0]["user"].startswith("The function strlen (readable C):")
     assert with_line[0]["digest"] == without[0]["digest"]
+
+
+def test_the_shared_names_prompts_show_no_name_that_could_be_asked():
+    """The globals' and the structures' prompts show the answer's form with placeholders: with real-looking
+    examples (g_20029aac, io_40004004, g_20000030) Haiku 5.5 took them for the names asked and named
+    nothing in 3 of 27 batches on FreeRTOS GCC -Os (2026-10-23), with placeholders in none."""
+    import re
+    from dread import pilot
+    for prompt in (pilot.GLOBALS_SYSTEM, pilot.STRUCTS_SYSTEM):
+        example = re.search(r"```json\n(.*?)```", prompt, re.S).group(1)       # (the answer's form)
+        assert not re.search(r"\b(g|io|rom)_[0-9a-f]{3,}|\bs_\d+\b|\bf_[0-9a-f]+\b", example), example
+        assert "<your name>" in example and "placeholders" in prompt
+    assert not re.search(r"\b(g|io|rom)_[0-9a-f]{3,}", pilot.GLOBALS_SYSTEM)
