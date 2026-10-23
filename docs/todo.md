@@ -2101,6 +2101,8 @@ undone). Other decisions are taken by the recommended option and written down in
   functions read xTail again to see whether an interrupt moved it: a case's `later`, memory that changes
   before the n-th read, could answer that), system registers, a run that faults in a call through a
   pointer a stub's fill gave (prvTimerTask's pending function calls).
+  On the private real-life test (2026-10-23; no whole-image run there): about a hundred more functions
+  accepted, a fifth fewer dropped for unrun instructions, and no more disagreements than before.
 
 - [ ] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
   (found 2026-10-23 with the frontier answers, FreeRTOS RISC-V GCC -Os). With xTaskResumeAll accepted
