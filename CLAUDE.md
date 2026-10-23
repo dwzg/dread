@@ -26,7 +26,7 @@ changing a table, case or report format.
    the calling convention, the compiler and the paths of its tables from `dread.target`. A constant
    in a tool that describes a firmware is a bug. Constants of the method (limits, search budgets)
    are named, documented and overridable.
-3. **Both gizmo builds pass.** `.venv/bin/pytest` runs the tests on the ARM-state build (`a32`) and
+3. **Both gizmo builds pass.** `.venv/bin/python -m pytest` runs the tests on the ARM-state build (`a32`) and
    the Cortex-M3 build (`m3`). A new tool comes with a test on gizmo. A test that needs Ghidra or
    another slow or optional program is marked and skipped when the program is missing.
 4. **Formats are interfaces.** Tables, case files and reports are read by other tools and by target
@@ -70,7 +70,7 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   (a force-push); then go on with what does not depend on it.
 - **When stuck**, after two serious attempts or a few hours on one item: write down what was tried
   and why it failed in the item, put the tree back to the last commit, and take the next item.
-- **Commit only green**: `.venv/bin/pytest` passes, every gizmo build. Push only through the leak
+- **Commit only green**: `.venv/bin/python -m pytest` passes, every gizmo build. Push only through the leak
   check (rule 9) with a script that stops on its exit status; never force-push without the user.
   The push script runs the fast tests first (`pytest -m "not slow"`, about 15 s) and refuses a red
   tree: once a push went out because the command that ran the tests went on after they failed.
@@ -97,6 +97,10 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   a directory): on 2026-10-22 a bare `git add -A` during a rebase committed the link, and merging it
   into the checkout replaced the checkout's venv with a link to itself (git takes ignored files for
   expendable); the venv had to be made anew. Add files by name in worktrees.
+  Run a worktree's tests with `.venv/bin/python -m pytest` from its root: `.venv/bin/pytest` imports
+  the checkout's `dread` through the editable install and silently tests main's code (two agents
+  measured main's code that way on 2026-10-23, one noticed only because a test failed on output of
+  main's newer code).
   CI has none of these caches: a test must make or search for what it needs and pass on a checkout
   without them (on 2026-10-22 a test read gizmo's cached cases without searching and failed only on
   CI). To see what CI sees, delete the caches in a worktree of its own before running the test.
