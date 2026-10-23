@@ -53,8 +53,9 @@ EXTENT_TAIL = 1024      # bytes behind a function's last instruction that may st
 
 class OverlayError(Exception):
     """The link cannot be made; `function` names the one function at fault when there is one,
-    `room`, when the room for the C is full, says (bytes over, the functions without room largest
-    first, {function: size}), and `failed` the sources that did not compile."""
+    `room`, when the room for the C is full, says (bytes over, the functions with C there largest
+    first, {function: its bytes there}: itself when no slot or hole took it, and its object's helpers),
+    and `failed` the sources that did not compile."""
 
     def __init__(self, message, function=None, room=None, failed=()):
         super().__init__(message)
@@ -83,6 +84,19 @@ def tail_bytes(objects, placed):
     return total
 
 
+def helper_owners(objs, funcs):
+    """{helper: the function of the original it belongs to}: a function the C defines that the
+    original does not have (a helper) belongs to the one function of the original its object defines
+    (a lifted function's file: its body behind a naked entry, a helper of its own); a helper of an
+    object with several (a source file written by hand) belongs to none."""
+    by_object = {}
+    for fn, v in objs.items():
+        if fn in funcs:
+            by_object.setdefault(v[4], []).append(fn)
+    return {fn: by_object[v[4]][0] for fn, v in objs.items()
+            if fn not in funcs and len(by_object.get(v[4], ())) == 1}
+
+
 def align_up(value, alignment):
     return (value + alignment - 1) // alignment * alignment
 
@@ -100,8 +114,8 @@ def runs_of(prog, fn):
 
 
 def read_objects(objects, arch):
-    """{function: (size, alignment, words of its contents, isa)} from the .text.NAME sections; the
-    isa from the function's symbol (arch.isa_of_symbol: ARM marks Thumb with bit 0)."""
+    """{function: (size, alignment, words of its contents, isa, object)} from the .text.NAME sections;
+    the isa from the function's symbol (arch.isa_of_symbol: ARM marks Thumb with bit 0)."""
     out = {}
     for obj in objects:
         elf = Elf(obj)
@@ -113,7 +127,7 @@ def read_objects(objects, arch):
                     raise OverlayError("function %s is defined in more than one object" % fn)
                 data = elf.data(sec)
                 words = set(struct.unpack_from("<%dI" % (len(data) // 4), data))
-                out[fn] = (sec.size, sec.align, words, isa.get(fn, arch.isa))
+                out[fn] = (sec.size, sec.align, words, isa.get(fn, arch.isa), obj)
     return out
 
 
@@ -236,6 +250,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
 
     branch_len = {fn: arch.branch_length(funcs[fn].isa, funcs[fn].entry, (base, limit)) for fn in replaced}
     in_slot, in_body, relocated, helpers = [], [], [], [fn for fn in sizes if fn not in funcs]
+    owner = helper_owners(objs, funcs)
     place, short, tramps = {}, set(), {}
     narrow = getattr(arch, "short_branch", None)
     for fn in sorted(replaced):
@@ -377,9 +392,16 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
         message = r.stderr
         room = None
         if "the room for the C is full" in r.stderr:
-            message += "no space for: %s\n" % " ".join(sorted(in_tail))
+            # what each function has there: itself when no slot or hole took it, and the helpers of its
+            # object (a body behind a naked entry: dread.lift's wrapped functions and those that hand
+            # back more results), which go there wherever the function itself went
+            there = {n: sizes[n] for n in in_tail}
+            for h in helpers:
+                if owner.get(h) is not None:
+                    there[owner[h]] = there.get(owner[h], 0) + sizes[h]
+            message += "no space for: %s\n" % " ".join(sorted(there))
             over = tail_bytes(objects, set(in_slot + in_body + in_hole)) - (tail_end - tail)
-            room = (max(over, 1), sorted(in_tail, key=lambda n: (-sizes[n], n)), {n: sizes[n] for n in in_tail})
+            room = (max(over, 1), sorted(there, key=lambda n: (-there[n], n)), there)
         raise OverlayError("the link failed:\n" + message, room=room)
     linked = Elf(elf_path)
     for sec in linked.sections:

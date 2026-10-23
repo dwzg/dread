@@ -683,7 +683,11 @@ its sources.
   what an earlier callee left, the C cannot have it (the three dropped above); a fix in dread.regflow
   would spare both. The readable C of such a function shows the naked entry and
   leaves the body as lifted C (as for a wrapped function), and lr read as a value in the body is the
-  entry's return address (likewise).
+  entry's return address (likewise). The body is a helper of its function's object and goes into the
+  room for the C wherever the entry went: on the private real-life test, short of room, the room
+  filled with bodies alone, the overlay named nothing to drop, and the lift check's build failed
+  (2026-10-23). The room's report now counts each helper with the one function of the original its
+  object defines (dread.overlay.helper_owners), so the check drops that function.
 - [ ] **The pilot on the draft.** Names for the readable C: the model proposes a map of names and a
   sentence, code applies it (docs/decisions.md). Built 2026-10-21: dread/naming.py (the
   readable_names table, applied by digest, a map kept only when its names are C identifiers nothing

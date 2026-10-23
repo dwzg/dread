@@ -874,3 +874,68 @@ def test_the_system_run_agrees_with_the_entries_in_the_whole_image(tmp_path):
         accepted = lift.check(t, t.image(), chosen, out=lines.append, jobs=2)
         assert sorted(accepted) == sorted(chosen), "\n".join(lines)
         assert "the whole image agrees" in "\n".join(lines), "\n".join(lines)
+
+
+ROOMY_A32_S = """
+    .syntax unified
+    .arch armv4t
+    .arm
+    .text
+    .global roomy_quad_split, roomy_reader
+    .type roomy_quad_split, %function
+roomy_quad_split:               @ four words back in r0-r3, long enough for the naked entry in place
+    add     r2, r0, r1
+    eor     r3, r0, r1
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    sub     r1, r0, r1
+    and     r0, r0, r2
+    bx      lr
+    .size roomy_quad_split, . - roomy_quad_split
+    .type roomy_reader, %function
+roomy_reader:                   @ reads r2 and r3 behind the call
+    push    {r4, lr}
+    bl      roomy_quad_split
+    add     r0, r0, r2
+    add     r0, r0, r3
+    pop     {r4, lr}
+    bx      lr
+    .size roomy_reader, . - roomy_reader
+"""
+
+
+@needs_arm
+def test_a_body_without_room_drops_its_function_not_the_build(tmp_path):
+    """A body behind a naked entry is a helper of its function's object and goes into the room for the
+    C, while the entry stays in the function's place. With that room full and nothing else there, the
+    lift check drops the function the body belongs to (dread.overlay.helper_owners): before, nothing
+    the overlay had planned stood in the room, nothing could be dropped and the build failed ("no
+    space for: " and nothing after it)."""
+    t = arm_program(tmp_path, "a32", source=ROOMY_A32_S, entry="roomy_reader")
+    image = t.image()
+    end = (image.base + len(image.payload()) + 7) & ~7
+    toml = tmp_path / "dread.toml"
+    toml.write_text(toml.read_text().replace("limit = 0x30000", "limit = 0x%x" % end))
+    t = Target.load(str(tmp_path))
+    p = Program(t, t.image())
+    got = lift.make_lifter(p, regflow.analyse(p)).lift(p.by_name["roomy_quad_split"])
+    assert got.more == ["r2", "r3"]
+    lines = []
+    accepted = lift.check(t, t.image(), ["roomy_quad_split"], out=lines.append, jobs=2)
+    text = "\n".join(lines)
+    assert accepted == [] and "the build failed" not in text, text
+    assert "dropped  roomy_quad_split" in text and "no room left for its C" in text, text
+    # with the room the body needs, it is accepted with its entry in place
+    toml.write_text(toml.read_text().replace("limit = 0x%x" % end, "limit = 0x30000"))
+    t = Target.load(str(tmp_path))
+    lines = []
+    assert lift.check(t, t.image(), ["roomy_quad_split"], out=lines.append, jobs=2) == ["roomy_quad_split"], \
+        "\n".join(lines)
