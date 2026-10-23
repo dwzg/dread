@@ -368,6 +368,8 @@ class Flow:
             for b in self.succ[a]:
                 self.pred[b].append(a)
         self._effects, self._defs, self._memo = {}, {}, {}
+        self.loads = {}                     # a source that is a load from memory -> the loads it came from
+                                            # (dread.autocase's frontier answers set the memory they read)
 
     def _plain_successors(self, a, insn, code):
         kind, target, falls = self.kind[a]
@@ -566,7 +568,7 @@ class Flow:
             # flags: their registers, though one may be an address) and what it calls register-only
             # are followed
             lit = arch.literal(insn, isa) if hasattr(arch, "literal") else None
-            through = {ctx.address_source(lit[0])} if lit is not None else set()
+            through = {self.load(d, ctx.address_source(lit[0]))} if lit is not None else set()
             if reg != "flags" and through:
                 return through | condition
             only = getattr(arch, "register_only", None)
@@ -619,16 +621,16 @@ class Flow:
             if c is not None:
                 at = ctx.address_source(c + offset)
                 if not index:
-                    return {at} | condition
+                    return {self.load(d, at)} | condition
                 if at[0] == "constant":             # a table in read-only memory: what indexes it decides
                     return index | condition
                 text = "%s indexed by %s" % (at[2], describe(primary(index)))
-                return {(at[0], at[1], text)} | condition
+                return {self.load(d, (at[0], at[1], text))} | condition
             main = primary(self.sources(d, base, depth, stack))
             cls = main[0] if main else "unknown"
             text = "field %s0x%x of %s%s" % ("-" if offset < 0 else "+", abs(offset), describe(main),
                                             " (indexed)" if indexed else "")
-            return {("field", (cls, offset), text)} | condition
+            return {self.load(d, ("field", (cls, offset), text))} | condition
         if arch.stack_kind(insn) == "pop":
             return {("local", "restored", "a value restored from the stack (%s at 0x%x)" % (insn_text(insn), d))}
         # a register computed from registers
@@ -647,6 +649,11 @@ class Flow:
                     insn_text(insn), d))} | condition
             return {("system", insn_text(insn), "what %s at 0x%x gives" % (insn_text(insn), d))} | condition
         return out | condition
+
+    def load(self, d, source):
+        """source, a load's from memory, remembered as coming from the load at d (self.loads)."""
+        self.loads.setdefault(source, set()).add(d)
+        return source
 
     @staticmethod
     def reads_carry(insn):
@@ -711,8 +718,8 @@ class Flow:
                 handed = self.handed(q, slot)
                 if handed:
                     name = self.callee(q) or "a call through a register"
-                    out.add(("callee", name, "what %s stores in the local at entry sp-0x%x (handed its address in "
-                                             "%s at 0x%x)" % (name, slot, handed, q)))
+                    out.add(self.load(d, ("callee", name, "what %s stores in the local at entry sp-0x%x (handed its "
+                                                          "address in %s at 0x%x)" % (name, slot, handed, q))))
                     continue
             if q == self.fn.entry:
                 entry = True

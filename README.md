@@ -46,7 +46,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | Target description, function tables, ARM and Thumb layer, ELF import | done |
 | Listing generator and byte-identical rebuild, Ghidra pipeline | done |
 | Emulator, differential test runner, overlay linker | done |
-| Case generator (coverage- and compare-guided, pointer learning, a dictionary for parsers) | done |
+| Case generator (coverage- and compare-guided, pointer learning, a dictionary for parsers, answers for the branches all cases take one way: a callee's result at one call, memory a load reads) | done |
 | Why cases leave code unrun (`dread uncovered`): each missed region's way in, what decides it traced back to its source (an argument, a callee's result, a global, a device register, a field, a loop), what the cases saw there and a run sent that way | first version |
 | Mutation check with survivor search and argued survivors | done |
 | Integration run: generated inputs with real callees, also through original callers | done |

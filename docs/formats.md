@@ -227,7 +227,7 @@ the seconds the search was allowed; only for showing what a function does, never
 | `args` | the argument registers |
 | `mem` | `[[address, size, value], ...]` written before the call (peripheral registers too) |
 | `returns` | the answers of the stubbed callees, in call order (later calls answer 0) |
-| `calls` | `[[callee, register mask, stack words], ...]`: the generic stubs; written cases without it get auto()'s; recorded cases (`dread record`) carry the ones they were recorded with, and those are kept |
+| `calls` | `[[callee, register mask, stack words], ...]`: the generic stubs; written cases without it get auto()'s; recorded cases (`dread record`) carry the ones they were recorded with, and those are kept. A fourth element, a list of call numbers (from 1, counting the callee's calls in the run), makes the stub answer those calls only: at the others the callee runs as if no stub were there, and they take no answer from `returns` and count as no stub call (the frontier answers, since 2026-10-23; a DREAD from before reads three elements and stubs every call) |
 | `frame` | the bytes of the function's frame a stub may fill behind a pointer to a local (as `calls`: from auto() unless the case carries it) |
 | `effects` | `[[call number, address, size, value], ...]` written by that stub call before it returns |
 | `fills` | `[[call number, which pointer, offset, size, value], ...]` set inside what a stub stored behind a pointer |
@@ -239,6 +239,7 @@ the seconds the search was allowed; only for showing what a function does, never
 | `hang` | true: not returning is the result (compared up to the limit) |
 | `tight` | true: a stub's fill stops at the first stack word the function stored itself |
 | `carried` | true: an input of an earlier generation, kept when the cases were made anew because it runs instructions the new ones do not, or that only new ones run whose outcome belongs to the original's frames (dread.autocase's carried; for reading only, the runner treats it like any case) |
+| `answer` | true: a case the frontier answers made from another (dread.autocase's answers: a callee's answer at one call, a stubbed callee's answer, or the memory a load reads, set to what a branch's other way needs; for reading only) |
 | `firm` | true: a fragile case (its outcome changes with the stack, or its input makes code touch a saved register: dread.fragile) with one input set small, added because it runs instructions only fragile cases ran (dread.autocase's firm_up; for reading only) |
 | `why`, `by` | where a written case comes from and why (`dread mutate --kill`, `dread record`); nothing reads them but people |
 | `kept` | in kept cases: `"stubbed"` or `"real callees"` |
@@ -258,6 +259,11 @@ work and the wall-clock time of the run. A generated-case cache entry
 (`BUILD/autocases/IMAGE/NAME.json`) also says how many `seconds` its generation took, and with
 `firm` the version of the firm-up its cases had (dread.autocase.FIRM: an entry without it, or with an
 older one, gets the firm-up once, its cases kept; a `failed` entry holds the generation's error).
+`answers` (since 2026-10-23) holds the frontier answers made from the entry's cases and the image's
+kept and written cases of the function: `{"key", "cases", "seconds"}`, the key a digest of the
+entry's key, its `firm`, dread.autocase.ANSWERS and those kept and written cases; under another key
+they are made anew and the generated cases stay. Readers that take `cases` only see the cases without
+the answers.
 
 ### `argued.tsv` (beside the cases directory)
 

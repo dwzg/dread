@@ -9,6 +9,73 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The frontier answers: a step after the search, from the cases the lift check runs (2026-10-23)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** `dread uncovered` showed what the cases lack: on the FreeRTOS builds most of what
+  ordinary functions miss lies behind a branch on a real callee's result, a stubbed callee's answer the
+  search never gave, or memory (a global); forced the missed way, much of it runs and returns. How is
+  the generator to give those values, where does it look for the branches, and how is it kept from
+  costing every cache its cases?
+- **Options and choices.**
+  1. Where: (a) a stage inside the search (`_generate_once`, after the decider), from the generated
+     corpus; (b) a step after the generation, like the firm-up, from the function's generated, kept and
+     written cases together (what the lift check runs). **(b)**: on FreeRTOS much of the frontier is
+     reached only by the cases dread sysrecord recorded in the system run (xEventGroupSync's test of
+     uxTaskResetEventItemValue's bit 25, vTaskPriorityDisinheritAfterTimeout's of uxListRemove's
+     result): no generated input gets there, so (a) could not answer them. Measured: of the answer
+     cases on five FreeRTOS builds 219 start from a recorded case, 119 from a generated one. The
+     search's cases stay as they were, so VERSION stays (the docstring's rule for what is added
+     afterwards: a version of its own, ANSWERS); the answers are cached in the entry under "answers",
+     keyed by the generation's key, its firm-up, ANSWERS and the kept and written cases, so that a newly
+     recorded case makes them anew without a new search. A generation that failed is answered from its
+     written cases (kept only where the failure is cached: a quick failure is not).
+  2. What decides a branch: (a) the compare-guided stage's dependence probes (change each input, see
+     what moves), (b) dread.uncovered's trace (decide: the flags' setter, each register back to its
+     sources). **(b)**: a real callee's result is no input, so no probe finds it; the trace names it,
+     and the load a global or a field comes from (uncovered.Flow.loads, a side table; its output is as
+     it was).
+  3. A real callee's result: (a) stub the callee at every call (the decider stage's way), (b) a stub
+     that answers only the call whose result decides, the callee running at its other calls (the fourth
+     element of a case's calls, the call numbers it answers; docs/formats.md). **(b)**: stubbed at every
+     call, xStreamBufferSend's earlier calls write nothing, the buffer stays empty and the run takes
+     another way long before the branch (prvSingleTaskTests checks each call's result); with (b) the run
+     is the same up to the answered call. The answer is inserted into `returns` where that call stands
+     among the stub calls, and later effects and fills are renumbered. A moved callee is hit twice per
+     call in a rebuilt image (the branch at its old entry, then its C): a call let run at the old entry
+     is not counted again at the C (same stack pointer, the next hit, at the alias).
+  4. Memory: (a) fixed addresses only (the item's wording), (b) the memory the deciding load read at
+     that visit, wherever its address came from (a field of an argument's object, of what a global
+     points to, a device register), not a local and not the image. **(b)**: the address is taken from
+     the run; FreeRTOS's xTaskGenericNotify tests a field of the TCB its argument points to.
+  5. A local a stubbed callee was handed: **the case gets the function's frame (loop_frame) and a tight
+     fill**, and a fill sets the value: an ordinary function's cases have no frame, so the stub wrote
+     nothing there (FreeRTOS -O0's prvSingleTaskTests checks the value xTaskGenericNotifyWait delivers:
+     1,087 of its 1,190 instructions behind it); without tight the fill wrote 64 bytes over other locals
+     and the run went elsewhere. A real callee's store into a local is not answered (rare on the bench).
+  6. The values: the compare's other operand and its neighbours, the operand and its neighbours (for a
+     test its bits), a constant offset solved from the first two runs, the word's edges, single bits:
+     at most ANSWER_TRIES (20) a branch and visit. The repairs (7.) only for the first ANSWER_FLIPS (2)
+     values that went the other way and could not be kept; later ones are tried once each. (a) No cap:
+     each failing value took its repairs along, up to nine runs, and on clang -O2's prvSingleTaskTests
+     400 runs left 252 of its 1,083 instructions missed (2,000 runs: 111); (b) no more values after two
+     such failures: 400 runs reached 111 and 1,000 runs 33, but FreeRTOS -O0's queue-set test lost what a
+     single flipped bit gives (a queue handle with one bit flipped is the set's other queue: 12 missed
+     instead of 0); **(c) values on, repairs off**: both (33 missed with 1,000 runs, in 70 s instead of
+     52 s; the queue-set test covered). ANSWER_RUNS 1,000 a function.
+  7. Repairs of a run that went the other way and failed: one that hangs in a callee is tried with the
+     callee stubbed, then ending at its call; one that faults or stores into the image is chased: first
+     the words no input gave that point just in front of the failing access (their values as read, from
+     a run of their own: a word read as 0 and written afterwards looked harmless after the run), then
+     arguments and given words that do, one at a time, nearest first (a zero argument lies in front of a
+     store at 8 too, and the answered word must not be taken: the first version pointed it elsewhere and
+     undid the answer), then the plain unread words; CHASE_TRIES × 2 runs a trial. A run that ends at a
+     stop whose callee may return is run once more with it stubbed, for the code behind the call.
+- **Undo.** Take `_answered` out of `_generated` (cases_for): the cached answers stay in the entries,
+  unread. Older readers of case files take three elements of calls and stub every call.
+- **Status.** In the code (branch frontier-answers): docs/todo.md, "The frontier answers".
+
 ## A build's readable C in a pool, kept in the process by what it is made from (2026-10-23)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

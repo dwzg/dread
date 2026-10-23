@@ -2062,6 +2062,71 @@ undone). Other decisions are taken by the recommended option and written down in
   no value_step, so memory through a register is "unknown" there; the system run's share of a function
   that never returns is not run again.
 
+- [x] **The frontier answers** (2026-10-23; the next step after `dread uncovered`: give the generator the
+  values it lacks). Generator.answers, a step after the search (its cases stay byte for byte, so VERSION
+  stays; ANSWERS keys the answers with the generation's key and the kept and written cases, in the cache
+  entry's "answers"): for each conditional branch that the function's generated, kept and written cases
+  together (what the lift check runs; a recorded case gets past checks no generated input does) take one
+  way only, dread.uncovered's trace names what decides it, and a case made from one that got there gives
+  that the value the other way needs: a real callee's result (a stub that answers only that call, the
+  fourth element of a case's calls, the callee running at its other calls), a stubbed callee's answer at
+  that call, the memory the deciding load read (a global, a field of an argument's or a global's object, a
+  device register; the address from the run), what a stubbed callee stores in a local it was handed (a
+  fill, with the function's frame and a tight fill). Values: the compare's other operand and its
+  neighbours, the operand and its neighbours, a constant offset solved from two runs, the edges, single
+  bits; repairs: a hang (the callee stubbed, then a stop), a fault or a store into the image (chased), a
+  stop whose callee may return (stubbed). Measured on copies of six FreeRTOS builds, generator 34 from
+  scratch and then the answers on its cached cases (accepted before and after; what ordinary functions
+  miss, instructions; the answers' CPU seconds): GCC -Os 329 -> 340, 232 -> 56, 21 s; clang -O2 281 ->
+  294, 1,046 -> 361, 99 s; GCC -O0 358 -> 381, 2,202 -> 1,186, 32 s; RISC-V GCC -Os 256 -> 269 by the
+  cases, 227 once the whole-image check dropped 42 (the open item below), 378 -> 132, 19 s; M4F GCC -Os
+  337 -> 349, 478 -> 275, 18 s; GCC 4 -Os 314 -> 323, 202 -> 87, 16 s. Nothing lost but by that check.
+  Over the six builds ordinary functions miss behind a callee's result 2,707 -> 690 instructions, behind
+  a field 588 -> 278, behind a global 375 -> 251 (fewer branches, but code reached newly shows new ones:
+  -O0 80 -> 171); functions that never return 6,328 -> 6,000 (most of it behind loops that need more
+  rounds than a loop case runs). Of the answer cases on five builds 219 start from a recorded case, 119
+  from a generated one. The lift check on cached cases with the answers took 64-151 s instead of 537-703
+  s from scratch (RISC-V 709 s: its culprit search). gizmo: every lifted table as it was;
+  gizmo-msp430's apply_config misses 18 of its 93 instructions instead of 37. Checked by hand:
+  xEventGroupSync's answer gives uxTaskResetEventItemValue an item value without bit 25 (the task timed
+  out) and the timeout path runs; xTaskGenericNotify's sets the TCB's event list item's container to 1 and
+  its configASSERT runs; xQueuePeek's tells it the queue is not empty after the timeout check (data came
+  meanwhile); xTaskGetHandle's has prvSearchForNameWithinSingleList miss at its twelfth call and the next
+  list is searched. Not done (what is left behind the answers): a loop that needs more rounds than a loop
+  case runs (the largest share of what functions that never return miss), a callee that hands its argument
+  back untouched (dread.regflow: the branch's source is the argument, not the stub's answer), a real
+  callee's store into a local, a call through a register (gizmo-msp430's apply_config), a switch's index,
+  a value two conditions decide together (xAreTimerDemoTasksStillRunning: a counter the function resets
+  unless a global equals its argument), two reads of one field compared (clang -O2's stream-buffer
+  functions read xTail again to see whether an interrupt moved it: a case's `later`, memory that changes
+  before the n-th read, could answer that), system registers, a run that faults in a call through a
+  pointer a stub's fill gave (prvTimerTask's pending function calls).
+
+- [ ] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
+  (found 2026-10-23 with the frontier answers, FreeRTOS RISC-V GCC -Os). With xTaskResumeAll accepted
+  (its answers covered it) on top of what was accepted before, the whole image differs: the stream-buffer
+  test task runs 8,124 blocks of C in a row (memcpy, memcmp, xStreamBufferSend, xStreamBufferSpacesAvailable,
+  xTaskResumeAll ...), no shared code and no device access between, and at a block its registers repeat
+  while its progress lies in memory, so System._loops takes the computation for a wait and moves the clock
+  to the timer: the rebuilt image takes the timer interrupt in front of a yield's ecall that the original
+  makes first (device log entry 507). sysrun's docstring names such a computation as possible but not
+  seen. xTaskResumeAll's C alone, and with the other new kernel functions, agrees in the whole image;
+  everything accepted except xTaskResumeAll agrees too (268 functions). The lift check's culprit search
+  (lift.culprits) looks for a smallest set that differs on its own, and for an effect of the combination
+  that set was 42 functions, all dropped: 227 accepted instead of 268. On GCC -O0 a first version of the
+  answers accepted a slightly different set, and the same rule ended the rebuilt run before the scheduler
+  starts: the demo creates its timers (pvPortMalloc, strcmp, memcpy, xQueueGenericSend, xTaskResumeAll
+  ..., 2,156 blocks, all C) and the run took that for a wait with nothing scheduled ("waits", after two
+  device log entries); the original's code for the same work takes other block counts and the rule did
+  not fire. Reproduced with the 381 functions another version accepted (its image agreed) plus
+  prvHighPriorityTimeout: the rule fires with that function's C in the image and not without, though the
+  function runs only in a task;
+  its C moves other functions' C (xTaskResumeAll into its old place, xQueueGenericSend behind the image),
+  and with that the registers or block counts at the anchor. The final version's -O0 image agrees. The
+  culprit search on -O0 runs the whole 30-million-unit scenario on the original for each probe and was
+  still going after half an hour. Two things to look at: the loop test (a memory digest at the anchor? a
+  second round?), and leaving out one culprit at a time where that makes the rest agree.
+
 - [x] **Code only a dropped case reached** (found 2026-10-22 on a private firmware, DREAD's real-life
   test: its uncovered functions took far longer to generate than those accepted, and most of them
   met callees stubbed for hanging). A case that should end at a call (stops, a loop case)

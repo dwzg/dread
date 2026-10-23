@@ -924,3 +924,167 @@ def test_code_only_a_dropped_case_reached_is_sought_again(tmp_path, monkeypatch)
     cases = g.generate("f", fn.entry, fn.insns)
     got, words = covered(g, "f", cases)
     assert seen and call in got, sorted(hex(a) for a in words - got)
+
+
+# The frontier answers (Generator.answers): behind a gate no generated input passes (the top bits of
+# key * 0x9E3779B1 against a constant: no compare to solve, no constant to try), a written case that
+# passes it reaches a branch on a global, one on a real callee's result and one on a stubbed callee's
+# answer, and takes each one way. Only the answers take the other way.
+GATE_KEY = 0x12345678
+GATE_TOP = ((GATE_KEY * 0x9E3779B1) & 0xFFFFFFFF) >> 7
+GATED_C = NOIPA_DEF + """
+volatile unsigned gated_limit, gated_out_a, gated_out_b, gated_out_c;
+NOIPA unsigned make_odd(unsigned k) { return k | 1u; }                   /* odd, whatever k is */
+NOIPA unsigned spin_for_debugger(unsigned k) { volatile unsigned go = 0; while (!go) ; return k + go; }
+NOIPA unsigned add_three(unsigned k) { return k + 3u; }
+#define GATE(key) (((key) * 0x9E3779B1u) >> 7 != 0x%xu)
+#define WORK(k) do { gated_out_a = (k); gated_out_b = (k) ^ 0x55u; gated_out_c = (k) + 9u; \\
+                     return add_three(k); } while (0)
+unsigned gated_by_global(unsigned key) { if (GATE(key)) return 1;
+    if (gated_limit == 0xC0FFEE11u) WORK(key); return 2; }
+unsigned gated_by_callee(unsigned key) { if (GATE(key)) return 1;
+    if ((make_odd(key) & 1u) == 0) WORK(key); return 3; }
+unsigned gated_by_stub(unsigned key) { if (GATE(key)) return 1;
+    if (spin_for_debugger(key) == 0x31337u) WORK(key); return 4; }
+unsigned make_odd_twice(unsigned k) { return make_odd(k) + 2 * make_odd(k + 1); }
+""" % GATE_TOP
+
+
+def gated_target(tmp_path):
+    """The gated program's target (with what a lift check needs) and the written cases that pass the
+    gate, in its extra_cases: spin_for_debugger, which waits for a debugger, stubbed in
+    gated_by_stub's."""
+    import os
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    (tmp_path / "t.c").write_text(GATED_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "gated_by_global", "-o", elf, str(tmp_path / "t.c")],
+                   check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-Os", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    spin = Program(t, t.image()).by_name["spin_for_debugger"].entry
+    written = {"gated_by_global": {"args": [GATE_KEY, 0, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0},
+               "gated_by_callee": {"args": [GATE_KEY, 0, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0},
+               "gated_by_stub": {"args": [GATE_KEY, 0, 0, 0], "mem": [], "returns": [0], "calls": [[spin, 1, 0]],
+                                 "frame": 0}}
+    os.makedirs(t.image().extra_cases, exist_ok=True)
+    for name, case in written.items():
+        with open(os.path.join(t.image().extra_cases, name + ".json"), "w") as f:
+            json.dump({"cases": [case]}, f)
+    return t, written
+
+
+def answered(gen, name, written):
+    """(what the generated and written cases cover, what the answers add to that, the answer cases, the
+    function's instructions)."""
+    fn = gen.program.by_name[name]
+    bases = gen.generate(name, fn.entry, fn.insns) + [written]
+    before = set().union(*(gen.coverage(fn.entry, fn.insns, c) for c in bases))
+    new = gen.answers(name, fn.entry, fn.insns, bases)
+    after = set().union(before, *(gen.coverage(fn.entry, fn.insns, c) for c in new))
+    return before, after, new, set(fn.insns)
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_give_a_global_what_the_branch_needs(tmp_path):
+    """gated_by_global's written case reads gated_limit (0 in the image) and returns 2. dread.uncovered's
+    trace names the load of gated_limit as what decides the branch; the answer sets the memory that load
+    read to the compare's other operand, and the code behind the branch runs."""
+    t, written = gated_target(tmp_path)
+    gen = Generator(t, t.image())
+    before, after, new, words = answered(gen, "gated_by_global", written["gated_by_global"])
+    assert before < words and after == words, sorted(hex(a) for a in words - after)
+    from dread.elf import Elf
+    limit = next(s.value for s in Elf(str(tmp_path / "t.elf")).symbols if s.name == "gated_limit")
+    assert [limit, 4, 0xC0FFEE11] in new[0]["mem"] and new[0].get("answer"), new
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_stub_one_call_of_a_real_callee(tmp_path):
+    """gated_by_callee tests make_odd's result, which is odd whatever its argument: a real callee that
+    answers one way. The answer stubs make_odd at that one call (the fourth element of the case's calls:
+    the callee runs at its other calls) with an even value, and the code behind the branch runs."""
+    t, written = gated_target(tmp_path)
+    gen = Generator(t, t.image())
+    before, after, new, words = answered(gen, "gated_by_callee", written["gated_by_callee"])
+    assert before < words and after == words, sorted(hex(a) for a in words - after)
+    make_odd = gen.program.by_name["make_odd"].entry
+    stubs = [c for c in new[0]["calls"] if c[0] == make_odd]
+    assert stubs and stubs[0][3] == [1] and new[0]["returns"][0] % 2 == 0, new
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_give_a_stubbed_callee_the_answer_the_branch_needs(tmp_path):
+    """gated_by_stub's written case stubs spin_for_debugger (it waits for a debugger) with the answer 0.
+    The answer gives the stub the compare's other operand at that call, and the code behind the branch
+    runs."""
+    t, written = gated_target(tmp_path)
+    gen = Generator(t, t.image())
+    before, after, new, words = answered(gen, "gated_by_stub", written["gated_by_stub"])
+    assert before < words and after == words, sorted(hex(a) for a in words - after)
+    assert new[0]["returns"][0] == 0x31337, new
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_lift_check_accepts_what_the_answers_cover(tmp_path, monkeypatch):
+    """The three gated functions with their written cases: without the answers each misses the code
+    behind its branch and is dropped; with them the lift check accepts all three (the lifted C agrees
+    with the original under the same answers, a stub that answers one call of make_odd and lets it run
+    at the others included), and the answers are cached beside the generated cases under a key of
+    their own."""
+    from dread import autocase, lift
+    t, _ = gated_target(tmp_path)
+    names = ["gated_by_callee", "gated_by_global", "gated_by_stub"]
+    monkeypatch.setattr(autocase, "ANSWER_RUNS", 0)
+    monkeypatch.setattr(autocase, "_GENERATORS", {})
+    lines = []
+    assert lift.check(t, t.image(), names, out=lines.append, jobs=1, system=False) == []
+    monkeypatch.setattr(autocase, "ANSWER_RUNS", 400)
+    monkeypatch.setattr(autocase, "ANSWERS", autocase.ANSWERS + 1)     # (the empty answers cached are stale)
+    monkeypatch.setattr(autocase, "_GENERATORS", {})
+    lines = []
+    assert sorted(lift.check(t, t.image(), names, out=lines.append, jobs=1, system=False)) == names, "\n".join(lines)
+    import os
+    entry = autocase.cache_load(os.path.join(t.build, "autocases", "main", "gated_by_callee.json"))
+    assert entry["answers"]["cases"] and all(c.get("answer") for c in entry["answers"]["cases"])
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_stub_that_answers_one_call_counts_a_moved_callee_once(tmp_path):
+    """In a rebuilt image a callee may lie elsewhere with a branch at its old entry, and a stub is hit
+    at both when the callee runs through it: a call let run at the old entry must not count twice.
+    make_odd_twice calls make_odd twice; a case answers the second call only, and the original and an
+    image with make_odd moved (its old entry a branch to a copy) agree on the call answered."""
+    t, _ = gated_target(tmp_path)
+    gen = Generator(t, t.image())
+    prog = gen.program
+    make_odd, twice = prog.by_name["make_odd"], prog.by_name["make_odd_twice"]
+    size = max(make_odd.insns) + prog.insn_size(max(make_odd.insns)) - make_odd.entry
+    moved = (t.image().base + len(gen.payload) + 0x40) & ~3
+    rebuilt = bytearray(gen.payload) + bytes(moved + size - t.image().base - len(gen.payload))
+    lo = make_odd.entry - t.image().base
+    rebuilt[moved - t.image().base:moved - t.image().base + size] = gen.payload[lo:lo + size]
+    branch = prog.arch.entry_branch(make_odd.entry, moved, prog.isa_at(make_odd.entry))
+    rebuilt[lo:lo + len(branch)] = branch
+    case = {"args": [10, 0, 0, 0], "mem": [], "returns": [0x100], "calls": [[make_odd.entry, 1, 0, [2]]], "frame": 0}
+    results = []
+    for payload, aliases in ((gen.payload, None), (bytes(rebuilt), {make_odd.entry: moved})):
+        m = gen.machine(payload=payload, aliases=aliases)
+        m.plan = []
+        gen.apply(m, case)
+        results.append((m.call(twice.entry, 10, max_instructions=10_000).ret, list(m.calls)))
+    assert results[0] == results[1] and results[0][0] == 11 + 2 * 0x100, results

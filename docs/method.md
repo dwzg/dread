@@ -81,6 +81,15 @@ each region's way in (a branch, a switch, a call that never came back) traces wh
 its source (an argument, a callee's result, a global, a device register, a field, a counter a loop
 carries), with the values the cached cases saw there and how a run sent that way ends.
 
+The generator then gives what that trace finds (the frontier answers, after its search): for a branch
+that all of a function's cases (generated, kept, written and recorded: what the lift check runs) take
+one way only, a case made from one that got there gives what decides it the value the other way needs,
+where a case can give it: a real callee's result by a stub that answers only that one call (the callee
+runs at its other calls, so the run is the same up to there), a stubbed callee's answer at that call,
+the memory the deciding load read, what a stubbed callee stores in a local it was handed. FreeRTOS's
+demo checks every result of its own queue and stream-buffer calls with configASSERT; no input made
+those calls fail, and the answers do, call by call.
+
 ## 5. Are the cases strong enough? `dread mutate`
 
 The C is changed in small ways (an operator, a constant, a comparison) and every change must make
@@ -199,6 +208,10 @@ Each of these cost time once and is now a check or a rule in a tool:
   exercised by the inputs is a refusal or a construction that makes it hold, not a hope.
 - A real callee answers one way (newlib's _read stub always fails): when code is left behind a
   call, the generator stubs that callee, its result an input.
+- A search sees only its own cases: much of FreeRTOS's frontier lies behind checks that only a case the
+  system run recorded gets past, so the frontier answers start from every case the lift check runs,
+  not from the search's. And a callee stubbed at every call is a different run: the answers stub one
+  call and let the callee run at the others.
 - A script that counts verdicts is code too: one read "dropped  FAIL fn" as a function named FAIL,
   and the numbers it reported were wrong for an evening.
 - A static analysis checked against a measurement: `dread callconv` found four gaps of regflow's in

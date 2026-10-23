@@ -36,6 +36,7 @@ KEPT_POISON = 0x5AC31E00    # kept scratch registers no argument sets start as K
 SPIN_PERIOD = 4         # longest cycle of peripheral reads the spin cut recognises
 ARGS_ROOM = 0x100   # mapped above the stack top: arguments beyond the registers lie there, as the
                     # caller's frame would hold them (writes there are compared like memory)
+RUN_CALLEE = object()   # what a stub returns to let the callee run at this call (Machine.stub)
 
 
 class EmuError(RuntimeError):
@@ -611,6 +612,8 @@ class Machine:
         read = self.core.read32
         args = tuple(read(r) for r in self.layout.arg_regs)
         ret = self.stubs[addr](self, *args)
+        if ret is RUN_CALLEE:               # the stub lets the callee run at this call (a case that
+            return                          # answers some of its calls only: dread.autocase)
         if getattr(self, "stopped_at", None):
             # The stub ended the run at this call (a stop, a loop case's last stub call): no return
             # from it, so the run ends at the callee's entry however the caller got there (behind a
@@ -631,7 +634,9 @@ class Machine:
         """Replace the function at addr with a callable(machine, r0, r1, r2, r3) -> result.
 
         The callable records what matters about the call with machine.log(); raw pointers into the
-        stack differ between builds, so it should log what they point to."""
+        stack differ between builds, so it should log what they point to. A callable that returns
+        RUN_CALLEE lets the function run at that call, as if no stub were there (and of a moved
+        function, the stub at its C is then hit too, through the branch at its old entry)."""
         addr &= ~1
         known = Machine.entries.get((self.layout.target.file, self.layout.image.name))
         if known is not None and self.layout.base <= addr < self.layout.image.end and addr not in known:

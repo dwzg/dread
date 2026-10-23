@@ -60,11 +60,40 @@ identifier, separator, value), and mutations insert, overwrite or exchange token
 runs code in a callee that no input ran before is kept for further mutation (not as a case): a
 parser's progress inside the callee that checks a line shows nowhere else.
 
+The frontier answers (Generator.answers), after the search and from more than its cases: the
+function's generated, kept and written cases together (what the lift check runs; a case dread
+sysrecord recorded in the system run gets past checks no generated input does). A conditional branch
+their runs took one way only is traced back through the function as dread uncovered traces it
+(dread.uncovered.decide), and where what decides it is an input a case can give, a case made from
+one that got there gives it what the other way needs:
+  - a real callee's result: a stub that answers only that call (the callee's last call before the
+    branch; the fourth element of a case's calls numbers the calls a stub answers, and the callee
+    runs at the others, so the run is the same up to there): FreeRTOS's demo checks what its own
+    stream-buffer calls return, every check a branch to an assertion no input reached;
+  - a stubbed callee's answer at that call (the answers past the eighth call are 0, and the
+    compare-guided stage varies the first SOLVE_RETURNS only);
+  - the memory a load reads, wherever its address comes from (a global, a field of an argument's
+    object or of what a global points to, a device register): where the load reads is taken from
+    the run, at the visit of the branch;
+  - what a stubbed callee stores in a local it was handed the address of (a fill: the case gets the
+    function's frame, so that the stub writes there, and a tight fill, so that it writes no further
+    than the function's own stores): FreeRTOS's demo checks the value a notification delivers.
+The values: the compare's other operand and its neighbours, the operand itself and its neighbours (for
+a test its bits), solved through a constant offset when two runs show one, the word's edges, single
+bits. A run that gains code and then hangs in a callee is tried with that callee stubbed, then ending
+at its call; one that faults or stores into the image is chased (words that point just in front of
+the failing access to buffers of their own, one at a time where given); one that ends at a stop whose
+callee may return is tried once more with it stubbed, for the code behind the call. Each answer is a
+case like any other (marked "answer"), compared under its stubs in both images; nothing is answered
+that the run would not take as an input (a local, the image). Bounded by ANSWER_RUNS runs a function.
+
 Generated cases are cached per function (BUILD/autocases/IMAGE/NAME.json), keyed by the function's
 bytes, the generator VERSION and the options. A change that alters what the generator produces
 needs a VERSION bump; SEED stays, so that a bump does not reshuffle every function's search. What
 is added to a generation afterwards has a version of its own instead and is added to cached cases
-without making them anew: the firm-up (FIRM, Generator.firm_up). The
+without making them anew: the firm-up (FIRM, Generator.firm_up), and the frontier answers (ANSWERS:
+under "answers" in the entry, keyed by the generation's key, ANSWERS and the kept and written cases,
+so that a new recorded case makes them anew without a new search). The
 search ends after a budget of runs and, in its last-resort stage, after LONG_SECONDS without any
 input that finished: on a much slower machine that stage can find less.
 
@@ -83,7 +112,7 @@ from capstone import arm as csarm
 from unicorn import UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE
 
 from dread.cases import confine_args
-from dread.emu import EmuError, Layout, Machine
+from dread.emu import RUN_CALLEE, EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
 VERSION = 34       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
@@ -175,6 +204,16 @@ SURVIVE_CHECKS = 64         # runs the repair checks against drop_bad_ends at mo
 MAX_STOPS = 4               # calls a case ends at at most (the repair adds to those it has)
 DECIDER_STUBS = 2           # callees at most that get stubbed because a stalled search left code behind their call
 DECIDER_RUNS = 200          # inputs per such callee (the last stage)
+ANSWER_RUNS = 1000          # runs of the frontier answers a function at most (Generator.answers)
+ANSWER_TRIES = 20           # values one input is given for one branch (one way in, one visit) at most
+ANSWER_FLIPS = 2            # ... the repairs of at most this many that went the other way and could not be kept
+                            # (the next value mostly fails alike: later ones are tried without repairs)
+ANSWER_VISITS = 2           # visits of a branch whose decision is answered (the first ones)
+ANSWER_BASES = 2            # cases a branch is answered from at most
+ANSWER_EVENTS = 512         # calls and visits a run records at most
+ANSWERS = 1                 # the frontier answers' version (Generator.answers): cached cases get them anew when
+                            # it changes, or when the cases they are made from change (_answered)
+READING_MARKS = ("carried", "firm", "kept", "why", "by", "answer")     # marks a case made from another drops
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
 # Float arguments (hard float), as bits: zeros, ones, halves, decimal steps, the integer conversions'
 # bounds, the smallest and largest normal numbers, denormals, infinities, quiet and signalling NaNs
@@ -188,6 +227,7 @@ CHASE_STEPS = 4             # a near miss of the compare-guided stage is tried a
 CHASE_RUNS = 64             # near misses chased per function at most
 CHASE_WORDS = 32            # words one step sets at most
 CHASE_BUFFER = 0x100        # bytes a chased word's buffer has
+CHASE_TRIES = 4             # given words the frontier answers' chase points elsewhere one at a time at most
 POINTER_BASE = 0x1000       # learned pointers get buffers from scratch + POINTER_BASE ...
 POINTER_STEP = 0x400        # ... this far apart ...
 POINTER_SLOTS = 16          # ... at most this many different ones (then they are reused)
@@ -218,6 +258,9 @@ SPIN_POLL = 0.5             # share of inputs that get a poll stage for a regist
 # many into its frame then agrees with any C).
 REAL_LIBRARY = ("memcpy", "memmove", "memset", "memcmp", "strcat", "strcmp", "strcpy", "strlen", "strncmp",
                 "strncpy", "strstr", "strchr")
+# Those of them that write: the frontier answers never answer a call of one either (the others, pure,
+# may answer one call: a check of what memcmp found)
+WRITING_LIBRARY = ("memcpy", "memmove", "memset", "strcat", "strcpy", "strncpy")
 
 
 
@@ -267,7 +310,9 @@ class Generator:
         self.owners = self.program.extent_owners()  # a load from another function's extent is one of code
         self.entries = {fn.name: fn.entry for fn in self.program.functions}
         self.real = {self.entries[n] for n in REAL_LIBRARY if n in self.entries}
+        self.writing = {self.entries[n] for n in WRITING_LIBRARY if n in self.entries}
         self.wide = self._wide_results()
+        self._tracer = None                 # dread.uncovered's Context, when a branch's sources are traced
         self._domains()
         self.io_fixed, self.long = False, 0
         self.current = None                 # the function whose cases are made or run (domains)
@@ -509,6 +554,8 @@ class Generator:
         frame = case.get("frame", 0)
         count = [0]
         made = m.stub_calls = [0]
+        counted, passing = {}, {}           # a callee's calls so far (answered or run); a call let run
+        marks = getattr(m, "call_marks", None)  # (callee, its call number, stub calls before it, answered)
         m.stopped_at = None                 # "calls" or "never returns" when a stub ended the run
         m.ends_at_call = bool(case.get("stops") or (case.get("hang") and case.get("stub_calls")))
         effects = case.get("effects", ())
@@ -520,7 +567,21 @@ class Generator:
             m.hook_add(UC_HOOK_MEM_WRITE, on_store, begin=lay.stack_top - lay.stack_size, end=lay.stack_top - 1)
         in_stack = lay.in_stack
 
-        def stub(m, *args, target=0, nargs=0, nstack=0):
+        def stub(m, *args, target=0, nargs=0, nstack=0, only=None):
+            if only is not None:            # it answers the calls numbered in only; the callee runs at the others
+                sp = m.reg("sp")
+                if passing.pop(target, None) == sp and m.unalias.get(m.reg("pc") & ~1) == target:
+                    return RUN_CALLEE       # (the same call, through the branch at a moved callee's old entry)
+                n = counted[target] = counted.get(target, 0) + 1
+                if marks is not None:
+                    marks.append(("call", target, n, made[0], n in only))
+                if n not in only:
+                    if target in m.aliases and m.reg("pc") & ~1 == target:
+                        passing[target] = sp
+                    return RUN_CALLEE
+            elif marks is not None:
+                n = counted[target] = counted.get(target, 0) + 1
+                marks.append(("call", target, n, made[0], True))
             made[0] += 1
             if made[0] > case.get("stub_calls", STUB_CALLS):
                 m.stopped_at = "calls"
@@ -568,8 +629,9 @@ class Generator:
 
         for target, nargs, *rest in case.get("calls", ()):
             nstack = rest[0] if rest else 0
-            m.stub(target, lambda m, *a, target=target, nargs=nargs, nstack=nstack:
-                   stub(m, *a, target=target, nargs=nargs, nstack=nstack))
+            only = frozenset(rest[1]) if len(rest) > 1 and rest[1] is not None else None
+            m.stub(target, lambda m, *a, target=target, nargs=nargs, nstack=nstack, only=only:
+                   stub(m, *a, target=target, nargs=nargs, nstack=nstack, only=only))
 
         def stop(m, *args, target=0):       # a callee that never returns: the run ends at its call
             m.log("call 0x%x, never returns" % target)
@@ -2186,6 +2248,466 @@ class Generator:
             if state["progress"] and not words_set <= covered:
                 runs[0], cost[0] = 0, 0
 
+    # ---- the frontier answers ----
+
+    def decision_sources(self, name, branch):
+        """What decides the conditional branch at `branch` of function name, as dread.uncovered traces it
+        back through the function, as far as a case can give it, in the trace's order (inputs from outside
+        the function first): ("callee", entry) for the result of a direct call, ("load", address) for the
+        load at that address of a global, a device register or a field (memory a case can set: where the
+        load reads is learned from a run), ("fill", (address, entry)) for the load at that address of a
+        local the callee at entry was handed the address of (what a stub stores there is the case's).
+        [] when there is none or the trace fails (a layer without value_step follows fixed addresses and
+        calls only)."""
+        cache = self.__dict__.setdefault("_decisions", {})
+        if (name, branch) in cache:
+            return cache[name, branch]
+        out = []
+        try:
+            from dread import uncovered
+            if self._tracer is None:
+                self._tracer = uncovered.Context(self.target, self.image, self.program, self.flow() or None)
+            flows = self.__dict__.setdefault("_flows", {})
+            if name not in flows:
+                flows.clear()               # (one function at a time)
+                flows[name] = uncovered.Flow(self._tracer, self.program.by_name[name])
+            flow = flows[name]
+            if branch in flow.insn:
+                for source in uncovered.ordered(uncovered.decide(flow, branch)[2]):
+                    cls, key, text = source
+                    if cls == "callee" and text.startswith("the result of ") and key in self.entries:
+                        found = [("callee", self.entries[key])]
+                    elif cls == "callee" and " stores in the local " in text and key in self.entries:
+                        found = [("fill", (d, self.entries[key])) for d in sorted(flow.loads.get(source, ()))]
+                    elif cls in ("global", "device", "field"):
+                        found = [("load", d) for d in sorted(flow.loads.get(source, ()))]
+                    else:
+                        continue
+                    out += [s for s in found if s not in out]
+        except Exception:
+            out = []
+        cache[name, branch] = out
+        return out
+
+    def answers(self, name, entry, words, cases, limit=200_000, loop=False):
+        """The frontier answers (see the module's docstring): the cases to add to `cases` (a function's
+        generated, kept and written cases: what the lift check runs), made from them. A conditional branch
+        that their runs took one way only (from the first ANSWER_BASES cases that got there, at its first
+        ANSWER_VISITS visits) gets what the other way needs, where what decides it is an input a case can
+        give (decision_sources): a real callee's result by a stub that answers only the call whose result
+        decides (the last call of that callee before the visit; the callee runs at its other calls, so the
+        run is the same up to there: the fourth element of a case's calls), a stubbed callee's answer at
+        that call, the memory the load that decides read at that visit (not a local, not the image), what
+        a stubbed callee stores in a local it was handed (a fill; the case gets the function's frame,
+        loop_frame, and a tight fill). The values: the other operand of the compare, one more and one less,
+        the operand itself and its neighbours (for a test its bits), solved through a constant offset when
+        the first two runs show one, the word's edges, single bits: ANSWER_TRIES of them. A run that gains
+        code and ends as a case must is kept; one that hangs in a callee is tried with it stubbed, then
+        ending at its call; one that faults or stores into the image is chased (chase); those repairs only
+        for the first ANSWER_FLIPS values that went the other way and failed (the next mostly fails alike;
+        a single bit can still give a pointer that names another object). One that ends at a stop whose
+        callee may return is run once more with that callee stubbed. Over again from the cases it made while one gains, at most
+        ANSWER_RUNS runs in all. loop: the function never returns (its cases are loop cases). What is not
+        done: a callee that returns its argument untouched (dread.regflow: the branch's source is then the
+        argument, not the stub's answer), a real callee's store into a local, a switch's index, a value two
+        conditions decide together (a global the function overwrites unless another one equals an
+        argument)."""
+        before, self.current = self.current, name
+        loop_before, self.loop = self.loop, loop
+        calls_before, self.loop_calls = self.loop_calls, self.loop_calls_for(words) if loop else LOOP_CALLS
+        try:
+            return self._answer(name, entry, words, cases, limit)
+        finally:
+            self.current, self.loop, self.loop_calls = before, loop_before, calls_before
+
+    def _answer(self, name, entry, words, cases, limit):
+        words_set = set(words)
+        setters = self.flag_setters(words)
+        image = self.image
+        start, end = cover_span(self.program, words)
+        runs = [ANSWER_RUNS]
+        names = {fn.entry: fn.name for fn in self.program.functions}
+        corpus = [json.loads(json.dumps(c)) for c in cases]
+        reach = {}
+        for i, case in enumerate(corpus):
+            runs[0] -= 1
+            got, why = self.attempt(entry, words, case, case.get("limit", limit))
+            if why is None:
+                reach[i] = set(got)
+        covered = set().union(*reach.values()) if reach else set()
+        branches = self.conditional_branches(words)
+
+        def edge():
+            return {w for w, (target, fall) in branches.items() if w in covered and (
+                (target is not None and target in words_set and target not in covered) or
+                (fall in words_set and fall not in covered))}
+
+        def run(case, watch=None, loads=()):
+            """(machine, events, error) of one run; events: the stub marks ("call", callee, its call
+            number, stub calls before it, answered), with watch (branch, decider, reader) the visits of
+            the branch's decider ("decide", operands or None, stub calls so far), and the reads of the
+            loads at the addresses in loads ("load", its address, address read, size, value), in order."""
+            runs[0] -= 1
+            m = self.machine()
+            m.plan = []
+            m.spin_limit = SPIN_READS
+            m.call_marks = events = []
+            m.regions = []                  # (stub call, which pointer, address, bytes): what stubs filled
+            self.apply(m, case)
+            m.cover(start, end)
+            m.trace_reads(image.base, image.end, self.code, self.owners)
+            if watch is not None:
+                branch, at, read = watch
+
+                def visit(uc, address, size, user):
+                    if len(events) < ANSWER_EVENTS:
+                        events.append(("decide", read(uc) if read is not None else None, m.stub_calls[0]))
+                m.hook_add(UC_HOOK_CODE, visit, begin=at if at is not None else branch,
+                           end=at if at is not None else branch)
+            if loads:
+                armed, pc = [None], self.layout.pc
+
+                def arm(uc, address, size, user):
+                    armed[0] = address
+
+                def on_read(uc, access, address, size, value, user):
+                    if armed[0] is not None and uc.reg_read(pc) & ~1 == armed[0]:
+                        if len(events) < ANSWER_EVENTS:
+                            events.append(("load", armed[0], address, size,
+                                           int.from_bytes(uc.mem_read(address, size), "little")))
+                        armed[0] = None
+                for a in sorted(loads):
+                    m.hook_add(UC_HOOK_CODE, arm, begin=a, end=a)
+                m.hook_add(UC_HOOK_MEM_READ, on_read)
+            try:
+                m.call(entry, *case["args"], max_instructions=case.get("limit", limit),
+                       stall=self.stall_for(case.get("limit", limit)))
+            except EmuError as e:
+                return m, events, e
+            return m, events, None
+
+        width, chase_set = self.arch.reg_bits // 8, set(self.chase_buffers)
+        from dread.emu import ARGS_ROOM
+        args_room = (self.layout.stack_top, self.layout.stack_top + ARGS_ROOM)
+        nregs = len(self.layout.arg_regs)
+
+        def first_reads(case):
+            """{address: the word first read there} of a run of case, outside the stack and the image."""
+            runs[0] -= 1
+            m = self.machine()
+            m.plan = []
+            m.spin_limit = SPIN_READS
+            self.apply(m, case)
+            out = {}
+
+            def on_read(uc, access, address, size, value, user):
+                if size == width and address not in out and not self.layout.in_stack(address) and \
+                        not image.base <= address < image.end:
+                    out[address] = int.from_bytes(uc.mem_read(address, size), "little")
+            m.hook_add(UC_HOOK_MEM_READ, on_read)
+            try:
+                m.call(entry, *case["args"], max_instructions=case.get("limit", limit),
+                       stall=self.stall_for(case.get("limit", limit)))
+            except EmuError:
+                pass
+            return out
+
+        def chase(case, m, keep=None):
+            """A run that gained code and then faulted or stored into the image, through a pointer no
+            input set or one an input gave as a small number: the cases to try, in order, in which such
+            words point to zeroed buffers of their own (as the compare-guided stage's chase). First one with
+            the words the run read that no input gave whose value lies just in front of a failing access;
+            without those, one for each argument and given word (not keep, the answered one) whose value
+            does, the nearest first (CHASE_TRIES; a zero argument lies in front of a store at 8 too, and
+            pointed elsewhere it changes the path); else one with the words no input gave, as that chase
+            takes them."""
+            given = {a for a, _, _ in case["mem"]}
+            failed = ([m.unmapped[1]] if getattr(m, "unmapped", None) is not None else []) + self.image_stores(m)
+
+            def distance(v):
+                d = [(a - (v & 0xFFFFFFFF)) for a in failed if 0 <= a - (v & 0xFFFFFFFF) < POINTER_REACH]
+                return min(d) if d and v not in chase_set else None
+
+            seen = first_reads(case)        # (the values as read: a word may be written after)
+
+            def now(a):
+                return seen.get(a)
+            fresh = [a for a, n in sorted(m.reads.items()) if n == width and a not in given
+                     and not image.base <= a < image.end and not self.target.memory.is_io(a)
+                     and not args_room[0] <= a < args_room[1]]
+            used = sum(1 for _, _, v in case["mem"] if v in chase_set) + sum(1 for v in case["args"] if v in chase_set)
+            free = iter(self.chase_buffers[used:])
+
+            def pointed(words=(), arg=None, cell=None):
+                out = json.loads(json.dumps(case))
+                try:
+                    for a in words:
+                        out["mem"].append([a, width, next(free)])
+                    if arg is not None:
+                        out["args"][arg] = next(free)
+                    if cell is not None:
+                        out["mem"][cell][2] = next(free)
+                except StopIteration:
+                    return None
+                return out
+            pointing = [a for a in fresh if distance(now(a)) is not None][:CHASE_WORDS]
+            if DEBUG:
+                print("  chase: failed %s pointing %s near %s" % ([hex(a) for a in failed], [hex(a) for a in pointing],
+                      sorted((distance(v), i) for i, v in enumerate(case["args"][:nregs]) if distance(v) is not None)
+                      + sorted((distance(v), hex(a)) for a, n, v in case["mem"] if n == width and a != keep
+                               and a in m.reads and distance(v) is not None)[:6]))
+            if pointing:
+                return [c for c in [pointed(pointing)] if c is not None]
+            near = [(distance(v), "arg", i) for i, v in enumerate(case["args"][:nregs])] + \
+                [(distance(v), "cell", k) for k, (a, n, v) in enumerate(case["mem"])
+                 if n == width and a != keep and a in m.reads]
+            near = sorted((d, kind, i) for d, kind, i in near if d is not None)[:CHASE_TRIES]
+            if near:
+                return [c for c in (pointed(arg=i) if kind == "arg" else pointed(cell=i) for _, kind, i in near)
+                        if c is not None]
+            return [c for c in [pointed(fresh[:CHASE_WORDS])] if fresh and c is not None]
+
+        def stopped(m):
+            """The callee whose stop ended the run, or None."""
+            if getattr(m, "stopped_at", None) != "never returns":
+                return None
+            found = re.match(r"call 0x([0-9a-f]+), never returns", (m.calls[-1] or ("",))[0]) if m.calls else None
+            return int(found.group(1), 16) if found else None
+
+        def gained(case, m, error, depth=0, keep=None, spare=None):
+            """Whether the run gained code and ended as a case must; the case is kept then. A run that hung
+            in a callee is run again with that callee stubbed, then ending at its call; one that faulted
+            or stored into the image is chased (CHASE_STEPS); one that ended at a stop whose callee may
+            return is run once more with that callee stubbed, for the code behind the call."""
+            if not m.covered_insns(words) - covered or runs[0] <= 0 or depth > CHASE_STEPS:
+                return False
+            spare = [CHASE_TRIES * 2] if spare is None else spare     # (runs the repairs of one trial take at most)
+            if error is not None and m.timed_out:
+                inside = self.program.function_at(m.reg("pc") & ~1)
+                stops = case.get("stops", ())
+                if inside is None or inside.entry == entry or self.loop:
+                    return False
+                tries = []
+                if inside.name not in self.endless() and all(c[0] != inside.entry for c in case.get("calls", ())):
+                    tries.append(dict(case, calls=[list(c) for c in case.get("calls", ())] +
+                                      [[inside.entry, self.reads_mask(inside.name), 0]]))
+                if inside.entry not in stops and len(stops) < MAX_STOPS:
+                    tries.append(dict(case, hang=True, limit=limit, stops=sorted(set(stops) | {inside.entry})))
+                for trial in tries:
+                    if spare[0] <= 0:
+                        break
+                    spare[0] -= 1
+                    m2, _, error2 = run(trial)
+                    if gained(trial, m2, error2, depth + 1, keep, spare):
+                        return True
+                return False
+            if error is not None or self.touches_image(m):
+                for chased in chase(case, m, keep):
+                    if runs[0] <= 0 or spare[0] <= 0:
+                        break
+                    spare[0] -= 1
+                    m2, _, error2 = run(chased)
+                    if DEBUG:
+                        print("   chased: %s, touches %s, new %d" % (error2 or "returns", self.touches_image(m2),
+                                                                  len(m2.covered_insns(words) - covered)))
+                    if gained(chased, m2, error2, depth + 1, keep, spare):
+                        return True
+                return False
+            if self.ends_badly(m) or (self.checked_at_end(case) and not self.survives(entry, case)):
+                return False
+            got = m.covered_insns(words)
+            covered.update(got)
+            case = {k: v for k, v in case.items() if k not in READING_MARKS}
+            case["answer"] = True
+            if case.get("hang") and not self.loop:
+                case = self.settle_hangs(entry, [case])[0]
+            corpus.append(case)
+            reach[len(corpus) - 1] = set(got)
+            stop = stopped(m)
+            if stop is not None and not self.loop and self.program.function_at(stop) is not None and \
+                    self.program.function_at(stop).name not in self.endless():
+                callee = self.program.function_at(stop)
+                trial = dict(case, stops=[s for s in case["stops"] if s != stop],
+                             calls=[list(c) for c in case.get("calls", ()) if c[0] != stop] +
+                             [[stop, self.reads_mask(callee.name), 0]])
+                m2, _, error2 = run(trial)
+                gained(trial, m2, error2, depth + 1)
+            return True
+
+        def renumber(case, after):
+            """A stub call inserted as number after + 1: the effects and fills of later calls move on."""
+            for key, at in (("effects", 0), ("fills", 0)):
+                for item in case.get(key, ()):
+                    if item[at] > after:
+                        item[at] += 1
+
+        def maker(base, kind, key, events, k, m=None):
+            """(make(value) -> case, the input's value in base or None, the address of the memory it sets
+            or None) for the source (kind, key) at the decider's visit events[k], or (None, None, None)."""
+            if kind == "load":              # the memory the load read last before the visit
+                last = next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key), None)
+                if last is None:
+                    return None, None, None
+                _, _, address, size, old = last
+                if size not in (1, 2, 4) or self.layout.in_stack(address) or \
+                        image.base <= address < self.program.writable_end():
+                    return None, None, None     # (a local, or the image: no input there)
+
+                def make(v):
+                    case = json.loads(json.dumps(base))
+                    case["mem"] = [c for c in case["mem"] if c[:2] != [address, size]] + \
+                        [[address, size, v & ((1 << 8 * size) - 1)]]
+                    return case
+                return make, old, address
+            if kind == "fill":              # a local a stub was handed: what it stores there
+                last = next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key[0]), None)
+                if last is None or m is None:
+                    return None, None, None
+                _, _, address, size, old = last
+                region = next((r for r in reversed(m.regions) if r[2] <= address and address + size <= r[2] + r[3]),
+                              None)
+                if size not in (1, 2, 4) or region is None:
+                    return None, None, None
+                number, which, at = region[0], region[1], address - region[2]
+
+                def make(v):
+                    case = json.loads(json.dumps(base))
+                    case["fills"] = [f for f in case.get("fills", ()) if f[:3] != [number, which, at]] + \
+                        [[number, which, at, size, v & ((1 << 8 * size) - 1)]]
+                    return case
+                return make, old, None
+            last = next((e for e in reversed(events[:k]) if e[0] == "call" and e[1] == key), None)
+            if last is None:
+                return None, None, None
+            _, _, n, before, answered = last
+            stub = next((c for c in base.get("calls", ()) if c[0] == key), None)
+            if answered:                    # a stubbed callee: its answer at that call
+                returns = list(base.get("returns", ())) + [0] * max(0, before + 1 - len(base.get("returns", ())))
+                old = returns[before]
+
+                def make(v):
+                    case = json.loads(json.dumps(base))
+                    case["returns"] = returns[:before] + [v & 0xFFFFFFFF] + returns[before + 1:]
+                    return case
+                return make, old, None
+
+            def make(v):                    # a callee that runs: answered at that call only
+                case = json.loads(json.dumps(base))
+                for c in case["calls"]:
+                    if c[0] == key:
+                        while len(c) < 4:
+                            c.append(0 if len(c) == 2 else [])
+                        c[3] = sorted(set(c[3] or ()) | {n})
+                if stub is None:
+                    case["calls"].append([key, self.reads_mask(names.get(key, "")), 0, [n]])
+                returns = list(case.get("returns", ())) + [0] * max(0, before - len(case.get("returns", ())))
+                case["returns"] = returns[:before] + [v & 0xFFFFFFFF] + returns[before:]
+                renumber(case, before)
+                return case
+            return make, None, None
+
+        def values(operands, old, probes):
+            """The values to try, in order, given the decider's operands in the base run (a, b, kind or
+            None), the input's old value (or None) and the runs so far [(value, operands)]."""
+            out = []
+            if operands is not None:
+                a, b, kind = operands
+                if kind == "test":
+                    out += [b, 0, a ^ b, ~a, a | b, a & ~b]
+                else:
+                    out += [b + 1, b - 1, b, a + 1, a - 1, a]
+            out += [0, 1, 0xFFFFFFFF, 2, 0x80000000, 0x7FFFFFFF]
+            if len(probes) >= 2 and probes[0][1] is not None and probes[1][1] is not None:
+                (v1, (a1, b1, kind)), (v2, (a2, b2, _)) = probes[:2]
+                step = (v2 - v1) & 0xFFFFFFFF
+                if kind == "compare" and step:
+                    for side, other, d in ((a1, b1, (a2 - a1) & 0xFFFFFFFF), (b1, a1, (b2 - b1) & 0xFFFFFFFF)):
+                        if d == step:       # operand = value + offset: solved for the other operand's
+                            out = [other - side + v1 + e for e in (0, 1, -1)] + out
+                        elif d == (-step) & 0xFFFFFFFF:     # operand = offset - value
+                            out = [side + v1 - other + e for e in (0, -1, 1)] + out
+            bits = [1 << i for i in range(32)]
+            out += [old ^ x for x in bits] if old is not None else bits
+            seen, ordered = {old} if old is not None else set(), []
+            for v in out:
+                v &= 0xFFFFFFFF
+                if v not in seen:
+                    seen.add(v)
+                    ordered.append(v)
+            return ordered
+
+        def answer(w, base, kind, key):
+            """Answers for the branch w from corpus case base through one source; whether one gained."""
+            at, read = setters.get(w, (None, None))
+            case = json.loads(json.dumps(base))
+            loads = (key,) if kind == "load" else (key[0],) if kind == "fill" else ()
+            if kind == "fill":              # (a stubbed callee: with the function's frame its stub fills the local,
+                if all(c[0] != key[1] or len(c) > 3 for c in case.get("calls", ())):    # up to the first word the
+                    return False                                                       # function stored: tight)
+                if case.get("frame", 0) < self.loop_frame(name):
+                    case.update(frame=self.loop_frame(name), tight=True)
+            if kind == "callee":
+                if key == entry or key in self.endless() or key in self.writing or key == self.fake_pointer:
+                    return False
+                if not any(c[0] == key for c in case.get("calls", ())):
+                    case["calls"] = [list(c) for c in case.get("calls", ())] + \
+                        [[key, self.reads_mask(names.get(key, "")), 0, []]]       # (counted, never answered)
+            m, events, error = run(case, (w, at, read), loads)
+            if error is not None and not case.get("stops") and not case.get("hang"):
+                return False
+            visits = [k for k, e in enumerate(events) if e[0] == "decide"][:ANSWER_VISITS]
+            for k in visits:
+                make, old, keep = maker(case, kind, key, events, k, m)
+                if make is None:
+                    continue
+                nth = sum(1 for e in events[:k + 1] if e[0] == "decide")
+                probes, tried, flips = [], 0, 0
+                while tried < ANSWER_TRIES and runs[0] > 0 and not self.late():
+                    order = [v for v in values(events[k][1], old, probes) if v not in {p[0] for p in probes}]
+                    if not order:
+                        break
+                    v = order[0]
+                    trial = make(v)
+                    tried += 1
+                    m2, events2, error2 = run(trial, (w, at, read))
+                    seen = [e[1] for e in events2 if e[0] == "decide"]
+                    probes.append((v, seen[nth - 1] if len(seen) >= nth else None))
+                    if DEBUG:
+                        print("  %s %s visit %d: 0x%x -> %s, %s, new %d" % (
+                            kind, key, nth, v, probes[-1][1], error2 or "returns",
+                            len(m2.covered_insns(words) - covered)))
+                    if gained(trial, m2, error2, keep=keep, spare=[0] if flips >= ANSWER_FLIPS else None):
+                        return True
+                    flips += bool(m2.covered_insns(words) - covered)    # (it went the other way, and failed)
+            return False
+
+        tried, progress = set(), True
+        while progress and runs[0] > 0 and not words_set <= covered and not self.late():
+            progress = False
+            for w in sorted(edge()):
+                if runs[0] <= 0 or self.late() or words_set <= covered:
+                    break
+                if w not in edge():
+                    continue
+                sources = self.decision_sources(name, w)
+                bases = [i for i in sorted(reach) if w in reach[i]][:ANSWER_BASES]
+                if DEBUG:
+                    print("answer 0x%x: sources %s, bases %s" % (w, sources, bases))
+                if not sources:
+                    continue
+                done = False
+                for i in bases:
+                    for kind, key in sources:
+                        if (w, i, kind, key) in tried or runs[0] <= 0:
+                            continue
+                        tried.add((w, i, kind, key))
+                        if answer(w, corpus[i], kind, key):
+                            progress = done = True
+                            break
+                    if done:
+                        break
+        return corpus[len(cases):]
+
 
 class Cells(dict):
     """The memory locations the generator gives values to: {address: size}, at most MAX_CELLS, none
@@ -2439,4 +2961,31 @@ def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True
         cache_store(path, cached)
     if cached.get("failed") and not extra_load(image, name):
         raise GenerationError(cached["failed"])
-    return cached
+    return _answered(name, fn, gen, image, cached, path, key, options, calls, frame, make)
+
+
+def _answered(name, fn, gen, image, cached, path, key, options, calls, frame, make=True):
+    """cached with the frontier answers (Generator.answers) behind its cases: made from those and the
+    image's kept and written cases of the function (what the lift check runs; a recorded case reaches
+    branches no generated one does), and kept in the cache entry under "answers" with a key of their
+    own: the generation's key, its firm-up, ANSWERS and those kept and written cases. Made anew when
+    that key changes (make=False: left out then). A generation that failed has the written cases to
+    answer from (the entry keeps the answers only where it keeps the failure: a quick one is not cached)."""
+    failed = cached.get("failed")
+    generated = [] if failed else list(cached.get("cases") or [])
+    kept, written = kept_load(image, name, gen.real), extra_load(image, name, calls, frame)
+    if not generated and not kept and not written:
+        return cached
+    akey = hashlib.sha1(json.dumps([key, cached.get("firm"), ANSWERS, kept, written], sort_keys=True).encode()
+                        ).hexdigest()
+    got = cached.get("answers")
+    if not got or got.get("key") != akey:
+        if not make:
+            return cached
+        started = time.time()
+        made = gen.answers(name, fn.entry, fn.insns, generated + kept + written, loop=bool(options.get("loop")))
+        got = {"key": akey, "cases": made, "seconds": round(time.time() - started, 2)}  # (seconds: for reading)
+        cached = dict(cached, answers=got)
+        if not failed or cached.get("seconds", 0) >= FAILURE_SECONDS:
+            cache_store(path, cached)
+    return dict(cached, cases=generated + got["cases"])
