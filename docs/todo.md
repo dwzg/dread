@@ -1413,7 +1413,7 @@ may stay lifted.
 A review on the private real-life test put DREAD's readable C (names from the pilot) beside a
 human's hand-written C of the same functions, a sample drawn over subsystems and sizes (the
 pairs and the counts are in that target's notes). Every function was structured (no goto), a few
-read as well as the human's, and in a third of them DREAD printed something a reader would take for
+read as well as the human's, and in many of them DREAD printed something a reader would take for
 a fact that is not one. The items below are what DREAD can fix by a rule, ranked by that first
 (what is wrong to a reader), then by what must be decoded by hand, then by what only lengthens;
 each names a public function that shows it, or a test to write where none was found. Not DREAD's
@@ -1698,8 +1698,8 @@ model).
   stays inside the object it is given, that an index stays inside its array (the cases and the whole
   image decide, as for every transformation; where the cases see otherwise, whole).
 - [x] **A refused case must not hide a difference.** On the private real-life test the gate accepted
-  readable C that had lost an argument of a formatting call: 21 of the function's 30 cases differed,
-  every one refused as "the input makes the original touch its own saved registers", and the 9 that
+  readable C that had lost an argument of a formatting call: most of the function's cases differed,
+  every one refused as "the input makes the original touch its own saved registers", and those that
   agreed still ran every instruction. A refusal says the case's input is one the C cannot reproduce;
   it should stand only where every difference of the case is one that refusal explains (the touched
   saved registers, what is computed from them, the stack words), and a difference beyond that (a stub
@@ -2979,8 +2979,8 @@ undone). Other decisions are taken by the recommended option and written down in
   functions read xTail again to see whether an interrupt moved it: a case's `later`, memory that changes
   before the n-th read, could answer that), system registers, a run that faults in a call through a
   pointer a stub's fill gave (prvTimerTask's pending function calls).
-  On the private real-life test (2026-10-23; no whole-image run there): about a hundred more functions
-  accepted, a fifth fewer dropped for unrun instructions, and no more disagreements than before.
+  On the private real-life test (2026-10-23; no whole-image run there): more functions accepted,
+  fewer dropped for unrun instructions, and no more disagreements than before.
 
 - [x] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
   (found 2026-10-23 with the frontier answers, FreeRTOS RISC-V GCC -Os). With xTaskResumeAll accepted
