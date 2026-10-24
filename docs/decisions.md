@@ -9,6 +9,26 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The lift check's retries: each function once, no fixed number of passes (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), found on the private
+real-life test: a function dropped by a lift check agreed in a trace against the check's final list.
+It had failed while a callee failed in the same round, so it was a suspect, but the retries go bottom
+up, one layer of suspects a pass, and stopped at 8 passes (RETRY_PASSES) before its turn; the check
+said nothing about it. Several of that firmware's checks had used all of them; of the 39 public builds'
+last checks none had needed more than two, and none had tried a function twice.
+
+- **Question.** How many passes may the retries take?
+- **Options.** (a) A larger fixed number: the same silent cut on a deeper tree. (b) Each function tried
+  again once, so the passes end by themselves (at most one a suspect), with a safety bound and the
+  suspects it leaves reported. (c) Every suspect at once in a last pass: a caller tried with a callee
+  that fails on its own fails through it again, which the bottom-up order exists to avoid.
+- **Choice.** (b): dread.lift Retries; RETRY_PASSES is a bound of 256 now, and a check that reaches it
+  prints "untried" with the suspects left. A function that fails again on its retry stays out (before,
+  it could become a suspect again, which the fixed number had to stop).
+- **Undo.** RETRY_PASSES back to 8, and Retries.failed without `- self.retried`.
+- **Status.** In the code (tests/test_lift_retries.py).
+
 ## The pilot page: a short form of the pilot's own options, a run followed from its events, its job's stop (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), for step 3 of "The GUI for

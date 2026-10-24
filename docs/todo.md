@@ -3739,6 +3739,11 @@ undone). Other decisions are taken by the recommended option and written down in
   system check (entry 18,201), but the benchmark's table of measure-38 still lists it, and that
   table's whole image differs since the runs go that far. Not traced to its instruction.
 
+- [x] **Retries beyond eight passes** (2026-10-24, found on a private firmware: a dropped function
+  agreed in a trace against the final list; the bottom-up retries had stopped at their eight passes
+  before its turn, silently). Each function is tried again once and the passes end by themselves, a
+  bound of 256 for safety, what it leaves printed as "untried" (dread.lift Retries; docs/decisions.md,
+  "The lift check's retries"). The public builds are unchanged: none had needed more than two passes.
 - [ ] **The culprit search's empty set** (2026-10-23). lift.check and dread readable --check take the
   image without lifted C for one that agrees (differs([]) is None, never run). Since function entries
   move the system run's clock, hand-written C that calls otherwise than the original (inlining one

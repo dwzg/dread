@@ -273,7 +273,43 @@ class Body:
         return "Body(%s, %d own, %d shared)" % (self.name, len(self.own), len(self.insns) - len(self.own))
 
 
-RETRY_PASSES = 8            # times the lift check tries again what failed through a failing callee
+RETRY_PASSES = 256          # a safety bound on the lift check's passes that try again what failed
+                            # through a failing callee (Retries: each function is tried again once, so
+                            # the passes end by themselves); 8 until 2026-10-24
+
+
+class Retries:
+    """The lift check's second chances. A function that failed while a lifted function in its call tree
+    (tree: name -> the names below it) failed too may have failed only through that one: it is a
+    suspect, tried again once that one's C is gone. Suspects are tried bottom up, those none of whose
+    callees is a suspect first (a cycle: all of its members at once; FreeRTOS: every task-creating
+    function failed through the heap's allocator, two calls down; tried again together, they failed
+    together). Each function is tried again once, so the passes end by themselves, at most one a
+    suspect; `bound` is a safety net, and what it leaves is reported. Until 2026-10-24 the passes
+    stopped at 8: on a private firmware's deep call trees the chain of suspects was longer, and the
+    functions at its top stayed dropped untried (one of them agreed in a trace against the final
+    list); on the public builds no check had needed more than two passes or tried a function twice."""
+
+    def __init__(self, tree, bound=None):
+        self.tree, self.bound = tree, RETRY_PASSES if bound is None else bound
+        self.suspects, self.retried, self.passes = set(), set(), 0
+
+    def failed(self, failing, final=()):
+        """A round's failures: those with another failure below them become suspects, not those tried
+        again already nor those whose failure is final (final: no cases from the original)."""
+        failing = set(failing)
+        self.suspects |= {n for n in failing - set(final) - self.retried if self.tree[n] & (failing - {n})}
+
+    def next(self):
+        """The functions to try again in the next pass (taken off the suspects), or an empty set when no
+        suspect is left or the bound is reached (what is left then: self.suspects)."""
+        if not self.suspects or self.passes >= self.bound:
+            return set()
+        ready = {n for n in self.suspects if not self.tree[n] & self.suspects} or set(self.suspects)
+        self.suspects -= ready
+        self.retried |= ready
+        self.passes += 1
+        return ready
 
 
 def call_trees(program, names):
@@ -3430,7 +3466,7 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
             refuse(name, e)
     callees = {n: direct_callees(program, program.by_name[n]) for n in candidates}
     tree = call_trees(program, candidates)
-    accepted, suspects, passes, rounds = list(candidates), set(), 0, 0
+    accepted, rounds, retries = list(candidates), 0, Retries(tree)
     loop_missed = {}                        # a function that never returns whose loop cases agreed: what
                                             # they left unrun (the system run may run it, system_check)
     while accepted:
@@ -3494,19 +3530,20 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
         # whose callees is a suspect; one that fails then fails on its own and stays out, and its
         # callers come next with its original code (FreeRTOS: every task-creating function failed
         # through the heap's allocator, two calls down; tried again together, they failed together).
-        suspects |= {n for n in failing - ungenerated if tree[n] & (failing - {n})}
+        retries.failed(failing, ungenerated)
         for name in set(uncovered) - failing:
             if name in loops:
                 loop_missed[name] = set(runner.RUN.get("missed", {}).get(name, ()))
         accepted = [n for n in accepted if n not in drop]
         if not drop:
-            if suspects and passes < RETRY_PASSES:
-                ready = {n for n in suspects if not tree[n] & suspects} or set(suspects)    # (a cycle: all)
+            ready = retries.next()
+            if ready:
                 out("retry    %s (a lifted function each calls failed too)" % ", ".join(sorted(ready)))
                 accepted += sorted(ready)
-                suspects -= ready
-                passes += 1
                 continue
+            if retries.suspects:
+                out("untried  %s (the retry passes' bound, %d, reached)" % (", ".join(sorted(retries.suspects)),
+                                                                           retries.bound))
             break
     endless = endless + sorted(n for n in loops if n not in accepted)     # what loop cases did not accept
     runs = system and target.scenarios and hasattr(program.arch, "reset")   # (an architecture without one: no system run)
