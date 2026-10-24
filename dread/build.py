@@ -317,10 +317,16 @@ def system_names(path):
                 and l.split("#", 1)[0].strip()}
 
 
-def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=None, lifter=None, transform=None):
+def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=None, lifter=None, transform=None,
+          vet=None):
     """Compile and link; returns the path of the rebuilt image. lifted: names to build from lifted C
     (default: the image's lifted table, those of its readable table from readable C: dread
-    readable); a name src defines is left to src. lifter, transform: see lift_sources."""
+    readable); a name src defines is left to src. lifter, transform: see lift_sources. vet: called
+    once the lifted C compiled, before the link; it returns {name: why} of functions whose C must
+    not be linked (dread lift --check: C that calls what the original does not call, read from the
+    objects), and build then raises dread.overlay OverlayError with them in its blamed, without
+    linking. A link the linker refuses raises OverlayError too, with the functions its errors name
+    in blamed (dread.overlay blame)."""
     workdir = out or recon_dir(target, image)
     objects = compile_all(target, image, src or image.src, os.path.join(workdir, "obj"))
     names = read_names(image.table("lifted")) if lifted is None else list(lifted)
@@ -345,6 +351,10 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
         with open(os.path.join(workdir, "lifted.json"), "w") as f:
             json.dump({"unreached": {n: a for n, a in sorted(made.items()) if a}, "system": sorted(endless),
                        "loop": sorted(loops), "bodies": {n: bodies[n] for n in sorted(bodies)}}, f, indent=1)
+        kept = vet() if vet is not None else None
+        if kept:
+            raise overlay.OverlayError("kept from the link: " + "; ".join("%s: %s" % kv for kv in sorted(kept.items())),
+                                       blamed=kept)
     elif os.path.exists(record):
         os.remove(record)
     payload = os.path.join(workdir, "payload.bin")

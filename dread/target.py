@@ -225,7 +225,8 @@ class Compiler:
     triple   clang's --target (kind = "clang" needs it)
     cflags   the flags of the original's build, as far as known
     lifted_cflags  added after cflags for the lifted C (default ["-Os"], and what the architecture
-             layer's lifted_cflags names for the compiler: the MSP430 with GCC -fno-ssa-phiopt): it
+             layer's lifted_cflags names for the compiler: the MSP430 with GCC -fno-ssa-phiopt, Thumb
+             without Thumb-2 with GCC -fno-jump-tables, from what cflags say of the core): it
              is DREAD's translation, not the original's code; at -O0 every register of the original
              lives in the frame, slow, large and deep (FreeRTOS's GCC -O0 build: six functions more at
              -Os, -O2: four; none lost on four builds). [] compiles it with cflags alone
@@ -268,8 +269,11 @@ class Compiler:
         if self.kind == "clang" and not self.triple:
             raise TargetError("%s: [compiler] kind = \"clang\" needs triple (clang's --target)" % target.file)
         self.cflags = list(data.get("cflags", []))
-        self.layer_required = list(getattr(getattr(target, "arch", None), "required_cflags", ()))
-        layer = list(getattr(getattr(target, "arch", None), "lifted_cflags", {}).get(self.kind, ()))
+        arch = getattr(target, "arch", None)
+        if hasattr(arch, "configure"):      # what the flags say about the core, which the layer's flags
+            arch.configure(self.cflags)     # may depend on (ARM's on Thumb-2; configured again, it stays)
+        self.layer_required = list(getattr(arch, "required_cflags", ()))
+        layer = list(getattr(arch, "lifted_cflags", {}).get(self.kind, ()))
         self.lifted_cflags = list(data.get("lifted_cflags", ["-Os"] + layer))
         self.generated_std = data.get("generated_std", "gnu11")
         self.cxxflags = list(data.get("cxxflags", self.cflags + self.CXX_FLAGS))

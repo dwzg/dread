@@ -242,6 +242,20 @@ class Arm:
         if self.thumb2 is None:
             self.thumb2 = self.profile == "m"
 
+    @property
+    def lifted_cflags(self):
+        """Flags the lifted C needs from a compiler besides -Os ([compiler] lifted_cflags' default;
+        dread.target configures the layer first): on Thumb code of a core without Thumb-2 (ARMv4T,
+        ARMv6-M, ARMv8-M Baseline) GCC makes a switch at -Os a call of libgcc's __gnu_thumb1_case_*
+        (uqi, sqi, uhi, shi, si: the table behind the call, read through lr), and the overlay links
+        no library: the image has the helper only where the original's own code was built for size,
+        and a lifted function that calls it was dropped either way (its C calls what the original
+        does not; until 2026-10-25 the whole lift check failed where the link lacked it). With
+        -fno-jump-tables GCC compares instead, as GCC 10, 13 and 16 do here alike (the cases compare
+        what the C does, not how it dispatches; docs/decisions.md). clang makes an inline table
+        there, no helper. ARM state and Thumb-2 keep their inline tables: their C is as it was."""
+        return {"gcc": ["-fno-jump-tables"]} if self.isa == "t32" and self.thumb2 is False else {}
+
     def describe(self):
         return "arm %s, %s profile, cpu %s, %s-endian, Thumb%s" % (
             self.isa, "M" if self.profile == "m" else "A", self.cpu or "Unicorn's default", self.endian,

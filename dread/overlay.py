@@ -30,6 +30,12 @@ whose C did not land exactly at its slot (an alignment the slot does not have) a
 Refused: replacing a function that other original code branches into behind its entry; a function
 that runs from a RAM copy; a function whose C is in another instruction set than the original.
 
+A link the linker refuses raises OverlayError with the linker's output and, in `blamed`, the
+functions its errors name by their objects or sections (blame: an undefined reference from one
+function's C, a relocation that does not fit), so that a caller testing many functions can leave
+those out and link again (dread lift --check); an error that names none is the caller's to report.
+The linker runs with LC_ALL=C: its messages read the same in every locale.
+
 Writes the image, report.tsv (function, address, original bytes, C bytes, placement) and
 placement.json (the same for programs: entry, address, branch at the old entry or not).
 
@@ -39,6 +45,7 @@ import argparse
 import bisect
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -55,15 +62,19 @@ class OverlayError(Exception):
     """The link cannot be made; `function` names the one function at fault when there is one,
     `room`, when the room for the C is full, says (bytes over, the functions with C there largest
     first, {function: its bytes there}: itself when no slot or hole took it, and its object's helpers),
-    `failed` the sources that did not compile, and `errors` {source: the first error its compiler
-    named, one line (dread.build compiler_error), "" where it named none}."""
+    `failed` the sources that did not compile, `errors` {source: the first error its compiler
+    named, one line (dread.build compiler_error), "" where it named none}, and `blamed` {function:
+    why, one line}: the functions whose C the linker's errors name (blame: an undefined reference
+    from one function's object, a relocation of its section), or that a caller's vet kept from the
+    link (dread.build build), each with what was said of it."""
 
-    def __init__(self, message, function=None, room=None, failed=(), errors=None):
+    def __init__(self, message, function=None, room=None, failed=(), errors=None, blamed=None):
         super().__init__(message)
         self.function = function
         self.room = room
         self.failed = list(failed)
         self.errors = dict(errors or {})
+        self.blamed = dict(blamed or {})
 
 
 TAIL_SECTIONS = (".text", ".rodata", ".srodata", ".glue_7", ".v4_bx", ".vfp11_veneer", ".iplt")
@@ -97,6 +108,114 @@ def helper_owners(objs, funcs):
             by_object.setdefault(v[4], []).append(fn)
     return {fn: by_object[v[4]][0] for fn, v in objs.items()
             if fn not in funcs and len(by_object.get(v[4], ())) == 1}
+
+
+BLAME_TEXT = 270        # characters of the linker's messages in a function's reason at most
+LINKER_NAME = re.compile(r"^\S*?\b(?:ld(?:\.\w+)?|collect2)(?:\.exe)?:\s+")  # the linker's (or GCC driver's) name
+SECTION_REF = re.compile(r"\((\.[A-Za-z_][\w.$]*)(?:\+0x[0-9a-fA-F]+)?\)")  # (.text.NAME+0x26): GNU ld's and lld's
+RECON_SECTION = re.compile(r"\.recon\.[A-Za-z_$][\w$]*")                     # a placed function's output section
+ABSOLUTE_PATH = re.compile(r"(?<![\w.])/(?:[^\s:()'`/]+/)+([^\s:()'`/]+)")       # /dir/.../file: its last part
+
+
+def blame(text, by_object, by_section):
+    """What a failed link's output says of whom: ({function: [its messages, each one line]}, [the
+    messages that name none]).
+
+    The output is cut into messages: a line, and the lines behind it that begin with ">>>" (lld's:
+    where a symbol is referenced from or defined). A function is named by the path of an object that
+    is that function's alone (by_object: {path as passed to the linker: function}) or by a section of
+    it (by_section: {".text.NAME" or ".recon.NAME": function}; GNU ld writes "file.c:(.text.NAME+0x26)",
+    lld "obj.o:(.text.NAME+0x26)" or "obj.o:(NAME)"). One message is held against one function:
+    - a message that begins with the linker's name (all of lld's, GNU ld's own): the function it
+      names first, by position (lld's "obj.o:(.text.f+0x4): relocation ... out of range" names the
+      callee's object after it: ">>> defined in");
+    - a line that begins with where it was found (GNU ld's "file.c:(.text.f+0x26): undefined
+      reference", "relocation truncated to fit ... in g.o"): the function that place names; with
+      debug information binutils 2.38 and older give only the source line, which names none (2.42
+      and 2.47: "file.c:2:(.text.f+0x4)"), and the message counts for the function of the context: GNU ld
+      names the object once, in a line of its own that ends with
+      a colon ("ld: obj.o: in function `f':"; binutils 2.27 and 2.28 "obj.o: In function `f':"), in
+      front of what it says of that function (until the next such line; one of an object that is no
+      function's alone names none).
+    A message with "warning:" counts for nobody. Paths, section names and the linker's name are read,
+    not the wording (link runs the linker with LC_ALL=C: "warning:" is the word, in every locale). The
+    messages come back without the linker's name in front, objects and absolute paths (a source
+    file's, with debug information) by their file names: a verdict reads the same wherever the
+    target lies."""
+    messages = []
+    for line in text.splitlines():
+        line = line.rstrip()
+        if not line.strip():
+            continue
+        if line.lstrip().startswith(">>>") and messages:
+            messages[-1].append(line)
+        else:
+            messages.append([line])
+    paths = sorted(by_object, key=len, reverse=True)    # (one path inside another: the longer first)
+
+    def first(part):
+        """The function `part` names first, by position, or None."""
+        hits = []
+        for path in paths:
+            k = part.find(path)
+            if k >= 0:
+                hits.append((k, by_object[path]))
+                part = part.replace(path, " " * len(path))      # (a shorter path inside it: not again)
+        hits += [(m.start(), by_section[m.group(1)]) for m in SECTION_REF.finditer(part) if m.group(1) in by_section]
+        hits += [(m.start(), by_section[m.group(0)]) for m in RECON_SECTION.finditer(part) if m.group(0) in by_section]
+        return min(hits)[1] if hits else None
+    found, unnamed, context = {}, [], None
+    for message in messages:
+        whole = "\n".join(message)
+        own = LINKER_NAME.match(message[0])
+        if len(message) == 1 and message[0].endswith(":"):     # GNU ld's "ld: obj.o: in function `f':"
+            context = first(whole[own.end():] if own else whole)    # (2.28 and older: "obj.o: In function")
+            continue
+        if "warning:" in whole:
+            continue
+        if own:
+            fn = first(whole[own.end():])
+        else:
+            fn = first(message[0].split(": ", 1)[0])
+            if fn is None:
+                fn = context
+        if fn is None:
+            unnamed.append(message)
+        else:
+            found.setdefault(fn, []).append(message)
+
+    def said(message):
+        """A message as one line: the linker's name in front of it left out, objects and absolute paths
+        (a source file's, with debug information) by their file names."""
+        text = " ".join(LINKER_NAME.sub("", m.strip().lstrip(">").strip()) for m in message)
+        for path in paths:
+            text = text.replace(path, os.path.basename(path))
+        return ABSOLUTE_PATH.sub(r"\1", text)
+    return {fn: [said(m) for m in ms] for fn, ms in found.items()}, [said(m) for m in unnamed]
+
+
+def link_blame(text, objs, funcs, placed):
+    """{function: why} for a failed link (blame): a function of the original whose object (one that
+    defines no other function of the original: a lifted function's file), whose section .text.NAME,
+    a helper's section counted to its function (helper_owners), or whose placed output section
+    .recon.NAME the linker's errors name; why is "the link of its C failed (MESSAGES)", the messages
+    one line each, joined by "; ", objects by their file names, BLAME_TEXT characters at most. objs:
+    read_objects; funcs: the original's functions by name; placed: the functions with a .recon
+    section of their own."""
+    owners = helper_owners(objs, funcs)
+    mine = {}
+    for fn, v in objs.items():
+        if fn in funcs:
+            mine.setdefault(v[4], []).append(fn)
+    by_object = {obj: fns[0] for obj, fns in mine.items() if len(fns) == 1}
+    by_section = {".text." + fn: fn if fn in funcs else owners[fn] for fn in objs if fn in funcs or fn in owners}
+    by_section.update({".recon." + fn: fn for fn in placed})
+    found, _ = blame(text, by_object, by_section)
+    out = {}
+    for fn, ms in found.items():
+        said = "; ".join(dict.fromkeys(ms))     # (in parentheses: dread.bench counts the reasons without them)
+        out[fn] = "the link of its C failed (%s)" % (said if len(said) <= BLAME_TEXT else said[:BLAME_TEXT - 3] + "...")
+    return out
 
 
 def align_up(value, alignment):
@@ -389,9 +508,10 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
     elf_path = os.path.join(workdir, "recon.elf")
     extra_ld = arch.linker_flags(target.compiler) if hasattr(arch, "linker_flags") else []
     r = subprocess.run(target.compiler.command("ld") + target.compiler.ldflags + extra_ld + ["-T", script, "-o", elf_path]
-                       + list(objects) + extra, capture_output=True, text=True)
+                       + list(objects) + extra, capture_output=True, text=True, env=dict(os.environ, LC_ALL="C"))
     if r.returncode:
         message = r.stderr
+        blamed = link_blame(r.stderr, objs, funcs, in_slot + in_body + in_hole)
         room = None
         if "the room for the C is full" in r.stderr:
             # what each function has there: itself when no slot or hole took it, and the helpers of its
@@ -404,7 +524,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             message += "no space for: %s\n" % " ".join(sorted(there))
             over = tail_bytes(objects, set(in_slot + in_body + in_hole)) - (tail_end - tail)
             room = (max(over, 1), sorted(there, key=lambda n: (-there[n], n)), there)
-        raise OverlayError("the link failed:\n" + message, room=room)
+        raise OverlayError("the link failed:\n" + message, room=room, blamed=blamed)
     linked = Elf(elf_path)
     for sec in linked.sections:
         if sec.kind == SHT_PROGBITS and sec.alloc and sec.size:

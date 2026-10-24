@@ -9,6 +9,102 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## A link that refuses one function's C drops that function; Thumb-1 switches without GCC's helper (2026-10-25)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "dread cclab
+run --lift with gcc-arm (GCC 16.2): the lift check of cortex-m0-O2 and cortex-m0-O3 fails as a whole"
+(docs/todo.md).
+
+- **Question.** On GCC 16's Cortex-M0 builds of the compiler lab at -O2 and -O3 the lift check failed as
+  a whole ("the build failed: the link failed": op_switch_jump's lifted C calls `__gnu_thumb1_case_uqi`,
+  which the link does not have), so those builds got no verdicts; at -Os the same function was dropped
+  alone ("its C calls __gnu_thumb1_case_uqi, which the original does not call"). The per-function check
+  finds the call in the -O2 object as well (the same R_ARM_THM_CALL against the same undefined symbol in
+  .text.op_switch_jump): it never ran there, since it read the objects only after a link that went
+  through. Lifted C is compiled at -Os whatever the original's level; GCC makes a Thumb-1 switch a call
+  of `__gnu_thumb1_case_*` only when it optimises for size (or for position-independent code); and the
+  image has the helper only where the original's own code calls one (from libgcc: the -Os build). There
+  the link resolved the C's call and the check after it dropped the function; at -O2 and -O3 the link
+  failed first. What should (1) the check of what the C calls, (2) a link the linker refuses, and (3)
+  lifted C that calls such a helper do?
+- **Options.**
+  1. The check of calls the original does not make: (a) after a link that went through, as before; (b)
+     before every link, from the compiled objects (dread.build build's vet).
+  2. A link the linker refuses: (a) fails the check, as before; (b) drops the functions whose objects or
+     sections the linker's errors name, with the linker's words in their verdicts, and links again; an
+     error that names none of the functions the check may drop fails it as before, with the message;
+     (c) halves the functions until the link goes through, as the whole image's differences are halved
+     (culprits).
+  3. Lifted C that GCC compiles into a call of a switch helper (Thumb code of a core without Thumb-2):
+     (a) dropped, as before (with 1b at every level alike); (b) compiled with -fno-jump-tables wherever
+     GCC compiles Thumb code for such a core (the ARM layer's lifted_cflags, as the MSP430's
+     -fno-ssa-phiopt); (c) the same, only where the image lacks the helper; (d) libgcc's helper linked
+     into the C's room; (e) the lifter writes such a switch otherwise (labels as values in a table of
+     its own).
+- **Choice.** (1b), (2b), (3b).
+- **Why.** (1b) What the C calls is a property of its object alone (its undefined symbols against what
+  the lifted C calls by name); the link adds nothing to it, and asked before the link it holds wherever
+  the link would fail on the same call, with the same reason at every level. In a round whose link would
+  also overfill the room for the C, the function that calls a helper now goes first and the largest
+  without room after it; the room is then short by less among the same candidates less that one, so that
+  round drops no function for room that the old order kept (not shown over several rounds). (2b) The
+  linker names the culprit of an undefined reference or of a relocation by its object and section, and a
+  lifted function's object and its .text.NAME are its own (dread.overlay blame reads GNU ld's and lld's
+  forms: the place a message begins with, GNU ld's "in function" line in front of what it says with debug
+  information, lld's ">>>" lines; one function a message, the one it names first). Halving (2c) needs a
+  link a step and cannot tell an error of nobody's (a missing library fails every half). An error that
+  names no function the check may drop stays an error of the build (dread.build BuildFailed), as for a
+  source written by hand that does not compile. (3b) The cases compare what the C does (results, memory,
+  calls, the original's coverage), not how its switch dispatches: a tree of compares runs the same arm
+  for the same index (a switch statement's meaning in C), and with the flag GCC 10, 13 and 16 emit no
+  helper (each checked, CI's two as well). Where the image has the helper (option c's exception), calling
+  it was no better: such C was dropped there too, since a case's stub of the helper would answer the C's
+  call, so a flag that depends on the image keeps functions out for nothing and makes one function's
+  translation depend on what else the original's compiler linked. (There the functions are not gained
+  yet: an original that dispatches through the helper gets no case that runs the dispatch, since the
+  runner refuses an input whose run loads a byte of a function's extent from another function, and the
+  helper reads its caller's table; docs/todo.md.) (3d) brings the toolchain's library into the rebuilt
+  image, needs the core's multilib, and still leaves a call the original does not make; (3e) is machinery
+  in the lifter for what one flag of the compiler does. clang makes an inline table on Thumb-1 (a byte
+  table read behind add pc, rN; clang 23), and ARM state and Thumb-2 have inline tables (ldr pc, tbb,
+  tbh): their C stays as it was. A target that names its own [compiler] lifted_cflags replaces the
+  default and the flag with it, as for the MSP430's.
+- **Cost.** The size of a switch's C changes little: op_switch_jump's 144 bytes with the helper's call
+  and its table, 156 with the compares (104 in the original at -O2; moved behind the image either way);
+  the test's six-way switch 100 and 96. A larger sparse switch grows more; on a core whose image is
+  full it may find no room ("no room left for its C": the safe side).
+- **Measured** (main at 1c241ac against this, each build's lift check on copies with the same cached
+  cases). The compiler lab's gcc-arm matrix (GCC 16.2, its sixteen builds with --lift): cortex-m0-O2 and
+  -O3, which had no verdicts, lift 89 of 94 probe functions each, op_switch_jump among them (four probes
+  that take a va_list's address are refused and _Z11cxx_virtuali's cases leave seven instructions unrun,
+  at both); cortex-m0-Os lifts 89 as before, op_switch_jump dropped as before but now for its unrun
+  dispatch (above), not for the helper's call; cortex-m0-O0 and the twelve Thumb-2 builds give the same
+  verdicts with the same reasons. gizmo built for the Cortex-M0 in a scratch directory (its image has the
+  helpers, for its own switches; no C written by hand): 49 accepted either way, handle_key and script_run
+  dropped for their unrun dispatch where they were dropped for the helper's call. The eight builds accept
+  the same functions, their lifted tables byte for byte and their verdicts with the reasons the same:
+  gizmo a32 36, m3 36, m4 44, rv32 32; FreeRTOS mps2-gcc-Os 341, mps2-clang-O2 300, the RISC-V GCC -Os
+  build 272, mps2-gcc-O0 382; and so do gizmo's m3cpp (43), rv32cpp (39) and msp430 (79).
+- **Not established.** (1) dread.overlay blame knows the forms GNU ld (seen from 2.27 to 2.47; the
+  tests link with 2.38, 2.42 and 2.47) and lld (14, 18 and 23) write; another linker's forms, or a
+  message that names no object or section of a function, fail the check as before (the safe side). (2) A
+  message whose first-named function is not its culprit (a form not seen here) would drop the wrong
+  function; its verdict shows the linker's words. (3) -fno-jump-tables reaches readable C on such cores
+  too (it is compiled with the same flags); dread readable --check was not run on a Thumb-1 build. (4)
+  An image whose [arch] differs from the target's gets the target's flags. (5) Other helpers lifted C
+  may call where the original does not (a 64-bit shift's on a core without the instruction, libgcc's
+  shifts on the MSP430) are dropped as before, now at every level alike, not avoided. (6) The system
+  run's single builds of a function that never returns (system_check) are not vetted (no case stubs a
+  callee there) and drop the function on a refused link, now with what the linker said of its C; the
+  whole image (whole_image) takes a refused link for its difference and halves, as before.
+- **How to undo.** dread/arch/arm.py: lifted_cflags removed (3); dread/lift.py check: foreign_calls asked
+  after the build again and the blamed branch removed (1, 2); dread.build build's vet and dread.overlay
+  blame, link_blame and OverlayError.blamed are then unused.
+- **Status.** Done (2026-10-25): dread.overlay blame, link_blame, OverlayError.blamed and the linker run
+  with LC_ALL=C; dread.build build's vet; dread.lift check (the foreign calls before each link, blamed
+  functions dropped); dread.arch.arm Arm.lifted_cflags, dread.target Compiler configuring the layer
+  before it reads the layer's flags; tests/test_lift_link.py, tests/test_cclab.py.
+
 ## One name per static object: structures over what their base reaches, one name per address and width, signed where read signed (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "One name

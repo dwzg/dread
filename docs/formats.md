@@ -742,21 +742,24 @@ answers); a `--task name` run of 40 functions 782 events, 181 KB (345 answers); 
 
 Written by `dread lift --check`: one line per function it looked at, `function`, `verdict`
 (`accepted`, `refused`: the lifter cannot translate it, `dropped`: lifted, but the cases or the
-system run disagree or do not run all of it, the overlay cannot place it, or the whole image differs
-with it, alone or together with the functions its reason names; `by hand`: src defines it), `reason`
-(the lifter's or the test run's words), `missed` (for a dropped function, the instructions no case
-ran). `dread gui` reads it; `dread rename` renames in it. Beside it `whole.txt`: the whole image's
-outcome (`agrees` or its first difference) on the first line, then one line per set of functions
-dropped for it (`dropped for it: A, B; with them alone: ...`, since 2026-10-22; where leaving out one
-of a smallest set of three or more is enough, only that one goes: `dropped for it: B (leaving it out
-alone is enough; the smallest set that differs: A, B, C); with them alone: ...`, since 2026-10-23,
+system run disagree or do not run all of it, the overlay cannot place it, its C calls what the
+original does not call (`its C calls X, which the original does not call ...`), the link refuses its
+C (`the link of its C failed (...)`, the linker's messages that name its object or section, one line
+each, joined by `; `: since 2026-10-25; until then such a link failed the whole check), or the whole
+image differs with it, alone or together with the functions its reason names; `by hand`: src defines
+it), `reason` (the lifter's or the test run's words), `missed` (for a dropped function, the
+instructions no case ran). `dread gui` reads it; `dread rename` renames in it. Beside it `whole.txt`: the
+whole image's outcome (`agrees` or its first difference) on the first line, then one line per set of
+functions dropped for it (`dropped for it: A, B; with them alone: ...`, since 2026-10-22; where leaving
+out one of a smallest set of three or more is enough, only that one goes: `dropped for it: B (leaving it
+out alone is enough; the smallest set that differs: A, B, C); with them alone: ...`, since 2026-10-23,
 and its reason in verdicts.tsv reads `the whole image differs with its lifted C; without it alone it
-agrees (...)`). `dread uncovered` reads it (the `missed` column, and the reason's first words for how
-the function was dropped). Since 2026-10-24 a dropped function's FAIL reason may go on after its case's
-label with the refusal that held but did not explain every difference (`FAIL NAME [label]: refused for
-X, but it differs Y: Z`, dread.runner), and the runner's REFUSED lines in the round files beside it end
-with what their reasons explained (`(it differs only after the touch: ...)`); older files have
-neither, and readers take the lines by their first words as before.
+agrees (...)`). `dread uncovered` reads it (the `missed` column, and the reason's first words for how the
+function was dropped). Since 2026-10-24 a dropped function's FAIL reason may go on after its case's label
+with the refusal that held but did not explain every difference (`FAIL NAME [label]: refused for X, but
+it differs Y: Z`, dread.runner), and the runner's REFUSED lines in the round files beside it end with
+what their reasons explained (`(it differs only after the touch: ...)`); older files have neither, and
+readers take the lines by their first words as before.
 
 ### `BUILD/sysrun/IMAGE/NAME.json` (the system run's record)
 

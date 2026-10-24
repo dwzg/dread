@@ -709,6 +709,22 @@ def test_run_lift_checks_each_build_with_dread(tmp_path):
     assert "## What DREAD lifts" in (tmp_path / "gcc-arm" / "report.md").read_text()
 
 
+@needs_gcc
+def test_run_lift_of_a_thumb_1_build_for_speed_gives_verdicts(tmp_path):
+    """run --lift on GCC's Cortex-M0 build at -O2: the lifted C of the switch probe made GCC call
+    __gnu_thumb1_case_uqi, which only an image built for size has, so until 2026-10-25 the link failed
+    and the build got no verdicts at all. The lifted C compares now (the ARM layer's -fno-jump-tables),
+    and a link error would drop only the function it names (tests/test_lift_link.py): every probe of
+    the file gets its verdict, the switch probe's among them."""
+    from dread.cclab import run
+    a = ad.load("gcc-arm")
+    results = run(a, str(tmp_path), only=["cortex-m0-O2"], names=["ops"], jobs=2, out=lambda *x: None, lift=True)
+    got = results["cortex-m0-O2"]["lift"]
+    assert "error" not in got, got
+    assert "-fno-jump-tables" not in got["compiler"]["cflags"], got["compiler"]      # (the layer's, not the build's)
+    assert got["verdicts"]["op_switch_jump"][0] == "accepted", got["verdicts"]["op_switch_jump"]
+
+
 @needs_newlib
 def test_a_bundles_objects_relinked_here_measure_the_same(tmp_path):
     """relink:DIR: the objects of a bundle's builds (a compiler that runs elsewhere: at work), copied

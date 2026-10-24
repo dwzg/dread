@@ -99,9 +99,18 @@ are kept as the system run's records, one a scenario (BUILD/sysrun/IMAGE/SCENARI
 dread.sysrun: both device logs, the function at each entry, the transfers into functions), which
 dread gui shows. What stays is written to the
 image's lifted table (config/lifted.txt), which dread recon builds from then on (it lifts those
-functions again at every build: the C is not kept). A build that dropping functions cannot mend (the
-sources written by hand do not compile, a header is missing) ends the check with exit 1 and the
-table as it was (dread.build BuildFailed; until 2026-10-23 it exited 0, the old table in place).
+functions again at every build: the C is not kept). Before each link the compiled C is read: a
+function whose C calls what the original does not call (a compiler's helper: foreign_calls) is
+dropped without being linked. A link the linker refuses drops the functions whose objects or
+sections its errors name, with the linker's words ("the link of its C failed (...)", dread.overlay
+blame), and links again. Until 2026-10-25 the first was asked only after a link that went through,
+and a link that failed ended the check: where the image lacks what the C calls (GCC's Thumb-1
+switch helper, which an image built for speed does not have), the whole check failed, where the
+image has it the one function was dropped. A build that dropping functions cannot mend (the sources
+written by hand do not compile, a header is missing, a link error that names no function the check
+may drop: a missing library, a failed assertion of the linker script, an object written by hand)
+ends the check with exit 1, the message and the table as it was (dread.build BuildFailed; until
+2026-10-23 it exited 0, the old table in place).
 
     dread lift [--target DIR] [--image NAME] [--out DIR] [NAME...]
     dread lift --check [--target DIR] [--image NAME] [NAME...]
@@ -3469,15 +3478,32 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
     accepted, rounds, retries = list(candidates), 0, Retries(tree)
     loop_missed = {}                        # a function that never returns whose loop cases agreed: what
                                             # they left unrun (the system run may run it, system_check)
+
+    def foreign():
+        """Before each link (build's vet): the functions whose compiled C calls what the original does
+        not call. Until 2026-10-25 this was asked after the link, which failed first where the image
+        lacks what the C calls (GCC's Thumb-1 switch helper __gnu_thumb1_case_uqi, which an image
+        built at -O2 has not: the check of the whole build failed, where at -Os the image had it and
+        the one function was dropped)."""
+        return {name: "its C calls %s, which the original does not call (a case's stub of it would answer "
+                      "the C)" % ", ".join(sorted(symbols))
+                for name, symbols in foreign_calls(program, work, accepted, lifter).items()}
     while accepted:
         rounds += 1
         try:
-            payload = build.build(target, image, out=work, lifted=accepted, quiet=True, lifter=lifter)
+            payload = build.build(target, image, out=work, lifted=accepted, quiet=True, lifter=lifter, vet=foreign)
         except overlay.OverlayError as e:
             if e.function in accepted:      # one function the overlay cannot place: without it
                 out("dropped  %-24s %s" % (e.function, e))
                 verdicts[e.function] = ("dropped", "the overlay: %s" % e, "")
                 accepted = [n for n in accepted if n != e.function]
+                continue
+            blamed = {n: why for n, why in e.blamed.items() if n in accepted}
+            if blamed:                      # C the vet keeps out, or whose object or section the linker's
+                for name, why in sorted(blamed.items()):    # errors name: without them, link again
+                    out("dropped  %-24s %s" % (name, why))
+                    verdicts[name] = ("dropped", why, "")
+                accepted = [n for n in accepted if n not in blamed]
                 continue
             if e.room:                      # the room for the C is full: the largest without room go
                 over, unplaced, sizes = e.room
@@ -3495,15 +3521,6 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
                     continue
             out("dread lift: the build failed: %s" % e)
             raise build.BuildFailed(str(e))
-        foreign = foreign_calls(program, work, accepted, lifter)
-        if foreign:                         # the C calls what the original does not: drop, build again
-            for name, symbols in sorted(foreign.items()):
-                why = ("its C calls %s, which the original does not call (a case's stub of it would answer "
-                       "the C)" % ", ".join(sorted(symbols)))
-                out("dropped  %-24s %s" % (name, why))
-                verdicts[name] = ("dropped", why, "")
-            accepted = [n for n in accepted if n not in foreign]
-            continue
         runner.prepare(target, image, payload)
         lines = []
         _, uncovered, results = runner.run(accepted, only=True, out=lines.append, jobs=jobs)
@@ -3682,8 +3699,8 @@ def _system_one(name):
         unreached = set(lifter.lift(fn).unreached)
         where = os.path.join(work, name)
         payload = build.build(target, image, out=where, lifted=[name], quiet=True, lifter=lifter)
-    except (Refused, overlay.OverlayError) as e:
-        return name, "dropped", str(e), "", None
+    except (Refused, overlay.OverlayError) as e:       # (a link refused: what the linker said of its C)
+        return name, "dropped", getattr(e, "blamed", {}).get(name) or str(e), "", None
     with open(os.path.join(where, "placement.json")) as f:
         placed = json.load(f)["functions"]
     built = [n for n, p in placed.items() if p["placement"] != "helper"]
@@ -3714,11 +3731,14 @@ def _system_one(name):
 
 def foreign_calls(program, work, names, lifter):
     """{name: symbols} of lifted functions whose compiled C calls a function the original does not
-    call: a compiler's helper (GCC on the MSP430 shifts in libgcc, __mspabi_srli). A generated case
-    may stub it (a callee a run hung in is stubbed, however deep: gizmo-msp430's script_run had
-    __mspabi_srli so) and would then answer the C's own calls. Not caught: C that calls a helper its
-    original calls too, more often than the original. The architecture's shared epilogues (jumped
-    to, never stubbed: own_epilogues) are allowed."""
+    call: a compiler's helper (GCC on the MSP430 shifts in libgcc, __mspabi_srli; on Thumb-1 a
+    switch, __gnu_thumb1_case_uqi, where the C is compiled without the ARM layer's -fno-jump-tables).
+    A generated case may stub it (a callee a run hung in is stubbed, however deep: gizmo-msp430's
+    script_run had __mspabi_srli so) and would then answer the C's own calls; where the image lacks
+    it, the link fails. Reads only the objects (work/obj-lifted/NAME.o): check asks it before each
+    link (dread.build build's vet). Not caught: C that calls a helper its original calls too, more
+    often than the original. The architecture's shared epilogues (jumped to, never stubbed:
+    own_epilogues) are allowed."""
     from dread.elf import Elf
     allowed = tuple(getattr(program.arch, "own_epilogues", ()))
     lifted = lifter.__dict__.get("lifted", {})

@@ -167,6 +167,14 @@ Only the probe functions are checked, not the toolchain's library; the check nee
 compiler (arm-none-eabi-gcc) on the machine. On 2026-10-20 it found, on GCC 16's -Os build, four
 of 94 probe functions not lifted: three that take the address of a stack argument, and ret_ll, whose
 64-bit constant GCC loads with `adr` and `ldrd` from its pool, which the rebuilt function covers.
+Until 2026-10-25 the check of GCC 16's Cortex-M0 builds at -O2 and -O3 failed as a whole: the lifted C
+of a switch (op_switch_jump) called GCC's Thumb-1 switch helper `__gnu_thumb1_case_uqi`, which only
+the -Os image has. Lifted C for such a core is compiled without jump tables since (GCC's
+-fno-jump-tables), the check reads the compiled C before each link, and a link error drops the
+function whose C it names (docs/decisions.md). Measured that day: the two builds lift 89 of 94 probe
+functions each, op_switch_jump among them; the -Os build 89 as before, op_switch_jump still dropped,
+now because no case runs its dispatch through the helper (docs/todo.md); the other thirteen builds of
+the matrix the same functions with the same reasons.
 
 ## A compiler that runs elsewhere (`relink:`)
 

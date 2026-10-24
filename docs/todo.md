@@ -4799,12 +4799,62 @@ reimplement them.
   dread whatcc, samecode and callpair on a target of one's own (their results show in the job's log only);
   adding a hit to the allow list from the leak check page (a change of the user's private file: asked, not
   assumed).
-- [ ] dread cclab run --lift with gcc-arm (GCC 16.2): the lift check of cortex-m0-O2 and cortex-m0-O3 fails as
+- [x] dread cclab run --lift with gcc-arm (GCC 16.2): the lift check of cortex-m0-O2 and cortex-m0-O3 failed as
   a whole ("the build failed: the link failed": the lifted C of op_switch_jump, built for the Cortex-M0, calls
-  `__gnu_thumb1_case_uqi`, which the link does not have), so those builds get no verdicts at all; at -Os the
-  same function is dropped alone ("its C calls __gnu_thumb1_case_uqi, which the original does not call").
+  `__gnu_thumb1_case_uqi`, which the link does not have), so those builds got no verdicts at all; at -Os the
+  same function was dropped alone ("its C calls __gnu_thumb1_case_uqi, which the original does not call").
   A link error of one function's C should drop that function, not the check (found 2026-10-24 by the
-  compiler lab page's trial; not traced further).
+  compiler lab page's trial). Done 2026-10-25 (docs/decisions.md):
+  - The cause was the order, not another section, relocation or symbol form: the -O2 object holds the same
+    R_ARM_THM_CALL against the same undefined symbol in .text.op_switch_jump, and foreign_calls finds it
+    there; it was only asked after a link that went through. Lifted C is compiled at -Os at every level, and
+    GCC makes a Thumb-1 switch a call of `__gnu_thumb1_case_*` only when it optimises for size, so only the
+    -Os image has the helper (libgcc's, for the original's own switches): there the link went through and the
+    check after it dropped the function; at -O2 and -O3 the link failed first.
+  - The check reads the compiled C before every link now (dread.build build's vet: foreign_calls), and a
+    link the linker refuses drops the functions whose objects or sections its errors name (dread.overlay
+    blame, GNU ld's and lld's forms; the verdict "the link of its C failed (...)" with the linker's words)
+    and links again; an error that names no function the check may drop (a failed assertion of the linker
+    script, a missing library, an object written by hand) still fails it with the linker's message. The
+    linker runs with LC_ALL=C.
+  - Lifted C for Thumb code of a core without Thumb-2 is compiled by GCC with -fno-jump-tables (the ARM
+    layer's lifted_cflags, after dread.target configured the layer from cflags): its switches compare
+    instead of calling the helper, whether the image has one or not.
+  - Measured (main against this, on copies with the same cached cases): the compiler lab's gcc-arm matrix with
+    --lift, cortex-m0-O2 and -O3 89 of 94 probe functions each (no verdicts before), op_switch_jump accepted
+    there; cortex-m0-Os 89 as before (op_switch_jump dropped as before, now because no case runs its dispatch:
+    the open item on the switch helper below); the other thirteen builds the same verdicts with the same
+    reasons. gizmo built for the Cortex-M0 in a scratch directory: 49 either way. The eight builds accept the
+    same functions, tables and verdicts with reasons byte for byte the same: gizmo a32 36, m3 36, m4 44, rv32
+    32; FreeRTOS mps2-gcc-Os 341, mps2-clang-O2 300, the RISC-V GCC -Os build 272, mps2-gcc-O0 382.
+  - Checked: tests/test_lift_link.py (a Thumb-1 program of our own whose switch GCC compiles into a call of
+    the helper, which its image lacks: with lifted_cflags = ["-Os"] the check drops that function before the
+    link and gives the other three their verdicts, and with the check before the link told nothing, the
+    linker's error drops it with its words; a function written by hand that calls what nobody defines fails
+    the check with the linker's message and no table; by default all four are accepted and the switch's C
+    calls no helper; the link with GNU ld, with debug information too, and with ld.lld names the one function
+    whose C it refuses; where the flag applies; blame on GNU ld's and lld's messages) and
+    tests/test_cclab.py (run --lift on the Cortex-M0 build at -O2 of the probes' ops file: verdicts, the
+    switch probe accepted; main gives "the lift check gave no verdicts"), on the host's GCC 16 and on CI's
+    GCC 13 and 10.
+  - Not established: other linkers' message forms (they fail the check as before); readable C on Thumb-1
+    gets the flag too, and the readable gate was not run on a Thumb-1 build; an image whose [arch] differs
+    from the target's gets the target's flags (docs/decisions.md lists the rest).
+- [ ] dread readable --check takes a link that its readable C makes the linker refuse for the end of the gate
+  (dread.build BuildFailed), as the lift check did until 2026-10-25: readable C that calls what the original
+  does not (a loop GCC turns into a memcpy, a helper) is dropped only where the image has the callee, and
+  checked only after the link. The lift check's way fits it: foreign_calls as build's vet before each link,
+  the functions OverlayError.blamed names dropped (dread.lift check). Left with the lift check's item, which
+  kept out of dread.readable.
+- [ ] A function whose original dispatches through GCC's Thumb-1 switch helper (bl __gnu_thumb1_case_uqi, the
+  table behind the call) gets no case that runs the dispatch: the helper, another function, loads a byte of
+  the caller's extent, which dread.emu trace_reads takes for code loaded as data (the extent owners' rule), so
+  every input that reaches the call is refused, the generator's and written ones alike ("the input loads
+  instructions as data or stores into the image"). Seen on GCC 16's Cortex-M0 -Os build of the compiler lab
+  (op_switch_jump: 37 of its 44 instructions never ran, ten written cases with every index refused) and on
+  gizmo built for the Cortex-M0 in a scratch directory (handle_key, script_run): since their C compiles
+  without the helper (2026-10-25), this is what drops them. The helper's loads of the table behind a call the
+  layer marks as a dispatch (insn.dispatch_call) are the caller's constants.
 
 ## Browser view (`dread gui`; asked for by the user on 2026-10-18)
 
