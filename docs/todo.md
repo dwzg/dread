@@ -2200,11 +2200,26 @@ model).
   in the negs idiom (t = (u64)0 + ~x + 1, 54 on GCC -Os) goes with "Flags as comparisons"; x = x + f()
   with a call stays (the call in plain sight); (u32)(u8)r1 << 5 stored into a byte keeps its inner cast
   (a shift is no low-bits operation for the pass).
-- [ ] **Names without their type.** DREAD's default names for narrow accesses carry the type
+- [x] **Names without their type.** DREAD's default names for narrow accesses carry the type
   (g_20001830_u8), and the naming model keeps the suffix in what it proposes. Strip a trailing type
   suffix from a proposed name that has other words (the answer's check), or show the question's
   defaults without it. Public example: the defaults of FreeRTOS mps2-gcc-Os (g_20001830_u8); whether
   the model keeps them on FreeRTOS was not checked (no pilot names in the bench copies).
+  Done 2026-10-24 (dread.naming untyped, in dread pilot's name_globals; docs/decisions.md, "Functions'
+  and texts' addresses in readable C", which records this one too). A proposal that ends in a type of
+  the default names (_u8, _s16, ... _s64) and has other words is kept without it (uxTimerFlags_u8 is
+  uxTimerFlags), unless the name without it is taken or another proposal of the same question (a word
+  and its byte at one address: state and state_u8 stay apart); the questions are as they were (two views
+  of one address would show one name). Measured with dread pilot --task globals, Haiku, on two copies of
+  FreeRTOS GCC -Os ($0.03 and $0.02): with the check's readable_types plan 16 default names with a type
+  were shown and no proposal kept it; without a plan (no structures of static data: every narrow access
+  a name of its own) 19 were shown and 3 proposals kept it (the NVIC's priority bytes, io_e000e400_u8 as
+  nvic_priority_u8, io_e000e408_u8 and io_e000e409_u8), stored as nvic_priority, nvic_ip_irq2 and
+  nvic_ip_irq3; neither table holds a name that ends in a type. Tests: tests/test_naming.py (untyped;
+  name_globals with a played model: a suffix stripped, kept where it tells two views apart or the name
+  without it is a function's). Left: the variables' and structures' questions show no such defaults
+  and get no such check; how often other models keep the type, and on the review's private target,
+  is not measured here.
 - [x] **Radix by use.** Counts, delays, sizes and line numbers print in hex, and a value compared in
   decimal can be stored in hex in the same function. Print a constant in decimal where it is a count,
   a multiplier, a size compared with decimal constants or stored beside them, unless it looks like a
@@ -2227,12 +2242,65 @@ model).
   hex though other functions store it in decimal (prvControllingTask's line number on GCC -Os: an
   image-wide pre-pass, like the readable_types plan, would carry the evidence); call arguments (memset's
   sizes, vAssertCalled's lines) stay hex: a size and an address cannot be told apart by the call alone.
-- [ ] **Addresses of functions and texts by name.** A function's entry (with the Thumb bit) or the
+- [x] **Addresses of functions and texts by name.** A function's entry (with the Thumb bit) or the
   address of a string in the image passed or stored as a value prints as a number. Print the
   function's name (`&f`) and, for text, a comment with the string or a named constant. Public
   examples: FreeRTOS mps2-gcc-Os vStartTimerDemoTask (`xTimerCreate(0xd9cu, ..., 0x913du)`: the timer
   name "FR Timer" and prvAutoReloadTimerCallback; `vAssertCalled(0xd3fu)` passes the source file's
   name); gizmo a32 print_status (`uart_puts(0x20d35u)` for "mode ").
+  Done 2026-10-24 (dread.constants Pointed; dread.naming apply_globals' pointee, function_use and
+  text_use, taken_kinds; the readable_types table's `takes`; dread.h FUNCTION_AT; cparse.Num's note,
+  which dread.polish keeps; dread pilot's name questions note a text once; docs/decisions.md,
+  "Functions' and texts' addresses in readable C"; docs/formats.md). A function's entry as code takes
+  its address (bit 0 set for Thumb code; its even entry, and an address inside a function, are none) is
+  the function's address through a macro of dread.h that is the same number, `(u32)&prvTimerCallback`
+  with `#define prvTimerCallback FUNCTION_AT(0x6ed5u)` above the function: `&f` of f's declaration would
+  be the place of f's own C, which the overlay moves (prvAutoReloadTimerCallback's lifted C is 112 bytes
+  for 80 on GCC -Os); where the file calls the function too, or is it, the number keeps `/* &name */`
+  (newlib's fflush hands _fflush_r to _fwalk_sglue and calls it). A text's start keeps its number with
+  the text in a note, `0xd9cu /* "FR Timer" */` (a C string literal, cut to its start and its end beyond
+  48 characters, "initially" in front where the startup fills that memory): a named constant would be a
+  name made from the text, and a string literal another copy. Where: a text only as an argument, for a
+  parameter that takes texts (taken_kinds: two distinct constants or more from the calls, every one a
+  text, more than half of them beginning behind a NUL) or that the callee dereferences (dread.shapes
+  pointer_params) where the text begins there; a function's for a parameter that takes functions (every
+  constant a function's entry, or one the callee calls through) or that the callee dereferences, what a
+  call through a constant goes to (gizmo's veneer: `((u32 (*) ( u32 , u32 , u32 , u32 ))&ram_crc)(r0,
+  r1, r2, r3)`), and a value stored into memory unless it looks like a bit pattern. Static data's rules
+  were tried first and annotated numbers on FreeRTOS: its texts lie at 0x100 to 0x1300, where the demos'
+  line numbers do, and GNU ld merges the ends of strings, so a line number stored into an error variable
+  mostly pointed inside a text (GCC -Os: 109 of 234 texts annotated so lay inside another, all but six
+  of them numbers). The forms: vStartTimerDemoTask `r0_1 = xTimerCreate(0xd9cu /* "FR Timer" */, r4 *
+  g_200017a8, 1, r3, (u32)&prvAutoReloadTimerCallback);`, `vAssertCalled(0xd3fu /*
+  "...Minimal/TimerDemo.c" */)` (the source file's path, its start and its end),
+  `xTaskCreate((u32)&prvTimerTestTask, 0xdb3u /* "Tmr Tst" */, 0xa0u, 0, 4, 0)`; newlib's std `r0->f_24
+  = (u32)&__sread;`; print_status `uart_puts(0x20d35u /* "mode " */);`, main `apply_config(0x20db7u /*
+  "volume = 7\nmode=2\n  baud = 0x2580\nname=3\n" */);`. Measured on copies of the eight builds (gizmo
+  a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; main at fa47c42 -> this): the
+  gate accepts the same functions, name by name (35, 36, 44, 31; 317, 275, 252, 354), the readable_types
+  tables the same but the new `takes` (17, 13, 14, 11 parameters on FreeRTOS, of them 5, 5, 4, 5
+  functions'; 2 texts' on each gizmo build: uart_puts and strcmp); every function's digest the same (the
+  names of the readable_names table apply as they did); the readable C of 4, 4, 5, 3; 163, 138, 130, 155
+  functions changed, every difference a note or a function's name (taken out again, the files are main's
+  line for line). Over every lifted function, texts noted 11, 11, 12, 11; 413, 365, 306, 335 (in the
+  readable functions 399, 355, 295, 335 on FreeRTOS), functions named 1, 1, 1, 0 (the veneer); 99, 97,
+  79, 99 (90, 88, 77, 90 as arguments, 9, 9, 2, 9 stored), the number kept with `/* &name */` 0; 1, 1,
+  0, 1; each name is a cast more in dread.cmetrics' count (`(u32)&name`: the externs take a u32 there),
+  the notes change no figure. The check's wall time on the shared machine 7, 4, 5, 3; 389, 271, 139, 448
+  s -> 5, 4, 4, 3; 347, 224, 120, 399 s (noise; Pointed takes 0.005 s and taken_kinds 0.05 s on GCC -Os
+  and -O0; on GCC -Os, two rounds alternating main and this, making the plan 12.1 and 11.7 s -> 12.2 and
+  11.8 s, every lifted function's readable C in a pool of eight 5.7 and 5.7 s -> 5.7 and 5.8 s). Tests:
+  tests/test_addresses.py (the rules on synthetic C with what lies at each constant given; taken_kinds;
+  the note printed and kept by dread.polish; Pointed on an image with Thumb functions, texts in a rom
+  region, a merged string's end, the loader's and the startup's bytes, code; a program of our own for
+  ARM state, Thumb-2 and RISC-V through the gate, with a timer-like function that only stores a name and
+  a callback, a stored callback, and a function's and a text's address handed to a count, which stay
+  numbers; gizmo's print_status and main on every build; the name questions); also with Ubuntu 22.04's
+  compilers. Left: a text given to a parameter that gets the same text at every call and does not
+  dereference it stays a number (xTimerCreateStatic's "T1"); a text plus an index (`0x908u + r4`) and a
+  text or a function assigned to a variable stay numbers; a text in memory an object of static data
+  covers is written as the object's address, without the text; a stored number that is a function's
+  entry by chance is named where an image's code lies where such numbers do (none on the bench).
 - [ ] **Initialised local arrays.** A byte-copy loop from constant data in the image into the frame
   (how some compilers initialise a local array) prints as a do-while over integer pointers. Make it a
   local array with its initialiser read from the image (or a copy helper's call). Public example: none

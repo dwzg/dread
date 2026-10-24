@@ -1937,7 +1937,10 @@ class Plan:
     (dread.frames kept_params: whether an object of the frame handed to it needs volatile), None where
     the table does not say (made before 2026-10-23's frame objects); whole: the functions whose frame's
     region dread.frames writes as one object, as before 2026-10-23 (the check puts a function there
-    whose objects the cases rejected)."""
+    whose objects the cases rejected). takes: {function: {parameter index: "text" or "function"}} of
+    the parameters every call gives texts' or functions' addresses (dread.naming taken_kinds), None
+    where the table does not say (made before 2026-10-24): what dread.naming apply_globals writes such
+    an argument as besides the parameters it uses as a pointer."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
@@ -1951,6 +1954,7 @@ class Plan:
         self.keeps = None               # function -> [indices of the parameters it may keep] (dread.frames)
         self.returns = None             # function -> [indices of the parameters its result may be] (dread.frames)
         self.whole = set()              # functions whose frame's region is one object (dread.frames, the check)
+        self.takes = None               # function -> {parameter index: "text" or "function"} (dread.naming)
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -1979,6 +1983,8 @@ class Plan:
             out["returns"] = {f: sorted(ix) for f, ix in sorted(self.returns.items())}
         if self.whole:
             out["whole"] = sorted(self.whole)
+        if self.takes is not None:
+            out["takes"] = {f: {str(i): k for i, k in sorted(ix.items())} for f, ix in sorted(self.takes.items())}
         return out
 
     @classmethod
@@ -2000,6 +2006,8 @@ class Plan:
         p.keeps = {f: list(ix) for f, ix in data["keeps"].items()} if "keeps" in data else None
         p.returns = {f: list(ix) for f, ix in data["returns"].items()} if "returns" in data else None
         p.whole = set(data.get("whole", []))
+        p.takes = {f: {int(i): k for i, k in ix.items()} for f, ix in data["takes"].items()} if "takes" in data \
+            else None
         return p
 
     def align(self, name, depth=0):

@@ -62,8 +62,9 @@ by where its value goes, its use, and only where C gives the printed form the sa
 
 What the pass decides from is the function alone: a character that arrives as a parameter (gizmo's
 handle_key compares its key with letters) is a number there; a place stored once in this function and
-in decimal company elsewhere stays hex here. Not done: a constant's name (an enumeration, a macro the
-source had), the address of a function or a text as such (a separate item).
+in decimal company elsewhere stays hex here. A function's address and a text's are dread.naming
+apply_globals's, before this pass ((u32)&name, and a text's number with the text in a note, which
+keeps its literal as it is). Not done: a constant's name (an enumeration, a macro the source had).
 """
 import re
 
@@ -1194,7 +1195,10 @@ def _strip_casts(x):
 def _keeps_form(e):
     """Whether a constant expression keeps its form: one with a bitwise operation or a shift besides
     a single complement (0x20001913u & ~0x7u shows the alignment it computes; the compare idiom's
-    (u32)~0x5fu its constant)."""
+    (u32)~0x5fu its constant), or a literal with a note (a text's address: dread.naming apply_globals
+    wrote 0xd9cu /* "FR Timer" */, the number the listing shows)."""
+    if isinstance(e, C.Num) and e.note:
+        return True
     for x in _walk(e):
         if isinstance(x, C.Binary) and (x.op in COMPARE or x.op in ("&&", "||")):
             return True                     # (if (0x80000000u == 0) says what it compares)

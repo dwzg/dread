@@ -144,7 +144,9 @@ something else, the default name says where it is: `io_40004004` (a device regis
 io`), `rom_c6e4` (a rom region), `g_20029aac` (anything else), with the type for an access other
 than a u32 one (`g_20029aac_u8`). The pilot asks for these before the functions' variables, or
 alone for every function's readable C (`dread pilot --task globals`, with the structures below);
-they need no digest, since an address does not change with the transformations. A structure of
+they need no digest, since an address does not change with the transformations. Since 2026-10-24 a
+proposed name keeps no such type at its end (`uxTimerFlags_u8` is stored as `uxTimerFlags`), unless the
+name without it is taken or another proposal of the same question (two views of one address). A structure of
 static data (the readable_types table's `statics`, since 2026-10-23) is named under `"0xADDRESS
 struct"` (its address), optionally with `"fields": {"OFFSET": name}`; a field without a name there
 takes the name of its own address and type (`"0x20000034 u32"`: the pilot asks for each field so,
@@ -248,6 +250,17 @@ part: every object of the frame is volatile, as before. `whole` (left out when e
 object, as before that day, instead of an object at each address handed out: the check puts a
 function there whose objects its cases rejected (a callee reaching past the object it was given), and
 keeps it there when it is accepted so; the builds read it.
+
+`takes` (since 2026-10-24; written whenever the check runs, also empty) lists the parameters that take
+texts' or functions' addresses (dread.naming taken_kinds): `{FUNCTION: {"INDEX": "text" | "function"}}`,
+from every lifted function's readable C: a parameter the calls give at least two distinct constants
+besides 0, every one a function's entry as code takes its address (bit 0 set for Thumb code), or every
+one the start of a text with more than half of them where a text begins (behind a NUL), and a
+parameter the function calls through. Readable C writes a function's entry handed to such a parameter,
+or to one `params` lists, as the function's address (`(u32)&prvTimerCallback`, with the macro
+`#define prvTimerCallback FUNCTION_AT(0x6ed5u)` of dread.h above the function: the same number), and a
+text's start as its number with the text in a note beside it (`0xd9cu /* "FR Timer" */`). A file from
+before has no `takes`: only the parameters `params` lists, as pointers, give them.
 
 ### `wide_results.txt` (`wide_results`)
 

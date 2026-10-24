@@ -9,6 +9,82 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Functions' and texts' addresses in readable C: a macro that is the number, a note beside it, by evidence of use (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20; two items of docs/todo.md,
+"From a review against hand-written C": Addresses of functions and texts by name, Names without their
+type).
+
+- **Question.** A function's entry or a text's address handed to a callee prints as a number
+  (FreeRTOS GCC -Os vStartTimerDemoTask: `xTimerCreate(0xd9cu, ..., 0x913du)`, the timer's name "FR
+  Timer" and prvAutoReloadTimerCallback; gizmo a32 print_status `uart_puts(0x20d35u)` for "mode ").
+  How is each written so that it compiles to the same code, and where is a constant such an address?
+  And the naming model keeps the type of DREAD's default names in its proposals (g_20001830_u8).
+- **Options for a function.** (a) `(u32)&f` with f's declaration: f is the C function's symbol, and
+  where the overlay moves the function's C the number changes (prvAutoReloadTimerCallback's lifted C
+  is 112 bytes for the original's 80 on GCC -Os and lands at 0x59d0): the callback a timer stores, and
+  its cases compare, is another one. (b) A symbol for every function's original entry, written by
+  dread.overlay, and a declaration that names it (an asm label): a change of every build path, and a
+  file that calls the function too must still call the C. (c) A macro that is the function at its
+  number, `#define prvAutoReloadTimerCallback FUNCTION_AT(0x913du)`, dread.h's FUNCTION_AT a cast of
+  the number to a function pointer, dereferenced: `(u32)&prvAutoReloadTimerCallback` is the constant
+  again, the code the same by construction, nothing for the overlay to know. **(c)**, the number as
+  code takes it (bit 0 set for Thumb code: a Thumb function's even entry is none, and no address inside
+  a function is one); where the file uses the name otherwise (it calls the function, or is it: the macro
+  would rewrite the call) or the name is no C name, the number stays with `/* &name */` beside it
+  (newlib's fflush, which calls _fflush_r and hands it to _fwalk_sglue).
+- **Options for a text.** (a) A comment beside the constant, `0xd9cu /* "FR Timer" */`; (b) a named
+  constant (`#define FR_Timer 0xd9cu`, or `text_d9c`): a name made from a text loses what makes it
+  that text (a trailing space in "mode ", "\r\n", an 80-character path), two texts give one name, a
+  default name says nothing, and the reader looks the text up either way; (c) a string literal: a new
+  copy elsewhere, other code. **(a)**: the number stays, as the listing and the machine code have it,
+  the exact text beside it as a C string literal (cut to its first third, "...", its end beyond 48
+  characters: a path ends in its file's name; `*/` written `*\/`), "initially" in front where the
+  startup fills that memory (a text in RAM the code may change); a comment changes no code, and the
+  pilot's questions already annotate constants so (dread.constants pointed_note). It is a note on the
+  literal (cparse.Num.note), which dread.polish keeps as it is, and which shows in the printed form,
+  the reading form and the naming questions.
+- **Where: measured.** The first version took static data's rules (an argument for a pointer parameter
+  or for a callee not analysed, a value stored, a result, an operand of == or !=). On FreeRTOS's mps2
+  builds it annotated line numbers stored into an error variable, a stack size, a device register's
+  bit and event bits compared with a constant as texts: the demos keep their texts at 0x100 to 0x1300,
+  where their line numbers lie, and GNU ld merges the ends of strings ("T1" is the end of "CNT1"), so
+  a number that falls among the texts mostly points inside one (GCC -Os: 109 of 234 texts annotated
+  lay inside another, all but six of them numbers). So a text is one only as an argument: for a
+  parameter that takes texts (dread.naming taken_kinds: at least two distinct constants from the
+  calls, every one a text, more than half of them beginning behind a NUL; the readable_types table's
+  new `takes`: xTimerCreate and xTaskCreate only store the name, no pointer for dread.shapes), or one
+  the callee uses as a pointer (pointer_params) where the text begins there (pointer_params counts an
+  index the callee adds to an address: xTaskCreateStatic's stack depth of 320 pointed inside a text).
+  A function's entry for such a parameter or one that takes functions (every constant a function's
+  entry, two at least, or a parameter the callee calls through: newlib's _fwalk_sglue), what a call
+  through a constant goes to (a veneer), and a value stored into memory, as for static data: every such
+  store on the eight builds is the function's address (newlib's FILE callbacks __sread, __swrite,
+  __sseek, __sclose, cleanup_stdio, stdio_exit_handler, the initial stack frame's prvTaskExitError, the
+  TaskNotify demos' prvRand as a random seed), except where the value looks like a bit pattern
+  (dread.polish patterned: a RISC-V image's first function at 0x80000000 is
+  taskEVENT_LIST_ITEM_VALUE_IN_USE's value; gizmo's first function at 0x20000). Never a value returned,
+  compared or assigned to a variable (none found on the bench; each a way to a number by chance).
+- **Names without their type.** (a) Show the question's defaults without the type: two views of one
+  address (a word and its byte) would show one name; (b) strip a type at the end of a proposal that
+  has other words (dread.naming untyped), in the answer's check (pilot.name_globals), unless the name
+  without it is taken or another proposal of the same question. **(b)**.
+- **Measured.** Figures in docs/todo.md under the two items: the gate accepts the same functions on the
+  eight builds, the digests are the same, the readable C of the functions with a text or a function
+  changed by the notes and names alone.
+- **Not established.** A store of a number that is a function's entry by chance is named where the
+  image's code lies where such numbers do (code first, from 0: none on the bench, whose texts lie
+  there); a parameter given the same text at every call takes nothing, and its text stays a number
+  where the callee does not dereference it (xTimerCreateStatic's "T1"); a text plus an index (`0x908u
+  + r4`) and a text assigned to a variable stay numbers; a text in memory an object of static data
+  covers is written as that object's address, without the text; that a text that begins behind a NUL
+  is the one meant (a number that falls exactly there is one).
+- **How to undo.** Context.pointed returning None (or pointed=None in dread.readable _named and
+  _question_one) gives the readable C as before, byte for byte; the table's `takes` is then unread.
+  pilot.name_globals: drop the untyped step.
+- **Status.** In the code (dread/constants.py Pointed; dread/naming.py apply_globals, taken_kinds,
+  untyped; dread/include/dread.h FUNCTION_AT; tests/test_addresses.py, tests/test_naming.py).
+
 ## One variable per value: a parameter kept apart from what its register hands back (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "One

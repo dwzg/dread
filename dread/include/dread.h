@@ -41,4 +41,10 @@ typedef signed long long s64;
  *     u32 my_name(u32 a) ORIGINAL(name_in_the_table);  */
 #define ORIGINAL(name) __asm__(#name)
 
+/* A function of the original at its address, for its address as a value: with
+ *     #define name FUNCTION_AT(0x913du)
+ * (u32)&name is 0x913d (the address code takes, bit 0 set for Thumb code) wherever the function's own
+ * C lands, so the code is the same as with the number. Readable C writes it so (dread.naming). */
+#define FUNCTION_AT(address) (*(void (*)(void))(address))
+
 #endif

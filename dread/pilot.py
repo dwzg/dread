@@ -819,8 +819,11 @@ def name_globals(target, image, program, provider, keys, uses, batch=None, shown
     and this thread alone checks the answers and writes them in the order of the batches, an answer
     that ends early waiting for those before it: each is checked against the names the batches before
     it took, so a name two batches propose goes to the earlier one, and the table ends as one batch
-    after another leaves it. After a batch the provider failed or declined, no batch is asked that was
-    not asked by then; those asked are kept. Returns how many were named."""
+    after another leaves it. A proposal keeps no type suffix of the default names (dread.naming untyped:
+    uxTimerFlags_u8 is uxTimerFlags) where the name without it is free and no other proposal of its
+    batch (the same address read at another width keeps its suffix then). After a batch the provider
+    failed or declined, no batch is asked that was not asked by then; those asked are kept. Returns how
+    many were named."""
     from dread import naming
     batch = batch or GLOBALS_BATCH
     table = naming.load(image, "globals")
@@ -867,10 +870,14 @@ def name_globals(target, image, program, provider, keys, uses, batch=None, shown
             continue
         by_default = {uses[key]["name"]: key for key in part}
         refused = []
+        given = [new for shown_name, new in proposed.items() if shown_name in by_default]
         for shown_name, new in proposed.items():
             key = by_default.get(shown_name)
             if key is None:
                 continue
+            plain = naming.untyped(new)     # (pressure_u8 for g_20001830_u8: the access's type goes; kept
+            if plain != new and plain not in taken and plain not in given and not DEFAULT_GLOBAL.match(plain):
+                new = plain                 # where it tells two views of one address apart)
             if (not isinstance(new, str) or not naming.IDENT.match(new) or new in taken
                     or DEFAULT_GLOBAL.match(new)):
                 refused.append("%s=%s" % (shown_name, new))
@@ -1643,12 +1650,17 @@ class Namer:
     def annotated(self, fn, shown_as=None):
         """(text, form) of a function's code as the questions show it: code() with each constant
         followed by what it points to (dread.constants pointed_note: text, a function, a table of
-        texts and functions) and the other functions by their names in shown_as ({name: name shown})."""
+        texts and functions) and the other functions by their names in shown_as ({name: name shown});
+        not a constant the readable C notes already (a text's address: dread.naming apply_globals), nor
+        one inside such a note."""
         from dread.constants import pointed_note
         program = self.program
         text, form = self.code(fn)
         if form != "listing":               # (the listing shows the texts already)
             def note(m):
+                at = m.string
+                if at.startswith(" /*", m.end()) or at.rfind("/*", 0, m.start()) > at.rfind("*/", 0, m.start()):
+                    return m.group(0)
                 s = pointed_note(program, int(m.group(1), 16))
                 return m.group(0) + (" /* %s */" % s.replace("*/", "* /") if s else "")
             text = HEX.sub(note, text)

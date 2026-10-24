@@ -99,13 +99,17 @@ class Name(Expr):
 
 
 class Num(Expr):
-    __slots__ = ("text", "value")
+    """A literal as written (text) and its value. note: a comment printed behind it, what lies at the
+    address it is ("FR Timer": dread.naming apply_globals), or None; it is no part of the literal (its
+    type and value come from text), and the parser never makes one (comments are skipped)."""
+    __slots__ = ("text", "value", "note")
 
-    def __init__(self, text, value=None):
+    def __init__(self, text, value=None, note=None):
         self.text = text
         if value is None:
             value = num_value(text)
         self.value = value
+        self.note = note
 
 
 def num_value(text):
@@ -1082,7 +1086,7 @@ def _expr(e):
     if isinstance(e, Name):
         return e.id
     if isinstance(e, Num):
-        return e.text
+        return e.text if not e.note else "%s /* %s */" % (e.text, e.note)
     if isinstance(e, Str):
         return " ".join(e.parts)
     if isinstance(e, Binary):

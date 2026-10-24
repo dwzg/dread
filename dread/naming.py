@@ -51,7 +51,7 @@ KEYWORDS = {"auto", "break", "case", "char", "const", "continue", "default", "do
             "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
             "volatile", "while", "_Bool", "_Complex", "_Imaginary", "asm", "__asm__", "__attribute__",
             "u8", "s8", "u16", "s16", "u32", "s32", "u64", "s64", "VAR", "VVAR", "REG8", "REG16", "REG32",
-            "ALWAYS_INLINE", "ORIGINAL", "NULL", "frame", "sp0"}
+            "ALWAYS_INLINE", "ORIGINAL", "FUNCTION_AT", "NULL", "frame", "sp0"}
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,47}$")
 
 
@@ -492,6 +492,21 @@ def default_name(address, ctype, memory=None):
     return name if ctype == "u32" else "%s_%s" % (name, ctype)
 
 
+TYPE_SUFFIX = re.compile(r"^(\w*[A-Za-z0-9])_[us](?:8|16|32|64)$")     # default_name's type at a name's end
+
+
+def untyped(name):
+    """A proposed name without a type suffix at its end of the kind default_name gives a narrow access
+    (g_20001830_u8: _u8, _s16, ...), where other words are left (uxTimerFlags_u8 is uxTimerFlags): a
+    naming model shown the default names keeps the suffix in what it proposes, and the type is the
+    access's, which the macro and the code show already. The name itself where nothing but a type or a
+    keyword would be left, or it has no such suffix."""
+    m = TYPE_SUFFIX.match(name) if isinstance(name, str) else None
+    if m is None or not IDENT.match(m.group(1)) or m.group(1) in KEYWORDS:
+        return name
+    return m.group(1)
+
+
 def globals_in(fn):
     """{(address, type)} of the function's accesses to memory at fixed addresses."""
     from dread.cflow import walk_expr
@@ -812,8 +827,79 @@ def _address_variables(fn, pointers=None, unknown=True):
     return used
 
 
+FUNCTION_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")    # a function's name readable C may write as one
+TAKES_LEAST = 2     # distinct constants calls give a parameter, all of one kind, for it to take that kind
+
+
+def _called_params(fn):
+    """The indices of the function's parameters whose value it calls (through a cast: ((T)r1)(...)),
+    or a plain copy of which it calls (r8 = r1; ... ((T)r8)(...): newlib's _fwalk_sglue)."""
+    from dread import statics as st
+    from dread.cflow import walk_expr
+    called, copies = set(), []
+    for s in st._statements(fn):
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Call):
+                    f = x.f.e if isinstance(x.f, C.Cast) else x.f
+                    if isinstance(f, C.Name) and isinstance(x.f, C.Cast):
+                        called.add(f.id)
+                elif isinstance(x, C.Assign) and x.op == "=" and isinstance(x.target, C.Name):
+                    v = x.value.e if isinstance(x.value, C.Cast) else x.value
+                    if isinstance(v, C.Name):
+                        copies.append((v.id, x.target.id))
+    changed = True
+    while changed:
+        changed = False
+        for src, dst in copies:
+            if dst in called and src not in called:
+                called.add(src)
+                changed = True
+    return {i for i, (_, name) in enumerate(fn.params) if name in called}
+
+
+def taken_kinds(trees, pointed, least=TAKES_LEAST):
+    """{callee: {parameter index: "text" or "function"}} of the parameters that take texts' or
+    functions' addresses, from the readable C of trees ([(tree, fn, macros)]: dread.readable
+    analysis_trees, every lifted function's): a parameter the calls in trees give constants for, at
+    least least distinct ones besides 0, every one of them a function's entry (pointed: dread.constants
+    Pointed), or every one a text with more than half of them where a text begins (Pointed.begins: a
+    merged string's end, "T1" inside "CNT1", is a text, and so is a line number that falls inside a
+    run of texts: FreeRTOS's demos keep their texts at addresses their line numbers have); and a
+    parameter the function calls through (_called_params: a function's). FreeRTOS's xTimerCreate is
+    given timer names and callbacks, which it only stores (no pointer for dread.shapes
+    pointer_params), xTaskCreate task functions, vAssertCalled the source files' names, newlib's
+    _fwalk_sglue a function it calls. One constant is no evidence: a line number may be a text's or a
+    function's address by chance; a parameter given a number besides takes nothing. The
+    readable_types table's takes (dread.readable make_plan): what apply_globals reads for such an
+    argument."""
+    from dread import statics as st
+    from dread.cflow import walk_expr
+    seen, out = {}, {}
+    for _, fn, _ in trees:
+        for i in sorted(_called_params(fn)):
+            out.setdefault(fn.name, {})[i] = "function"
+        for s in st._statements(fn):
+            for e in _exprs(s):
+                for x in walk_expr(e):
+                    if isinstance(x, C.Call) and isinstance(x.f, C.Name):
+                        for i, a in enumerate(x.args):
+                            while isinstance(a, C.Cast):
+                                a = a.e
+                            if isinstance(a, C.Num) and isinstance(a.value, int) and a.value:
+                                seen.setdefault((x.f.id, i), set()).add(a.value)
+    for (callee, i), values in sorted(seen.items()):
+        if len(values) < least or i in out.get(callee, {}):
+            continue
+        if all(pointed.function(v) is not None for v in values):
+            out.setdefault(callee, {})[i] = "function"
+        elif all(pointed.text(v) for v in values) and 2 * sum(1 for v in values if pointed.begins(v)) > len(values):
+            out.setdefault(callee, {})[i] = "text"
+    return {f: dict(sorted(ix.items())) for f, ix in sorted(out.items())}
+
+
 def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, names=None, arrays=None,
-                  pointers=None, image=None):
+                  pointers=None, image=None, pointed=None, takes=None):
     """The function's accesses to memory at fixed addresses written as names, a macro for each above
     the function (#define g_20029aac (*(volatile u32 *)0x20029aacu)): the table's name (named: the
     globals part) where it has one the file does not use for something else (nor avoid: the names the
@@ -855,7 +941,28 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
     An element's address the code computes (the constant plus a scaled index) is one wherever it is
     used, for an object in the image. Every access stays one volatile access of its width at its
     address; an access of another type than its field stays the macro it was (a read of the field's
-    width and the other signedness is cast: (s16)g_200018de[r6]). Returns {key: name} of what it
+    width and the other signedness is cast: (s16)g_200018de[r6]).
+
+    With pointed (dread.constants Pointed) a constant that is a function's entry as code takes its
+    address (bit 0 set for Thumb code: a Thumb function's even entry is none) and is used as an
+    address is written as the function's address, (u32)&prvAutoReloadTimerCallback, through a macro
+    of dread.h above the function (#define prvAutoReloadTimerCallback FUNCTION_AT(0x913du)): the same
+    constant whatever becomes of the function's own C (moved by dread overlay, &name of its
+    declaration would be the new place); where the file uses the name otherwise (it calls the
+    function, or is it) or the name is no C name, the number stays with the name in a note,
+    0x913du /* &name */. A constant that is a text's start and used as an address keeps its number
+    with the text in a note beside it, 0xd9cu /* "FR Timer" */ (Pointed.note: cut where long,
+    "initially" where the startup fills that memory): what the code passes is that number, and a string
+    literal would be a new copy elsewhere. Used as an address means here, more strictly than for
+    static data (a function's or a text's address can be a plain number by chance where the image
+    begins at 0: a line number): an argument for a parameter the callee uses as a pointer by the
+    table's evidence (pointers; a callee it does not analyse counts for nothing; a text inside a
+    longer one, a merged string's end, only for a parameter that takes texts) or that takes texts or
+    functions (takes: {callee: {index: "text" or "function"}}, taken_kinds, the readable_types
+    table's); a function's also what a call through a constant goes to (a veneer's
+    ((u32 (*)(u32))&ram_crc)(r0)) and a value stored into memory that does not look like a bit pattern
+    (function_use, text_use); never a value returned, compared or assigned to a variable, nor a text
+    stored, nor anything an object of static data takes first. Returns {key: name} of what it
     named: a structure's fields under
     their address and type as "NAME.FIELD", an array under static_key as its name and its elements'
     fields under the address and type of its first element's as "NAME[].FIELD" (what dread pilot asks
@@ -867,7 +974,7 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
     named = named or {}
     found = globals_in(fn)
     rows_of = _static_rows(statics, arrays)
-    if not found and not rows_of:
+    if not found and not rows_of and pointed is None:
         return {}
     busy = other_names(tree, fn) | set(variables(fn)) | set(avoid)
     starts = sorted(rows_of)
@@ -971,11 +1078,13 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
         via.update(used)
         return where[0], where[1], where[2], index
 
-    bits = _bit_variables(fn) if rows_of else set()
-    addressed = _address_variables(fn, pointers) if rows_of else set()
-    loaded = _loaded_variables(fn) if rows_of else set()
-    values = _straight_values(fn) if rows_of else {}
+    looked = bool(rows_of) or pointed is not None
+    bits = _bit_variables(fn) if looked else set()
+    addressed = _address_variables(fn, pointers) if looked else set()
+    loaded = _loaded_variables(fn) if looked else set()
+    values = _straight_values(fn) if looked else {}
     here = [{}]                             # (what the variables hold at the statement being rewritten)
+    functions = {}                          # (name -> its address as code takes it: FUNCTION_AT macros)
 
     def pointer_like(x):
         """Whether an operand a constant is compared with is one an address may be compared with: a
@@ -1002,7 +1111,69 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
             return pointer_like(use[1])
         return True
 
+    def argument_evidence(use):
+        """(whether the callee uses the parameter as a pointer, the kind of address it takes or None)
+        of an argument (use ("arg", callee, index)); (False, None) for any other use."""
+        if use[0] != "arg":
+            return False, None
+        callee, i = use[1], use[2]
+        pointer = pointers is not None and callee in pointers and i in pointers[callee]
+        return pointer, ((takes or {}).get(callee) or {}).get(i)
+
+    def function_use(value, use):
+        """Whether a function's entry used so (use as for as_address, or ("call",): what a call goes
+        through) is its address: an argument for a parameter the callee uses as a pointer (pointers, by
+        evidence: a callee the table does not analyse counts for nothing) or that takes functions
+        (takes: taken_kinds), what a call goes through, a value stored into memory (a callback put
+        into a structure, as for static data) unless it looks like a bit pattern (polish.patterned: a
+        RISC-V image's first function lies at 0x80000000, a mask's value). Not a value returned,
+        compared or assigned to a variable (none found on the bench, and each a way to a number by
+        chance)."""
+        from dread.polish import patterned
+        pointer, kind = argument_evidence(use)
+        if use[0] == "arg":
+            return pointer or kind == "function"
+        if use[0] == "value":
+            return not isinstance(use[1], C.Name) and not patterned(value)
+        return use[0] == "call"
+
+    def text_use(value, use):
+        """Whether a text's start used so is its address: only an argument, for a parameter that takes
+        texts (takes), or that the callee uses as a pointer where the text begins there (a merged
+        string's end needs the parameter's texts as evidence: dread.shapes pointer_params counts an
+        index the callee adds to an address, and FreeRTOS's stack depth of 320 points inside a text).
+        Not a value stored, returned or compared: on FreeRTOS's demos every text found so was a number
+        by chance (line numbers stored into an error variable, a stack size, a device register's bit:
+        their texts lie at the addresses line numbers have)."""
+        pointer, kind = argument_evidence(use)
+        return kind == "text" or (pointer and pointed.begins(value))
+
+    def pointee(e, use):
+        """A constant that is a function's entry used as its address (function_use), as that
+        ((u32)&name, its macro noted in functions; where the file uses the name for something else, a
+        callee of its own or itself, or it is no C name, the number with the name in a note: &name),
+        or a text's start used as its address (text_use), with the text in a note; else None."""
+        if pointed is None or not isinstance(e, C.Num) or not isinstance(e.value, int):
+            return None
+        name = pointed.function(e.value)
+        if name is not None:
+            if not function_use(e.value, use):
+                return None
+            if FUNCTION_NAME.match(name) and name not in busy and name not in KEYWORDS and (
+                    functions.get(name, e.value) == e.value):
+                functions[name] = e.value
+                return C.Cast("u32", C.Unary("&", C.Name(name)))
+            return C.Num(e.text, value=e.value, note="&" + name)
+        if pointed.text(e.value) and text_use(e.value, use):
+            return C.Num(e.text, value=e.value, note=pointed.note(e.value))
+        return None
+
     def address_of(e, facts, f, use):
+        """object_address, else pointee (a function's or a text's address)."""
+        got = object_address(e, facts, f, use)
+        return got if got is not None else pointee(e, use)
+
+    def object_address(e, facts, f, use):
         """The address expression ((u32)&g_x.f_8, (u32)&g_x[r3]) of a value e that is an address
         inside an object at a field or an element, else None: a constant only where it is used as an
         address (use: as_address), and only for an object where the image keeps static data (image)."""
@@ -1065,8 +1236,13 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
                 return None
             if isinstance(e, C.Call):
                 callee = e.f.id if isinstance(e.f, C.Name) else None
-                return C.Call(_rewrite(e.f, f), [address_of(x, facts, f, ("arg", callee, i)) or _rewrite(x, f)
-                                                 for i, x in enumerate(e.args)])
+                target = e.f
+                if isinstance(target, C.Cast) and isinstance(target.e, C.Num):
+                    got = pointee(target.e, ("call",))      # (a call through a function's address: a veneer's)
+                    if got is not None:
+                        target = C.Cast(target.type, got.e if isinstance(got, C.Cast) else got)
+                return C.Call(_rewrite(target, f), [address_of(x, facts, f, ("arg", callee, i)) or _rewrite(x, f)
+                                                    for i, x in enumerate(e.args)])
             if isinstance(e, C.Assign):
                 value = (address_of(e.value, facts, f, ("value", e.target)) if e.op == "=" else None) \
                     or _rewrite(e.value, make(facts))
@@ -1091,13 +1267,23 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
         st.drop_unread(fn, via)
     else:
         f0 = make({})
+
+        def visit0(s):
+            here[0] = values.get(id(s), {})
+            if isinstance(s, C.Return) and s.e is not None:
+                s.e = address_of(s.e, {}, f0, ("result",)) or _rewrite(s.e, f0)
+            else:
+                _rewrite_stmt(s, f0, inner=False)
+            for inner in _inner(s):
+                visit0(inner)
         for s in fn.body.body:
-            _rewrite_stmt(s, f0)
+            visit0(s)
     chosen = {a: n for a, n in chosen.items() if a in used}
-    if not chosen and not objects:
+    if not chosen and not objects and not functions:
         return out
     k_ = tree.items.index(fn)
     lines = ["#define %s (*(volatile %s *)0x%xu)" % (chosen[a], a[1], a[0]) for a in chosen]
+    lines += ["#define %s FUNCTION_AT(0x%xu)" % (name, value) for name, value in functions.items()]
     for b, (name, tag, _) in objects.items():
         rows, k, _ = rows_of[b]
         if k is None:

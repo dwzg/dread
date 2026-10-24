@@ -699,11 +699,12 @@ cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-Os"]
 }
 
 
-def kind_target(tmp_path, kind, source, ram=None):
+def kind_target(tmp_path, kind, source, ram=None, rodata=False):
     """The target of a C program (source) built with GCC -Os for kind ("a32": ARMv4T in ARM state,
     "m3": a Cortex-M3, "rv32": RV32IMAC), its code in flash and its data in RAM at ram (default the
     kind's) in the order of their names, imported from its ELF with its startup's ranges; its lift check
-    run."""
+    run. rodata: the read-only data in a section of its own behind the code (dread import-elf takes the
+    data inside a RISC-V .text for code: it has no mapping symbols there)."""
     from conftest import RISCV_CROSS, RISCV_MARCH, riscv_toml
     from dread import elfimport, lift
     from dread.target import Target
@@ -713,9 +714,10 @@ def kind_target(tmp_path, kind, source, ram=None):
         cc = [RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32"]
         toml = riscv_toml(toml)
     (tmp_path / "t.c").write_text(source)
-    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x%x; .text : { *(.text*) *(.rodata*) } . = 0x%x; .data : "
+    code = ".text : { *(.text*) } .rodata : { *(.rodata*) }" if rodata else ".text : { *(.text*) *(.rodata*) }"
+    (tmp_path / "t.ld").write_text("SECTIONS { . = 0x%x; %s . = 0x%x; .data : "
                                    "{ *(SORT_BY_NAME(.data*)) } .bss : { *(SORT_BY_NAME(.bss*)) *(COMMON) } }\n"
-                                   % (text, ram))
+                                   % (text, code, ram))
     elf = str(tmp_path / "t.elf")
     subprocess.run(cc + ["-Os", "-ffreestanding", "-nostdlib", "-fno-common", "-ffunction-sections", "-fdata-sections",
                          "-g", "-T", str(tmp_path / "t.ld"), "-Wl,-e,main", "-o", elf, str(tmp_path / "t.c")],

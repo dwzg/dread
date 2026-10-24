@@ -188,6 +188,38 @@ def test_the_pilot_names_the_globals_before_the_variables(tmp_path):
     assert "#define UART_DATA (*(volatile u32 *)0x40011000u)" in out and "UART_DATA = c_r0;" in out, out
 
 
+def test_a_proposal_keeps_no_type_suffix():
+    """untyped: the type default_name gives a narrow access (g_20001830_u8) goes from a proposal that has
+    other words; a proposal that is nothing but a type or a keyword with one, or has no such suffix at its
+    end, stays as it is."""
+    for proposal, kept in (("uxTimerFlags_u8", "uxTimerFlags"), ("offset_s16", "offset"), ("a_b_u64", "a_b"),
+                           ("count", "count"), ("u8", "u8"), ("_u8", "_u8"), ("int_u8", "int_u8"),
+                           ("level_U8", "level_U8"), ("width_u12", "width_u12"), ("u16_mode", "u16_mode")):
+        assert naming.untyped(proposal) == kept, (proposal, naming.untyped(proposal))
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_globals_names_keep_no_type_suffix(tmp_path):
+    """name_globals keeps a proposal without the type suffix the default name it answers showed
+    (rx_count_u8 for g_20000010_u8 is rx_count), unless the name without it is taken (a function's) or
+    another proposal of the batch (a word and its byte at one address: state and state_u8 stay apart)."""
+    from dread import llm, pilot
+    target, image, program, _, _ = gizmo_copy(tmp_path / "gizmo")
+    uses = {key: {"name": name, "functions": ["main"], "uses": [("main", "%s = 1;" % name)]}
+            for key, name in (("0x20000010 u8", "g_20000010_u8"), ("0x20000014 u32", "g_20000014"),
+                              ("0x20000014 u8", "g_20000014_u8"), ("0x20000018 s16", "g_20000018_s16"),
+                              ("0x2000001c u8", "g_2000001c_u8"))}
+    answer = ('```json\n{"g_20000010_u8": "rx_count_u8", "g_20000014": "state", "g_20000014_u8": "state_u8", '
+              '"g_20000018_s16": "offset_s16", "g_2000001c_u8": "main_u8"}\n```')
+    lines = []
+    assert pilot.name_globals(target, image, program, llm.Scripted([answer]), sorted(uses), uses,
+                              out=lines.append) == 5, lines
+    table = naming.load(image, "globals")
+    assert {k: e["name"] for k, e in table.items()} == {
+        "0x20000010 u8": "rx_count", "0x20000014 u32": "state", "0x20000014 u8": "state_u8",
+        "0x20000018 s16": "offset", "0x2000001c u8": "main_u8"}, table
+
+
 def gizmo_copy(path):
     """(target, image, program, context, lifter) of a fresh copy of gizmo's m3 build at path."""
     from conftest import GIZMO

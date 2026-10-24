@@ -96,6 +96,8 @@ class Context:
         self._static_names = None
         self._program = None            # the program (its machine code: pushes and the frame's save words,
         self._saves = {}                # dread.frames; no table, so not in context_key)
+        self._pointed = None            # what constants may be the address of (dread.constants Pointed; the
+                                        # program's, so not in context_key either)
         if target is None:
             return
         self.plan = shapes.load_plan(image)
@@ -135,6 +137,14 @@ class Context:
             self._static_names = naming.static_names(self.plan.statics, self.globals, self.memory, avoid=shaped,
                                                      arrays=self.plan.arrays)
         return self._static_names
+
+    def pointed(self):
+        """dread.constants Pointed of the program (functions' entries, texts' starts), made once; None
+        without a program (a context made by hand may hold a stand-in that has no functions)."""
+        if self._pointed is None and getattr(self._program, "functions", None) is not None:
+            from dread.constants import Pointed
+            self._pointed = Pointed(self._program)
+        return self._pointed
 
     def saves(self, name):
         """{offset from sp0 (negative): register} of the frame words a function's entry saves what it keeps
@@ -424,7 +434,7 @@ def _question_one(name):
     int_bits = tidy.context(fn).int_bits
     naming.apply_globals(tree, fn, context.globals, context.memory, statics=context.plan.statics,
                          names=context.static_names(), arrays=context.plan.arrays, pointers=context.plan.params,
-                         image=context.image_spans)
+                         image=context.image_spans, pointed=context.pointed(), takes=context.plan.takes)
     shapes.apply_types(tree, fn, context.plan, digest, names=context.struct_names())
     from dread import vartypes
     vartypes.apply(tree, fn, context.plan, digest, names=context.struct_names(), int_bits=int_bits)
@@ -515,6 +525,7 @@ def question_trees(program, context, lifter, names, jobs=None):
     warm(lifter)
     context.struct_names()                  # (once, before the pool forks: the workers share them)
     context.static_names()
+    context.pointed()
     names = list(names)
     return dict(zip(names, in_pool(_question_one, names, jobs, program=program, context=context, lifter=lifter)))
 
@@ -794,7 +805,9 @@ def _named(name, text, stages, context=None):
                              names=context.static_names() if context is not None else None,
                              arrays=context.plan.arrays if context is not None else None,
                              pointers=context.plan.params if context is not None else None,
-                             image=context.image_spans if context is not None else None)
+                             image=context.image_spans if context is not None else None,
+                             pointed=context.pointed() if context is not None else None,
+                             takes=context.plan.takes if context is not None else None)
         if context is not None:
             from dread import shapes, vartypes
             shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
@@ -897,6 +910,7 @@ def readable_texts(texts, context=None, jobs=None):
         if context is not None:             # (once, before the pool forks: the workers share them)
             context.struct_names()
             context.static_names()
+            context.pointed()
         for n, made in zip(todo, in_pool(_text_one, todo, jobs, chunksize=1, texts=texts, context=context)):
             store[(n, digests[n])] = made
     return {n: store[(n, digests[n])] for n in texts}
@@ -999,8 +1013,10 @@ def make_plan(program, context, lifter, names, flow=None, digests=None):
     data (dread.statics), then the structures behind pointers (dread.shapes), from every function's
     readable C (static data first: an index added to an address inside it is no pointer for the
     shapes); the types of variables and prototypes (dread.vartypes); which parameters a function may
-    keep or return (dread.frames kept_params). The builds read the table too. digests, a dict: filled
-    with each function's digest (what the check's carry of names compares with)."""
+    keep or return (dread.frames kept_params); which ones every call gives texts' or functions'
+    addresses (dread.naming taken_kinds: what apply_globals writes such an argument as). The builds
+    read the table too. digests, a dict: filled with each function's digest (what the check's carry of
+    names compares with)."""
     from dread import frames, shapes, vartypes
     digests = {} if digests is None else digests
     trees = analysis_trees(program, context, lifter, names, named=context.globals, digests=digests)
@@ -1011,6 +1027,8 @@ def make_plan(program, context, lifter, names, flow=None, digests=None):
     context._struct_names = context._static_names = None
     vartypes.plan(context.plan, trees, digests, context)
     context.plan.keeps, context.plan.returns = frames.kept_params(trees, context)
+    pointed = context.pointed()
+    context.plan.takes = naming.taken_kinds(trees, pointed) if pointed is not None else None
     return context.plan
 
 

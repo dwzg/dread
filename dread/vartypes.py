@@ -132,7 +132,7 @@ def _copy(e):
     if isinstance(e, C.Name):
         return C.Name(e.id)
     if isinstance(e, C.Num):
-        return C.Num(e.text, value=e.value)
+        return C.Num(e.text, value=e.value, note=e.note)
     if isinstance(e, C.Str):
         return C.Str(list(e.parts))
     if isinstance(e, (C.Unary, C.Post)):

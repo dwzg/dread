@@ -219,6 +219,108 @@ def string_at(program, address, limit=48):
 
 POINTED_WORDS = 4       # words of a table a constant points to that pointed_note shows at most
 SMALLEST_POINTER = 0x100    # a smaller constant is a number, even where the image begins at 0
+TEXT_SHOWN = 48         # characters of a text Pointed.note shows at most (longer: its first third, "...", its end)
+TEXT_ALIGN = 4          # a text at an address this aligned may follow a word whose last byte is a text character
+TEXT_CHARS = frozenset(range(0x20, 0x7F)) | {9, 10, 13}     # the bytes a text consists of (string_at's)
+C_ESCAPES = {9: "\\t", 10: "\\n", 13: "\\r", 34: '\\"', 92: "\\\\"}     # how a C string literal writes them
+
+
+class Pointed:
+    """What a constant of a program may be the address of, for readable C (dread.naming apply_globals):
+    a function's entry as code takes it (function: the arch layer's start_address, bit 0 set for Thumb
+    code, so that a Thumb function's even entry is none, and no address inside a function is one), or
+    the start of a text (text, note): at least two printable characters (tab, newline and carriage
+    return among them) up to a NUL, in the image's bytes or in memory the startup fills before the code
+    runs (its code and data copies through their stored bytes, the loader's bytes of a load copy: the
+    text there is what that memory holds at the start, and the note says "initially"), never where an
+    instruction lies (a number that points into code reads its bytes: code at its run address, and the
+    stored bytes of code the startup copies). Neither below SMALLEST_POINTER. Whether a constant is
+    used as an address is the caller's question; this only says what lies there. Made once a program
+    (dread.readable Context.pointed)."""
+
+    def __init__(self, program, shown=TEXT_SHOWN):
+        self.program = program
+        self.shown = shown
+        self.entries = {}
+        for fn in program.functions:
+            self.entries.setdefault(program.arch.start_address(fn.entry, fn.isa), fn.name)
+        startup = list(program.image.startup())
+        self._loads = [c for c in startup if c.kind == "load"]
+        self._filled = [c for c in startup if c.kind in ("data", "load")]
+        self._code_copies = [(c.stored, c.stored + c.size) for c in startup if c.kind == "code"]
+        self._texts = {}
+
+    def function(self, value):
+        """The name of the function whose entry value is as code takes its address, or None."""
+        return self.entries.get(value) if value >= SMALLEST_POINTER else None
+
+    def _byte(self, address):
+        """The byte memory holds at address before the code runs, or None where neither the image nor
+        the startup says (or an instruction lies there)."""
+        p = self.program
+        if address & ~1 in p.instruction_halves() or any(lo <= address < hi for lo, hi in self._code_copies):
+            return None
+        for c in self._loads:
+            if address in c:
+                return c.data[address - c.run]
+        return p.read(address, 1)[0] if p.in_image(address) else None
+
+    def text(self, value):
+        """(the text at value, whether memory the startup fills holds it) when value is a text's start,
+        else None; a text longer than TEXT_SCAN characters is its first TEXT_SCAN."""
+        if value in self._texts:
+            return self._texts[value]
+        got = None
+        if value >= SMALLEST_POINTER:
+            out = bytearray()
+            while len(out) < TEXT_SCAN:
+                b = self._byte(value + len(out))
+                if b is None or (b and b not in TEXT_CHARS):
+                    out = None
+                    break
+                if b == 0:
+                    break
+                out.append(b)
+            if out is not None and len(out) >= 2:
+                got = (out.decode("ascii"), any(value in c for c in self._filled))
+        self._texts[value] = got
+        return got
+
+    def begins(self, value):
+        """Whether a text at value begins there: no text character in front of it (a NUL, another byte,
+        or none known), or one alone in front of a word-aligned text (the last byte of a table's word:
+        TEXT_ALIGN). A linker that merges strings hands out the end of a longer one ("T1" inside
+        "CNT1"), and a number that falls into a run of texts points inside one: what lies there tells
+        the two apart only in that a text's start mostly follows a NUL."""
+        run = 0
+        while run < 2:
+            before = self._byte(value - 1 - run)
+            if before is None or before == 0 or before not in TEXT_CHARS:
+                break
+            run += 1
+        return run == 0 or (run == 1 and value % TEXT_ALIGN == 0)
+
+    def note(self, value):
+        """The comment readable C writes beside a text's address: the text as a C string literal ("mode
+        "), cut to its first third, "..." and its end where it is longer than shown characters (a path
+        ends in its file's name), "initially" in front where memory the startup fills holds it, and no
+        "*/" or "/*" in it; None where value is no text's start."""
+        got = self.text(value)
+        if got is None:
+            return None
+        text, filled = got
+
+        def esc(part):
+            return "".join(C_ESCAPES.get(ord(ch), ch) for ch in part)
+        if len(text) >= TEXT_SCAN:
+            shown = esc(text[:self.shown]) + "..."
+        elif len(text) > self.shown:
+            head = self.shown // 3
+            shown = esc(text[:head]) + "..." + esc(text[len(text) - (self.shown - head):])
+        else:
+            shown = esc(text)
+        shown = shown.replace("*/", "*\\/").replace("/*", "/\\*")
+        return ("initially " if filled else "") + '"%s"' % shown
 
 
 def pointed(program, address):
