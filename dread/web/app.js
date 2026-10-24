@@ -842,7 +842,9 @@ function readingBody(d) {
   if (a.pending) return `<div class="placeholder">The readable C follows when the register analysis is done.</div>`;
   if (!a.lines) return `<div class="placeholder"><span class="warn">No readable C:</span> ${esc(a.why || "")}</div>`;
   const how = a.accepted ? "in the readable table: built from this C, its cases agree"
-    : "not in the readable table: made now, not built or tested";
+    : a.gate && a.gate.state === "rejected" ? `made now, not built: ${a.gate.note}`
+    : a.gate && a.gate.state === "not lifted" ? "made now, not built: not in the lifted table, so the check never saw it"
+    : "not in the readable table: made now, not built or tested (no check has seen it)";
   return `<div class="pane-sub">dread readable --plain · ${how} · margin: each statement's first instruction</div>` +
     `<div class="code reading">${codeHTML(a.lines.map((l) => l[1]).join("\n"), 1, a.lines.map((l) => l[0]))}</div>`;
 }

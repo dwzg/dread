@@ -2902,10 +2902,17 @@ the pilot's names, which the first review had taken for raw frames. New items:
   beside its pointers); a place stored once and in decimal company in another function stays hex
   (image-wide evidence); call arguments stay hex; a digit's character added to a number (printi's
   `r8 + 48`) is a number where the function compares too few characters to be text.
-- [ ] **Readable C the gate has not accepted, marked.** `dread readable NAME` prints any function that
+- [x] **Readable C the gate has not accepted, marked.** `dread readable NAME` prints any function that
   lifts, under the same first line ("readable C from its lifted C"), whether the gate accepted it,
   rejected it, or never saw it. Say so in that line, and in the GUI's reading view. Public example:
   FreeRTOS mps2-gcc-Os prvNotifiedTask_73ac (not in that build's lifted table).
+  Done 2026-10-25 (dread.readable gate_states, gate_note, marked; dread.gui reading's "gate"): the first
+  line of `dread readable NAME` (printed, --plain and --out alike) ends "; accepted by dread readable
+  --check", "; not accepted by dread readable --check: REASON" (the check's verdict, e.g. FAIL NAME
+  [generated 1]), "; never checked by dread readable --check: not in the lifted table" or "; not checked: no
+  dread readable --check has seen it"; the GUI's reading view says the same, with the rejection's reason.
+  The forms the gate builds and the tests compare (printed, reading) keep their line; only what a person
+  reads carries the standing (tests/test_gate_mark.py).
 - [ ] (low) **A margin address of the statement's own.** The margin shows the lowest folded address,
   which can be the entry's copy of a parameter. gizmo a32 read_line shows `2097c  r0[r4] = 0;` for the
   store at 0x209c8; 0x2097c is `mov r5, r0`. Prefer the statement's own instruction when the folded ones

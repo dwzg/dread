@@ -1105,6 +1105,48 @@ def _printed_items(name, text, context, plain):
     return items, fn, ran
 
 
+def gate_states(target, image):
+    """Each function's standing with the readable check (dread readable --check): {name: (state,
+    reason)}. "accepted": in the readable table (the gate built the function from its readable C and its
+    cases agreed); "rejected": the check kept it lifted (reason: why, from its verdicts,
+    BUILD/readable-check/IMAGE/verdicts.tsv); "not lifted": not in the lifted table, which is all the check
+    looks at. A function the dict lacks no check has seen (gate_note: a new function, or no check since)."""
+    from dread import build
+    out = {}
+    path = os.path.join(target.build, "readable-check", image.name, "verdicts.tsv")
+    if os.path.exists(path):
+        with open(path) as f:
+            next(f, None)
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 2 and parts[1] in ("lifted", "not lifted"):
+                    out[parts[0]] = ("rejected" if parts[1] == "lifted" else "not lifted",
+                                     parts[2] if len(parts) > 2 else "")
+    for name in build.read_names(image.table("readable")):
+        out[name] = ("accepted", "")
+    return out
+
+
+def gate_note(name, states):
+    """The words for a function's standing with the readable check (gate_states), as dread readable
+    prints them in its first line and the GUI's reading view shows them: whether the gate accepted the
+    function, rejected it (and why) or never saw it. Until 2026-10-25 every function printed alike."""
+    state, reason = states.get(name, (None, ""))
+    if state == "accepted":
+        return "accepted by dread readable --check"
+    if state == "rejected":
+        return "not accepted by dread readable --check: %s" % (reason or "it stays lifted")
+    if state == "not lifted":
+        return "never checked by dread readable --check: not in the lifted table"
+    return "not checked: no dread readable --check has seen it"
+
+
+def marked(text, note):
+    """text (printed, or the first line of reading) with note in its first comment: "... (dread readable);
+    NOTE */"."""
+    return text.replace("(dread readable) */", "(dread readable); %s */" % note, 1)
+
+
 def printed(name, text, context=None):
     """The function's readable C as dread readable prints it: the compiled form (transform) with the
     image's structures left to the image's header (HEADER: an #include where they were, and a comment
@@ -2123,6 +2165,7 @@ def main(argv=None):
         elif os.path.exists(path):          # (from tables that had structures: no file includes it now)
             os.remove(path)
     status = 0
+    states = gate_states(target, image)
     for name in args.names or [fn.name for fn in program.functions]:
         fn = program.by_name.get(name)
         if fn is None:
@@ -2134,11 +2177,15 @@ def main(argv=None):
         except lift.Refused as e:
             print("dread readable: %s does not lift: %s" % (name, e), file=sys.stderr)
             continue
+        note = gate_note(name, states)
         if args.plain:
             lines = reading(name, lifted, context)
+            if lines:
+                lines[0] = (lines[0][0], marked(lines[0][1], note))
             text = margin_text(lines) if lines is not None else None
         else:
             text = printed(name, lifted, context)
+            text = marked(text, note) if text is not None else None
         if text is None:
             print("dread readable: %s: its lifted C is not the dialect dread.cparse reads" % name, file=sys.stderr)
             continue

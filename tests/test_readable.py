@@ -1013,7 +1013,8 @@ def test_the_image_s_structures_once_in_a_header_the_printed_form_includes(tmp_p
     out = tmp_path / "out"
     assert readable.main(["--target", target.root, "--out", str(out), "ring_put", "print_status"]) == 0
     assert (out / readable.HEADER).read_text() == header
-    assert (out / "ring_put.c").read_text() == ring
+    states = readable.gate_states(target, image)    # (the file's first line says where the check stands)
+    assert (out / "ring_put.c").read_text() == readable.marked(ring, readable.gate_note("ring_put", states))
     capsys.readouterr()
     assert readable.main(["--target", target.root, "--header"]) == 0
     assert capsys.readouterr().out == header

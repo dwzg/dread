@@ -392,6 +392,8 @@ class State:
                 self.system |= set(data.get("system", ()))
         self.lifted = set(read_names(img.table("lifted")))
         self.readable = set(read_names(img.table("readable")))     # (what dread readable --check accepted)
+        from dread import readable as readable_mod
+        self.gate = readable_mod.gate_states(self.target, img)      # (and what it rejected, and why)
         self.readings = {}                                  # name -> (the tables' stamp, its reading form)
         self.reading_context = None                         # (the tables' stamp, a dread.readable Context)
         self.pilot = {os.path.basename(f)[:-2] for f in glob.glob(os.path.join(p["pilot"], "*.c"))}
@@ -862,7 +864,9 @@ class State:
     def reading(self, name):
         """The function's readable C in the reading form (dread readable --plain: dread.readable
         reading): {"name", "lines": [[address or None, line]], "accepted": whether the readable table
-        has it (the gate built it from this C and it agreed), "why": why there is none ("lines" then
+        has it (the gate built it from this C and it agreed), "gate": {"state": accepted, rejected, not
+        lifted or unchecked, "note": dread.readable gate_note's words, with a rejection's reason}, "why":
+        why there is none ("lines" then
         null)}, or {"pending": true} while the register analysis runs. The lift is made under the lock
         (it may run the program in the emulator), the readable C and its context outside it (0.1-0.5 s
         a function on a FreeRTOS build, seconds for the largest: the page goes on meanwhile); kept for
@@ -880,7 +884,9 @@ class State:
                 return dict(got[1], status=self.status())
             context = self.reading_context[1] if self.reading_context and self.reading_context[0] == key else None
             program, flow = self.program, self.ready("flow")
-            out = {"name": name, "lines": None, "accepted": name in self.readable, "why": None}
+            out = {"name": name, "lines": None, "accepted": name in self.readable, "why": None,
+                   "gate": {"state": self.gate.get(name, (None, ""))[0] or "unchecked",
+                            "note": readable.gate_note(name, self.gate)}}
             try:
                 if self.lifter is None:
                     self.lifter = lift.make_lifter(self.program, flow, self.ready("endless"))
