@@ -156,6 +156,11 @@ README_LINES = [
     "pilot --task name --score truth.elf --grounded p --against a.tsv b.tsv --vs c.tsv fn1 fn2",
     "llm providers", "llm ask --provider local hello world", "liftfuzz --isa t32 --isa a32",
     "readable --target examples/gizmo/m3 --out rc", "ghidra --region 0x8000", "flat -- -odd",
+    "doctor", "doctor --json --all --timeout 0.5", "new ~/targets/fw build/fw.elf",
+    "new ~/targets/raw fw.bin --arch cortex-m3 --base 0x08000000 --ram 0x20000000:0x5000 --ram '0x10000000 0x100'",
+    "llm set claude --kind anthropic --model claude-sonnet-5-5 --price-in 3 --price-out 15 --default",
+    "llm set local --no-batch --unset price_in --unset key_file", "llm key claude --file 'my keys/claude'",
+    "llm ask --provider claude hello",
 ]
 
 

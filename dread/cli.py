@@ -11,6 +11,8 @@ import sys
 import threading
 
 COMMANDS = {
+    "doctor": ("dread.doctor", "what DREAD needs on this machine, what it finds, and what to install"),
+    "new": ("dread.newtarget", "a new target from an ELF or a raw image, and what to run next"),
     "info": ("dread.target", "show the target as DREAD reads it"),
     "import-elf": ("dread.elfimport", "an image's tables from an ELF with symbols"),
     "functions": ("dread.listfunctions", "list the functions of an image with their extents"),
@@ -42,7 +44,7 @@ COMMANDS = {
     "trace": ("dread.trace", "one case in the original and the rebuilt image, to the first point where they part"),
     "liftfuzz": ("dread.liftfuzz", "check the lifter on random instructions against the emulator"),
     "pilot": ("dread.pilot", "the reconstruction loop run by code, a language model only for the judgement"),
-    "llm": ("dread.llm", "the language-model providers: list them, or ask one a question"),
+    "llm": ("dread.llm", "the language-model providers: list them, set them up (llm.toml, keys), or ask one a question"),
     "bench": ("dread.bench", "build a real project in many ways and measure what DREAD makes of it"),
     "cclab": ("dread.cclab", "put a compiler in and learn how it compiles: probes run in the emulator"),
     "leakcheck": ("dread.leakcheck", "look for a private project's names and addresses before publishing"),

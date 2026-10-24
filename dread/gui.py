@@ -70,6 +70,21 @@ the tools know and decided, and runs nothing heavy itself:
   record N.json beside it (docs/formats.md) that survives the server: a job that was running when the
   server stopped is marked so. The server's environment reaches the jobs and nothing of it is kept or
   shown. Stopping the server stops its jobs.
+- the Setup page (#/setup, key u, a button in the bar; dread/guipages/setup.py): what this machine has
+  (dread doctor), a new target from an ELF or a raw image (dread new as a job; the image a path on this
+  machine or a file uploaded from the browser into the new target's original/), the target opened once
+  it is made, its first analyses as a chain of jobs (the functions where the image has none yet, dread
+  regflow, dread lift --check, dread readable --check), and the language-model providers (llm.toml set
+  up line by line, a key written into a key file of mode 600 and never shown back, a provider tried
+  with one question as a job).
+A server started where there is no target (no --target, no $DREAD_TARGET, no dread.toml above the
+working directory) comes up with the Setup page alone: the browsing views wait for a target, its jobs
+(dread new, a provider's test) run in the directory it started in with their records in the user's
+state directory ($XDG_STATE_HOME/dread/gui/jobs, else ~/.local/state/dread/gui/jobs). The Setup page
+makes or opens a target, and the server then shows that one (Server.open_target): one server, one target
+at a time, switched only while none of its jobs runs or waits (they would lose their server), never on a
+read-only server or one that listens beyond this machine; the page reloads itself when the server shows
+another target. For two targets at once, two servers (another --port).
 It reloads by itself when the tables or the tools' records change (the names' tables alone, names.tsv
 and review.tsv among them, and the system run's records, without loading the image again), also where
 a job from the Run page changed them. The analyses that take a while on a large image (callers,
@@ -78,17 +93,21 @@ background; the page fills them in when they are ready.
 
 Pages of their own: the Run page is the first page that is a module of dread/guipages (its API routes
 registered from it, imported at start) with a script of its own in dread/web (run.js, imported by
-app.js and registered with its router). Later pages are added the same way without touching the
-lines of another; dread/guipages/__init__.py says how. The pages of browsing above stay here and in
-app.js.
+app.js and registered with its router); the Setup page (setup.py, setup.js) the second. Later pages are
+added the same way without touching the lines of another; dread/guipages/__init__.py says how. The pages
+of browsing above stay here and in app.js.
 
 The answers, JSON, all computed here from the tables and the tools' records (the page computes
 nothing; what the names give is kept until a names table changes):
 - /api/gui: {"pages": [{"name", "script", "style"}] (dread/guipages' pages, whose scripts the page
-  imports), "read_only", "version", "status" (as /api/status's "pages")};
+  imports), "read_only", "version", "status" (as /api/status's "pages"), "target" ({"name", "title",
+  "root", "image", "images"}, null without one), "local" (whether it listens on this machine alone),
+  "home" (where it started), "upload_limit" (bytes)};
 - /api/status: {"generation" (a load of the image), "pending" (analyses), "names" (a change of the
   names' tables), "runs" (a change of the system run's records), "pages" ({page: what it adds}: the
-  Run page's dread.jobs status)};
+  Run page's dread.jobs status), "target" (the root of the target shown: the page reloads when it
+  changes; null without a target, when the browsing answers say 409 with "setup": true)};
+- the Setup page's: /api/setup/... (dread/guipages/setup.py says what each answers);
 - the Run page's: /api/commands, /api/command, /api/command-line, /api/jobs, /api/job, /api/job-log,
   POST /api/jobs/start and /api/jobs/stop (dread/guipages/run.py says what each answers);
 - /api/functions: each function's name, entry, size, origin and test record, its "certainty"
@@ -126,18 +145,20 @@ nothing; what the names give is kept until a names table changes):
   "text", "proposed"}], "groups": [{"group", "functions": how many found}], "more": left out beyond
   SEARCH_LIMIT}, or what /api/program says while the groups are found.
 
-Safety: the server listens on 127.0.0.1 unless told otherwise, answers only requests addressed to
-that host name (no DNS rebinding), and a change needs the token of the page it served (no other web
-page can make one): a rename, a note, starting or stopping a job. Jobs run DREAD's commands with
-whatever arguments the form gives, as the user who runs the server, so they run only where the server
-listens on this machine alone (127.0.0.1, the default): whoever can load the page has its token, and
-on another address that is anyone who can reach it. --read-only turns off every change and job (the
-jobs' records and logs are still shown). One server per target runs jobs (dread.jobs: a lock in
-BUILD/gui/jobs); another one on the same target shows them and starts none. Over SSH: ssh -L
-8350:127.0.0.1:8350 HOST, then open http://127.0.0.1:8350/.
+Safety: the server listens on 127.0.0.1 unless told otherwise, answers only requests addressed to that
+host name (no DNS rebinding), and a change needs the token of the page it served (no other web page can
+make one): a rename, a note, starting or stopping a job, the Setup page's changes (a file uploaded, a
+target made or opened, llm.toml and key files written). Jobs run DREAD's commands with whatever
+arguments the form gives, as the user who runs the server, so they run only where the server listens on
+this machine alone (127.0.0.1, the default): whoever can load the page has its token, and on another
+address that is anyone who can reach it; the Setup page changes nothing there either. --read-only turns
+off every change and job (the jobs' records and logs are still shown). A file uploaded to the Setup
+page is refused beyond --upload-limit MiB (default 64) before it is read. One server per target runs
+jobs (dread.jobs: a lock in BUILD/gui/jobs); another one on the same target shows them and starts none.
+Over SSH: ssh -L 8350:127.0.0.1:8350 HOST, then open http://127.0.0.1:8350/.
 
     dread gui [--target DIR] [--image NAME] [--host 127.0.0.1] [--port 8350] [--allow-host NAME] [--open]
-              [--read-only] [--jobs N]
+              [--read-only] [--jobs N] [--upload-limit MIB]
 """
 import argparse
 import glob
@@ -164,6 +185,7 @@ ORIGINS = ("hand", "pilot", "lifted", "refused", "dropped", "original")
 SEARCH_LIMIT = 5000     # the functions one search lights in the whole program at most
 TIMELINE_ROWS = 400     # device log entries of each image one timeline answer holds by default
 TIMELINE_MAX = 5000     # and at most
+UPLOAD_LIMIT = 64 << 20  # bytes a file uploaded to the Setup page may have (dread gui --upload-limit)
 KEYWORDS = {"if", "while", "for", "switch", "return", "sizeof", "do", "else"}
 
 
@@ -1134,11 +1156,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def state(self, query):
         """The State of the image the request names (default: the server's)."""
-        name = query.get("image") or self.default
         with self.lock:
+            if self.target is None:
+                raise tgt.TargetError("no target yet: the Setup page (#/setup) makes or opens one")
+            name = query.get("image") or self.default
             if name not in self.states:
                 self.states[name] = State(self.target, self.target.image(name))
             return self.states[name]
+
+    def target_brief(self):
+        """{"name", "title", "root", "image", "images"} of the target shown, or None."""
+        t = self.target
+        return None if t is None else {"name": t.name, "title": t.title, "root": t.root, "image": self.default,
+                                       "images": list(t.images)}
 
     def reply(self, code, data, kind="application/json"):
         body = data if isinstance(data, bytes) else json.dumps(data).encode()
@@ -1176,16 +1206,21 @@ class Handler(BaseHTTPRequestHandler):
             from dread import __version__
             return self.reply(200, {"pages": [p.brief() for p in guipages.PAGES.values()],
                                     "read_only": bool(self.server.read_only), "version": __version__,
-                                    "status": guipages.statuses(self.server)})
+                                    "status": guipages.statuses(self.server), "target": self.target_brief(),
+                                    "local": bool(self.server.local), "home": self.server.home,
+                                    "upload_limit": self.server.upload_limit})
         found = guipages.ROUTES.get(("GET", url.path))
         if found is not None:
             if found.change and self.refused():
                 return
             return self.answer(found, query)
+        if url.path == "/api/status" and self.target is None:      # (no target yet: the pages' share alone)
+            return self.reply(200, {"generation": 0, "pending": [], "names": None, "runs": None, "target": None,
+                                    "pages": guipages.statuses(self.server)})
         try:
             state = self.state(query).refresh()
         except tgt.TargetError as e:
-            return self.reply(404, {"error": str(e)})
+            return self.reply(409 if self.target is None else 404, {"error": str(e), "setup": self.target is None})
         try:
             if url.path == "/api/reading":          # (makes readable C outside the lock: reading())
                 return self.reply(200, state.reading(query.get("name", "")))
@@ -1208,15 +1243,16 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, state.timeline(query.get("name"), query.get("from"),
                                                           query.get("count", TIMELINE_ROWS)))
                 if url.path == "/api/status":
-                    return self.reply(200, dict(state.status(), pages=guipages.statuses(self.server)))
+                    return self.reply(200, dict(state.status(), pages=guipages.statuses(self.server),
+                                                target=self.target.root))
         except KeyError as e:
             return self.reply(404, {"error": "no function %s" % e})
         return self.reply(404, {"error": "not found"})
 
-    def answer(self, found, query, data=None):
+    def answer(self, found, query, data=None, body=None):
         """A page's route (dread.guipages): its answer, or the error it ended with."""
         try:
-            got = found.fn(guipages.Request(self, query, data))
+            got = found.fn(guipages.Request(self, query, data, body))
         except guipages.Failure as e:
             return self.reply(e.status, {"error": str(e)})
         except tgt.TargetError as e:
@@ -1251,6 +1287,22 @@ class Handler(BaseHTTPRequestHandler):
         found = guipages.ROUTES.get(("POST", url.path))
         if self.refused(found is None or found.change):
             return
+        if found is not None and found.raw:         # (a file's bytes: an upload, up to the server's limit)
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                return self.reply(411, {"error": "a file's upload says its length"})
+            if length > self.server.upload_limit or length < 0:
+                self.close_connection = True
+                return self.reply(413, {"error": "the file has %d bytes, more than the %d this server takes "
+                                                 "(dread gui --upload-limit)" % (length, self.server.upload_limit)})
+            body = b""
+            while len(body) < length:
+                piece = self.rfile.read(min(1 << 20, length - len(body)))
+                if not piece:
+                    return self.reply(400, {"error": "the upload ended after %d of %d bytes" % (len(body), length)})
+                body += piece
+            return self.answer(found, dict(urllib.parse.parse_qsl(url.query)), body=body)
         if not self.headers.get("Content-Type", "").startswith("application/json"):
             return self.reply(415, {"error": "expected JSON"})
         try:
@@ -1276,9 +1328,15 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     """The page's server; closing it also stops its jobs (dread.jobs Jobs.close: the running ones get
-    SIGTERM, the queued ones are cancelled) and the threads of the images' states (State.close)."""
+    SIGTERM, the queued ones are cancelled) and the threads of the images' states (State.close). One
+    target at a time, or none (the Setup page alone, until one is made or opened: open_target)."""
     read_only = False
     jobs = None
+    state = None
+    local = True
+    home = None                 # the directory the server started in: the jobs' without a target
+    upload_limit = UPLOAD_LIMIT
+    jobs_limit = 1
 
     def server_close(self):
         super().server_close()
@@ -1287,43 +1345,99 @@ class Server(ThreadingHTTPServer):
         for state in list(self.RequestHandlerClass.states.values()):
             state.close()
 
+    def open_target(self, path):
+        """Show another target (a dread.toml or its directory), or the first one: refused (TargetError)
+        while a job of this server is queued or running (they would lose their server), on a read-only
+        server and on one that listens beyond this machine. The images' states of the one before are
+        closed, its jobs' directory given up; the new target's jobs are this server's from then on (or
+        another server's, which then runs them). Returns the Target."""
+        if self.read_only:
+            raise tgt.TargetError("this page is read-only (dread gui --read-only): it opens no other target")
+        if not self.local:
+            raise tgt.TargetError("a server that listens beyond this machine opens no other target")
+        handler = self.RequestHandlerClass
+        with handler.lock:
+            target = tgt.Target.load(path)
+            if handler.target is not None and target.file == handler.target.file:
+                return target
+            image = target.image()
+            busy = self.jobs.status() if self.jobs is not None and not self.jobs.owner else None
+            if busy and (busy["running"] or busy["queued"]):
+                raise tgt.TargetError("%d job%s of this page still run or wait: stop them first, or start another "
+                                      "dread gui for %s (dread gui --target %s --port 0)" % (
+                                          busy["running"] + busy["queued"], "" if busy["running"] + busy["queued"] == 1
+                                          else "s", target.name, target.root))
+            state = State(target, image)
+            old_states, old_jobs = list(handler.states.values()), self.jobs
+            handler.target, handler.default, handler.states = target, image.name, {image.name: state}
+            self.state = state
+            if old_jobs is not None:
+                old_jobs.close()
+            self.jobs = self.make_jobs(jobs_dir(target))
+        for old in old_states:
+            old.close()
+        return target
+
+    def make_jobs(self, directory):
+        """The jobs of a directory as this server runs them (dread.jobs Jobs): none where it is read-only
+        or listens beyond this machine."""
+        try:
+            jobs = jobs_.Jobs(directory, limit=self.jobs_limit, read_only=self.read_only or not self.local)
+        except OSError as e:                # (the page still shows the image; it runs no jobs)
+            jobs = jobs_.Jobs(directory, read_only=True)
+            jobs.owner = "no jobs: %s" % e
+        if not self.local and not self.read_only:       # (whoever can load the page has its token)
+            jobs.owner = ("jobs run only where the server listens on this machine alone (127.0.0.1): anyone who "
+                          "can reach %s could run commands; for another machine use ssh -L" % self.server_address[0])
+        from dread import llmconfig
+        for value, name in llmconfig.file_keys():       # (the keys of key files: hidden in the logs as well)
+            jobs.add_secret(value, name)
+        return jobs
+
 
 def jobs_dir(target):
     """Where the page's jobs keep their logs and records: BUILD/gui/jobs."""
     return os.path.join(target.build, "gui", "jobs")
 
 
-def serve(target, image, host="127.0.0.1", port=8350, allow_hosts=(), read_only=False, jobs=1):
+def home_jobs_dir():
+    """Where a server without a target keeps its jobs (the Setup page's: dread new, a provider's test):
+    $XDG_STATE_HOME/dread/gui/jobs, else ~/.local/state/dread/gui/jobs."""
+    state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(state, "dread", "gui", "jobs")
+
+
+def serve(target, image, host="127.0.0.1", port=8350, allow_hosts=(), read_only=False, jobs=1,
+          upload_limit=UPLOAD_LIMIT, home=None):
     """The server, not yet serving (serve_forever() or a thread does that); its address is
     server.server_address. Requests are answered for the host names 127.0.0.1, localhost, [::1],
     the address listened on and allow_hosts (any port: a tunnel may use another one). read_only: no
-    change and no job (the jobs' records are still shown); jobs: how many run at a time."""
+    change and no job (the jobs' records are still shown); jobs: how many run at a time. target None:
+    no target yet (the Setup page alone, its jobs in home_jobs_dir(), run in home: default the working
+    directory); upload_limit: the bytes a file uploaded to the Setup page may have."""
     import socket
     guipages.load()
-    state = State(target, image)
+    state = State(target, image) if target is not None else None
     token = secrets.token_urlsafe(24)
     names = {host, "127.0.0.1", "localhost", "[::1]"} | set(allow_hosts)
     if host in ("0.0.0.0", "::", ""):
         names |= {socket.gethostname(), socket.getfqdn()}
-    handler = type("BoundHandler", (Handler,), {"target": target, "default": image.name, "states": {image.name: state},
-                                                "token": token, "lock": threading.Lock(),
+    handler = type("BoundHandler", (Handler,), {"target": target, "default": image.name if image else None,
+                                                "states": {image.name: state} if state else {},
+                                                "token": token, "lock": threading.RLock(),
                                                 "hosts": frozenset(n.lower() for n in names)})
     try:
         server = Server((host, port), handler)
     except OSError:
-        state.close()
+        if state is not None:
+            state.close()
         raise
     server.daemon_threads = True
     server.token, server.state, server.read_only = token, state, bool(read_only)
-    local = host in ("localhost", "::1") or host.startswith("127.")
-    try:
-        server.jobs = jobs_.Jobs(jobs_dir(target), limit=jobs, read_only=read_only or not local)
-    except OSError as e:                    # (the page still shows the image; it runs no jobs)
-        server.jobs = jobs_.Jobs(jobs_dir(target), read_only=True)
-        server.jobs.owner = "no jobs: %s" % e
-    if not local and not read_only:         # (whoever can load the page has its token)
-        server.jobs.owner = ("jobs run only where the server listens on this machine alone (127.0.0.1): anyone who "
-                             "can reach %s could run commands; for another machine use ssh -L" % host)
+    server.local = host in ("localhost", "::1") or host.startswith("127.")
+    server.jobs_limit, server.upload_limit = jobs, int(upload_limit)
+    server.home = os.path.abspath(home or os.getcwd())
+    server.jobs = server.make_jobs(jobs_dir(target) if target is not None else home_jobs_dir())
     return server
 
 
@@ -1340,11 +1454,18 @@ def main(argv=None):
                              "still shown)")
     parser.add_argument("--jobs", type=int, default=1, metavar="N",
                         help="commands the Run page runs at a time (default 1; the others wait in a queue)")
+    parser.add_argument("--upload-limit", type=float, default=UPLOAD_LIMIT / (1 << 20), metavar="MIB",
+                        help="the size of a file the Setup page takes from the browser, in MiB (default %(default)g)")
     args = parser.parse_args(argv)
     try:
-        target, image = tgt.from_args(args)
+        try:
+            target, image = tgt.from_args(args)
+        except tgt.TargetError:
+            if args.target or os.environ.get("DREAD_TARGET"):
+                raise
+            target = image = None           # (no target here: the Setup page makes or opens one)
         server = serve(target, image, args.host, args.port, args.allow_host, read_only=args.read_only,
-                       jobs=max(1, args.jobs))
+                       jobs=max(1, args.jobs), upload_limit=max(0.0, args.upload_limit) * (1 << 20))
     except (tgt.TargetError, OSError) as e:
         print("dread gui: %s" % e, file=sys.stderr)
         return 1
@@ -1354,11 +1475,15 @@ def main(argv=None):
               "the page's token" % args.host, file=sys.stderr)
     if server.jobs.owner and not args.read_only:
         print("dread gui: %s: this page starts no jobs" % server.jobs.owner, file=sys.stderr)
-    print("dread gui: %s, image %s, on %s (Ctrl-C ends it%s)" % (
-        target.name, image.name, url, " and stops its jobs" if not server.jobs.owner else ""), flush=True)
+    if target is None:
+        print("dread gui: no target here or above %s: the Setup page makes one (or opens one) on %s (Ctrl-C ends it)"
+              % (os.getcwd(), url + "#/setup"), flush=True)
+    else:
+        print("dread gui: %s, image %s, on %s (Ctrl-C ends it%s)" % (
+            target.name, image.name, url, " and stops its jobs" if not server.jobs.owner else ""), flush=True)
     if args.open:
         import webbrowser
-        webbrowser.open(url)
+        webbrowser.open(url + ("#/setup" if target is None else ""))
     import signal
 
     def stop(signum, frame):            # (a terminal closed, or kill: the jobs stop with the server)

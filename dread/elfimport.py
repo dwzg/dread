@@ -535,6 +535,9 @@ def main(argv=None):
                                                         os.path.relpath(target.file)))
     elif free:
         print("free ranges for [image.%s] in dread.toml:\n%s" % (image.name, free_toml(free)))
+    if args.write_startup and (copies or fixed or free):    # (read again: the program then knows code that runs
+        target = tgt.Target.load(target.file)               # from RAM; a dread.toml without the startup list
+        image = target.image(image.name)                    # made the walk below read 0x40000000 outside the image)
     called = called_without_function(target, image)
     if called:
         write_tables(image, sorted(functions + called), code, symbols)

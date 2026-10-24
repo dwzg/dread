@@ -506,6 +506,61 @@ one question) and `answer` (the text as it came). A question it holds is answere
 asked (dread.llm AnswerCache); `--no-judge-cache` neither reads nor writes it. Removing the file only
 costs the answers again.
 
+### The providers (`llm.toml`: `$DREAD_LLM`, else `~/.config/dread/llm.toml`) and their key files
+
+Read by dread.llm (its docstring shows every kind with an example): a top-level `default` (a provider's
+name) and a table `[providers.NAME]` per provider. Written by hand, or line by line by `dread llm set`
+and `dread llm key` and dread gui's Setup page (dread.llmconfig), which change a field's value where it
+stands (a comment behind it kept), add a field below the provider's last one, a provider at the end of
+the file and `default` below the other top-level keys, and leave every other line as it is; a provider
+written as an inline table or with dotted keys is changed by hand only.
+
+The fields the editor writes (others, such as `max_tokens`, `timeout`, `path`, `headers`, `quick`,
+`command` and the batch tunings, are kept as they are and written by hand):
+
+| Field | Meaning |
+|---|---|
+| `kind` | `"openai"` (an OpenAI-compatible server), `"anthropic"` or `"command"` (a command line that answers; a new one is written by hand, its `command` too) |
+| `model` | the model asked |
+| `url` | the server's base URL (OpenAI-compatible; Anthropic's default `https://api.anthropic.com`) |
+| `price_in`, `price_out` | US dollars per million tokens in and out, from the provider's price list (the usage ledger's costs) |
+| `cache_min` | the model's least cacheable prompt in tokens (Anthropic's prompt cache: a provider without it claims no cache) |
+| `batch` | `false` turns Message Batches off (Anthropic; default on) |
+| `key_env` | the environment variable that holds the key |
+| `key_file` | the file that holds the key (since 2026-10-24) |
+| `default` | (top level) the provider used when none is named |
+
+A request takes the key from `$key_env` where it is set and not empty, else from `key_file` (an
+Anthropic provider with neither field: `$ANTHROPIC_API_KEY`). `key_file` is a path, `~` for the home,
+relative to the directory of `llm.toml`; the file is read when a request goes out and only if it is a
+regular file of this user's (a symbolic link is followed), readable and writable by the user alone
+(mode 600 or stricter), in a directory no other user may write to, and outside any git work tree; its
+first line that is not blank is the key. `dread llm key NAME` (and the Setup page) writes it: by default
+`keys/NAME` beside `llm.toml` (`~/.config/dread/keys/NAME`), mode 600, a directory it makes 700, and
+sets `key_file` to it. The key file holds the key alone; a key never goes into `llm.toml`, a log, a job's
+record, the usage ledger or an error message. A DREAD from before 2026-10-24 ignores `key_file` and takes
+keys from the environment alone.
+
+### What this machine has (`dread doctor --json`, dread gui's `/api/setup/doctor`)
+
+Written by dread.doctor (since 2026-10-24): `{"version" (DREAD's), "system": {"platform", "name",
+"manager" ("apt", "pacman", "dnf", "brew" or null)}, "essentials" (whether every essential finding is
+ok: the exit status), "findings": [...]}`, each finding `{"id" (stable: "python", "unicorn",
+"arm-gcc", "llm:NAME", ...), "group" ("essentials", "compilers", "python", "tools", "models"), "what",
+"need" ("essential" or "optional"), "state" ("ok", "missing", "wrong"), "found" (a version or a path),
+"detail" (what needs it, or what is wrong), "fix" (null, or {"apt", "pacman", "dnf", "brew": a command or
+null for no known package, "pip", "text"}, each key where it applies)}`. It describes the machine at the
+moment it ran: not deterministic, never a key.
+
+### `BUILD/gui/chain.json` (the first analyses started from dread gui's Setup page)
+
+Written by dread gui's Setup page when it starts a target's first analyses (since 2026-10-24), whole and
+renamed into place: `{"version": 1, "started": seconds since the epoch, "image", "steps": [{"step"
+("functions", "regflow", "lift", "readable"), "command" (DREAD's command, null for a step that was done
+already: the functions an ELF's symbols gave), "line" (the job's command line), "why", "job" (its number
+in BUILD/gui/jobs, null without one)}]}`. Each step's state is its job's record; the page reads both.
+A new start replaces the file.
+
 ### The usage ledger (`$XDG_STATE_HOME/dread/llm-usage.tsv`, else `~/.local/state/dread/llm-usage.tsv`)
 
 Written by `dread.llm` (every provider, `Provider.record`): a line per answer of a language model,
@@ -855,6 +910,10 @@ printed it. `N.json`, written whole and renamed into place at each change:
 
 Never the environment. `lock` holds the process id of the server that runs the jobs (an advisory
 lock on it: one server a target runs them; another one reads the records and starts none).
+
+A server without a target (dread gui started where there is none: its Setup page alone) keeps the same
+files in `$XDG_STATE_HOME/dread/gui/jobs` (else `~/.local/state/dread/gui/jobs`), its jobs (dread new, a
+provider's test) run in the directory it started in (since 2026-10-24).
 
 ## The whole-program graph (`dread groups --json`, `dread gui`'s `/api/program`)
 

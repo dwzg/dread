@@ -14,14 +14,20 @@ fill it in as you go. It asks for what `dread.toml` needs and for the evidence b
 
 ## Steps
 
-1. **Write `dread.toml`** (the reference is DREAD's `docs/target.md`): the image file, its load
-   address and limit, the entry, `[arch]` (isa, profile, cpu; `thumb2 = false` for ARMv4T to ARMv6
-   and Cortex-M0), the memory map with the peripheral ranges, a stack and a scratch area, and
-   `[compiler]` with flags as close to the original's compiler as you can tell. Check it with
-   `dread info`.
-2. **Make the tables.** With an ELF that has symbols: `dread import-elf FILE --payload IMAGE.bin
-   --write-startup`. Without one: `dread ghidra` (headless analysis, writes the function and code
-   tables), then name what you know in `config/symbols.txt`.
+1. **Make it with `dread new DIR IMAGE`** (`dread doctor` first, on a machine new to DREAD): from an
+   ELF, or from a raw image with `--arch` and `--base`. It writes `dread.toml` (the image file, its
+   load address, the entry, `[arch]`, the memory map, a stack and a scratch area, `[compiler]` with the
+   original's flags where the debug information records them), copies the image into `original/` and,
+   from an ELF with symbols, writes the tables (`dread import-elf --write-startup`). dread gui's Setup
+   page does the same from a form. Then go through the comments in `dread.toml` that say "guessed"
+   (the reference is DREAD's `docs/target.md`, "Making a target"): the RAM's size, the peripheral
+   ranges (none are known for A-profile ARM, RISC-V or MIPS devices: add them to `[memory] io`), the
+   room behind the image (`limit`); whether Thumb code may use Thumb-2 follows the `-mcpu` or `-march`
+   in `cflags` (`thumb2 = false` in `[arch]` says it where they do not). Check it with `dread info` and
+   `dread doctor --target DIR` (which tries the compiler with the target's flags).
+2. **Make the tables** where the image has no symbols: `dread ghidra` (headless analysis, writes the
+   function and code tables; `dread new` names it among the next steps), then name what you know in
+   `config/symbols.txt`.
 3. **Prove the listing.** `dread asm --verify` must rebuild the image byte for byte. A failure names
    the first differing address; `--verify` also moves instructions GNU as encodes differently into
    `config/asm_raw_words.txt`. Do not go on until this passes: every later comparison stands on it.

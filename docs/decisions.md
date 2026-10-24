@@ -9,6 +9,123 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Setting up: dread doctor, dread new, keys from a file, one server that opens the target it made (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), for step 2 of "The GUI for
+everything" (docs/todo.md; the user, 2026-10-24: "... and also provides an easy way to set everything
+up"). Step 1's principle holds: every action is a command first (usable over SSH and in scripts), the
+page a form over it, so the page does nothing the command line cannot.
+
+- **Question.** How does a person get from a fresh checkout to a target with its first analyses and a
+  language model to ask, from the command line and from the page?
+- **Options and choices.**
+  1. The prerequisites: (a) a page that probes, (b) a command, `dread doctor`, whose findings the page
+     shows (dread.doctor check(), the same code). **(b)**. It looks and changes nothing: each fix is the
+     command for this system's package manager (apt, pacman, dnf, brew; detected from /etc/os-release, all
+     four with --all) or pip, printed, never run (installing system software is the user's to do). The
+     essentials, which decide the exit status: Python 3.11, unicorn 2.1.4 (pinned), capstone 5, and with
+     a target its compiler, which has to take the target's cflags (a RISC-V GCC before 12 refuses
+     `_zicsr`: the probe found it before a build would). A local model server is asked for /v1/models
+     within two seconds; a server elsewhere is not contacted (a request to a cloud API from a check is
+     not the check's business). The package names come from CI's install step and bench/toolchains
+     where those name them; Fedora's bare-metal RISC-V GCC and the MSP430 GCC are said to be not known
+     in the distributions rather than guessed. Undo: delete dread/doctor.py and its route.
+  2. A new target: (a) an option of dread import-elf (`--new DIR`), (b) a command of its own, `dread new
+     DIR IMAGE`. **(b)**: import-elf writes an existing target's tables from an ELF and stays that; a new
+     target also comes from a raw image, which has no ELF, and needs a dread.toml before import-elf can
+     run (its regions decide which sections are the image's and which a loader's). dread new calls
+     import-elf for an ELF. DIR must be new, empty, or hold only original/ with the image (where the page
+     puts an upload); an existing target is never touched, and a failure takes back what was made.
+  3. The memory map of an ELF, which does not keep the linker script's MEMORY: the image's region from
+     the load addresses of the sections near the entry (64 KiB apart at most; farther ones are a loader's,
+     "load" copies, as QEMU's MPS2 ELF has), the RAM from the writable sections' addresses, clustered and
+     reaching up to the initial stack pointer (an M-profile vector table's first word, else a stack symbol
+     such as _estack or __stack_top), the peripheral ranges only where the architecture fixes them
+     (Cortex-M's Peripheral and System regions, the MSP430's first 512 bytes; none for ARM's A profile,
+     RISC-V and MIPS, whose devices then fault in the emulator until named), a scratch region and the
+     sentinel at addresses nothing else uses (below the RAM, as gizmo's are). On all eight gizmo builds
+     this gives gizmo's own architecture, image, entry, startup copies, functions and stack top. A 16-bit
+     MSP430 whose flash begins right above its RAM (FreeRTOS's F449 demo: code from 0x1100, the vectors at
+     0xffe0) leaves no unused addresses for the scratch: it then takes the erased flash between the code
+     and the vectors, as the bench's target of that build does by hand, the vectors becoming a loader's
+     bytes. Every guess carries a comment in dread.toml. Undo: the comments say what to replace.
+  4. The room behind the image (limit): (a) none unless --limit, (b) the image's end rounded up to 64 KiB,
+     (c) as much room again as the image takes, rounded up to 64 KiB; each marked a guess. **(c)**: without
+     room, the lift check dropped two of three gizmo functions whose lifted C is larger than the original
+     ("no room left for its C"), and the first analyses would report a lifter far worse than it is; (b),
+     tried first, left FreeRTOS's 60 KB image 5 KB, where the bench's run (with the board's 4 MiB) had
+     placed 16 KB of C behind it, and the trial's lift check dropped functions for room. The emulator
+     maps the room; whether the device's flash reaches that far is not known, and nothing of DREAD claims
+     an image runs on hardware. Undo: --limit, or the line.
+  5. The compiler: the original's where this machine has one for the architecture, else the one it has
+     (the lifted C is DREAD's own translation and compares by behaviour, so another compiler serves). The
+     original's is the debug information's producer (GCC records its code-generation flags, clang none).
+     Which producer: (a) the most frequent string, (b) the compile unit's that holds main (else the entry,
+     else the most code), read with pyelftools. **(b)**: the linker keeps each string once, so (a) counts
+     nothing, and a C library linked in has a producer of its own: on the FreeRTOS builds (a) took newlib's
+     flags (no -mcpu) and, on the clang build, newlib's GCC for the application's compiler. Without
+     pyelftools only a single producer is taken. A flag naming a path of the build machine (TI's
+     -mdevices-csv-loc=/home/...) is left out. This part depends on the machine, which the docs say.
+  6. The functions of an image without symbols: (a) dread ghidra where Ghidra is installed, (b) a finder
+     of DREAD's own, (c) none. **(a), else (c)**: DREAD has no function finder of its own (its tables come
+     from Ghidra or an ELF, docs/formats.md); writing one is a project of its own. Without Ghidra the
+     first analyses are refused with what to do (install Ghidra, dread doctor says how; or an ELF with
+     symbols). Undo: first_analyses.
+  7. Keys: until now a key came from the environment alone (dread.llm: "the key comes from the
+     environment, never from a file"). That rule changes: a provider may name a key_file. Why: dread gui's
+     jobs inherit the server's environment, so a key only in the environment means starting the GUI with
+     it set, which a page cannot do and a person forgets; and the user's own key already lives in a file
+     that is read into the environment for each command, so a file is where keys are kept anyway. What
+     keeps it safe, as ssh insists for its keys: the file is read when a request goes out (not cached),
+     and refused unless it is a regular file of this user's, readable and writable by the user alone (mode
+     600 or stricter), in a directory no other user may write to, and outside any git work tree (where a
+     commit would take it along; ~/.config as a dotfiles repository is refused too). The environment comes
+     first where key_env is set (a key for one run without touching the file). A key never goes into a
+     page, a log, a job's record, the usage ledger or an error message: an HTTP error's body has the
+     request's key replaced by [key] (a server that echoes its authorization header), and dread gui hides
+     the key files' keys in its jobs' logs as it hides the environment's secrets. Undo: drop key_file from
+     provider_key; the rule is back.
+  8. Writing a key: `dread llm key NAME` reads it from standard input (without echo from a terminal),
+     never from the command line (a command line is kept in shell histories and in a job's record). The
+     page writes the key it was given in a password field with the same function in its own process, not
+     as a job (a job's standard input is /dev/null, and a key handed to a job would sit in the server's
+     memory until the job starts, then pass through a pipe for nothing). The page shows a key as set or
+     not set, never back.
+  9. Changing llm.toml: (a) parse, change and write the file anew, (b) edit its lines. **(b)**: the file is
+     the user's, with comments and fields DREAD does not know; a rewrite loses them. A field's value is
+     replaced where it stands, a new field goes below the provider's last one, a new provider to the end;
+     the result must parse and read back as asked, with every other provider and key as before, or the
+     file stays as it was. A provider written as an inline table or with dotted keys is refused (edit it by
+     hand), and a new command provider too (its command line is written by hand).
+  10. Opening the new target: (a) the page links to a server per target, started in a terminal; (b) one
+     server switches to the target it made. **(b)**: one tab from a fresh checkout to the first analyses,
+     which is what "easy" asks for; a server cannot start another server as a job (it runs until stopped).
+     A server started where there is no target comes up with the Setup page alone, its jobs (dread new, a
+     provider's test) in the user's state directory and run where it started. Switching is refused while
+     any job of the server runs or waits (it would lose its server), on a read-only server and on one that
+     listens beyond this machine; the old target's analyses are stopped and its jobs' lock given up, and
+     the page reloads when /api/status names another target. Two targets at once: two servers. Undo: the
+     open route and Server.open_target.
+  11. Uploads: a route that takes a file's bytes (not JSON), refused beyond --upload-limit (64 MiB by
+     default) before it is read, written only to DIR/original/NAME of a directory dread new would take,
+     NAME reduced to a plain file name, DIR or its original/ refused where it is a symbolic link (the file
+     would land elsewhere), no link followed when writing; the page then runs dread new on the file where
+     it lies. Paths typed
+     into the page are taken as typed, relative to the directory dread gui started in, and dread new runs
+     there: no shell, no ~. (Relative to the target shown, as the Run page's jobs are, a second target made
+     while the first was open landed inside the first one's directory: found in the browser trial.)
+  12. The first analyses: chained jobs (step 1's `after`), the chain kept in BUILD/gui/chain.json so that a
+     reload or another server shows it; each step's state from its job, its log's last line beside it.
+- **Found on the way.** dread import-elf --write-startup walked the calls of a target whose dread.toml it
+  had just given a startup list with the description read before: code run from RAM was not seen, and
+  gizmo-a32 failed with "0x40000000 is outside image main" (gizmo's targets never showed it: their lists
+  were there already). It reads the target again after writing. Not fixed: an empty free list does not
+  take out a `free` line an older import wrote (gizmo-mips's dread.toml names a 16-byte gap that is 8
+  bytes now; noted in docs/todo.md).
+- **Status.** In the code: dread/doctor.py, dread/newtarget.py, dread/llmconfig.py, key_file in dread/llm.py,
+  dread/guipages/setup.py with dread/web/setup.js and setup.css; tests/test_doctor.py, test_newtarget.py,
+  test_llmconfig.py, test_gui_setup.py, test_gui_setup_browser.py.
+
 ## Merged arms and hoisted statements: arms of one code as one condition with ||, what every arm shares in front of or behind the if (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Merged arms

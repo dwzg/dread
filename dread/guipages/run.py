@@ -5,7 +5,8 @@ The forms come from dread.cli parser and dread.cliforms: the page sends the form
 command line the server makes of them, the same code that starts the job. A job is `sys.executable -m
 dread.cli COMMAND ARGS...` (dread.jobs command) in the target's directory, with --target (and --image
 for an image other than the target's first) of what the page shows where the command takes them and
-the form leaves them empty: the command line says so, and is what a person would type there.
+the form leaves them empty: the command line says so, and is what a person would type there. A server
+without a target runs them in the directory it started in, with nothing filled in.
 NOT_AS_JOB says which commands do not run as a job, and why. Other pages start DREAD's commands with
 start_command (the setup's analyses, a pilot run).
 
@@ -57,11 +58,19 @@ def why_not(request, name):
     return request.jobs.owner
 
 
+def home(request):
+    """Where a job runs: the target's directory, or without a target the directory the server started in."""
+    return request.target.root if request.target is not None else request.server.home
+
+
 def defaults(request, parser):
     """What a job fills in where the form leaves it empty: --target (the target the page shows: "." in
-    its directory) and --image (the image it shows, where that is not the target's first)."""
+    its directory) and --image (the image it shows, where that is not the target's first); nothing while
+    the server has no target."""
     flags = {s for a in parser._actions for s in a.option_strings}
     target, out = request.target, {}
+    if target is None:
+        return out
     if "--target" in flags:
         out["--target"] = "." if os.path.basename(target.file) == tgt.FILE else target.file
     if "--image" in flags and request.image != target.default_image:
@@ -108,7 +117,7 @@ def start_command(request, name, values=None, args=None, grace=None, after=None,
         grace = min(max(float(grace), GRACE_RANGE[0]), GRACE_RANGE[1])
     argv, line, env = jobs_.command(name, args)
     try:
-        return request.jobs.start(argv, cwd or request.target.root, line=line, command=name, env=env, grace=grace,
+        return request.jobs.start(argv, cwd or home(request), line=line, command=name, env=env, grace=grace,
                                   after=after)
     except jobs_.JobsError as e:
         raise Failure(409, str(e))
@@ -149,7 +158,7 @@ def command(request):
     parser = cli.parser(name)
     why = why_not(request, name)
     out = {"name": name, "about": cli.COMMANDS[name][1], "form": cliforms.describe(parser), "runnable": why is None,
-           "why": why, "cwd": request.target.root, "defaults": defaults(request, parser), "values": None, "error": None}
+           "why": why, "cwd": home(request), "defaults": defaults(request, parser), "values": None, "error": None}
     if request.query.get("args"):
         try:
             args = json.loads(request.query["args"])
@@ -169,7 +178,7 @@ def preview(request):
     values = json.loads(request.query.get("values") or "{}")
     if not isinstance(values, dict):
         raise ValueError("values is a JSON object")
-    out = {"args": None, "line": None, "cwd": request.target.root, "error": None, "field": None}
+    out = {"args": None, "line": None, "cwd": home(request), "error": None, "field": None}
     try:
         parser = cli.parser(name)
         args = cliforms.argv(parser, filled(values, defaults(request, parser)))

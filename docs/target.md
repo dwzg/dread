@@ -9,6 +9,36 @@ Unknown sections and keys are errors, so a typo does not go unnoticed. Numbers m
 hex (`0x20000`). Paths are relative to the target directory. `dread info` prints the target as
 DREAD reads it.
 
+## Making a target: `dread new`
+
+`dread new DIR IMAGE` makes a target directory from an ELF or a raw image (dread gui's Setup page runs
+the same as a job, with the image a path or a file uploaded into `DIR/original/`). DIR has to be new,
+empty, or hold nothing but `original/` with the image; an existing target is never touched, and a
+failure takes back what was made. The image is copied into `original/`; from an ELF, `dread import-elf
+--payload --write-startup` writes the raw image beside it, the tables (from the symbols), the startup
+copies, the free ranges and RISC-V's `gp`.
+
+What it writes, and from where (each value that is a guess has a comment in `dread.toml` saying so):
+
+| Key | From an ELF | From a raw image |
+|---|---|---|
+| `[arch]` | the machine; ARM's build attributes (`.ARM.attributes`: profile, architecture version, CPU, floats in VFP registers) or the ELF's flags; RISC-V's `.riscv.attributes` (else the C extension from the flags and I and M assumed, said so) | `--arch`, one of `dread new --help`'s list (ARM state, ARM926, ARM1176, Cortex-M0/M3/M4/M4F/M7/M33, RV32IMC, RV32IMAC, the MSP430, MIPS32) |
+| `base`, `original` | the lowest load address of the sections loaded where the entry lies (sections loaded farther than 64 KiB away are a loader's, `"load"` copies) | `--base` (needed) |
+| `entry` | the ELF's, by the name of the function symbol there | `--entry`, else an M-profile vector table's reset handler, the MSP430's reset vector, else the base (a guess) |
+| `limit` | `--limit`, else as much room again as the image takes, its end rounded up to 64 KiB (a guess: the ELF does not say where the flash ends) | the same |
+| `regions` | the image's region (`rom`; `ram` where its zeroed data lies right behind it: an image a loader puts into RAM), the RAM its writable sections and its code run from RAM use, clustered and reaching up to the initial stack pointer (an M-profile vector table's first word, or a stack symbol: `_estack`, `__StackTop`, `__stack_top`, ...), a `scratch` region at unused addresses | `--ram`, else from the SRAM region's start (0x20000000) up to an M-profile vector table's stack pointer, else a placeholder at unused addresses (a guess) |
+| `io` | `--io`, else the architecture's fixed map: Cortex-M's Peripheral and System regions (0x40000000-0x60000000, 0xe0000000-0xe0100000), the MSP430's 0x0-0x200; none for the others (a device's registers then fault in the emulator until they are named here) | the same |
+| `stack` | its top at the initial stack pointer (else the end of the RAM, a guess), at most 8 KiB (512 bytes on the MSP430) | the same |
+| `sentinel`, `scratch` | addresses no region, peripheral range or stack uses, below the RAM where there is room (on an M-profile core below the execute-never 0xe0000000); an MSP430 whose flash begins right above its RAM (TI's F449: code from 0x1100, the vectors at the top) has no such room: the scratch then takes the erased flash between the code and the vectors, `limit` ends below it, a region `flash2` holds the rest of the flash with the vectors (`"load"` copies) | the same |
+| `[compiler]` | the original's compiler where this machine has one for the architecture, else the other one it has (`--compiler`, `--cross` choose): the producer of the debug information's compile unit that holds `main` (else the entry, else the most code; a C library linked in brings a producer of its own; pyelftools reads which is which, and without it several producers give none); GCC records its code-generation flags, which become `cflags` (not `-g`, warnings, include paths, a path of the machine that built it; RISC-V's `-march` as `[arch]` reads it); clang records none | the architecture's flags, with the compiler this machine has |
+
+The `[compiler]` section depends on the compilers on the machine (`dread doctor` lists them); everything
+else depends on the image and the options alone. At the end it prints what to run next, the first
+analyses: the functions (none to find where the ELF had them; `dread ghidra --no-decompile` for an image
+without symbols where Ghidra is installed, else nothing can find them and it says so), `dread regflow`,
+`dread lift --check`, `dread readable --check`. A device's own peripheral ranges, models for `dread
+sysrun` and scenarios are not guessed: they are added by hand.
+
 ## Example
 
 The Cortex-M3 build of gizmo (`examples/gizmo/m3/dread.toml`):

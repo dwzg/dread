@@ -15,7 +15,8 @@ Configured in ~/.config/dread/llm.toml (or the file $DREAD_LLM names):
     [providers.claude]
     kind = "anthropic"
     model = "claude-sonnet-5-5"
-    key_env = "ANTHROPIC_API_KEY"     # the key comes from the environment, never from a file
+    key_env = "ANTHROPIC_API_KEY"     # the key from the environment, where set there,
+    key_file = "~/.config/dread/keys/claude"    # else from a file of this user's alone (dread llm key)
     max_tokens = 16000
 
     [providers.github-models]         # GitHub Models: OpenAI's format at a path of its own
@@ -50,12 +51,22 @@ The two GitHub presets follow GitHub's documentation (2026-10): the CLI's progra
 the CLI on by policy) and GitHub Models' inference endpoint (a token with models:read; the
 organisation must allow models). Neither was tried here. `dread llm ask` tries a provider with one
 question; `dread llm providers` lists them; `dread llm batches` lists a provider's last Message Batches
-and cancels those named (--cancel ID...: a run killed outright, SIGKILL, cannot cancel its own).
+and cancels those named (--cancel ID...: a run killed outright, SIGKILL, cannot cancel its own);
+`dread llm set` adds a provider or changes its fields and `dread llm key` writes its key into a key
+file (dread.llmconfig: llm.toml edited line by line, its comments kept).
 
-Requests go out with urllib (no SDK). Keys are read from the environment only; nothing here writes a
-key anywhere. A rate limit or an overload (HTTP 429, 529, 500, 502-504) is asked again up to retries
-times (default 4), after the server's retry-after or retry_wait seconds (default 5), three times
-longer each time.
+Requests go out with urllib (no SDK). A rate limit or an overload (HTTP 429, 529, 500, 502-504) is
+asked again up to retries times (default 4), after the server's retry-after or retry_wait seconds
+(default 5), three times longer each time.
+
+A provider's key comes from the environment ($key_env, where set and not empty) or from its key_file,
+read when a request goes out (provider_key): a file of this user's, readable by the user alone (mode
+600 or stricter, as ssh insists), in a directory nobody else may write to, outside any git work tree,
+its first line the key (check_key_file says why one is refused). A relative key_file is taken from
+llm.toml's directory, ~ is this user's home. A key never goes into an error message (an HTTP error's
+text has it replaced), the usage ledger or anything printed; key_status() says how a key stands
+without reading it out. Until 2026-10-24 keys came from the environment only (docs/decisions.md,
+"Setting up").
 
 Every answer of a provider (but a played one, Scripted) adds a line to a usage ledger (USAGE,
 USAGE_COLUMNS: time, provider, model, input and output tokens, how it ended, the tokens read from and
@@ -308,7 +319,7 @@ class Provider:
                     text = response.read().decode()
                     return text if raw else json.loads(text)
             except urllib.error.HTTPError as e:
-                text = e.read().decode(errors="replace")[:300]
+                text = hidden(e.read().decode(errors="replace")[:300], headers)
                 if e.code not in self.RETRY or attempt + 1 == tries:
                     raise ProviderError("%s: HTTP %d: %s" % (self.name, e.code, text))
                 try:
@@ -328,10 +339,11 @@ class OpenAICompatible(Provider):
                                                                                        "/v1/chat/completions")
         headers = dict(self.config.get("headers", {}))
         if any(k.lower() in ("authorization", "x-api-key", "api-key") for k in headers):
-            raise ProviderError("%s: a key comes from the environment (key_env), not from headers" % self.name)
-        key_env = self.config.get("key_env")
-        if key_env and os.environ.get(key_env):
-            headers["authorization"] = "Bearer " + os.environ[key_env]
+            raise ProviderError("%s: a key comes from the environment (key_env) or a key file (key_file), not from "
+                                "headers" % self.name)
+        key = provider_key(self.name, self.config)
+        if key:
+            headers["authorization"] = "Bearer " + key
         body = {"model": self.model, "messages": [{"role": "system", "content": system}] + [
                     dict(m, content=content_text(m["content"])) for m in messages],
                 "max_tokens": int(self.config.get("max_tokens", 32000)),
@@ -399,9 +411,9 @@ class Anthropic(Provider):
         return body
 
     def headers(self):
-        key = os.environ.get(self.config.get("key_env", "ANTHROPIC_API_KEY"), "")
+        key = provider_key(self.name, self.config, default_env="ANTHROPIC_API_KEY")
         if not key:
-            raise ProviderError("%s: no key in $%s" % (self.name, self.config.get("key_env", "ANTHROPIC_API_KEY")))
+            raise ProviderError("%s: no key (%s)" % (self.name, key_places(self.config, "ANTHROPIC_API_KEY")))
         return {"x-api-key": key, "anthropic-version": "2023-06-01"}
 
     def url(self, path):
@@ -1533,9 +1545,10 @@ def usage_summary(month=None, path=None, config_path=None):
 
 
 def load(name=None, path=None):
-    """The provider `name` (default: the file's `default`) of the configuration file."""
+    """The provider `name` (default: the file's `default`) of the configuration file (its key_file taken
+    from the file's directory where relative)."""
     import tomllib
-    path = path or os.environ.get("DREAD_LLM") or CONFIG
+    path = path or config_path()
     if not os.path.exists(path):
         raise ProviderError("no provider configuration: %s (see dread.llm)" % path)
     with open(path, "rb") as f:
@@ -1544,11 +1557,164 @@ def load(name=None, path=None):
     name = name or config.get("default") or (sorted(providers)[0] if providers else None)
     if name not in providers:
         raise ProviderError("no provider %s in %s (there are: %s)" % (name, path, ", ".join(sorted(providers))))
-    spec = providers[name]
+    spec = resolved(providers[name], path)
     kind = KINDS.get(spec.get("kind"))
     if kind is None:
         raise ProviderError("provider %s: unknown kind %r (known: %s)" % (name, spec.get("kind"), ", ".join(KINDS)))
     return kind(name, spec)
+
+
+# ---- keys: from the environment or from a key file (2026-10-24) ----
+
+SECRET_HEADERS = ("authorization", "x-api-key", "api-key")
+
+
+def config_path():
+    """The providers' configuration file: $DREAD_LLM, else ~/.config/dread/llm.toml."""
+    return os.environ.get("DREAD_LLM") or CONFIG
+
+
+def key_path(spec, path=None):
+    """The absolute path of a provider's key_file (~ this user's home; relative to the directory of the
+    configuration file at path), or None without one."""
+    value = spec.get("key_file")
+    if not value:
+        return None
+    value = os.path.expanduser(str(value))
+    if not os.path.isabs(value):
+        value = os.path.join(os.path.dirname(os.path.abspath(path or config_path())), value)
+    return os.path.normpath(value)
+
+
+def resolved(spec, path=None):
+    """A provider's configuration with its key_file made absolute (key_path)."""
+    return dict(spec, key_file=key_path(spec, path)) if spec.get("key_file") else dict(spec)
+
+
+def git_work_tree(path):
+    """The top of the git work tree path lies in (a directory holding .git, a directory or a worktree's
+    file), or None: walked up from path's real directory."""
+    here = os.path.realpath(path)
+    if not os.path.isdir(here):
+        here = os.path.dirname(here)
+    while True:
+        if os.path.exists(os.path.join(here, ".git")):
+            return here
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def check_key_file(path, exists=True):
+    """Why a key file may not hold a key (a text that never shows the key), or None: it is a regular file
+    of this user's (symbolic links followed), readable and writable by the user alone (mode 600 or
+    stricter), in a directory no other user may write to, and outside any git work tree (where a commit
+    could take it along). exists=False: only what holds before the file is made (its place)."""
+    import stat
+    real = os.path.realpath(path)
+    tree = git_work_tree(real if exists else os.path.dirname(real))
+    if tree is not None:
+        return "%s lies in the git work tree %s: keep keys outside any repository" % (path, tree)
+    folder = os.path.dirname(real)
+    try:
+        info = os.stat(folder)
+        if hasattr(os, "getuid") and info.st_uid not in (os.getuid(), 0):
+            return "the directory %s belongs to another user" % folder
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not info.st_mode & stat.S_ISVTX:
+            return "others may write to the directory %s (chmod go-w)" % folder
+    except FileNotFoundError:
+        if exists:
+            return "no directory %s" % folder
+    if not exists:
+        return None
+    try:
+        info = os.stat(real)
+    except FileNotFoundError:
+        return "no key file %s (dread llm key PROVIDER writes one)" % path
+    except OSError as e:
+        return "%s: %s" % (path, e.strerror)
+    if not stat.S_ISREG(info.st_mode):
+        return "%s is not a regular file" % path
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        return "%s belongs to another user" % path
+    if info.st_mode & 0o077:
+        return "%s may be read or written by others (mode %o): chmod 600 it" % (path, info.st_mode & 0o777)
+    if not info.st_size:
+        return "%s is empty" % path
+    return None
+
+
+def read_key_file(path):
+    """The key a key file holds (its first line that is not blank, without surrounding blanks): a
+    ProviderError that names the file and the reason, never the key, where check_key_file refuses it or
+    it holds none."""
+    why = check_key_file(path)
+    if why:
+        raise ProviderError("key file: %s" % why)
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    return line.strip()
+    except (OSError, UnicodeDecodeError) as e:
+        raise ProviderError("key file %s cannot be read: %s" % (path, type(e).__name__))
+    raise ProviderError("key file %s holds no key" % path)
+
+
+def provider_key(name, spec, default_env=None):
+    """A provider's key, read when a request goes out: $key_env (default_env where the configuration
+    names none and has no key_file) where it is set and not empty, else its key_file's (read_key_file;
+    a ProviderError where that file is refused), else None."""
+    env = spec.get("key_env") or (default_env if not spec.get("key_file") else None)
+    if env and os.environ.get(env):
+        return os.environ[env]
+    path = spec.get("key_file")
+    if path:
+        try:
+            return read_key_file(key_path(spec))
+        except ProviderError as e:
+            raise ProviderError("%s: %s" % (name, e))
+    return None
+
+
+def key_places(spec, default_env=None):
+    """Where a provider's key is looked for, in words (for a message without the key)."""
+    env = spec.get("key_env") or (default_env if not spec.get("key_file") else None)
+    places = (["$" + env] if env else []) + (["key_file %s" % key_path(spec)] if spec.get("key_file") else [])
+    return " or ".join(places) or "no key_env or key_file in its configuration"
+
+
+def key_status(spec, path=None, kind=None):
+    """How a provider's key stands, without reading it out: {"needed": whether its kind sends one (a
+    command finds its own; an OpenAI-compatible server without key_env and key_file is asked without),
+    "set": whether a request would carry one, "how": "env NAME" or "file PATH" (what a request would
+    take), "problem": why the key file is refused, or None}."""
+    kind = kind or spec.get("kind")
+    default_env = "ANTHROPIC_API_KEY" if kind == "anthropic" else None
+    needed = kind == "anthropic" or (kind == "openai" and bool(spec.get("key_env") or spec.get("key_file")))
+    env = spec.get("key_env") or (default_env if not spec.get("key_file") else None)
+    out = {"needed": needed, "set": False, "how": None, "problem": None}
+    if kind == "command":
+        return out
+    if env and os.environ.get(env):
+        return dict(out, set=True, how="env " + env)
+    if spec.get("key_file"):
+        where = key_path(spec, path)
+        out["problem"] = check_key_file(where)
+        if out["problem"] is None:
+            return dict(out, set=True, how="file " + where)
+    return out
+
+
+def hidden(text, headers):
+    """A text (an HTTP error's body) with the keys of a request's headers replaced by [key]."""
+    for name, value in (headers or {}).items():
+        if name.lower() in SECRET_HEADERS and value:
+            for secret in (value, value.split(" ", 1)[-1]):
+                if len(secret) >= 8:
+                    text = text.replace(secret, "[key]")
+    return text
 
 
 def main(argv=None):
@@ -1556,12 +1722,13 @@ def main(argv=None):
     [--provider NAME] [--limit N] [--cancel ID...]: the configured providers, one question to one of them
     with its answer (to try a provider before a pilot run), or a provider's last Message Batches with
     how they stand (cancelling those named: a run killed outright cannot cancel its own, and a batch
-    left running is billed for every question it answers)."""
+    left running is billed for every question it answers); dread llm set and dread llm key
+    (dread.llmconfig): a provider added or changed in llm.toml, its key written into a key file."""
     import argparse
     import sys
     import time
     parser = argparse.ArgumentParser(prog="dread llm", description="the language-model providers: list them, "
-                                                                   "or ask one a question")
+                                                                   "set them up, or ask one a question")
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("providers", help="the providers of the configuration file")
     p = sub.add_parser("ask", help="ask a provider one question and print its answer")
@@ -1572,18 +1739,23 @@ def main(argv=None):
     b.add_argument("--provider", help="a provider of the configuration (default: its default)")
     b.add_argument("--limit", type=int, default=20, help="batches listed at most (default 20)")
     b.add_argument("--cancel", nargs="+", metavar="ID", help="cancel these batches instead")
+    from dread import llmconfig
+    llmconfig.add_parsers(sub)
     args = parser.parse_args(argv)
+    if args.action in llmconfig.ACTIONS:
+        return llmconfig.run(args)
     if args.action == "providers":
         import tomllib
         path = os.environ.get("DREAD_LLM") or CONFIG
         if not os.path.exists(path):
-            print("dread llm: no configuration %s (see dread.llm)" % path, file=sys.stderr)
+            print("dread llm: no configuration %s (see dread.llm; dread llm set writes one)" % path, file=sys.stderr)
             return 1
         with open(path, "rb") as f:
             config = tomllib.load(f)
         for name, spec in sorted(config.get("providers", {}).items()):
-            print("%-16s %-9s %s%s" % (name, spec.get("kind", "?"), spec.get("model", "?"),
-                                       "   (default)" if name == config.get("default") else ""))
+            print("%-16s %-9s %-24s %s%s" % (name, spec.get("kind", "?"), spec.get("model", "?"),
+                                             llmconfig.key_words(key_status(spec, path)),
+                                             "   (default)" if name == config.get("default") else ""))
         return 0
     if args.action == "batches":
         try:

@@ -37,7 +37,8 @@ start() and stop() raise JobsError with the reason ("owner").
 
 Log text is read in pieces from an offset (log()): whole lines (a line still being written waits for
 its end, unless the job has ended), the values of the environment's secrets (variables named like
-SECRET_NAMES, eight characters or more) replaced by their names in case a command prints one; a
+SECRET_NAMES, eight characters or more) and of the keys add_secret() was given replaced by their names
+in case a command prints one; a
 record's command line has them replaced too ("redacted": the words run are the real ones). Times are
 the wall clock's (time.time()): the records say when things happened, they are not deterministic
 output.
@@ -366,6 +367,14 @@ class Jobs:
             self._save(record)
             self._step()
             return dict(record)
+
+    def add_secret(self, value, name):
+        """A value replaced by [$name] in the logs served and the command lines kept from now on, beside the
+        environment's secrets (a key file's key: dread gui reads the providers' at start, and a key written
+        from its Setup page)."""
+        if value and len(value) >= 8:
+            with self.cond:
+                self.secrets = sorted(set(self.secrets) | {(value, name)}, key=lambda kv: (-len(kv[0]), kv[1]))
 
     def stop(self, number, why="stopped from the page"):
         """Stop a job: a queued one is cancelled, a running one gets SIGTERM, SIGKILL after its grace."""

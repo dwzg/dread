@@ -247,7 +247,7 @@ let renders = 0;
 // ---- pages of their own (a module of dread/guipages on the server, a script beside this one) ----
 
 // What /api/gui says: the pages' scripts, whether the server is read-only (no change, no job).
-const GUI = { pages: [], readOnly: false, version: "" };
+const GUI = { pages: [], readOnly: false, version: "", target: null, local: true, home: "", uploadLimit: 0 };
 const PAGES = [];               // registered: {name, match, show, leave, status, keys, help, nav}
 const pageKeys = {};
 let shownPage = null;           // the registered page on screen, or null
@@ -303,14 +303,15 @@ function pageStatus(pages) {
 }
 
 // The pages' scripts and stylesheets, imported before the first view (an older server has none).
-async function loadPages() {
-  let gui;
+async function loadPages(known) {
+  let gui = known;
   try {
-    gui = await api("/api/gui");
+    gui = gui || await api("/api/gui");
   } catch {
     return;
   }
-  Object.assign(GUI, { pages: gui.pages || [], readOnly: !!gui.read_only, version: gui.version || "" });
+  Object.assign(GUI, { pages: gui.pages || [], readOnly: !!gui.read_only, version: gui.version || "",
+    target: gui.target || null, local: gui.local !== false, home: gui.home || "", uploadLimit: gui.upload_limit || 0 });
   document.documentElement.classList.toggle("read-only", GUI.readOnly);
   for (const p of GUI.pages) {
     if (!p.style) continue;
@@ -346,6 +347,7 @@ async function route(keep = false) {
   shownPage = page;
   for (const b of document.querySelectorAll(".nav-btn")) b.classList.toggle("on", !!page && b.dataset.page === page.name);
   if (page) await page.show(hash.match(page.match), keep);
+  else if (!GUI.target) showNoTarget();
   else if (m) await showFunction(m[2], m[3] ? parseInt(m[3], 16) : null, keep, m[1] === "r" ? "relations" : "code");
   else if (p) await showProgram(p[1] || null, keep);
   else if (t) await showTimeline(t[1] || null, keep);
@@ -3199,6 +3201,10 @@ async function poll() {
   let delay = 4000;
   try {
     const status = await api("/api/status");
+    if ((status.target || null) !== (GUI.target ? GUI.target.root : null)) {
+      location.reload();                // (the server opened another target: from the Setup page, here or elsewhere)
+      return;
+    }
     const waited = S.pending.length && !status.pending.length;
     if (status.generation !== S.generation || (status.names != null && status.names !== S.names)) {
       S.generation = status.generation;    // (the tables, or only the names: names.tsv, review.tsv)
@@ -3226,6 +3232,14 @@ async function refreshView() {
 function showError(message) {
   S.view = "error";
   $("#main").innerHTML = `<div class="error-view"><b>${esc(message)}</b><p><a href="#/">Overview</a></p></div>`;
+}
+
+// No target yet (dread gui started where there is none): the browsing views wait for the Setup page.
+function showNoTarget() {
+  S.view = "error";
+  document.title = "DREAD";
+  $("#main").innerHTML = `<div class="error-view"><b>No target yet</b><p>dread gui started where there is no dread.toml.
+    The <a href="#/setup">Setup page</a> makes a target from an ELF or a raw image, or opens one.</p></div>`;
 }
 
 // ---- wiring ----
@@ -3398,6 +3412,19 @@ async function start() {
   wireRelations();
   wireProgram();
   wireTimeline();
+  let gui = null;
+  try {
+    gui = await api("/api/gui");
+  } catch { /* an older server: as before */ }
+  if (gui && !gui.target) {             // (no target yet: the Setup page makes or opens one)
+    $("#where").innerHTML = `<b>no target yet</b>`;
+    document.documentElement.classList.add("no-target");
+    await loadPages(gui);
+    if (!location.hash || location.hash === "#/" || location.hash === "#") history.replaceState(null, "", "#/setup");
+    await route();                      // (replaceState: no hashchange, so one route, not two)
+    setTimeout(poll, 1500);
+    return;
+  }
   try {
     const o = await api("/api/overview");
     const images = o.image.images;
@@ -3413,7 +3440,7 @@ async function start() {
   } catch (e) {
     return showError(e.message);
   }
-  await loadPages();
+  await loadPages(gui);
   await route();
   setTimeout(poll, 1500);
 }

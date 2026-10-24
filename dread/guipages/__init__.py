@@ -25,10 +25,13 @@ and dread/web/app.js; they answer through the same server.
    page(): the files in dread/web the page brings (served at /NAME.js and /NAME.css), and a function
    whose answer joins /api/status as "pages": {NAME: ...} (the page polls /api/status every few
    seconds: a page that follows something running gets its news there without a poll of its own).
-   A route gets a Request: .query (the query string's values), .data (a POST's JSON object), .server,
-   .target, .image (the name of the image the page shows), .state() (that image's dread.gui State,
-   loaded and refreshed: costly the first time on a large image, so only where it is needed), .jobs
-   (the server's dread.jobs Jobs) and .read_only. A page runs DREAD's commands as jobs with
+   A route gets a Request: .query (the query string's values), .data (a POST's JSON object), .body (a
+   raw route's bytes: route("POST", PATH, raw=True), an upload, refused beyond the server's limit before
+   it is read), .server, .target (None while the server has no target: the Setup page makes or opens
+   one, server.open_target), .image (the name of the image the page shows), .state() (that image's
+   dread.gui State, loaded and refreshed: costly the first time on a large image, so only where it is
+   needed), .jobs (the server's dread.jobs Jobs: the target's, or without a target the user's, run in
+   server.home) and .read_only. A page runs DREAD's commands as jobs with
    dread.guipages.run start_command(request, COMMAND, values=... or args=[...], grace=, after=, cwd=):
    the record's "id" is the job, #/jobs/N its page, /api/job-log its log; after= chains jobs. It returns data or (status, data); Failure(status, message) answers {"error":
    message}, a KeyError 404, a ValueError or TypeError 400, anything else 500 (the traceback on the
@@ -83,8 +86,8 @@ class Failure(Exception):
 
 
 class Route:
-    def __init__(self, fn, method, path, change):
-        self.fn, self.method, self.path, self.change = fn, method, path, change
+    def __init__(self, fn, method, path, change, raw=False):
+        self.fn, self.method, self.path, self.change, self.raw = fn, method, path, change, raw
 
 
 class Page:
@@ -95,16 +98,19 @@ class Page:
         return {"name": self.name, "script": self.script, "style": self.style}
 
 
-def route(method, path, change=None):
+def route(method, path, change=None, raw=False):
     """Register a function as the answer to METHOD PATH. change (default: every POST): it needs the
-    page's token and is refused by a read-only server."""
+    page's token and is refused by a read-only server (a POST always needs the token). raw (a POST): the
+    request's body is a file's bytes, not JSON (request.body), refused beyond the server's upload limit
+    (dread gui --upload-limit) before it is read."""
     method = method.upper()
 
     def register(fn):
         key = (method, path)
         if key in ROUTES and ROUTES[key].fn.__module__ != fn.__module__:
             raise ValueError("%s %s is %s's already" % (method, path, ROUTES[key].fn.__module__))
-        ROUTES[key] = Route(fn, method, path, method == "POST" if change is None else bool(change))
+        ROUTES[key] = Route(fn, method, path, method == "POST" if change is None else bool(change),
+                            raw and method == "POST")
         return fn
     return register
 
@@ -153,8 +159,9 @@ def statuses(server):
 class Request:
     """What a route gets (see the module's docstring)."""
 
-    def __init__(self, handler, query, data=None):
+    def __init__(self, handler, query, data=None, body=None):
         self.handler, self.query, self.data = handler, query, data if data is not None else {}
+        self.body = body                    # (a raw route's bytes)
         self.server = handler.server
 
     @property

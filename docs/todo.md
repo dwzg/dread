@@ -4381,12 +4381,66 @@ reimplement them.
     the help texts (an option whose help does not follow it is always shown); the page keeps a log's
     last 20,000 lines (the file keeps all), tried with short logs only; not tried on macOS; a long form
     (dread pilot's three dozen options) is checked by its round trips, not yet for how well it reads.
-- [ ] 2. Setup: a new target from an ELF (dread import-elf) or a raw image (architecture, load address,
+- [x] 2. Setup: a new target from an ELF (dread import-elf) or a raw image (architecture, load address,
   entry); the prerequisites checked (Python packages, cross compilers, podman, Ghidra optional) with
   what to install; the first analyses as one chain of jobs (functions, regflow, the lift check, the
   readable check) with their progress; the language-model providers as a form (llm.toml: models,
   prices, cache_min, batch size; keys from a key file per provider, written with mode 600 and never
-  shown back).
+  shown back). Done 2026-10-24 (docs/decisions.md, "Setting up"); every action a command first:
+  - `dread doctor` (dread/doctor.py): Python, unicorn 2.1.4, capstone 5 and a target's compiler (which must
+    take its cflags) are the essentials and decide the exit status; z3, pyelftools, Playwright and a
+    browser, GCC for ARM, RISC-V (with the -march it takes: _zicsr or not) and the MSP430, clang with
+    ld.lld and its targets, podman, git, Ghidra with a java, each provider of llm.toml (its key there or
+    not, never shown; a local server asked for /v1/models within 2 s; a command on PATH) are optional and
+    say what needs them. For what is missing: the command for this system's package manager (apt, pacman,
+    dnf, brew from os-release; all four with --all) or pip, printed, never run; --json.
+  - `dread new DIR IMAGE` (dread/newtarget.py): the directory, dread.toml and original/; from an ELF the
+    architecture (build attributes), the image (sections near the entry; farther ones a loader's), the
+    entry, the startup copies, a memory map (the RAM up to the stack's top, the architecture's peripheral
+    ranges where it fixes them, scratch and sentinel at unused addresses, as much room again as the image
+    behind it), the compiler of the image's own C (the producer of the compile unit holding main) with its
+    flags, and the tables through dread import-elf; from a raw image with --arch and --base, an M-profile
+    vector table read for the entry and the RAM. Each guess has a comment in dread.toml. On all eight
+    gizmo builds it gives gizmo's own architecture, image, entry, startup copies, functions and stack top
+    (tests/test_newtarget.py); on the FreeRTOS builds, the bench's compilers and flags. It prints the first
+    analyses to run (newtarget.first_analyses: the functions by dread ghidra where an image has none).
+  - `dread llm set` and `dread llm key` (dread/llmconfig.py): a provider added or changed in llm.toml line
+    by line (comments and unknown fields kept; inline tables, dotted keys and new command providers by
+    hand); a key from standard input into a key file (keys/NAME beside llm.toml, mode 600, never in a git
+    work tree or a directory others may write to). dread.llm reads key_file when a request goes out
+    (env first where key_env is set), refuses a file others may read, and hides a key in HTTP errors;
+    dread gui hides the key files' keys in its jobs' logs. `dread llm providers` says whether each key is
+    there.
+  - The Setup page (dread/guipages/setup.py, dread/web/setup.js and setup.css; #/setup, key u): the doctor's
+    findings (the problems, the rest on request) with each command to copy; the new-target form (a path, or
+    a file uploaded into DIR/original/, at most --upload-limit MiB) with the command line as typed, run as
+    a job, the target opened when it is made; the first analyses as chained jobs with each step's state,
+    time and its log's last line; the providers with a form (a password field for the key, shown back as
+    set or not set) and a Test button (dread llm ask as a job). dread gui started where there is no target
+    comes up with this page alone; the server switches to the target made or opened (Server.open_target),
+    refused while a job of it runs, on a read-only server and on one listening beyond this machine.
+  - Checked: tests/test_doctor.py (a fake PATH of stand-in compilers, providers of every kind),
+    test_newtarget.py (every gizmo build against its own target, raw images, refusals, taking back, a lift
+    check on a target it made), test_llmconfig.py, test_gui_setup.py, test_gui_setup_browser.py; tried in
+    headless Chrome, light and dark, 1360 and 390 px wide (no script error, no horizontal scroll): targets
+    made from gizmo-m3's ELF by path (first analyses 40-85 s: 49 of 50 functions lifted, all readable),
+    from its raw image uploaded from the browser (dread ghidra first: 56 s, 30 of Ghidra's 32 functions
+    lifted, all readable) and from a copy of FreeRTOS's mps2-gcc-Os ELF (19 min on a machine busy with
+    other runs: 298 of 366 functions lifted, all 298 readable; the bench's own target of that build lifts
+    329, and its 55 files of extra cases, recorded before, cover 29 of the 64 dropped here; the rest of the
+    difference is not traced), a provider added with a key and tried against a stand-in server.
+  - Found on the way: dread import-elf --write-startup walked a new target's calls with the description
+    read before it wrote the startup list (gizmo-a32 failed: "0x40000000 is outside image main"); fixed.
+  - Not established: a guessed memory map is the device's (devices without a fixed peripheral map fault
+    until [memory] io names them; the room behind the image is a guess); the producer of a clang-built
+    image's own code is told from a C library's only with pyelftools; the page's upload is tried with
+    files of a few dozen KiB only; Fedora's bare-metal RISC-V GCC and the MSP430 GCC are not known in the
+    distributions (said so, not guessed); not tried on macOS. Left: gizmo-mips's dread.toml keeps a free
+    range an older import wrote (import-elf does not take out a `free` line when no gap is left: below).
+- [ ] dread import-elf --write-startup leaves a `free = [...]` line in place when the image has no free
+  range any more: gizmo-mips's names [0xbfc014f0, 0xbfc01500], of which .ramfunc's last 8 bytes now lie
+  in the first half (the overlay could put C over them). Take the line out when the list is empty, and
+  regenerate gizmo-mips (found 2026-10-24 by dread new, which writes the target from scratch).
 - [ ] 3. The pilot: start a run (task, provider, budget, batches), follow it live (stage, questions asked
   and answered, batches waiting and their age, spend so far against the budget, the names as they
   come), stop it (its batches cancelled: a job's stop is SIGTERM to its process group, which makes the
