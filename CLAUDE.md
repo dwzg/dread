@@ -81,7 +81,11 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   to push while the last finished run on main is red, except the push that fixes it (`--ci-red-ok`).
   On 2026-10-20 CI had been red for 74 pushes nobody looked at. `bin/with-toolchain NAME COMMAND...`
   runs a command (the tests) with the compilers of a toolchain image (bench/toolchains/, podman) in
-  front of the host's: a change that depends on compiler versions is tried on CI's older ones first.
+  front of the host's: a change that depends on compiler versions is tried on CI's older ones first,
+  both of them: `ubuntu-24.04` (GCC 13, RISC-V GCC 13.2) and `ubuntu-22.04` (GCC 10). A test that
+  compiles code meets three compilers that way (on 2026-10-24 a new test passed on the host and on
+  22.04 and failed on CI's 24.04, whose RISC-V GCC made a branch where the others made a select).
+  The container sees only /tmp, the checkout and the bench: pytest's `--basetemp` goes under /tmp.
 - **Stay polite on the machine**: long runs go to the background (polite, as the tools are);
   nothing that fills memory or runs without a bound.
 - **Beside a long run**: a bench measurement starts every step anew from the tree it runs from, so
