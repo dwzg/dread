@@ -4689,8 +4689,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 - [ ] PowerPC 32, big endian: brings big-endian support to the emulator, the program database and
   the listing generator; lr/ctr calls.
 - [ ] Big-endian ARM (BE-8) on the existing ARM layer.
-- [ ] x86, 32-bit freestanding: variable-length instructions in the program database and the
-  listing generator.
+- [ ] **x86 and x86-64 (amd64)** (the user, 2026-10-24), freestanding ELF images first. Variable-length
+  instructions in the program database and the listing generator (no fixed alignment: decoding by
+  flow from known entries); the arch layer on capstone and Unicorn (both have x86 and x86-64); the
+  six flags (CF, ZF, SF, OF, PF, AF) in the lifter and regflow; the System V calling conventions
+  (i386: arguments on the stack; AMD64: rdi, rsi, rdx, rcx, r8, r9, the 128-byte red zone) and a
+  target's own convention where it states one; RIP-relative addressing. For x86-64, 64-bit registers
+  and pointers through every tool first, as for AArch64 (shared work). Gizmo builds for both with GCC
+  and clang, then an open-source program as a larger test target.
 - [ ] AVR on the emulator interface the MSP430 work brings (clang builds it, Unicorn does not run
   it): an interpreter behind it, Harvard memory (program and data spaces) in the program database.
 - [ ] Z80 (low priority; the user, 2026-10-19: "Z80 and later 8051, but both low in prio"): an engine
