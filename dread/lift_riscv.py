@@ -79,10 +79,12 @@ class RiscVLifter(lift.Lifter):
                 and getattr(insn, "rv_target", None) is None and values.get(NAMES[f.rs1]) == self.RET)
 
     def frame_value(self, number, depth, values):
-        """("sp", k) when register `number` holds an address in the frame (sp itself included)."""
+        """("sp", k) when register `number` holds an address in the frame (sp itself included). depth
+        None means the stack pointer's value is no longer known (scan_stack_args past an auipc sp or a
+        variable adjustment): sp is then not a known frame address, a frame pointer still is."""
         name = NAMES[number]
         if name == "sp":
-            return ("sp", depth)
+            return ("sp", depth) if depth is not None else None
         v = values.get(name)
         return v if isinstance(v, tuple) and v and v[0] == "sp" else None
 
@@ -191,10 +193,23 @@ class RiscVLifter(lift.Lifter):
             return None
         return NAMES[f.rd], NAMES[src]
 
+    def reads_above_entry(self, insn, depth, values):
+        """How many words above the entry's stack pointer this instruction reads through a frame
+        address (sp when depth is known, or a register that holds one), 0 for none; depth None (past a
+        non-static stack pointer, scan_stack_args) counts only reads through such a register."""
+        f = fields(insn)
+        if f.width is None or f.rs1 is None:
+            return 0
+        v = self.frame_value(f.rs1, depth, values)
+        if v is not None and f.imm - v[1] >= 0:
+            return (f.imm - v[1] + f.width + 3) // 4
+        return 0
+
     def stack_args(self, fn):
         """Words above the entry's stack pointer the function reads (its stack arguments): RISC-V
         passes eight arguments in registers, and the translation refuses the rest (0 or None). [abi]
-        stack_args overrides it for a function whose stack pointer is not static."""
+        stack_args overrides it for a function whose stack pointer is not static; scan_stack_args
+        infers it for a refused callee (inferred_stack_args)."""
         if fn.name in self._stack_args:
             return self._stack_args[fn.name]
         declared = self.prog.target.abi.stack_args.get(fn.name)
@@ -209,12 +224,7 @@ class RiscVLifter(lift.Lifter):
             return None
         top = 0
         for a, (depth, values) in states.items():
-            f = fields(self.prog.insn(a))
-            if f.width is None:
-                continue
-            v = self.frame_value(f.rs1, depth, values)
-            if v is not None and f.imm - v[1] >= 0:
-                top = max(top, (f.imm - v[1] + f.width + 3) // 4)
+            top = max(top, self.reads_above_entry(self.prog.insn(a), depth, values))
         self._stack_args[fn.name] = top
         return top
 
@@ -258,6 +268,9 @@ class RiscVLifter(lift.Lifter):
         callee = self.prog.by_entry.get(target) if isinstance(target, int) else None
         if kind == "call":
             fx.hands |= set(ARGS) | (set(self.leaves(callee)) if callee is not None else set())
+            for k in range(self.call_stack_words(callee) if callee is not None else 0):
+                if 4 * k < depth:
+                    fx.words.append((4 * k, 4))     # a bound call's stack argument k, from the frame (_bound_call)
         elif kind == "icall":
             fx.hands |= (set(ARGS) | set(reads)) - {"sp"}
         elif kind == "return" or self.ret_jump(insn, values):
@@ -533,28 +546,24 @@ class RiscVLifter(lift.Lifter):
             return ""
         return "((u64)a1 << 32 | a0)" if self._wide(self.ctx["fn"].name) else "a0"
 
-    def _args(self, insn, callee=None):
-        nstack = self.stack_args(callee) if callee is not None else 0
-        if nstack is None:
-            raise Refused("0x%x calls %s, whose stack arguments are not known" % (insn.address, callee.name))
-        if nstack:
-            raise Refused("0x%x calls %s, which takes stack arguments" % (insn.address, callee.name))
-        return list(ARGS)
-
     def _call(self, callee, insn, bind=False):
         if not IDENT.match(callee.name):
             raise Refused("0x%x calls %s, whose name is not a C identifier" % (insn.address, callee.name))
-        args = self._args(insn, callee)
+        nstack = self.stack_args(callee)
+        if nstack is None:
+            nstack = self.inferred_stack_args(callee, insn)      # a callee whose stack pointer is not static
         leaves = self.leaves(callee)
-        if leaves:
+        if leaves:                           # RISC-V has no -ffixed-REG (can_hand): the C cannot hold them
             raise Refused("0x%x calls %s, which reads %s its caller leaves" % (
                 insn.address, callee.name, ", ".join(leaves)))
         behind = self._check_after_call(callee, insn, bind=bind)
         if behind:
-            return self._bound_call(callee, behind)
+            return self._bound_call(callee, behind, nstack=nstack, insn=insn)
+        if nstack:                           # a normal call carries no stack arguments on RISC-V (only a bound one)
+            raise Refused("0x%x calls %s, which takes stack arguments" % (insn.address, callee.name))
         wide = self._wide(callee.name)
         self.ctx["callees"].add((callee.name, 0, wide))
-        call = "%s(%s)" % (callee.name, ", ".join(args))
+        call = "%s(%s)" % (callee.name, ", ".join(ARGS))
         keep = set(self.flow.preserved_regs(callee.name)) if self.flow else set()
         cleared = [r for r in SCRATCH if r not in (("a0", "a1") if wide else ("a0",)) and r not in keep]
         clear = " = ".join(cleared) + " = 0;" if cleared else ""
@@ -566,24 +575,40 @@ class RiscVLifter(lift.Lifter):
         clear = " = ".join(r for r in SCRATCH if r != "a0") + " = 0;"
         return "a0 = ((u32 (*)(%s))%s)(%s); %s" % (", ".join(["u32"] * len(ARGS)), fp, ", ".join(ARGS), clear)
 
-    def _bound_call(self, callee, behind):
+    def _bound_call(self, callee, behind, nstack=0, insn=None):
         """A call whose caller reads behind it what the callee leaves beyond a C result
         (_check_after_call: a callee that hands back more than a0 and a1, dread.lift's more_results):
         the call in an asm statement with a0-a7 bound in and out, and the other scratch registers the
         caller reads behind it, so that the C goes on with what the original's caller finds; ra and the
         other scratch registers are clobbered (0 behind it in the C, as behind a C call, unless the
-        callee never writes one). The callee takes no stack arguments (_args)."""
+        callee never writes one).
+
+        Stack arguments (nstack): the asm reserves their words below the stack pointer (its 16-byte
+        alignment kept), stores them there (their values the caller's C has, _stack_arg_values, passed
+        as inputs), calls, and restores the stack pointer; the call does not know the callee reads them
+        off the stack, so the asm puts them on the real one."""
         self.ctx["bound"].add(callee.name)      # no prototype (the asm names it); a callee all the same
         regs = list(ARGS) + [r for r in SCRATCH if r in behind and r not in ARGS]
         binds = ", ".join('x%d __asm__("%s") = %s' % (k, r, cname(r)) for k, r in enumerate(regs))
         outs = ", ".join('"+r"(x%d)' % k for k in range(len(regs)))
         clobbers = ", ".join(['"ra"'] + ['"%s"' % r for r in SCRATCH if r not in regs] + ['"memory"'])
         back = " ".join("%s = x%d;" % (cname(r), k) for k, r in enumerate(regs))
+        pre, post, inputs = "", "", ""
+        if nstack:
+            room = (4 * nstack + 15) & ~15       # (keep the stack 16-byte aligned at the call)
+            values = self._stack_arg_values(insn, nstack)
+            inputs = ", ".join('[sa%d] "r"(%s)' % (k, v) for k, v in enumerate(values))
+            pre = "addi sp, sp, -%d\\n\\t" % room + "".join(
+                "sw %%[sa%d], %d(sp)\\n\\t" % (k, 4 * k) for k in range(nstack))
+            post = "\\n\\taddi sp, sp, %d" % room
         keep = set(self.flow.preserved_regs(callee.name)) if self.flow else set()
         cleared = [r for r in SCRATCH if r not in regs and r not in keep]
         clear = " " + " = ".join(cleared) + " = 0;" if cleared else ""
-        return '{ register u32 %s; __asm__ volatile ("call %s" : %s :: %s); %s%s }' % (
-            binds, callee.name, outs, clobbers, back, clear)
+        if inputs:
+            asm = '__asm__ volatile ("%scall %s%s" : %s : %s : %s);' % (pre, callee.name, post, outs, inputs, clobbers)
+        else:
+            asm = '__asm__ volatile ("call %s" : %s :: %s);' % (callee.name, outs, clobbers)
+        return "{ register u32 %s; %s %s%s }" % (binds, asm, back, clear)
 
     def _switches(self, fn):
         super()._switches(fn)

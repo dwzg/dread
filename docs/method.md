@@ -153,7 +153,13 @@ Where the C cannot say what the original's code relies on, the translation says 
 - what a caller reads behind a call that a C call cannot return (a 64-bit remainder in r2:r3, the
   flags of a compare helper, a register the callee leaves) and what a callee reads of its caller's
   registers: a call in an asm statement that binds them (bound calls; on RISC-V too since
-  2026-10-23);
+  2026-10-23). Such a call passes stack arguments too (since 2026-10-24): the asm reserves the words
+  below the stack pointer, stores them there before the call and restores the stack pointer after, as
+  a normal call would, since the asm call does not know its callee reads them off the stack;
+- a callee whose stack pointer is not static (a context switch, a variable-length array) so its stack
+  arguments were not known: they are inferred from the words it reads above its entry (before the
+  stack pointer moves, and through a frame pointer after), and a caller that stores them into its
+  outgoing area is accepted while the callee stays refused (since 2026-10-24);
 - results beyond what a C function returns (an old ARM compiler's __value_in_regs, a structure of up
   to four words in r0-r3; a value a RISC-V function leaves in a2 for its callers, where C returns a0
   and a1): the C body stores them into an area that a naked entry at the function's place reserves,

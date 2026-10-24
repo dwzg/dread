@@ -425,10 +425,12 @@ def test_results_in_r2_and_r3_are_handed_back_by_an_entry(tmp_path, kind):
     quad_held_bias, which reads its caller's r4) before the body runs. A tail call and a call whose
     words the function hands back are bound calls (the bl in an asm statement with r0-r3 bound).
     quad_fifth_arg takes a stack argument too: wrapped (its frame and stack arguments on the real
-    stack, the area below them), not on Thumb-1, where it stays refused; its caller stays refused on
-    every core, as a bound call passes no stack arguments. With clang the C gets no register as its
-    caller left it (no -ffixed-REG): quad_held_bias stays refused there, its caller use binds r4 all
-    the same."""
+    stack, the area below them), not on Thumb-1, where it stays refused. Its caller quad_fifth_user
+    reads r2 behind it: a bound call that also passes the stack argument (the asm reserves it below the
+    stack pointer and stores it before the bl), lifted and accepted, except on Thumb-1, where a bound
+    call makes no stack arguments and it stays refused. With clang the C gets no register as its caller
+    left it (no -ffixed-REG): quad_held_bias stays refused there, its caller use binds r4 all the
+    same."""
     t = arm_program(tmp_path, kind)
     p = Program(t, t.image())
     lifter = lift.make_lifter(p, regflow.analyse(p))
@@ -459,11 +461,17 @@ def test_results_in_r2_and_r3_are_handed_back_by_an_entry(tmp_path, kind):
     if kind == "t1":
         assert lifted["quad_held_bias"].handed == ["r4"] and '"push {r5, lr}' in entry, entry
         assert "takes stack arguments" in refused["quad_fifth_arg"], refused
+        # Thumb-1 makes no bound call with stack arguments: the caller stays refused
+        assert "Thumb-1 does not make" in refused["quad_fifth_user"], refused
     else:
         assert '"sub sp, sp, #16\\n\\tstr lr, [sp, #4]\\n\\tadd lr, sp, #8\\n\\tstr lr, [sp]' in entry, entry
         wrapped = lifted["quad_fifth_arg"].text
         assert "u32 a3, u32 sp0)" in wrapped and "*(volatile u32 *)(sp0 - 16) = r2;" in wrapped, wrapped
-    assert "reads r2 behind the call of quad_fifth_arg" in refused["quad_fifth_user"], refused
+        # quad_fifth_user reads r2 behind quad_fifth_arg (which takes a stack argument): a bound call
+        # that reserves the stack argument below the stack pointer and stores it before the bl
+        user = lifted["quad_fifth_user"].text
+        assert 'sub sp, sp, #8\\n\\tstr %[sa0], [sp, #0]\\n\\tbl quad_fifth_arg\\n\\tadd sp, sp, #8' in user \
+            and '[sa0] "r"(*(volatile u32 *)(sp0 - 16))' in user, user
     lines = []
     accepted = lift.check(t, t.image(), QUAD_NAMES, out=lines.append, jobs=2)
     expected = set(QUAD_NAMES) - set(refused)
@@ -710,10 +718,11 @@ def test_risc_v_results_in_a2_and_a3(tmp_path, compiler):
     refused, and so were their callers ("reads a2 behind the call of ..."). The same entry hands a2
     and a3 back (ra the only register it changes before the body runs), the callers' calls are bound
     (the call in an asm statement with a0-a7 bound), and quad_ninth_arg, with a ninth argument on the
-    stack, is wrapped with the area below its frame; its caller, use, stays refused (a call with stack
-    arguments is not modelled). A function that reads what its caller left in s1 stays refused, and
-    so does its caller: the C cannot get registers as the caller left them on RISC-V (Lifter.can_hand).
-    The lifted C compiled by GCC and by clang."""
+    stack, is wrapped with the area below its frame. Its caller, use, reads a3 behind it: a bound call
+    that also passes the stack argument (the asm reserves it below the stack pointer and stores it
+    before the call), lifted and accepted. A function that reads what its caller left in s1 stays
+    refused, and so does its caller: the C cannot get registers as the caller left them on RISC-V
+    (Lifter.can_hand). The lifted C compiled by GCC and by clang."""
     (tmp_path / "t.s").write_text(QUAD_RV_S)
     obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
     subprocess.run([RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32", "-c", "-o", obj, str(tmp_path / "t.s")],
@@ -733,12 +742,15 @@ def test_risc_v_results_in_a2_and_a3(tmp_path, compiler):
     assert '"call quad_pair_split" : "+r"(x0)' in lifter.lift(p.by_name["quad_sum_reader"]).text
     ninth = lifter.lift(p.by_name["quad_ninth_arg"])      # (use reads a3 behind it: a3 alone handed back)
     assert ninth.more == ["a3"] and "u32 p7, u32 sp0)" in ninth.text and "(sp0 - 32) = a3;" in ninth.text, ninth.text
-    for name, why in (("use", "takes stack arguments"), ("held_scale_reader", "reads s1 before anything writes it"),
+    use = lifter.lift(p.by_name["use"]).text              # a bound call to quad_ninth_arg that passes its stack argument
+    assert 'addi sp, sp, -16\\n\\tsw %[sa0], 0(sp)\\n\\tcall quad_ninth_arg\\n\\taddi sp, sp, 16' in use \
+        and '[sa0] "r"(*(volatile u32 *)(sp0 - 32))' in use, use
+    for name, why in (("held_scale_reader", "reads s1 before anything writes it"),
                       ("held_scale_user", "which reads s1 its caller leaves")):
         with pytest.raises(lift.Refused, match=why):
             lifter.lift(p.by_name[name])
     names = ["quad_pair_split", "quad_forward_tail", "quad_forward_call", "quad_sum_reader", "quad_store_reader",
-             "quad_ninth_arg"]
+             "quad_ninth_arg", "use"]
     lines = []
     assert sorted(lift.check(t, t.image(), names, out=lines.append, jobs=2)) == sorted(names), "\n".join(lines)
 

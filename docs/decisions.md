@@ -9,6 +9,84 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Stack arguments through a bound call; a callee whose stack pointer is not static (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Two refusals of the lifter, found on a private real-life target (dozens of functions
+  each there; its figures stay with it): (1) a call of a function that reads a register its caller
+  leaves (r4-r11), or whose result the caller reads behind the call, and that also takes stack
+  arguments, was refused, since Lifter._bound_call passed no stack arguments; (2) a call of a function
+  whose stack pointer is not static (sp set from an auipc or from a register the analysis does not
+  know, a variable-length array's sub sp, sp, rN; a load of sp from memory, a context switch, was
+  followed already) was refused for every caller, since its stack arguments were not known
+  (stack_args None). How are such calls made?
+- **Options and choices.**
+  1. A bound call with stack arguments: (a) the asm statement reserves the stack-argument words below
+     the stack pointer, stores them there and restores the stack pointer after the call; (b) a thunk
+     per callee that takes them as C arguments and makes the bound call; (c) wrap the caller (its frame
+     on the real stack) and point the stack pointer at its outgoing area for the call. **(a)**
+     (_bound_call): the values are those a normal call passes (_stack_arg_values, from the caller's
+     outgoing area, its own stack parameters or a wrapped frame), handed to the asm as inputs, and
+     the stores go where the callee reads them whatever the C's frame looks like; the stack stays
+     8-byte aligned at the call (16 on RISC-V). (b) adds an object per callee and a second call; (c)
+     changes the caller's whole frame for one call, and a callee's frame would overwrite what the C
+     keeps below the outgoing area. frame_effects counts the words (call_stack_words), so saves_out
+     keeps the outgoing area in the caller's frame. Thumb-1 is refused with its own reason (its str
+     needs a low register, which an input operand may not get); RISC-V's normal calls still carry no
+     stack arguments, its bound calls now do.
+  2. A callee whose stack pointer is not static: (a) infer its stack arguments from its code and accept
+     a caller whose stores agree; (b) declare them per function ([abi] stack_args); (c) leave it
+     refused. **(a)**, (b) staying as it was for what the code cannot tell. scan_stack_args walks the
+     function as states() does but goes on where the stack pointer is lost (_tolerant_states: the
+     depth becomes unknown, the registers that hold a frame address keep it, since a frame address is
+     relative to the entry's stack pointer, which does not change) and counts the words read above
+     the entry: through sp before it moves, through a frame pointer after. Past that point no access
+     through sp is a stack argument (it is on another stack, or at an offset not known). The caller
+     must store each of those words into its outgoing area on its own path (_caller_provides,
+     vacuous for none; every whole word a store covers counts: a str or sw, the words of a push or an
+     stm, both words of an strd, which GCC 7 at -O2 stores two stack arguments with): where the two
+     agree the caller is accepted, and the callee stays refused for
+     its own stack pointer. The cases decide the rest: a count that is too small or too large reads
+     another word where the callee reads its argument. The walk is states() in all else (a conditional
+     instruction keeps only what holds either way, a conditional return lets the code behind it run
+     unpopped, a load of sp from memory ends its path); where a path reaches an instruction that does
+     not decode, which also makes stack_args None, the code behind it is not seen and the stack
+     arguments stay not known (rule 7): those callers stay refused, now with that reason. A first
+     version took such a callee for one without stack arguments; on the public builds its six callers
+     (the register-test tasks' entries, whose callee keeps an inline marker that does not decode) then
+     lifted and even passed the lift check, but nothing had seen the code behind the marker.
+  3. What it takes from a comparison (rule 6): nothing. The cases compared every register the callers
+     read after the call already; the stack arguments are compared through what the callee does with
+     them (its real code runs in the cases).
+- **Figures.** Programs of our own (tests/test_stack_args.py, and tests/test_lift_results.py's
+  quad_fifth_user and RISC-V use, which the old gate refused): refused before (the old gate restored
+  by a monkeypatch), accepted after through the lift check (every case agreeing, every instruction
+  run): (1) on ARM state and Thumb-2 with GCC and clang (a callee that reads r5 and takes a fifth
+  argument) and on RISC-V with GCC and clang (quad's use); (2) on RISC-V with GCC and clang (a callee
+  that sets sp from auipc) and on Thumb-2 with GCC -Os and -O2 (a variable-length array with six
+  arguments, its fifth and sixth read through r7; a caller that stores both stack arguments with one
+  strd). A stack argument stored at the wrong offset, or the two read swapped, is dropped; a callee
+  whose code does not decode keeps its caller refused. The same tests pass with Ubuntu 22.04's and
+  Debian 10's compilers (bin/with-toolchain); there GCC 7 at -O2 showed the strd, which the first
+  version of the agreement did not count, and a mutation whose swap the cases did not see (the callee
+  used e + f, and inputs could make them equal: it now returns 2e - f with f = e + 1). The 39 FreeRTOS builds: 6 of 13,684 functions go from refused to lifting, all through (2)
+  (xPortStartScheduler on the five clang RISC-V builds, whose callee sets sp from an auipc;
+  freertos_vector_table on clang 14, calling the exception handler, likewise); none from lifting to
+  refused; every other function's C byte for byte as before; six refusals keep their verdict with the
+  reason made exact (the register-test entries above: "its code at ... does not decode"); gizmo's
+  lifting unchanged on the seven builds DREAD lifts. (1) has no public case. Lift checks with the system
+  run and the whole image, the code before against this: GCC -Os 341 -> 341, clang -O2 300 -> 300,
+  RISC-V GCC -Os 272 -> 272, RISC-V clang 14-Os 259 -> 260 (xPortStartScheduler; freertos_vector_table
+  lifts and the check refuses it as code only the core enters, Lifter.entered_unseen), RISC-V clang -Os
+  257 -> 257 (xPortStartScheduler lifts, and its generated cases fault: its callee goes on on a task's
+  stack; dropped), nothing lost on any and the whole image agreeing on all five.
+- **Undo.** In _bound_call refuse when nstack is set; in Lifter._call and RiscVLifter._call refuse when
+  stack_args is None instead of calling inferred_stack_args, and use stack_args again in
+  frame_effects for call_stack_words.
+- **Status.** Done (dread/lift.py, dread/lift_riscv.py; dread/lift_msp430.py has its own calls and is
+  unchanged).
+
 ## Readable C's two-word results, callers of a function that fails, save areas behind a frame copy (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), from regressions on the

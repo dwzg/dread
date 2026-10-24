@@ -593,8 +593,10 @@ def test_declared_stack_arguments_of_a_context_switch(tmp_path):
     """A function that loads its stack pointer from memory not on the stack (a context switch) takes
     the stack words it reads before the switch: none here, so its callers lift as they are. One whose
     stack pointer is not static otherwise (taken from a register the analysis does not know: here an
-    argument) has stack arguments the lifter cannot count, so its callers are refused; [abi]
-    stack_args says how many, and they lift."""
+    argument) has no static stack arguments (stack_args None); until 2026-10-24 its callers were
+    refused for it. Now scan_stack_args counts what it reads above its entry before sp moves (nothing
+    here), so its caller lifts with the same C as with [abi] stack_args declaring it, which still
+    says how many where the code cannot tell."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
@@ -628,11 +630,9 @@ def test_declared_stack_arguments_of_a_context_switch(tmp_path):
         assert lifter.switches_stacks(p.by_name["switcher"]) and lifter.stack_args(p.by_name["switcher"]) == 0
         assert not lifter.switches_stacks(p.by_name["adjuster"])
         assert "switcher(r0, r1, r2, r3)" in lifter.lift(p.by_name["caller"]).text
-        if declared:
-            assert "adjuster(r0, r1, r2, r3)" in lifter.lift(p.by_name["other"]).text
-        else:
-            with pytest.raises(lift.Refused, match="calls adjuster, whose stack arguments are not known"):
-                lifter.lift(p.by_name["other"])
+        if not declared:
+            assert lifter.stack_args(p.by_name["adjuster"]) is None and lifter.scan_stack_args(p.by_name["adjuster"]) == 0
+        assert "adjuster(r0, r1, r2, r3)" in lifter.lift(p.by_name["other"]).text
 
 
 def test_registers_the_callers_keep_are_compiled_call_saved(tmp_path):

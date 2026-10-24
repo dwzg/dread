@@ -670,8 +670,8 @@ its sources.
   where it always lifted), four for coverage, three whose r2 is on one path what an earlier callee left
   (xTaskResumeAll on GCC 14, xTimerIsTimerActive on GCC 8 and 9; see the over-reading below).
   Left: the private firmware's refusals (not measured here); a bound call that passes stack
-  arguments (a caller of such a function that reads the extra results stays refused); Thumb-1 with
-  stack arguments; the stale readers on clang targets and on RISC-V, where the C gets no register as
+  arguments (done 2026-10-24, the item below; still refused on Thumb-1); the stale readers on clang
+  targets and on RISC-V, where the C gets no register as
   its caller left it (the entry's area could carry them; no public function would gain: those there
   are refused for other reasons); groups as an optimisation (the entry's bytes where every caller is
   C). On the public builds none of the extra results is one a programmer meant: dread.regflow's
@@ -688,6 +688,50 @@ its sources.
   filled with bodies alone, the overlay named nothing to drop, and the lift check's build failed
   (2026-10-23). The room's report now counts each helper with the one function of the original its
   object defines (dread.overlay.helper_owners), so the check drops that function.
+- [x] **Stack arguments through a bound call.** A call of a function that reads a register its caller
+  leaves (r4-r11), or whose result the caller reads behind the call, and that also takes stack
+  arguments was refused ("calls X, which reads r5 its caller leaves"; "reads r2 behind the call of
+  X"): Lifter._bound_call passed none. Found on the private real-life target (dozens of functions
+  there; not measured here). Done 2026-10-24 (docs/decisions.md): the asm statement reserves the
+  stack-argument words below the stack pointer (8-byte alignment kept, 16 on RISC-V), stores them as
+  the caller's C has them (_stack_arg_values, shared with _call) before the bl or call, and restores
+  the stack pointer after; frame_effects counts the words, so the caller's frame keeps its outgoing
+  area. Programs of our own (tests/test_stack_args.py: a callee that reads r5 and takes a fifth
+  argument, ARM state and Thumb-2 by GCC and clang; tests/test_lift_results.py: quad_fifth_user,
+  which reads r2 behind a wrapped callee with a stack argument, and use on RISC-V, which reads a3
+  behind one): refused before (the old gate restored by a monkeypatch), accepted after through the
+  lift check, every case agreeing and every instruction run, also with Ubuntu 22.04's and Debian 10's
+  compilers; a stack argument stored at the wrong offset is dropped. The 39 FreeRTOS builds have no such call (no function there both takes stack
+  arguments and is bound): nothing changes there. Left: Thumb-1 (its str needs a low register the
+  compiler may not give the value: refused with its own reason); a normal call with stack arguments
+  on RISC-V (only a bound one carries them, as before).
+- [x] **A callee whose stack pointer is not static.** A call of a function whose stack pointer is not
+  static (sp set from an auipc or from a register the analysis does not know, a variable-length
+  array's sub sp, sp, rN) was refused for every caller ("calls X, whose stack arguments are not
+  known"). Found on the private real-life target (dozens there; not measured here). Done 2026-10-24
+  (docs/decisions.md): scan_stack_args counts the words such a callee reads above its entry, walking
+  past the point where its stack pointer is lost and following the registers that still hold a frame
+  address (a frame pointer set from sp at the entry); a caller that stores those words into its
+  outgoing area is accepted (inferred_stack_args, _caller_provides), the callee stays refused. A
+  callee a path of which reaches an instruction that does not decode stays not known (the code behind
+  it is not seen), and so do its callers, now with that reason. Programs of our own
+  (tests/test_stack_args.py: a RISC-V function that sets sp from auipc, GCC and clang; a
+  variable-length array with six arguments, ARM GCC -Os and -O2, read through r7; a caller that stores
+  both with one strd, as GCC 7 at -O2 does; a callee with an undecodable halfword on its path): refused
+  before, accepted after through the lift check (the last stays refused), also with Ubuntu 22.04's and
+  Debian 10's compilers; stack arguments read swapped are dropped. The 39 FreeRTOS
+  builds: 6 of 13,684 functions go from refused to lifting (xPortStartScheduler on the five clang
+  RISC-V builds, freertos_vector_table on clang 14), none from lifting to refused, every other
+  function's C byte for byte as before; the register-test entries on GCC 10 and clang 14 and 16 stay
+  refused (their callee keeps an inline marker that does not decode); gizmo unchanged. Lift checks
+  with the system run and the whole image, before -> after: GCC -Os 341 -> 341, clang -O2 300 -> 300,
+  RISC-V GCC -Os 272 -> 272, RISC-V clang 14 259 -> 260 (xPortStartScheduler; freertos_vector_table
+  lifts now and the check refuses it as code only the core enters), RISC-V clang -Os 257 -> 257
+  (xPortStartScheduler lifts and is dropped: its generated cases fault, its callee goes on on a task's
+  stack), nothing lost and the whole image agreeing on all five. Left: the callee itself (its stack
+  pointer is still not static); a callee whose code does not decode; a tail call through a register to
+  such a callee (still refused); the generic stubs (dread.autocase's stack_words) still count 0 stack
+  words for such a callee.
 - [ ] **The pilot on the draft.** Names for the readable C: the model proposes a map of names and a
   sentence, code applies it (docs/decisions.md). Built 2026-10-21: dread/naming.py (the
   readable_names table, applied by digest, a map kept only when its names are C identifiers nothing

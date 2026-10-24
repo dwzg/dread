@@ -17,10 +17,16 @@ reach them (it goes to a call, into memory, back to the caller, or an access thr
 where the analysis does not know). Literal loads and adr are constants read
 from the image at lift time. A call passes the four argument registers and as many stack words as
 the callee reads above its entry (from the caller's outgoing area, or its own stack arguments for a
-tail call); the result is r0, or r0 and r1 for a callee whose callers read r1 (dread.regflow). A
-call through a register passes the four registers and the lowest frame words, which is where the
-original's callee would find stack arguments. A switch is a C switch over the index its bound check
-compares, with the target dread.switches finds for every value the check lets through.
+tail call); the result is r0, or r0 and r1 for a callee whose callers read r1 (dread.regflow). When
+the callee's own stack pointer is not static (a context switch, an auipc sp, a variable-length
+array), the words it reads above its entry are found all the same (scan_stack_args: before the stack
+pointer moves, and through a frame pointer set from it after), and a caller that stores them into its
+outgoing area is accepted while the callee stays refused (inferred_stack_args); where a path of the
+callee reaches an instruction that does not decode, the code behind it is not seen and its stack
+arguments stay not known (its callers refused, as before). A call through a
+register passes the four registers and the lowest frame words, which is where the original's callee
+would find stack arguments. A switch is a C switch over the index its bound check compares, with the
+target dread.switches finds for every value the check lets through.
 
 A function whose callers read registers beyond r0 and r1 that it sets (an old ARM compiler's
 __value_in_regs returns a structure of up to four words in r0-r3; r2, r3 and r12 on ARM, a2-a7 and
@@ -35,6 +41,14 @@ call of a function whose registers it hands back. With stack arguments its frame
 (wrapped, below), the area below it; on Thumb-1, which has no wrapped frame, it stays refused. Until
 2026-10-23 every such function was refused, and on RISC-V their callers too.
 
+A bound call passes stack arguments too (a call whose callee reads a register its caller leaves, or
+whose result the caller reads behind the call, and that also takes stack arguments): the asm statement
+reserves the stack-argument words below the stack pointer (its 8-byte alignment kept, 16 on RISC-V),
+stores them there (their values as the caller's C has them, from its outgoing area) before the bl or
+call, and restores the stack pointer after, since the bl does not know its callee reads them off the
+stack. Thumb-1 is refused (its str needs a low register the stored value may not get). Until
+2026-10-24 a bound call passed no stack arguments, and such a call was refused.
+
 Lifted C is a stepping stone, not a reconstruction: no names, no structure, nobody read it. It is
 useful because it builds and comes with generated cases that must cover every instruction of the
 original and agree on all of them before it is accepted (see --check). The translation of each
@@ -48,14 +62,17 @@ caller leaves: C receives r0-r3 only; with GCC on ARM the C gets r4-r12 as the c
 can_hand), callers that read the flags it leaves (C cannot return them) or a register beyond r0 and
 r1 it sets that no naked entry hands back (cannot_return_more: a compiler without naked functions, an
 exception handler, stack arguments on Thumb-1), a read of a scratch register or the flags behind a
-call that the callee leaves where the call cannot be bound (dread.regflow; a callee with stack
-arguments), a call of a function that reads registers its caller leaves where the call cannot be
-bound (beyond r0-r3 and r4-r12, lr included: such a helper finds data behind the call; a callee with
-stack arguments), a tail call through a register in a function that hands back more results, the
-address of a stack argument, an indirect jump that is neither a resolved switch nor a tail call, an
-exception return, code that falls through into what follows, or an entry in the asm_only table. A
-call of a function that never returns (dread.noreturn) does not fall through: an endless loop follows
-it in the C.
+call that the callee leaves where the call cannot be bound (dread.regflow; beyond r1-r3, r12 and the
+flags), a call of a function that reads registers its caller leaves where the call cannot be bound
+(beyond r0-r3 and r4-r12, lr included: such a helper finds data behind the call), a bound call that
+passes stack arguments on Thumb-1 (its str needs a low register), a call of a function whose stack
+pointer is not static whose stack arguments this caller does not store into its outgoing area
+(scan_stack_args and the caller disagree), a call of a function whose stack arguments are not known
+(a path of it reaches code that does not decode), a tail call through a register in a function that hands back
+more results, the address of a stack argument, an indirect jump that is neither a resolved switch nor
+a tail call, an exception return, code that falls through into what follows, or an entry in the
+asm_only table. A call of a function that never returns (dread.noreturn) does not fall through: an
+endless loop follows it in the C.
 
 With --check the lifted C is put to the test: every function that lifts (and that src does not
 define by hand, and that no code outside the function enters behind its entry: a branch of other
@@ -346,6 +363,8 @@ class Lifter:
         return, when the caller has them already (dread.noreturn.find, which otherwise runs here)."""
         self.prog, self.arch, self.flow = program, program.arch, flow
         self._stack_args, self._entry, self._resolved, self._states, self._handlers = {}, {}, {}, {}, {}
+        self._scanned = {}                  # scan_stack_args: stack arguments inferred past a lost stack pointer
+        self._unseen = {}                   # scan_stack_args: the first instruction a path reaches that does not decode
         self._switching = set()             # functions whose states(switch=True) met a StackSwitch
         self._noreturn = set(endless) if endless is not None else None
         self._targets = None                # every direct jump's and call's target (_direct_targets)
@@ -682,10 +701,13 @@ class Lifter:
         return outcome.get(insn.cc)
 
     def frame_value(self, insn, reg, depth, values):
-        """("sp", k) when the register holds an address in the frame (sp itself included)."""
+        """("sp", k) when the register holds an address in the frame (sp itself included). depth None
+        means the stack pointer's value is no longer known (scan_stack_args walks on past a context
+        switch or a variable adjustment): sp is then not a known frame address, but a register that
+        still holds one (a frame pointer set from sp at the entry) is."""
         name = self.arch._name(insn.reg_name(reg))
         if name == "sp":
-            return ("sp", depth)
+            return ("sp", depth) if depth is not None else None
         v = values.get(name)
         return v if v is not None and v[0] == "sp" else None
 
@@ -776,9 +798,29 @@ class Lifter:
         raise Refused("0x%x changes the stack pointer in a way not modelled: %s %s" % (
             insn.address, insn.mnemonic, insn.op_str))
 
+    def reads_above_entry(self, insn, depth, values):
+        """How many words above the entry's stack pointer this instruction reads or writes through a
+        frame address (sp when depth is known, or a register that holds one): its stack-argument
+        reach, 0 for none. depth None (scan_stack_args, past a non-static stack pointer) counts only
+        reads through a register that still holds a frame address (a frame pointer set from sp at the
+        entry), not sp itself. Each instruction set has its own (dread.lift_riscv)."""
+        top = 0
+        for o in insn.operands:
+            if o.type == A.ARM_OP_MEM and not o.mem.index:
+                v = self.frame_value(insn, o.mem.base, depth, values)
+                if v is None:
+                    continue
+                off = o.mem.disp - v[1]
+                width = 8 if insn.id in (A.ARM_INS_LDRD, A.ARM_INS_STRD) else 4
+                if off >= 0:
+                    top = max(top, (off + width + 3) // 4)
+        return top
+
     def stack_args(self, fn):
         """How many words above its entry's stack pointer a function reads or passes on to a tail
-        call: its stack arguments. None when that is not known (its stack pointer is not static)."""
+        call: its stack arguments. None when that is not known (its stack pointer is not static);
+        scan_stack_args then infers it for a function the lifter refuses, so that its callers can
+        pass its stack arguments (inferred_stack_args)."""
         key = getattr(fn, "key", fn.name)
         if key in self._stack_args:
             return self._stack_args[key]
@@ -790,25 +832,16 @@ class Lifter:
             return declared
         self._stack_args[key] = 0               # a recursive call counts nothing while this is worked out
         try:
-            depth = self.depths(fn, strict=False, switch=True)
+            states = self.states(fn, strict=False, switch=True)
         except Refused:
             self._stack_args[key] = None
             return None
-        states = self.states(fn, strict=False, switch=True)
         top = 0
         for a in fn.insns:
-            if a not in depth:
+            if a not in states:
                 continue
-            insn, d = self.prog.insn(a), depth[a]
-            for o in insn.operands:
-                if o.type == A.ARM_OP_MEM and not o.mem.index:
-                    v = self.frame_value(insn, o.mem.base, d, states[a][1])
-                    if v is None:
-                        continue
-                    off = o.mem.disp - v[1]
-                    width = 8 if insn.id in (A.ARM_INS_LDRD, A.ARM_INS_STRD) else 4
-                    if off >= 0:
-                        top = max(top, (off + width + 3) // 4)
+            insn, (d, values) = self.prog.insn(a), states[a]
+            top = max(top, self.reads_above_entry(insn, d, values))
             kind, target, _ = self.arch.flow(insn)
             callee = self.prog.by_entry.get(target & ~1) if kind in ("call", "jump") and target is not None else None
             if callee is not None and callee is not fn:
@@ -817,6 +850,116 @@ class Lifter:
                     top = max(top, (4 * n - d + 3) // 4)
         self._stack_args[key] = top
         return top
+
+    def scan_stack_args(self, fn):
+        """How many words above its entry's stack pointer a function reads, found even when its stack
+        pointer stops being static (a variable-length array's sub sp, sp, rN, an auipc sp, mov sp from
+        a register the analysis does not know): the function is walked as states() does, but where sp
+        is lost the walk goes on tracking the registers that still hold a frame address
+        (_tolerant_states), so stack arguments read through sp before it moves and through a frame
+        pointer after are both counted. Past the point where sp is lost no sp-relative access is a
+        stack argument (it is on another stack, or at an offset the analysis does not know). For a
+        callee the lifter refuses, so inferred_stack_args can tell its callers how many to pass; the
+        callee itself stays refused. None when a path reaches an instruction that does not decode: the
+        code behind it is not seen, so its stack arguments are not known (rule 7: the callers stay
+        refused, as before)."""
+        key = getattr(fn, "key", fn.name)
+        if key in self._scanned:
+            return self._scanned[key]
+        self._scanned[key] = 0                  # a recursive call counts nothing while this is worked out
+        states, unseen = self._tolerant_states(fn)
+        if unseen:
+            self._scanned[key] = None
+            self._unseen[key] = min(unseen)
+            return None
+        top = 0
+        for a, (depth, values) in states.items():
+            top = max(top, self.reads_above_entry(self.prog.insn(a), depth, values))
+        self._scanned[key] = top
+        return top
+
+    def call_stack_words(self, callee):
+        """How many stack-argument words a call to `callee` passes: its static stack_args, or, when
+        its stack pointer is not static, the scan_stack_args inference. The frame's top must keep these
+        words (frame_uses, saves_out): a caller stores them into its outgoing area, and the C reads
+        them there (_call) or stores them onto the real stack (_bound_call)."""
+        n = self.stack_args(callee)
+        if n is None:
+            n = self.scan_stack_args(callee)
+        return n or 0                       # (not known even so: _call refuses the call)
+
+    def _tolerant_states(self, fn):
+        """({address: (depth, values)}, [addresses that do not decode]): states(strict=False,
+        switch=True) with one difference, that a stack-pointer move the analysis cannot follow does not
+        refuse. Such a move (an unmodelled write of sp, a conditional move of it, paths that meet with
+        different depths) ends sp's tracking: depth becomes None, and the walk goes on with the other
+        registers, so a frame pointer set from sp at the entry keeps its ("sp", k) and reads through it
+        are still seen (scan_stack_args). Only the live stack pointer becomes unknown; a frame address
+        already in a register is relative to the entry's stack pointer, which does not change.
+        Everything else is as in states(): a load of sp from memory not on the stack ends its path (the
+        code behind it runs on another stack), a conditional instruction keeps only what holds whether
+        it runs or not, a conditional return lets the code behind it run unpopped. An instruction that
+        does not decode, which makes states() refuse, ends its path here and is listed: the caller then
+        knows the code behind it was not seen."""
+        prog, arch = self.prog, self.arch
+        index = {a: i for i, a in enumerate(fn.insns)}
+        start = fn.insns[0]
+        states = {start: (0, self.entry_values())}
+        work, unseen = [start], []
+        while work:
+            a = work.pop()
+            insn = prog.insn(a)
+            if insn is None:
+                unseen.append(a)
+                continue
+            depth, values = states[a]
+            returning = arch.flow(insn)[0] == "return" or self.ret_jump(insn, values)
+            if depth is None:
+                new, after = None, self._lossy_after(insn, values)
+            else:
+                try:
+                    new, after = self.step(insn, depth, values)
+                except StackSwitch:
+                    continue                # (as states(switch=True): what follows runs on another stack)
+                except Refused:
+                    new, after = None, self._lossy_after(insn, values)
+            if arch.predicate(insn) is not None:
+                if new != depth and not returning:
+                    new = None              # a conditional move of sp: not known behind it
+                after = {k: v for k, v in after.items() if values.get(k) == v}    # it may not run
+            if returning:
+                new, after = depth, values  # what follows a conditional return runs unpopped
+            for b in self.successors(fn, index, a, insn, strict=False, values=values):
+                if b not in states:
+                    states[b] = (new, after)
+                    work.append(b)
+                    continue
+                old_depth, old = states[b]
+                merged_depth = old_depth if old_depth == new else None
+                met = {k: v for k, v in old.items() if after.get(k) == v}
+                if merged_depth != old_depth or met != old:
+                    states[b] = (merged_depth, met)
+                    work.append(b)
+        return states, unseen
+
+    def _lossy_after(self, insn, values):
+        """The register values after an instruction when the stack pointer's value is not known: the
+        written registers are dropped and a frame address a copy or an add of another frame-holding
+        register makes is kept (made_value with no depth: sp-based values become None). Slots are not
+        tracked (a stack argument read past a lost stack pointer goes through a register that holds a
+        frame address, not through a slot)."""
+        after = dict(values)
+        reads, writes = self.arch.reg_effects(insn)
+        for r in writes:
+            if r not in ("sp", "pc", "flags"):
+                after.pop(r, None)
+        if self.arch.flow(insn)[0] in ("call", "icall"):
+            for r in self.after_call(insn):
+                after.pop(r, None)
+        known = self.made_value(insn, None, values)
+        if known is not None:
+            self._put(after, known[0], known[1])
+        return after
 
     def entry_states(self, fn, given=frozenset()):
         """({address: registers that may still hold what the caller left, before the instruction},
@@ -1269,9 +1412,9 @@ class Lifter:
         callee = self.prog.by_entry.get(target & ~1) if isinstance(target, int) else None
         if kind == "call":
             fx.hands |= set(self.ARGS) | (set(self.leaves(callee)) if callee is not None else set())
-            for k in range((self.stack_args(callee) or 0) if callee is not None else 0):
+            for k in range(self.call_stack_words(callee) if callee is not None else 0):
                 if 4 * k < depth:
-                    fx.words.append((4 * k, 4))     # its stack argument k, from the frame (_call)
+                    fx.words.append((4 * k, 4))     # its stack argument k, from the frame (_call, _bound_call)
         elif kind == "icall":
             fx.hands |= (set(self.ARGS) | set(reads)) - {"sp", "pc"}
             if i != A.ARM_INS_SVC:
@@ -2317,24 +2460,67 @@ class Lifter:
         return " ".join("*(volatile u32 *)(%s) = %s;" % (at if not i else "%s + %d" % (at, 4 * i), r)
                         for i, r in enumerate(more)) + " "
 
-    def _call(self, callee, insn, bind=False):
-        if not IDENT.match(callee.name):
-            raise Refused("0x%x calls %s, whose name is not a C identifier" % (insn.address, callee.name))
-        nstack = self.stack_args(callee)
-        if nstack is None:
-            raise Refused("0x%x calls %s, whose stack arguments are not known (its stack pointer is not static)"
-                          % (insn.address, callee.name))
-        leaves = self.leaves(callee)
-        if leaves and not (bind and nstack == 0 and set(leaves) <= HANDED):
-            raise Refused("0x%x calls %s, which reads %s its caller leaves" % (
-                insn.address, callee.name, ", ".join(leaves)))
-        behind = self._check_after_call(callee, insn, bind=bind and nstack == 0)
-        if behind or leaves:
-            return self._bound_call(callee, behind, leaves)
-        wide = self._wide(callee.name)
-        self.ctx["callees"].add((callee.name, nstack, wide))
+    def inferred_stack_args(self, callee, insn):
+        """How many stack arguments a callee takes whose stack pointer is not static (stack_args is
+        None): scan_stack_args finds the words it reads above its entry (before sp moves and through a
+        frame pointer after). The caller must provide them (store them into its outgoing area), so that
+        a word the C reads there is one it put there (_caller_provides): where the two agree the caller
+        is accepted, the callee stays refused. Refused when the caller does not provide them, and when
+        a path of the callee reaches an instruction that does not decode (its stack arguments are not
+        known: the code behind it is not seen)."""
+        n = self.scan_stack_args(callee)
+        if n is None:
+            key = getattr(callee, "key", callee.name)
+            raise Refused("0x%x calls %s, whose stack arguments are not known (its code at 0x%x does not decode)"
+                          % (insn.address, callee.name, self._unseen.get(key, callee.entry)))
+        if not self._caller_provides(insn, n):
+            raise Refused("0x%x calls %s, whose stack pointer is not static; its %d stack argument(s) are not "
+                          "stored by this caller" % (insn.address, callee.name, n))
+        return n
+
+    def _outgoing_slots(self):
+        """The words below the caller's entry stack pointer that it stores (by the depth of each word's
+        lowest byte), its outgoing-argument area among them: every whole word a store covers, a single
+        str or sw, each word of a push or an stm, and both of an strd (GCC 7 at -O2 stores two stack
+        arguments with one; an instruction that stores registers and loads none, frame_effects' "other"
+        accesses). Cached on the context."""
+        if "outgoing" in self.ctx:
+            return self.ctx["outgoing"]
+        fn, states = self.ctx["fn"], self.ctx["states"]
+        own, results, w = set(fn.insns), self.results(fn, self.ctx.get("handler")), self.arch.word
+        slots = set()
+        for a, (depth, values) in states.items():
+            insn = self.prog.insn(a)
+            if insn is None:
+                continue
+            fx = self.frame_effects(fn, insn, depth, values, results, own)
+            for base, idx, disp, size, kind, reg, nofetch in fx.accesses:
+                store = kind == "store" or (kind == "other" and fx.stored and not fx.loaded)
+                if not store or idx is not None or not size or size % w:
+                    continue
+                v = ("sp", depth) if base == "sp" else values.get(base)
+                if self._frame_address(v):
+                    slots.update(v[1] - disp - w * i for i in range(size // w))
+        self.ctx["outgoing"] = slots
+        return slots
+
+    def _caller_provides(self, insn, n):
+        """Whether the caller stores all n outgoing words of the call at `insn` (at [sp, #0], [sp, #4],
+        ..., the slots n-1 down to 0 words above the call's stack pointer): the agreement
+        inferred_stack_args needs. Vacuously true for n == 0."""
+        if n <= 0:
+            return True
         d = self.ctx["depth"][insn.address]
-        args = list(ARGS)
+        slots = self._outgoing_slots()
+        return all((d - 4 * k) in slots for k in range(n))
+
+    def _stack_arg_values(self, insn, nstack):
+        """The C expressions of a call's stack arguments: the caller's outgoing-argument area (below
+        its entry stack pointer), or, above it, a wrapped function's real stack argument or this
+        function's own stack parameter. Refused when it would pass a stack word the function does not
+        have. Shared by _call and _bound_call."""
+        d = self.ctx["depth"][insn.address]
+        args = []
         for k in range(nstack):
             off = 4 * k - d
             if off < 0:
@@ -2344,7 +2530,25 @@ class Lifter:
             elif off // 4 < self.ctx["stack_params"]:
                 args.append("s%d" % (off // 4))
             else:
-                raise Refused("0x%x passes %s a stack word it does not have" % (insn.address, callee.name))
+                raise Refused("0x%x passes a stack word it does not have" % insn.address)
+        return args
+
+    def _call(self, callee, insn, bind=False):
+        if not IDENT.match(callee.name):
+            raise Refused("0x%x calls %s, whose name is not a C identifier" % (insn.address, callee.name))
+        nstack = self.stack_args(callee)
+        if nstack is None:
+            nstack = self.inferred_stack_args(callee, insn)
+        leaves = self.leaves(callee)
+        if leaves and not (bind and set(leaves) <= HANDED):
+            raise Refused("0x%x calls %s, which reads %s its caller leaves" % (
+                insn.address, callee.name, ", ".join(leaves)))
+        behind = self._check_after_call(callee, insn, bind=bind)
+        if behind or leaves:
+            return self._bound_call(callee, behind, leaves, nstack=nstack, insn=insn)
+        wide = self._wide(callee.name)
+        self.ctx["callees"].add((callee.name, nstack, wide))
+        args = list(ARGS) + self._stack_arg_values(insn, nstack)
         call = "%s(%s)" % (callee.name, ", ".join(args))
         keep = set(self.flow.preserved_regs(callee.name)) if self.flow else set()
         clear = [r for r in (("r2", "r3", "r12") if wide else ("r1", "r2", "r3", "r12")) if r not in keep]
@@ -2396,29 +2600,52 @@ class Lifter:
         instruction sets' lifters subclass this one)."""
         return self.arch.name == "arm" and self.prog.target.compiler.kind == "gcc"
 
-    def _bound_call(self, callee, behind, inputs=()):
-        """A call whose caller reads behind it what the callee leaves beyond a C result (_check_after_call):
-        the bl in an asm statement with r0-r3 bound in and out (r12 too when it is read) and, when the
-        flags are read, an mrs right behind the bl, so that the C goes on with what the original's
-        caller finds. The callee takes no stack arguments; the r4-r11 it keeps by the convention, and
-        those it reads from its caller (inputs: a compiler's shared code), r12 too (HANDED), are bound as
-        well, from the C's variables (and back: whatever it leaves there)."""
+    def _bound_call(self, callee, behind, inputs=(), nstack=0, insn=None):
+        """A call whose caller reads behind it what the callee leaves beyond a C result (_check_after_call),
+        or whose callee reads registers its caller leaves (inputs): the bl in an asm statement with r0-r3
+        bound in and out (r12 too when it is read) and, when the flags are read, an mrs right behind the
+        bl, so that the C goes on with what the original's caller finds. The r4-r11 the callee keeps by
+        the convention and those it reads from its caller (inputs: a compiler's shared code), r12 too
+        (HANDED), are bound as well, from the C's variables (and back: whatever it leaves there).
+
+        Stack arguments (nstack): the asm reserves their words below the stack pointer (the AAPCS's 8-byte
+        alignment kept), stores them there (their values the caller's C has, _stack_arg_values, passed as
+        inputs), calls, and restores the stack pointer. The bl does not know the callee reads them off the
+        stack, so the asm puts them on the real one, where a regular C call would. Thumb-1 is refused (its
+        str needs a low register, which the stored value may not get)."""
+        if nstack and self.prog.isa_at(self.ctx["fn"].entry) == "t32" and getattr(self.arch, "thumb2", None) is False:
+            raise Refused("0x%x calls %s with stack arguments through a bound call, which Thumb-1 does not make"
+                          % (insn.address if insn is not None else 0, callee.name))
         self.ctx["bound"].add(callee.name)      # no prototype (the asm names it); a callee all the same
         regs = ["r0", "r1", "r2", "r3"] + (["r12"] if "r12" in behind or "r12" in inputs else []) + sorted(
             set(inputs) - {"r12"}, key=lambda r: int(r[1:]))
         binds = ", ".join('x%s __asm__("%s") = %s' % (r[1:], r, r) for r in regs)
         outs = ['"+r"(x%s)' % r[1:] for r in regs]
-        text = "bl %s" % callee.name
+        ins = []
+        pre, post = "", ""
+        if nstack:
+            room = (4 * nstack + 7) & ~7         # (keep the stack 8-byte aligned at the call)
+            values = self._stack_arg_values(insn, nstack)
+            ins = ['[sa%d] "r"(%s)' % (k, v) for k, v in enumerate(values)]
+            pre = "sub sp, sp, #%d\\n\\t" % room + "".join(
+                "str %%[sa%d], [sp, #%d]\\n\\t" % (k, 4 * k) for k in range(nstack))
+            post = "\\n\\tadd sp, sp, #%d" % room
+        text = pre + "bl %s" % callee.name
         if "flags" in behind:
             outs.append('"=r"(t)')
             text += "\\n\\tmrs %%%d, apsr" % (len(outs) - 1)
+        text += post
         clobbers = ['"lr"', '"cc"', '"memory"'] + ([] if "r12" in regs else ['"r12"'])
         if self.ctx.get("fp"):              # a hard-float callee may change s0-s15 (FPU_MIRROR reads them back)
             clobbers += ['"s%d"' % k for k in range(16)]
         lines = ["{ register u32 %s;" % binds]
         if "flags" in behind:
             lines.append("u32 t;")
-        lines.append('__asm__ volatile ("%s" : %s :: %s);' % (text, ", ".join(outs), ", ".join(clobbers)))
+        if ins:
+            lines.append('__asm__ volatile ("%s" : %s : %s : %s);' % (
+                text, ", ".join(outs), ", ".join(ins), ", ".join(clobbers)))
+        else:
+            lines.append('__asm__ volatile ("%s" : %s :: %s);' % (text, ", ".join(outs), ", ".join(clobbers)))
         lines.append(" ".join("%s = x%s;" % (r, r[1:]) for r in regs))
         if "flags" in behind:
             lines.append("n = t >> 31; z = t >> 30 & 1; c = t >> 29 & 1; v = t >> 28 & 1;")
