@@ -1485,8 +1485,12 @@ def usage_summary(month=None, path=None, config_path=None):
     """{provider: {"model", "answers", "input", "output", "cache_read", "cache_write", "batch" (answers of
     Message Batches), "cost" (None without prices)}} of the usage ledger for a month ("YYYY-MM",
     default: this one), each line priced as it came (answer_cost: a batch's at the batch rate, its
-    cache's tokens at theirs). A line of before 2026-10-22 has no cache columns, one of before
-    2026-10-24 no mode and no hour-long cache writes (USAGE_COLUMNS; docs/formats.md)."""
+    cache's tokens at theirs). A line whose provider the configuration does not price (a measurement's
+    copy of llm.toml with providers of other names, a provider renamed or removed since) is priced as a
+    configured provider of the same model that has prices, and its entry says which ("priced_as");
+    until 2026-10-24 such lines went unpriced and the month's total left them out. A line of before
+    2026-10-22 has no cache columns, one of before 2026-10-24 no mode and no hour-long cache writes
+    (USAGE_COLUMNS; docs/formats.md)."""
     import time
     import tomllib
     month = month or time.strftime("%Y-%m")
@@ -1495,6 +1499,10 @@ def usage_summary(month=None, path=None, config_path=None):
     if os.path.exists(config_path):
         with open(config_path, "rb") as f:
             specs = tomllib.load(f).get("providers", {})
+    by_model = {}                           # (the first priced provider of each model, by name)
+    for name, spec in sorted(specs.items()):
+        if spec.get("model") and prices_of(spec, spec.get("kind")) is not None:
+            by_model.setdefault(spec["model"], (name, spec))
     out = {}
     path = path or USAGE
     if not os.path.exists(path):
@@ -1516,6 +1524,8 @@ def usage_summary(month=None, path=None, config_path=None):
             for key, value in zip(("input", "output", "cache_read", "cache_write"), tokens):
                 entry[key] += value
             spec = specs.get(row[1]) or {}
+            if prices_of(spec, spec.get("kind")) is None and row[2] in by_model:
+                entry["priced_as"], spec = by_model[row[2]]
             dollars = answer_cost(spec, spec.get("kind"), *tokens, mode=row[8] or None)
             if dollars is not None:
                 entry["cost"] = (entry["cost"] or 0.0) + dollars

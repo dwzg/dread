@@ -339,6 +339,30 @@ def test_a_correction_that_keeps_the_survivor_is_asked_for_the_argument(gizmo):
     assert "leaves the same change unnoticed as before" in provider.asked[2][1][-1]["content"]
 
 
+def test_usage_lines_of_a_provider_not_configured_are_priced_by_their_model(tmp_path, monkeypatch, capsys):
+    """A ledger line whose provider the configuration does not price (a measurement's copy of llm.toml
+    with providers of other names, a provider renamed since) is priced as a configured provider of the
+    same model, and the summary and dread pilot --usage say which; a model that no priced provider has
+    stays unpriced. Until 2026-10-24 such lines went unpriced and the month's total left them out."""
+    ledger, config = tmp_path / "usage.tsv", tmp_path / "llm.toml"
+    config.write_text('[providers.cloud]\nkind = "anthropic"\nmodel = "m"\nprice_in = 3\nprice_out = 15\n'
+                      '[providers.free]\nkind = "openai"\nmodel = "q"\n')
+    monkeypatch.setattr(llm, "USAGE", str(ledger))
+    monkeypatch.setenv("DREAD_LLM", str(config))
+    for name, model in (("cloud-a1", "m"), ("judge", "m"), ("free", "q"), ("other", "z")):
+        p = llm.Provider(name, {"model": model})
+        p.last = {"finish": "end_turn", "tokens": 1000, "input": 500000}
+        p.record()
+    s = llm.usage_summary()
+    assert s["cloud-a1"]["cost"] == pytest.approx(1.5 + 0.015) and s["cloud-a1"]["priced_as"] == "cloud"
+    assert s["judge"]["priced_as"] == "cloud" and s["judge"]["cost"] == pytest.approx(1.515)
+    assert s["free"]["cost"] is None and "priced_as" not in s["free"]
+    assert s["other"]["cost"] is None and "priced_as" not in s["other"]
+    pilot.print_usage()
+    out = capsys.readouterr().out
+    assert "priced as cloud" in out and "$3.03 where prices are known" in out, out
+
+
 def test_the_usage_ledger(tmp_path, monkeypatch):
     """Every answer adds its tokens to the ledger; the month's summary sums them per provider and
     prices them where the configuration gives prices, each line as it came: an answer of a Message

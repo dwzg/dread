@@ -4119,7 +4119,8 @@ def print_usage(month=None):
     for name, e in sorted(summary.items()):
         cost = "$%.2f" % e["cost"] if e["cost"] is not None else "no prices in llm.toml"
         total += e["cost"] or 0
-        more = ", ".join(x for x in ("%d in Message Batches" % e["batch"] if e.get("batch") else "",
+        more = ", ".join(x for x in ("priced as %s" % e["priced_as"] if e.get("priced_as") else "",
+                                     "%d in Message Batches" % e["batch"] if e.get("batch") else "",
                                      "cache: %d tokens read, %d written" % (e["cache_read"], e["cache_write"])
                                      if e.get("cache_read") or e.get("cache_write") else "") if x)
         print("%-16s %-22s %5d answers %10d tokens in %9d out  %s%s" % (name, e["model"], e["answers"], e["input"],
