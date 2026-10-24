@@ -3,7 +3,8 @@
 // it, with their logs and their history (dread/jobs.py). The page computes nothing: it sends the form's
 // values and shows the command line the server makes of them, with the same code that starts the job.
 // Addresses: #/run (the commands), #/run/NAME (one command's form), #/run/NAME@N (the form filled from
-// job N's command line), #/jobs (every job), #/jobs/N (one job and its log, followed while it runs).
+// job N's command line), #/run/NAME@["--x", ...] (filled from those words, a JSON list: another page's
+// "every option"), #/jobs (every job), #/jobs/N (one job and its log, followed while it runs).
 
 import { $, esc, api, ago, when, toast, showError, S, GUI, register, enter, nextRender, isCurrent } from "./app.js";
 
@@ -386,7 +387,8 @@ async function refreshRecent() {
 }
 
 async function showRun(match, keep) {
-  const name = match[1] || null, from = match[2] ? Number(match[2]) : null;
+  const name = match[1] || null, from = match[2] && /^\d+$/.test(match[2]) ? Number(match[2]) : null;
+  const given = match[2] && match[2].startsWith("[") ? match[2] : null;    // (words another page hands over)
   const again = S.view === "run" && $("#run");
   if (keep && again && RUN.name === name) { refreshRecent(); return; }      // (a reload: the form stays as typed)
   const mine = nextRender();
@@ -398,7 +400,7 @@ async function showRun(match, keep) {
       if (from != null) {
         const r = await api("/api/job", { id: from });
         if (r.args) params.args = JSON.stringify(r.args);
-      }
+      } else if (given) params.args = given;
       cmd = await api("/api/command", params);
     }
   } catch (e) {
@@ -411,11 +413,11 @@ async function showRun(match, keep) {
   RUN.commands = list;
   if (RUN.name) RUN.kept[RUN.name] = RUN.values;     // (each command's form keeps what was set while the page lives)
   if (cmd) {
-    const changed = RUN.name !== name || from != null;
+    const changed = RUN.name !== name || from != null || given != null;
     RUN.name = name;
     RUN.command = cmd;
-    if (changed) RUN.values = from != null ? cmd.values || {} : RUN.kept[name] || {};
-    if (cmd.error) toast(`The command line of job ${from} does not fit the form: ${cmd.error}`, true);
+    if (changed) RUN.values = from != null || given != null ? cmd.values || {} : RUN.kept[name] || {};
+    if (cmd.error) toast(`The command line ${from != null ? "of job " + from : "handed over"} does not fit the form: ${cmd.error}`, true);
     renderForm();
     schedulePreview(true);
   } else {
@@ -701,7 +703,7 @@ function wire() {
 wire();
 
 register({
-  name: "run", match: /^\/run(?:\/([^@/]+)(?:@(\d+))?)?$/, show: showRun,
+  name: "run", match: /^\/run(?:\/([^@/]+)(?:@(\d+|\[.*\]))?)?$/, show: showRun,
   leave: () => { clearTimeout(RUN.timer); },
   status: onStatus,
   keys: { x: () => { location.hash = "#/run"; } },

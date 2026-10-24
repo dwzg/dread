@@ -812,7 +812,7 @@ function renderC() {
 // (the page shows a placeholder meanwhile) and keeps it for the load and the readable C's tables.
 function readingBody(d) {
   const name = d.header.name, r = S.reading;
-  if (!r || r.name !== name || r.generation !== S.generation) {
+  if (!r || r.name !== name || r.generation !== S.generation || r.names !== S.names) {   // (names: a run's readable_names)
     loadReading(name);
     return `<div class="placeholder">Making its readable C…</div>`;
   }
@@ -829,7 +829,7 @@ let readingAsked = null;
 async function loadReading(name) {
   if (readingAsked === name) return;
   readingAsked = name;
-  const generation = S.generation;
+  const generation = S.generation, names = S.names;
   let data;
   try {
     data = await api("/api/reading", { name });
@@ -837,7 +837,7 @@ async function loadReading(name) {
     data = { name, lines: null, why: e.message };
   }
   if (readingAsked === name) readingAsked = null;
-  S.reading = { name, generation, data };
+  S.reading = { name, generation, names, data };
   if (data.pending) {                     // (asked again when the register analysis may be done)
     setTimeout(() => { if (S.reading && S.reading.data === data) { S.reading = null; renderC(); } }, 1500);
   }

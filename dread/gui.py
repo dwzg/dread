@@ -77,6 +77,13 @@ the tools know and decided, and runs nothing heavy itself:
   regflow, dread lift --check, dread readable --check), and the language-model providers (llm.toml set
   up line by line, a key written into a key file of mode 600 and never shown back, a provider tried
   with one question as a job).
+- the pilot page (#/pilot, key l; dread/guipages/pilot.py): dread pilot started from a short form (the
+  task, the provider with its prices, the budget, all functions or some, Message Batches, the task's few
+  options; the Run page's form has every option), its estimate (the dry run's count, an earlier run's
+  tokens a function at the provider's prices), a run followed live from its events (the stage, the
+  questions answered of those planned, the batches out and their age, the spend against the budget, the
+  names as they come) and stopped as its job; the runs before, what the answers cost a month, the
+  pilot's comparisons of names.
 A server started where there is no target (no --target, no $DREAD_TARGET, no dread.toml above the
 working directory) comes up with the Setup page alone: the browsing views wait for a target, its jobs
 (dread new, a provider's test) run in the directory it started in with their records in the user's
@@ -110,6 +117,9 @@ nothing; what the names give is kept until a names table changes):
 - the Setup page's: /api/setup/... (dread/guipages/setup.py says what each answers);
 - the Run page's: /api/commands, /api/command, /api/command-line, /api/jobs, /api/job, /api/job-log,
   POST /api/jobs/start and /api/jobs/stop (dread/guipages/run.py says what each answers);
+- the pilot page's: /api/pilot, /api/pilot/runs, /api/pilot/job, /api/pilot/follow, /api/pilot/usage,
+  /api/pilot/compare, POST /api/pilot/estimate, /api/pilot/start, /api/pilot/stop,
+  /api/pilot/cancel-batches and /api/pilot/compare/start (dread/guipages/pilot.py);
 - /api/functions: each function's name, entry, size, origin and test record, its "certainty"
   (dread.relations CERTAINTY), "confidence" (its vote's agreement, where there was a vote), "proposed"
   (the name it goes by where the tables have none) and "review" ({"mark", "outcome", "old": the name

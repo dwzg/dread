@@ -688,12 +688,14 @@ ignore kinds and fields they do not know; the start event's `format` (1) changes
 | `settled` | a function, group, batch of globals or the device done | `stage`, `function`, `result` (`proposed`, `named`, `none`, `unasked`: the budget held back a question of it and nothing was kept; for `--task write` `accepted`, `rejected`, `refused`; `inputs`), and where they apply `name`, `confidence`, `what`, `why`, `changed`, `names`, `named`, `of`, `refused`, `ran`, `answers` |
 | `budget` | the first question the budget holds back | `state` (`reached`), `budget`, `spent`, `reserved`, `estimate` (of what was held back), `questions`, `words` |
 | `warning`, `error` | what the run warned of | `text` |
-| `end` | the run ends | `how` (`done`; `stopped`: SIGTERM, SIGHUP or SIGINT; `failed`: an exception; `budget reached`), `exit` (the command's status; absent when it did not return), `error` (how it was stopped, or the exception), `seconds`, `answers`, `batch`, `input`, `output`, `cache_read`, `cache_write`, `cost`, `asked` (questions admitted), `held` (questions held back by the budget), `outputs` (`{kind: {"out": tokens out of an answer, "chars": characters of a question a token, "per_in": tokens out a token in}}` of its answers: a later run's first estimates; a kind is a digest of the model, whether it asks without reasoning and the question's instructions) |
+| `end` | the run ends | `how` (`done`; `stopped`: SIGTERM, SIGHUP or SIGINT; `failed`: an exception; `budget reached`), `exit` (the command's status; absent when it did not return), `error` (how it was stopped, or the exception), `seconds`, `answers`, `batch`, `input`, `output`, `cache_read`, `cache_write`, `cost`, `asked` (questions admitted), `held` (questions held back by the budget), `outputs` (`{kind: {"out": tokens out of an answer, "chars": characters of a question a token, "per_in": tokens out a token in}}` of its answers: a later run's first estimates; a kind is a digest of the model, whether it asks without reasoning and the question's instructions), `settled` (`{result: count}` of the functions settled, since 2026-10-24) and `settled_other` (the same of the other subjects: `group N`, `globals N`, `structures N`, `device`) |
 
 `index.jsonl` (beside the runs' directories) has two lines a run, appended under a lock of the file
 (`flock`: runs of one target may start and end at once): `{"run", "state": "start", "t", "task",
 "image", "provider", "model", "budget", "pid", "host"}` and `{"run", "state": "end", "t", "how",
-"seconds", "answers", "cost", "outputs"}`. A run without an end line was killed outright (SIGKILL, a
+"seconds", "answers", "cost", "outputs", "settled", "settled_other"}` (the last two since 2026-10-24: a
+run of before has neither, and `pilotlog.settled` counts its settled events; dread gui's history shows
+them). A run without an end line was killed outright (SIGKILL, a
 crash) or is running: `runs()` tells them apart by the pid on the same host and that process's start
 time (`gone` or `running`; a run of another host stays `running`). A run directory the index lacks is
 read from its events.

@@ -201,7 +201,11 @@ as a failed one, the vote taking the answers there are. A batch's questions that
 weighed again once the first ones are answered. SIGTERM, SIGHUP and SIGINT stop a run in order: the
 batches it waits for are cancelled, the questions not begun are not asked and those being asked are
 waited for llm.STOP_WAIT (20) seconds at most (llm.thread_pool: dread gui kills a job 30 s after its
-SIGTERM), its end event says "stopped", its tables are as it left them.
+SIGTERM), its end event says "stopped", its tables are as it left them. Before a run, --dry-run of --task
+name, readable and globals prints what it would take (planned: the functions, those it would ask) and an
+estimate: those functions times the tokens a function of the newest earlier run of the task on this
+target, at the provider's prices (dread.pilotlog estimate; none without such a run). dread gui's pilot
+page (dread/guipages/pilot.py) starts runs as jobs, shows that estimate and follows a run from its events.
 
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
                 [--no-mutate] [--no-integration] [--dry-run]
@@ -318,6 +322,67 @@ def candidates(target, image, program, limit=None):
     names = sorted((n for n in lifted if n in program.by_name and n not in defined and may_show(target, n)),
                    key=lambda n: (len(program.by_name[n].insns), n))
     return names[:limit] if limit else names
+
+
+def planned(target, image, program, task, names=None, limit=None, refine=False, out=print):
+    """What a run of task takes before it asks anything, as its dry run prints it and dread gui's pilot
+    page shows it: {"task", "functions": the functions it takes in its order (names, else its own choice;
+    at most limit), "asked": those it asks about, "already": how many of them it leaves (None where the
+    task cannot tell before it runs), "everything": for readable and globals, the functions whose shared
+    names it asks for, "approximate": whether asked may hold too many or too few}. --task name: the
+    functions without a name (FUN_), callees first (callers first with refine), asked those without a
+    proposal (with refine: with one not refined yet); readable: the readable table's functions, asked
+    those without an entry in the readable_names table (approximate: an entry made for other C is asked
+    again, and whether it is decides the function's readable C, made as the run begins); globals: every
+    function, all of them asked. None for the other tasks: their questions are known only as they run.
+    out: where [llm] only's count of the functions held back goes. ValueError for a name the image has no
+    function of."""
+    unknown = [n for n in names or () if n not in program.by_name]
+    if unknown:
+        raise ValueError("no function %s in image %s" % (", ".join(unknown[:5]) + (" ..." if len(unknown) > 5 else ""),
+                                                          image.name))
+    if task == "name":
+        from dread.samecode import UNNAMED
+        chosen = shown(target, names, out=out) if names else [
+            fn.name for fn in program.functions if UNNAMED.match(fn.name) and may_show(target, fn.name)]
+        rounds = callees_first(program, chosen)
+        chosen = [n for r in (reversed(rounds) if refine else rounds) for n in r]
+        chosen = chosen[:limit] if limit else chosen
+        refined = set()
+        known = read_proposals(target, image, refined)
+        entries = {n: program.by_name[n].entry for n in chosen}
+        asked = [n for n in chosen if (entries[n] in known and entries[n] not in refined if refine
+                                       else entries[n] not in known)]
+        return {"task": task, "functions": chosen, "asked": asked, "already": len(chosen) - len(asked),
+                "approximate": False}
+    if task in ("readable", "globals"):
+        from dread import build, naming
+        listed = build.read_names(image.table("readable")) if task == "readable" else [
+            fn.name for fn in program.functions]
+        everything = shown(target, listed, out=lambda *_: None)
+        chosen = shown(target, names, out=out) if names else everything
+        chosen = chosen[:limit] if limit else chosen
+        if task == "globals":
+            return {"task": task, "functions": chosen, "asked": chosen, "already": None, "everything": everything,
+                    "approximate": False}
+        named = naming.load(image)
+        asked = [n for n in chosen if n not in named]
+        return {"task": task, "functions": chosen, "asked": asked, "already": len(chosen) - len(asked),
+                "everything": everything, "approximate": True}
+    return None
+
+
+def estimate_line(target, args, functions):
+    """The dry run's estimate (dread.pilotlog estimate): what a run over `functions` functions would cost at
+    the provider's prices, from an earlier run of the task on this target; or why there is none."""
+    try:
+        provider = llm.load(args.provider)
+    except llm.ProviderError as e:
+        return "dread pilot --dry-run: no estimate: %s" % e
+    got = pilotlog.estimate(target.build, args.task, provider.config, provider.kind, functions,
+                            batch=args.batch > 0 and provider.can_batch, settings=settings_of(args),
+                            name=provider.name)
+    return "dread pilot --dry-run: %s" % got["words"]
 
 
 def result_words(program, flow, name):
@@ -4472,18 +4537,25 @@ def pilot_main(argv=None):
             return logged(target, image, args, provider, lambda: review_task(target, image, program, flow, args,
                                                                              provider, device), argv=argv)
         if args.task in ("readable", "globals"):
-            from dread import build, lift, readable
+            from dread import lift, readable
             # readable: the functions of the readable table, whose C is built; globals: every function,
-            # its readable C checked or not, as the questions for function names show it
-            listed = build.read_names(image.table("readable")) if args.task == "readable" else [
-                fn.name for fn in program.functions]
-            everything = shown(target, listed, out=lambda *_: None)
-            names = shown(target, args.names) if args.names else everything
-            names = names[:args.limit] if args.limit else names
+            # its readable C checked or not, as the questions for function names show it (planned)
+            try:
+                plan = planned(target, image, program, args.task, args.names, args.limit)
+            except ValueError as e:
+                print("dread pilot: %s" % e, file=sys.stderr)
+                return 1
+            everything, names = plan["everything"], plan["functions"]
             if args.dry_run:
-                print("\n".join(names))
-                print("dread pilot --task %s --dry-run: %s%d functions would be asked about; nothing asked" % (
-                    args.task, "the globals and structures of " if args.task == "globals" else "", len(names)))
+                print("\n".join(plan["asked"]))
+                if args.task == "globals":
+                    print("dread pilot --task globals --dry-run: the globals and structures of %d functions would "
+                          "be asked about; nothing asked" % len(names))
+                else:
+                    print("dread pilot --task readable --dry-run: %d functions would be asked about, %d of %d with "
+                          "names already left (asked again where their C changed since: their readable C decides as "
+                          "the run begins); nothing asked" % (len(plan["asked"]), plan["already"], len(names)))
+                print(estimate_line(target, args, len(plan["asked"])))
                 return 0
             def shared_and_variables():
                 context = readable.Context(target, image, program, flow)
@@ -4517,23 +4589,20 @@ def pilot_main(argv=None):
                 return 0
             return logged(target, image, args, provider, shared_and_variables, functions=len(names), argv=argv)
         if args.task == "name":
-            from dread.samecode import UNNAMED
-            names = shown(target, args.names) if args.names else [
-                fn.name for fn in program.functions if UNNAMED.match(fn.name) and may_show(target, fn.name)]
-            rounds = callees_first(program, names)
-            names = [n for r in (reversed(rounds) if args.refine else rounds) for n in r]
-            names = names[:args.limit] if args.limit else names
+            try:
+                plan = planned(target, image, program, "name", args.names, args.limit, args.refine)
+            except ValueError as e:
+                print("dread pilot: %s" % e, file=sys.stderr)
+                return 1
+            names = plan["functions"]
             if args.dry_run:
-                refined = set()
-                known = read_proposals(target, image, refined)
-                entries = {n: program.by_name[n].entry for n in names}
-                todo = [n for n in names if (entries[n] in known and entries[n] not in refined if args.refine
-                                             else entries[n] not in known)]
+                todo = plan["asked"]
                 print("\n".join(todo))
                 print("dread pilot --task name --dry-run: %d functions would be asked about, %s first (%d %s "
                       "already); nothing asked" % (len(todo), "callers" if args.refine else "callees",
                                                    len(names) - len(todo), "refined or without a first proposal"
                                                    if args.refine else "proposed"))
+                print(estimate_line(target, args, len(todo)))
                 return 0
             def propose():
                 made, asked, spent = name_functions(target, image, program, lambda: naming_provider(args), names,

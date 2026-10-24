@@ -27,10 +27,18 @@ interpreter's crash): such a run has no end event, and runs() and state() call i
 process is (looked up on the same host by its pid and the process's start time; a run of another host
 stays "running"). Times are the wall clock's: the events are a log, not a deterministic output, and the
 run's tables do not depend on them.
+
+The end event and the index's end line count what was settled (since 2026-10-24, for dread gui's
+history): "settled", {result: functions} of the functions settled, and "settled_other", the same of
+the other subjects (groups, batches of globals and structures, the device); settled() reads them from
+an older run's events. estimate() prices a run before it begins from an earlier run of the same task
+on the target: its tokens a function asked, at a provider's prices (dread pilot --dry-run prints it,
+dread gui's pilot page shows it).
 """
 import collections
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -40,6 +48,15 @@ ENDINGS = ("done", "stopped", "failed", "budget reached")
 LAST = 8                    # the answers state() keeps as the last ones
 WARNINGS = 5                # and the warnings
 PROGRESS = 30.0             # seconds between two progress lines of follow()
+OTHER = re.compile(r"(group|globals|structures) \d+|device")    # subjects of settled events that are not functions
+EDGE = 64 * 1024            # bytes of an events file read for its first or its last event
+# The settings of a task that change what its run costs a function (its start event's settings, as
+# dread pilot settings_of keeps them): an estimate prefers an earlier run that had the same
+ESTIMATE_SETTINGS = {"name": ("samples", "passes", "subsystems", "refine", "behaviour", "ablate", "gate", "thinking"),
+                     "readable": ("thinking", "tries"), "globals": ("thinking",),
+                     "subsystems": ("samples", "thinking"), "device": ("samples", "thinking"), "input": ("tries",),
+                     "write": ("tries", "no_mutate", "no_integration", "no_lifted"),
+                     "review": ("samples", "rounds", "margin", "thinking")}
 
 CURRENT = None              # the RunLog of the run in this process (current()), or None
 
@@ -103,6 +120,12 @@ def append(path, data, lock=False):
         os.close(fd)
 
 
+def is_function(subject):
+    """Whether the subject of a settled or outcome event is a function (not "group N", "globals N",
+    "structures N", "device")."""
+    return not OTHER.fullmatch(str(subject or ""))
+
+
 class RunLog:
     """One run's events (see the module): start() makes the run's directory and writes its start
     event and index line, event() writes an event, end() the end event and the index line, after which
@@ -115,6 +138,8 @@ class RunLog:
         self.fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         self.started = time.time()
         self.stage = None                   # the stage begun last (stage events), put into outcomes
+        self.settled = collections.Counter()        # {result: functions settled so}, for the end event
+        self.settled_other = collections.Counter()  # the same of groups, batches of globals, the device
 
     @classmethod
     def start(cls, build, task, image=None, provider=None, model=None, settings=None, budget=None, functions=None,
@@ -158,6 +183,9 @@ class RunLog:
         with self.lock:
             if self.fd is None:
                 return
+            if kind == "settled":
+                (self.settled if is_function(fields.get("function")) else self.settled_other)[
+                    str(fields.get("result"))] += 1
             while data:
                 data = data[os.write(self.fd, data):]
 
@@ -165,11 +193,15 @@ class RunLog:
         append(index_path(self.build), line_of(record), lock=True)
 
     def end(self, how, **fields):
-        """The end event (how: ENDINGS; fields: the totals) and the index line; the file is closed."""
+        """The end event (how: ENDINGS; fields: the totals; with what was settled: "settled" and
+        "settled_other", see the module) and the index line; the file is closed."""
         seconds = round(time.time() - self.started, 1)
-        self.event("end", how=how, seconds=seconds, **fields)
+        with self.lock:
+            settled, other = dict(self.settled), dict(self.settled_other)
+        self.event("end", how=how, seconds=seconds, settled=settled, settled_other=other, **fields)
         self.index({"run": self.run, "state": "end", "t": round(time.time(), 3), "how": how, "seconds": seconds,
-                    "answers": fields.get("answers"), "cost": fields.get("cost"), "outputs": fields.get("outputs")})
+                    "answers": fields.get("answers"), "cost": fields.get("cost"), "outputs": fields.get("outputs"),
+                    "settled": settled, "settled_other": other})
         with self.lock:
             if self.fd is not None:
                 os.close(self.fd)
@@ -243,8 +275,9 @@ def alive(start):
 def runs(build):
     """The runs of a target, newest first: [{"run", "task", "image", "provider", "model", "budget",
     "started", "pid", "host", "status": "running", "ended" or "gone", "how" (ENDINGS) and "ended",
-    "seconds", "answers", "cost" for an ended run}], from the index; a run directory the index lacks is
-    read from its start and end events."""
+    "seconds", "answers", "cost" for an ended run, and "settled", "settled_other" where its end line
+    has them (see the module; settled() reads them from the events of an older run)}], from the index; a
+    run directory the index lacks is read from its start and end events."""
     by = collections.OrderedDict()
     records, _ = read_lines(index_path(build))
     for r in records:
@@ -257,6 +290,7 @@ def runs(build):
             entry["started"] = r.get("t")
         elif r.get("state") == "end":
             entry.update({k: r.get(k) for k in ("how", "seconds", "answers", "cost")})
+            entry.update({k: r[k] for k in ("settled", "settled_other") if isinstance(r.get(k), dict)})
             entry["ended"] = r.get("t")
     folder = runs_dir(build)
     if os.path.isdir(folder):
@@ -267,6 +301,8 @@ def runs(build):
             if st is not None:
                 by[run] = {k: st.get(k) for k in ("run", "task", "image", "provider", "model", "budget", "started",
                                                    "pid", "host", "how", "ended", "seconds", "answers", "cost")}
+                end = st.get("end") or {}
+                by[run].update({k: end[k] for k in ("settled", "settled_other") if isinstance(end.get(k), dict)})
     out = []
     for entry in by.values():
         if entry.get("how"):
@@ -299,6 +335,129 @@ def prior_outputs(build):
                             and isinstance(v, (int, float)) and v > 0}
                     if kept:
                         out[kind] = dict(out.get(kind, {}), **kept)
+    return out
+
+
+def edge_event(build, run, last=False):
+    """A run's first event (its start) or, with last, its last whole one (its end once it has ended),
+    read from the first or the last EDGE bytes of its events file; None where none can be read."""
+    try:
+        with open(events_path(build, run), "rb") as f:
+            start = 0
+            if last:
+                f.seek(0, os.SEEK_END)
+                start = max(0, f.tell() - EDGE)
+                f.seek(start)
+            data = f.read(EDGE)
+    except OSError:
+        return None
+    lines = data.split(b"\n")[:-1]          # (whole lines: the last piece is empty or still being written)
+    if last and start:
+        lines = lines[1:]                   # (the first piece may begin inside a line)
+    for line in (reversed(lines) if last else lines[:1]):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            return record
+    return None
+
+
+def settled(build, run):
+    """({result: functions}, {result: other subjects}) a run settled (see the module): from its end
+    event where it has them, else counted over its events (a run of before 2026-10-24, or one going on)."""
+    end = edge_event(build, run, last=True)
+    if end and end.get("event") == "end" and isinstance(end.get("settled"), dict):
+        return dict(end["settled"]), dict(end.get("settled_other") or {})
+    functions, other = collections.Counter(), collections.Counter()
+    for e in read_lines(events_path(build, run))[0]:
+        if e.get("event") == "settled":
+            (functions if is_function(e.get("function")) else other)[str(e.get("result"))] += 1
+    return dict(functions), dict(other)
+
+
+def asked_functions(counts):
+    """The functions a run asked about, of its settled counts: those of every result but "unasked"."""
+    return sum(n for result, n in (counts or {}).items() if result != "unasked" and isinstance(n, int))
+
+
+def estimate(build, task, config, kind=None, functions=0, batch=True, settings=None, name=None):
+    """What a run of task over `functions` functions would cost at a provider's prices (config: its table
+    in llm.toml, kind: its kind, name: its name for the words), from an earlier run of the task on this
+    target: the newest ended one that asked functions, preferring one whose settings that change what a
+    function costs (ESTIMATE_SETTINGS) are those given (settings: as dread pilot settings_of keeps them).
+    Its tokens in, out, read from and written to a prompt cache, each over the functions it asked (settled
+    with a question: every result but "unasked"), priced at config's prices; the share of its answers that
+    came from Message Batches at the batch rate where batch (this run may ask in batches), none otherwise.
+    Returns {"cost": US dollars or None, "functions", "per_function", "basis": {"run", "task", "provider",
+    "model", "how", "asked", "answers", "batch", "cost", "settings"} or None, "differ": [[setting, the
+    basis's value, the value given]], "batch_share", "words": how it was made, or why there is none}.
+
+    What it does not establish: the shared stages (groups, globals and structures) are spread over the
+    functions the earlier run asked, whatever their number now; a function's questions grow with its
+    code, and an answer's length with the model; a run started again asks only what has no answer yet,
+    where a dry run of --task readable counts the functions named already too. A rough figure for
+    choosing a budget: --budget is what holds a run to one."""
+    from dread import llm
+    out = {"cost": None, "functions": functions, "per_function": None, "basis": None, "differ": [],
+           "batch_share": None}
+    prices = llm.prices_of(config or {}, kind)
+    label = name or (config or {}).get("model") or "the provider"
+    if prices is None:
+        out["words"] = "no estimate: %s has no prices in llm.toml (price_in, price_out)" % label
+        return out
+    keys = ESTIMATE_SETTINGS.get(task, ())
+    wanted = {k: (settings or {}).get(k) for k in keys}
+    chosen = None
+    for entry in runs(build):
+        if entry.get("task") != task or entry.get("status") != "ended" or not entry.get("answers"):
+            continue
+        start = edge_event(build, entry["run"]) or {}
+        end = edge_event(build, entry["run"], last=True) or {}
+        if end.get("event") != "end" or not end.get("input"):
+            continue
+        counts = end["settled"] if isinstance(end.get("settled"), dict) else settled(build, entry["run"])[0]
+        asked = asked_functions(counts)
+        if not asked:
+            continue
+        had = {k: (start.get("settings") or {}).get(k) for k in keys}
+        differ = [[k, had[k], wanted[k]] for k in keys if settings is not None and had[k] != wanted[k]]
+        candidate = (entry, start, end, asked, differ)
+        if not differ:
+            chosen = candidate
+            break
+        if chosen is None:
+            chosen = candidate
+    if chosen is None:
+        out["words"] = ("no estimate: no earlier run of --task %s on this target asked any function; a first run "
+                        "with a small --budget gives one (the budget stops it where its own estimates say the money "
+                        "ends)" % task)
+        return out
+    entry, start, end, asked, differ = chosen
+    answers = max(1, int(end.get("answers") or 0))
+    share = (int(end.get("batch") or 0) / answers) if batch else 0.0
+    per = {k: float(end.get(k) or 0) / asked for k in ("input", "output", "cache_read", "cache_write")}
+    plain = llm.answer_cost(config, kind, per["input"], per["output"], per["cache_read"], per["cache_write"])
+    batched = llm.answer_cost(config, kind, per["input"], per["output"], per["cache_read"], per["cache_write"],
+                              mode="batch")
+    each = (1 - share) * plain + share * batched
+    out.update(cost=each * functions, per_function=each, differ=differ, batch_share=share,
+               basis={"run": entry["run"], "task": task, "provider": entry.get("provider"), "model": entry.get("model"),
+                      "how": entry.get("how"), "asked": asked, "answers": int(end.get("answers") or 0),
+                      "batch": int(end.get("batch") or 0), "cost": end.get("cost"),
+                      "settings": {k: (start.get("settings") or {}).get(k) for k in keys}})
+    words = "about %s: %d functions at %s a function, the tokens a function of run %s (%s, %s functions asked, %s) " \
+            "at %s's prices" % (money(out["cost"]), functions, money(each), entry["run"], entry.get("provider") or "?",
+                                "{:,}".format(asked), money(end.get("cost")), label)
+    if share:
+        words += ", %.0f %% of them in Message Batches as there" % (100 * share)
+    elif batch and (kind or (config or {}).get("kind")) == "anthropic" and (config or {}).get("batch", True):
+        words += " (it asked one at a time: in Message Batches, half price, this run may cost less)"
+    if differ:
+        words += "; its settings differ: %s" % ", ".join("%s %s (now %s)" % (k, json.dumps(a), json.dumps(b))
+                                                          for k, a, b in differ)
+    out["words"] = words + "; rough (the shared stages spread over its functions)"
     return out
 
 

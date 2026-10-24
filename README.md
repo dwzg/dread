@@ -56,7 +56,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick); each run kept as a record: both device logs with the function behind each entry, and who entered whom (calls through pointers, tasks started by their scheduler, exceptions) | done |
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
 | Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order, the functions in groups found from their code alone, the subsystems a reader would see (`dread groups`: shared memory, texts and devices, neighbours in memory); renaming everywhere at once (`dread rename`) | done |
-| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes; the system run's device logs of both images side by side; every command from a form made from its own options, run as a job with its log followed; a Setup page: what this machine has, a new target from an ELF or a raw image (a path or an upload), its first analyses as a chain of jobs, the language-model providers with their keys in key files | done |
+| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes; the system run's device logs of both images side by side; every command from a form made from its own options, run as a job with its log followed; a Setup page: what this machine has, a new target from an ELF or a raw image (a path or an upload), its first analyses as a chain of jobs, the language-model providers with their keys in key files; the pilot started from a short form with an estimate, followed live within its budget, stopped, its runs, costs per month and comparisons | done |
 | Setting up (`dread doctor`, `dread new`, `dread llm set`/`key`): the prerequisites with what to install for this system's package manager; a target directory and its `dread.toml` from an ELF (architecture, image, startup copies, memory map, compiler and its flags from the debug information, the tables from the symbols) or from a raw image (an architecture of a list, a load address), each guess marked; providers added and changed in `llm.toml` with its comments kept, keys in files of mode 600 | first version |
 | Relations (`dread relations`, and in the browser): a function's callers, callees, memory, texts and structures as a graph, each piece marked by how sure its name is (its vote's agreement, and the name review's suspects); the whole program as a graph of its groups (`dread groups --json`), a group opening into its functions, a search lighting the functions and groups it finds; both laid out by a force simulation as they are drawn | first version |
 | Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
@@ -178,7 +178,8 @@ lifted function's readable C to read, each statement's first instruction in a ma
 in the listing), verdicts and cases, search by name, proposed name, address and text. Its only changes are
 names (through `dread rename`), notes (annotations.txt) and the commands its Run page starts; everything
 else is the tools' work. Keys: `/` search, `j` `k` lines, `Enter` follow, `n` rename, `;` note, `r`
-relations, `p` the whole program, `s` the system run, `x` run a command, `u` setup, `?` all of them.
+relations, `p` the whole program, `s` the system run, `x` run a command, `u` setup, `l` the pilot, `?` all of
+them.
 
 The Run page (`x`, or the button in the bar) has a form for every command of DREAD, made from the
 command's own options as `--help` lists them (a subcommand's form inside its command's; dread pilot's
@@ -188,6 +189,25 @@ and the others waiting, its output kept in BUILD/gui/jobs and followed live, wit
 processes, SIGKILL after a grace period), Run again, and Change and run. Where a job changes the tables,
 the other views reload. The jobs live with the server: stopping it stops them, and the history stays.
 `dread gui --read-only` changes nothing and runs nothing.
+
+The pilot page (`l`, or the dial in the bar) runs `dread pilot` and watches it:
+- **Start**: a short form of what matters (the task, the provider with its prices, a budget in dollars,
+  all functions or the first N or some, Message Batches on or off, the few options the task needs), the
+  command line it makes, and an estimate where an earlier run of the task gives one (the dry run's count
+  times that run's tokens a function at the chosen provider's prices; `dread pilot --dry-run` prints
+  the same). "Every option" opens the Run page's form of dread pilot filled in with these.
+- **A run**: followed live from its events (BUILD/pilot/runs): the stage, the questions answered of those
+  planned, the Message Batches out and their age, the spend against the budget (the bar turns amber,
+  then red, near it), the rate and the time left, and the names as they come, newest first, each with
+  its function's page, accepted or refused and why. Stop sends its job SIGTERM: the run cancels its
+  batches and ends "stopped", its tables as it left them; started again, it goes on where it stopped.
+- **The runs before**, how each ended, what it cost and named; **the cost per month** from the usage
+  ledger, per provider, with the shares of Message Batches and of the prompt cache and what they saved;
+  **comparisons** of names as dread pilot makes them: with the true names (`--score`, which asks
+  nothing without a judge), with another copy's names (`--against`), two settings over replicate copies
+  (`--vs`).
+
+Keys stay out of the page: it says whether a provider's key is there, never what it is.
 
 A function's relations are the pieces of the puzzle around it, as a graph:
 - its callers above and callees below, to a depth of 1 to 3;
@@ -232,6 +252,8 @@ program is drawn on a canvas, its repulsion approximated by Barnes-Hut.
 ![The system run of a FreeRTOS build: the device logs of the original and of the image with 329 functions from lifted C side by side, each entry with the function that made it](docs/images/gui-timeline.webp)
 ![The Run page: dread lift's form, made from its options, and the command line it makes](docs/images/gui-run.webp)
 ![A job: the lift check run from the page, its command line, exit status and log](docs/images/gui-job.webp)
+![The pilot page's short form: a readable run with Haiku on a FreeRTOS build, its budget, the functions, batches off, and its estimate from the run before](docs/images/gui-pilot.webp)
+![A pilot run followed live: its stages, the questions answered of those planned, the spend against the budget, a Message Batch out and its age](docs/images/gui-pilot-run.webp)
 
 ### With Claude Code
 

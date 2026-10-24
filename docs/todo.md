@@ -4441,12 +4441,80 @@ reimplement them.
   range any more: gizmo-mips's names [0xbfc014f0, 0xbfc01500], of which .ramfunc's last 8 bytes now lie
   in the first half (the overlay could put C over them). Take the line out when the list is empty, and
   regenerate gizmo-mips (found 2026-10-24 by dread new, which writes the target from scratch).
-- [ ] 3. The pilot: start a run (task, provider, budget, batches), follow it live (stage, questions asked
+- [x] 3. The pilot: start a run (task, provider, budget, batches), follow it live (stage, questions asked
   and answered, batches waiting and their age, spend so far against the budget, the names as they
   come), stop it (its batches cancelled: a job's stop is SIGTERM to its process group, which makes the
   pilot cancel its batches; start_command's grace gives it longer than 30 s where that takes longer),
   its history and the cost per month (the usage log), two runs compared (--score, the judge). The
   pilot's side (structured progress events, the budget) is done: 3a; the page reads dread.pilotlog.
+  Done 2026-10-24 (dread/guipages/pilot.py, dread/web/pilot.js and pilot.css; docs/decisions.md, "The
+  pilot page"):
+  - The pilot page (#/pilot, key `l`, a dial in the bar with the runs going on): a short form of the
+    pilot's own options (its parser through dread.cliforms: the task, the provider of llm.toml with its
+    prices, Message Batches and prompt cache and whether its key is there, never the key; the budget in
+    dollars; all functions, the first N or some; Message Batches on or off with their round size; the
+    two to four options each task needs), the command line (the Run page's route), Copy, Start (a job of
+    `dread pilot`, grace 60 s), and "Every option": the Run page's form of dread pilot filled in with
+    these (run.js now takes `#/run/NAME@["--x", ...]`). Providers and keys are set up on the Setup page
+    (a link; each provider's key said there or not, and from where: dread.llm key_status). A server
+    without a target shows the cost per month here and starts nothing (the routes about runs: 409).
+  - The estimate: the dry run's count (dread.pilot planned, from which `dread pilot --dry-run` now prints
+    too; for --task readable those without an entry in readable_names, a guess the readable C confirms
+    as the run begins) times the tokens a function of the newest earlier run of the task on this target
+    at the chosen provider's prices, its share of Message Batches at the batch rate where this run may
+    batch, a run with the same settings preferred and differing ones named (dread.pilotlog estimate);
+    the dry run prints the same line. None without an earlier run, and the page says why.
+  - A run (#/pilot/ID; #/pilot/job/N until the job's run begins): the stage and the stages with their
+    questions, the questions answered of those planned (a bar), the answers and those from Message
+    Batches, the spend against the budget (a bar that turns amber at 75 % and red at 90 %), the rate and
+    the time left, the batches out with their age and answers, the budget reached, the end with its
+    totals, the warnings and errors; the names as they come, newest first (each function settled with
+    its name and vote or its variables' names and sentence, each refusal with its reason, the stages and
+    batches; every answer too where a function is asked once), each with a link to its function's page.
+    The server folds each followed run from the offset it read (Follow) and the page polls from its own:
+    a poll reads what was written since. Stop is the run's job's stop (the job whose process is the
+    run's), "stopping" until the end event "stopped" comes; a run started elsewhere is followed, not
+    stopped; a run gone without an end offers to cancel its batches (`dread llm batches --cancel`, a
+    job).
+  - The runs before (task, image, provider, how it ended, answers, cost of the budget, functions named,
+    duration, its job), from pilotlog.runs and the end's new counts (`settled`, `settled_other`:
+    docs/formats.md; an older run's events counted once); the cost per month from the usage ledger
+    (usage_summary per month: per provider its answers, share from Message Batches, input tokens and the
+    shares read from and written to the prompt cache, output tokens, cost, and what batches and cache
+    saved against the standard prices; every month with its total).
+  - Comparisons as the pilot makes them, started as jobs and shown by what the pilot prints: with the
+    true names (--score TRUTH, the target's ELF files offered; free without a judge), with another
+    copy's names.tsv (--against with --grounded or --judge, the copies beside the target offered), two
+    settings over replicate copies (--against ... --vs ... --grounded); the judge defaults to the run's
+    provider, else the cheapest. Two runs picked in the history are explained: other tasks' names have
+    no comparison in the pilot, and two naming runs of one target are one set of names (one names.tsv).
+  - Found on the way: a function page's readable C did not show names a run wrote to readable_names
+    while the page was open (the reading was kept by the load's generation only): now kept by the
+    names' too (app.js), so the function pages follow a readable run as the list and overview follow a
+    naming run.
+  - Checked: tests/test_gui_pilot.py with a fake provider (Anthropic's Messages API and Message Batches
+    played on 127.0.0.1, its key made up; the jobs reach it through an llm.toml of the test's own and
+    write a usage ledger of their own): a run started from the page, its run found by its job's process,
+    followed from offsets while its batch is out (the stage, the batch and its age), stopped (the batch
+    cancelled at the provider, the end "stopped", the job "stopped"); a run to its end with its names on
+    the list and in the function pages, the history, the month's costs with the batches' share, the
+    estimate from it (and its settings differing), a --score comparison as a job; two runs explained; no
+    answer of the page and no job record or log holding the key; a read-only server that starts and
+    stops nothing. tests/test_pilotlog.py: the end's counts, an older run's counted from its events,
+    estimate() with and without batches and settings, the dry run's plan and estimate line.
+    tests/test_gui_pilot_browser.py: the same page in headless Chrome (skipped without Playwright).
+  - The trial, on a stripped copy of FreeRTOS GCC -Os (mps2) with Haiku 5.5, followed in headless Chrome,
+    light and dark, 1360 and 390 px wide (no horizontal scroll, no script error; docs/decisions.md has the
+    figures): a readable run of 80 functions to its end ($0.0203, two Message Batches); its estimate for
+    the next 12 ($0.0053 one at a time, $0.0028 with batches); those 12 stopped by a budget of $0.003 (7
+    named, $0.0032), a function page open meanwhile showing the names as they were written; a naming run
+    stopped from the page while its batch was out (cancelled, none of it billed), run again ($0.0009),
+    and compared with the true names and with an older copy's names ($0.0013); after the rebase onto
+    step 2, a naming run of three functions ($0.0005) with the history and the costs. Spent: $0.0263.
+  - Not established: a run's job is found by its pid on this host; the estimate is rough (pilotlog
+    estimate: the shared stages are spread over the earlier run's functions, and a readable run's count
+    of functions named already is a guess before their C is made); not tried on macOS or in Firefox; most
+    of the trial ran before step 2 came onto main (after the rebase only the short naming run above).
 - [x] 3a. The pilot's side of 3: a run followed live and kept within a budget. Done when every run
   writes structured events as they happen, `dread pilot --budget DOLLARS` stops a run where its
   estimates say the budget ends with the tables as for a normal end, `dread pilot --status [--follow]`

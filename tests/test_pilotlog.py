@@ -365,3 +365,97 @@ def test_a_budget_needs_prices_and_is_not_for_the_review(tmp_path, monkeypatch, 
     assert pilot.main(["--target", target.root, "--task", "review", "--budget", "1"]) == 1
     assert "not for --task review" in capsys.readouterr().err
     assert pilotlog.runs(target.build) == []
+
+
+def test_the_end_counts_what_was_settled_and_older_runs_are_counted_from_their_events(tmp_path):
+    """The end event and the index's end line count the functions settled by result, and apart the
+    other subjects (groups, batches of globals, the device); runs() and settled() read them, and an
+    older run's events (no counts in its end) are counted."""
+    build = str(tmp_path / "build")
+    log = pilotlog.RunLog.start(build, "readable", "main", "played", "m", {"thinking": True}, None, 3)
+    for function, result in (("f1", "named"), ("f2", "named"), ("f3", "unasked"), ("globals 0", "named"),
+                             ("group 4", "none"), ("device", "named")):
+        log.event("settled", function=function, result=result)
+    log.end("budget reached", answers=3, cost=0.002, input=3000, output=900, batch=2)
+    end = pilotlog.events(build, log.run)[0][-1]
+    assert end["settled"] == {"named": 2, "unasked": 1} and end["settled_other"] == {"named": 2, "none": 1}
+    assert pilotlog.runs(build)[0]["settled"] == {"named": 2, "unasked": 1}
+    assert pilotlog.settled(build, log.run) == ({"named": 2, "unasked": 1}, {"named": 2, "none": 1})
+    assert pilotlog.asked_functions(end["settled"]) == 2
+    assert pilotlog.edge_event(build, log.run)["event"] == "start"
+    assert pilotlog.edge_event(build, log.run, last=True)["event"] == "end"
+    old = "20261020-120000-name-0ld0"                   # (as a run of before the counts left its events)
+    os.makedirs(os.path.dirname(pilotlog.events_path(build, old)))
+    with open(pilotlog.events_path(build, old), "w") as f:
+        for e in ({"event": "start", "run": old, "task": "name", "t": 1.0}, {"event": "settled", "function": "a",
+                  "result": "proposed"}, {"event": "settled", "function": "group 1", "result": "named"},
+                  {"event": "end", "how": "done", "answers": 2, "t": 2.0}):
+            f.write(json.dumps(e) + "\n")
+    assert pilotlog.settled(build, old) == ({"proposed": 1}, {"named": 1})
+    assert pilotlog.is_function("FUN_00001234") and not pilotlog.is_function("structures 2")
+
+
+def test_an_estimate_from_an_earlier_run_of_the_task(tmp_path):
+    """estimate(): the tokens a function asked of the newest ended run of the task, at the prices given,
+    the share of its answers in Message Batches at the batch rate where this run may batch; one with the
+    same settings preferred, a run with other settings said to differ; none without such a run or without
+    prices."""
+    build = str(tmp_path / "build")
+    config = {"price_in": 1.0, "price_out": 5.0}            # (an "openai" provider: no cache or batch factors)
+    assert pilotlog.estimate(build, "readable", {}, "openai", 10)["words"].startswith("no estimate: the provider has "
+                                                                                       "no prices")
+    assert "no earlier run of --task readable" in pilotlog.estimate(build, "readable", config, "openai", 10)["words"]
+
+    def run(settings, tokens_in, tokens_out, batch, asked=4):
+        log = pilotlog.RunLog.start(build, "readable", "main", "played", "m", settings, None, asked)
+        for k in range(asked):
+            log.event("settled", function="f%d" % k, result="named")
+        log.event("settled", function="f_late", result="unasked")
+        log.end("done", answers=asked, batch=batch, input=tokens_in, output=tokens_out, cost=0.01)
+        time.sleep(1.1)                                     # (runs are ordered by their start time)
+        return log.run
+    first = run({"thinking": True}, 4000, 800, 0)
+    second = run({"thinking": False}, 2000, 400, 4)
+    got = pilotlog.estimate(build, "readable", config, "openai", 10, batch=True, settings={"thinking": True}, name="p")
+    assert got["basis"]["run"] == first and got["differ"] == [] and got["batch_share"] == 0.0
+    assert got["per_function"] == pytest.approx((1000 * 1.0 + 200 * 5.0) / 1e6)
+    assert got["cost"] == pytest.approx(10 * got["per_function"]) and "at p's prices" in got["words"]
+    newest = pilotlog.estimate(build, "readable", config, "openai", 10, batch=True, settings={"thinking": None})
+    assert newest["basis"]["run"] == second and newest["differ"] == [["thinking", False, None]]
+    batched = pilotlog.estimate(build, "readable", dict(config, price_batch=0.5), "openai", 10, batch=True,
+                                settings={"thinking": False})
+    assert batched["basis"]["run"] == second and batched["batch_share"] == 1.0
+    assert batched["per_function"] == pytest.approx(0.5 * (500 * 1.0 + 100 * 5.0) / 1e6)
+    alone = pilotlog.estimate(build, "readable", dict(config, price_batch=0.5), "openai", 10, batch=False,
+                              settings={"thinking": False})
+    assert alone["per_function"] == pytest.approx(2 * batched["per_function"])
+    assert pilotlog.estimate(build, "name", config, "openai", 10)["cost"] is None
+
+
+def test_the_dry_run_plans_and_prices_a_naming_run(tmp_path, monkeypatch, capsys):
+    """pilot.planned: the functions a naming run takes and those it asks (not those proposed already);
+    a name the image lacks refused; no plan for a task whose questions come as it runs. The dry run
+    prints the estimate from the run before (the tokens a function at the provider's prices)."""
+    target, image, program, flow = copy_of(tmp_path / "gizmo")
+    made = []
+    monkeypatch.setattr(llm, "load", provider_loader(made))
+    plan = pilot.planned(target, image, program, "name", NAMES)
+    assert sorted(plan["functions"]) == sorted(NAMES) and plan["asked"] == plan["functions"] and plan["already"] == 0
+    with pytest.raises(ValueError, match="no function nosuch"):
+        pilot.planned(target, image, program, "name", ["led_on", "nosuch"])
+    assert pilot.planned(target, image, program, "write") is None
+    assert pilot.main(["--target", target.root, "--task", "name", "--dry-run", "led_on"]) == 0
+    assert "dread pilot --dry-run: no estimate: no earlier run of --task name" in capsys.readouterr().out
+    assert name_run(target) == 0
+    capsys.readouterr()
+    plan = pilot.planned(target, image, program, "name", NAMES + ["strlen", "clamp"])
+    assert sorted(plan["asked"]) == ["clamp", "strlen"] and plan["already"] == len(NAMES)
+    run = pilotlog.runs(target.build)[0]
+    assert pilot.main(["--target", target.root, "--task", "name", "--samples", "2", "--passes", "1",
+                       "--no-subsystems", "--dry-run", "strlen", "clamp"]) == 0
+    out = capsys.readouterr().out
+    assert "2 functions would be asked about" in out
+    line = [l for l in out.splitlines() if l.startswith("dread pilot --dry-run: about $")][0]
+    assert "2 functions at" in line and run["run"] in line and "settings differ" not in line, line
+    assert pilot.main(["--target", target.root, "--task", "name", "--dry-run", "nosuch"]) == 1
+    assert "no function nosuch" in capsys.readouterr().err

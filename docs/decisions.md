@@ -9,6 +9,106 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The pilot page: a short form of the pilot's own options, a run followed from its events, its job's stop (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), for step 3 of "The GUI for
+everything" (docs/todo.md; the user, 2026-10-24: "... an easy way to set everything up and run and
+monitor the pilot?").
+
+- **Question.** How does the page start a pilot run, say beforehand what it may cost, follow it while it
+  runs, stop it, and show the runs before, their cost and their comparison, without a second
+  implementation of anything the pilot does?
+- **Options and choices.**
+  1. The form: (a) the Run page's form of dread pilot (three dozen options, the task's tied ones shown
+     for it); (b) a form of the page's own, its fields written in the page; (c) a short form of the
+     pilot's own fields (dread.cliforms describe of its parser): the task, provider, budget, all
+     functions or the first N or some, Message Batches on or off, and the two to four options each task
+     needs (SHORT). **(c)**, with the Run page's form one click away and filled in with these values: the
+     Run page takes `#/run/NAME@["--x", ...]` (a JSON list of words, read back into its form through
+     the parser, as `@N` reads job N's), a few lines of run.js. The help, defaults and checks are the
+     parser's, and the command line is the Run page's own route, so the short form cannot drift from
+     `dread pilot --help`. Undo: drop SHORT and link the Run page.
+  2. The estimate: (a) build every question of the run and weigh each with the run's meter (exact input
+     tokens; but a readable run's questions need every function's readable C, seconds to minutes, and a
+     naming run's later questions depend on answers not given yet); (b) a fixed price a function; (c)
+     the pilot's dry run's count of what it would ask (dread.pilot planned, which the dry run itself now
+     prints from) times the tokens a function asked of an earlier run of the task on this target
+     (dread.pilotlog estimate), priced at the chosen provider's prices, the earlier run's share of
+     Message Batches at the batch rate where this one may batch, a run with the same settings that
+     change a function's cost preferred (ESTIMATE_SETTINGS) and differing ones named. **(c)**, and no
+     estimate where no such run exists (the page says why and points to a first run with a small
+     --budget, which is what holds a run to a sum anyway). The dry run prints the same line, so the
+     figure is the pilot's, not the page's. It is rough: the shared stages (groups, globals and
+     structures) are spread over the functions of the earlier run, and a dry run of --task readable
+     takes a function with an entry in readable_names for named (its readable C, made as the run begins,
+     decides: an entry made for other C is asked again). Undo: the route and the dry run's line.
+  3. Following a run: (a) the page reads the events file from its offset and folds it itself; (b) the
+     server folds each followed run from the byte offset it has read (Follow: pilotlog.Run, the newest
+     KEEP = 400 events worth a line, at most 16 runs kept, the least recently asked dropped) and answers
+     the page with the state and the events since the page's offset. **(b)**: a poll a second reads only
+     what was written since, and the answers (thousands on a long run) reach the page as counts in the
+     state, not one by one; a first look gets the newest 400 events worth a line and says how many older
+     ones it left out. A poll a second, as the Run page's log (decision "The GUI runs every command", 4).
+  4. Stopping: the run's job (the page's job whose process is the run's: the same pid on this host, the
+     run begun while the job ran; no new field in the events or the job's record), its stop (SIGTERM to
+     its group), with a grace of 60 s (three times llm.STOP_WAIT: the batches' cancels, the questions
+     being asked, the end event) before SIGKILL. A run started elsewhere (a terminal, another server)
+     is followed and not stopped: the page says where to stop it. A run gone without an end (killed
+     outright) may have left Message Batches billed at the provider: its page offers their cancel, a job
+     of `dread llm batches --cancel`.
+  5. The history: pilotlog.runs, with what each run settled. The end event and the index's end line now
+     count the functions settled by result (`settled`, and the other subjects apart: `settled_other`;
+     docs/formats.md), so that the list needs the index alone; an older run's events are counted once and
+     kept by the file's size and time.
+  6. The cost per month: dread.llm usage_summary for the month shown and for every month of the ledger,
+     each provider with its share of answers from Message Batches, its shares of input tokens read from
+     and written to the prompt cache, and what both saved against the standard prices (its tokens at
+     price_in and price_out); priced with today's llm.toml, as `dread pilot --usage` prices, so a
+     provider since taken out of llm.toml shows "no prices".
+  7. Comparisons: what the pilot compares (function names, names.tsv of --task name: with the true names,
+     --score; with another copy's names.tsv, --against with --grounded or --judge; two settings over
+     replicate copies, --against ... --vs ... with --grounded), started as jobs of dread pilot, their
+     result what the pilot prints and writes. Two runs picked in the history are explained instead: the
+     pilot has no comparison for the other tasks' names (no truth to score variables against, no judge
+     for them), and two naming runs of one target wrote one names.tsv, the later asking only what had
+     no proposal, so they are one set of names; separate copies are compared with --against. The judge
+     defaults to the start form's provider where it has prices, else the cheapest.
+  8. Keys and providers: the page shows whether a provider's key is there and where a request would take
+     it from (dread.llm key_status: $KEY_ENV in the server's environment, or a key file that passes its
+     checks, else why not), never a key; setting providers and keys up is the Setup page's (a link). A
+     server without a target (the Setup page alone) shows the cost per month here and starts nothing:
+     the routes about a target's runs answer 409 with the way to one.
+  9. The estimate is a POST with the page's token (it reads the image's tables in the server; another
+     web page must not trigger it) that a read-only server answers: it changes nothing.
+- **Found on the way.** A function's readable C on its page stayed as it was when a run wrote the
+  readable_names table: the page kept the reading by its load's generation, which the names tables do
+  not change; it is now kept by the names' too (app.js readingBody), so a readable run from the page
+  shows its names on the function pages as they come (the overview and the list already reloaded).
+- **Measured** (2026-10-24; a stripped copy of FreeRTOS GCC -Os, mps2, its readable table made by `dread
+  readable --check`; Haiku 5.5; the page in headless Chrome, light and dark, 1360 and 390 px wide). A
+  readable run of the first 80 functions, Message Batches from 20 questions, a budget of $0.03: to its end
+  in 5 min 14 s, $0.0203, 85 answers, 80 of them from two batches (24 admitted first, the other 56 once
+  those were answered), followed live (its stages, the batch out with its age, the spend at 28 %, the
+  time left). After it the form's estimate for 12 more functions: $0.0053 one at a time, $0.0028 with
+  batches. Those 12 with a budget of $0.003, one question at a time: "budget reached" after 27 s, 7
+  named, $0.0032 (107 % of the budget: the questions being answered cost more than their estimates, as
+  the meter allows); a function page left open showed its globals' new names 6 s after the run wrote
+  them. A naming run of 10 functions stopped from the page while its batch of 9 questions was out:
+  "stopped" 2 s after the click, the batch cancelled at the provider (`dread llm batches`: canceled 9, none
+  billed); run again to its end, $0.0009; its names compared with the true names (--score, free) and with
+  an older copy's names.tsv (--against --judge haiku, $0.0013). Spent on the trial: $0.0263 of Haiku 5.5
+  (with the run after the rebase, below).
+  Following a played run of 1,830 answers (4,028 events, 756 KB; Follow alone): the first look 18 ms (the
+  newest 400 events worth a line, 80 KB of JSON), a poll with nothing new 0.1 ms, one with an event 0.03 ms.
+- **Not established.** The run's job is found by its process on this host; the estimate's accuracy
+  beyond the earlier run it takes (pilotlog.estimate's docstring); the page was tried with Haiku 5.5 on
+  FreeRTOS only (above), in Chrome, most of it before the Setup page and its key files came onto main
+  (rebased onto them since: its tests pass, and a naming run of three functions from the page, $0.0005,
+  with the history and the costs, the copies' providers priced as haiku); not on macOS or in Firefox.
+- **Status.** In the code (dread/guipages/pilot.py, dread/web/pilot.js, pilot.css; dread/pilot.py
+  planned, estimate_line; dread/pilotlog.py estimate, settled, edge_event, the end's counts; run.js's
+  handed-over words; app.js readingBody).
+
 ## Setting up: dread doctor, dread new, keys from a file, one server that opens the target it made (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), for step 2 of "The GUI for
