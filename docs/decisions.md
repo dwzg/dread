@@ -9,6 +9,68 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Arrays a pointer walks, members for derived pointers, a callee that reaches one field past its pointer (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Arrays and
+members for uniform runs and interior pointers" (docs/todo.md).
+
+- **Question.** Static data that code fills through a pointer it steps printed as a structure of
+  numbered fields with padding between (FreeRTOS GCC -Os's vStartTimerDemoTask: xAutoReloadTimers, 21
+  handles, as `struct g_200017dc_t { u32 f_0; u8 pad_4[72]; u32 f_4c; u32 f_50; }`); a typed pointer
+  plus the offset of a field printed as an integer sum (`(u32)r0 + 8` for &pxList->xListEnd), an access
+  of another width at a field's place as a raw access; a structure handed at an offset to a callee
+  that reaches one field of it stayed flat (xTimerCreate's `vListInitialiseItem((u32)r0_1 + 4)` for
+  &pxNewTimer->xTimerListItem); and a variable that holds a stack argument read through its address
+  (`r4 = *(volatile u32 *)&s2`) was never typed, so prvInitialiseNewTask wrote its task block's every
+  field raw. What says that an array lies where a pointer walks, which derived pointers print as
+  members, and what makes a held structure a member of its type?
+- **Options and choices.**
+  1. A walk's evidence: (a) the machine code's pass (each arch layer's value_step following a register
+     stepped by a constant), (b) the lifted functions' readable C: a variable given one constant address
+     and otherwise only stepped by one constant (dread.statics walks), its accesses taken as indexed
+     ones at its start with its stride as the scale and its start as the base. **(b)**: no arch layer
+     changes, as for the indexed accesses (2026-10-23). Strides of two bytes or more (a byte walk is a
+     text or a buffer: texts keep their notes); a walk counts only where its start is a base that counts
+     (separate_bases), tried with the end its structure would have (a walk alone, from a base the plan
+     does not trust, made a one-element array that cut the structure there); the count stays what the
+     code reaches at constant places. A walking variable handed to a callee gives the callee's reach in
+     each element (statics.handed): pxReadyTasksLists' elements took vListInitialise's five fields.
+  2. Derived pointers: (a) a typed variable plus the offset of a field is the field's address
+     (`&p->f_8`, `&p->f_4.f_8` inside a held structure), in every use but against a constant (a
+     member's address a compiler may take for never null: the sum stays, as a held structure's address
+     does against 0); an access of another width at a field's place through the field's address
+     (`*(volatile u8 *)&p->f_8`, one access of its width); (b) also variables that hold such addresses
+     typed as pointers to the field's type. **(a)**: (b) is dread.vartypes' to decide by its cast trials.
+  3. What makes a structure a member of its type: (a) a callee whose template reaches one field past
+     its pointer and none in front of it takes one kind of structure, as one that reaches two fields
+     did (shapes.structure: the call holds, links kinds, and a structure handed at an offset holds the
+     callee's there); (b) a callee's parameter typed as a structure (dread.vartypes' prototypes, made
+     after the plan) makes its callers' memory that structure. **(a)**: within the analysis, and one
+     field at the pointer itself still says nothing (memset, memcpy, strcmp touch offset 0 of
+     anything). vListInitialiseItem (one field at 16) now takes items: its prvInitialiseNewTask caller
+     hands it the task block's items, so xTimerCreate's timer holds an item at 4.
+  4. Typing a value read through a variable's address: `_uses` kept every variable an integer whose
+     assignment's value had an address-of a variable of the function in it (for a_1 = (u32)&s1, whose
+     typed reads clang -O2 took as outside s1). Now only one whose value may be that address: an
+     address-of under a dereference is read through, its value the argument.
+  5. dread.polish: an element's index is a number (vTaskSwitchContext's 31 - clz read 0x1fu once the
+     element's address was no longer the sum 20 * r4 + ...).
+- **Measured** (main -> after, the gate's readable functions; docs/todo.md has the rest): the gate
+  accepts the same functions on the eight builds, name by name; raw accesses on FreeRTOS GCC -Os 78 ->
+  61, clang -O2 105 -> 71, RISC-V GCC -Os 68 -> 67, GCC -O0 107 -> 90; members 711 -> 747, 689 -> 742,
+  439 -> 452, 700 -> 737; casts 810 -> 800, 790 -> 798, 521 -> 513, 731 -> 747 (a variable typed now and
+  read as an integer: (u32)r0); on the 39 builds' static data (--statics --score) structures 558 -> 547
+  and arrays 571 -> 583, each new array with its source's element size, no structure or array over
+  several variables (0 -> 0). Against the source (--score) no typed variable lost; duplicate structures
+  became one on clang -O2 and RISC-V (12 -> 10 and 7 -> 5 beyond one per source structure), every held
+  member where the source holds one. The plan and the readable C take as long as before (within half a
+  second a build).
+- **Undo.** statics.LEAST_STRIDE above every stride (walks find none); shapes.structure without its
+  one-field clause; apply_types without field_address and the field's address for other widths;
+  shapes._uses' handed() back to any address-of; polish without the Index clause; the arrays' trust
+  back to the base's full reach (statics.plan own_end).
+- **Status.** In the code (dread/statics.py, dread/shapes.py, dread/polish.py; tests/test_statics.py,
+  tests/test_shapes.py, tests/test_polish.py).
 ## Readable C kept by what it is made of: the check's rounds make anew only what changed (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "A cheaper

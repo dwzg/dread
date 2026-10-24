@@ -29,7 +29,9 @@ by where its value goes, its use, and only where C gives the printed form the sa
 - decimal: a constant below DECIMAL wherever the check lets a plain int stand (0 and 1 for 0x0u and
   0x1u; 1u where only an unsigned literal keeps the type); a larger one where its use is a number: a
   divisor, a modulus, a multiplier (multiplier: not a division's reciprocal, x * 0x5556u >> 16), a
-  shift's count, a bound in an ordered comparison, or a constant assigned to, stored into, compared
+  shift's count, a bound in an ordered comparison, an element's index (g_x[i], since 2026-10-24: the
+  arrays of static data took away the index times the element size that had made i a number), or a
+  constant assigned to, stored into, compared
   with or added to a place (a variable, a field, memory at a fixed address; a sum's constant also by
   the place the sum goes into) whose object holds numbers. One radix per object (_objects): the places
   of one object (a variable; an array's elements, a local's, static data's or a typed pointer's, x[k]
@@ -505,6 +507,9 @@ class Polisher:
                 address(e.base)
             elif isinstance(e, C.Index):
                 address(e.base)
+                p = place_of(e.index)       # (an element's index counts: g_x[r4] makes r4 a number, as
+                if p:                       # 20 * r4 did where the element's address was a sum)
+                    numbers.add(p)
             if isinstance(e, C.Name):
                 reads[e.id] = reads.get(e.id, 0) + 1
                 if bits == "shift":

@@ -195,7 +195,12 @@ structure's fields
 are those a C structure holds at their offsets without packing (naturally aligned, not overlapping,
 the gaps bytes); a function's variables listed there are declared `volatile struct NAME *` and their
 accesses written as members (`p->f_2c`, `p->f_4.f_8` inside a held structure; its address
-`&p->f_4`), every other use cast to u32. `digest` is the readable C's
+`&p->f_4`; since 2026-10-24 a field's address `&p->f_8` too, and an access of another width at a
+field's place through it, `*(volatile u8 *)&p->f_8`), every other use cast to u32. Since 2026-10-24 a
+callee that reaches one field past its pointer (none in front of it) makes what its callers hand it
+one kind, as one that reaches two fields did: a structure handed at an offset to such a callee holds
+its structure there (`embeds`; FreeRTOS's timer and the item it hands vListInitialiseItem); a table
+from before has fewer such members, and is read as before. `digest` is the readable C's
 before names (dread.naming): a function whose C changed since gets no types until the next check.
 Written by `dread readable --check` from every lifted function's readable C before it checks any;
 the builds read it. Not edited by hand. A file from before `embeds` has none: its structures are
@@ -228,7 +233,10 @@ at the address the code made where its accesses' constants lie below it (`table[
 literal, not the constant an element below it); an access whose constant lies below an array that
 starts at the address its arithmetic adds is that array's element at the index minus the elements
 below (`g_20000020[r0 - 1].f_4`). A file from before keeps its starts (an array then started at the
-lowest constant, or was not found).
+lowest constant, or was not found). Since 2026-10-24 a pointer that walks static data (given an
+address, stepped by a constant of two bytes or more) gives the elements' size as an index would, where
+its start is a base that counts (dread.statics walks): FreeRTOS's xAutoReloadTimers, filled so, is an
+array of 21 words, not a structure of three. A file from before lists such an object among `statics`.
 
 `params` (left out when empty; since 2026-10-23) lists, for every analysed function, the indices of
 its parameters that it uses as a pointer (dread.shapes pointer_params): `{FUNCTION: [0, 2]}`. A

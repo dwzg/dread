@@ -79,7 +79,13 @@ and aligned in every element (an element's first field that nothing reads a gap,
 structure starts), and what callees reach through an element's address. Without readable C (a
 function that does not lift), a structure whose fields are one type one after another, which the
 machine code reaches with an index of that width, is an array of that type (a run of equal fields
-that the code also indexes). Readable C writes an element's field as one (g_200299f8[r9].f_4,
+that the code also indexes). A pointer that walks static data (walks: given an address, stepped by
+one constant of two bytes or more) says the same of its accesses as an index would, its stride the
+elements' size and its start the base (since 2026-10-24: FreeRTOS GCC -Os's vStartTimerDemoTask fills
+xAutoReloadTimers through r5 = 0x200017dcu ... r5 = r5 + 4, and the timers printed as a structure
+of a word at 0 and two at 0x4c and 0x50 with 72 bytes of padding between); only where its start is
+a base that counts, tried with the end its structure would have (a walk alone makes no array).
+Readable C writes an element's field as one (g_200299f8[r9].f_4,
 g_20000c74[1], the index plus the element its constant lies in, g_x[r3 + 1], or minus the elements
 below the array's start it lies, g_x[r0 - 1].f_4: the index as the code computes it) through a macro
 that is a pointer to the first element (#define g_200299f8 ((volatile struct g_200299f8_t
@@ -633,18 +639,84 @@ def straight_facts(fn, visit, memory=None):
     walk(fn.body.body, {})
 
 
+LEAST_STRIDE = 2        # the least step of a walk that says an array lies there (walks; bytes: a text, a buffer)
+
+
+def walks(fn, memory=None):
+    """{variable: (start, stride)} of the function's variables that walk static data with a pointer: one
+    plain assignment gives it a constant address the plan looks at (its start) and every other one adds
+    one constant stride to it, at least LEAST_STRIDE and below 2**31 (v = v + 4: a pointer that goes up an
+    element at a time), nothing else writes it (no ++, +=, assignment inside an expression or initial
+    value: readable C before dread.polish) and it is none of _unsure. FreeRTOS GCC -Os's
+    vStartTimerDemoTask fills xAutoReloadTimers so: r5 = 0x200017dcu; ... *(volatile u32 *)r5 = r0_1; r5 =
+    r5 + 4. A walk that goes down, steps by a variable or starts at two addresses is none."""
+    from dread import cparse as C
+    from dread.cflow import walk_expr
+    from dread.naming import _exprs
+    defs, bad = {}, set(_unsure(fn))
+    for s in _statements(fn):
+        got = _assignment(s)
+        if got is not None:
+            defs.setdefault(got[0], []).append(got[1])
+        if isinstance(s, C.Decl):
+            bad.update(d.name for d in s.items if d.init is not None)
+        for e in _exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Assign) and isinstance(x.target, C.Name) and not (got is not None and x is s.e):
+                    bad.add(x.target.id)
+                elif isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--") and isinstance(x.e, C.Name):
+                    bad.add(x.e.id)
+    out = {}
+    for v, values in sorted(defs.items()):
+        if v in bad:
+            continue
+        starts, steps = set(), set()
+        for value in values:
+            const, terms = linear(value)
+            if not terms:
+                starts.add(const)
+            elif list(terms) == [v] and terms[v][0] == 1 and isinstance(terms[v][1], C.Name):
+                steps.add(const)
+            else:
+                break
+        else:
+            if len(starts) == 1 and len(steps) == 1:
+                a, k = starts.pop(), steps.pop()
+                if LEAST_STRIDE <= k < 1 << 31 and _address(memory, a):
+                    out[v] = (a, k)
+    return out
+
+
+def _walked(addr, found):
+    """(the address, stride, start) of an address of readable C that is a walking variable (found: walks)
+    plus a constant c, at the start plus c in the walk's first step, else None."""
+    from dread import cparse as C
+    const, terms = linear(addr)
+    if len(terms) != 1:
+        return None
+    k1, term = next(iter(terms.values()))
+    if k1 != 1 or not isinstance(term, C.Name) or term.id not in found:
+        return None
+    a, k = found[term.id]
+    return (a + const) % WORD, k, a
+
+
 def indexed_accesses(fn, memory=None):
-    """[(constant, scale, type, base)] of the function's loads and stores (readable C: *(volatile u32
-    *)(...)) at a constant plus a scaled index (scaled, with the scales of scales_of), the scale at least
-    the access's width: what says that an array of elements of that size lies there. base: the address
-    the code made (base_of) or None. The constant is an address the plan looks at, or lies below the
-    base by at most BELOW elements (below_base: table[i - 1], whose constant can lie in front of the
+    """[(constant, scale, type, base[, walk])] of the function's loads and stores (readable C: *(volatile
+    u32 *)(...)) at a constant plus a scaled index (scaled, with the scales of scales_of), the scale at
+    least the access's width: what says that an array of elements of that size lies there. base: the
+    address the code made (base_of) or None. The constant is an address the plan looks at, or lies below
+    the base by at most BELOW elements (below_base: table[i - 1], whose constant can lie in front of the
     memory region the array starts). 0x200299f8u + 0x14u * r9_2 + 4 is (0x200299fc, 20, "u32",
-    0x200299f8)."""
+    0x200299f8). An access through a variable that walks static data (walks) plus a constant c is one
+    at its start plus c with its stride as the scale and its start as the base, marked (walk True: the
+    plan takes it only where the start is a base that counts, find_arrays): *(volatile u32 *)(r5 - 4)
+    with r5 walking from 0x200017dc by 4 is (0x200017d8, 4, "u32", 0x200017dc, True)."""
     from dread import cparse as C
     from dread.cflow import walk_expr
     from dread.naming import ACCESS, _exprs
     facts = scales_of(fn, memory)
+    walking = walks(fn, memory)
     out = []
     for s in _statements(fn):
         for e in _exprs(s):
@@ -653,6 +725,12 @@ def indexed_accesses(fn, memory=None):
                     continue
                 m = ACCESS.match(" ".join(x.e.type.split()))
                 if not m or isinstance(x.e.e, C.Num):
+                    continue
+                walked = _walked(x.e.e, walking) if walking else None
+                if walked is not None:
+                    c, k, a = walked
+                    if k >= SIZES.get(m.group(1), 4) and (_address(memory, c) or below_base(a, c, k, memory)):
+                        out.append((c, k, m.group(1), a, True))
                     continue
                 got = scaled(x.e.e, facts)
                 if got is None or got[1] < SIZES.get(m.group(1), 4):
@@ -678,7 +756,9 @@ def handed(trees, shapes_, memory=None):
     address that is a constant plus an index times a scale (scaled: &pxReadyTasksLists[uxPriority]
     handed to vListInsertEnd) comes with the scale, its constant the address, and its base (base_of):
     what the callee reaches lies in an element of an array of that element size (the element the
-    constant lies in counted from the base where it lies below it: &table[i - 1])."""
+    constant lies in counted from the base where it lies below it: &table[i - 1]); so does a variable
+    that walks static data (walks) plus a constant, with its stride as the scale and its start as the
+    base (vListInitialise(r4) with r4 walking pxReadyTasksLists by 20)."""
     from dread import cparse as C
     from dread.cflow import walk_expr
     from dread.constants import SMALLEST_POINTER
@@ -686,7 +766,7 @@ def handed(trees, shapes_, memory=None):
     summaries = shapes_.summaries
     out = {}
     for _, fn, _ in trees:
-        facts = None
+        facts, walking = None, None
         for s in _statements(fn):
             for e in _exprs(s):
                 for x in walk_expr(e):
@@ -701,11 +781,15 @@ def handed(trees, shapes_, memory=None):
                         v, k, base = constant(a), None, None
                         if v is None:
                             if facts is None:
-                                facts = scales_of(fn, memory)
-                            got = scaled(a, facts)
-                            if got is None or got[1] < 2:
-                                continue
-                            v, k, base = got[0], got[1], base_of(a, facts, memory)
+                                facts, walking = scales_of(fn, memory), walks(fn, memory)
+                            got = _walked(a, walking) if walking else None
+                            if got is not None:
+                                v, k, base = got
+                            else:
+                                got = scaled(a, facts)
+                                if got is None or got[1] < 2:
+                                    continue
+                                v, k, base = got[0], got[1], base_of(a, facts, memory)
                         if not (v >= SMALLEST_POINTER and _address(memory, v)) and not (
                                 k is not None and below_base(base, v, k, memory)):
                             continue
@@ -786,10 +870,23 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
         bounds |= {c.run, c.run + c.size}
     found = {}
     if indexed:
+        before = sorted(starts)
+
+        def own_end(o):
+            """Where a structure at base o ends (as below, before the arrays): its reach, cut where the next
+            object starts and at its region's end; the end a base that counts is tried with (on RISC-V GCC
+            reaches the variables behind an array through the array's upper half: the array's base reached
+            them, and tried up to its full reach it counted for no array where it counted for a structure)."""
+            end = o + reach.get(o, 0)
+            i = bisect.bisect_right(before, o)
+            if i < len(before):
+                end = min(end, before[i])
+            region = memory.region(o) if memory is not None else None
+            return min(end, region.end) if region is not None else end
         found = find_arrays(indexed, evidence_, accesses, data_symbols, bounds, memory,
                             [r for _, rows in sorted((handed or {}).items()) for r in rows],
                             lambda o: trust == "all" or (o in through and separate_bases(
-                                o, o + reach.get(o, 0), through[o], seen, near)))
+                                o, own_end(o), through[o], seen, near)))
         starts |= set(found)
         if arrays is not None:
             arrays.update(found)
@@ -861,37 +958,39 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
 
 def find_arrays(indexed, evidence_, accesses, data_symbols=(), bounds=(), memory=None, handed=(), trusted=None):
     """{start: (element size, count, [(offset in the element, type)])} of the arrays that the readable
-    C's indexed accesses show ({function: [(constant, scale, type[, base])]}, indexed_accesses): an
-    access at a constant plus an index times k says that elements of k bytes lie there, the access's
-    place a field of one. Accesses with one scale whose constants lie less than k apart are one array
-    (the fields of one element: pxReadyTasksLists' counts at 0x200299f8 + 20 * i, its indices at
-    0x200299fc + 20 * i). Where it starts: where every address the code made the accesses from
-    (base_of's base, else their origin in evidence_) lies above all of them, by at most BELOW elements,
-    the array starts at the lowest of those addresses, or at a data symbol within an element below it
-    (_made_above), and the accesses are at elements below its start (table[i - 1].level: GCC and clang
-    make table's own address, and the index's -1 and the field's offset fold into a constant an element
-    below it; without this the array started at that constant, its structure at the lowest field read,
-    and a data symbol in front of it, another variable's, could even be taken for its start); else at
-    the greatest data symbol at most k below the lowest of them, else at the greatest address the code
-    made such an access from or handed out there, else at the lowest constant. It
-    reaches as far as its accesses' elements (at least one) and, where its start is a base that counts
-    (trusted(start): plan's separate_bases; not a section anchor nor clang's merged globals, whose next
-    variables lie at further elements' places), the elements the code reaches at constant addresses
-    from its start (xAutoReloadTimers' [0], [19] and [20]: 21 elements, as declared), never past what
-    bounds says starts (a data symbol, a startup range) nor its memory region; arrays of one element
-    size where one goes on from the other are one, and of two that overlap with different sizes the one
-    with fewer accesses goes. An element's fields are every access inside the array at its offset in an
-    element (indexed or at a constant address, through any base; an indexed one below the start at its
-    offset in the element it lies in), laid out as layout() does and also aligned in every element (the
-    element size a multiple of each field's), none across an element's end; and what callees reach
-    through an element's address handed to them (handed: [(address, {offset: {type: count}}, scale or
-    None[, base])], statics.handed: a constant one inside the array, or an indexed one with the array's
-    element size, also one below the array's start that the array's start is the base of), at their
-    offsets from that address. What is not established: that the array is the source's (an index into
-    the middle of a structure that holds an array reads as an array of its own) and how many elements it
-    has (the count is what the code reaches at constant places, at least one); that a compiler which
-    folds a field's offset or the index's constant into the literal it loads (none of GCC 4.9 and 16 and
-    clang 23 did in our tests) makes the array's start: such a literal is taken for it."""
+    C's indexed accesses show ({function: [(constant, scale, type[, base[, walk]])]}, indexed_accesses):
+    an access at a constant plus an index times k says that elements of k bytes lie there, the access's
+    place a field of one (an access through a pointer that walks static data, walk True, says so too,
+    but only where the array's start is a base that counts, trusted: what the code reaches from it at
+    constant places is then the array's; a walk alone makes no array). Accesses with one scale whose
+    constants lie less than k apart are one array (the fields of one element: pxReadyTasksLists' counts
+    at 0x200299f8 + 20 * i, its indices at 0x200299fc + 20 * i). Where it starts: where every address
+    the code made the accesses from (base_of's base, else their origin in evidence_) lies above all of
+    them, by at most BELOW elements, the array starts at the lowest of those addresses, or at a data
+    symbol within an element below it (_made_above), and the accesses are at elements below its start
+    (table[i - 1].level: GCC and clang make table's own address, and the index's -1 and the field's
+    offset fold into a constant an element below it; without this the array started at that constant,
+    its structure at the lowest field read, and a data symbol in front of it, another variable's, could
+    even be taken for its start); else at the greatest data symbol at most k below the lowest of them,
+    else at the greatest address the code made such an access from or handed out there, else at the
+    lowest constant. It reaches as far as its accesses' elements (at least one) and, where its start is
+    a base that counts (trusted(start): plan's separate_bases; not a section anchor nor clang's merged
+    globals, whose next variables lie at further elements' places), the elements the code reaches at
+    constant addresses from its start (xAutoReloadTimers' [0], [19] and [20]: 21 elements, as declared),
+    never past what bounds says starts (a data symbol, a startup range) nor its memory region; arrays of
+    one element size where one goes on from the other are one, and of two that overlap with different
+    sizes the one with fewer accesses goes. An element's fields are every access inside the array at its
+    offset in an element (indexed or at a constant address, through any base; an indexed one below the
+    start at its offset in the element it lies in), laid out as layout() does and also aligned in every
+    element (the element size a multiple of each field's), none across an element's end; and what
+    callees reach through an element's address handed to them (handed: [(address, {offset: {type:
+    count}}, scale or None[, base])], statics.handed: a constant one inside the array, or an indexed one
+    with the array's element size, also one below the array's start that the array's start is the base
+    of), at their offsets from that address. What is not established: that the array is the source's (an
+    index into the middle of a structure that holds an array reads as an array of its own) and how many
+    elements it has (the count is what the code reaches at constant places, at least one); that a
+    compiler which folds a field's offset or the index's constant into the literal it loads (none of GCC
+    4.9 and 16 and clang 23 did in our tests) makes the array's start: such a literal is taken for it."""
     origins, escapes = {}, set()
     for ev in evidence_.values():
         escapes |= ev.escapes
@@ -903,12 +1002,13 @@ def find_arrays(indexed, evidence_, accesses, data_symbols=(), bounds=(), memory
         for row in rows:
             c0, k, t0 = row[:3]
             made = row[3] if len(row) > 3 and row[3] is not None else origins.get((fname, c0, t0))
+            walk = len(row) > 4 and bool(row[4])
             for c, t in _words(c0, t0):
                 if k % SIZES.get(t, 4) or not (_address(memory, c) or below_base(made, c, k, memory)):
                     continue                # (an element holds every access whole and aligned)
-                by_scale.setdefault(k, []).append((c, t, made))
+                by_scale.setdefault(k, []).append((c, t, made, walk))
     symbols_ = sorted(data_symbols)
-    candidates = sorted(set(o for rows in by_scale.values() for _, _, o in rows if o is not None) | escapes)
+    candidates = sorted(set(o for rows in by_scale.values() for _, _, o, _ in rows if o is not None) | escapes)
     ends = sorted(bounds)
     through = {}                            # origin -> the addresses accessed through it at constant offsets
     for ev in evidence_.values():
@@ -917,7 +1017,7 @@ def find_arrays(indexed, evidence_, accesses, data_symbols=(), bounds=(), memory
                 through.setdefault(o, set()).add(a)
     groups = []                             # [element size, start, count, rows]
     for k, rows in sorted(by_scale.items()):
-        rows.sort(key=lambda r: (r[0], r[1], r[2] or 0))
+        rows.sort(key=lambda r: (r[0], r[1], r[2] or 0, r[3]))
         run = []
         for row in rows + [None]:
             if run and (row is None or row[0] - run[0][0] >= k):
@@ -926,13 +1026,17 @@ def find_arrays(indexed, evidence_, accesses, data_symbols=(), bounds=(), memory
                 if start is None:
                     start = _greatest(symbols_, hi - k, lo)
                 if start is None:
-                    start = _greatest(sorted({o for _, _, o in run if o is not None} | set(
+                    start = _greatest(sorted({o for _, _, o, _ in run if o is not None} | set(
                         candidates[bisect.bisect_right(candidates, hi - k):bisect.bisect_right(candidates, lo)])),
                         hi - k, lo)
                 if start is None:
                     start = lo
-                n = max([1] + [(c - start) // k + 1 for c, _, _ in run])
-                if trusted is None or trusted(start):   # (a base of its own: what it reaches is the array's)
+                n = max([1] + [(c - start) // k + 1 for c, _, _, _ in run])
+                counts = trusted is None or trusted(start)  # (a base of its own: what it reaches is the array's)
+                if not counts and all(w for _, _, _, w in run):
+                    run = [] if row is None else [row]      # (a walk alone: no array)
+                    continue
+                if counts:
                     n = max([n] + [(a - start) // k + 1 for a in through.get(start, ()) if a >= start])
                 end = start + n * k
                 i = bisect.bisect_right(ends, start)
@@ -964,8 +1068,8 @@ def find_arrays(indexed, evidence_, accesses, data_symbols=(), bounds=(), memory
     out = {}
     for k, start, n, run in sorted(kept, key=lambda g: g[1]):
         fields = {}
-        for c, t, _ in run + [(w, u, o) for (_, a, t), o in sorted(origins.items())
-                              if o == start and start <= a < start + k * n for w, u in _words(a, t)]:
+        for c, t, *_ in run + [(w, u, o) for (_, a, t), o in sorted(origins.items())
+                               if o == start and start <= a < start + k * n for w, u in _words(a, t)]:
             fields.setdefault((c - start) % k, {}).setdefault(t, 0)
             fields[(c - start) % k][t] += 1     # (and the machine code's through its start: scale not shown)
         for a in places[bisect.bisect_left(places, start):bisect.bisect_left(places, start + k * n)]:
@@ -1004,7 +1108,7 @@ def _made_above(run, k, lo, hi, symbols_=(), memory=None):
     decided as before (a data symbol, an origin within an element below the lowest, the lowest), so
     that a field's address one function made does not move an array whose start another function
     made."""
-    made = sorted({m for _, _, m in run if m is not None and (below_base(m, lo, k, memory) or hi - k < m <= lo)})
+    made = sorted({m for _, _, m, *_ in run if m is not None and (below_base(m, lo, k, memory) or hi - k < m <= lo)})
     if not made or made[0] <= lo:
         return None
     m = made[0]

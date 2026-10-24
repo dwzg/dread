@@ -2118,7 +2118,7 @@ model).
   objects: done 2026-10-23 with "Local objects whose address goes to a callee" (volatile only where an
   address may escape into memory: dread.frames kept_params; print_status's and
   xTimerGenericCommandFromTask's are plain now).
-- [ ] **Arrays and members for uniform runs and interior pointers.** An object accessed at constant
+- [x] **Arrays and members for uniform runs and interior pointers.** An object accessed at constant
   offsets of one element type prints as a structure of numbered fields and padding, walked by integer
   pointer arithmetic; an access through `p + k` stays raw where the structure has a member at k; the
   address of an embedded structure is `(u32)((u64)(u32)p + 4 + 0)`. Make a run of same-type fields at
@@ -2128,6 +2128,56 @@ model).
   g_200017dc_t { u32 f_0; u8 pad_4[72]; u32 f_4c; u32 f_50; }`, filled by `*(volatile u32 *)r5 =
   r0_1; r5 = w_1;`); xTimerCreate and prvProcessExpiredTimer
   (`vListInitialiseItem((u32)((u64)(u32)r0_1 + 4 + 0))` for `&pxNewTimer->xTimerListItem`).
+  Done 2026-10-24 (docs/decisions.md, "Arrays a pointer walks, members for derived pointers, a callee
+  that reaches one field past its pointer"). Walks (dread.statics walks): a variable of a lifted
+  function's readable C given one address of static data and otherwise only stepped by one constant of
+  two bytes or more is a pointer that walks an array; its accesses count as indexed ones at its start
+  with its stride as the scale (indexed_accesses), its address handed to a callee as an element's
+  (handed: pxReadyTasksLists' elements take vListInitialise's five fields), only where the start is a
+  base that counts, tried with the end its structure would have (the arrays' trust used the base's
+  whole reach, which on RISC-V GCC covered the variables behind the array). vStartTimerDemoTask now
+  reads `r5 = &g_200017dc[0];` ... `*r5++ = r0_1;` ... `g_200017dc[20] = r0_2;`, `#define g_200017dc
+  ((volatile u32 *)0x200017dcu)`. Members for derived pointers (dread.shapes apply_types): a typed
+  variable plus a field's offset is the field's address (`r0->f_c = (u32)&r0->f_8;` in vListInitialise,
+  `(u32)&r0->f_4.f_8` inside a held structure), against a constant the sum as before; an access of
+  another width at a field's place goes through the field's address (`*(volatile u8 *)&p->f_8`). A
+  callee that reaches one field past its pointer and none in front of it takes one kind of structure,
+  as one that reaches two did (shapes.structure): vListInitialiseItem takes items, the timer xTimerCreate
+  hands it at 4 holds one, `vListInitialiseItem(&r0_1->f_4);` under `void vListInitialiseItem(volatile
+  struct s_9 *r0) { r0->f_10 = 0; }`; getters of one field take their structure (`uxQueueMessagesWaiting`:
+  `r0->f_38` for `r0[14]`), and the queue's set container at 0x48 is a pointer to a queue, as the
+  source's. A value read through a stack argument's address (`r4 = *(volatile u32 *)&s2`) may be typed
+  (shapes._uses): prvInitialiseNewTask's and xTimerCreateStatic's task block and timer print as members.
+  dread.polish takes an element's index for a number (vTaskSwitchContext's `31 - clz`).
+  Measured on the eight builds (main -> now; dread.cmetrics over the gate's readable functions, and their
+  printed C): the gate accepts the same functions, name by name (gizmo a32 35, m3 36, m4 44, rv32 31;
+  FreeRTOS GCC -Os 317, clang -O2 275, RISC-V GCC -Os 252, GCC -O0 354); raw accesses GCC -Os 78 -> 61,
+  clang -O2 105 -> 71, RISC-V GCC -Os 68 -> 67, GCC -O0 107 -> 90 (with a constant offset, `*(volatile
+  T *)(x + k)`: 62 -> 47, 66 -> 35, 58 -> 57, 54 -> 40); members 711 -> 747, 689 -> 742, 439 -> 452, 700 ->
+  737; members' addresses `&p->` 35 -> 46, 32 -> 44, 27 -> 35, 36 -> 47, a typed pointer plus a constant
+  as an integer `(u32)p + k` 26 -> 19, 22 -> 13, 11 -> 3, 18 -> 8; typed variables 242 -> 253, 201 -> 214,
+  165 -> 173, 266 -> 290 (none lost); casts 810 -> 800, 790 -> 798, 521 -> 513, 731 -> 747 (up where a
+  variable typed now is read as an integer: clang -O2's vQueueDelete compares its queue with the
+  registry's handles, `(u32)r0` ten times; GCC -O0 rereads its stack arguments, a cast each time). The
+  structures with numbered runs that became arrays: xAutoReloadTimers on GCC -Os; on the 39 builds
+  (dread readable --statics --score) structures 558 -> 547, arrays 571 -> 583, every new one inside one
+  source variable with its element size, their fields 1602 -> 1859, 1591 -> 1848 the source's. Functions
+  whose readable C changed: 35, 58, 41 and 85, of them 6, 37, 17 and 59 only by the structures' numbers
+  (s_N): structures 50 -> 49, 54 -> 50, 28 -> 26, 46 -> 47, kinds the weak holds joined; names by anchor
+  and offset (readable_names' structs part) keep every field (293, 450, 235, 269); xAutoReloadTimers'
+  field names (keyed by offset) no longer apply, its object's does. Against the source (dread readable
+  --score): pointer fields the source's pointers to a structure 20 of 23 -> 21 of 25, 45 of 55 -> 31 of
+  41, 33 of 33 -> 22 of 22, 13 of 17 -> 14 of 19 (fewer counted where duplicate structures became one:
+  source structures in 23 -> 21 and 14 -> 12 of ours on clang -O2 and RISC-V, 12 -> 10 and 7 -> 5 beyond
+  one each), the typed parameters' fields still 97-99 % the source's, every held member where the source
+  holds one. The plan 10.9 -> 11.4 s, 14.0 -> 14.6, 8.7 -> 8.7, 12.2 -> 12.1; the readable C of every
+  lifted function 5.7 -> 5.7, 6.0 -> 6.4, 4.4 -> 4.2, 5.7 -> 5.6 s (eight workers, best of two, a shared
+  machine). Left: arrays inside structures behind pointers (a task block's ulNotifiedValue[] indexed,
+  `*(volatile u32 *)((u32)r0 + ((r1 + 18) << 2))`, its pcTaskName walked from `(u32)r4 + 0x33u`);
+  links that point to items or to a list's end marker stay integers, and the raw accesses through them
+  (`*(volatile u32 *)(r2_1 + 4)`); walks downwards or from two addresses; static data that is one of
+  dread.shapes' structures keeps a type of its own (FreeRTOS's lists: 24-43 casts a build of their
+  addresses to the list's structure pointer, `(volatile struct s_24 *)&g_20029988`).
 - [ ] **Structures that share a header stay apart.** Structures that begin with the same link (a list
   node at offset 0) and pass through the same list functions merge into one type with each one's
   fields at their offsets; an access to one's field that falls inside another's member prints raw.

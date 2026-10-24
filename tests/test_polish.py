@@ -204,6 +204,11 @@ def test_radix_by_use():
         assert line in out, (line, out)
     single = polished("u32 f(u32 r0)\n{\n    if (r0 != 0) g_20000930 = 0xb4u;\n    return 0;\n}\n")
     assert "g_20000930 = 0xb4u;" in single, single
+    # (an element's index is a number: FreeRTOS's vTaskSwitchContext computes the priority it indexes
+    # its ready lists with as 31 - clz, which read 0x1fu once the element's address was no longer the
+    # sum 20 * r4 + ...)
+    index = polished("u32 f(u32 r0)\n{\n    u32 r4;\n    r4 = 0x1fu - (r0 >> 3);\n    return ((volatile u32 *)0x20000100u)[r4];\n}\n")
+    assert "r4 = 31 - (r0 >> 3);" in index, index
 
 
 def test_masks_stay_masks():

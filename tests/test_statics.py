@@ -964,3 +964,120 @@ def test_the_arrays_of_gizmo_start_where_its_code_makes_their_address(variant):
     assert all(a in made or a in symbols for a in arrays), (sorted(arrays), statics.describe(found, arrays))
     if variant == "a32":                    # (handle_key's table: its literal, 0x20dac)
         assert arrays.get(0x20dac, (None,))[0] == 1 and 0x20dac - 98 not in arrays, statics.describe(found, arrays)
+
+
+# ---- arrays that a pointer walks (2026-10-24)
+
+# A pointer that walks static data: given an address, stepped by a word, read one element back
+WALK = ("/* f at 0x0 */\n#include \"dread.h\"\nextern u32 make(u32);\n"
+        "u32 f(u32 r0)\n{\n    u32 r3, r5, r6;\n    r5 = 0x20000100u;\n    r3 = 0;\n"
+        "L_1: ;\n    *(volatile u32 *)r5 = make(r3); r5 = r5 + 4;\n    r3 = r3 + 1;\n"
+        "    if (r3 != 10) goto L_1;\n    r6 = *(volatile u32 *)(r5 - 4);\n"
+        "    *(volatile u32 *)0x20000128u = r6;\n    *(volatile u32 *)0x20000100u = 0;\n    return r6;\n}\n")
+
+
+def test_a_pointer_that_walks_static_data_says_an_array_lies_there():
+    """r5 = 0x20000100u, stepped by 4: a walk from that address (walks); the accesses through it are
+    elements of 4 bytes, the one read back (r5 - 4) an element below its start (indexed_accesses, marked
+    as a walk's). A walk by bytes, by a variable, downwards or from two addresses says nothing."""
+    fn = cparse.parse(WALK).function("f")
+    assert statics.walks(fn) == {"r5": (0x20000100, 4)}
+    assert statics.indexed_accesses(fn) == [(0x20000100, 4, "u32", 0x20000100, True),
+                                            (0x200000fc, 4, "u32", 0x20000100, True)]
+    for step in ("r5 = r5 + 1;", "r5 = r5 + r0;", "r5 = r5 - 4;", "r5 = r5 + 4; if (r3 == 3) r5 = 0x20000200u;"):
+        other = cparse.parse(WALK.replace("r5 = r5 + 4;", step)).function("f")
+        assert statics.walks(other) == {}, step
+
+
+def test_a_walk_makes_an_array_only_from_a_base_that_counts():
+    """The walk gives the elements' size; how many there are is what the code reaches at constant
+    places from the start, where the start is a base that counts (trusted: separate_bases). From a
+    base that does not count (a section anchor's run), a walk alone makes no array."""
+    fn = cparse.parse(WALK).function("f")
+    indexed = {"f": statics.indexed_accesses(fn)}
+    ev = statics.Evidence("f")
+    ev.accesses = [(0x20000100, "u32", 0x20000100, False), (0x20000128, "u32", 0x20000100, False)]
+    accesses = {0x20000100: {"u32": 1}, 0x20000128: {"u32": 1}}
+    got = statics.find_arrays(indexed, {"f": ev}, accesses, trusted=lambda start: True)
+    assert got == {0x20000100: (4, 11, [(0, "u32")])}, got
+    assert statics.find_arrays(indexed, {"f": ev}, accesses, trusted=lambda start: False) == {}
+
+
+@pytest.mark.compiles
+def test_a_walked_array_compiles_to_the_same_accesses(variant, tmp_path):
+    """The readable C with the walked array (the start's address &g_20000100[0], its elements at
+    constant places g_20000100[10]) compiles on every gizmo build, its loads and stores those of the C
+    without it: each one instruction of its width."""
+    from conftest import gizmo_dir
+    from dread import build
+    from dread.target import Target
+    target = Target.load(gizmo_dir(variant))
+    image = target.image()
+    arrays = {0x20000100: (4, 11, [(0, "u32")])}
+    widths = []
+    for label, plan in (("array", arrays), ("raw", {})):
+        t = cparse.parse(WALK)
+        naming.apply_globals(t, t.function("f"), None, None, arrays=plan)
+        text = cparse.unparse(t, notes=False)
+        if plan:
+            assert "r5 = (u32)&g_20000100[0];" in text and "g_20000100[10] = r6;" in text, text
+            assert "g_20000100[0] = 0;" in text, text
+        src = tmp_path / label
+        src.mkdir()
+        (src / "f.c").write_text(text)
+        objs = build.compile_all(target, image, str(src), str(tmp_path / (label + "-obj")), quiet=True,
+                                 flags=target.compiler.lifted_cflags)
+        assert len(objs) == 1
+        widths.append(access_widths(target, objs[0]))
+    if widths[0] is not None:
+        assert widths[0] == widths[1] and sum(widths[0].values()) == 4, widths
+
+
+# Timers made one after another into an array by a pointer walk, the last two at constant places
+# (FreeRTOS's vStartTimerDemoTask fills xAutoReloadTimers so); the period and the count are neighbours
+# the code reaches through bases of their own
+SPARROW = HEAD + """u32 sparrow_period;
+u32 sparrow_timers[12];
+u32 sparrow_count;
+u32 sparrow_make(u32 p, u32 i) __attribute__((noipa));
+void sparrow_start(u32 p)
+{
+    u32 i;
+    sparrow_period = p;
+    for (i = 0; i < 10; i++)
+        sparrow_timers[i] = sparrow_make(p, i);
+    sparrow_timers[10] = sparrow_make(p, 10);
+    sparrow_timers[11] = sparrow_make(p, 11);
+    sparrow_count = 12;
+}
+u32 sparrow_check(void) { return sparrow_timers[0] + sparrow_timers[11] + sparrow_period + sparrow_count; }
+u32 sparrow_make(u32 p, u32 i) { return p * 3 + i; }
+int main(void) { return 0; }
+"""
+
+
+@pytest.mark.parametrize("kind", [pytest.param(k, marks=needs_kind(k)) for k in ("a32", "m3", "rv32")])
+def test_an_array_a_pointer_walks_is_an_array_of_its_elements(kind, tmp_path):
+    """GCC -Os fills sparrow_timers through a pointer it steps by a word (ARM's post-indexed store,
+    RISC-V's addi) and its last two elements at constant offsets from the same base: an array of 12
+    words, not a structure of a word at 0 and two at 40 and 44 with a gap of bytes between (as
+    xAutoReloadTimers printed on FreeRTOS GCC -Os before 2026-10-24). Readable C writes the walk's
+    start as the first element's address and the others as elements; the gate accepts every function."""
+    from dread import build, readable
+    from dread.program import Program
+    target = kind_target(tmp_path, kind, SPARROW)
+    at = data(Program(target, target.image()))
+    program, context, lifter, found, arrays, _ = kind_plan(target)
+    assert arrays.get(at["sparrow_timers"]) == (4, 12, [(0, "u32")]), statics.describe(found, arrays)
+    assert at["sparrow_timers"] not in found, statics.describe(found, arrays)
+    image = target.image()
+    lines = []
+    accepted = readable.check(target, image, out=lines.append)
+    assert accepted == sorted(build.read_names(image.table("lifted"))) and "sparrow_start" in accepted, lines
+    out = readable.transform("sparrow_start", lifter.lift(program.by_name["sparrow_start"]).text,
+                             context=readable.Context(target, image))
+    name = "g_%x" % at["sparrow_timers"]
+    for text in ("&%s[0]" % name, "%s[10] = " % name, "%s[11] = " % name,
+                 "#define %s ((volatile u32 *)0x%xu)" % (name, at["sparrow_timers"])):
+        assert text in out, (text, out)
+    assert "struct %s_t" % name not in out, out

@@ -680,3 +680,96 @@ def test_the_source_s_structures_and_what_they_point_to_and_hold(tmp_path):
     assert structs["Item"]["pointers"] == {4: "Item", 8: "List"}, structs
     assert structs["List"]["pointers"] == {4: "Item", 12: "Item", 16: "List"} and structs["List"]["held"] == {8: "Item"}
     assert list(params.values()) == [{0: "Task", 1: "List"}], params
+
+
+# ---- members for derived pointers (2026-10-24)
+
+# A list's end marker at 8: its address stored into the list's links and compared, its first word read
+# as a byte once (another width at a field's place)
+ENDS = ("u32 init(u32 r0)\n{\n    *(volatile u32 *)(r0 + 8) = 0xffffffffu;\n    *(volatile u32 *)(r0 + 12) = r0 + 8u;\n"
+        "    *(volatile u32 *)(r0 + 4) = r0 + 8u;\n    *(volatile u32 *)(r0 + 16) = r0 + 8u;\n    *(volatile u32 *)r0 = 0u;\n"
+        "    if (r0 + 8u == 0) return 1u;\n"
+        "    if (*(volatile u32 *)(r0 + 4) == r0 + 8u) return 2u;\n"
+        "    return *(volatile u8 *)(r0 + 8);\n}\n")
+
+
+def test_a_field_s_address_and_another_width_at_it_are_written_through_the_field():
+    """r0 + 8, where the structure has a field at 8, is &r0->f_8 (a held structure's start was already
+    &r0->f_4); a byte read at the word field's place reads through its address, *(volatile u8
+    *)&r0->f_8; compared with a constant the address stays the sum (a compiler may take a member's
+    address for never 0)."""
+    p = plan_of(ENDS)
+    s = p.typed["init"]["r0"]
+    assert p.structs[s] == [(0, "u32"), (4, "u32"), (8, "u32"), (12, "u32"), (16, "u32")], p.structs
+    tree = cparse.parse(HEAD + ENDS)
+    shapes.apply_types(tree, tree.function("init"), p)
+    out = cparse.unparse(tree, notes=False)
+    for text in ("r0->f_c = (u32)&r0->f_8;", "r0->f_4 = (u32)&r0->f_8;", "r0->f_10 = (u32)&r0->f_8;",
+                 "if ((u32)r0 + 8u == 0) return 1u;", "if (r0->f_4 == (u32)&r0->f_8) return 2u;",
+                 "return *(volatile u8 *)&r0->f_8;"):
+        assert text in out, (text, out)
+
+
+@pytest.mark.compiles
+def test_a_field_s_address_compiles_to_the_same_accesses(variant, tmp_path):
+    """&r0->f_8 is r0 + 8 and *(volatile u8 *)&r0->f_8 the byte load at r0 + 8: on every gizmo build the
+    typed function's loads and stores are the integer one's, each one instruction of its width (GCC
+    may fold the address into a store with writeback instead of an add: the same accesses)."""
+    from conftest import gizmo_dir
+    from test_statics import access_widths
+    from dread import build
+    from dread.target import Target
+    target = Target.load(gizmo_dir(variant))
+    image = target.image()
+    p = plan_of(ENDS)
+    widths = []
+    for label in ("typed", "raw"):
+        tree = cparse.parse('#include "dread.h"\n' + ENDS)
+        if label == "typed":
+            shapes.apply_types(tree, tree.function("init"), p)
+        text = cparse.unparse(tree, notes=False)
+        assert ("&r0->f_8" in text) == (label == "typed"), text
+        src = tmp_path / label
+        src.mkdir()
+        (src / "f.c").write_text(text)
+        objs = build.compile_all(target, image, str(src), str(tmp_path / (label + "-obj")), quiet=True,
+                                 flags=target.compiler.lifted_cflags)
+        assert len(objs) == 1
+        widths.append(access_widths(target, objs[0]))
+    if widths[0] is not None:
+        assert widths[0] == widths[1] and sum(widths[0].values()) == 7, widths
+
+
+def test_a_value_read_through_a_stack_argument_s_address_may_be_a_pointer():
+    """r4 = *(volatile u32 *)&s1 holds the stack argument, not the address of a variable of the
+    function: it may point to a structure (FreeRTOS GCC -Os's prvInitialiseNewTask took its task block
+    so and wrote every field of it as a raw access); a_1 = (u32)&s1 itself stays an integer."""
+    p = plan_of(TWO, "u32 g(u32 r0, u32 r1, u32 r2, u32 r3, u32 s0, u32 s1)\n{\n    u32 a_1, r4;\n"
+                "    a_1 = (u32)&s0;\n    r4 = *(volatile u32 *)&s1;\n    *(volatile u32 *)(r4 + 12) = *(volatile u32 *)a_1;\n"
+                "    return t(r4) + *(volatile u32 *)(a_1 + 4);\n}\n")
+    assert p.typed["g"].get("r4") == p.typed["t"]["r0"] and "a_1" not in p.typed["g"], p.typed
+
+
+ITEMS = HELD.split("u32 drop(")[0] + (
+    "u32 item_clear(u32 r0)\n{\n    *(volatile u32 *)(r0 + 16) = 0u;\n    return 0;\n}\n"
+    "u32 clear(u32 r0)\n{\n    *(volatile u32 *)r0 = 0u;\n    return 0;\n}\n"
+    "u32 task_init(u32 r0)\n{\n    item_clear(r0 + 4u);\n    unlink(r0 + 4u);\n    *(volatile u32 *)(r0 + 44) = 3u;\n"
+    "    return 0;\n}\n"
+    "u32 alarm_init(u32 r0)\n{\n    *(volatile u32 *)r0 = 1u;\n    item_clear(r0 + 4u);\n    clear(r0 + 28u);\n"
+    "    *(volatile u32 *)(r0 + 24) = 7u;\n    *(volatile u8 *)(r0 + 36) = 1;\n    return 0;\n}\n")
+
+
+def test_a_callee_that_reaches_one_field_past_its_pointer_takes_one_kind():
+    """item_clear sets one field of what it gets, 16 bytes in (FreeRTOS's vListInitialiseItem sets an
+    item's container): a task block hands it the item it holds at 4, so it takes items, and the alarm
+    that hands it its own place 4 holds an item there, written as a member: item_clear((u32)&r0->f_4)
+    (before, (u32)r0 + 4, the alarm's structure flat). A callee that touches only offset 0 (memset's
+    kind) makes nothing a member: the alarm has a word at 28 of it, whose address it hands on."""
+    p = plan_of(ITEMS)
+    item, alarm = p.typed["unlink"]["r0"], p.typed["alarm_init"]["r0"]
+    assert p.typed["item_clear"]["r0"] == item, p.typed
+    assert p.embeds.get(alarm) == {4: item}, p.embeds
+    tree = cparse.parse(HEAD + ITEMS)
+    shapes.apply_types(tree, tree.function("alarm_init"), p)
+    out = cparse.unparse(tree, notes=False)
+    assert "item_clear((u32)&r0->f_4);" in out and "clear((u32)&r0->f_1c);" in out, out

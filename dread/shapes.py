@@ -89,6 +89,20 @@ it joined lists with items, and with them kept apart found fewer pointer fields 
 Two kinds one function takes as different parameters are joined neither through a slot nor as what
 one place holds. How many of ours each source structure is: score_kinds (dread readable --score for
 the plan's structures, with --shapes for the kinds the parameters point to).
+
+Members for derived pointers (since 2026-10-24): a typed variable plus the offset of a field of its
+structure is that field's address (&r0->f_8, &r0->f_4.f_8 inside a structure it holds; a held
+structure's own start was &r0->f_4 already), an access of another width at a field's place reads
+through the field's address (*(volatile u8 *)&r0->f_8, one access of its width at that address);
+compared with a constant such an address stays the sum, as a held structure's does with 0. A callee
+that reaches one field past its pointer and none in front of it takes one kind of structure, as one
+that reaches two fields does (structure(): FreeRTOS's vListInitialiseItem sets an item's container,
+and the timer that hands it its own place 4 now holds an item there, &pxNewTimer->xTimerListItem
+read (u32)r0_1 + 4 before); one field at the pointer itself still says nothing (memset, memcpy and
+strcmp). And a value read through the address of a variable of the function (r4 = *(volatile u32
+*)&s2, the lifters' read of a stack argument) may be a pointer; the address itself stays an integer
+(_uses: FreeRTOS GCC -Os's prvInitialiseNewTask and xTimerCreateStatic wrote their task block's and
+timer's every field as a raw access).
 """
 import re
 
@@ -943,9 +957,17 @@ def address_taken(fn):
 
 def structure(tmpl):
     """Whether a template says its memory is a structure: two fields or more at or after the pointer.
-    A header in front alone (vPortFree's) says nothing, nor does one field: memset, memcpy and strcmp
-    touch offset 0 of whatever they get, and made task blocks, queues and timer messages one kind."""
-    return tmpl is not None and tmpl[0] == "copy" and sum(1 for rel in tmpl[1] if rel >= 0) >= 2
+    A header in front alone (vPortFree's) says nothing, nor does one field at the pointer: memset,
+    memcpy and strcmp touch offset 0 of whatever they get, and made task blocks, queues and timer
+    messages one kind. One field past the pointer and none in front of it does (since 2026-10-24): a
+    callee that reaches into what it is given at a fixed place takes one kind of structure
+    (vListInitialiseItem sets an item's container at 16; called with a timer plus 4, the timer holds an
+    item there, which it held in no other function on FreeRTOS GCC -Os, and its address read (u32)r0_1
+    + 4 instead of &r0_1->f_4)."""
+    if tmpl is None or tmpl[0] != "copy":
+        return False
+    rels = list(tmpl[1])
+    return sum(1 for rel in rels if rel >= 0) >= 2 or (len(rels) == 1 and rels[0] > 0)
 
 
 def settle(shapes):
@@ -2314,7 +2336,11 @@ def _uses(fn):
     variable of the function (a_1 = (u32)&s1: the lifter reads a stack argument and the one after it
     through it; typed, clang -O2 took the second read as outside s1, and xTaskCreateStatic read unmapped
     memory). The address of static data at a fixed address (dread.naming's (u32)&g_20029988, a macro's
-    object, no variable of the function) is none: nothing derives an object's size from it."""
+    object, no variable of the function) is none: nothing derives an object's size from it; nor is a
+    value read through such an address (r4 = *(volatile u32 *)&s2, the lifter's read of a stack
+    argument: what it holds is the argument, a pointer the rewrite may type; until 2026-10-24 it stayed
+    an integer, and FreeRTOS GCC -Os's prvInitialiseNewTask wrote its task block's every field as a
+    raw access)."""
     from dread.cflow import walk_expr
     from dread.naming import _exprs, _inner, variables
     out = set()
@@ -2326,6 +2352,20 @@ def _uses(fn):
             x = x.base
         return not isinstance(x, C.Name) or x.id in own
 
+    def handed(e):
+        """Whether e's value may hold the address of a variable of the function: an address-of one in it
+        that no dereference reads through first."""
+        work = [e]
+        while work:
+            x = work.pop()
+            if isinstance(x, C.Unary) and x.op == "&" and local(x.e):
+                return True
+            if isinstance(x, C.Unary) and x.op == "*":
+                continue                    # (a load: its value is what lies there, not the address)
+            from dread.tidy import _children
+            work.extend(y for y in _children(x) if y is not None)
+        return False
+
     def visit(st):
         if isinstance(st, C.Decl):
             out.update(d.name for d in st.items if d.init is not None or d.ptr or d.dims)
@@ -2336,8 +2376,7 @@ def _uses(fn):
             for x in walk_expr(e):
                 if isinstance(x, C.Assign) and x.op != "=" and isinstance(x.target, C.Name):
                     out.add(x.target.id)
-                if isinstance(x, C.Assign) and isinstance(x.target, C.Name) and any(
-                        isinstance(y, C.Unary) and y.op == "&" and local(y.e) for y in walk_expr(x.value)):
+                if isinstance(x, C.Assign) and isinstance(x.target, C.Name) and handed(x.value):
                     out.add(x.target.id)
                 if isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--", "&") and isinstance(x.e, C.Name):
                     out.add(x.e.id)
@@ -2351,14 +2390,16 @@ def _uses(fn):
 def apply_types(tree, fn, p, made_for=None, names=None):
     """The function's pointer variables declared as pointers to the plan's structures (volatile, so
     that every access stays one), their accesses written as members (p->f_2c, p->f_4.f_8 inside a
-    structure it holds; with a cast where the access reads another type of the field's size, as raw
-    access where the structure has no such field), the address of a structure held inside one as
-    &p->f_4, every other use cast to u32; the structures defined above the function, a held one
-    before its holder. A chain of assignments that assigns one of them is one assignment per variable
-    first (dread.tidy split_typed: r3 = 0; r2 = 0; r1_1 = 0; for r1_1 = r2 = r3 = 0, whose r2 = r3 = 0
-    would have a pointer's value for the u32 r1_1). Only when the plan was made for this C (made_for:
-    its digest before names). names: {s_N: (name, {offset: field name})} from the readable_names table
-    (dread.naming struct_names). Returns the names of the structures it defined."""
+    structure it holds; with a cast where the access reads another type of the field's size, through
+    the field's address where it has another width, *(volatile u8 *)&p->f_8, as raw access where the
+    structure has no field there), the address of a structure held inside one as &p->f_4 and of a
+    field as &p->f_8 (but against a constant: the sum), every other use cast to u32; the structures
+    defined above the function, a held one before its holder. A chain of assignments that assigns one of
+    them is one assignment per variable first (dread.tidy split_typed: r3 = 0; r2 = 0; r1_1 = 0; for
+    r1_1 = r2 = r3 = 0, whose r2 = r3 = 0 would have a pointer's value for the u32 r1_1). Only when the
+    plan was made for this C (made_for: its digest before names). names: {s_N: (name, {offset: field
+    name})} from the readable_names table (dread.naming struct_names). Returns the names of the
+    structures it defined."""
     names = names or {}
 
     def cname(k):
@@ -2411,7 +2452,9 @@ def apply_types(tree, fn, p, made_for=None, names=None):
             target = ptrs[k2].get(rel)
             return chain(base.id, path, fname(k2, rel)), ("ptr", target) if target else rows[rel], ctype
         address = C.Cast("u32", C.Name(base.id))
-        if k:
+        if k >= 0 and rows.get(rel) is not None:    # (another width at a field: through the field's address)
+            address = C.Unary("&", chain(base.id, path, fname(k2, rel)))
+        elif k:
             address = C.Binary("+" if k > 0 else "-", address, C.Num("%d" % abs(k)))
         return C.Unary("*", C.Cast("volatile %s *" % ctype, address)), ctype, ctype
 
@@ -2425,6 +2468,22 @@ def apply_types(tree, fn, p, made_for=None, names=None):
         if not path or rel:
             return None
         return k2, C.Unary("&", chain(e.l.id, path))
+
+    def field_address(e):
+        """&p->f_8 (&p->f_4.f_8 inside a structure it holds) for a typed variable plus the offset of a
+        field of its structure (r0 + 8 for a list's end marker, whose first word is the list's f_8); None
+        for anything else (a held structure's start is held's)."""
+        if not (isinstance(e, C.Binary) and e.op == "+" and isinstance(e.l, C.Name) and e.l.id in typed
+                and isinstance(e.r, C.Num) and isinstance(e.r.value, int)) or signed32(e.r.value) <= 0:
+            return None
+        path, k2, rel = p.place(typed[e.l.id], signed32(e.r.value))
+        if rel not in fields.get(k2, {}):
+            return None
+        return C.Unary("&", chain(e.l.id, path, fname(k2, rel)))
+
+    def plain_sum(e):
+        """A typed variable plus a constant as the integer sum ((u32)p + 8)."""
+        return C.Binary("+", C.Cast("u32", C.Name(e.l.id)), e.r)
 
     def value(e):
         return _rewrite(e, f)
@@ -2497,10 +2556,18 @@ def apply_types(tree, fn, p, made_for=None, names=None):
             # may take for never 0)
             if pa is not None and held(e.l) is None and isinstance(e.r, C.Num) and e.r.value == 0:
                 return C.Binary(e.op, pa[1], e.r)
+            # (a field's address against a constant stays the sum: a compiler may take it for never 0)
+            if isinstance(e.r, C.Num) and field_address(e.l) is not None:
+                return C.Binary(e.op, plain_sum(e.l), e.r)
+            if isinstance(e.l, C.Num) and field_address(e.r) is not None:
+                return C.Binary(e.op, e.l, plain_sum(e.r))
             return None
         hv = held(e)
         if hv is not None:
             return C.Cast("u32", hv[1])
+        fa = field_address(e)
+        if fa is not None:
+            return C.Cast("u32", fa)
         if isinstance(e, C.Name) and e.id in typed:
             return C.Cast("u32", C.Name(e.id))
         return None
