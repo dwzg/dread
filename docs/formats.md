@@ -502,6 +502,29 @@ one question) and `answer` (the text as it came). A question it holds is answere
 asked (dread.llm AnswerCache); `--no-judge-cache` neither reads nor writes it. Removing the file only
 costs the answers again.
 
+### The usage ledger (`$XDG_STATE_HOME/dread/llm-usage.tsv`, else `~/.local/state/dread/llm-usage.tsv`)
+
+Written by `dread.llm` (every provider, `Provider.record`): a line per answer of a language model,
+appended, no text of the conversation and no key, so that `dread pilot --usage [YYYY-MM]`
+(`llm.usage_summary`) can sum a month per provider and price it with the providers' prices in
+`llm.toml`. Columns, without a header that readers need (a new file gets `USAGE_COLUMNS` as its first
+line; an older file's six-column header stays and means nothing more):
+
+| column | meaning |
+|---|---|
+| `time` | when the answer came (local time, `YYYY-MM-DDTHH:MM:SS`; a month is the lines that begin with it) |
+| `provider`, `model` | the provider's name in `llm.toml` and its model |
+| `input`, `output` | tokens in, every one (those read from or written to a prompt cache among them), and out (a model's reasoning among them) |
+| `finish` | how the answer ended (`end_turn`, `max_tokens`, `refusal`, `stop`, ...) |
+| `cache_read`, `cache_write` | of `input`, the tokens read from and written to the provider's prompt cache (since 2026-10-22) |
+| `mode` | `batch` for an answer of a Message Batch, priced at the batch rate (`price_batch` of the standard prices, half by default for Anthropic); empty for a question asked alone (since 2026-10-24) |
+| `cache_write_1h` | of `cache_write`, the tokens kept for an hour (priced at `price_cache_write_1h`, twice the input price by default for Anthropic; the rest at five minutes' `price_cache_write`) (since 2026-10-24) |
+
+Every line since 2026-10-24 has the ten columns. A line of 2026-10-22 or 2026-10-23 has eight (the
+cache's columns only where it read or wrote any, six otherwise), one older six: its missing columns
+read as 0 and empty, its answer as asked alone with nothing cached. Each line is priced as it came, so
+a month's cost does not depend on how its lines mix.
+
 ### `BUILD/pilot/IMAGE/groups.tsv`, `subsystems.tsv`, `names-subsystems.tsv`
 
 Written by `dread pilot --task subsystems` and by `--task name --subsystems` (since 2026-10-22): the

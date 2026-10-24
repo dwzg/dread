@@ -145,10 +145,43 @@ again, and another provider may answer it. On 2026-10-20 Anthropic's Sonnet 5.5 
 every --task input question on FreeRTOS (a listing with instructions to reach), also with the purpose
 stated, while Haiku 5.5 answered the same question.
 
+What the naming questions cost (since 2026-10-24; dread.llm). Every question is a conversation (a
+generator: name_talk, subsystem_talk, readable_talk, one_talk, dread.namejudge judge_talk) that
+decides what an answer means and what goes back, so that a question asked alone and one asked in a
+Message Batch are handled alike. --batch N (default BATCH_MIN, 100; 0: one at a time): a round of N
+questions or more goes as a Message Batch, at half the price, the answers matched back by their
+custom_id, those that ask again (a name that cannot be used, names the checks refuse, verdicts
+missing) making the next round, a batch again when they are N or more, else one at a time. On
+FreeRTOS GCC -Os with Haiku 5.5 (docs/decisions.md): --task name $1.07 and 648 s one at a time, $0.69
+and 1,858 s with batches (10 batches of 130-410 questions, 2-3.5 minutes each), $0.61 with the cache
+too; --task readable $0.16 and 167 s, $0.11 and 235 s. The stages: the groups' questions (all samples of all groups), the
+globals' and the structures' batches, the variables of --task readable, the grounded judge's
+questions (the first run's question of each source batch first: it writes the sources to the prompt
+cache for an hour, a batch taking longer than its five minutes, the other runs' after it); --task
+name's passes, whose functions wait for their callees' (callers') names, go in waves when a level of
+the call graph has N questions or more (one_pass_waves: every function whose dependencies are named,
+asked at once, settled before the next wave; one question at a time a function is asked as soon as
+its own dependencies are named). A batch is looked at every ten seconds and cancelled after two hours
+(batch_poll, batch_wait in llm.toml), its unanswered questions then failing, as a provider's error
+does. Where the provider keeps prompts (llm.toml's cache_min, the model's least cacheable prompt), the
+beginning that several questions share is marked for its cache (shared_parts, cache_parts): a
+function's samples share the device line and its code (Namer.question_parts: only the callers' order
+differs), a group's samples the whole question; one question at a time, the first sample goes first
+and the others once it has ended (a cache entry is there only once its answer has begun); in a batch
+the first samples come first, the cache being the API's best effort there. A readable question is
+asked once (and asked again only after a refusal by the checks), and a globals' or structures'
+question shares no more than the instructions, which are shorter than the minimum: neither is marked.
+--no-thinking asks the naming questions without the model's hidden reasoning (llm.Provider.quick, the
+provider's quick fields: Haiku 5.5's thinking disabled), which Haiku 5.5 produces by default and
+nothing reads (its text is not returned), at the price of output tokens: 375 of a name answer's 474
+on FreeRTOS (2026-10-24). It is not the default of any task (THINKING): without it a name run cost
+half, but its names were judged against the source 0.645 against 0.784 (five runs a side, p 0.008),
+and the readable names lost too (docs/decisions.md).
+
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
                 [--no-mutate] [--no-integration] [--dry-run]
                 [--task write|input|name|readable|globals|subsystems|device|review] [--no-device] [--jobs N]
-                [--refine] [--behaviour]
+                [--batch N] [--[no-]thinking] [--refine] [--behaviour]
                 [--[no-]subsystems] [--samples K] [--temperature T] [--gate C] [--passes N] [--ablate]
                 [--score TRUTH [--judge PROVIDER] [--grounded PROVIDER [--source DIR] [--names-only]
                                                    [--no-judge-cache]]
@@ -721,38 +754,65 @@ def global_uses(program, context, lifter, names, per=2, jobs=None):
     return uses, by_function
 
 
-class Providers:
-    """Providers for questions that threads ask side by side: take() hands out one that no question
-    being asked holds (a free one, else a new one that make() makes), give() takes it back, spent() sums
-    what every one made spent. At most as many are made as questions are asked at once. Given a
-    provider instead of a function that makes one, that provider is the only one (limit 1: one question
-    at a time, since a provider keeps how its last answer ended)."""
+Providers = llm.Providers      # (moved to dread.llm with Message Batches: converse_all takes one)
+summed = llm.summed
 
-    def __init__(self, provider):
-        import threading
-        self.lock = threading.Lock()
-        if callable(provider):
-            self.make, self.free, self.made, self.limit = provider, [], [], None
+BATCH_MIN = 100         # --batch's default: questions a round needs to go as a Message Batch (0: none does);
+                        # measured on FreeRTOS, docs/decisions.md 2026-10-24: half the price, about three times the
+                        # time of --task name there
+
+
+def batching(providers, batch, size):
+    """The provider that asks a round of size questions as Message Batches (Providers.batcher), or None:
+    batch 0 (none), a round smaller than batch, or a provider without batches."""
+    if not batch or size < batch:
+        return None
+    return providers.batcher()
+
+
+def cache_parts(text, shared):
+    """A question as parts (dread.llm) whose first, its first shared characters (followed in text by the
+    blank line content_text joins parts with), is marked for the prompt cache: the beginning the other
+    questions of the same function or group share; text itself when nothing is shared."""
+    if not shared or shared > len(text) or (shared < len(text) and text[shared:shared + 2] != "\n\n"):
+        return text
+    if shared == len(text):
+        return [{"text": text, "cache": True}]
+    return [{"text": text[:shared], "cache": True}, {"text": text[shared + 2:]}]
+
+
+def shared_parts(provider, system, questions):
+    """questions ([(text, shared)]: shared, the length of the beginning that the function's or group's
+    other questions may share) as [(content, lead)]: content the text, or parts with that beginning
+    marked for the prompt cache (cache_parts) where at least two of them begin alike and provider would
+    keep it (llm.Provider.cacheable: its cache minimum), lead the index of the first question that
+    begins alike (the one that writes the cache: asked before the others where questions go one at a
+    time) or None for the first and for questions whose beginning is not kept."""
+    first, count = {}, collections.Counter()
+    for k, (text, shared) in enumerate(questions):
+        first.setdefault(text[:shared], k)
+        count[text[:shared]] += 1
+    out = []
+    for k, (text, shared) in enumerate(questions):
+        head = text[:shared]
+        content = cache_parts(text, shared) if count[head] > 1 else text
+        if content is not text and provider is not None and provider.cacheable(system, content):
+            out.append((content, first[head] if first[head] != k else None))
         else:
-            self.make, self.free, self.made, self.limit = None, [provider], [provider], 1
-
-    def take(self):
-        with self.lock:
-            if self.free:
-                return self.free.pop()
-            p = self.make()
-            self.made.append(p)
-            return p
-
-    def give(self, p):
-        with self.lock:
-            self.free.append(p)
-
-    def spent(self):
-        return summed(p.spent() for p in self.made)
+            out.append((text, None))
+    return out
 
 
-def ask_batches(providers, system, users, jobs=1):
+def one_talk(system, user):
+    """One question asked once (a dread.llm conversation): returns (answer or None, failure: None,
+    "declined" or "the provider: ERROR")."""
+    answer, last, error = yield (system, [{"role": "user", "content": user}], None)
+    if error is not None:
+        return None, "the provider: %s" % error
+    return answer, "declined" if (last or {}).get("finish") in llm.Provider.REFUSED else None
+
+
+def ask_batches(providers, system, users, jobs=1, batch=0, out=print):
     """Ask each question of users once (with system), jobs at a time in threads, each with a provider
     of providers (Providers) while it is asked, the next one asked as soon as one ends. Yields (k,
     answer, label, failure) in the order of users, each once it and every question before it have ended,
@@ -760,8 +820,17 @@ def ask_batches(providers, system, users, jobs=1):
     failure None, "declined" (the provider declined: llm.Provider.REFUSED) or "the provider: ERROR"
     (answer None); label the provider's. After a failure no question is asked that was not asked by
     then (one after another stops there); those asked end and are yielded. Only the threads ask: the
-    caller writes, and no thread is left when it ends (the caller may fork then)."""
+    caller writes, and no thread is left when it ends (the caller may fork then). With batch, as many
+    questions or more go together as a Message Batch (batching; llm.converse_all), all of them asked
+    at once and yielded in their order once it has ended."""
     import concurrent.futures
+    batcher = batching(providers, batch, len(users))
+    if batcher is not None:
+        got = llm.converse_all(providers, [one_talk(system, user) for user in users], batch=batch, jobs=jobs,
+                               out=out)
+        for k, (answer, failure) in enumerate(got):
+            yield k, answer, batcher.label(), failure
+        return
     jobs = max(1, min(jobs, providers.limit or jobs))
 
     def one(k):
@@ -809,7 +878,7 @@ def json_block(answer):
 
 
 def name_globals(target, image, program, provider, keys, uses, batch=None, shown_functions=4, out=print,
-                 shown_as=None, device="", jobs=1):
+                 shown_as=None, device="", jobs=1, batched=0):
     """Ask for names of the memory at fixed addresses in keys that the readable_names table does not
     name yet, batch (default GLOBALS_BATCH) at a time, each with its uses in up to shown_functions
     functions; keep the names that are C identifiers no function or other global has. shown_as
@@ -853,7 +922,7 @@ def name_globals(target, image, program, provider, keys, uses, batch=None, shown
         users.append(about(device, "\n".join(lines)))
     providers = provider if isinstance(provider, Providers) else Providers(provider)
     named = 0
-    for k, answer, label, failure in ask_batches(providers, GLOBALS_SYSTEM, users, jobs):
+    for k, answer, label, failure in ask_batches(providers, GLOBALS_SYSTEM, users, jobs, batched, out):
         part = parts[k]
         if answer is None:
             out("dread pilot: the globals' names: %s" % failure)
@@ -963,7 +1032,7 @@ def struct_uses(program, context, lifter, names, per=3, jobs=None):
 
 
 def name_structs(target, image, program, provider, plan, uses, wanted, taken=(), batch=None, shown_functions=4,
-                 out=print, device="", jobs=1):
+                 out=print, device="", jobs=1, batched=0):
     """Ask for names of the plan's structures in wanted and of their fields, batch (default STRUCTS_BATCH)
     at a time, each with its definition and its uses in up to shown_functions functions; keep in the
     readable_names table's structs part what dread.naming.struct_names accepts (keyed by the
@@ -999,7 +1068,7 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
         users.append(about(device, "\n\n".join(blocks)))
     providers = provider if isinstance(provider, Providers) else Providers(provider)
     named = 0
-    for b, answer, label, failure in ask_batches(providers, STRUCTS_SYSTEM, users, jobs):
+    for b, answer, label, failure in ask_batches(providers, STRUCTS_SYSTEM, users, jobs, batched, out):
         part = parts[b]
         if answer is None:
             out("dread pilot: the structures' names: %s" % failure)
@@ -1037,7 +1106,7 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
 
 
 def name_shared(target, image, program, provider, context, lifter, names, everything, out=print, shown_as=None,
-                device="", jobs=1):
+                device="", jobs=1, batch=0):
     """The names the functions of names share with the rest of the image, asked before their own: the
     globals they use (name_globals, with their uses in the readable C of everything; shown_as: the
     functions' proposed names; the structures of static data, dread.statics, and their fields among
@@ -1059,7 +1128,7 @@ def name_shared(target, image, program, provider, context, lifter, names, everyt
     wanted = sorted(set().union(*(by_function.get(n, set()) for n in names))) if names else []
     asking = time.time()
     named = name_globals(target, image, program, providers, wanted, uses, out=out, shown_as=shown_as, device=device,
-                         jobs=jobs)
+                         jobs=jobs, batched=batch)
     out("dread pilot: %d globals named, of %d the functions use (their uses %.0f s, the questions %.0f s, %d at a "
         "time)" % (named, len(wanted), asking - started, time.time() - asking, at_once))
     context.globals, context._static_names = naming.load(image, "globals"), None
@@ -1071,7 +1140,7 @@ def name_shared(target, image, program, provider, context, lifter, names, everyt
         taken = {e.get("name") for e in context.globals.values() if isinstance(e, dict)}
         asking = time.time()
         structs = name_structs(target, image, program, providers, context.plan, suses, swanted, taken, out=out,
-                               device=device, jobs=jobs)
+                               device=device, jobs=jobs, batched=batch)
         out("dread pilot: %d structures named, of %d their variables point to (their uses %.0f s, the questions "
             "%.0f s, %d at a time)" % (structs, len(swanted), asking - started, time.time() - asking, at_once))
         context.structs, context._struct_names = naming.load(image, "structs"), None
@@ -1183,22 +1252,26 @@ def ask_readable(target, image, provider, job, tries, work):
     to the same code, naming.same_code in the directory work), tell the model what was wrong and ask
     again, up to tries answers. Writes nothing but work, so that threads can run it side by side, each
     with a provider and a directory of its own (keep_readable writes the rest). Returns (entry or None,
-    why not, the conversation's log, how the last answer ended: the provider's finish or None)."""
+    why not, the conversation's log, how the last answer ended: the provider's finish or None). The
+    conversation itself is readable_talk's, which a batch asks as well."""
+    return llm.converse(provider, readable_talk(target, image, job, tries, work, provider.label()))
+
+
+def readable_talk(target, image, job, tries, work, label):
+    """ask_readable's conversation (a dread.llm conversation, the provider's label for its log; work: a
+    directory, or a function that gives the calling thread's)."""
     import copy
     from dread import naming, readable
     name, tree, fn = job["name"], job["tree"], job["fn"]
     messages = [{"role": "user", "content": job["user"]}]
-    log = ["# %s, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (name, provider.label(), READABLE_SYSTEM,
-                                                                        job["user"])]
+    log = ["# %s, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (name, label, READABLE_SYSTEM, job["user"])]
     entry, why, finish = None, "no answer", None
-    provider.last = {}                      # (a provider error leaves no finish: not a refusal)
     for _ in range(tries):
-        try:
-            answer = provider.ask(READABLE_SYSTEM, messages)
-        except Exception as e:
-            why = "the provider: %s" % e
+        answer, last, error = yield (READABLE_SYSTEM, messages, None)
+        if error is not None:
+            why = "the provider: %s" % error
             break
-        finish = (getattr(provider, "last", {}) or {}).get("finish")
+        finish = (last or {}).get("finish")
         log.append("## Answer\n\n%s" % answer)
         if finish in llm.Provider.REFUSED:
             why = "the provider declined"
@@ -1216,8 +1289,9 @@ def ask_readable(target, image, provider, job, tries, work):
                 tree2 = copy.deepcopy(tree)
                 fn2 = tree2.function(name)
                 naming.rename(fn2, names)
-                if naming.same_code(target, image, job["file"], readable.print_file(tree2, fn2), work):
-                    entry = {"digest": job["digest"], "names": names, "what": what, "by": provider.label()}
+                if naming.same_code(target, image, job["file"], readable.print_file(tree2, fn2),
+                                    work() if callable(work) else work):
+                    entry = {"digest": job["digest"], "names": names, "what": what, "by": label}
                     if job.get("ids") is not None:
                         entry["ids"] = job["ids"]
                     break
@@ -1264,20 +1338,8 @@ def name_readable(target, image, program, provider, name, context, lifter, tries
     return keep_readable(image, folder, name, entry, why, log, out)
 
 
-def summed(spents):
-    """What several providers spent together ([Provider.spent()]): answers, tokens in and out, the
-    costs of those that have prices (None where none has)."""
-    spent = {"answers": 0, "input": 0, "output": 0, "cost": None}
-    for sp in spents:
-        for key in ("answers", "input", "output"):
-            spent[key] += sp[key]
-        if sp.get("cost") is not None:
-            spent["cost"] = (spent["cost"] or 0.0) + sp["cost"]
-    return spent
-
-
 def name_variables(target, image, program, make_provider, names, context, lifter, jobs=4, tries=2, out=print,
-                   device=""):
+                   device="", batch=0):
     """The variables of names named as name_readable names one function's, jobs functions at a time
     (--task readable). First, before any thread starts, every question is prepared (readable_jobs:
     the readable C in a pool of worker processes, which fork, the callers in one walk over the code);
@@ -1289,7 +1351,13 @@ def name_variables(target, image, program, make_provider, names, context, lifter
     their names), so the table ends as one question after another leaves it. After DECLINED_IN_A_ROW
     declined or FAILED_IN_A_ROW failed (the provider's errors) in a row nothing more is asked (those
     asked by then end). Returns (functions named, those named already counted; asked; spent: summed
-    over the providers made)."""
+    over the providers made).
+
+    batch: when there are as many questions or more, they go as a Message Batch (llm.converse_all, the
+    provider permitting: batching), every function's conversation the same as asked alone
+    (readable_talk); the answers that fail their checks ask again in the next round (another batch when
+    they are as many, else one at a time), the checks jobs at a time; the main thread then writes the
+    table, the conversations and the lines in the order of the functions."""
     import concurrent.futures
     import threading
     started = time.time()
@@ -1301,6 +1369,21 @@ def name_variables(target, image, program, make_provider, names, context, lifter
             time.time() - started))
     folder = os.path.join(target.build, "pilot", image.name)
     os.makedirs(folder, exist_ok=True)
+    pool_of = Providers(make_provider)
+    batcher = batching(pool_of, batch, len(todo))
+    if batcher is not None:
+        local, slots = threading.local(), iter(range(1 << 30))
+
+        def work():                         # (a directory a thread for the same-code checks)
+            if getattr(local, "dir", None) is None:
+                local.dir = os.path.join(folder, "naming", "b%d" % next(slots))
+            return local.dir
+        got = llm.converse_all(pool_of, [readable_talk(target, image, job, tries, work, batcher.label())
+                                         for job in todo], batch=batch, jobs=max(1, jobs), out=out)
+        named = len(known)
+        for job, (entry, why, log, finish) in zip(todo, got):
+            named += keep_readable(image, folder, job["name"], entry, why, log, out) is not None
+        return named, len(todo), pool_of.spent()
     local, providers, lock = threading.local(), [], threading.Lock()
 
     def one(job):
@@ -1693,6 +1776,14 @@ class Namer:
         name, prefix and sentence (SUBSYSTEM_LINE), the form then ending in SUBSYSTEM; shuffle, a seed:
         the callers in an order of their own (random.Random(shuffle), the same for the same seed), for
         a vote's samples (the runs shown as they are)."""
+        text, form, _ = self.question_parts(fn, shown_as, shuffle)
+        return text, form
+
+    def question_parts(self, fn, shown_as=None, shuffle=None):
+        """(text, form, shared) of question(): shared, the length of its beginning (the device line and
+        the function's code) that the function's other questions with the same names shown share (a
+        vote's samples differ only in what follows: the callers' order), which a provider's prompt
+        cache can keep for them (shared_parts)."""
         text, form = self.annotated(fn, shown_as)
         runs = self.runs_of(fn)
 
@@ -1704,6 +1795,8 @@ class Namer:
             user = "The function %s, its machine code (no C could be made):\n\n```\n%s\n```" % (fn.name, text)
         else:
             user = "The function %s, as C made from its machine code:\n\n```c\n%s\n```" % (fn.name, text)
+        shared = len(about(self.device, user))
+        if form != "listing":
             callers = []
             for caller in self.caller_names(fn):
                 shown = (shown_as or {}).get(caller, caller)
@@ -1722,7 +1815,7 @@ class Namer:
             size, row = self.subsystem[fn.name]
             user += "\n\n" + SUBSYSTEM_LINE.format(size=size, name=row["name"], prefix=row["prefix"], what=row["what"])
             form += SUBSYSTEM
-        return about(self.device, user), form
+        return about(self.device, user), form, shared
 
     def caller_names(self, fn):
         """The functions that call fn directly that an LLM may be shown, each once, in call order."""
@@ -1773,19 +1866,23 @@ def ask_name(provider, program, name, user, tries=2, temperature=None, own=None)
     (name_problem) or an answer without the two lines goes back with the reason, up to tries
     answers; proposed is None when none came. temperature: the question's sampling temperature
     (llm.Provider), None for the provider's own. own: a name the answer may give although the
-    tables have it (the function's own, which a review asks to give again if it fits)."""
+    tables have it (the function's own, which a review asks to give again if it fits). user: the
+    question's text, or its parts (dread.llm: a beginning marked for the prompt cache). The
+    conversation is name_talk's, which a batch asks as well."""
+    return llm.converse(provider, name_talk(program, name, user, tries, temperature, own, provider.label()))
+
+
+def name_talk(program, name, user, tries=2, temperature=None, own=None, label="?"):
+    """ask_name's conversation (a dread.llm conversation; label: the provider's, for its log)."""
     messages = [{"role": "user", "content": user}]
-    log = ["# %s, asked %s\n\n## Question\n\n%s" % (name, provider.label(), user)]
+    log = ["# %s, asked %s\n\n## Question\n\n%s" % (name, label, llm.content_text(user))]
     why = "no answer"
     for _ in range(tries):
-        provider.last = {}
-        try:
-            answer = provider.ask(NAME_SYSTEM, messages) if temperature is None else \
-                provider.ask(NAME_SYSTEM, messages, temperature=temperature)
-        except Exception as e:
-            return None, None, log, "the provider: %s" % e
+        answer, last, error = yield (NAME_SYSTEM, messages, temperature)
+        if error is not None:
+            return None, None, log, "the provider: %s" % error
         log.append("## Answer\n\n%s" % answer)
-        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+        if (last or {}).get("finish") in llm.Provider.REFUSED:
             return None, None, log, "the provider declined"
         parsed = parse_name(answer)
         why = "no two lines name: and what:" if parsed is None else \
@@ -2172,19 +2269,22 @@ def subsystem_problem(prefix):
 
 def ask_subsystem(provider, user, tries=2, temperature=None):
     """((name, prefix, what) or None, log, why) of asking for one group's name: an answer without the
-    three lines or with a prefix that cannot be used goes back with the reason, up to tries answers."""
+    three lines or with a prefix that cannot be used goes back with the reason, up to tries answers.
+    user: the question's text or its parts (dread.llm). The conversation is subsystem_talk's."""
+    return llm.converse(provider, subsystem_talk(user, tries, temperature, provider.label()))
+
+
+def subsystem_talk(user, tries=2, temperature=None, label="?"):
+    """ask_subsystem's conversation (a dread.llm conversation; label: the provider's, for its log)."""
     messages = [{"role": "user", "content": user}]
-    log = ["## Question, asked %s\n\n%s" % (provider.label(), user)]
+    log = ["## Question, asked %s\n\n%s" % (label, llm.content_text(user))]
     why = "no answer"
     for _ in range(tries):
-        provider.last = {}
-        try:
-            answer = provider.ask(SUBSYSTEM_SYSTEM, messages) if temperature is None else \
-                provider.ask(SUBSYSTEM_SYSTEM, messages, temperature=temperature)
-        except Exception as e:
-            return None, log, "the provider: %s" % e
+        answer, last, error = yield (SUBSYSTEM_SYSTEM, messages, temperature)
+        if error is not None:
+            return None, log, "the provider: %s" % error
         log.append("## Answer\n\n%s" % answer)
-        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+        if (last or {}).get("finish") in llm.Provider.REFUSED:
             return None, log, "the provider declined"
         parsed = parse_subsystem(answer)
         why = "no three lines name:, prefix: and what:" if parsed is None else subsystem_problem(parsed[1])
@@ -2197,7 +2297,7 @@ def ask_subsystem(provider, user, tries=2, temperature=None):
 
 
 def name_subsystems(target, image, program, provider, found, namer, touched, samples=1, jobs=4, tries=2,
-                    temperature=None, shown_as=None, out=print):
+                    temperature=None, shown_as=None, out=print, batch=0, pool=None):
     """Names for the groups of found (dread.groups find, numbered by their place) that subsystems.tsv
     does not name yet (by their members key) and that have SUBSYSTEM_SMALLEST functions or more: each
     asked samples times (subsystem_question, the same question each time: the provider's sampling
@@ -2205,7 +2305,14 @@ def name_subsystems(target, image, program, provider, found, namer, touched, sam
     answers agree with is kept (dread.naming vote), with the name and the sentence of the answer that
     gave it, the agreement its confidence. groups.tsv gets the grouping, subsystems.tsv a line a
     group, the conversations go to BUILD/pilot/IMAGE/subsystems/. Returns {function name: (its
-    group's size, its row)} of the named groups."""
+    group's size, its row)} of the named groups.
+
+    A group's samples are one question asked samples times: where the provider keeps it in its prompt
+    cache (shared_parts: its cache minimum), the question is marked for it and the first sample of every
+    group is asked before the others, which read it. batch (with pool, a Providers): when the samples of
+    all the groups are as many questions or more, they go as one Message Batch (llm.converse_all; the
+    first samples first, the cache then is the API's best effort), each conversation as asked alone
+    (subsystem_talk)."""
     import concurrent.futures
     from dread import naming
     write_groups(target, image, program, found)
@@ -2215,6 +2322,12 @@ def name_subsystems(target, image, program, provider, found, namer, touched, sam
         key = members_key(program, group)
         if key not in known and len(group) >= SUBSYSTEM_SMALLEST and any(may_show(target, n) for n in group):
             todo.append((k, group, key, subsystem_question(namer, group, touched, shown_as)))
+    n = max(1, samples)
+    asked = {}                              # {k: the question as asked: its text, or parts to cache}
+    probe = provider() if todo and n > 1 else None
+    for k, _, _, user in todo:
+        asked[k] = shared_parts(probe, SUBSYSTEM_SYSTEM, [(user, len(user))] * n)[0][0] if n > 1 else user
+    order = [(k, j) for j in range(n) for k, _, _, _ in todo]   # (the first samples first: they write the cache)
 
     def one(item):
         k, sample, user = item
@@ -2222,11 +2335,23 @@ def name_subsystems(target, image, program, provider, found, namer, touched, sam
         got, log, why = ask_subsystem(p, user, tries, temperature)
         return k, sample, got, log, why, p
     results = {}
-    if todo:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-            for k, sample, got, log, why, p in pool.map(one, [(k, j, user) for k, _, _, user in todo
-                                                              for j in range(max(1, samples))]):
-                results.setdefault(k, {})[sample] = (got, log, why, p)
+    batcher = batching(pool, batch, len(order)) if pool is not None else None
+    if batcher is not None:
+        got = llm.converse_all(pool, [subsystem_talk(asked[k], tries, temperature, batcher.label())
+                                      for k, _ in order], batch=batch, jobs=jobs, out=out,
+                               leads=[None if j == 0 or not isinstance(asked[k], list) else order.index((k, 0))
+                                      for k, j in order], strict=False)
+        for (k, sample), (parsed, log, why) in zip(order, got):
+            results.setdefault(k, {})[sample] = (parsed, log, why, batcher)
+    elif todo:
+        cached = any(isinstance(asked[k], list) for k in asked)
+        rounds = [[(k, 0, asked[k]) for k, _, _, _ in todo], [(k, j, asked[k]) for k, _, _, _ in todo
+                                                                for j in range(1, n)]] \
+            if cached else [[(k, j, asked[k]) for k, _, _, _ in todo for j in range(n)]]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool_:
+            for items in rounds:            # (with a cache the first samples, then the others: they read it)
+                for k, sample, got, log, why, p in pool_.map(one, items):
+                    results.setdefault(k, {})[sample] = (got, log, why, p)
     folder = os.path.join(target.build, "pilot", image.name, "subsystems")
     for k, group, key, user in todo:
         got = [results[k][j] for j in range(max(1, samples))]
@@ -2347,7 +2472,7 @@ def question_key(text):
 
 def name_functions(target, image, program, make_provider, names, flow=None, jobs=4, tries=2, out=print,
                    refine=False, behaviour=False, samples=1, temperature=None, gate=None, passes=1,
-                   ablate=False, subsystems=False, device=""):
+                   ablate=False, subsystems=False, device="", batch=0):
     """Proposals for the functions of names, callees first: a function is asked as soon as every
     function it calls among names has its answer (call_components; functions that call each other in
     a circle together), jobs questions at a time with a provider each (make_provider() makes one), each
@@ -2423,6 +2548,7 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
         for d in cs:
             callers[d].append(c)
     local, providers, lock = threading.local(), [], threading.Lock()
+    pool_of = Providers(make_provider)      # (the providers of Message Batches and of the rounds between them)
     run = {"proposed": 0, "asked": 0, "declined": 0, "failed": 0, "stopped": False}
 
     def provider():
@@ -2447,7 +2573,7 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
             out("dread pilot: %d functions in %d groups (dread.groups, %.0f s)" % (len(program.functions), len(found),
                                                                                   time.time() - started))
             namer.subsystem = name_subsystems(target, image, program, provider, found, namer, touched, samples, jobs,
-                                              tries, temperature, shown_as, out)
+                                              tries, temperature, shown_as, out, batch=batch, pool=pool_of)
 
     def one(item):
         name, kind, k, user = item
@@ -2520,10 +2646,65 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
             return row is not None and row["entry"] not in refined
         return row is None or row["question"] != key
 
+    def probe():
+        """A provider of the run (the main thread's), to tell which questions its prompt cache keeps."""
+        return provider()
+
+    def build(c, kind):
+        """The functions of component c the pass asks about now (wanted), each as (name, fn, form, key,
+        questions, names shown): questions [(qkind, k, content, lead)], the samples' questions (and with
+        ablate the hidden ones), content the text or, where questions begin alike (the code, the same
+        names shown) and the provider keeps that beginning in its prompt cache, parts with it marked
+        (shared_parts), lead the index in questions of the one asked first, which writes it."""
+        items = []
+        for n in comps[c]:
+            fn = program.by_name[n]
+            user, form, shared = namer.question_parts(fn, shown_as)
+            key = question_key(user)
+            if not wanted(kind, state.get(fn.entry), key):
+                continue
+            note = ""
+            if kind == "refine":
+                note = "\n\n" + REFINE_NOTE.format(name=state[fn.entry]["proposed"], what=state[fn.entry]["what"])
+                form += REFINED
+            seed = ["%x:%d" % (fn.entry, k) if k else None for k in range(samples)]
+            texts, kinds = [(user + note, shared)], [("shown", 0)]
+            for k in range(1, samples):
+                text, _, at = namer.question_parts(fn, shown_as, shuffle=seed[k])
+                texts.append((text + note, at))
+                kinds.append(("shown", k))
+            if ablate and not (state.get(fn.entry) or {}).get("hidden"):
+                for k in range(samples):
+                    text, _, at = namer.question_parts(fn, None, shuffle=seed[k])
+                    texts.append((text + note, at))
+                    kinds.append(("hidden", k))
+            asked = shared_parts(probe(), NAME_SYSTEM, texts) if len(texts) > 1 else [(texts[0][0], None)]
+            items.append((n, fn, form, key, [(qk, k, content, lead) for (qk, k), (content, lead) in zip(kinds, asked)],
+                          namer.names_shown(fn, shown_as)))
+        return items
+
+    def counted(got, why, finish):
+        """A question's end in the run's counts of questions declined and failed in a row; stops the run
+        when either reaches its limit."""
+        if got is None:
+            run["declined"] = run["declined"] + 1 if finish in llm.Provider.REFUSED else 0
+            run["failed"] = run["failed"] + 1 if why.startswith("the provider:") else 0
+        else:
+            run["declined"] = run["failed"] = 0
+        if not run["stopped"] and run["declined"] >= DECLINED_IN_A_ROW:
+            out("dread pilot: the provider declined %d questions in a row; no more are asked" % run["declined"])
+            run["stopped"] = True
+        if not run["stopped"] and run["failed"] >= FAILED_IN_A_ROW:
+            out("dread pilot: the provider failed %d questions in a row; no more are asked (the run goes on where "
+                "it stopped when started again)" % run["failed"])
+            run["stopped"] = True
+
     def one_pass(number, kind):
         """kind: "first" (callees first, the functions without a proposal), "again" (callers first on
         even passes: the functions whose question changed), "refine". Returns (proposed, asked,
-        changed): changed, the functions whose shown name changed."""
+        changed): changed, the functions whose shown name changed. A question that waits for another of
+        its function (lead: it reads what that one writes to the prompt cache) is asked once that one
+        has ended."""
         down = kind == "refine" or (kind == "again" and number % 2 == 0)       # (callers first)
         deps, then = (callers, callees) if down else (callees, callers)
         waiting = [len(d) for d in deps]
@@ -2542,33 +2723,18 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
             while (ready and not run["stopped"]) or running:
                 while ready and not run["stopped"]:
                     c = ready.pop(0)
-                    todo = []
-                    for n in comps[c]:
-                        fn = program.by_name[n]
-                        user, form = namer.question(fn, shown_as)
-                        key = question_key(user)
-                        if wanted(kind, state.get(fn.entry), key):
-                            todo.append((n, fn, user, form, key))
-                    left[c] = len(todo)
-                    if not todo:
+                    items = build(c, kind)
+                    left[c] = len(items)
+                    if not items:
                         finished(c)
-                    for n, fn, user, form, key in todo:
-                        note = ""
-                        if kind == "refine":
-                            note = "\n\n" + REFINE_NOTE.format(name=state[fn.entry]["proposed"],
-                                                               what=state[fn.entry]["what"])
-                            form += REFINED
-                        seed = ["%x:%d" % (fn.entry, k) if k else None for k in range(samples)]
-                        questions = [("shown", 0, user + note)] + [
-                            ("shown", k, namer.question(fn, shown_as, shuffle=seed[k])[0] + note)
-                            for k in range(1, samples)]
-                        if ablate and not (state.get(fn.entry) or {}).get("hidden"):
-                            questions += [("hidden", k, namer.question(fn, None, shuffle=seed[k])[0] + note)
-                                          for k in range(samples)]
+                    for n, fn, form, key, questions, names_shown in items:
                         jobs_of[n] = {"fn": fn, "form": form, "key": key, "component": c, "results": {},
-                                      "questions": len(questions), "names": namer.names_shown(fn, shown_as)}
-                        for q in questions:
-                            running[pool.submit(one, (n,) + q)] = n
+                                      "questions": len(questions), "names": names_shown, "held": {}}
+                        for qk, k, content, lead in questions:
+                            if lead is None:
+                                running[pool.submit(one, (n, qk, k, content))] = n
+                            else:
+                                jobs_of[n]["held"].setdefault(questions[lead][:2], []).append((n, qk, k, content))
                 if not running:
                     break
                 done, _ = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -2577,11 +2743,10 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                     _, qkind, k, got, what, log, why, p, finish = future.result()
                     job = jobs_of[n]
                     job["results"][(qkind, k)] = (got, what, log, why, p)
-                    if got is None:
-                        run["declined"] = run["declined"] + 1 if finish in llm.Provider.REFUSED else 0
-                        run["failed"] = run["failed"] + 1 if why.startswith("the provider:") else 0
-                    else:
-                        run["declined"] = run["failed"] = 0
+                    counted(got, why, finish)
+                    for q in job["held"].pop((qkind, k), []):     # (the questions that read its cache)
+                        if not run["stopped"]:
+                            running[pool.submit(one, q)] = n
                     if len(job["results"]) == job["questions"]:
                         counts["asked"] += 1
                         changed = settle(n, job, number, kind)
@@ -2591,22 +2756,79 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                         left[job["component"]] -= 1
                         if not left[job["component"]]:
                             finished(job["component"])
-                    if not run["stopped"] and run["declined"] >= DECLINED_IN_A_ROW:
-                        out("dread pilot: the provider declined %d questions in a row; no more are asked" %
-                            run["declined"])
-                        run["stopped"] = True
-                    if not run["stopped"] and run["failed"] >= FAILED_IN_A_ROW:
-                        out("dread pilot: the provider failed %d questions in a row; no more are asked (the run "
-                            "goes on where it stopped when started again)" % run["failed"])
-                        run["stopped"] = True
                 if run["stopped"]:              # (the questions not begun yet are not asked)
                     for future in [f for f in running if f.cancel()]:
                         running.pop(future)
         return counts["proposed"], counts["asked"], counts["changed"]
 
+    def one_pass_waves(number, kind):
+        """one_pass in waves, for Message Batches: every component whose dependencies have settled is
+        asked at once, the questions of the whole wave one round of llm.converse_all (a batch when they
+        are batch or more, else one at a time, the questions that read a cache after the one that writes
+        it), and the wave's functions are settled in their order before the next wave is taken. The same
+        questions, conversations (name_talk) and votes as one_pass; a function waits for the slowest
+        question of its wave, not only for its own dependencies."""
+        down = kind == "refine" or (kind == "again" and number % 2 == 0)
+        deps, then = (callers, callees) if down else (callees, callers)
+        waiting = [len(d) for d in deps]
+        ready = [c for c in range(len(comps)) if not waiting[c]]
+        counts = {"proposed": 0, "asked": 0, "changed": 0}
+
+        def finished(c):
+            for d in then[c]:
+                waiting[d] -= 1
+                if not waiting[d]:
+                    ready.append(d)
+        label = probe()
+        while ready and not run["stopped"]:
+            wave = []
+            while ready:                    # (what asks nothing ends at once: what waits on it joins the wave)
+                c = ready.pop(0)
+                items = build(c, kind)
+                if items:
+                    wave.append((c, items))
+                else:
+                    finished(c)
+            if not wave:
+                break
+            where, talks, leads = [], [], []
+            for first in (True, False):     # (the questions that write a cache before those that read it)
+                for c, items in wave:
+                    for n, fn, form, key, questions, names_shown in items:
+                        for qk, k, content, lead in questions:
+                            if (lead is None) == first:
+                                where.append((n, qk, k, lead))
+                                talks.append(name_talk(program, n, content, tries, temperature, None, label.label()))
+            index = {(n, qk, k): i for i, (n, qk, k, _) in enumerate(where)}
+            for n, qk, k, lead in where:
+                questions = next(q for c, items in wave for m, _, _, _, q, _ in items if m == n)
+                leads.append(None if lead is None else index[(n,) + questions[lead][:2]])
+            got = llm.converse_all(pool_of, talks, batch=batch, jobs=jobs, leads=leads, strict=False, out=out)
+            results = {}
+            for (n, qk, k, _), (proposed, what, log, why) in zip(where, got):
+                results.setdefault(n, {})[(qk, k)] = (proposed, what, log, why, label)
+                counted(proposed, why or "", "refusal" if why == "the provider declined" else None)
+            for c, items in wave:
+                for n, fn, form, key, questions, names_shown in items:
+                    job = {"fn": fn, "form": form, "key": key, "component": c, "results": results[n],
+                           "questions": len(questions), "names": names_shown}
+                    counts["asked"] += 1
+                    changed = settle(n, job, number, kind)
+                    if changed is not None:
+                        counts["proposed"] += 1
+                        counts["changed"] += changed
+                finished(c)
+        return counts["proposed"], counts["asked"], counts["changed"]
+
+    per_function = samples * (2 if ablate else 1)
+    waves = bool(batch) and pool_of.batcher() is not None and max(
+        [len(r) for r in callees_first(program, list(names))] or [0]) * per_function >= batch
+    if waves:
+        out("dread pilot --task name: the passes go in waves of the functions whose dependencies are named, a wave "
+            "of %d questions or more as a Message Batch (%s)" % (batch, pool_of.batcher().label()))
     order = [("refine", 2)] if refine else [("first", 1)] + [("again", k) for k in range(2, passes + 1)]
     for kind, number in order:
-        made, asked, changed = one_pass(number, kind)
+        made, asked, changed = (one_pass_waves if waves else one_pass)(number, kind)
         run["proposed"] += made
         run["asked"] += asked
         if len(order) > 1:
@@ -2616,7 +2838,7 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                                           " (confidence %.2f or more)" % gate if gate else ""))
         if run["stopped"] or (kind == "again" and not changed):
             break                           # (no question would change: nothing more to ask)
-    return run["proposed"], run["asked"], summed(p.spent() for p in providers)
+    return run["proposed"], run["asked"], summed([p.spent() for p in providers] + [pool_of.spent()])
 
 
 JUDGE_SYSTEM = """You compare names of functions of a program. In each numbered pair the first name
@@ -2825,7 +3047,7 @@ def grounded_line(label, verdicts, of, sentences=True):
 
 
 def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None, grounded=None, sources=(),
-                sentences=True, jobs=1, cache=None):
+                sentences=True, jobs=1, cache=None, batch=0):
     """The image's proposals (names.tsv; upto_pass: as they were after that pass) against true names
     (dread.naming.function_truth): prints a line a function into BUILD/pilot/IMAGE/names-score.tsv
     (names-score-passN.tsv) and the totals: the words (exact, the same, shared, overlap, and style:
@@ -2850,7 +3072,7 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
         mine = {r["address"]: (r["proposed"], rows[r["address"]]["what"]) for r in scored if r["address"] in src}
         with_source = len(mine)
         found = namejudge.judge(grounded, [("this", mine)], src, sentence=sentences, out=out, jobs=jobs,
-                                cache=cache)["this"]
+                                cache=cache, batch=batch)["this"]
     suffix = "-pass%d" % upto_pass if upto_pass is not None else ""
     path = os.path.join(target.build, "pilot", image.name, "names-score%s.tsv" % suffix)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2927,7 +3149,7 @@ def score_names(target, image, truth_path, out=print, judge=None, upto_pass=None
 
 
 def compare_names(target, image, truth_path, against, judge, out=print, upto_pass=None, grounded=None, sources=(),
-                  sentences=True, jobs=1, cache=None):
+                  sentences=True, jobs=1, cache=None, batch=0):
     """This image's proposals (names.tsv; upto_pass: as they were after that pass) against another
     run's (against, a names.tsv of the same image), function by function where the two proposals
     differ (case aside): with judge, judged pairwise (judge_pairs: which of the two is closer to the
@@ -2952,7 +3174,8 @@ def compare_names(target, image, truth_path, against, judge, out=print, upto_pas
         items = [it for it in items if it[0] in src]
         runs = [(label, {a: (names[a]["proposed"], names[a]["what"]) for a, _, _, _ in items})
                 for label, names in (("this", rows), ("other", other))]
-        found = namejudge.judge(grounded, runs, src, sentence=sentences, out=out, jobs=jobs, cache=cache)
+        found = namejudge.judge(grounded, runs, src, sentence=sentences, out=out, jobs=jobs, cache=cache,
+                                batch=batch)
         pairs = {}
         for a, _, _, _ in items:
             if a in found["this"] and a in found["other"]:
@@ -3036,7 +3259,7 @@ def pairing(first, second, value_first, value_second, functions):
 
 
 def compare_runs(target, image, truth_path, set_a, set_b, grounded, out=print, upto_pass=None, sources=(),
-                 sentences=True, jobs=1, cache=None):
+                 sentences=True, jobs=1, cache=None, batch=0):
     """Two settings compared over replicate runs (--against RUN... --vs RUN...): set_a and set_b are the
     names.tsv of runs of this image, each made anew with one setting (a1, a2, ... and b1, b2, ...). Each
     run's proposals are judged against the functions' sources once (dread.namejudge, grounded: all runs
@@ -3085,7 +3308,7 @@ def compare_runs(target, image, truth_path, set_a, set_b, grounded, out=print, u
         return t
     found = namejudge.judge(grounded, [(label, {a: (rows[label][a]["proposed"], rows[label][a]["what"])
                                                 for a in common}) for label in labels],
-                            src, sentence=sentences, out=out, jobs=jobs, cache=cache)
+                            src, sentence=sentences, out=out, jobs=jobs, cache=cache, batch=batch)
     judged = [a for a in common if all(a in found[label] for label in labels)]
     t["judged"] = len(judged)
     if not judged:
@@ -3237,6 +3460,19 @@ def compare_runs(target, image, truth_path, set_a, set_b, grounded, out=print, u
     return t
 
 
+def spent_words(spent):
+    """"N answers (M of them in Message Batches), N tokens in (R read from the prompt cache, W written to
+    it), N out ($cost)" of what providers spent (llm.summed, Provider.spent), the parentheses only where
+    there is something to say."""
+    cached = ", ".join(x for x in ("%d read from the prompt cache" % spent["cache_read"] if spent.get("cache_read")
+                                   else "", "%d written to it" % spent["cache_write"] if spent.get("cache_write")
+                                   else "") if x)
+    return "%d answers%s, %d tokens in%s, %d out%s" % (
+        spent["answers"], " (%d of them in Message Batches)" % spent["batch"] if spent.get("batch") else "",
+        spent["input"], " (%s)" % cached if cached else "", spent["output"],
+        " ($%.2f)" % spent["cost"] if spent.get("cost") is not None else "")
+
+
 def spent_text(provider, kept=None):
     """"; N answers, tokens in (of them read from a cache), out ($cost)" of what a provider object spent
     (its own answers), for a score's line, and "; N answers kept from before" where an answer cache
@@ -3245,9 +3481,7 @@ def spent_text(provider, kept=None):
     hits = "; %d answers kept from before (%s)" % (kept.hits, kept.path) if kept is not None and kept.hits else ""
     if not sp.get("answers"):
         return hits
-    return "; %d answers, %d tokens in%s, %d out%s%s" % (
-        sp["answers"], sp["input"], " (%d read from the cache)" % sp["cache_read"] if sp.get("cache_read") else "",
-        sp["output"], " ($%.2f)" % sp["cost"] if sp.get("cost") is not None else "", hits)
+    return "; " + spent_words(sp) + hits
 
 
 # ---- what the image is (--task device) ----
@@ -3376,10 +3610,13 @@ def device_task(target, image, program, provider, samples=NAME_SAMPLES, dry_run=
     log = ["# What the image is, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s" % (
         provider.label(), DEVICE_SYSTEM, user)]
     answers = []
+    asked = user                            # (the samples ask one question one after another: where the
+    if samples > 1:                         # provider keeps it, the first writes its cache, the others read it)
+        asked = shared_parts(provider, DEVICE_SYSTEM, [(user, len(user))] * 2)[0][0]
     for k in range(max(1, samples)):
         provider.last = {}
         try:
-            answer = provider.ask(DEVICE_SYSTEM, [{"role": "user", "content": user}])
+            answer = provider.ask(DEVICE_SYSTEM, [{"role": "user", "content": asked}])
         except Exception as e:
             out("dread pilot --task device: the provider: %s" % e)
             break
@@ -3443,17 +3680,16 @@ def subsystems_task(target, image, program, flow, args, provider):
 
     def one_provider():                     # (a provider a thread: as name_functions does)
         if getattr(local, "provider", None) is None:
-            local.provider = provider if not providers else llm.load(args.provider)
+            local.provider = provider if not providers else naming_provider(args)
             with lock:
                 providers.append(local.provider)
         return local.provider
+    pool = Providers(lambda: naming_provider(args))       # (Message Batches, and the rounds between them)
     named = name_subsystems(target, image, program, one_provider, found, namer, touched, args.samples, args.jobs,
-                            min(args.tries, 3), args.temperature, shown_as)
-    spent = summed(p.spent() for p in providers)
-    print("dread pilot --task subsystems: %d functions in %d groups, %d of them in named groups (%s); %d answers, "
-          "%d tokens in, %d out%s" % (len(program.functions), len(found), len(named), subsystems_path(target, image),
-                                      spent["answers"], spent["input"], spent["output"],
-                                      " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""))
+                            min(args.tries, 3), args.temperature, shown_as, batch=args.batch, pool=pool)
+    spent = summed([p.spent() for p in providers] + [pool.spent()])
+    print("dread pilot --task subsystems: %d functions in %d groups, %d of them in named groups (%s); %s" % (
+        len(program.functions), len(found), len(named), subsystems_path(target, image), spent_words(spent)))
     return 0
 
 
@@ -3473,8 +3709,8 @@ def review_task(target, image, program, flow, args, provider, device):
     first = [provider]
 
     def make_provider():                    # (the first thread takes the provider already loaded)
-        return first.pop() if first else llm.load(args.provider)
-    make_decider = (lambda: llm.load(args.decider)) if args.decider else None
+        return first.pop() if first else naming_provider(args)
+    make_decider = (lambda: naming_provider(args, args.decider)) if args.decider else None
     started = time.time()
     totals = namereview.review(
         target, image, program, make_provider, make_decider, flow, names=names, jobs=args.jobs,
@@ -3507,13 +3743,43 @@ def print_usage(month=None):
     for name, e in sorted(summary.items()):
         cost = "$%.2f" % e["cost"] if e["cost"] is not None else "no prices in llm.toml"
         total += e["cost"] or 0
-        print("%-16s %-22s %5d answers %10d tokens in %9d out  %s" % (name, e["model"], e["answers"], e["input"],
-                                                                     e["output"], cost))
+        more = ", ".join(x for x in ("%d in Message Batches" % e["batch"] if e.get("batch") else "",
+                                     "cache: %d tokens read, %d written" % (e["cache_read"], e["cache_write"])
+                                     if e.get("cache_read") or e.get("cache_write") else "") if x)
+        print("%-16s %-22s %5d answers %10d tokens in %9d out  %s%s" % (name, e["model"], e["answers"], e["input"],
+                                                                       e["output"], cost, " (%s)" % more if more else ""))
     print("%s: $%.2f where prices are known (%s)" % (month, total, llm.USAGE))
     return 0
 
 
+THINKING = {"name": True, "subsystems": True, "readable": True, "globals": True, "device": True, "review": True}
+# --thinking's default per task (docs/decisions.md 2026-10-24): whether its questions let the model reason before
+# it answers (Haiku 5.5's hidden reasoning, most of an answer's tokens); measured on FreeRTOS for name (its groups'
+# questions among them) and readable (its globals' and structures' among them)
+
+
+def thinking(args):
+    """Whether the task's questions let the model reason (--thinking / --no-thinking, else THINKING)."""
+    return THINKING.get(args.task, True) if args.thinking is None else args.thinking
+
+
+def naming_provider(args, name=None):
+    """A provider (--provider, or name) for the naming tasks' questions: without thinking (thinking())
+    asked without reasoning (llm.Provider.quick: the configuration's quick fields; a provider without
+    them asks as always)."""
+    p = llm.load(name or args.provider)
+    p.quick = not thinking(args)
+    return p
+
+
 def main(argv=None):
+    """dread pilot (the module's docstring); SIGTERM and SIGHUP end it in order (llm.ending_on_signals:
+    the Message Batches it waits for are cancelled)."""
+    with llm.ending_on_signals():
+        return pilot_main(argv)
+
+
+def pilot_main(argv=None):
     parser = argparse.ArgumentParser(prog="dread pilot", description=__doc__.split("\n\n")[0])
     tgt.add_arguments(parser)
     parser.add_argument("--provider", help="a provider of ~/.config/dread/llm.toml (default: its default)")
@@ -3601,6 +3867,17 @@ def main(argv=None):
                         help="--task review: rounds at most (default 2)")
     parser.add_argument("--threshold", type=float, default=None, metavar="S",
                         help="--task review: the score of reasons from which a name is challenged (default 1.0)")
+    parser.add_argument("--batch", type=int, default=BATCH_MIN, metavar="N",
+                        help="--task name, readable, globals and subsystems, and --grounded: a round of N questions or "
+                             "more goes to the provider as a Message Batch, at half the price, answered within the "
+                             "hour mostly (0: never; default %d; a provider without batches asks one at a time)"
+                             % BATCH_MIN)
+    parser.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=None,
+                        help="--task name, readable, globals, subsystems, device and review: whether the model may "
+                             "reason before it answers; --no-thinking asks the provider for answers without (its "
+                             "quick fields in llm.toml, Haiku 5.5: thinking disabled), most of what the answers cost "
+                             "(default per task: off for %s, on for the others)" % (
+                                 ", ".join(t for t, on in sorted(THINKING.items()) if not on) or "none"))
     parser.add_argument("--no-device", action="store_true",
                         help="--task name, readable, globals and subsystems: the questions do not say what the image "
                              "is for (by default they begin with the target's [llm] device, or with what --task "
@@ -3644,7 +3921,7 @@ def main(argv=None):
         if args.vs:
             return 0 if compare_runs(target, image, args.score, args.against, args.vs, grounded,
                                      upto_pass=args.upto_pass, sources=args.source, sentences=not args.names_only,
-                                     jobs=args.jobs, cache=cache)["judged"] else 1
+                                     jobs=args.jobs, cache=cache, batch=args.batch)["judged"] else 1
         if args.against:
             if judge is None and grounded is None:
                 print("dread pilot: --against needs --grounded or --judge (a provider that judges the pairs)",
@@ -3652,10 +3929,10 @@ def main(argv=None):
                 return 1
             return 0 if compare_names(target, image, args.score, args.against[0], judge, upto_pass=args.upto_pass,
                                       grounded=grounded, sources=args.source, sentences=not args.names_only,
-                                      jobs=args.jobs, cache=cache)["both"] else 1
+                                      jobs=args.jobs, cache=cache, batch=args.batch)["both"] else 1
         return 0 if score_names(target, image, args.score, judge=judge, upto_pass=args.upto_pass, grounded=grounded,
                                 sources=args.source, sentences=not args.names_only, jobs=args.jobs,
-                                cache=cache)["functions"] else 1
+                                cache=cache, batch=args.batch)["functions"] else 1
     if args.task == "name" and args.gate and args.samples < 2:
         print("dread pilot: --gate needs --samples 2 or more (one question's proposal has no confidence)",
               file=sys.stderr)
@@ -3668,7 +3945,7 @@ def main(argv=None):
         provider = None
         if not args.dry_run:                # (a dry run asks nothing, so it needs no provider)
             try:
-                provider = llm.load(args.provider)
+                provider = naming_provider(args) if args.task != "input" else llm.load(args.provider)
             except llm.ProviderError as e:
                 print("dread pilot: %s" % e, file=sys.stderr)
                 return 1
@@ -3704,27 +3981,26 @@ def main(argv=None):
             first = [provider]
 
             def make_provider():            # (the first question takes the provider already loaded)
-                return first.pop() if first else llm.load(args.provider)
+                return first.pop() if first else naming_provider(args)
             begun = time.time()
             made = name_shared(target, image, program, make_provider, context, lifter, names, everything,
-                               shown_as=proposals, device=device, jobs=args.jobs)
+                               shown_as=proposals, device=device, jobs=args.jobs, batch=args.batch)
             if args.task == "globals":
                 spent = made[2]
                 print("dread pilot --task globals: %d globals and %d structures named (the table has %d and %d), %d "
-                      "questions at a time (%.0f s); %d answers, %d tokens in, %d out%s" % (
+                      "questions at a time (%.0f s); %s" % (
                           made[0], made[1], len(context.globals), len(context.structs), max(1, args.jobs),
-                          time.time() - begun, spent["answers"], spent["input"], spent["output"],
-                          " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""))
+                          time.time() - begun, spent_words(spent)))
                 return 0
             started = time.time()
-            named, asked, spent = name_variables(target, image, program, lambda: llm.load(args.provider), names,
-                                                 context, lifter, jobs=args.jobs, tries=args.tries, device=device)
+            named, asked, spent = name_variables(target, image, program, lambda: naming_provider(args), names,
+                                                 context, lifter, jobs=args.jobs, tries=args.tries, device=device,
+                                                 batch=args.batch)
             spent = summed([made[2], spent])        # (the globals' and structures' answers too)
             print("dread pilot --task readable: %d of %d functions named, %d asked, %d at a time (%.0f s; the globals "
-                  "and structures before them %.0f s); %d answers, %d tokens in, %d out%s" % (
+                  "and structures before them %.0f s); %s" % (
                       named, len(names), asked, max(1, args.jobs), time.time() - started, started - begun,
-                      spent["answers"], spent["input"], spent["output"],
-                      " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""))
+                      spent_words(spent)))
             return 0
         if args.task == "name":
             from dread.samecode import UNNAMED
@@ -3745,16 +4021,14 @@ def main(argv=None):
                                                    len(names) - len(todo), "refined or without a first proposal"
                                                    if args.refine else "proposed"))
                 return 0
-            made, asked, spent = name_functions(target, image, program, lambda: llm.load(args.provider), names,
+            made, asked, spent = name_functions(target, image, program, lambda: naming_provider(args), names,
                                                 flow, jobs=args.jobs, tries=min(args.tries, 3), refine=args.refine,
                                                 behaviour=args.behaviour, samples=args.samples,
                                                 temperature=args.temperature, gate=args.gate, passes=passes,
-                                                ablate=args.ablate, subsystems=args.subsystems, device=device)
-            cost = " ($%.2f)" % spent["cost"] if spent["cost"] is not None else ""
-            print("dread pilot --task name: %d of %d asked functions got a proposal%s (%s); %d answers, %d tokens "
-                  "in, %d out%s" % (made, asked, ", over the passes" if passes > 1 else "",
-                                    names_path(target, image), spent["answers"], spent["input"], spent["output"],
-                                    cost))
+                                                ablate=args.ablate, subsystems=args.subsystems, device=device,
+                                                batch=args.batch)
+            print("dread pilot --task name: %d of %d asked functions got a proposal%s (%s); %s" % (
+                made, asked, ", over the passes" if passes > 1 else "", names_path(target, image), spent_words(spent)))
             return 0
         missed = missed_instructions(target, image, args.names or [fn.name for fn in program.functions])
         for name, addresses in lift_missed(target, image, program).items():      # what the lifter left

@@ -35,7 +35,11 @@ verdicts a little), which is the same batch for every run. Since 2026-10-23 the 
 their question (judge's cache, dread.llm.AnswerCache; dread pilot keeps them in
 BUILD/pilot/IMAGE/grounded-answers.jsonl): a run judged once, in the same batches, is answered from the
 file in any later comparison, which is what makes replicate runs affordable (dread pilot --against
-RUN... --vs RUN...: each run judged once, every pairing counted from those verdicts).
+RUN... --vs RUN...: each run judged once, every pairing counted from those verdicts). Since 2026-10-24
+the questions can go as Message Batches (dread pilot --batch, judge's batch): every source batch's
+question of the first run first, its sources kept for an hour, then the other runs' in a batch that
+reads them: ten FreeRTOS runs judged by Sonnet 5.5 so cost $2.28, 2.48 M of their 3.33 M tokens in read
+from the cache.
 
 What a verdict does not establish: that the judge read the code right, nor that a person would agree
 (not measured yet). Measured on eight FreeRTOS naming runs (docs/decisions.md, 2026-10-22): two
@@ -380,7 +384,28 @@ def parse(answer, numbers, sentence=True):
     return out
 
 
-def judge(provider, runs, sources, sentence=True, out=print, tries=2, jobs=1, cache=None):
+def judge_talk(provider, store, messages, numbers, sentence=True, tries=2, where=""):
+    """One run's question of a batch as a dread.llm conversation: asked again (up to tries) while
+    verdicts are missing, each attempt answered from store (a dread.llm.AnswerCache, or None) where it
+    holds the answer and kept in it when asked (keyed by provider's kind and model). Returns ({number:
+    verdict}, None) or (what it got, why it stopped: the provider's error, said with where)."""
+    got = {}
+    for attempt in range(max(1, tries)):
+        key = store.key(provider, SYSTEM, messages, attempt) if store is not None else None
+        answer = store.get(key) if store is not None else None
+        if answer is None:
+            answer, _, error = yield (SYSTEM, messages, None)
+            if error is not None:
+                return got, "no verdicts for %s: %s" % (where, error)
+            if store is not None:
+                store.put(key, answer)
+        got.update(parse(answer, [k for k in numbers if k not in got], sentence))
+        if len(got) == len(numbers):
+            break
+    return got, None
+
+
+def judge(provider, runs, sources, sentence=True, out=print, tries=2, jobs=1, cache=None, batch=0):
     """{label: {entry: (verdict, why, sentence verdict or None, why)}} of runs ([(label, {entry: (name,
     what)})]) as a provider judges them against sources ({entry: Source}): a batch at a time
     (batches()), every run's question of a batch one after another so that they share its cached
@@ -392,10 +417,17 @@ def judge(provider, runs, sources, sentence=True, out=print, tries=2, jobs=1, ca
     cache: a dread.llm.AnswerCache (or a path for one): a question it holds an answer to (the same
     sources, the same proposals, the same attempt) is answered from it and not asked, and every answer
     asked is kept in it; a run's question does not depend on the other runs judged with it, so a run
-    judged once is not paid for again in another comparison of the same batches."""
+    judged once is not paid for again in another comparison of the same batches.
+
+    batch (dread pilot --batch): the questions go in rounds (dread.llm converse_all), a round of batch
+    questions or more as a Message Batch: first every source batch's question of the first run, which
+    writes the sources to the prompt cache for an hour (a batch may take longer than its five minutes),
+    then those of the other runs, which read it; the conversations (judge_talk) and the answers kept by
+    question are the same."""
     import concurrent.futures
     import copy
     import threading
+    from dread import llm
     from dread.llm import AnswerCache, ProviderError
     store = AnswerCache(cache) if isinstance(cache, str) else cache
     results = {label: {} for label, _ in runs}
@@ -405,16 +437,44 @@ def judge(provider, runs, sources, sentence=True, out=print, tries=2, jobs=1, ca
     shared = sum(1 for _, proposals in runs if proposals) > 1
     local, copies, lock = threading.local(), [], threading.Lock()
 
+    def fresh():
+        mine = copy.copy(provider)              # (its own last answer and counts: a thread's)
+        mine.last, mine.used = {}, dict.fromkeys(provider.used, 0)
+        with lock:
+            copies.append(mine)
+        return mine
+
     def asker():
         if jobs <= 1:
             return provider
         if getattr(local, "provider", None) is None:
-            mine = copy.copy(provider)          # (its own last answer and counts: a thread's)
-            mine.last, mine.used = {}, dict.fromkeys(provider.used, 0)
-            local.provider = mine
-            with lock:
-                copies.append(mine)
+            local.provider = fresh()
         return local.provider
+
+    if batch:
+        talks, where, leads = [], [], []
+        for path, entries in batches(wanted, sources):
+            first, lead = sources_part(path, entries, sources), None
+            for label, proposals in runs:
+                numbers = [k + 1 for k, e in enumerate(entries) if e in proposals]
+                if not numbers:
+                    continue
+                content = [{"text": first, "cache": "1h" if shared else False},
+                           {"text": proposals_part(entries, proposals, sentence)}]
+                talks.append(judge_talk(provider, store, [{"role": "user", "content": content}], numbers, sentence,
+                                        tries, "%s (%s)" % (path, label)))
+                where.append((label, entries))
+                leads.append(lead if shared else None)
+                lead = len(talks) - 1 if lead is None else lead
+        got = llm.converse_all(llm.Providers(fresh), talks, batch=batch, jobs=jobs, leads=leads, out=out)
+        for (label, entries), (verdicts, failure) in zip(where, got):
+            if failure:
+                out("dread pilot --grounded: " + failure)
+            results[label].update({entries[k - 1]: verdict for k, verdict in verdicts.items()})
+        for mine in copies:
+            for key, value in mine.used.items():
+                provider.used[key] = provider.used.get(key, 0) + value
+        return results
 
     def one(batch):
         path, entries = batch

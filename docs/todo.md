@@ -1226,6 +1226,34 @@ its sources.
   groups, but not beyond chance; it changed only one group's name, the device line having fixed the
   misread groups already. On the way it crashed the process in Unicorn (eight threads in one engine of
   dread.constants: engines are per thread since). Its people's names not tried there.
+- [x] **What the naming runs cost** (asked for 2026-10-24: this month Haiku 5.5 took 243,329 answers,
+  $83.91, about $50 of it output; Sonnet 5.5 $43.66). Done when the pilot's questions can go as
+  Anthropic's Message Batches, what several questions share is marked for the prompt cache where it
+  reaches the model's minimum, the answers lose what nothing reads, each measured on FreeRTOS GCC -Os
+  (cost, time, the names' quality) and decided (docs/decisions.md, three entries of 2026-10-24).
+  Done 2026-10-24. Every question is a conversation (a generator: dread.llm converse for one question
+  after another, converse_all for many in rounds, a round of `--batch N` questions or more as a Message
+  Batch, default 100), so an answer of a batch is handled as one asked alone; `--task name`'s passes go
+  in waves when a level is that large. The usage ledger got a mode column (`batch`, priced at half) and
+  the cache's hour-long writes (docs/formats.md); `dread llm batches` lists and cancels batches.
+  Measured (Haiku 5.5, defaults, `--no-device --jobs 16`): `--task name` $1.07 and 648 s one at a time
+  (main's code), $0.69 and 1,858 s with batches, $0.57-0.61 with the cache too (A1, the closest to a run
+  alone: 1.67 M of 4.25 M tokens in read from the cache), the names as good by their words; `--task
+  readable` $0.16 and 167 s, $0.10-0.11 and 235-299 s with batches. The answers' hidden reasoning (375 of
+  a name answer's 474 tokens out; Haiku 5.5 thinks by default and returns none of it) is the only text
+  produced that nothing reads; without it (`--no-thinking`, llm.toml's quick fields) a name run cost
+  $0.25-0.29 and a readable run $0.06-0.07, but the names got worse: by their words in every one of five
+  runs a side (the same words 21-25 against 70-81 of 366, overlap 0.24-0.26 against 0.40-0.42), the
+  readable names in every one of three (parameters as the source 45-49 % against 52-53 %); judged against
+  the source by Sonnet 5.5, five runs a side: 0.645 +- 0.009 against 0.784 +- 0.018 (p 0.008, by groups
+  25:3). So the reasoning stays (THINKING; `--no-thinking` an option); the run one at a time (0.785) and
+  the one with batches alone (0.783) judged as the runs with batches and the cache.
+  The sentences are read (names.tsv, the GUI, the review, the judge; readable C's comment) and stay.
+  Spent: $9.42 of API (Haiku $6.77 for 19 naming runs and the probes, Sonnet $2.66 judging 12 runs, its
+  questions in batches: $2.28 for ten runs, 2.48 M of 3.33 M tokens in read from the cache). Open: batches and the cache on a large image (time, the share batched); `--thinking`
+  per task with effort levels between (Haiku 5.5's low effort wrote 406 tokens where medium wrote 474 on
+  one question: not tried on runs); asking the losing samples' sentences no more (about half of a
+  quick answer's tokens; the kept sentence would then be another sample's).
 - [x] **Scored against the sources.** A bench step: per build, the functions turned readable and
   accepted, gotos left, statements and nesting against the source's functions.
   Done 2026-10-22: `dread bench measure RECIPE [BUILD...] --steps readable`, one of the default steps,

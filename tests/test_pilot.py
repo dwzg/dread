@@ -163,13 +163,13 @@ def test_provider_wire_formats(monkeypatch):
         remote.ask("be brief", [{"role": "user", "content": "hello"}], temperature=1.0)
         assert Fake.seen[-1][2]["temperature"] == 1.0
         assert remote.last == {"finish": "max_tokens", "tokens": 34, "reasoning": 4, "input": 57, "cache_read": 7,
-                               "cache_write": 0}
+                               "cache_write": 0, "cache_write_1h": 0}
         assert {k.lower(): v for k, v in headers.items()}["x-api-key"] == "secret"
         parts = [{"text": "the sources", "cache": True}, {"text": "the names"}]
-        remote.ask("be brief", [{"role": "user", "content": parts}])     # (a part to cache: Anthropic's block)
-        assert Fake.seen[-1][2]["messages"][0]["content"] == [
-            {"type": "text", "text": "the sources", "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": "the names"}]
+        remote.ask("be brief", [{"role": "user", "content": parts}])     # (a part to cache: Anthropic's block;
+        assert Fake.seen[-1][2]["messages"][0]["content"] == [          # the API joins blocks as they are, so
+            {"type": "text", "text": "the sources", "cache_control": {"type": "ephemeral"}},    # the blank line
+            {"type": "text", "text": "\n\nthe names"}]               # content_text joins them with is sent)
         local.ask("be brief", [{"role": "user", "content": parts}])      # (one text for the others)
         assert Fake.seen[-1][2]["messages"][1]["content"] == "the sources\n\nthe names"
     finally:
@@ -341,7 +341,10 @@ def test_a_correction_that_keeps_the_survivor_is_asked_for_the_argument(gizmo):
 
 def test_the_usage_ledger(tmp_path, monkeypatch):
     """Every answer adds its tokens to the ledger; the month's summary sums them per provider and
-    prices them where the configuration gives prices."""
+    prices them where the configuration gives prices, each line as it came: an answer of a Message
+    Batch (mode batch) at the batch rate, tokens written to the prompt cache for an hour at their price;
+    lines of an older ledger (six columns, eight with the cache's) are read as before."""
+    import time
     ledger, config = tmp_path / "usage.tsv", tmp_path / "llm.toml"
     config.write_text('[providers.cloud]\nkind = "anthropic"\nmodel = "m"\nprice_in = 3\nprice_out = 15\n')
     monkeypatch.setattr(llm, "USAGE", str(ledger))
@@ -355,22 +358,45 @@ def test_the_usage_ledger(tmp_path, monkeypatch):
     other.record()
     summary = llm.usage_summary()
     assert summary["cloud"]["answers"] == 2 and summary["cloud"]["input"] == 1000000
+    assert ledger.read_text().splitlines()[0].split("\t") == list(llm.USAGE_COLUMNS)
     priced = llm.Provider("cloud", {"model": "m", "price_in": 3, "price_out": 15})
     priced.last = {"finish": "end_turn", "tokens": 1000, "input": 500000}
     priced.record()                     # its own count, not the ledger's (runs beside it share that)
     assert priced.spent() == {"answers": 1, "input": 500000, "output": 1000, "cache_read": 0, "cache_write": 0,
-                              "cost": 1.5 + 0.015}
+                              "batch": 0, "cost": 1.5 + 0.015}
     assert p.spent()["answers"] == 2 and p.spent()["cost"] is None
     assert abs(summary["cloud"]["cost"] - (3.0 + 0.03)) < 1e-9
     assert summary["local"]["cost"] is None and summary["local"]["output"] == 10
-    assert "\tcloud\tm\t500000\t1000\tend_turn\n" in ledger.read_text()
+    assert "\tcloud\tm\t500000\t1000\tend_turn\t0\t0\t\t0\n" in ledger.read_text()
     cached = llm.Anthropic("cloud", {"model": "m", "price_in": 3, "price_out": 15})    # (a prompt cache's tokens:
     cached.last = {"finish": "end_turn", "tokens": 0, "input": 1000000, "cache_read": 800000, "cache_write": 100000}
     cached.record()                     # read at a tenth of the input price, written at a quarter more)
     assert cached.spent()["cost"] == pytest.approx((100000 * 3 + 800000 * 0.3 + 100000 * 3.75) / 1e6)
-    assert "\tcloud\tm\t1000000\t0\tend_turn\t800000\t100000\n" in ledger.read_text()
+    assert "\tcloud\tm\t1000000\t0\tend_turn\t800000\t100000\t\t0\n" in ledger.read_text()
     assert llm.usage_summary()["cloud"]["cost"] == pytest.approx(     # (three answers as before, the cached one)
         (1500000 * 3 + 3000 * 15 + 100000 * 3 + 800000 * 0.3 + 100000 * 3.75) / 1e6)
+    batch = llm.Anthropic("cloud", {"model": "m", "price_in": 3, "price_out": 15})   # (a batch's answer: half the
+    batch.last = {"finish": "end_turn", "tokens": 2000, "input": 600000, "cache_read": 0, "cache_write": 200000,
+                  "cache_write_1h": 50000}                      # price, its hour-long cache writes at twice the input)
+    batch.record("batch")
+    one = (400000 * 3 + 150000 * 3.75 + 50000 * 6 + 2000 * 15) / 1e6 * 0.5
+    assert batch.spent() == {"answers": 1, "input": 600000, "output": 2000, "cache_read": 0, "cache_write": 200000,
+                             "batch": 1, "cost": pytest.approx(one)}
+    assert "\tcloud\tm\t600000\t2000\tend_turn\t0\t200000\tbatch\t50000\n" in ledger.read_text()
+    now = llm.usage_summary()["cloud"]
+    assert now["batch"] == 1 and now["answers"] == 5 and now["cost"] == pytest.approx(
+        (1500000 * 3 + 3000 * 15 + 100000 * 3 + 800000 * 0.3 + 100000 * 3.75) / 1e6 + one)
+    month = time.strftime("%Y-%m")      # (lines of older ledgers: six columns, then eight)
+    with open(ledger, "a") as f:
+        f.write("%s-01T00:00:00\tcloud\tm\t1000\t100\tend_turn\n" % month)
+        f.write("%s-01T00:00:01\tcloud\tm\t1000\t100\tend_turn\t500\t0\n" % month)
+    later = llm.usage_summary()["cloud"]
+    assert later["answers"] == 7 and later["cache_read"] == 800500 and later["cost"] == pytest.approx(
+        now["cost"] + (1000 * 3 + 100 * 15) / 1e6 + (500 * 3 + 500 * 0.3 + 100 * 15) / 1e6)
+    discount = tmp_path / "other.toml"  # (a price list's own batch rate)
+    discount.write_text('[providers.cloud]\nkind = "anthropic"\nmodel = "m"\nprice_in = 3\nprice_out = 15\n'
+                        'price_batch = 0.25\n')
+    assert llm.usage_summary(config_path=str(discount))["cloud"]["cost"] == pytest.approx(later["cost"] - one / 2)
 
 
 def test_inputs_for_what_the_lift_check_left_uncovered(tmp_path):
@@ -668,6 +694,74 @@ def test_a_vote_keeps_the_name_most_answers_agree_with(gizmo):
     assert (rows["led_on"]["confidence"], rows["led_on"]["names_shown"], rows["led_on"]["pass"]) == ("1.00", "1", "1")
     assert rows["gpio_set"]["names_shown"] == "0" and "pin_write(" in seen[3][1]
     assert any("2 of 3 agree" in line for line in lines), lines
+
+
+def test_names_go_in_waves_of_batches(gizmo):
+    """--batch (name_functions in waves): every function whose callees have their names is asked in one
+    wave, a wave of batch questions or more as a Message Batch, an answer that cannot be used asked again
+    in the next round (another batch here); the proposals are those of the questions asked one at a time,
+    with the same answers."""
+    target, image, program, flow = gizmo
+    rows, made = {}, []
+
+    def answer(messages):                   # (gpio_set's first answers cannot be used, those asked again can)
+        name = re.search(r"The function (\w+)", llm.content_text(messages[0]["content"])).group(1)
+        if name == "gpio_set":
+            return "no idea" if len(messages) == 1 else "name: pin_write\nwhat: drives a pin"
+        return "name: led_switch_on\nwhat: switches it on"
+    for batch in (0, 1):
+        def provider():
+            made.append(llm.Scripted(answer, batches=True))
+            return made[-1]
+        shutil.rmtree(os.path.join(target.build, "pilot"), ignore_errors=True)
+        lines = []
+        done, asked, spent = pilot.name_functions(target, image, program, provider, ["led_on", "gpio_set"], flow,
+                                                  jobs=1, out=lines.append, samples=2, batch=batch)
+        assert (done, asked) == (2, 2), lines
+        rows[batch] = {r["now"]: (r["proposed"], r["samples"], r["confidence"], r["what"])
+                       for r in pilot.read_name_rows(pilot.names_path(target, image))}
+        if batch:
+            batcher = next(p for p in made if p.submitted)
+            sizes = [len(b["requests"]) for b in batcher.submitted]
+            assert sizes == [2, 2, 2], sizes  # (gpio_set's two samples, both asked again, led_on's two)
+            again = batcher.submitted[1]["requests"][0][1]["messages"]
+            assert again[-1]["content"].startswith("That name cannot be used") and spent["batch"] == 6
+            assert "pin_write(" in llm.content_text(batcher.submitted[2]["requests"][0][1]["messages"][0]["content"])
+            assert any("in waves" in line for line in lines), lines
+    assert rows[0] == rows[1] and rows[0]["gpio_set"][0] == "pin_write", rows
+
+
+def test_the_samples_share_their_code_in_the_prompt_cache(gizmo):
+    """Where the provider keeps it (llm.Provider.cacheable), the beginning a function's samples share (the
+    device line and its code; the callers' order differs) is marked for the prompt cache, the text as
+    content_text joins the parts the same as before; asked one at a time the first sample goes first and
+    the others once it has ended; in a batch the first samples come first."""
+    target, image, program, flow = gizmo
+    asked, made = [], []
+
+    def answer(messages):
+        content = messages[0]["content"]
+        asked.append(content)
+        return "name: %s_x\nwhat: does it" % re.search(r"The function (\w+)", llm.content_text(content)).group(1)
+    pilot.name_functions(target, image, program, lambda: llm.Scripted(answer, caches=True), ["led_on", "gpio_set"],
+                         flow, jobs=4, samples=3)
+    gpio = [c for c in asked if "The function gpio_set" in llm.content_text(c)]
+    assert len(gpio) == 3 and all(isinstance(c, list) and c[0]["cache"] for c in gpio), gpio
+    assert len({c[0]["text"] for c in gpio}) == 1 and gpio[0][0]["text"].endswith("```")
+    text, _, shared = pilot.Namer(target, image, program, flow).question_parts(program.by_name["gpio_set"])
+    assert llm.content_text(pilot.cache_parts(text, shared)) == text and shared < len(text)
+    assert [llm.content_text(c).startswith(gpio[0][0]["text"]) for c in gpio] == [True] * 3
+    shutil.rmtree(os.path.join(target.build, "pilot"))
+    asked.clear()
+
+    def provider():
+        made.append(llm.Scripted(answer, caches=True, batches=True))
+        return made[-1]
+    pilot.name_functions(target, image, program, provider, ["led_on", "gpio_set"], flow, jobs=4, samples=3, batch=1)
+    batcher = next(p for p in made if p.submitted)
+    first = [p["messages"][0]["content"] for _, p in batcher.submitted[0]["requests"]]
+    assert len(first) == 3 and [isinstance(c, list) for c in first] == [True] * 3
+    assert pilot.shared_parts(None, "s", [("a\n\nb", 1), ("a\n\nc", 1)]) == [("a\n\nb", None), ("a\n\nc", None)]
 
 
 def test_a_gate_shows_sure_names_only_and_later_passes_ask_what_changed(gizmo):
@@ -1528,3 +1622,28 @@ def test_a_decision_takes_both_orders_and_a_margin():
     assert namereview.parse_decision("I prefer A") == (None, None)
     assert namereview.alike("TaskDelay", "task_delay") and namereview.alike("queue_send_back", "queue_back_send")
     assert not namereview.alike("task_list_insert", "port_list_insert")     # (another part: decided, not confirmed)
+
+
+def test_no_thinking_makes_the_naming_providers_quick(gizmo, monkeypatch, capsys):
+    """--no-thinking: every provider the naming tasks make is asked to be quick (llm.Provider.quick);
+    --thinking: none is; without either, the task's default (THINKING)."""
+    target, image, program, flow = gizmo
+    made = []
+
+    def load(name=None, path=None):
+        made.append(llm.Scripted(lambda messages: "name: x_%d\nwhat: does it" % len(made)))
+        return made[-1]
+    monkeypatch.setattr(llm, "load", load)
+    assert pilot.main(["--target", target.root, "--task", "name", "--no-thinking", "--no-subsystems", "--samples", "1",
+                       "--passes", "1", "--no-device", "led_on"]) == 0
+    assert made and all(p.quick for p in made)
+    made.clear()
+    shutil.rmtree(os.path.join(target.build, "pilot"))
+    assert pilot.main(["--target", target.root, "--task", "name", "--no-subsystems", "--samples", "1", "--passes", "1",
+                       "--no-device", "led_on"]) == 0
+    assert made and all(p.quick != pilot.THINKING["name"] for p in made)    # (the task's default)
+    made.clear()
+    shutil.rmtree(os.path.join(target.build, "pilot"))
+    assert pilot.main(["--target", target.root, "--task", "name", "--thinking", "--no-subsystems", "--samples", "1",
+                       "--passes", "1", "--no-device", "led_on"]) == 0
+    assert made and not any(p.quick for p in made)

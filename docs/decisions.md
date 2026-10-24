@@ -9,6 +9,158 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The naming runs' cost (1): rounds of 100 questions or more as Message Batches, by default (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), on the request to make the
+pilot's runs cheaper without making the names worse (the month to 2026-10-24 by the usage ledger: Haiku
+5.5 243,329 answers, 343 M tokens in, 99 M out, $83.91, about $50 of it output; Sonnet 5.5 $43.66).
+
+- **Question.** Anthropic's Message Batches cost half (input and output), and a batch is answered within
+  minutes to an hour (24 at most) where a question takes seconds. The naming questions come in stages:
+  the groups', the globals' and structures' batches, the variables of `--task readable` and the
+  grounded judge's questions are independent within a stage; `--task name` asks a function only once its
+  callees (callers, on even passes) are named, 23 levels deep on FreeRTOS GCC -Os. Batches where, and by
+  default?
+- **Options.** (a) One question at a time, as before. (b) An option only. (c) Every stage as batches.
+  (d) By default, a round of N questions or more as a batch, smaller rounds one at a time as before;
+  `--task name`'s passes in waves (every function whose dependencies are named, asked at once, settled
+  before the next wave) when a level of the call graph has N questions or more.
+- **Choice: (d) with N = 100** (`--batch N`, BATCH_MIN; `--batch 0` asks one at a time). Every question is
+  a conversation (a generator) that decides what an answer means, the same code whether its question
+  goes alone or in a batch (dread.llm converse, converse_all); answers come back by custom_id; what asks
+  again (a name that cannot be used, names the checks refuse, verdicts missing) makes the next round. A
+  batch is looked at every 10 s and cancelled after 2 hours (batch_poll, batch_wait), its unanswered
+  questions failing with an error that says so; an interrupted run, SIGTERM and SIGHUP too, cancels the
+  batches it waits for (`dread llm batches --cancel` for one killed outright). Each answer of a batch is
+  a line of the usage ledger with mode `batch`, priced at half (docs/formats.md).
+- **Measured** on FreeRTOS GCC -Os (mps2): `--task name` on a copy of the bench's stripped build (366
+  functions FUN_), `--task readable` on a copy of the named build after `dread readable --check` (317
+  readable functions), Haiku 5.5, the defaults (`--samples 5 --passes 2 --subsystems`), `--no-device
+  --jobs 16`, one run each:
+
+      run                          answers  tokens in  out     cost   time    word scores (same words, half the words, overlap, style)
+      name, one at a time (main)   3,345    4.26 M     1.30 M  $1.07    648 s  75, 132, 0.39, 0.47
+      name, --batch 100            3,340    4.25 M     1.28 M  $0.69  1,858 s  78, 155, 0.42, 0.49
+      readable, one at a time      347      0.36 M     0.25 M  $0.16    167 s  parameters 198 of 374 as the source
+      readable, --batch 100        363      0.37 M     0.26 M  $0.11    235 s  191 of 369
+
+  The name run's ten batches carried 2,310 of its 3,340 answers (the groups' 145 questions, levels of
+  130 to 410), each answered in 125-208 s; the rounds below 100 went one at a time (69 % of the answers
+  batched: -35 %). The readable run's variables went as one batch of 317 (156 s); its globals' and
+  structures' 15 questions and the 46 asked again one at a time (-31 %). The names are those of the same
+  questions asked one at a time (a provider's sampling): the word scores within the noise of runs (five
+  runs of one setting below: the same words 70-81), the readable scores too (three runs 52-53 %); judged
+  against the source by Sonnet 5.5 (the replicate method, next entries), the run one at a time 0.785,
+  the run with batches 0.783, the five with batches and the cache 0.784 +- 0.018 (0.761-0.807).
+- **Why.** The answers are the model's to the same questions; only the price and the waiting change.
+  Half the price of the large rounds is most of a run's cost on a large image, where rounds are wide,
+  and a round below 100 questions (a handful of functions, a review's candidates) is asked as quickly as
+  before. The price is time: on FreeRTOS `--task name` took 2.9 times as long (31 minutes), `--task
+  readable` 1.4 times; most runs are unattended (the bench, replicate comparisons), where money is the
+  limit. On a large image a batch of thousands of questions should not take longer than asking them 16
+  at a time (about three answers a second here) takes; not measured.
+- **Not established.** Batches on a large image (their latency with thousands of questions, the run's
+  time); how long batches take at other hours (here, a Saturday afternoon with up to ten runs at a time,
+  117 Haiku batches took 114-280 s, median 186 s; Sonnet's three for the judge 364-734 s); the readable
+  task's globals' and structures' stages as batches (15 questions: one at a time by the threshold).
+- **Undo.** `--batch 0`, or BATCH_MIN = 0; a provider's `batch = false` in llm.toml.
+- **Status.** In the code (dread/llm.py ask_batch, converse, converse_all, Providers, ending_on_signals,
+  the providers' batch_* calls, `dread llm batches`; dread/pilot.py the conversations name_talk,
+  subsystem_talk, readable_talk, one_talk, batching, one_pass_waves, --batch; dread/namejudge.py judge_talk
+  and judge's batch; docs/formats.md the ledger's columns).
+
+## The naming runs' cost (2): the prompt cache for what several questions share, where llm.toml gives the model's minimum (2026-10-24)
+
+**Decided by recommendation** (the same request).
+
+- **Question.** Anthropic keeps a prompt's beginning for questions that begin alike: read for a tenth of
+  the input price (Haiku 5.5; Sonnet 5.5 and Opus 5.5 0.05), written for a quarter more (for an hour:
+  twice), a prompt of at least 512 tokens on the 5.5 models, available only once the answer that writes
+  it has begun. What do the pilot's questions share, and where does marking it pay?
+- **What is shared.** The instructions (NAME_SYSTEM and its kin, 200-340 tokens) and the device line are
+  shorter than the minimum alone, and the group's line a function's question shows (about 80 tokens) adds
+  too little to reach it for the questions of one group's functions. What reaches it: a function's
+  samples (five by default) share the device line and its code, the bulk of the question, and differ only
+  in the callers' order after it (Namer.question_parts: the code ends the shared part); a group's samples
+  are one question asked five times; the device question likewise; the grounded judge's runs share a
+  source batch's sources (marked since 2026-10-22). A readable question is asked once (again only when
+  the checks refuse its answer), a globals' or structures' question shares only its instructions: not
+  marked (a mark written and never read costs a quarter more).
+- **Choice.** A provider whose configuration gives cache_min (the model's least cacheable prompt) says
+  that it caches (Provider.cacheable); the pilot then marks the shared part of questions at least two of
+  which begin alike, where the prompt up to its end reaches the minimum (estimated at 3 characters a
+  token: the naming questions took 2.4), and orders them for it: one at a time the first sample goes
+  first and the others once it has ended; in a batch the first samples come first (the cache is the
+  API's best effort there); the judge in batches asks every source batch's first run first, in a round
+  of its own, its sources kept for an hour. Without cache_min nothing new is marked and nothing waits.
+  The parts go to the API with the blank line content_text joins them with (the API puts a message's
+  blocks together as they are, measured with its token count), so a question split for the cache is the
+  same text, the answer cache's keys unchanged.
+- **Measured** (the first entry's setting, `--batch 100`, cache_min 512): the name run A1 read 1.67 M of its
+  4.25 M tokens in from the cache and wrote 1.06 M, $0.61 against $0.69 without marks (-12 % of the run,
+  -31 % of its input cost): questions asked one at a time 0.56 M read and 0.14 M written of 1.17 M (-40 %
+  of their input cost), questions of batches 1.11 M read and 0.92 M written of 3.09 M (-25 %); the groups'
+  batch alone (145 questions, the samples of one question) 0.45 M read and 0.39 M written of 0.84 M,
+  where every sample after the first reading would have written 0.17 M. Four runs beside it (A2-A5) read
+  2.2-2.3 M: concurrent runs of one build ask the same questions (no names yet in the groups' and the
+  first level's) and read each other's cache, $0.57-0.59.
+- **Why.** The samples are where a run's input repeats itself; ordered for the cache, a function's code is
+  paid about one and a half times instead of five. The model's minimum is a fact of its price list:
+  from the configuration, not a constant in the code (Haiku 4.5's is 4,096).
+- **Not established.** The cache one at a time in a whole run without batches (only the rounds below 100
+  of these runs, which went so); the best effort in a batch elsewhere (here about two thirds of the reads
+  it could have had); the estimate of tokens on code of other compilers and architectures.
+- **Undo.** Remove cache_min from llm.toml (no marks, no ordering).
+- **Status.** In the code (dread/llm.py Anthropic.blocks, cacheable, CHARS_PER_TOKEN, the hour's price
+  CACHE_WRITE_1H, price_cache_write_1h; dread/pilot.py cache_parts, shared_parts, Namer.question_parts,
+  name_subsystems, one_pass's held questions, device_task; dread/namejudge.py). The user's llm.toml needs
+  `cache_min = 512` in the Haiku 5.5, Sonnet 5.5, Opus 5.5 and Fable 5.1 providers, and `price_cache_read`
+  0.10 and 0.20 for Sonnet 5.5 and Opus 5.5 (their reads are 0.05 of the input price; the code's default
+  is Haiku's 0.1).
+
+## The naming runs' cost (3): the model's hidden reasoning stays; answering without it an option (2026-10-24)
+
+**Decided by recommendation** (the same request: shorter answers, never at the cost of what the names
+say).
+
+- **Question.** What do the answers hold beyond what the pilot uses? A name answer is two lines (about
+  100 tokens: the name, a sentence), a readable answer a ```json block (the names, a sentence), a group's
+  three lines. The sentences are read: names.tsv's what, the GUI, the review, the grounded judge's second
+  verdict; readable C's comment above each function. But Haiku 5.5 reasons before it answers (adaptive
+  thinking by default, effort medium), returns none of that text (its display is omitted) and bills it
+  as output: 375 of 474 tokens out on a FreeRTOS name question; output was 60 % of a name run's cost and
+  78 % of a readable run's. Ask without it?
+- **Options.** (a) As before. (b) The naming questions without thinking (Haiku 5.5 accepts thinking
+  disabled at effort high or below; Sonnet 5.5 needs between_tools; Opus 5.5 cannot turn it off). (c) A
+  lower effort (low: 406 tokens out on the same question, hardly fewer). (d) The sentence asked of one
+  sample of a vote only.
+- **Measured** with the replicate method (2026-10-23): five name runs a side, side by side from one
+  commit, batches and the cache on (`--batch 100`, cache_min 512), the second side with `--no-thinking`
+  (llm.toml's quick fields: thinking disabled), each judged once against the source by Sonnet 5.5,
+  sentences apart: the runs' means 0.784 +- 0.018 (0.761-0.807; right 212-232 of 332, wrong 27-39)
+  against 0.645 +- 0.009 (0.631-0.652; right 148-159, wrong 53-64), +0.139, permutation test over runs p
+  0.008 (the least possible); by groups over the 25 pairings 25:3 (sign test p 3e-5), by source files
+  32:5; within a setting -15 to +11. The sentences 0.607-0.648 against 0.479-0.544. Their words: the same
+  words as the source 70-81 against 21-25 of 366, overlap 0.40-0.42 against 0.24-0.26, every run without
+  below every run with. Cost $0.57-0.61 against $0.25-0.29 a run (tokens out 1.28-1.33 M against 0.30 M).
+  Three readable runs a side: parameters named as the source 52-53 % against 45-49 %, local names among
+  the source's 89-109 against 85-87, globals named as the source 18-25 against 13-15, $0.10-0.11 against
+  $0.06-0.07, 350-363 answers against 421-434 (more names the checks refused). Without thinking the names
+  describe the mechanics, longer (queue_set_check_and_reset_error_flag where with it queue_set_check_progress,
+  the source's xAreQueueSetPollTasksStillRunning), and a group's answer sometimes hedges inside its line
+  (prefix: pvPortMalloc_ (heap_, mem_; ...)), which goes back as unusable.
+- **Choice: (a).** Thinking stays the default of every naming task (THINKING, per task); `--no-thinking`
+  stays an option, asking the provider for its quick fields (llm.toml), for a model where it measures
+  otherwise or a local reasoning model where time counts. (c) was not tried on runs; (d) not done: the
+  kept sentence would then often be another sample's than the winning name's.
+- **Why.** The reasoning is what makes the names: nothing reads its text, but the names come out of it.
+  Without it a run costs half, and its names are judged clearly worse by every measure.
+- **Not established.** A lower effort (low, between none and the default); another model naming without
+  it; a firmware the model does not know.
+- **Undo.** THINKING (per task), or `--no-thinking` on a run.
+- **Status.** In the code (dread/llm.py Provider.quick, quick_fields; dread/pilot.py THINKING, thinking(),
+  naming_provider, --thinking). The judge's answers and the twenty runs are not kept in the repository.
+
 ## Results as the source has them: reads of bits nobody uses, results nobody reads, second words that are leftovers (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Two-word

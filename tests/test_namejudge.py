@@ -152,3 +152,45 @@ def test_a_run_judged_once_is_answered_from_the_kept_answers(tmp_path):
     changed = [("x", {0x10: ("list_op", "Does it."), 0x20: ("list_unlink", "Removes.")})]
     assert namejudge.judge(other, changed, sources, cache=kept)["x"][0x10][0] == "partly"
     assert other.used["answers"] == 1
+
+
+def test_a_judge_asks_in_batches_with_the_first_run_writing_the_cache(tmp_path):
+    """judge with batch: the same verdicts as asked one at a time; every source batch's question of the
+    first run goes first, its sources marked for the prompt cache for an hour, the other runs' questions
+    of that batch once it has ended (a question missing verdicts asked again in the next round), each
+    round a Message Batch; the answers are kept by question as before and a judging again asks nothing."""
+    sources = {0x10: namejudge.Source(0x10, "list_add", "/src/list.c", 1, "void list_add(void)\n{\n}"),
+               0x30: namejudge.Source(0x30, "uart_init", "/src/uart.c", 1, "void uart_init(void)\n{\n}"),
+               0x40: namejudge.Source(0x40, "uart_send", "/src/uart.c", 5, "void uart_send(void)\n{\n}")}
+    this = {0x10: ("list_insert", "Adds."), 0x30: ("serial_setup", "Sets it up."), 0x40: ("serial_put", "Sends.")}
+    other = {0x10: ("list_append", "Appends."), 0x30: ("timer_start", "Starts a timer.")}
+
+    def answering():                        # (a run's answers: the question about serial_setup misses a
+        times = {}                          # verdict the first time it is asked, and is asked again)
+
+        def answer(messages):
+            text = messages[0]["content"][1]["text"]
+            times[text] = times.get(text, 0) + 1
+            if "list_insert" in text:
+                return '```json\n{"1": "right | right"}\n```'
+            if "list_append" in text:
+                return '```json\n{"1": "partly: vague | right"}\n```'
+            if "serial_setup" in text and times[text] == 1:
+                return '```json\n{"1": "right | right"}\n```'
+            if "serial_setup" in text:
+                return '```json\n{"2": "right | partly: sends a byte"}\n```'
+            return '```json\n{"1": "wrong: no timer | wrong: no"}\n```'
+        return answer
+    plain = namejudge.judge(llm.Scripted(answering()), [("this", this), ("other", other)], sources)
+    batching = llm.Scripted(answering(), batches=True)
+    path = str(tmp_path / "answers.jsonl")
+    got = namejudge.judge(batching, [("this", this), ("other", other)], sources, batch=1, cache=path)
+    assert got == plain and got["this"][0x40] == ("right", "", "partly", "sends a byte"), got
+    rounds = [[llm.content_text(p["messages"][0]["content"][1]["text"]).split("\n")[-1] for _, p in b["requests"]]
+              for b in batching.submitted]
+    assert [len(r) for r in rounds] == [2, 2, 1], rounds    # (this: list.c, uart.c; uart.c again, list.c's other;
+    first = batching.submitted[0]["requests"][0][1]["messages"][0]["content"][0]    # uart.c's other)
+    assert first["cache"] == "1h" and batching.used["answers"] == 5 and batching.used["batch"] == 5
+    again = llm.Scripted([], batches=True)
+    assert namejudge.judge(again, [("this", this), ("other", other)], sources, batch=1, cache=path) == got
+    assert again.submitted == []

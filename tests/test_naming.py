@@ -309,6 +309,36 @@ def test_the_pilot_names_functions_jobs_at_a_time(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_variables_asked_in_batches_end_as_asked_alone(tmp_path):
+    """name_variables with batch: every function's question goes in one Message Batch (played in memory),
+    the answer the checks refuse asks again in a second batch, the declined one gets no entry; the
+    readable_names table ends byte for byte as one question after another leaves it, and the answers are
+    counted as a batch's."""
+    from dread import llm, pilot
+    tables, made = {}, []
+    for batch in (0, 1):
+        target, image, program, context, lifter = gizmo_copy(tmp_path / ("batch%d" % batch))
+        answer, order = played(1)
+
+        def provider():
+            made.append(llm.Scripted(answer, batches=True))
+            return made[-1]
+        lines = []
+        named, asked, spent = pilot.name_variables(target, image, program, provider, ASKED, context, lifter, jobs=2,
+                                                   tries=2, out=lines.append, batch=batch)
+        assert (named, asked) == (5, 6) and order.count("fmt_hex") == 2, (lines, order)
+        with open(image.table("readable_names")) as f:
+            tables[batch] = f.read()
+        if batch:
+            batcher = next(p for p in made if p.submitted)
+            assert [len(b["requests"]) for b in batcher.submitted] == [6, 1], batcher.submitted
+            assert spent["batch"] == 7 and spent["answers"] == 7
+            assert any("as 1 Message Batch" in line for line in lines), lines
+            assert "u32 is taken" in open(os.path.join(target.build, "pilot", image.name, "fmt_hex.readable.md")).read()
+    assert tables[0] == tables[1]
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_the_readable_task_asks_jobs_at_a_time_from_the_command_line(tmp_path, monkeypatch, capsys):
     """dread pilot --task readable --jobs 2 NAME...: the globals' question first (uart_putc's device
     registers, answered with no names), then the functions' variables, two at a time, each thread with
