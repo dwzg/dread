@@ -81,7 +81,7 @@ import threading
 
 from dread import cparse as C
 from dread import cexpr
-from dread.cflow import Graph, has_effects, walk_expr, _reads_of, is_volatile_access, is_pure_call
+from dread.cflow import Graph, expr_writes, has_effects, walk_expr, _reads_of, is_volatile_access, is_pure_call
 
 
 # --- small helpers ---
@@ -2346,46 +2346,82 @@ def conditions(fn):
     search reads of it: its text, its variables' types, the widths of int and long, whether z3 is there
     (until 2026-10-23 each round searched again: two thirds of the searches for FreeRTOS's GCC -Os
     demo were of a condition the same run had searched before). A proof that ran out of time
-    (cexpr.PROOF_MS) so stays a no for the rest of the run."""
-    import copy
+    (cexpr.PROOF_MS) so stays a no for the rest of the run (smallest_truths, simpler_truth)."""
     ctx = context(fn)
     changed = False
+    for s in with_arms(fn.body.body):
+        if isinstance(s, C.If):                     # (a branch's, a conditional block's)
+            parts = [(lambda s=s: s.cond, lambda v, s=s: setattr(s, "cond", v), True)]
+        elif is_assign(s):                          # (a select's, a flag's: 0 or 1 either way)
+            parts = [(lambda s=s: s.e.value, lambda v, s=s: setattr(s.e, "value", v), False)]
+        elif isinstance(s, C.ExprStmt):             # (a call's arguments, a store's value)
+            parts = [(lambda s=s: s.e, lambda v, s=s: setattr(s, "e", v), False)]
+        elif isinstance(s, C.Return) and s.e is not None:
+            parts = [(lambda s=s: s.e, lambda v, s=s: setattr(s, "e", v), False)]
+        else:
+            continue
+        for get, put, cond in parts:
+            before = C.expr_text(get())
+            after = smallest_truths(get(), ctx, cond)
+            if C.expr_text(after) != before:
+                put(after)
+                changed = True
+    return changed
 
-    def simpler(cond):
-        limit = size(cond)
-        if limit <= 3:
-            return None
-        names = sorted({x.id for x in walk_expr(cond) if isinstance(x, C.Name)})
-        key = (C.expr_text(cond), tuple((n, ctx.types.get(n)) for n in names), ctx.int_bits, ctx.long_bits,
-               cexpr.z3 is not None)
-        memo = getattr(_RUN, "memo", None)
-        if memo is not None and key in memo:
-            got = memo[key]
-            return copy.deepcopy(got) if got is not None else None
-        got = _simpler(cond, limit)
-        if memo is not None:
-            memo[key] = copy.deepcopy(got) if got is not None else None
-        return got
 
-    def _simpler(cond, limit):
-        loads = loads_once(cond)
-        if loads is None or cexpr.z3 is None:
-            return None
-        check = None                        # (made for the first candidate that reads cond's loads)
-        for _, cand, recipe in shared_candidates(cond, ctx, below=limit):
-            if loads_once(cand) != loads:   # (same_loads)
-                continue
-            if check is None:
-                check = cexpr.Checker(cond, ctx, as_bool=True)
-            if check.stands_for(cand):
-                return made_candidate(recipe, ctx)
+def simpler_truth(cond, ctx):
+    """The smallest candidate (shared_candidates) proved to have cond's truth, made of copies of its
+    parts (made_candidate), or None: conditions' search, its answers kept for the tidy run under way
+    (_RUN.memo) by what it reads."""
+    import copy
+    limit = size(cond)
+    if limit <= 3:
         return None
+    names = sorted({x.id for x in walk_expr(cond) if isinstance(x, C.Name)})
+    key = (C.expr_text(cond), tuple((n, ctx.types.get(n)) for n in names), ctx.int_bits, ctx.long_bits,
+           cexpr.z3 is not None)
+    memo = getattr(_RUN, "memo", None)
+    if memo is not None and key in memo:
+        got = memo[key]
+        return copy.deepcopy(got) if got is not None else None
+    got = _simpler_truth(cond, limit, ctx)
+    if memo is not None:
+        memo[key] = copy.deepcopy(got) if got is not None else None
+    return got
 
+
+def _simpler_truth(cond, limit, ctx):
+    loads = loads_once(cond)
+    if loads is None or cexpr.z3 is None:
+        return None
+    check = None                            # (made for the first candidate that reads cond's loads)
+    for _, cand, recipe in shared_candidates(cond, ctx, below=limit):
+        if loads_once(cand) != loads:       # (same_loads)
+            continue
+        if check is None:
+            check = cexpr.Checker(cond, ctx, as_bool=True)
+        if check.stands_for(cand):
+            return made_candidate(recipe, ctx)
+    return None
+
+
+def _zero(e):
+    return isinstance(e, C.Num) and isinstance(e.value, int) and not isinstance(e.value, bool) and e.value == 0
+
+
+def smallest_truths(e, ctx, cond=False):
+    """e with its truth values as small as proved (simpler_truth): e itself where it is a condition
+    (cond) or a truth value; else, or when nothing smaller stands for it, its parts. A truth value
+    compared with 0 is itself or its negation (since 2026-10-25: truths and fold left if ((c && !z) !=
+    0) where a variable set by ifs to 0 and 1 was tested)."""
     def truths(e, cond=False):
-        """e with its truth values as small as proved: e itself where it is a condition (cond) or a
-        truth value; else, or when nothing smaller stands for it, its parts."""
+        if isinstance(e, C.Binary) and e.op in ("==", "!=") and (
+                (truth_value(e.l) and _zero(e.r)) or (truth_value(e.r) and _zero(e.l))):
+            from dread.structure import negate          # (a truth value compared with 0: itself or its negation;
+            inner = truths(e.l if truth_value(e.l) else e.r, True)      # truths and fold make if ((c && !z) != 0))
+            return inner if e.op == "!=" else negate(inner)
         if cond or truth_value(e):
-            cand = simpler(e)
+            cand = simpler_truth(e, ctx)
             if cand is not None:
                 return cand
         if isinstance(e, C.Binary) and e.op in ("&&", "||"):
@@ -2405,24 +2441,7 @@ def conditions(fn):
         if isinstance(e, C.Assign):                 # (one stored)
             return C.Assign(e.op, e.target, truths(e.value))
         return e
-    for s in with_arms(fn.body.body):
-        if isinstance(s, C.If):                     # (a branch's, a conditional block's)
-            parts = [(lambda s=s: s.cond, lambda v, s=s: setattr(s, "cond", v), True)]
-        elif is_assign(s):                          # (a select's, a flag's: 0 or 1 either way)
-            parts = [(lambda s=s: s.e.value, lambda v, s=s: setattr(s.e, "value", v), False)]
-        elif isinstance(s, C.ExprStmt):             # (a call's arguments, a store's value)
-            parts = [(lambda s=s: s.e, lambda v, s=s: setattr(s, "e", v), False)]
-        elif isinstance(s, C.Return) and s.e is not None:
-            parts = [(lambda s=s: s.e, lambda v, s=s: setattr(s, "e", v), False)]
-        else:
-            continue
-        for get, put, cond in parts:
-            before = C.expr_text(get())
-            after = truths(get(), cond)
-            if C.expr_text(after) != before:
-                put(after)
-                changed = True
-    return changed
+    return truths(e, cond)
 
 
 # --- flags read through variables: a compare's flags read by several statements, an add's carry ---
@@ -3568,6 +3587,320 @@ def values(fn):
     return changed
 
 
+def _constant_of(s, v, ty):
+    """The value a statement gives variable v, as v's type ty has it, where it is v = K; None for
+    anything else (a declaration's initial value too: the lifters give registers no argument holds 0 at
+    the entry, which says nothing of the program's own stores)."""
+    if _constant_store(s) and s.e.target.id == v:
+        return cexpr.wrap(s.e.value.value, ty)
+    return None
+
+
+def call_addresses(fn):
+    """The instructions of fn's statements that call (a function that is not pure): the zeros the lifters
+    give the registers a call leaves behind it (r0 = f(...); r1 = r2 = r3 = r12 = 0, split one a
+    statement) carry the call's, which tells them from the program's own stores of 0."""
+    out = set()
+    for s in fn.body.body:
+        for st in _flat(s):
+            if st.addr is not None and any(isinstance(x, C.Call) and not is_pure_call(x)
+                                           for e in _stmt_all_exprs(st) for x in walk_expr(e)):
+                out.add(st.addr[0])
+    return out
+
+
+def _only_tests_between(g, i, v):
+    """Whether every way back from node i of graph g to a definition of v passes only statements without
+    an effect (tests, branches, arithmetic, labels): the stores of one dispatch, not a value a register
+    kept across a call or a store (dread.tidy held: GCC's zero for a call's argument, still in r3 behind
+    the call, stood in for the source's xStartIndex = 0 in an else, and the store moved before the call:
+    FreeRTOS GCC -Os prvNonBlockingReceiverTask)."""
+    seen, todo = set(), list(g.nodes[i].pred)
+    while todo:
+        k = todo.pop()
+        if k in seen:
+            continue
+        seen.add(k)
+        n = g.nodes[k]
+        if v in n.writes:
+            continue
+        if n.effects:
+            return False
+        todo += n.pred
+    return True
+
+
+def held(fn):
+    """A store of the value its variable holds on every path into it goes: v = K in an arm (behind a
+    label of the flat view: a conditional block's arm, a branch's target, with nothing between that has
+    an effect or writes v) where every definition of v that reaches it (dread.cflow, in a flat_view) is a
+    store of K, the value as v's type has it (a dispatch that sets its result before its tests and again
+    in one case: r0 = 0; ... if (x == 0) { r0 = 0; } else if (x == 1) r0 = 1;); not where a declaration's
+    initial value reaches it (_constant_of), nor a zero the lifters give a register behind a call (they
+    carry the call's instruction), and only where the ways back to those stores pass nothing with an
+    effect (_only_tests_between: no call, no store, no volatile load between, which would make the store
+    a value a register kept through other work, not the dispatch's). What reaches it stands for it
+    (cparse copy_of: its instruction stays one of the variable's definitions for dread.naming
+    identities); a store none of whose definitions stays is kept."""
+    view = flat_view(fn)
+    body = view.body.body
+    stores = [s for s in body if _constant_store(s)]
+    seen = {}                               # (only a store of a constant another store gives the same variable)
+    for s in stores:
+        key = (s.e.target.id, s.e.value.value & 0xffffffffffffffff)
+        seen[key] = seen.get(key, 0) + 1
+    cands = []
+    for k, s in enumerate(body):
+        if id(s) not in view.homes or not _constant_store(s) or \
+                seen[(s.e.target.id, s.e.value.value & 0xffffffffffffffff)] < 2:
+            continue
+        j = k - 1                           # (an arm's: behind a label, through statements without an effect
+        while j >= 0 and isinstance(body[j], (C.ExprStmt, C.Note, C.Empty)) and \
+                not (isinstance(body[j], C.ExprStmt) and (has_effects_but_assigns(body[j].e) or     # that
+                     s.e.target.id in expr_writes(body[j].e, set()))):                    # write no v)
+            j -= 1
+        if j >= 0 and isinstance(body[j], C.Label):
+            cands.append(s)
+    if not cands:
+        return False
+    g = Graph(view)
+    reach = g.reaching()
+    index = {id(n.stmt): n.index for n in g.nodes}
+    calls = {n.stmt.addr[0] for n in g.nodes if n.effects and n.stmt.addr is not None and
+             any(isinstance(x, C.Call) and not is_pure_call(x) for e in _stmt_all_exprs(n.stmt) for x in walk_expr(e))}
+
+    def own(x):                             # (not one of the zeros the lifters give the registers a call
+        return x.addr is None or x.addr[0] not in calls     # leaves: they carry the call's instruction)
+    drops = {}
+    for s in cands:
+        v, i = s.e.target.id, index.get(id(s))
+        t = type_of(fn, v)
+        ty = cexpr.Ctx().ctype(t) if t else None
+        if ty is None or i is None or not own(s):
+            continue
+        defs = reach[i].get(v, set()) - {i}
+        if not defs or -1 in defs:
+            continue
+        stmts = [g.nodes[d].stmt for d in sorted(defs)]
+        if all(_constant_of(x, v, ty) == cexpr.wrap(s.e.value.value, ty) and own(x) for x in stmts) and \
+                _only_tests_between(g, i, v):
+            drops[id(s)] = (s, stmts)
+    changed = False
+    for s, stmts in drops.values():
+        kept = [x for x in stmts if id(x) not in drops]
+        if not kept:                        # (stores that only stand for each other: one stays)
+            continue
+        for x in kept:
+            C.copy_of(x, s)
+        replace(view, s)
+        changed = True
+    return changed
+
+
+def _truth(c):
+    """c as a truth value: itself where it is one (truth_value), else c != 0; a negation of one turned
+    round (dread.structure negate)."""
+    from dread.structure import negate
+    if isinstance(c, C.Unary) and c.op == "!":
+        return negate(_truth(c.e))
+    return c if truth_value(c) else C.Binary("!=", c, C.Num("0"))
+
+
+def _formula(e, ty):
+    """The truth value of a select of 0 and 1 (e: constants and selects of them, ty the type it is
+    assigned in), conditions in their order, each evaluated where the select evaluates it: c ? 1 : 0 as c,
+    c ? x : 0 as c && x, c ? 1 : x as c || x, negated for the other arm; 0 or 1 (ints) for a constant."""
+    from dread.structure import negate
+    if isinstance(e, C.Num):
+        return 1 if cexpr.wrap(e.value, ty) else 0
+    c, a, b = _truth(e.c), _formula(e.t, ty), _formula(e.f, ty)
+    if isinstance(a, int) and isinstance(b, int):
+        return a if a == b else c if a else negate(c)
+    if b == 0:
+        return C.Binary("&&", c, a)
+    if a == 0:
+        return C.Binary("&&", negate(c), b)
+    if a == 1:
+        return C.Binary("||", c, b)
+    if b == 1:
+        return C.Binary("||", negate(c), a)
+    return C.Cond(c, a, b)
+
+
+def truths(fn):
+    """v = K; followed by an if whose arms, through ifs and else-ifs on conditions that do not read v,
+    only store constants into v or do nothing, as v = the value they make where those and K are 0 and 1:
+    v = 0; if (c) v = 1; as v = c, v = 1; if (c) v = 0; as v = !c turned round, v = 0; if (x != 0) { if
+    (x == 1) v = 1; } as v = x == 1. The first if's condition may load or call once (it runs where it ran,
+    first in the value); the others have no effect. The truth value is written in the conditions' order,
+    each where the ifs evaluated it (_formula), then as small as conditions' search proves it
+    (smallest_truths), without the operands of its && and || the others imply (x != 0 && (x == 1 || x ==
+    2) as x == 1 || x == 2); each step and the whole taken only where dread.cexpr proves it the value the
+    ifs give v (equivalent: the select of the stores' constants, in v's type), with the same load or call
+    made first on every path. Statements between the store and the if that neither read nor write v and
+    have no effect stay in front of it. Not where the store is a zero the lifters give a register behind a
+    call (call_addresses). The new statement keeps the first store's instruction, the ifs'
+    instructions absorbed and the arms' stores as copies (cparse copy_of: the definitions dread.naming
+    identities counts, so a name made for v carries). A pass of the clean-up (a conditional move of 1
+    after a mov of 0) and the last step of dread.structure (the ifs of branches: a dispatch by successive
+    subtraction that sets a result per case)."""
+    changed = False
+    ctx = calls = None
+    for body in every_list(fn):
+        k = 0
+        while k < len(body):
+            s = body[k]
+            got = None
+            if _constant_store(s):
+                j = k + 1
+                while j < len(body) and _passes(body[j], s.e.target.id):
+                    j += 1
+                if j < len(body) and isinstance(body[j], C.If):
+                    tree = _truth_tree(s, body[j], fn)
+                    if tree is not None:
+                        calls = call_addresses(fn) if calls is None else calls
+                        if s.addr is None or s.addr[0] not in calls:
+                            ctx = ctx or context(fn)
+                            got = _truth_of(s, body[j], ctx, tree)
+            if got is None:
+                k += 1
+                continue
+            new, notes = got
+            body[k:j + 1] = body[k + 1:j] + notes + [new]
+            changed = True
+            k = j
+    return changed
+
+
+def _constant_store(s):
+    """Whether statement s stores an integer constant into a variable (v = K)."""
+    return is_assign(s) and isinstance(s.e.value, C.Num) and isinstance(s.e.value.value, int) and \
+        not isinstance(s.e.value.value, bool)
+
+
+def _passes(x, v):
+    """Whether statement x may stand between v = K and the if truths makes v's value: a note, an empty
+    statement, or one without an effect that neither reads nor writes v."""
+    if isinstance(x, (C.Note, C.Empty)):
+        return True
+    return isinstance(x, C.ExprStmt) and not has_effects_but_assigns(x.e) and \
+        not any(isinstance(y, C.Name) and y.id == v for y in walk_expr(x.e))
+
+
+def has_effects_but_assigns(e):
+    """Whether e does more than compute values and assign variables (a call, a store through a pointer,
+    a volatile access)."""
+    for y in walk_expr(e):
+        if isinstance(y, C.Call) and not is_pure_call(y):
+            return True
+        if isinstance(y, C.Assign) and not isinstance(y.target, C.Name):
+            return True
+        if is_volatile_access(y):
+            return True
+    return False
+
+
+def _without_one(e):
+    """e, a truth value of && and ||, with one of its operands left out (at any depth), each way."""
+    if isinstance(e, C.Binary) and e.op in ("&&", "||"):
+        yield e.r
+        yield e.l
+        for x in _without_one(e.l):
+            yield C.Binary(e.op, x, e.r)
+        for x in _without_one(e.r):
+            yield C.Binary(e.op, e.l, x)
+
+
+def _effects_unconditional(e):
+    """Whether e makes its loads and calls on every path through it: none in the right of && or ||, nor
+    in an arm of ?:."""
+    return not any((isinstance(x, C.Binary) and x.op in ("&&", "||") and has_effects(x.r)) or
+                   (isinstance(x, C.Cond) and (has_effects(x.t) or has_effects(x.f))) for x in walk_expr(e))
+
+
+def _truth_tree(s, top, fn):
+    """(select, stores, ifs, notes, type) of v = K; s and the if top behind it, where the if's arms, through
+    ifs and else-ifs on conditions that do not read v (the first one may load or call once, the others
+    have no effect), only store 0 and 1 into v or nothing, as K is: select the value they give v, of the
+    constants and the ifs' conditions (C.Cond), stores [(store, its instruction or its if's)]; else
+    None (truths)."""
+    v = s.e.target.id
+    t = type_of(fn, v)
+    ty = cexpr.Ctx().ctype(t) if t else None
+    if ty is None or ty[0] > 32:
+        return None
+    stores, ifs, notes = [], [], []
+
+    def tree(stmts, outer, first=False):
+        real = []
+        for x in stmts:
+            if isinstance(x, C.Note):
+                notes.append(x)
+            elif not isinstance(x, C.Empty):
+                real.append(x)
+        if not real:
+            return s.e.value
+        if len(real) != 1:
+            return None
+        x = real[0]
+        here = x.addr if x.addr is not None else outer
+        if _constant_store(x) and x.e.target.id == v:
+            stores.append((x, here))
+            return x.e.value
+        if not isinstance(x, C.If):
+            return None
+        effects = len(loads_once(x.cond) or ()) <= 1 if first and loads_once(x.cond) is not None else \
+            not has_effects(x.cond)         # (the first condition runs where the if did: a load or a call of its own)
+        arms = (C.Block, C.If, C.ExprStmt, C.Note, C.Empty)
+        if effects and v not in _reads_of(x.cond) and isinstance(x.then, arms) and \
+                (x.orelse is None or isinstance(x.orelse, arms)):
+            ifs.append(x)
+            a = tree(_arm(x.then), here)
+            b = tree(_arm(x.orelse), here) if a is not None else None
+            return None if b is None else C.Cond(x.cond, a, b)
+        return None
+    sel = tree([top], top.addr, first=True)
+    if sel is None or not stores:
+        return None
+    if any(cexpr.wrap(n.value, ty) not in (0, 1) for n in [s.e.value] + [x.e.value for x, _ in stores]):
+        return None
+    return sel, stores, ifs, notes, ty
+
+
+def _truth_of(s, top, ctx, got):
+    """(the statement v = truth value, the notes of the arms) for v = K; s and the if top behind it, the
+    if-tree _truth_tree found (got), or None where nothing is proved (truths)."""
+    import copy
+    sel, stores, ifs, notes, ty = got
+    v = s.e.target.id
+    name = "%s%d" % ("s" if ty[1] else "u", ty[0])
+
+    def same(e):                            # (the value the ifs give v, as v's type has it)
+        return cexpr.z3 is not None and cexpr.equivalent(C.Cast(name, sel), C.Cast(name, e), ctx)
+    got = _formula(sel, ty)
+    if isinstance(got, int):
+        value = C.Num(str(got))
+    else:
+        value = smallest_truths(copy.deepcopy(got), ctx)
+        while True:                         # (an operand the others imply: r1 != 0 && (r1 == 1 || r1 == 2))
+            fewer = next((x for x in sorted(_without_one(value), key=size) if same(x)), None)
+            if fewer is None:
+                break
+            value = fewer
+    if loads_once(value) != loads_once(top.cond) or not _effects_unconditional(value) or not same(value):
+        return None
+    new = C.ExprStmt(C.Assign("=", C.Name(v), value), s.addr)
+    if new.addr is None:
+        new.addr = top.addr
+    for x in ifs:
+        C.absorb(new, x)
+    for x, here in stores:
+        if here is not None and new.addr is not None and tuple(here) != tuple(new.addr):
+            other = C.ExprStmt(x.e, here)
+            C.copy_of(new, other)
+    return new, notes
+
+
 def plain_literal(n, other_type, ctx):
     """A small unsigned literal (0x5u) written as 5 where that is the same: the value fits int, and the
     other operand is unsigned and at least int's width (the int converts to it anyway)."""
@@ -3633,8 +3966,8 @@ PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("dead", d
           ("selects", selects), ("merge", merge_ifs), ("chains", chains), ("fold", fold), ("arms", empty_arms), ("spread", spread),
           ("addresses", addresses),
           ("expressions", tidy_expressions), ("bits", bits),
-          ("pairs", pairs), ("values", values), ("flags", flags),
-          ("conditions", conditions), ("sums", sums), ("literals", literals),
+          ("pairs", pairs), ("held", held), ("values", values), ("flags", flags),
+          ("conditions", conditions), ("truths", truths), ("sums", sums), ("literals", literals),
           ("declarations", tidy_declarations)]
 
 

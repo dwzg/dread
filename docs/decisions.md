@@ -9,6 +9,69 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Truth values of ifs that store 0 and 1: one comparison, proved; a store of the value held dropped (2026-10-25)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Truth values
+as one comparison" (docs/todo.md).
+
+- **Question.** A dispatch by successive subtraction that sets a result before its tests and again in
+  each case (`mov r0, #0; subs r1, r1, #1; blo a; beq b; ... a: mov r0, #0 ... b: mov r0, #1`) printed `r0 = 0; if (x == 0) r0 = 0; else if (x == 1) r0 = 1;` for
+  `return x == 1`; a conditional move after a 0 (`mov r2, #0; cmp r1, #5; movhi r2, #1`), a value set
+  and cleared on the other way, and GCC -O0's `xReturn = pdFALSE; if (...) xReturn = pdTRUE;` read alike.
+  Where do such ifs become the truth value, how is the arm's store of the value already held dropped,
+  and how is each kept exact?
+- **Options.** Where: (a) in dread.structure only, once the branches are ifs; (b) a pass of the clean-up
+  for the conditional blocks it has (IT blocks, ARM's conditional moves) and the same function as the
+  structure stage's last step for the ifs of branches; (c) dread.polish, on the finished tree. The arm's
+  store: (d) by data flow in the clean-up's flat view (reaching definitions: every definition that
+  reaches the store gives the same constant); (e) within the truth value itself: the ifs' value is the
+  select of every store in them and of the value before, a store of that value a leaf like any other.
+  The value: (f) rules per shape (v = 0; if (c) v = 1; as v = c); (g) the select of the stores written in
+  the conditions' order (c ? 1 : 0 as c, c ? x : 0 as c && x, ...), made small by the conditions' search
+  and by leaving out operands the others imply, each step and the whole proved by dread.cexpr.
+- **Choice: (b), (d) and (e), (g)** (dread.tidy held and truths; dread.structure calls truths last).
+  held drops an arm's v = K (behind a label of the clean-up's flat view: a conditional block's arm, a
+  branch's target) where every definition of v that reaches it is the program's store of K (not a
+  declaration's initial value, nor one of the zeros the lifters give the registers a call leaves, which
+  carry the call's instruction) and the ways back to them pass only statements without an effect.
+  truths takes v = K; and an if-tree behind it whose arms store only constants into v or nothing,
+  conditions that do not read v (the first may load or call once: it runs first in the value; the
+  others have no effect), and makes v the truth value where every constant is 0 or 1, with the same
+  load or call made first on every path; the new statement keeps the first store's instruction, the
+  ifs' absorbed, the arms' stores as copies (dread.naming identities: a name made for v carries). The
+  conditions' search takes a truth value compared with 0 for itself (fold leaves `if ((c && !z) != 0)`
+  where the variable truths made was tested).
+- **Why.** (b): the clean-up sees a conditional move's if and folds the new value into its reader
+  (`return r0 + (r1 > 5);`), while the ifs of branches exist only after the structure; the structure
+  stage is the last stage, and what the tables do after it (types, names, frames) reads its output.
+  (d) and (e): the flat view has exact reaching definitions; the structured tree has none, and the
+  truth value needs none (the arm's store of the value held is a leaf of the select). (g): the
+  conditions' order and evaluation are kept exactly by construction (&& and || where the ifs nest), so
+  the proof only has to show the smaller forms, and a rule per shape would miss the else-if chains.
+  held's restrictions come from first versions on FreeRTOS GCC -Os, which moved stores: one that dropped
+  any store a store of the same constant reached took GCC's zero for a call's fourth argument, still in
+  r3 behind the call (dread.regflow knows the callee keeps it), for the source's `xStartIndex = 0` in an
+  else (prvNonBlockingReceiverTask), and moved a loop counter's `r4 = 0` back to an earlier zero of r4
+  (prvSenderTask), in ten functions; one that took the lifters' zeros behind a call for definitions
+  dropped an IT block's own `movne r2, #0` (xTimerGenericCommandFromTask); one that took any store, not
+  an arm's, dropped a movt's repeat of its movw's value and moved the statement's instruction (clang
+  -O2's prvCheckTask). All of them correct, and further from the source; truths would have taken the
+  lifters' zeros behind a call for its first store too, and does not. A declaration's initial value is no
+  definition for held (the lifters give the registers no argument holds 0 at the entry: a first version
+  took clang -O2's printi's `r4 = 0` for that 0).
+- **Not established.** Ifs that store other constants (`v = 0; if (c) v = 7;` stays: a select of
+  constants would be another rule); a store and its if with a load or a call between
+  (xAreBlockTimeTestTasksStillRunning: `s12 = 1; r2 = g; if (r2 == ...) s12 = 0;`), a run of ifs that
+  each clear one flag (`if (a) s12 = 0; if (b) s12 = 0;`); `v = x; if (v != 0) v = 1;` (clang's subs;
+  movne: `r6 = x != 0`); a truth value of branches' ifs folded into its one reader (no clean-up runs
+  behind the structure: `r0_1 = r1 == 1; return r0_1 + r0;`); held where the value is kept through
+  other work.
+- **How to undo.** Take ("held", held) and ("truths", truths) out of dread.tidy PASSES, the call of
+  tidy.truths at the end of dread.structure.structure and the comparison with 0 in smallest_truths.
+- **Status.** In the code (dread/tidy.py, dread/structure.py; tests/test_flags.py). On the eight builds
+  the gate accepts the same functions (run with --verify), the readable tables byte for byte, and the
+  printed C of 9 functions changed; the figures are in docs/todo.md under the item.
+
 ## Facts about variables: known bits from all their definitions, assumed by the proofs (2026-10-25)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Register

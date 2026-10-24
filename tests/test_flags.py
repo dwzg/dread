@@ -352,6 +352,383 @@ def test_a_dispatch_by_successive_subtractions_through_the_gate(tmp_path):
     assert readable.check(t, t.image(), out=lines.append, jobs=2) == ["step_action", "use"], lines
 
 
+TRUTHS_S = """
+    .syntax unified
+    .arch armv4t
+    .arm
+    .text
+    .global truth_one, truth_two, truth_negated, truth_moved, truth_seven, use
+    .type truth_one, %function
+truth_one:                      @ base + (x == 1), by successive subtraction: the result set first, then
+    push    {r4, lr}            @ in the arm of each case, 0 again in the first
+    mov     r4, r0
+    mov     r0, #0
+    subs    r1, r1, #1
+    blo     .La
+    beq     .Lb
+    b       .Lend
+.La:
+    mov     r0, #0
+    b       .Lend
+.Lb:
+    mov     r0, #1
+.Lend:
+    add     r0, r0, r4
+    pop     {r4, lr}
+    bx      lr
+    .size truth_one, . - truth_one
+    .type truth_two, %function
+truth_two:                      @ base + (x == 1 || x == 2), alike with a case more
+    push    {r4, lr}
+    mov     r4, r0
+    mov     r0, #0
+    subs    r1, r1, #1
+    blo     .L2a
+    beq     .L2b
+    subs    r1, r1, #1
+    beq     .L2b
+    b       .L2end
+.L2a:
+    mov     r0, #0
+    b       .L2end
+.L2b:
+    mov     r0, #1
+.L2end:
+    add     r0, r0, r4
+    pop     {r4, lr}
+    bx      lr
+    .size truth_two, . - truth_two
+    .type truth_negated, %function
+truth_negated:                  @ base + (x == 3): set, then cleared on the other way
+    mov     r2, #1
+    cmp     r1, #3
+    beq     .Lk
+    mov     r2, #0
+.Lk:
+    add     r0, r0, r2
+    bx      lr
+    .size truth_negated, . - truth_negated
+    .type truth_moved, %function
+truth_moved:                    @ base + (x > 5): a conditional move
+    mov     r2, #0
+    cmp     r1, #5
+    movhi   r2, #1
+    add     r0, r0, r2
+    bx      lr
+    .size truth_moved, . - truth_moved
+    .type truth_seven, %function
+truth_seven:                    @ base + (x > 5 ? 7 : 0): no truth value
+    mov     r2, #0
+    cmp     r1, #5
+    movhi   r2, #7
+    add     r0, r0, r2
+    bx      lr
+    .size truth_seven, . - truth_seven
+    .type use, %function
+use:
+    push    {r4, r5, r6, lr}
+    mov     r4, r0
+    mov     r5, r1
+    bl      truth_one
+    mov     r6, r0
+    mov     r0, r4
+    mov     r1, r5
+    bl      truth_two
+    add     r6, r6, r0
+    mov     r0, r4
+    mov     r1, r5
+    bl      truth_negated
+    add     r6, r6, r0
+    mov     r0, r4
+    mov     r1, r5
+    bl      truth_moved
+    add     r6, r6, r0
+    mov     r0, r4
+    mov     r1, r5
+    bl      truth_seven
+    add     r0, r6, r0
+    pop     {r4, r5, r6, lr}
+    bx      lr
+    .size use, . - use
+"""
+
+# What each function's readable C computes its result from (the parameter x in r1); before, truth_one
+# printed r0_1 = 0; if (r1 == 0) { r0_1 = 0; } else if (r1 == 1) r0_1 = 1;, truth_two the same with else
+# if (r1 == 1 || r1 == 2), truth_negated r2 = 1; if (r1 != 3) r2 = 0;, truth_moved r2 = 0; if (r1 > 5) r2 = 1;
+TRUTHS_READ = {"truth_one": "r1 == 1", "truth_two": "r1 == 1 || r1 == 2", "truth_negated": "r1 == 3",
+               "truth_moved": "r1 > 5"}
+
+
+@needs_z3
+@needs_arm
+def test_truth_values_of_a_dispatch_through_the_gate(tmp_path):
+    """A result set before a dispatch by successive subtraction and again in each case (TRUTHS_S, ARM
+    state, as a compiler without a select makes it): the case that sets the value it holds already loses
+    its store (dread.tidy held), and the structure's ifs of 0 and 1 are one comparison (dread.tidy truths,
+    proved), as is a value cleared on the other way and a conditional move of 1 after a 0; a select of 7
+    and 0 stays an if. The gate accepts every function."""
+    from dread import lift, readable, regflow
+    from dread.program import Program
+    from test_lift_results import arm_program
+    t = arm_program(tmp_path, "a32", TRUTHS_S)
+    p = Program(t, t.image())
+    flow = regflow.analyse(p)
+    lifter = lift.make_lifter(p, flow)
+    context = readable.Context(t, t.image(), p, flow)
+    names = sorted(TRUTHS_READ) + ["truth_seven"]
+    out = {n: readable.transform(n, lifter.lift(p.by_name[n]).text, context=context) for n in names}
+    for name, wanted in TRUTHS_READ.items():
+        assert re.search(r"(= %s;|return (r0 \+ \(%s\)|\(%s\) \+ r0);)" % (re.escape(wanted), re.escape(wanted),
+                                                                         re.escape(wanted)), out[name]), (name, out[name])
+        assert "if (" not in out[name].split("{", 1)[1], (name, out[name])
+    assert "if (r1 > 5) r2 = 7;" in out["truth_seven"], out["truth_seven"]
+    lines = []
+    assert sorted(lift.check(t, t.image(), names + ["use"], out=lines.append, jobs=2)) == sorted(names + ["use"]), lines
+    assert sorted(readable.check(t, t.image(), out=lines.append, jobs=2)) == sorted(names + ["use"]), lines
+
+
+HELD = """u32 f(u32 a0, u32 a1)
+{
+    u32 r0 = a0, r1 = a1, r2, r3;
+    r2 = 0;  /* 0: mov r2, #0 */
+    r3 = 5;  /* 4: mov r3, #5 */
+    if (r1 == 0) goto L_a;  /* 8: beq */
+    if (r1 == 1) goto L_b;  /* c: beq */
+    r3 = 6;  /* 10: mov r3, #6 */
+    goto L_end;  /* 14: b */
+L_a: ;
+    r2 = 0x0u;  /* 18: mov r2, #0 */
+    r3 = 5;  /* 1c: mov r3, #5 */
+    goto L_end;  /* 20: b */
+L_b: ;
+    r2 = 1;  /* 24: mov r2, #1 */
+    r3 = 5;  /* 28: mov r3, #5 */
+    r0 = 0;  /* 2c: mov r0, #0 */
+L_end: ;
+    return r0 + r2 + r3;  /* 30: bx lr */
+}
+"""
+
+
+def test_a_store_of_the_value_its_variable_holds_goes():
+    """held: r2 = 0 in the arm reached only from r2 = 0 goes, the store before it standing for it (its
+    instruction a copy there: dread.naming identities keeps the variable's definitions); r3 = 5 where 5
+    is all that reaches it goes too, not where 6 may (behind L_end nothing is stored); r0 = 0 where the
+    parameter's value reaches it stays, and so does r2 = 1."""
+    fn = cparse.parse(HELD).function("f")
+    assert tidy.held(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "r2 = 0x0u;" not in out and out.count("r3 = 5;") == 1 and "r2 = 1;" in out and "r0 = 0;" in out, out
+    first = next(s for s in fn.body.body if tidy.is_assign(s) and s.e.target.id == "r2")
+    assert 0x18 in cparse.copies(first.addr), first.addr
+    from dread import naming
+    assert naming.identities(fn)["r2"] == "r2 0x0 0x18 0x24", naming.identities(fn)
+
+
+TRUTHS = [  # (statements, what they become)
+    ("v = 0; if (x == 1) { v = 1; }", "v = x == 1;"),
+    ("v = 1; if (x == 3) { v = 0; }", "v = x != 3;"),
+    ("v = 0; if (x != 0) { if (x == 1) { v = 1; } }", "v = x == 1;"),
+    ("v = 0; if (x == 0) { v = 0; } else if (x == 1) { v = 1; }", "v = x == 1;"),
+    ("v = 0; if (x == 0) { v = 0; } else if (x == 1) { v = 1; } else if (x == 2) { v = 1; }", "v = x == 1 || x == 2;"),
+    ("v = 0; if (x & 4) { v = 1; }", "v = (x & 4) != 0;"),
+    ("v = 0; if (x > 5) { v = 1; } else { v = 1; }", "v = 1;"),
+    ("v = 0x0u; t = x + 1; if (t == 3) { v = 0x1u; }", "t = x + 1; v = t == 3;"),
+    ("v = 1; if (x < 4) { if (y < 4) { v = 0; } }", "v = x >= 4 || y >= 4;"),
+    ("v = 0; if (f(x) == 0) { v = 1; }", "v = f(x) == 0;"),                # (the first condition runs where
+    ("v = 1; if (*(volatile u32 *)x != 0) { v = 0; }", "v = *(volatile u32 *)x == 0;"),     # the if did)
+]
+
+KEPT_TRUTHS = [
+    "v = 0; if (x > 5) { v = 7; }",                     # (no truth value)
+    "v = 0; if (x > 5) { v = 1; t = 2; }",              # (an arm that does more)
+    "v = 0; if (x == 2) { if (f(x) == 0) { v = 1; } }",     # (a call in an inner condition: runs on one way)
+    "v = 0; if (*(volatile u32 *)x == *(volatile u32 *)y) { v = 1; }",     # (two loads: their order)
+    "v = 0; if (v == x) { v = 1; }",                    # (the condition reads v)
+    "v = 0; f(x); if (x == 1) { v = 1; }",              # (a call between)
+    "v = 0; t = v + 1; if (x == 1) { v = 1; }",         # (a statement between reads v)
+]
+
+
+@pytest.mark.parametrize("text,wanted", [("(x == 1 && y == 2) != 0", "x == 1 && y == 2"),
+                                         ("(x < 3) == 0", "x >= 3"), ("0 != (x == 1 || y > 2)", "x == 1 || y > 2"),
+                                         ("(x & 4) != 0", "(x & 4) != 0")])
+def test_a_truth_value_compared_with_0_is_itself(text, wanted):
+    """smallest_truths: a truth value compared with 0 is itself (!= 0) or its negation (== 0), what
+    truths and fold leave where a variable the ifs set to 0 and 1 is tested (if ((c && !z_1) != 0) on
+    FreeRTOS clang -O2's prvInterruptTriggerLevelTest); a value that is no truth value keeps its test."""
+    c = cexpr.Ctx(types={"x": (32, False), "y": (32, False)})
+    assert cparse.expr_text(tidy.smallest_truths(expr(text), c, True)) == wanted
+
+
+def truths_of(stmts):
+    text = "extern u32 f(u32);\nu32 g(u32 x, u32 y)\n{\n    u32 v, t;\n    %s\n    return v + t;\n}\n" % stmts
+    fn = cparse.parse(text).function("g")
+    tidy.truths(fn)
+    body = cparse.unparse(fn, notes=False).split("{", 1)[1].split("return")[0]
+    return " ".join(body.split("u32 v, t;", 1)[1].split())
+
+
+@needs_z3
+@pytest.mark.parametrize("stmts,wanted", TRUTHS)
+def test_ifs_that_store_0_and_1_are_the_truth_value(stmts, wanted):
+    """truths: v = K; and an if (else-ifs, ifs inside) that only stores 0 and 1 into v, as v = the truth
+    value, as small as proved (an operand the others imply left out); statements between that neither
+    read nor write v stay in front."""
+    assert truths_of(stmts) == wanted, (stmts, truths_of(stmts))
+
+
+@needs_z3
+@pytest.mark.parametrize("stmts", KEPT_TRUTHS)
+def test_what_is_no_truth_value_of_ifs_stays(stmts):
+    text = "extern u32 f(u32);\nu32 g(u32 x, u32 y)\n{\n    u32 v, t;\n    %s\n    return v + t;\n}\n" % stmts
+    before = " ".join(cparse.unparse(cparse.parse(text).function("g"), notes=False).split())
+    fn = cparse.parse(text).function("g")
+    assert not tidy.truths(fn)
+    assert " ".join(cparse.unparse(fn, notes=False).split()) == before
+
+
+@needs_z3
+def test_the_truth_value_keeps_the_stores_as_its_definitions():
+    """The statement truths makes keeps the first store's instruction, the ifs' absorbed and the arms'
+    stores as copies (cparse copy_of): the variable's identity (dread.naming) is what it was, so a name
+    made for it carries."""
+    from dread import naming
+    text = """u32 g(u32 x)
+{
+    u32 v;
+    v = 0;  /* 10: mov r0, #0 */
+    if (x == 0)  /* 14: blo */
+    {
+        v = 0;  /* 20: mov r0, #0 */
+    }
+    else
+    {
+        if (x == 1)  /* 18: beq */
+        {
+            v = 1;  /* 24: mov r0, #1 */
+        }
+    }
+    return v;  /* 30: bx lr */
+}
+"""
+    fn = cparse.parse(text).function("g")
+    before = naming.identities(fn)["v"]
+    assert before == "v 0x10 0x20 0x24", before
+    assert tidy.truths(fn)
+    s = next(x for x in fn.body.body if tidy.is_assign(x))
+    assert cparse.expr_text(s.e.value) == "x == 1" and s.addr[0] == 0x10, cparse.unparse(fn)
+    assert naming.identities(fn)["v"] == before, naming.identities(fn)
+    assert cparse.absorbed(s.addr) == {0x14, 0x18, 0x20, 0x24} and cparse.copies(s.addr) == {0x20, 0x24}, s.addr
+
+
+def random_truths_function(rng, name):
+    """A function of v = K; and an if-tree behind it (else-ifs, ifs inside, arms that store 0, 1 or 2
+    into v, do nothing, or more), conditions on the parameters and on a variable computed between."""
+    def cond():
+        a = rng.choice(["x", "y", "t", "(x & 4)", "(y ^ x)"])
+        return "%s %s %s" % (a, rng.choice(["==", "!=", "<", ">=", ">", "<="]), rng.choice(["0", "1", "2", "5", "0x80000000u"]))
+
+    def tree(depth):
+        r = rng.random()
+        if depth == 0 or r < 0.35:
+            return rng.choice(["v = 1;", "v = 0;", "", "v = 1;", "v = 0x1u;", "v = 2;" if rng.random() < 0.1 else "",
+                               "v = 1; t = t + 1;" if rng.random() < 0.1 else "v = 0;"])
+        text = "if (%s) { %s }" % (cond(), tree(depth - 1))
+        if rng.random() < 0.6:
+            text += " else { %s }" % tree(depth - 1)
+        return text
+    between = "t = x + y;" if rng.random() < 0.5 else ""
+    return "u32 %s(u32 x, u32 y)\n{\n    u32 v, t = x ^ 3;\n    v = %s; %s\n    %s\n    return v * 3 + t;\n}\n" % (
+        name, rng.choice(["0", "1", "0x0u"]), between, tree(3))
+
+
+@needs_z3
+@pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
+def test_random_truth_values_compute_the_same(tmp_path):
+    """Random functions of a store and an if-tree of stores behind it (random_truths_function) through
+    truths, compiled with the host's C compiler beside the originals and called with random and boundary
+    arguments: the same results every time, and most of them rewritten."""
+    rng = random.Random(31)
+    count, originals, results, changed = 150, [], [], 0
+    for i in range(count):
+        text = random_truths_function(rng, "orig_%d" % i)
+        originals.append(text)
+        fn = cparse.parse(text.replace("orig_", "truth_")).function("truth_%d" % i)
+        changed += tidy.truths(fn)
+        results.append(cparse.unparse(fn, notes=False))
+    head = "typedef unsigned int u32;\ntypedef signed int s32;\n"
+    (tmp_path / "truths.c").write_text(head + "".join(originals) + "\n".join(results) + "\n")
+    lib = tmp_path / "truths.so"
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(tmp_path / "truths.c")], check=True)
+    so = ctypes.CDLL(str(lib))
+    edges = [0, 1, 2, 3, 4, 5, 6, 0x7fffffff, 0x80000000, 0xfffffffe, 0xffffffff]
+    for i in range(count):
+        a, b = getattr(so, "orig_%d" % i), getattr(so, "truth_%d" % i)
+        for f in (a, b):
+            f.restype, f.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * 2
+        for _ in range(40):
+            args = [rng.choice(edges + [rng.getrandbits(32)]) for _ in range(2)]
+            assert a(*args) == b(*args), (i, args, originals[i], results[i])
+    assert changed > count * 0.4, changed
+
+
+def random_held_function(rng, name):
+    """A function in the lifters' dialect of stores of 0, 1 and 2 into two registers and branches forward
+    on the parameters between them, some stores in conditional blocks."""
+    lines = ["u32 %s(u32 a0, u32 a1)" % name, "{", "    u32 r0 = a0, r1 = a1, r2 = 0, r3;", "    r3 = 1;"]
+    labels = []
+    for k in range(rng.randint(6, 14)):
+        r = rng.random()
+        if r < 0.45:
+            line = "%s = %du;" % (rng.choice(["r2", "r3"]), rng.choice([0, 1, 1, 2]))
+            if rng.random() < 0.2:
+                line = "if (r1 > %d) { %s }" % (rng.randint(0, 4), line)
+        elif r < 0.75:
+            label = "L_%d" % k
+            labels.append(label)
+            line = "if (%s %s %d) goto %s;" % (rng.choice(["r0", "r1"]), rng.choice(["==", "<", ">"]), rng.randint(0, 4),
+                                                label)
+        else:
+            line = "r0 = r0 + r1;"
+        lines.append("    %s  /* %x: i */" % (line, 4 * k))
+        if labels and rng.random() < 0.35:
+            lines.append("%s: ;" % labels.pop(0))
+    lines += ["%s: ;" % label for label in labels] + ["    return r0 + (r2 << 4) + (r3 << 8);", "}"]
+    return "\n".join(lines) + "\n"
+
+
+@pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
+def test_random_stores_of_held_values_dropped_compute_the_same(tmp_path):
+    """Random functions of stores and branches (random_held_function) through held, compiled with the
+    host's C compiler beside the originals and called with random and boundary arguments: the same
+    results every time, and stores dropped."""
+    rng = random.Random(37)
+    count, originals, results, dropped = 150, [], [], 0
+    for i in range(count):
+        text = random_held_function(rng, "orig_%d" % i)
+        originals.append(text)
+        fn = cparse.parse(text.replace("orig_", "held_")).function("held_%d" % i)
+        before = cparse.unparse(fn).count(" = ")
+        tidy.held(fn)
+        out = cparse.unparse(fn, notes=False)
+        dropped += before - out.count(" = ")
+        results.append(out)
+    head = "typedef unsigned int u32;\n"
+    (tmp_path / "held.c").write_text(head + "".join(originals) + "\n".join(results) + "\n")
+    lib = tmp_path / "held.so"
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(tmp_path / "held.c")], check=True)
+    so = ctypes.CDLL(str(lib))
+    for i in range(count):
+        a, b = getattr(so, "orig_%d" % i), getattr(so, "held_%d" % i)
+        for f in (a, b):
+            f.restype, f.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * 2
+        for args in [(x, y) for x in range(6) for y in range(6)] + [(rng.getrandbits(32), rng.getrandbits(32))
+                                                                     for _ in range(20)]:
+            assert a(*args) == b(*args), (i, args, originals[i], results[i])
+    assert dropped > count * 0.5, dropped
+
+
 CONDS = ["z", "!z", "c", "!c", "n", "!n", "v", "!v", "(c && !z)", "(!c || z)", "(n == v)", "(n != v)",
          "(!z && n == v)", "(z || n != v)"]      # (eq ne hs lo mi pl vs vc hi ls ge lt gt le)
 

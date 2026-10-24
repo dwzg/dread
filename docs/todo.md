@@ -2854,12 +2854,63 @@ the pilot's names, which the first review had taken for raw frames. New items:
   value reaches would tell, dread.cflow); a callee that neither lifts nor gets a negative-looking
   constant from a lifted function says nothing (a function printed on request passes -1 to it); what a
   callee does with a value it stores is not followed.
-- [ ] **Truth values as one comparison.** A dispatch by successive subtraction that sets a result per
+- [x] **Truth values as one comparison.** A dispatch by successive subtraction that sets a result per
   case (`mov r0, #0; subs r1, r1, #1; blo a; beq b; ... a: mov r0, #0 ... b: mov r0, #1`) prints `r0 =
   0; if (x == 0) r0 = 0; else if (x == 1) r0 = 1;` for `return x == 1`. Drop an arm's store of a value
   the variable already holds on every path into it, then turn `v = 0; if (c) v = 1;` into `v = c`.
   Public example: none (GCC uses no branches here). Test: that ARM-state sequence through the conditions
   pass and the gate, as tests/test_flags.py does.
+  Done 2026-10-25 (dread.tidy held, truths with _truth_tree, _formula and _truth_of, call_addresses;
+  conditions' search shared as simpler_truth and smallest_truths, which now also takes a truth value
+  compared with 0 for itself; dread.structure calls truths last; docs/decisions.md, "Truth values of ifs
+  that store 0 and 1: one comparison, proved; a store of the value held dropped"). held drops an arm's v =
+  K (behind a label of the clean-up's flat view) where every definition of v that reaches it stores K and
+  the ways back pass nothing with an effect (not a declaration's initial value, nor the zeros the lifters
+  give the registers a call leaves). truths makes v = K; and an if-tree behind it that stores only 0 and 1
+  into v (conditions that do not read v; the first may load or call once) v = the truth value they make:
+  written in the conditions' order (c ? 1 : 0 as c, c ? x : 0 as c && x, ...), as small as the conditions'
+  search proves it, without operands the others imply, the whole proved by dread.cexpr; in the clean-up
+  for conditional moves, as dread.structure's last step for the ifs of branches; the new statement keeps
+  the first store's instruction, the ifs' absorbed, the arms' stores as copies (dread.naming identities:
+  names carry). The item's sequence in ARM-state assembly of our own (tests/test_flags.py TRUTHS_S) prints
+  `r0_1 = r1 == 1;` (before `r0_1 = 0; if (r1 == 0) { r0_1 = 0; } else if (r1 == 1) r0_1 = 1;`), with a
+  case more `r0_1 = r1 == 1 || r1 == 2;`, a value cleared on the other way `r2 = r1 == 3;`, a conditional
+  move of 1 after 0 `return r0 + (r1 > 5);`; a select of 7 stays an if; the gate accepts all. On fresh
+  copies of the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC
+  -O0; main 6f015bc -> this; the gate run with --verify, which passes on all eight): the gate accepts the
+  same functions (35, 36, 44, 31; 317, 275, 252, 354) and writes the same readable tables; the shape (v =
+  0 or 1 and ifs behind it that store 0 and 1) in the lifted tables' functions 0, 0, 0, 0; 0, 3, 0, 8 ->
+  0, 0, 0, 0; 0, 0, 0, 4 (the four left on GCC -O0 load between the store and its if, and clear the flag
+  in a run of such ifs: `s12 = 1; r2 = g_20000928; if (r2 == g_20000a00) s12 = 0; ...` in
+  xAreAbortDelayTestTasksStillRunning and three alike). The printed C of 9 functions changed (every
+  function that lifts: 0, 0, 0, 0; 0, 5, 0, 4): on clang -O2 printi (`r4 = 0; if ((s32)r1 >= 0) r4 = 1;`
+  folded into its reader, `lr_1 = ((s32)r1 >= 0) | ...`), prvInterruptTriggerLevelTest (`if (c && !z_1) r8
+  = 1;` for `r0_3 = 0; if (c && !z_1) r0_3 = 1; if (r0_3 != 0) r8 = 1;`), vTaskPrioritySet (`r6 = r5 <=
+  *(volatile u32 *)(r1_1 + 44);`), xStreamBufferIsFull and xTaskPriorityInherit (`return r1_1 <= (r12 & 1)
+  << 2;`, `return r0_1 < *(volatile u32 *)(r1_5 + 44);`); on GCC -O0 prvTestWaitCondition (`s12 = r2 == 0
+  ? (r1 & r0) != 0 : r1 == (r1 & r0);`), xAreCountingSemaphoreTasksStillRunning (`s12 = g_20000a44 ==
+  0;`), xQueueGenericCreate and xQueueGenericReset (`r1_1 = (u64)r0 * r1 > 0xffffffffu;`, the size's
+  overflow test). held drops a store in three functions (GCC -Os's prvTestSlaveTask, RISC-V's
+  eTaskGetState and prvSanityCheckCreatedQueue) whose printed C stays the same (the clean-up took out
+  later what it dropped). Names made for the C before carry (tables naming every variable of the 9
+  functions): 109 of 113, the 4 dropped those of the variables whose truth value went into its one reader.
+  held and truths took 0.85 and 0.3 s of every lifted function's readable tree on GCC -Os and 0.44 and 0.2
+  s on GCC -O0 (one process, CPU time, on main bc223f9 with the same code), less than the totals move from
+  run to run on a machine shared with other runs. Tests (tests/test_flags.py): that program through the
+  gate, held on a small function (the arm's store and one reached by 5 alone go; one reached by 6 too, one
+  reached by a parameter stay; the store's instruction kept as a copy, the identity unchanged), truths on
+  snippets (else-if chains, ifs inside, an operand implied, a statement between, a call or a load in the
+  first condition; kept: other constants, an arm that does more, a call in an inner condition, two loads,
+  a condition reading v, a call or a read of v between), the identity kept, random functions of stores and
+  if-trees through truths and of stores and branches through held compiled beside the originals (host cc,
+  random and boundary arguments), a truth value compared with 0; with Ubuntu 24.04's and 22.04's compilers
+  too. Left: ifs that store other constants (`v = 0; if (c) v = 7;`: a select of constants would be
+  another rule); a store and its if with a load or a call between (GCC -O0's
+  xAreBlockTimeTestTasksStillRunning: `s12 = 1; r2 = g_20001860; if (r2 == g_2000186c) s12 = 0;`), a run
+  of ifs that each clear a flag; `v = x; if (v != 0) v = 1;` (clang's subs; movne: `if (r6 != 0) r6 = 1;`
+  in printi, vTaskPrioritySet); a truth value of branches' ifs folded into its one reader (nothing cleans
+  up behind the structure: `r0_1 = r1 == 1; return r0_1 + r0;`); held where the value is kept through
+  other work (left alone on purpose).
 - [x] **Signed variables from negative values.** Since negative constants print as such, `u32 ret = -10;
   ... return ret;` is common. Type a variable s32 when it is assigned negative constants and read only
   by ==, by return or by signed comparisons (and the result likewise), where that adds no casts. Public

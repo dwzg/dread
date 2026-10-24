@@ -1834,7 +1834,9 @@ def structure(fn, run=None):
     """The function's body with its gotos as if/else, loops and switches where they can be; unchanged
     when the body holds what the cut does not handle (a switch other than a jump table). Made once
     plain and, where that nests more than GUARDS levels, once more with the early exits that repeat
-    short ways, taken when they take GUARDS levels or more off."""
+    short ways, taken when they take GUARDS levels or more off. Last, a variable set to 0 or 1 and then
+    by ifs to 0 or 1 is set once to the truth value they make (dread.tidy truths, proved: the ifs of
+    branches, which the clean-up before saw as gotos)."""
     body = fn.body.body
     k = 0
     while k < len(body) and isinstance(body[k], (C.Decl, C.Note)):
@@ -1859,6 +1861,8 @@ def structure(fn, run=None):
     fn.body.body[:] = head + out
     entered(fn, fn.body.body)
     fn.body.body[:] = counted(fn.body.body, address_taken(fn.body.body))
+    from dread import tidy                  # (v = 0; if (c) v = 1; of branches as v = c: dread.tidy truths)
+    tidy.truths(fn)
     return fn
 
 

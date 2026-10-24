@@ -123,7 +123,9 @@ loop's init and step at the instructions of the statements they were made from, 
 when dread.structure began to make for loops of them: an older entry has those statements' own,
 which is the same; a statement written once for copies of it at several instructions, arms of one
 code merged or a statement every arm shared moved out of them, at every copy's instruction, as the
-copies were), BASE alone for a local nothing writes. When the transformations change the C, the names go to the variables of
+copies were; since 2026-10-25 also a store that stands for others, dread.tidy truths' v = c for the
+stores of the ifs it replaces and the store that reaches one held drops, at their instructions), BASE
+alone for a local nothing writes. When the transformations change the C, the names go to the variables of
 the new C with the same identity (carrying): a parameter's to the parameter at its position, a
 local's to the local of the same base whose definitions it shares most, more than half of all the two
 have (Jaccard, dread.naming CARRY_OVERLAP), where each is the other's only best match. Every carried
