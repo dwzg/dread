@@ -52,6 +52,14 @@ falls into it, where that takes the if a level less deep (short_way). The functi
 and the exits are taken for all of it or not at all; taken for fewer levels, they mostly made
 functions flatter than their sources, with code repeated (docs/decisions.md).
 
+After the loops are refined, what the repeats and the clean-up wrote into several arms is written once
+(arms_pass): neighbouring arms of an else-if chain with the same code are one arm, their tests joined
+with || (FreeRTOS's eTaskGetState: else if (list == delayed || list == overflow) r = 2;, where one block
+of the compiler's was written into each), an arm whose code is the last else's drops its test where the
+test has no effect, a run of ifs without else whose arms are the same code and never fall through is
+one if, and what every arm of an if / else (or a whole chain with a last else) begins with goes in front
+of it where the tests have no effect and read nothing it writes, what every arm ends with behind it.
+
 Correct whatever is decided: every block is emitted once, under its label (a short way to a return
 also repeated, without one, where jumps go to it), and every transfer of control is a fall-through
 to the block that really follows, a break or continue of the loop it leaves, or a goto (C lets a goto
@@ -1327,6 +1335,290 @@ def counted(stmts, taken=frozenset()):
     return out
 
 
+# --- merged arms and hoisted statements ---
+
+def same_code(a, b):
+    """Whether two statement lists are the same code: the same text without the instructions' comments
+    (comments and empty statements left out), wherever their instructions are."""
+    return _code_text(a) == _code_text(b)
+
+
+def _code_text(stmts):
+    return C.unparse(C.Block(_real(stmts)), notes=False, style="readable")
+
+
+def _pure(e):
+    from dread.cflow import has_effects, reads_memory
+    return not has_effects(e) and not reads_memory(e)
+
+
+class Arm:
+    """One way of an if / else if chain: its test (None for the last else), its statements, and the if
+    it was (its instruction: the branch's; None for the last else)."""
+    __slots__ = ("cond", "body", "node")
+
+    def __init__(self, cond, body, node):
+        self.cond, self.body, self.node = cond, body, node
+
+
+def chain_of(s):
+    """([Arm] of an if and of the ifs its else arms hold alone (else if), the last else an Arm without a
+    test where there is one; the comments in front of each else if)."""
+    arms, notes = [Arm(s.cond, list(_list(s.then)), s)], []
+    o = s.orelse
+    while o is not None:
+        body = _list(o)
+        real = _real(body)
+        if len(real) == 1 and isinstance(real[0], C.If):
+            notes += [x for x in body if isinstance(x, C.Note)]
+            arms.append(Arm(real[0].cond, list(_list(real[0].then)), real[0]))
+            o = real[0].orelse
+            continue
+        arms.append(Arm(None, list(body), None))
+        break
+    return arms, notes
+
+
+def chain_if(arms):
+    """The if / else if chain of arms (the last one without a test: the last else)."""
+    if arms[-1].cond is None:
+        out, rest = C.Block(arms[-1].body), arms[:-1]
+    else:
+        out, rest = None, arms
+    for k in range(len(rest) - 1, -1, -1):
+        a = rest[k]
+        out = C.If(a.cond, C.Block(a.body), out, a.node.addr if a.node is not None else None)
+        if k:
+            out = C.Block([out])
+    return out
+
+
+def merged_arms(arms):
+    """Neighbouring arms of the same code as one, their tests joined with ||: if (a) X else if (b) X is if
+    (a || b) X (b evaluated only where a fails, as before); an arm that is the last else's code drops
+    its test where the test has no effect (else if (c) X else X: else X). The statements kept absorb
+    the instructions of the copies they stand for, the if those of the test it took in
+    (cparse.absorb). Returns (arms, whether any merged)."""
+    arms = list(arms)
+    merged = False
+    k = 0
+    while k + 1 < len(arms):
+        a, b = arms[k], arms[k + 1]
+        if b.cond is not None and same_code(a.body, b.body):
+            _absorb_copies(a.body, b.body)
+            C.absorb(a.node, b.node)
+            arms[k] = Arm(C.Binary("||", a.cond, b.cond), a.body, a.node)
+            del arms[k + 1]
+            merged = True
+            continue
+        k += 1
+    while len(arms) >= 2 and arms[-1].cond is None and same_code(arms[-2].body, arms[-1].body) and \
+            _pure(arms[-2].cond):
+        _absorb_copies(arms[-1].body, arms[-2].body)
+        del arms[-2]
+        merged = True
+    return arms, merged
+
+
+def _absorb_copies(kept, other):
+    """The statements of kept stand for the same statements of other (cparse.copy_of: dread.naming
+    identities counts their instructions as the definitions they were), nested ones too, where those
+    are other instructions."""
+    for x, y in zip(_real(kept), _real(other)):
+        C.copy_of(x, y)
+        for xi, yi in zip(_nested_lists(x), _nested_lists(y)):
+            _absorb_copies(xi, yi)
+
+
+def _nested_lists(s):
+    if isinstance(s, C.If):
+        return [_list(s.then)] + ([_list(s.orelse)] if s.orelse is not None else [])
+    if isinstance(s, (C.While, C.DoWhile, C.For, C.Switch)):
+        return [_list(s.body)]
+    if isinstance(s, C.Block):
+        return [s.body]
+    return []
+
+
+def hoisted(arms, plain=False, taken=frozenset()):
+    """(before, arms, after) of an if / else if chain with a last else: the statements every arm begins
+    with, moved in front of the if, and those every arm ends with, moved behind it. In front only an
+    expression statement behind no label (a goto there would skip it) that writes nothing a test reads,
+    where no test has an effect (no call, no access to memory: the stages' accesses are volatile) or the
+    statement is an assignment of a value without one, of variables no test writes and whose address
+    the function never takes (taken: a test's call cannot reach them): each test has its value, and
+    the statement does what it did in any arm. Behind the if any
+    statement but a label, a case or a declaration: it ran last on every way that fell off an arm, and
+    does so behind the if. In a chain of more than two ways no arm but the last else is left empty (the
+    last else then goes); an if / else with an arm left empty is turned round (make_if). Nothing leaves
+    arms that declare variables of their own (it would leave their scope). plain: arms of plain
+    statements only (no jump, label, loop, switch or declaration: dread.tidy's conditional blocks). The
+    statement kept absorbs the instructions of the others."""
+    if len(arms) < 2 or arms[-1].cond is not None:
+        return [], arms, []
+    lists = [list(a.body) for a in arms]
+    if any(isinstance(y, C.Decl) for x in lists for y in x) or (plain and any(not _plain_arm(x) for x in lists)):
+        return [], arms, []                 # (an arm that declares: what leaves it would leave its scope)
+    conds = [a.cond for a in arms[:-1]]
+    reads, written = set(), set()
+    for c in conds:
+        reads |= _names(c)
+        written |= _writes(c)
+    pure = all(_pure(c) for c in conds)
+
+    def keeps(new):                         # (a chain's arms but its last stay non-empty)
+        return len(new) == 2 or all(_real(x) for x in new[:-1])
+
+    def plain_value(st):                    # (an assignment of a value without an effect, of variables
+        from dread import tidy              # no test writes and no call can reach)
+        return tidy.is_assign(st) and _pure(st.e.value) and \
+            not (({st.e.target.id} | _names(st.e.value)) & (written | set(taken)))
+    before, after = [], []
+    while True:
+        firsts = [_first_real(x) for x in lists]
+        if None in firsts:
+            break
+        heads = [x[i] for x, i in zip(lists, firsts)]
+        if not isinstance(heads[0], C.ExprStmt) or any(isinstance(y, C.Label) for x, i in zip(lists, firsts)
+                                                          for y in x[:i]):
+            break
+        if not all(same_code([heads[0]], [h]) for h in heads[1:]) or _writes(heads[0].e) & reads or \
+                not (pure or plain_value(heads[0])):
+            break
+        new = [[y for y in x[:i] if not isinstance(y, C.Note)] + x[i + 1:] for x, i in zip(lists, firsts)]
+        if not keeps(new):
+            break
+        for h in heads[1:]:
+            _absorb_copies([heads[0]], [h])
+        before += [y for y in lists[0][:firsts[0]] if isinstance(y, C.Note)] + [heads[0]]
+        lists = new
+    while True:
+        lasts = [_last_real(x) for x in lists]
+        if None in lasts:
+            break
+        tails = [x[i] for x, i in zip(lists, lasts)]
+        if isinstance(tails[0], (C.Label, C.Case, C.Decl)) or not all(same_code([tails[0]], [t]) for t in tails[1:]):
+            break
+        new = [x[:i] + x[i + 1:] for x, i in zip(lists, lasts)]
+        if not keeps(new):
+            break
+        for t in tails[1:]:
+            _absorb_copies([tails[0]], [t])
+        after.insert(0, tails[0])
+        lists = new
+    if not before and not after:
+        return [], arms, []
+    out = [Arm(a.cond, x, a.node) for a, x in zip(arms, lists)]
+    if len(out) > 2 and not _real(out[-1].body):
+        out = out[:-1]                      # (a last else left empty: none)
+    return before, out, after
+
+
+def _first_real(stmts):
+    for k, s in enumerate(stmts):
+        if not isinstance(s, (C.Note, C.Empty, C.Label)):
+            return k
+    return None
+
+
+def _last_real(stmts):
+    for k in range(len(stmts) - 1, -1, -1):
+        if not isinstance(stmts[k], (C.Note, C.Empty)):
+            return k if not isinstance(stmts[k], C.Label) else None
+    return None
+
+
+def _plain_arm(stmts):
+    return not any(isinstance(s, (C.Goto, C.Label, C.Return, C.Break, C.Continue, C.Case, C.While, C.DoWhile,
+                                  C.For, C.Switch, C.Decl, C.Asm)) for s in _all_stmts(stmts))
+
+
+def arms_pass(stmts, plain=False, chained=False, taken=None):
+    """Merged arms and hoisted statements in every statement list: an if / else if chain's neighbouring
+    arms of the same code as one (merged_arms), what both arms of an if / else begin or end with in
+    front of or behind it (hoisted), and a run of ifs without else whose arms are the same code that
+    never falls through as one if (if (a) return x; if (b) return x; is if (a || b) return x;: the
+    second test ran only where the first failed). Returns (statements, whether anything changed).
+    plain: only hoisting, only for ifs whose arms are plain statements (dread.tidy's conditional
+    blocks); blocks that bind registers are left alone."""
+    from dread import tidy
+    if taken is None:
+        taken = address_taken(stmts)
+    changed = False
+    out = []
+    for s in stmts:
+        if isinstance(s, C.If):
+            if isinstance(s.then, (C.Goto, C.Return)) or isinstance(s.orelse, (C.Goto, C.Return)):
+                out.append(s)                   # (a branch stays one: if (c) goto L;)
+                continue
+            for arm in ("then", "orelse"):
+                x = getattr(s, arm)
+                if isinstance(x, C.Block):      # (an else of one if is an else if: its chain is this one)
+                    real = _real(x.body)
+                    x.body, c = arms_pass(x.body, plain, arm == "orelse" and len(real) == 1 and
+                                          isinstance(real[0], C.If), taken)
+                elif x is not None:             # (else if, as the parser reads it: its chain is this one)
+                    got, c = arms_pass([x], plain, True, taken)
+                    setattr(s, arm, got[0] if len(got) == 1 else C.Block(got))
+                else:
+                    c = False
+                changed = changed or c
+            arms, notes = chain_of(s)
+            merged = False
+            if not plain:
+                arms, merged = merged_arms(arms)
+            before, arms, after = hoisted(arms, plain, taken) if not chained else ([], arms, [])
+            if merged or before or after:
+                changed = True
+                out += notes + before + _rebuilt_if(arms, s.addr) + after
+                continue
+            out.append(s)
+            continue
+        if isinstance(s, (C.While, C.DoWhile, C.For, C.Switch)):
+            body, c = arms_pass(_list(s.body), plain, False, taken)
+            s.body = C.Block(body)
+            changed = changed or c
+        elif isinstance(s, C.Block) and not tidy.binds_registers(s):
+            s.body, c = arms_pass(s.body, plain, False, taken)
+            changed = changed or c
+        out.append(s)
+    if not plain:
+        joined = _joined_exits(out)
+        changed = changed or len(joined) != len(out)
+        out = joined
+    return out, changed
+
+
+def _rebuilt_if(arms, addr):
+    """The statements for a chain after merging and hoisting: an if / else with an arm left empty turned
+    round (make_if), both empty its test alone where it has an effect."""
+    if len(arms) == 2 and arms[1].cond is None:
+        if not _real(arms[0].body) and not _real(arms[1].body) and _pure(arms[0].cond):
+            return [x for x in arms[0].body + arms[1].body if isinstance(x, C.Note)]
+        return [make_if(arms[0].cond, arms[0].body, arms[1].body, addr)]
+    if len(arms) == 1 and arms[0].cond is None:
+        return arms[0].body
+    return [chain_if(arms)]
+
+
+def _joined_exits(stmts):
+    """if (a) X; if (b) X; (X the same code, never falling through; comments between) as if (a || b) X."""
+    out = []
+    for s in stmts:
+        k = len(out) - 1
+        while k >= 0 and isinstance(out[k], (C.Note, C.Empty)):
+            k -= 1
+        prev = out[k] if k >= 0 else None
+        if isinstance(s, C.If) and s.orelse is None and isinstance(prev, C.If) and prev.orelse is None and \
+                ends(_list(prev.then)) and same_code(_list(prev.then), _list(s.then)):
+            _absorb_copies(_list(prev.then), _list(s.then))
+            C.absorb(prev, s)
+            prev.cond = C.Binary("||", prev.cond, s.cond)
+            continue
+        out.append(s)
+    return out
+
+
 def _names(e):
     from dread.cflow import walk_expr
     return {x.id for x in walk_expr(e) if isinstance(x, C.Name)}
@@ -1563,6 +1855,7 @@ def structure(fn, run=None):
     if out is None:                         # (reachable but not emitted: leave the function as it is)
         return fn
     out = refine_loops(out)
+    out = arms_pass(out)[0]
     fn.body.body[:] = head + out
     entered(fn, fn.body.body)
     fn.body.body[:] = counted(fn.body.body, address_taken(fn.body.body))

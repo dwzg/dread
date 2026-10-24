@@ -29,7 +29,10 @@ with the IT instruction's note between. What makes such code one if/else again:
 - merge (merge_ifs): a run of conditional blocks on one pure condition or its negation is one
   if/else, as long as nothing in the arms writes what the condition reads; the notes go in front of
   it, and up to BETWEEN statements without a call between two such blocks (a load GCC scheduled
-  between two IT blocks) go into both arms, where they ran on either path;
+  between two IT blocks) go into both arms, where they ran on either path; once the clean-up has
+  settled, what both arms of such an if still begin or end with goes back in front of or behind it
+  (dread.structure arms_pass, plain), and the passes run again: the one reader can take it in
+  (prvCheckExpectedTimeIsWithinAnAcceptableMargin's r4 = r1 + 7, in both arms: if (r1 + 7 < r0));
 - dead and fold see inside the arms (flat_view: the blocks spread out), so a register an arm sets
   for its store alone goes, and the store takes the constant; an arm left empty goes (empty_arms);
 - flatten also spreads an instruction's block inside an arm (a conditional compare, cmpne), and
@@ -4259,7 +4262,9 @@ def tidy(fn, run=None, passes=None, rounds=8):
     anything (at most rounds times); then the calls' and the
     function's own arguments (trim_calls, params) and the passes once more, the calls' again while
     that leaves values nobody reads; last the variables one per web (webs, with the run's context: a
-    parameter apart from what its register hands back) and the passes again. The conditions' answers are kept for the run (_RUN: conditions),
+    parameter apart from what its register hands back) and the passes again, and what both arms of a
+    conditional block's if begin or end with in front of or behind it (dread.structure arms_pass,
+    plain) and the passes again. The conditions' answers are kept for the run (_RUN: conditions),
     and the callees' declared result types (run.returns, the file's declarations) are what the proofs
     give their calls (_RUN.returns, read by context: cexpr.Ctx.result_type)."""
     outer, outer_returns = getattr(_RUN, "memo", None), getattr(_RUN, "returns", None)
@@ -4294,6 +4299,11 @@ def _tidy(fn, run, passes, rounds):
                 break
             split_any = True
         if split_any:
+            settle()
+        from dread import structure         # (what merge_ifs wrote into both arms of an if, once used)
+        body, moved = structure.arms_pass(fn.body.body, plain=True)
+        if moved:
+            fn.body.body[:] = body
             settle()
         group_declarations(fn)
     return fn

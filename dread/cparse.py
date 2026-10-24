@@ -241,19 +241,29 @@ class Addr(tuple):
     in), with those they had absorbed. To everything else a tuple (address, text): it compares and
     hashes as one, so a statement's equality, the lines the printer groups and the digests of readable
     C (dread.naming digest: what the readable_types and readable_names tables are made for) do not
-    change. note_text prints shown; first_addresses reads absorbed. The parser makes plain tuples;
-    absorb and take make these."""
+    change. note_text prints shown; first_addresses reads absorbed. copies: the instructions of the same
+    statement elsewhere that this one stands for since dread.structure wrote them once (arms of one code
+    merged, a statement every arm began or ended with moved out of them: copy_of), which dread.naming
+    identities counts as the definitions they were. The parser makes plain tuples; absorb, take and
+    copy_of make these."""
 
-    def __new__(cls, addr, absorbed=(), shown=None):
+    def __new__(cls, addr, absorbed=(), shown=None, copies=()):
         self = tuple.__new__(cls, (addr[0], addr[1]))
         self.absorbed = frozenset(absorbed)
         self.shown = (shown[0], shown[1]) if shown is not None and tuple(shown) != tuple(self) else None
+        self.copies = frozenset(copies)
         return self
 
 
 def absorbed(addr):
     """The addresses an instruction's statement absorbed (Addr), none for a plain tuple or None."""
     return getattr(addr, "absorbed", frozenset())
+
+
+def copies(addr):
+    """The addresses of the copies a statement stands for (Addr: copy_of), none for a plain tuple or
+    None."""
+    return getattr(addr, "copies", frozenset())
 
 
 def shown(addr):
@@ -273,7 +283,7 @@ def absorb(into, other):
         return
     got = absorbed(a) | {b[0]} | absorbed(b)
     if got != absorbed(a):
-        into.addr = Addr(a, got, getattr(a, "shown", None))
+        into.addr = Addr(a, got, getattr(a, "shown", None), copies(a))
 
 
 def take(into, other):
@@ -283,7 +293,19 @@ def take(into, other):
     a, b = into.addr, other.addr
     if a is None or b is None:
         return
-    into.addr = Addr(a, absorbed(a) | {b[0]} | absorbed(b), shown(b))
+    into.addr = Addr(a, absorbed(a) | {b[0]} | absorbed(b), shown(b), copies(a))
+
+
+def copy_of(into, other):
+    """Statement into is the same code as other and stands for it from now on (dread.structure: one arm
+    for two of one code, a statement moved out of the arms that each began or ended with it): other's
+    instruction and its copies join into's copies, and its instruction and what it absorbed into's
+    absorbed (the reading form's margin). Nothing where either has no instruction or both have one."""
+    a, b = into.addr, other.addr
+    if a is None or b is None or tuple(a) == tuple(b):
+        return
+    into.addr = Addr(a, absorbed(a) | {b[0]} | absorbed(b), getattr(a, "shown", None),
+                     copies(a) | {b[0]} | copies(b))
 
 
 def first_addresses(fn):

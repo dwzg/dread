@@ -121,7 +121,9 @@ slot it lives in (its name without the numbers of its webs: r4 for r4_2, s36 for
 instruction that writes it (`0x1a2b`, in order; `entry` for a declaration's initial value; a for
 loop's init and step at the instructions of the statements they were made from, since 2026-10-24,
 when dread.structure began to make for loops of them: an older entry has those statements' own,
-which is the same), BASE alone for a local nothing writes. When the transformations change the C, the names go to the variables of
+which is the same; a statement written once for copies of it at several instructions, arms of one
+code merged or a statement every arm shared moved out of them, at every copy's instruction, as the
+copies were), BASE alone for a local nothing writes. When the transformations change the C, the names go to the variables of
 the new C with the same identity (carrying): a parameter's to the parameter at its position, a
 local's to the local of the same base whose definitions it shares most, more than half of all the two
 have (Jaccard, dread.naming CARRY_OVERLAP), where each is the other's only best match. Every carried

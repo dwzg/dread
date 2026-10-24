@@ -255,7 +255,8 @@ def identities(fn):
     it lives in), each DEF ("0x1a2b", in order) an instruction that writes it: the own instruction (the
     addr: the one it came from, which dread.tidy keeps when it folds others in) of each statement whose
     expressions assign it, increment it or are an asm's output for it (a for loop's init and step: those
-    of the statements they were, cparse For's init_addr and step_addr, since 2026-10-24), else the
+    of the statements they were, cparse For's init_addr and step_addr; and the instructions of the
+    copies a statement stands for, cparse copies: since 2026-10-24), else the
     instruction of the statement around it (a store in an IT block's arm: its if's), and ENTRY for a declaration's initial
     value outside any statement with an instruction. A local nothing writes is its BASE alone. One
     string a variable: the readable_names table keeps them so (docs/formats.md)."""
@@ -274,15 +275,17 @@ def identities(fn):
                 if isinstance(o.e, C.Name):
                     defs.setdefault(o.e.id, set()).add(here or ENTRY)
         for e in _exprs(s):
-            at = here
+            at, addr = here, s.addr
             if isinstance(s, C.For):            # (a counted loop's init and step: the statements they were)
                 own = s.init_addr if e is s.init else s.step_addr if e is s.step else None
-                at = "0x%x" % own[0] if own is not None else here
+                at, addr = ("0x%x" % own[0], own) if own is not None else (here, s.addr)
+            more = ["0x%x" % a for a in C.copies(addr)]     # (the copies one statement stands for)
             for x in walk_expr(e):
                 target = x.target if isinstance(x, C.Assign) else x.e if isinstance(x, (C.Post, C.Unary)) and \
                     x.op in ("++", "--") else None
                 if isinstance(target, C.Name):
                     defs.setdefault(target.id, set()).add(at or ENTRY)
+                    defs[target.id].update(more)
         for inner in _inner(s):
             visit(inner, here)
         if isinstance(s, C.For) and isinstance(s.init, C.Decl):

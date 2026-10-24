@@ -9,6 +9,52 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Merged arms and hoisted statements: arms of one code as one condition with ||, what every arm shares in front of or behind the if (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Merged arms
+and hoisted statements" (docs/todo.md).
+
+- **Question.** Readable C writes the same code into several arms where the compiler had one block for
+  them: dread.structure repeats a short way to a return at every jump to it (TAIL), so an else-if chain
+  whose tests reached one block has that block in each arm (FreeRTOS's eTaskGetState: `else if (list
+  == delayed) r = 2; else if (list == overflow) r = 2;` for the source's one test with ||), and
+  dread.tidy's merge_ifs writes a statement GCC scheduled between two IT blocks into both arms of the
+  one if (prvCheckExpectedTimeIsWithinAnAcceptableMargin: `r4 = r1 + 7;` in both, where the source
+  computes the bound once); a compiler that duplicated a call into both arms (GCC -O0) leaves it in
+  both. Which arms should become one, which statements should leave the arms, and where may that be
+  done so that every way runs what it ran, in its order?
+- **Options.** (a) Neighbouring arms of an else-if chain with the same code as one arm, their tests
+  joined with || (the second evaluated only where the first fails, as before: any test may have an
+  effect); an arm whose code is the last else's drops its test where the test has no effect; a run of
+  ifs without else whose arms are the same code and never fall through as one if (`if (a) return x; if
+  (b) return x;`). (b) Arms apart in a chain too (`if (a) X else if (b) Y else if (c) X`: c would be
+  tested before b, which needs every test between without an effect). (c) What every arm of an if /
+  else (or of a whole chain with a last else) begins with in front of it where no test has an effect
+  and none reads what the statement writes, or the statement assigns a value without an effect of
+  variables no test writes and no call can reach (an address taken nowhere); what every arm ends with
+  behind it, always; (d) hoisting from the arms of an else if alone (the chain's first arms keep it:
+  `else { if (b) X else Y; S }`, a level deeper). Where: (e) in dread.structure after the loops are
+  refined, on every if; (f) also in dread.tidy, for its conditional blocks' ifs, once the clean-up
+  has settled, and the clean-up again after it.
+- **Choice: (a), (c), (e) and (f).** (b) changes the order of tests; (d) breaks a flat chain into a
+  deeper else for one statement fewer (gizmo's read_line). (f) matters for IT blocks: merge_ifs writes
+  the statement into both arms so that dead and fold can use it on each way, and once they have, it is
+  moved back, where the clean-up can fold it into its one reader (`if (r1 + 7 < r0_1)`, the source's
+  comparison); in dread.structure alone it would stay a variable. Code is compared as text without the
+  instructions' comments (copies the compiler duplicated have other instructions); the statement kept
+  stands for the others (cparse copy_of: their instructions join its absorbed, for the reading form's
+  margin, and its copies, which dread.naming identities counts as the definitions they were: without
+  that, a variable two copies at two instructions defined lost one definition, half of its identity,
+  and its name did not carry, GCC -O0's prvSuspendedTaskTimerTestCallback). Nothing leaves arms that
+  declare variables of their own.
+- **Not done.** Arms apart in a chain stay apart; a statement every arm begins with that reads memory
+  or calls stays where a test calls (FreeRTOS's interrupt tests load a handle in both arms of a test of
+  a call's result: the load might see what the call wrote); a statement first in one arm and second in
+  another (behind a statement it does not depend on) stays (gizmo rv32's script_run, case 1).
+- **How to undo.** dread/structure.py: structure without the arms_pass call; dread/tidy.py: _tidy
+  without the hoisting at its end; cparse copy_of back to absorb (and identities without copies).
+- **Status.** In the code (tests/test_arms.py).
+
 ## Loops in their source shape: tests at the head as the condition, loops proved entered, steps folded into their accesses (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Loops in

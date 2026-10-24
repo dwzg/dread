@@ -2259,11 +2259,46 @@ model).
   the item "No parameters from pushes"); not established that a return regflow finds unread is
   a leftover in the source (a function without callers, or called through pointers only, counts as
   unread), and what the pilot names the new variables was not asked.
-- [ ] **Merged arms and hoisted statements.** Arms with identical bodies stay apart, and a statement
+- [x] **Merged arms and hoisted statements.** Arms with identical bodies stay apart, and a statement
   common to every arm is printed in each. Merge arms with one body into one condition with ||, hoist
   what all arms begin or end with. Public example: FreeRTOS mps2-gcc-Os
   prvCheckExpectedTimeIsWithinAnAcceptableMargin (`r4 = r1 + 7;` in both arms; the source computes
   the bound once).
+  Done 2026-10-24 (dread.structure arms_pass, merged_arms, hoisted, chain_of; dread.tidy's hoisting at
+  the end of the clean-up; cparse copy_of and copies, read by dread.naming identities; docs/decisions.md,
+  "Merged arms and hoisted statements"). Neighbouring arms of an else-if chain with the same code (as
+  text, wherever their instructions are) are one arm with their tests joined by ||, an arm that is the
+  last else's code drops its test where it has no effect, a run of ifs without else whose arms are the
+  same code and never fall through is one if; what every arm of an if / else (or of a whole chain with
+  a last else) begins with goes in front of it where no test has an effect and none reads what it
+  writes (or it assigns a value without an effect of variables no test writes and no call reaches),
+  what every arm ends with behind it. In dread.tidy for its conditional blocks' ifs once the clean-up
+  has settled, then the clean-up again: prvCheckExpectedTimeIsWithinAnAcceptableMargin is `r0_1 =
+  xTaskGetTickCount() - r0; if (r0_1 < r1) g_200009d0 = 759; if (r1 + 7 < r0_1) g_200009d0 = 767;`, the
+  source's two tests; eTaskGetState's `else if (r5 == r7 || r5 == r6) r0_1 = 2;`; xEventGroupWaitBits's
+  `if (r1 >= 0x1000000u || r1 == 0) vAssertCalled(...)`; vPrimaryBlockTimeTestTask's four IT-block if /
+  elses one line each. Measured as "Loops in their source shape" (the same copies of the eight builds),
+  that item -> this: the gate accepts the same functions, set for set (35, 36, 44, 31, 317, 275, 252,
+  354, as main); the readable C of 0, 0, 1, 2, 18, 11, 5, 11 functions changed; neighbouring arms of one
+  code 0, 0, 0, 0, 15, 1, 0, 3 -> 0 everywhere; runs of exits with one body 0, 0, 0, 0, 1, 1, 1, 0 -> 0;
+  ifs whose every arm begins with one statement 0, 0, 1, 3, 50, 3, 6, 3 -> 0, 0, 0, 0, 30, 1, 0, 2 (what
+  is left: a load or a call in front of a test that calls, the interrupt tests' handles), whose every
+  arm ends with one 1, 1, 1, 1, 2, 12, 0, 7 -> 1, 1, 1, 0, 0, 1, 0, 1 (gizmo ARM's: an else if's own two
+  arms, read_line's, which its chain's first arm does not share); arms of one code apart in a chain 9,
+  1, 8, 11 on FreeRTOS -> 10, 1, 8, 11; every GCC -Os function's readable C 65.5 and 67.7 s of CPU before,
+  66.8 and 67.6 s with this. Names a script made for main's C carry to this C: of 6, 5, 6, 6, 39, 16, 19,
+  34 functions whose C changed under them, all (44, 36, 45, 42, 468, 217, 265, 267 names), 1, 1, 1, 4,
+  12, 4, 0, 3 dropped: the copies "Loops in their source shape" took out and variables the clean-up
+  folded away once their statement was written once (prvCheckExpectedTimeIsWithinAnAcceptableMargin's
+  r4, vPrimaryBlockTimeTestTask's r2_2 and r2_4, __sseek's r3_1); no variable left without a name (without
+  copy_of GCC -O0's two prvSuspendedTaskTimerTestCallback lost r0's: a call written once for its copies
+  at two instructions). Tests (tests/test_arms.py): each rewrite and what refuses it, the clean-up's
+  hoisting of an IT block's statement, the identities of a statement written once, gizmo's rv32
+  script_run, read_line and m4 apply_config, random functions of shared arms rewritten and compiled by the
+  host beside their originals; also with Ubuntu 24.04's and 22.04's compilers.
+  Left: arms of one code apart in a chain (a test would move before another); a statement every arm
+  begins with that loads or calls, where a test calls; a statement first in one arm and second in the
+  other behind one it does not depend on (gizmo rv32's script_run, case 1); an else if's own arms.
 - [x] **Structure definitions once per image.** Every function's readable C repeats the full
   definition of each structure it touches. Write them to one header per image (`--out` writes it
   beside the files; the printed form includes it), and print only the members a function uses, as a
