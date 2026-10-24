@@ -154,24 +154,26 @@ A name for an object the C has not (the region split otherwise since, by the rea
 `whole` or prototypes) is dropped alone.
 
 Its `globals` part names memory at fixed addresses: `{"0xADDRESS TYPE": {"name", "by"}}` (TYPE the
-access's: u32, u8, ...). dread readable writes such an access as the name, a macro above the
-function that is the access itself; without an entry, or where the function's C uses the name for
-something else, the default name says where it is: `io_40004004` (a device register: `[memory]
-io`), `rom_c6e4` (a rom region), `g_20029aac` (anything else), with the type for an access other
-than a u32 one (`g_20029aac_u8`). The pilot asks for these before the functions' variables, or
-alone for every function's readable C (`dread pilot --task globals`, with the structures below);
-they need no digest, since an address does not change with the transformations. Since 2026-10-24 a
-proposed name keeps no such type at its end (`uxTimerFlags_u8` is stored as `uxTimerFlags`), unless the
-name without it is taken or another proposal of the same question (two views of one address). A structure of
+access's: u32, u8, ...; since 2026-10-24, with the readable_types table's `signed` part, the one type
+an address is named with at that width: signed where it is listed, else unsigned, an entry under the
+other signedness's key taken where that type's has none). dread readable writes such an access as the
+name, a macro above the function that is the access itself; without an entry, or where the function's C
+uses the name for something else, the default name says where it is: `io_40004004` (a device register:
+`[memory] io`), `rom_c6e4` (a rom region), `g_20029aac` (anything else), with the type for an access
+other than a u32 one (`g_20029aac_u8`). The pilot asks for these before the functions' variables, or
+alone for every function's readable C (`dread pilot --task globals`, with the structures below); they
+need no digest, since an address does not change with the transformations. Since 2026-10-24 a proposed
+name keeps no such type at its end (`uxTimerFlags_u8` is stored as `uxTimerFlags`), unless the name
+without it is taken or another proposal of the same question (two views of one address). A structure of
 static data (the readable_types table's `statics`, since 2026-10-23) is named under `"0xADDRESS
 struct"` (its address), optionally with `"fields": {"OFFSET": name}`; a field without a name there
 takes the name of its own address and type (`"0x20000034 u32"`: the pilot asks for each field so,
 written `g_20000030.f_4` in its question), else `f_4`. An array of static data (`arrays`, since
-2026-10-23) is named alike under its address, its `fields` an element's by their offset in it; a
-field without one takes the name of the first element's field's address and type (written
-`g_200299f8[].f_4` in the pilot's question). A name that a global staying a macro has, or
-another structure's, is not used for a structure or a field (it would expand inside them). A file
-from before has no such entries: its structures read `g_20000030.f_4`.
+2026-10-23) is named alike under its address, its `fields` an element's by their offset in it; a field
+without one takes the name of the first element's field's address and type (written `g_200299f8[].f_4`
+in the pilot's question). A name that a global staying a macro has, or another structure's, is not used
+for a structure or a field (it would expand inside them). A file from before has no such entries: its
+structures read `g_20000030.f_4`.
 
 Its `structs` part names the structures of the readable_types plan and their fields:
 `{"FUNCTION:VARIABLE": {"name", "fields": {"OFFSET": name}, "anchors": ["FUNCTION:VARIABLE", ...],
@@ -207,15 +209,20 @@ the builds read it. Not edited by hand. A file from before `embeds` has none: it
 flat, as they were written; an `embeds` entry naming a structure the file lacks is left out.
 
 `statics` (left out when empty; since 2026-10-23) lists the structures of static data at fixed
-addresses (dread.statics): `{"0xADDRESS": [[offset, type], ...]}`, the fields laid out as
-`structs`' are. Every function's access at such a field's address with its type is written as a
-member of the structure's object (`g_20000030.f_4`, one macro `#define g_20000030 (*(volatile struct
-g_20000030_t *)0x20000030u)` and the structure above the function), whatever the function's digest;
-an access of another type stays the macro it was (a read of the field's width and the other
-signedness is cast: `(s16)g_20000030.f_4`, since 2026-10-23). Made from every function's machine code
-(and the lifted functions' readable C for the fields, and what callees reach through the addresses
-it hands them). A file from before has none: readable C writes a macro per address and type, as
-before.
+addresses (dread.statics): `{"0xADDRESS": [[offset, type], ...]}`, the fields laid out as `structs`'
+are. Every function's access at such a field's address with its type is written as a member of the
+structure's object (`g_20000030.f_4`, one macro `#define g_20000030 (*(volatile struct g_20000030_t
+*)0x20000030u)` and the structure above the function), whatever the function's digest; a read of the
+field's width and the other signedness is cast (`(s16)g_20000030.f_4`, since 2026-10-23), a store of it
+goes into the field as it is, and an access of another width at a field's place through the field's
+address (`*(volatile u8 *)&g_20000030.f_4`; until 2026-10-24 both stayed the macros they were). Since
+2026-10-24 a field is signed where an access of its size is (in `structs` too: the lifters write every
+store unsigned; before, a field stored anywhere was unsigned), and a structure goes on over an address
+handed out and another base where its base reaches past them (until then each ended it; a data symbol,
+a startup range, an array and a handed base still do), and one whose fields recur at the stride of the
+addresses handed out inside it is an array (`arrays`). Made from every function's machine code (and the
+lifted functions' readable C for the fields, and what callees reach through the addresses it hands
+them). A file from before has none: readable C writes a macro per address and type, as before.
 
 `arrays` (left out when empty; since 2026-10-23) lists the arrays of static data (dread.statics
 find_arrays): `{"0xADDRESS": {"size": element size, "count": elements, "fields": [[offset in the
@@ -237,6 +244,16 @@ lowest constant, or was not found). Since 2026-10-24 a pointer that walks static
 address, stepped by a constant of two bytes or more) gives the elements' size as an index would, where
 its start is a base that counts (dread.statics walks): FreeRTOS's xAutoReloadTimers, filled so, is an
 array of 21 words, not a structure of three. A file from before lists such an object among `statics`.
+
+`signed` (since 2026-10-24; written whenever the check runs, also empty) lists the scalars at fixed
+addresses, outside the structures and arrays of static data, that an access of that size reads signed
+(dread.statics plan, from every function's machine code and the lifted functions' readable C):
+`{"0xADDRESS": [size, ...]}`. Readable C names memory at a fixed address once at each width, the same
+in every function: a macro of the signed type where it is listed, else of the unsigned
+(`#define g_200018dc_s16 (*(volatile s16 *)0x200018dcu)`), a read of the other signedness a cast of it
+(`(u16)g_200018dc_s16`), a store into it as it is (`g_200018dc_s16++`); its entry in readable_names'
+globals part is that type's, else one of the other signedness's. A file from before has no `signed`:
+a macro per address and type, as before (`g_200018dc_u16 = g_200018dc_s16 + 1`).
 
 `params` (left out when empty; since 2026-10-23) lists, for every analysed function, the indices of
 its parameters that it uses as a pointer (dread.shapes pointer_params): `{FUNCTION: [0, 2]}`. A

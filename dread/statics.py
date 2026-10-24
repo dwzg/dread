@@ -28,14 +28,23 @@ plus 52, and the anchor is no structure).
 
 The decision (plan()): a base is the origin of an access at a constant offset at or above it in
 some function. Its structure reaches as far as its accesses do over every function (the widest
-offset plus its width) and ends earlier where something else starts: a base of other accesses, an
-address that escapes, an array's start, a data symbol of the target's table (symbols.txt;
-symbols=False leaves them out), a range of the startup's copies, the end of its memory region. Its
-fields are every access at a constant address inside it, through any base (the gp-relative ones
-too), laid out as dread.shapes lays out a kind (layout()). A structure needs two fields, one of them
-wider than a byte (bytes alone are mostly a string or a buffer, read better as they are), and a base
-with an access below it is none (the object goes on below). Device registers ([memory] io) are left
-out: no structure the source declares, and their names (io_40011004) already say where they are.
+offset plus its width) and ends earlier where something else starts: an array's start, a data symbol
+of the target's table (symbols.txt; symbols=False leaves them out), a range of the startup's copies,
+the end of its memory region. An address that escapes and another base inside what it reaches are a
+member's address and a base reaching into it (REACH_PAST; until 2026-10-24 they ended it: FreeRTOS's
+countsem.c hands xParameters[1] to xTaskCreate, and the second block's words printed as names of their
+own on 31 of the 39 benchmark builds), a base inside a structure made goes into it; whether a base
+counts is asked of its run up to the next start of any kind, as before. Its fields are every access at
+a constant address inside it, through any base (the gp-relative ones too), laid out as dread.shapes
+lays out a kind (layout(): signed where an access of a field's size is, signed_type). A structure
+needs two fields, one of them wider than a byte (bytes alone are mostly a string or a buffer, read
+better as they are), and a base with an access below it is none (the object goes on below). One
+whose fields recur at a stride that the addresses handed out inside it recur at is an array of
+elements of that stride (xParameters two blocks of 12 bytes, newlib's __sf three FILEs). Device
+registers ([memory] io) are left out: no structure the source declares, and their names
+(io_40011004) already say where they are. The scalars outside every structure and array that an
+access reads signed are listed apart (plan's signed: readable C gives memory at a fixed address one
+name at each width, signed where listed; dread.naming apply_globals).
 
 The hard part is a section anchor: GCC without -fdata-sections reaches every variable of a source
 file from one base, clang merges a file's globals into one object (on RISC-V, and with its global
@@ -304,22 +313,30 @@ def layout(fields, base):
     """[(offset from base, type)] of the fields ({offset from base: {type: count}}) a C structure at
     base holds at their offsets without packing: naturally aligned both at their offset and at their
     address, not overlapping a field before them; an offset accessed with several sizes takes its most
-    frequent one (a tie the wider), unsigned unless only signed accesses have that size (as
-    dread.shapes lays out a kind). A 64-bit access counts as two words (the lifters write it so)."""
+    frequent one (a tie the wider), signed where an access of that size is (as dread.shapes lays out a
+    kind: a signed access is a load that extends the sign, which a compiler makes of a signed field, and
+    the lifters write every store unsigned; until 2026-10-24 a field stored anywhere was unsigned and
+    each signed read of it a cast). A 64-bit access counts as two words (the lifters write it so)."""
     rows, end = [], 0
     for off in sorted(o for o in fields if o >= 0):
         by_size = {}
         for t, c in fields[off].items():
             by_size[SIZES.get(t, 4)] = by_size.get(SIZES.get(t, 4), 0) + c
         size = max(by_size, key=lambda z: (by_size[z], z))
-        signed = [t for t in fields[off] if SIZES.get(t, 4) == size and t.startswith("s")]
-        unsigned = [t for t in fields[off] if SIZES.get(t, 4) == size and not t.startswith("s")]
-        ctype = ("s%d" if signed and not unsigned else "u%d") % (size * 8)
+        ctype = signed_type(fields[off], size)
         if off % size or (base + off) % size or off < end:
             continue
         rows.append((off, ctype))
         end = off + size
     return rows
+
+
+def signed_type(types, size):
+    """The C type of a place accessed with types ({type: count}) whose size is size: signed where one of
+    them of that size is signed (a load that extends the sign: the lifters write stores unsigned, so a
+    store says nothing of the sign, and a compiler extends the sign of a signed place where it reads it as
+    a value), else unsigned."""
+    return ("s%d" if any(SIZES.get(t, 4) == size and t.startswith("s") for t in types) else "u%d") % (size * 8)
 
 
 # ---- what readable C indexes: the scale, which the machine code's pass does not follow
@@ -801,10 +818,15 @@ def handed(trees, shapes_, memory=None):
 
 
 NEAR = 64               # bytes around a structure where its neighbours lie (separate_bases)
+# What a base's structure goes on over where the base reaches past it (an address handed out inside it,
+# another base); "symbol" would take data symbols too, measured 2026-10-24 on the 39 FreeRTOS builds: 43
+# structures over several source variables (clang's merged globals, newlib's malloc state), so a data
+# symbol still ends a structure (right with an ELF's symbols; a person's, naming a field, would want it)
+REACH_PAST = ("escape", "base")
 
 
 def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidence", indexed=None, arrays=None,
-         handed=None):
+         handed=None, signed=None):
     """{base: [(offset, type)]} of the structures of static data the evidence ({name: Evidence},
     gather) shows (see the module's docstring). extra: more accesses at fixed addresses {function:
     [(address, type)]} for the fields (the readable C's: an ldm's or stm's words, which the evidence
@@ -820,9 +842,13 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
     count}}, scale, base)]}, statics.handed): each such address is a base whose structure reaches as far as the
     callee does, its fields there too; it counts without separate_bases (a parameter points into one
     object), ends only where a data symbol, a startup range, an array or another such base starts (an
-    address handed out inside it is a member's), and a structure inside it is left out."""
+    address handed out inside it is a member's), and a structure inside it is left out. signed, a set:
+    the places outside the structures and arrays found that an access reads signed go into it, as
+    (address, size) for sizes of a word or less (signed_type: the one type readable C names a scalar
+    with at that width, dread.naming apply_globals; the readable_types table's signed part)."""
     memory = program.target.memory
     accesses, starts, reach, below, seen, through = {}, set(), {}, set(), {}, {}
+    escapes, origins = set(), set()
 
     def note(fname, a, t, origin=None):
         a &= MASK
@@ -831,6 +857,7 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
         seen.setdefault(fname, {}).setdefault(a, set()).add(origin)
     for ev in evidence_.values():
         starts |= ev.escapes
+        escapes |= ev.escapes
         for address, ctype, origin, ix in ev.accesses:
             if ix:
                 # (an array starts at its constant part, or at the address the code made where the
@@ -842,6 +869,7 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
             if origin is None:
                 continue
             starts.add(origin)
+            origins.add(origin)
             through.setdefault(origin, set()).add(ev.name)
             off = (address - origin) & MASK
             if off >= 0x80000000:
@@ -865,18 +893,24 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
     data_symbols = {a for kind, a, _ in program.symbols() if kind == "d"} if symbols else set()
     starts |= data_symbols
     bounds = set(data_symbols)              # (what ends an array: a variable or a startup range starts)
+    firm = set()                            # (what ends a structure whatever its base reaches past)
     for c in program.image.startup():       # (an object lies in one of the startup's ranges)
         starts |= {c.run, c.run + c.size}
         bounds |= {c.run, c.run + c.size}
+        firm |= {c.run, c.run + c.size}
+    for kind, places_ in (("escape", escapes), ("base", origins), ("symbol", data_symbols)):
+        if kind not in REACH_PAST:
+            firm |= places_
     found = {}
     if indexed:
         before = sorted(starts)
 
         def own_end(o):
-            """Where a structure at base o ends (as below, before the arrays): its reach, cut where the next
-            object starts and at its region's end; the end a base that counts is tried with (on RISC-V GCC
-            reaches the variables behind an array through the array's upper half: the array's base reached
-            them, and tried up to its full reach it counted for no array where it counted for a structure)."""
+            """Where a base's run ends for the evidence test (as below, before the arrays): its reach, cut where
+            the next object starts and at its region's end; the end a base that counts is tried with (on
+            RISC-V GCC reaches the variables behind an array through the array's upper half: the array's
+            base reached them, and tried up to its full reach it counted for no array where it counted for
+            a structure)."""
             end = o + reach.get(o, 0)
             i = bisect.bisect_right(before, o)
             if i < len(before):
@@ -907,9 +941,10 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
         ends[a] = end
     starts |= set(ends)
     held = sorted(ends.items())
-    order = sorted(starts)
+    order = sorted(firm | set(found) | set(ends))
+    every = sorted(starts)                  # (what the evidence test cuts a base's run at, as before)
     places = sorted(accesses)
-    out = {}
+    out, made = {}, (0, 0)                  # (made: the last structure's place, which a base inside goes into)
     for base in sorted(set(reach) | set(ends)):
         if base in below and base not in ends:
             continue
@@ -919,17 +954,25 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
         i = bisect.bisect_right(held, (base, -1)) - 1
         if i >= 0 and held[i][0] < base < held[i][1]:
             continue                        # (inside what a callee reaches from a handed address)
+        if made[0] < base < made[1] and base not in ends:
+            continue                        # (inside a structure another base reaches over: its fields)
         if base in ends:
             end = ends[base]
         else:
-            end = base + reach[base]
+            end = cut = base + reach[base]
             i = bisect.bisect_right(order, base)
             if i < len(order):
                 end = min(end, order[i])
+            i = bisect.bisect_right(every, base)
+            if i < len(every):
+                cut = min(cut, every[i])
             region = memory.region(base) if memory is not None else None
             if region is not None:
-                end = min(end, region.end)
-            if trust != "all" and not separate_bases(base, end, through[base], seen, near):
+                end, cut = min(end, region.end), min(cut, region.end)
+            # (whether the base counts is asked of its run up to the next start of any kind, as before:
+            # tried up to all it reaches, clang -O2's xQueueRegistry, which hands out its last entry's
+            # address, lost its neighbour and with it the structure)
+            if trust != "all" and not separate_bases(base, cut, through[base], seen, near):
                 continue
         fields = {}
         for a in places[bisect.bisect_left(places, base):bisect.bisect_left(places, end)]:
@@ -939,6 +982,36 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
         rows = layout(fields, base)
         if len(rows) >= LEAST_FIELDS and any(SIZES[t] > 1 for _, t in rows):
             out[base] = rows
+            made = (base, base + max(off + SIZES[t] for off, t in rows))
+    if arrays is not None and "escape" in REACH_PAST:
+        # A structure whose fields recur at a stride, with addresses handed out inside it that recur too
+        # (an element handed to a task: FreeRTOS's xParameters[1]; newlib's &__sf[1] and &__sf[2], with
+        # a member of each, its _mbstate, handed to memset), is an array of elements of that stride: of
+        # the distances between two of its handed addresses (its base one of them), smallest first, the
+        # first with a divisor that its extent is a whole number of and at which its fields recur (each
+        # field at its place in its element with one type there, every element holding a field), its
+        # greatest such divisor (clang -O2 hands out xQueueRegistry's tenth entry, 72 bytes into its 80:
+        # entries of 8).
+        def recurring(rows, k, size):
+            """[(offset in an element, type)] of rows as elements of k bytes over size, or None where they
+            are not: each field inside its element, aligned, with one type at its place in every element,
+            and every element holding a field."""
+            if size % k or size // k < 2:
+                return None
+            elem = {}
+            for off, t in rows:
+                if off % k + SIZES[t] > k or k % SIZES[t] or elem.setdefault(off % k, t) != t:
+                    return None
+            return sorted(elem.items()) if {off // k for off, _ in rows} == set(range(size // k)) else None
+        for base, rows in sorted(out.items()):
+            size = max(off + SIZES[t] for off, t in rows)
+            given = sorted({0} | {a - base for a in escapes if base < a < base + size})
+            for gap in sorted({b - a for i, a in enumerate(given) for b in given[i + 1:]}):
+                k = next((d for d in range(gap, 1, -1) if gap % d == 0 and recurring(rows, d, size)), None)
+                if k is not None:
+                    arrays[base] = (k, size // k, recurring(rows, k, size))
+                    del out[base]
+                    break
     if arrays is not None:
         # A structure that is a run of fields of one type, one after another, which the machine code
         # also reaches with an index of that width at one of them, is an array of that type (the
@@ -953,6 +1026,16 @@ def plan(program, evidence_, extra=None, symbols=True, near=NEAR, trust="evidenc
                     and any((base + off, z) in ix for off, _ in rows):
                 arrays[base] = (z, len(rows), [(0, layout({0: {t: 1 for _, t in rows}}, base)[0][1])])
                 del out[base]
+    if signed is not None:
+        covered = sorted([(b, b + max(off + SIZES[t] for off, t in rows)) for b, rows in out.items()] +
+                         [(b, b + k * n) for b, (k, n, _) in (arrays if arrays is not None else found).items()])
+        for a, types in sorted(accesses.items()):
+            i = bisect.bisect_right(covered, (a, MASK + 1)) - 1
+            if i >= 0 and covered[i][0] <= a < covered[i][1]:
+                continue                    # (a field's place: its structure's layout decides)
+            for z in sorted({SIZES.get(t, 4) for t in types}):
+                if z <= 4 and signed_type(types, z)[0] == "s":
+                    signed.add((a, z))
     return out
 
 

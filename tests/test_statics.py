@@ -177,24 +177,29 @@ def readable_c(named=None, plan=PLAN):
 
 
 def test_the_fields_of_a_structure_of_static_data_are_members_of_one_object():
-    """One macro for the structure, its definition above the function; a byte at its address it has
-    no such field for stays a macro of its own, and memory outside every structure too."""
+    """One macro for the structure, its definition above the function; a byte at the place of a word
+    field goes through the field's address (one name per static object, since 2026-10-24: before, it was
+    a macro of its own, g_20000030_u8), memory outside every structure stays a macro."""
     out, chosen = readable_c()
     assert "r3 = g_20000030.f_0 + g_20000030.f_4;" in out and "g_20000030.f_8 = r3;" in out, out
-    assert "g_20000030_u8 = 1;" in out and "return g_20000040;" in out, out
+    assert "*(volatile u8 *)&g_20000030.f_0 = 1;" in out and "return g_20000040;" in out, out
+    assert "g_20000030_u8" not in out, out
     assert "if (g_20000044.f_0 != 0) g_20000044.f_4 = 2;" in out, out
     assert "#define g_20000030 (*(volatile struct g_20000030_t *)0x20000030u)" in out, out
     assert "struct g_20000030_t\n{\n    u32 f_0;\n    u16 f_4;\n    u8 pad_6[2];\n    u32 f_8;\n};" in out, out
     assert out.index("struct g_20000030_t\n{") < out.index("#define g_20000030 ") < out.index("u32 f(u32 r0)"), out
-    assert chosen["0x20000034 u16"] == "g_20000030.f_4" and chosen["0x20000030 u8"] == "g_20000030_u8", chosen
+    assert chosen["0x20000034 u16"] == "g_20000030.f_4" and chosen["0x20000030 u32"] == "g_20000030.f_0", chosen
+    assert "0x20000030 u8" not in chosen, chosen
     same, _ = readable_c(plan={})                       # (without a plan: a macro per address and type)
     assert "struct" not in same and "r3 = g_20000030 + g_20000034_u16;" in same, same
 
 
-def test_a_word_at_a_structure_s_address_it_holds_no_word_for_keeps_a_name_of_its_own():
+def test_a_word_at_a_structure_s_halfword_field_reads_through_the_field_s_address():
+    """A word read where the structure has a halfword field is one word access through the field's
+    address (until 2026-10-24 a name of its own, g_20000030_u32: two names for one object)."""
     out, _ = readable_c(plan={0x20000030: [(0, "u16"), (4, "u16"), (8, "u32")]})
-    assert "r3 = g_20000030_u32 + g_20000030.f_4;" in out, out
-    assert "#define g_20000030_u32 (*(volatile u32 *)0x20000030u)" in out, out
+    assert "r3 = *(volatile u32 *)&g_20000030.f_0 + g_20000030.f_4;" in out, out
+    assert "g_20000030_u32" not in out, out
 
 
 def test_a_structure_and_its_fields_take_the_table_s_names_where_they_are_free():
@@ -221,7 +226,8 @@ def test_the_figures_count_members_of_static_data_apart():
     t = cparse.parse(out.replace("struct g_20000030_t\n{\n    u32 f_0;\n    u16 f_4;\n    u8 pad_6[2];\n    u32 f_8;\n};",
                                  "").replace("struct g_20000044_t\n{\n    u32 f_0;\n    u16 f_4;\n};", ""))
     got = cmetrics.readable_figures(t, t.function("f"))
-    assert (got["fixed_members"], got["fixed"], got["frame_members"], got["members"]) == (5, 2, 0, 0), got
+    assert (got["fixed_members"], got["fixed"], got["frame_members"], got["members"]) == (5, 1, 0, 0), got
+    assert got["fixed_addresses"] == 1, got             # (the byte through the field's address)
 
 
 def access_widths(target, obj):
@@ -486,13 +492,14 @@ def test_the_elements_of_arrays_of_static_data_are_written_as_such():
     (directly or through a variable that holds the index times the size), at a constant address the
     element's; the addresses of elements, fields and objects that the code passes, assigns or
     compares are &-expressions; an access of the field's width but the other signedness is a cast when
-    it is read; a byte inside a word field, a place at no field and a byte address inside a field stay
-    as they were. The variable that held the index times the size goes where nothing reads it any more."""
+    it is read; a byte at a word field's place goes through the field's address (since 2026-10-24); a
+    place at no field and a byte address inside a field stay as they were. The variable that held the
+    index times the size goes where nothing reads it any more."""
     out = indexed_c()
     for line in ("r2 = g_20000100[r0].f_0;", "g_20000100[r0].f_4 = r2 + 1;", "r4 = g_20000100[r1].f_c;",
                  "heron_link((u32)&g_20000100[r0], (u32)&g_20000100[1]);", "g_20000200[r1] = g_20000200[1];",
                  "if (*(volatile u32 *)(0x20000110u + r3) == (u32)&g_20000100[0].f_c) r4 = 0;",
-                 "*(volatile u8 *)(0x20000104u + r3) = 1;", "r4 = r4 + (u32)(s32)g_20000200[r0];",
+                 "*(volatile u8 *)&g_20000100[r0].f_4 = 1;", "r4 = r4 + (u32)(s32)g_20000200[r0];",
                  "if (g_20000300.f_0 != (u32)&g_20000300.f_4) heron_link((u32)&g_20000300, 0x20000306u);",
                  "g_20000200[r0] = 0x0u;", "return g_20000200[r0];",
                  "#define g_20000100 ((volatile struct g_20000100_t *)0x20000100u)",
@@ -548,7 +555,7 @@ def test_the_figures_count_elements_and_addresses_of_static_data():
     out = indexed_c()
     t = cparse.parse(re.sub(r"struct g_\w+_t\n\{.*?\n\};\n", "", out, flags=re.S))
     got = cmetrics.readable_figures(t, t.function("f"))
-    assert (got["fixed_members"], got["fixed_indexed"], got["fixed_addresses"]) == (7, 5, 5), got
+    assert (got["fixed_members"], got["fixed_indexed"], got["fixed_addresses"]) == (7, 5, 6), got
     assert got["fixed"] == 0, got
 
 
@@ -1081,3 +1088,176 @@ def test_an_array_a_pointer_walks_is_an_array_of_its_elements(kind, tmp_path):
                  "#define %s ((volatile u32 *)0x%xu)" % (name, at["sparrow_timers"])):
         assert text in out, (text, out)
     assert "struct %s_t" % name not in out, out
+
+
+# ---- one name per static object (2026-10-24)
+
+# A halfword counter read signed and incremented (FreeRTOS's sNextCheckVariable++ in prvSemaphoreTest:
+# ldrsh, then strh, which the lifters write unsigned), and a function that only stores it
+COUNTER = ("/* f at 0x0 */\n#include \"dread.h\"\n"
+           "u32 f(void)\n{\n    u32 r6;\n    r6 = (u32)*(volatile s16 *)0x200018dcu;\n"
+           "    *(volatile u16 *)0x200018dcu = (u16)((u32)*(volatile s16 *)0x200018dcu + 1);\n"
+           "    return r6 + *(volatile u16 *)0x200018dcu;\n}\n"
+           "u32 g(u32 r0)\n{\n    *(volatile u16 *)0x200018dcu = (u16)r0;\n    return 0;\n}\n")
+
+
+def test_memory_read_at_two_signednesses_has_one_name():
+    """With the table's signed part, an address read signed somewhere is one signed name at that width
+    in every function, a read of the other signedness a cast of it, a store into it as it is, and
+    dread.polish writes the increment as such (sNextCheckVariable++); its table entry is the signed
+    type's, else the other's. Without the part (a table from before) a macro per address and type."""
+    from dread import polish
+    out = {}
+    for signed in (None, {(0x200018dc, 2)}):
+        texts, chosen = [], {}
+        for name in ("f", "g"):             # (each in a file of its own, as readable C has them)
+            t = cparse.parse(COUNTER)
+            chosen.update(naming.apply_globals(t, t.function(name), {"0x200018dc u16": {"name": "next"}}, None,
+                                               signed=signed))
+            polish.polish(t, t.function(name))
+            texts.append(cparse.unparse(t.function(name), notes=False) + "".join(
+                item.text + "\n" for item in t.items if isinstance(item, cparse.Raw)))
+        out[signed is None] = ("\n".join(texts), chosen)
+    text, chosen = out[False]
+    for line in ("#define next (*(volatile s16 *)0x200018dcu)", "r6 = next;", "next++;", "return r6 + (u16)next;",
+                 "next = r0;"):
+        assert line in text, (line, text)
+    assert "_u16" not in text and "_s16" not in text and chosen == {"0x200018dc s16": "next"}, (text, chosen)
+    text, chosen = out[True]
+    assert "next = g_200018dc_s16 + 1;" in text and "#define g_200018dc_s16 " in text, text
+    assert sorted(chosen) == ["0x200018dc s16", "0x200018dc u16"], chosen
+
+
+@pytest.mark.compiles
+def test_one_name_compiles_to_the_same_accesses(variant, tmp_path):
+    """The counter with one name compiles on every gizmo build to the loads and stores of the macro per
+    type: the signed load, the halfword store, the unsigned load, each one instruction of its width."""
+    from conftest import gizmo_dir
+    from dread import build
+    from dread.target import Target
+    target = Target.load(gizmo_dir(variant))
+    image = target.image()
+    widths = []
+    for label, signed in (("one", {(0x200018dc, 2)}), ("two", None)):
+        t = cparse.parse(COUNTER)
+        for name in ("f", "g"):
+            naming.apply_globals(t, t.function(name), None, None, signed=signed)
+        src = tmp_path / label
+        src.mkdir()
+        (src / "f.c").write_text(cparse.unparse(t, notes=False))
+        objs = build.compile_all(target, image, str(src), str(tmp_path / (label + "-obj")), quiet=True,
+                                 flags=target.compiler.lifted_cflags)
+        assert len(objs) == 1
+        widths.append(access_widths(target, objs[0]))
+    if widths[0] is not None:
+        assert widths[0] == widths[1] and sum(widths[0].values()) == 5, widths
+
+
+def test_a_store_of_the_other_signedness_goes_into_the_field():
+    """A field read signed somewhere is signed (dread.statics signed_type: the lifters write every store
+    unsigned); a store into it of its width is the member (one name; until 2026-10-24 the macro it was)."""
+    assert statics.layout({0: {"s16": 2, "u16": 3}, 4: {"u32": 1}}, 0x20000100) == [(0, "s16"), (4, "u32")]
+    t = cparse.parse("/* f */\n#include \"dread.h\"\nu32 f(u32 r0)\n{\n"
+                     "    *(volatile u16 *)0x20000100u = (u16)r0;\n"
+                     "    return (u32)*(volatile s16 *)0x20000100u + *(volatile u16 *)0x20000100u;\n}\n")
+    naming.apply_globals(t, t.function("f"), None, None, statics={0x20000100: [(0, "s16"), (4, "u32")]})
+    out = cparse.unparse(t, notes=False)
+    assert "g_20000100.f_0 = (u16)r0;" in out and "return (u32)g_20000100.f_0 + (u16)g_20000100.f_0;" in out, out
+    assert "#define g_20000100_u16" not in out, out
+
+
+def test_the_plan_lists_the_scalars_read_signed():
+    """dread.statics plan's signed: the places outside the structures and arrays it finds that a signed
+    access reads, by size (a store's unsigned type says nothing); the readable_types table keeps them
+    (an older table: None)."""
+    class Program:
+        class target:
+            memory = None
+        class image:
+            @staticmethod
+            def startup():
+                return []
+
+        @staticmethod
+        def symbols():
+            return []
+    ev = statics.Evidence("f")
+    ev.accesses = [(0x20000300, "s16", None, False), (0x20000300, "u16", None, False),
+                   (0x20000304, "u8", None, False), (0x20000308, "s8", None, False),
+                   (0x20000400, "u32", 0x20000400, False), (0x20000404, "s16", 0x20000400, False),
+                   (0x200003fc, "u32", 0x200003fc, False)]      # (a neighbour through a base of its own)
+    signed = set()
+    found = statics.plan(Program, {"f": ev}, signed=signed)
+    assert found == {0x20000400: [(0, "u32"), (4, "s16")]}, found
+    assert signed == {(0x20000300, 2), (0x20000308, 1)}, signed
+    p = shapes.Plan()
+    p.signed = signed
+    data_ = p.to_json()
+    assert data_["signed"] == {"0x20000300": [2], "0x20000308": [1]}
+    assert shapes.Plan.from_json(data_).signed == signed and shapes.Plan.from_json({"structs": {}}).signed is None
+
+
+# Two parameter blocks in an array whose second one's address is handed out (FreeRTOS's countsem.c:
+# xParameters[1] handed to xTaskCreate) and a counter read signed and incremented (sNextCheckVariable)
+OWL = HEAD + """struct owl_slot { u32 key; u32 value; u32 seen; };
+struct owl_slot owl_slots[2];
+u32 owl_seen;
+volatile short owl_next;
+volatile short owl_counts[4];
+void owl_hand(struct owl_slot *s) __attribute__((noipa));
+void owl_hand(struct owl_slot *s) { owl_seen = s->key; }
+void owl_start(u32 a, u32 b)
+{
+    owl_seen = 0;
+    owl_slots[0].key = a;
+    owl_slots[0].value = 1;
+    owl_slots[0].seen = 0;
+    owl_slots[1].key = b;
+    owl_slots[1].value = 2;
+    owl_slots[1].seen = 0;
+    owl_hand(&owl_slots[0]);
+    owl_hand(&owl_slots[1]);
+}
+u32 owl_take(void)
+{
+    short mine = owl_next;
+    owl_next++;
+    if (mine < 4)
+        owl_counts[mine]++;
+    return (u32)(int)mine;
+}
+int main(void) { return 0; }
+"""
+
+
+@pytest.mark.parametrize("kind", [pytest.param(k, marks=needs_kind(k)) for k in ("a32", "m3", "rv32")])
+def test_one_name_per_static_object_through_the_gate(kind, tmp_path):
+    """GCC -Os reaches both parameter blocks of owl_slots from one base and hands out the second one's
+    address: one object over both (until 2026-10-24 the handed address ended a structure after the first,
+    and the second block's words printed as names of their own), an array of two blocks, since its
+    fields recur at the handed address's stride, the address handed out an element's; the counter read
+    with a signed load and stored has one name, signed (until then g_x_s16 and g_x_u16; where a compiler
+    loads it unsigned and extends the sign apart, one unsigned name). The gate accepts every function so. (RISC-V GCC reaches each word through an upper half made by lui alone and
+    the word's own low part: no base, no structure, as before.)"""
+    from dread import build, readable
+    from dread.program import Program
+    target = kind_target(tmp_path, kind, OWL)
+    at = data(Program(target, target.image()))
+    program, context, lifter, found, arrays, _ = kind_plan(target)
+    assert at["owl_slots"] not in found, statics.describe(found, arrays)
+    assert arrays.get(at["owl_slots"]) == (None if kind == "rv32" else (12, 2, [(0, "u32"), (4, "u32"), (8, "u32")])), \
+        statics.describe(found, arrays)
+    image = target.image()
+    lines = []
+    accepted = readable.check(target, image, out=lines.append)
+    assert accepted == sorted(build.read_names(image.table("lifted"))) and "owl_take" in accepted, lines
+    context = readable.Context(target, image)
+    # (GCC 16 loads the counter with ldrsh, a signed load; GCC 10 and 13 with ldrh, then sxth apart)
+    signed = (at["owl_next"], 2) in context.plan.signed
+    start = readable.transform("owl_start", lifter.lift(program.by_name["owl_start"]).text, context=context)
+    name = "g_%x" % at["owl_slots"]
+    if kind != "rv32":
+        assert re.search(r"owl_hand\(.*&%s\[1\]\)" % name, start) and "%s[1].f_8 = " % name in start, start
+    take = readable.transform("owl_take", lifter.lift(program.by_name["owl_take"]).text, context=context)
+    macros = re.findall(r"#define (\w+) \(\*\(volatile \w+ \*\)0x%xu\)" % at["owl_next"], take)
+    assert macros == ["g_%x_%s" % (at["owl_next"], "s16" if signed else "u16")], take

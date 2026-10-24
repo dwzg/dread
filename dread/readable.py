@@ -612,7 +612,8 @@ def readable_one(program, context, lifter, name, named=None, statics=False):
                                   names=context.static_names() if with_statics else None,
                                   arrays=context.plan.arrays if with_statics else None,
                                   pointers=context.plan.params if with_statics else None,
-                                  image=context.image_spans if with_statics else None)
+                                  image=context.image_spans if with_statics else None,
+                                  signed=context.plan.signed if with_statics else None)
     return tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}, digest
 
 
@@ -741,7 +742,8 @@ def question_tree(name, text, context):
     int_bits = tidy.context(fn).int_bits
     naming.apply_globals(tree, fn, context.globals, context.memory, statics=context.plan.statics,
                          names=context.static_names(), arrays=context.plan.arrays, pointers=context.plan.params,
-                         image=context.image_spans, pointed=context.pointed(), takes=context.plan.takes)
+                         image=context.image_spans, pointed=context.pointed(), takes=context.plan.takes,
+                         signed=context.plan.signed)
     shapes.apply_types(tree, fn, context.plan, digest, names=context.struct_names())
     from dread import vartypes
     vartypes.apply(tree, fn, context.plan, digest, names=context.struct_names(), int_bits=int_bits)
@@ -1174,7 +1176,8 @@ def _framed(name, text, stages, context=None, names=True, cleaned=None):
                          pointers=context.plan.params if context is not None else None,
                          image=context.image_spans if context is not None else None,
                          pointed=context.pointed() if context is not None else None,
-                         takes=context.plan.takes if context is not None else None)
+                         takes=context.plan.takes if context is not None else None,
+                         signed=context.plan.signed if context is not None else None)
     if context is not None:
         from dread import shapes, vartypes
         shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
@@ -1431,7 +1434,7 @@ def chooser(names, context=None, jobs=None, verify=False, stats=None, kept=None)
     return change
 
 
-def static_plan(program, context, trees, flow=None, symbols=True, trust="evidence", evidence=None):
+def static_plan(program, context, trees, flow=None, symbols=True, trust="evidence", evidence=None, signed=None):
     """(structures, arrays, shapes) of static data (dread.statics plan and find_arrays) from every
     function's machine code (evidence: dread.statics gather, made when None) and the trees' readable C
     ([(tree, fn, macros)]: analysis_trees of the lifted functions): its accesses at fixed addresses
@@ -1439,19 +1442,24 @@ def static_plan(program, context, trees, flow=None, symbols=True, trust="evidenc
     addresses of static data it hands them (dread.statics handed, from the shapes' templates). The
     shapes (dread.shapes analyse of the trees) are made between, with the static data found without
     the callees' reach, an index added to whose addresses is no pointer for them; they are returned
-    for the readable_types plan. symbols, trust: as for dread.statics plan."""
+    for the readable_types plan. symbols, trust: as for dread.statics plan; signed, a set: filled with the
+    places of scalars accessed signed (dread.statics plan's signed: what the readable_types table's signed
+    part holds)."""
     from dread import shapes, statics
     evidence = evidence if evidence is not None else statics.gather(program, flow=flow)
     seen = {fn.name: sorted(set(macros.values())) for _, fn, macros in trees}
     indexed = {fn.name: statics.indexed_accesses(fn, context.memory) for _, fn, _ in trees}
-    arrays = {}
-    found = statics.plan(program, evidence, extra=seen, symbols=symbols, trust=trust, indexed=indexed, arrays=arrays)
+    arrays, signs = {}, set()
+    found = statics.plan(program, evidence, extra=seen, symbols=symbols, trust=trust, indexed=indexed, arrays=arrays,
+                         signed=signs)
     s = shapes.analyse(trees, unread=context.unread, static_spans=static_spans(found, arrays))
     given = statics.handed(trees, s, context.memory)
     if given:
-        arrays = {}
+        arrays, signs = {}, set()
         found = statics.plan(program, evidence, extra=seen, symbols=symbols, trust=trust, indexed=indexed,
-                             arrays=arrays, handed=given)
+                             arrays=arrays, handed=given, signed=signs)
+    if signed is not None:
+        signed |= signs
     return found, arrays, s
 
 
@@ -1536,9 +1544,10 @@ def make_plan(program, context, lifter, names, flow=None, digests=None, kept=Non
         if ("evidence",) not in kept:
             kept[("evidence",)] = statics.gather(program, flow=flow)
         evidence = kept[("evidence",)]
-    found, arrays, s = static_plan(program, context, trees, flow, evidence=evidence)
+    signed = set()
+    found, arrays, s = static_plan(program, context, trees, flow, evidence=evidence, signed=signed)
     context.plan = shapes.plan(s, trees, digests)
-    context.plan.statics, context.plan.arrays = found, arrays
+    context.plan.statics, context.plan.arrays, context.plan.signed = found, arrays, signed
     context.plan.params = shapes.pointer_params(s, trees)
     context._struct_names = context._static_names = None
     vartypes.plan(context.plan, trees, digests, context)

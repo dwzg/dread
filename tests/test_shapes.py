@@ -170,11 +170,13 @@ def typed_plan():
 
 
 def test_a_plan_declares_a_structure_for_what_pointers_reach_with_its_fields_at_their_offsets():
+    """The fields at their offsets, a halfword read signed somewhere signed (since 2026-10-24: a signed
+    read is a load that extends the sign, which a compiler makes of a signed field; unsigned before)."""
     p = typed_plan()
-    assert p.structs == {"s_1": [(4, "u32"), (8, "u32"), (12, "u16")]}, p.structs
+    assert p.structs == {"s_1": [(4, "u32"), (8, "u32"), (12, "s16")]}, p.structs
     assert p.typed == {"caller": {"r0": "s_1"}, "get": {"r0": "s_1"}}, p.typed
     assert shapes.struct_text("s_1", p.structs["s_1"]) == (
-        "struct s_1\n{\n    u8 pad_0[4];\n    u32 f_4;\n    u32 f_8;\n    u16 f_c;\n};")
+        "struct s_1\n{\n    u8 pad_0[4];\n    u32 f_4;\n    u32 f_8;\n    s16 f_c;\n};")
     again = shapes.Plan.from_json(p.to_json())
     assert again.structs == p.structs and again.typed == p.typed
 
@@ -188,8 +190,8 @@ def test_the_rewrite_writes_members_through_a_volatile_struct_pointer():
     assert "u32 caller(volatile struct s_1 *r0)" in out, out
     assert "extern u32 caller(volatile struct s_1 *);" in out, out        # (it calls itself)
     assert out.index("struct s_1\n{") < out.index("extern u32 get"), out
-    assert "r0->f_4 = 1u;" in out and "r3 = r0->f_c;" in out, out
-    assert "r2 = (u32)(s16)r0->f_c;" in out, out           # (a signed read of the field: cast, not zero-extended)
+    assert "r0->f_4 = 1u;" in out and "r3 = (u16)r0->f_c;" in out, out    # (an unsigned read of it: cast)
+    assert "r2 = (u32)r0->f_c;" in out, out                 # (the signed read: the field's own)
     assert "if (r0 == 0)" in out and "get((u32)r0)" in out, out
     assert "struct s_1\n{" in out, out
 

@@ -9,6 +9,76 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## One name per static object: structures over what their base reaches, one name per address and width, signed where read signed (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "One name
+per static object" (docs/todo.md).
+
+- **Question.** One object of static data printed under several names: a structure ended where an
+  address was handed out inside it, though its base reached further, so the rest printed as macros of
+  their own (FreeRTOS's countsem.c xParameters, two parameter blocks, the second one's address handed
+  to xTaskCreate: a structure of the first block's three words and three loose names, on 31 of the
+  39 builds; newlib's __sf, stdin, stdout and stderr, handed out at 0x68 and 0xd0); a halfword read
+  signed and stored had a name per signedness (prvSemaphoreTest's sNextCheckVariable++ read
+  `g_200018dc_u16 = (u16)(g_200018dc_s16 + 1)`); a store of the other signedness into a field, and an
+  access of another width at a field's place, kept a macro of their own. What extends a structure, which
+  type is an address's one name, and how is an access of another type written?
+- **Options and choices.**
+  1. What a base's structure goes on over where the base reaches past it: (a) an address handed out
+     inside it, (b) another base, (c) a data symbol (the item's wording: "a data symbol inside such a
+     run a member, not an end"); a startup range, an array, a handed base (what callees reach) and the
+     region's end still end it. **(a) and (b)**, measured on the 39 FreeRTOS builds (dread readable
+     --statics --score, the structures and arrays against the debug information's variables): (a) alone
+     let 38 structures go on over the rest of their source variable (xParameters on 31 builds, newlib's
+     __sf on six, clang -O2's xQueueRegistry: 3608 -> 3865 fields, 3507 -> 3752 the source's, the rest
+     the FILE word the score already counts wrong), none over several variables, none lost; (b) added
+     one more (GCC 9 -O2's xAutoReloadTimers, reached through a base inside it); (c) made 43 structures
+     over several source variables (clang's merged globals on RISC-V clang -Os, newlib's malloc state on
+     17 ARM builds) and is left out: with an ELF's symbols a data symbol inside a run is another
+     variable; a person's partial symbols, naming a field, would want it, which needs the target to say
+     so (not built).
+  2. Whether the base counts (separate_bases) is asked of its run up to the next start of any kind, as
+     before; asked up to all it reaches, clang -O2's xQueueRegistry, which hands out its last entry's
+     address, lost the neighbour that made it count and with it the structure (18 right fields).
+  3. A structure whose fields recur at a stride, with addresses handed out inside it that recur at it,
+     is an array of elements of that stride: xParameters two blocks of 12 bytes, __sf three FILEs of 104
+     (one 312-byte structure otherwise). The stride: of the distances between two handed addresses (the
+     base among them), smallest first, the first with a divisor that the structure is a whole number of
+     and at which its fields recur, every element holding a field, its greatest such divisor: __sf hands out each FILE and its _mbstate
+     (to memset), 12 bytes apart, where no element of 12 holds a field everywhere; clang -O2's
+     xQueueRegistry hands out its tenth entry at 72 of 80 bytes: entries of 8, the source's. The
+     greatest common divisor alone made __sf no array and xQueueRegistry an array of 72-byte entries
+     over the next variables (one array over several variables on the 39 builds, now none).
+  4. A place's type at a width: (a) unsigned unless only signed accesses (as before: a store, which the
+     lifters write unsigned, made every stored field unsigned and each signed read a cast); (b) signed
+     where an access is signed (a signed access is a load extending the sign, which a compiler makes of
+     a signed place). **(b)**, for the fields of static data (dread.statics layout), of structures behind
+     pointers (dread.shapes layout) and for scalars: FreeRTOS's queue locks (int8_t) read `r0->f_45`
+     instead of `(s8)r0->f_45`.
+  5. Scalars' one name: the plan lists, image-wide, the scalars outside structures and arrays that an
+     access reads signed (the readable_types table's `signed`, from every function's machine code and the
+     lifted functions' readable C); each address has one name at each width, signed where listed, a read
+     of the other signedness cast to it, a store as it is. Per function it could not be one name: a
+     function that only stores the counter would name it unsigned.
+  6. Another type at a field's place: a store of the field's width goes into the field (the same bits:
+     before, the macro it was); another width reads or writes through the field's address
+     (`*(volatile u8 *)&g_20000030.f_4`), one access of its width at its address (before, a macro of its
+     own, g_20000030_u8: a second name, which dread.cmetrics counts as a name, not a raw access).
+- **Measured** (before -> after, behind the arrays and members of the entry below; docs/todo.md has the
+  rest): the gate accepts the same functions on the eight builds, name by name; names of two
+  signednesses at one address 1 -> 0 on FreeRTOS GCC -Os, clang -O2 and RISC-V GCC -Os; addresses with a
+  macro of their own 242 -> 239, 272 -> 267, 214 -> 214, 252 -> 249 (GCC -O0); members of static data
+  108 -> 115, 160 -> 171, 22 -> 22, 95 -> 102; casts 800 -> 785, 798 -> 796, 513 -> 500, 747 -> 739; on
+  the 39 builds structures 547 -> 510, arrays 583 -> 621, none over several source variables, every
+  array inside one with its source's element size, the source's structures and arrays grouped whole 329
+  -> 368 and in part 89 -> 51. The plan and the readable C take as long as before.
+- **Undo.** statics.REACH_PAST = () (and the evidence test with it); the periodic arrays' block in
+  statics.plan; signed_type back to "unsigned unless only signed" in both layouts; an empty plan's
+  `signed` (None) gives a macro per address and type; apply_globals' widths and stores back to the macro.
+- **Status.** In the code (dread/statics.py, dread/naming.py, dread/shapes.py, small parts of
+  dread/readable.py and dread/vartypes.py that hand the signed part on; tests/test_statics.py,
+  tests/test_shapes.py).
+
 ## Arrays a pointer walks, members for derived pointers, a callee that reaches one field past its pointer (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Arrays and

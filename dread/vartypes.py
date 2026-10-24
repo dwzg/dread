@@ -1549,7 +1549,7 @@ def finished(tree, fn, p, context, digest=None):
     tree = copy.deepcopy(tree)
     fn = tree.function(fn.name)
     naming.apply_globals(tree, fn, context.globals, context.memory, statics=p.statics, names=context.static_names(),
-                         arrays=p.arrays, pointers=p.params, image=context.image_spans)
+                         arrays=p.arrays, pointers=p.params, image=context.image_spans, signed=p.signed)
     shapes.apply_types(tree, fn, p, digest, names=context.struct_names())
     return tree, fn
 

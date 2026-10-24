@@ -914,7 +914,7 @@ def taken_kinds(trees, pointed, least=TAKES_LEAST):
 
 
 def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, names=None, arrays=None,
-                  pointers=None, image=None, pointed=None, takes=None):
+                  pointers=None, image=None, pointed=None, takes=None, signed=None):
     """The function's accesses to memory at fixed addresses written as names, a macro for each above
     the function (#define g_20029aac (*(volatile u32 *)0x20029aacu)): the table's name (named: the
     globals part) where it has one the file does not use for something else (nor avoid: the names the
@@ -955,8 +955,18 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
     the image keeps static data (image: [(start, end)], dread.statics image_spans; None: every object).
     An element's address the code computes (the constant plus a scaled index) is one wherever it is
     used, for an object in the image. Every access stays one volatile access of its width at its
-    address; an access of another type than its field stays the macro it was (a read of the field's
-    width and the other signedness is cast: (s16)g_200018de[r6]).
+    address: a read of a field's width and the other signedness is cast ((s16)g_200018de[r6]), a store
+    of it goes into the field as it is (the same bits; until 2026-10-24 the macro it was, a second name),
+    an access of another width at a field's place goes through the field's address (*(volatile u8
+    *)&g_20000030.f_4: one name per static object; until 2026-10-24 a macro of its own, g_20000030_u8).
+
+    With signed ({(address, size)}, the readable_types table's signed part: the scalars outside the
+    structures and arrays that an access of that size reads signed, dread.statics plan) memory at a
+    fixed address has one name at each width: its macro signed where it is listed, else unsigned, a read
+    of the other signedness cast to it ((u16)g_200018dc_s16), a store of it as it is (FreeRTOS's
+    sNextCheckVariable++ read g_200018dc_u16 = g_200018dc_s16 + 1 with two names; now g_200018dc_s16++);
+    its entry in the table is its type's, else one of the other signedness's (named before). Without
+    signed (a table from before) a macro per address and type, as before.
 
     With pointed (dread.constants Pointed) a constant that is a function's entry as code takes its
     address (bit 0 set for Thumb code: a Thumb function's even entry is none) and is used as an
@@ -1010,7 +1020,7 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
             return None
         end = max(off + st.SIZES[t] for off, t in rows)
         return (b, None, address - b) if address < b + end else None
-    members, reads = {}, {}                 # (address, type) -> (object, element index or None, offset)
+    members, reads, widths = {}, {}, {}     # (address, type) -> (object, element index or None, offset)
     for address, ctype in sorted(found):
         got = inside(address)
         field = dict(rows_of[got[0]][0]).get(got[2]) if got is not None else None
@@ -1018,6 +1028,19 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
             members[(address, ctype)] = got
         elif field is not None and st.SIZES[field] == st.SIZES.get(ctype, 4):
             reads[(address, ctype)] = got   # (the field's width, the other signedness: a read casts it)
+        elif field is not None and ctype in st.SIZES:
+            widths[(address, ctype)] = got  # (another width at a field's place: through its address)
+
+    def one_type(address, ctype):
+        """The type the one name of memory at address is declared with at the width of ctype: signed where
+        the plan's signed part says an access of that width there is (signed: {(address, size)}), else
+        unsigned; the access's own type where there is no such part (a table from before 2026-10-24) or
+        the access is wider than a word."""
+        z = st.SIZES.get(ctype)
+        if signed is None or z is None or z > 4:
+            return ctype
+        return ("s%d" if (address, z) in signed else "u%d") % (8 * z)
+    canon = {a: (a[0], one_type(*a)) for a in found if a not in members and a not in reads and a not in widths}
     objects = {}                            # object -> (name, tag, fields) in this function
 
     def obj(b):
@@ -1032,10 +1055,11 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
     # (every object's names, also those this function reaches only by an address written later)
     taken_by_objects = {n for n, _, _ in (names or {}).values()} | {default_name(b, "u32", memory) for b in rows_of}
     chosen = {}
-    for address, ctype in sorted(found):
-        if (address, ctype) in members:
-            continue
-        name = (named.get(global_key(address, ctype)) or {}).get("name")
+    for address, ctype in sorted(set(canon.values())):
+        # (the table's name of the one type, else of an access of the other signedness: named before)
+        name = next((n for n in ((named.get(global_key(address, t)) or {}).get("name") for t in [ctype] + sorted(
+            t for a, t in canon if a == address and canon[(a, t)] == (address, ctype) and t != ctype))
+            if isinstance(n, str)), None)
         if (not isinstance(name, str) or not IDENT.match(name) or name in busy or name in KEYWORDS
                 or name in chosen.values() or name in taken_by_objects):
             name = default_name(address, ctype, memory)
@@ -1231,23 +1255,30 @@ def apply_globals(tree, fn, named=None, memory=None, avoid=(), statics=None, nam
         def f(e):
             a = fixed_access(e)
             if a is not None:
-                if a in members or (a in reads and not store):
+                if a in members or a in reads:
+                    # (a store of the other signedness goes into the field as it is: the same bits)
                     b, j, off = members.get(a) or reads[a]
                     named_as(b, off, j)
-                    return element(b, j, off) if a in members else C.Cast(a[1], element(b, j, off))
-                used.add(a)
-                return C.Name(chosen[a])
+                    return element(b, j, off) if a in members or store else C.Cast(a[1], element(b, j, off))
+                if a in widths:             # (*(volatile u8 *)&g_x.f_4: one access of its width there)
+                    b, j, off = widths[a]
+                    named_as(b, off, j)
+                    return C.Unary("*", C.Cast("volatile %s *" % a[1], C.Unary("&", element(b, j, off))))
+                c = canon[a]
+                used.add(c)
+                return C.Name(chosen[c]) if c == a or store else C.Cast(a[1], C.Name(chosen[c]))
             if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast) and arrays:
                 m = ACCESS.match(" ".join(e.e.type.split()))
                 got = indexed(e.e.e, facts) if m else None
                 if got is not None:
                     b, j, off, index = got
                     field = dict(rows_of[b][0]).get(off)
-                    if field == m.group(1) or (field is not None and not store
-                                               and st.SIZES[field] == st.SIZES.get(m.group(1), 4)):
+                    if field is not None and m.group(1) in st.SIZES:
                         named_as(b, off, j)
                         got = element(b, j, off, _rewrite(copy.deepcopy(index), make(facts)))
-                        return got if field == m.group(1) else C.Cast(m.group(1), got)
+                        if st.SIZES[field] != st.SIZES[m.group(1)]:
+                            return C.Unary("*", C.Cast("volatile %s *" % m.group(1), C.Unary("&", got)))
+                        return got if field == m.group(1) or store else C.Cast(m.group(1), got)
                 return None
             if isinstance(e, C.Call):
                 callee = e.f.id if isinstance(e.f, C.Name) else None

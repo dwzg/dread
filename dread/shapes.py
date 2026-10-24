@@ -1882,7 +1882,11 @@ def kinds(s, trees):
 def layout(kind):
     """[(offset from the base, type)] of the fields a C structure holds at their offsets without
     packing: at or after the base, naturally aligned, not overlapping a field before them; an offset
-    read with several types takes its most frequent size, unsigned unless only signed reads it."""
+    read with several types takes its most frequent size, signed where an access of that size is
+    (dread.statics signed_type: the lifters write every store unsigned, and a compiler extends the sign
+    of a signed field where it reads it; until 2026-10-24 a field stored anywhere was unsigned, each
+    signed read of it a cast: FreeRTOS's queue locks, int8_t, read (s8)r0->f_45)."""
+    from dread.statics import signed_type
     rows, end = [], 0
     for off in sorted(o for o in kind.fields if kind.base is not None and o >= kind.base):
         types = kind.fields[off]
@@ -1890,9 +1894,7 @@ def layout(kind):
         for t, c in types.items():
             by_size[SIZES.get(t, 4)] = by_size.get(SIZES.get(t, 4), 0) + c
         size = max(by_size, key=lambda z: (by_size[z], z))
-        signed = [t for t in types if SIZES.get(t, 4) == size and t.startswith("s")]
-        unsigned = [t for t in types if SIZES.get(t, 4) == size and not t.startswith("s")]
-        ctype = ("s%d" if signed and not unsigned else "u%d") % (size * 8)
+        ctype = signed_type(types, size)
         rel = off - kind.base
         if rel % size or rel < end:
             continue
@@ -1967,7 +1969,10 @@ class Plan:
     as a mask, 0xffffffffu, never -1), None where the table does not say (made before 2026-10-24).
     results: the functions readable C prints with the result the lifters return although no caller
     reads it (the check puts a function there whose cases rejected it void: dread.tidy void_results;
-    its callers' calls of it are assignments again)."""
+    its callers' calls of it are assignments again). signed: {(address, size)} of the scalars at fixed
+    addresses (outside the structures and arrays of static data) that an access of that size reads
+    signed (dread.statics plan), None where the table does not say (made before 2026-10-24): dread.naming
+    apply_globals names such a scalar once at that width, signed where it is listed, else unsigned."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
@@ -1984,6 +1989,7 @@ class Plan:
         self.takes = None               # function -> {parameter index: "text" or "function"} (dread.naming)
         self.masks = None               # function -> [indices of the parameters it uses only as masks] (dread.polish)
         self.results = set()            # functions printed with their result, read or not (the check)
+        self.signed = None              # {(address, size)}: scalars at fixed addresses read signed (dread.statics)
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -2018,6 +2024,11 @@ class Plan:
             out["masks"] = {f: sorted(ix) for f, ix in sorted(self.masks.items()) if ix}
         if self.results:
             out["results"] = sorted(self.results)
+        if self.signed is not None:
+            sizes = {}
+            for a, z in sorted(self.signed):
+                sizes.setdefault("0x%x" % a, []).append(z)
+            out["signed"] = sizes
         return out
 
     @classmethod
@@ -2043,6 +2054,8 @@ class Plan:
             else None
         p.masks = {f: list(ix) for f, ix in data["masks"].items()} if "masks" in data else None
         p.results = set(data.get("results", []))
+        p.signed = {(int(a, 16), z) for a, sizes in data["signed"].items() for z in sizes} if "signed" in data \
+            else None
         return p
 
     def align(self, name, depth=0):

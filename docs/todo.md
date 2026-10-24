@@ -2184,12 +2184,54 @@ model).
   Unify through a callee's parameter only over what the callee reaches (the header), and keep the
   containers apart. Public example: none found (FreeRTOS's lists are members at nonzero offsets);
   test: gizmo with two structures that start with the same link and a list function taking either.
-- [ ] **One name per static object.** A static block's structure can end early and its later fields
+- [x] **One name per static object.** A static block's structure can end early and its later fields
   print as loose macros, and an address read and written at two signednesses gets two names. Extend
   a structure over the fields the code reaches from the same base (a data symbol inside such a run a
   member, not an end), and give a field one name with a cast for the other width or signedness.
   Public example: FreeRTOS mps2-gcc-Os prvSemaphoreTest (`g_200018dc_u16 = (u16)(g_200018dc_s16 +
   1);` for `sNextCheckVariable++`). The early end: none found.
+  Done 2026-10-24 but for the data symbols (docs/decisions.md, "One name per static object"). The early
+  end was found: an address handed out inside a structure ended it (countsem.c's xParameters, whose
+  second block xTaskCreate gets, on 31 of the 39 benchmark builds; newlib's __sf on six, clang -O2's
+  xQueueRegistry). A structure now goes on over an address handed out and another base where its base
+  reaches past them (dread.statics REACH_PAST), whether the base counts still asked of its run up to the
+  next start; one whose fields recur at the stride of the addresses handed out inside it is an array:
+  vStartCountingSemaphoreTasks reads `g_20001858[1].f_0 = r0; ...` and `vQueueAddToRegistry(
+  g_20001858[1].f_0, ...)` where it read `g_20001864 = r0; ...` with three names of their own. Data
+  symbols still end a structure: as members, on the 39 builds 43 structures lay over several source
+  variables (clang's merged globals on RISC-V clang -Os, newlib's malloc state); right only for a
+  person's partial symbols, which would need the target to say so (left). One name per address and
+  width: a place is signed where an access of its size is (dread.statics signed_type, in both layouts:
+  the lifters write stores unsigned), the readable_types table lists the scalars read signed (`signed`),
+  and memory at a fixed address has one name at a width, a read of the other signedness cast to it, a
+  store as it is: prvSemaphoreTest reads `g_200018dc_s16++;`, prvUnlockQueue `r5 = r0->f_45; ...
+  r0->f_45 = -1;` (the queue's cTxLock, int8_t, was `(s8)r0->f_45`, `0xffu`); a store of the other
+  signedness into a field of static data goes into it, an access of another width at a field's place
+  through its address (`*(volatile u8 *)&g_x.f_4`, before a name of its own).
+  Measured on the eight builds (before -> now, after the arrays and members above; dread.cmetrics over
+  the gate's readable functions, and their printed C): the gate accepts the same functions, name by name
+  (gizmo a32 35, m3 36, m4 44, rv32 31; FreeRTOS GCC -Os 317, clang -O2 275, RISC-V GCC -Os 252, GCC -O0
+  354); addresses with names of two signednesses 1 -> 0 on GCC -Os, clang -O2 and RISC-V GCC -Os
+  (sNextCheckVariable), none on GCC -O0 (only in a function the gate leaves lifted); second names of a
+  static object's places 0 -> 0 (none on these builds, but a structure's word read through a halfword
+  field's address in the tests); addresses with a macro of their own 242 -> 239, 272 -> 267, 214 -> 214,
+  252 -> 249; uses of such macros 1260 -> 1252, 1406 -> 1395, 950 -> 949, 1157 -> 1150; members of
+  static data 108 -> 115, 160 -> 171, 22 -> 22, 95 -> 102; casts 800 -> 785, 798 -> 796, 513 -> 500, 747
+  -> 739 (the signed fields); raw accesses as before (61, 71, 67, 90). Structures of static data that
+  became arrays: xParameters (GCC -Os, clang -O2, GCC -O0) and clang -O2's xQueueRegistry (10 entries of
+  8 bytes, the source's); the source's structures and arrays reached at two places or more now all
+  grouped whole on GCC -Os (15 -> 16 of 16), clang -O2 (11 -> 13 of 14, none in part) and GCC -O0 (5 ->
+  6 of 6). On the 39 builds (dread readable --statics --score) structures 547 -> 510, arrays 583 -> 621,
+  none over several source variables, every array inside one with its element size (572 -> 610), the
+  source's structures and arrays grouped whole 329 -> 368 and in part 89 -> 51, fields that are the
+  source's 3507 + 1848 -> 3333 + 2270 (the 12 more wrong are __sf's FILE word, _flags and _file stored
+  as one, in two more elements). Functions whose readable C changed: 16, 13, 10 and 14; no structure
+  renumbered, every field kept (names by anchor and offset); the structures that became arrays keep
+  their object's name, their first element's field names apply by offset, the others' not. The plan and
+  the readable C take as long as before (10.1- 12.7 s and 3.0-5.5 s a build, within the noise of a
+  shared machine). Left: data symbols inside a base's run, as members where the target's symbols are
+  partial (not built: no target says so); a structure reached from several bases that do not reach over
+  one another still comes out as pieces.
 - [x] **Negative constants by use.** An mvn immediate prints as `~0xNu` also where the value is a
   negative number. Print `-(N+1)` where it is returned, compared, stored or passed as a value, and
   `~N` where it is a mask (and, bic, eor). Public examples: FreeRTOS mps2-gcc-Os
