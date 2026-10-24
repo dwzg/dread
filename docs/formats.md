@@ -137,6 +137,18 @@ without `ids` (a table from before) applies by its digest only and is never carr
 new proposal, as every entry did before; an identity in another form matches nothing. With `ids` the
 table of FreeRTOS's GCC -Os build (315 functions) is 266 KB instead of 208.
 
+Since 2026-10-24 the names may name the frame's objects (dread.frames: `stack20` for the object that
+starts 20 bytes below the frame's top): dread readable makes them before it applies the names, and the
+pilot's question shows them. Their `ids` are their base (`stack20`, the offset) for an array or a
+structure, with the instructions that write it for a scalar (`stack36 0x1a2b`), and their names carry
+to the object of the same identity. An entry from before was made from a question that showed the
+frame raw (`u32 frame[6]; u32 sp0 = (u32)&frame[6];`, `sp0 - 20` for the object): it has no identity
+of an object and may name `frame` or `sp0`. Such a name is dropped where the objects took those away
+(it used to keep the objects from being made), the entry's other names apply as before, and `dread
+pilot --task readable` asks the function again for its objects (its question shows the other names).
+A name for an object the C has not (the region split otherwise since, by the readable_types table's
+`whole` or prototypes) is dropped alone.
+
 Its `globals` part names memory at fixed addresses: `{"0xADDRESS TYPE": {"name", "by"}}` (TYPE the
 access's: u32, u8, ...). dread readable writes such an access as the name, a macro above the
 function that is the access itself; without an entry, or where the function's C uses the name for

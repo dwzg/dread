@@ -18,15 +18,18 @@ branches as comparisons), then the structure (dread.structure: gotos as if/else 
 them the tables (_named): memory at fixed addresses as names, the fields of structures of static
 data as members of one object (dread.naming apply_globals with the readable_types plan's statics,
 dread.statics: g_20000030.f_4), the structures behind pointers (dread.shapes), the types of variables,
-parameters and externs (dread.vartypes: volatile u8 *p, p[1], s32), the variables' names;
-then the part of the frame that addresses handed out reach becomes the function's local objects
-(dread.frames: one at each address handed out, below the words the entry saves its caller's registers
-into; a scalar stack36, an array of bytes u8 stack20[12] or of the width an index or a callee's
-parameter says, stack48[r3], a callee's structure struct s_29 stack32, a structure of its own for
-mixed accesses, stack40.f_4, with a union where accesses overlap; volatile only where an address
-escapes into memory, by the readable_types table's keeps). Last, constants and casts are written by their use
-(dread.polish: -1 for ~0x0u returned, ' ' for 0x20u compared with a character, 0 for (u8)0x0u stored
-into a byte, x++); the naming questions' C gets it too, after the digest their names are made for.
+parameters and externs (dread.vartypes: volatile u8 *p, p[1], s32); then the part of the frame that
+addresses handed out reach becomes the function's local objects (dread.frames: one at each address
+handed out, below the words the entry saves its caller's registers into; a scalar stack36, an array
+of bytes u8 stack20[12] or of the width an index or a callee's parameter says, stack48[r3], a callee's
+structure struct s_29 stack32, a structure of its own for mixed accesses, stack40.f_4, with a union
+where accesses overlap; volatile only where an address escapes into memory, by the readable_types
+table's keeps); then the variables' names, the objects' too (the readable_names table: the naming
+question shows the objects; a name of the frame array or sp0, which the objects take away, is
+dropped; until 2026-10-24 the names came before the objects and blocked them wherever they named
+either). Last, constants and casts are written by their use (dread.polish: -1 for ~0x0u returned, ' '
+for 0x20u compared with a character, 0 for (u8)0x0u stored into a byte, x++); the naming questions'
+C gets it too, after the digest their names are made for.
 
 A build from readable C (dread.build with a chooser: the check's rounds and its whole image, dread
 recon on an image with a readable table, dread pilot's builds) makes the readable C of every chosen
@@ -290,8 +293,6 @@ def transform(name, text, stages=None, context=None):
 
 
 EXTERN = re.compile(r"^extern (\w+) (\w+)\(([^)]*)\);$")
-FRAME_OBJECT = re.compile(r"^\s*(?:volatile\s+)?[\w ]+\bstack\d+(?:_\d+)?\b(?:\[\d+\])?"
-                          r"(?:\s+__attribute__[^;]*)?;$", re.M)     # (dread.frames' objects, declared)
 
 
 def readable_tree(name, text, stages=None, context=None):
@@ -416,7 +417,7 @@ def _view_one(name):
 
 
 def _question_one(name):
-    from dread import lift, shapes
+    from dread import lift
     fn_p = _G["program"].by_name.get(name)
     if fn_p is None:
         return "no function of that name"
@@ -424,7 +425,12 @@ def _question_one(name):
         text = _G["lifter"].lift(fn_p).text
     except lift.Refused as e:
         return str(e)
-    context = _G["context"]
+    return question_tree(name, text, _G["context"])
+
+
+def question_tree(name, text, context):
+    """One function's tuple of question_trees from its lifted C (text), or why there is none."""
+    from dread import shapes
     made = readable_tree(name, text, context=context)
     if made is None:
         return "its lifted C is not the dialect"
@@ -439,6 +445,9 @@ def _question_one(name):
     from dread import vartypes
     vartypes.apply(tree, fn, context.plan, digest, names=context.struct_names(), int_bits=int_bits)
     if not tidy.fixed_registers(tree):
+        from dread import frames            # (the frame's objects, as the builds make them before the names:
+        objects = frames.frame_objects(tree, fn, context)   # the question names them too, and their names carry)
+        ids = frames.object_identities(fn, ids, objects)
         polish_tree(tree, fn, context, int_bits)
     return tree, fn, digest, print_file(tree, fn), cparse.unparse(fn, notes=False, style="readable"), ids
 
@@ -517,11 +526,13 @@ def question_trees(program, context, lifter, names, jobs=None):
     """{name: (tree, function, digest, file, code, ids), or why there is none (a text)}: what a question
     for the names of a function's variables needs (dread pilot --task readable), made in a pool
     (in_pool) before any question is asked. The tree is the readable C after the stages, digest what a
-    proposal is made for (dread.naming digest, before the names), ids its variables' identities there
-    (dread.naming identities: what carries names to C made anew), then the context's globals and
-    structures applied (its tables as they are now); file: the whole file as it compiles without the
-    variables' names (print_file), code: the function as the question shows it. context must not be
-    None."""
+    proposal is made for (dread.naming digest, before the names), then the context's globals,
+    structures and types applied (its tables as they are now) and the frame's objects made (dread.frames,
+    as the builds make them before the names: since 2026-10-24 the question shows them, stack20 for sp0 -
+    20); ids: the identities of the variables it shows (dread.naming identities, what carries names to
+    C made anew: taken before the globals, the objects' own after dread.frames, frames
+    object_identities); file: the whole file as it compiles without the variables' names (print_file),
+    code: the function as the question shows it. context must not be None."""
     warm(lifter)
     context.struct_names()                  # (once, before the pool forks: the workers share them)
     context.static_names()
@@ -783,39 +794,75 @@ def margin_text(lines):
                    for a, line in lines)
 
 
-def _named(name, text, stages, context=None):
-    """(tree, function, stages) of the readable C with the tables applied: the globals' names, the
-    structures, the variables' names (each only for the C it was made for), then the frame's region
-    that addresses handed out reach as the function's objects (dread.frames); None when the lifted C is not the
-    dialect. stages: [] when the function keeps fixed registers (left as the lifter wrote it)."""
+def _framed(name, text, stages, context=None, names=True):
+    """(tree, function, stages, the frame's objects, then) of the readable C with the tables applied but
+    the variables' names: the globals' names, the structures, the types, then the frame's region that
+    addresses handed out reach as the function's objects (dread.frames: their names, None where it
+    made none); then: what _named needs to apply the variables' names after them (None where it runs
+    no stage); None when the lifted C is not the dialect. names: False leaves the readable_names table
+    out (the objects then never avoid its names)."""
     made = readable_tree(name, text, stages, context)
     if made is None:
         return None
     tree, fn = made
     if tidy.fixed_registers(tree):          # (kept as the lifter wrote it: readable_tree ran no stage)
         stages = []
-    if STAGES if stages is None else stages:
-        made_for = naming.digest(fn)        # (a function's names are made for its C before the globals')
-        int_bits = tidy.context(fn).int_bits    # (while the lifter's register names tell it: polish)
-        entry = context.names.get(name) if context is not None else None
-        mine = set((entry or {}).get("names", {}).values()) if (entry or {}).get("digest") == made_for else set()
-        naming.apply_globals(tree, fn, context.globals if context is not None else None,
-                             context.memory if context is not None else None, avoid=mine,
-                             statics=context.plan.statics if context is not None else None,
-                             names=context.static_names() if context is not None else None,
-                             arrays=context.plan.arrays if context is not None else None,
-                             pointers=context.plan.params if context is not None else None,
-                             image=context.image_spans if context is not None else None,
-                             pointed=context.pointed() if context is not None else None,
-                             takes=context.plan.takes if context is not None else None)
-        if context is not None:
-            from dread import shapes, vartypes
-            shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
-            vartypes.apply(tree, fn, context.plan, made_for, names=context.struct_names(), int_bits=int_bits)
-        if entry:
-            naming.apply(tree, fn, entry, made_for)     # (only for the C it was made for: its digest)
-        from dread import frames            # (the frame that addresses handed out reach as its objects:
-        frames.frame_objects(tree, fn, context)     # on the names the table gave)
+    if not (STAGES if stages is None else stages):
+        return tree, fn, stages, None, None
+    made_for = naming.digest(fn)            # (a function's names are made for its C before the globals')
+    int_bits = tidy.context(fn).int_bits    # (while the lifter's register names tell it: polish)
+    entry = context.names.get(name) if context is not None and names else None
+    mine = set((entry or {}).get("names", {}).values()) if (entry or {}).get("digest") == made_for else set()
+    naming.apply_globals(tree, fn, context.globals if context is not None else None,
+                         context.memory if context is not None else None, avoid=mine,
+                         statics=context.plan.statics if context is not None else None,
+                         names=context.static_names() if context is not None else None,
+                         arrays=context.plan.arrays if context is not None else None,
+                         pointers=context.plan.params if context is not None else None,
+                         image=context.image_spans if context is not None else None,
+                         pointed=context.pointed() if context is not None else None,
+                         takes=context.plan.takes if context is not None else None)
+    if context is not None:
+        from dread import shapes, vartypes
+        shapes.apply_types(tree, fn, context.plan, made_for, names=context.struct_names())
+        vartypes.apply(tree, fn, context.plan, made_for, names=context.struct_names(), int_bits=int_bits)
+    # The frame's objects before the variables' names: dread.frames finds the frame by the lifters'
+    # names (frame, sp0), which a table's names would hide, and the objects are variables the names
+    # name too (the question they are proposed from shows them: question_trees). The objects take no
+    # name the table gives (avoid); a name of what they took away (the frame array, sp0) is dropped.
+    before = naming.variables(fn)
+    from dread import frames
+    objects = frames.frame_objects(tree, fn, context, avoid=mine)
+    return tree, fn, stages, objects, (made_for, int_bits, entry, before)
+
+
+def framed(name, text, context=None):
+    """The names dread.frames gives the objects it makes of the function's frame in its readable C under
+    the context, before the readable_names table renames them ([] where it makes none), or None when
+    the lifted C is not the dialect: what the check asks before it tries a function's region as one
+    object (the readable C it built may have the objects under the table's names)."""
+    made = _framed(name, text, None, context, names=False)
+    return None if made is None else made[3] or []
+
+
+def _named(name, text, stages, context=None):
+    """(tree, function, stages) of the readable C with the tables applied: the globals' names, the
+    structures, the types, the frame's region that addresses handed out reach as the function's objects
+    (dread.frames), then the variables' names (each only for the C it was made for: its digest; the
+    names of the frame array and sp0 that the objects took away dropped, dread.frames table_names);
+    None when the lifted C is not the dialect. stages: [] when the function keeps fixed registers (left
+    as the lifter wrote it). Until 2026-10-24 the names came before the objects, and dread.frames, which
+    finds the frame by the lifters' names, made none wherever the table named frame or sp0."""
+    made = _framed(name, text, stages, context)
+    if made is None:
+        return None
+    tree, fn, stages, _, then = made
+    if then is not None:
+        made_for, int_bits, entry, before = then
+        if entry:                           # (only for the C it was made for: its digest)
+            from dread import frames
+            naming.apply(tree, fn, dict(entry, names=frames.table_names(entry.get("names") or {}, before, fn)),
+                         made_for)
         polish_tree(tree, fn, context, int_bits)    # (constants and casts by their use: last)
     return tree, fn, stages
 
@@ -1151,9 +1198,9 @@ def check(target, image, names=None, out=print, jobs=None):
         # A function whose frame's region readable C split into objects (dread.frames) is tried once more
         # with the region as one object, as before 2026-10-23: a callee given one of its objects may reach
         # past it where the original reached the next (a generated case's queue with another item size),
-        # which the cases see and the split cannot keep (the readable_types table's whole)
-        whole = {n for n in gone if n not in context.plan.whole and n in texts and
-                 FRAME_OBJECT.search(readable_texts({n: texts[n]}, context, jobs)[n] or "")}
+        # which the cases see and the split cannot keep (the readable_types table's whole). Asked of
+        # dread.frames, not of the C built: there the readable_names table may have named the objects
+        whole = {n for n in gone if n not in context.plan.whole and n in texts and framed(n, texts[n], context)}
         # A function whose code reaches another that went wrong in this round is tried once more with that
         # one built from lifted C: its cases run its callees for real, so one callee's wrong readable C
         # fails every caller whose cases reach it (2026-10-24, on a private firmware: one function's

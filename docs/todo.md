@@ -2335,7 +2335,7 @@ the most frequent thing a reader decodes by hand. Two of the day's printing rule
 worse (masks as negative numbers, one object in two radices), and the frame objects were blocked by
 the pilot's names, which the first review had taken for raw frames. New items:
 
-- [ ] **Frame objects under the table's names.** dread.frames finds the frame array and its end by their
+- [x] **Frame objects under the table's names.** dread.frames finds the frame array and its end by their
   names (`frame`, `sp0`) and runs after the readable_names table is applied. Wherever a naming run named
   either, no objects are made: not in the printed C, not in the compiled C the gate builds, not in the
   next naming question (which then names the raw array again). On a private firmware this caused most of
@@ -2347,6 +2347,29 @@ the pilot's names, which the first review had taken for raw frames. New items:
   (`buf_end`). `u8 stack20[12]; fmt_dec((u32)stack20, ...)` becomes `u32 frame[6]; u32 buf_end =
   (u32)&frame[6]; fmt_dec(buf_end - 20, ...)`. Test: that entry through the printer and the gate on
   every gizmo build.
+  Done 2026-10-24 (docs/decisions.md, "The frame's objects before the variables' names, and in the naming
+  question"). dread.readable makes the objects before it applies the names (_framed, then _named), on
+  the lifters' names as before, taking no name the entry gives; a name of the frame array or sp0 is
+  dropped where the objects took them away, as is one of an object the C has not (dread.frames
+  table_names); the naming question shows the objects (question_tree) and keeps their identities, the
+  offset (object_identities), so their names carry; dread pilot asks an entry made from a question that
+  showed the frame raw again for its objects, its other names shown (unasked); the check asks
+  dread.frames whether a failing function has objects before it tries its region whole (it looked for
+  stackN in the C it built). The digest an entry is made for is taken before the objects as always, so
+  every entry applies to the same C as before. Measured on the eight builds with a table a script made
+  for main's C, naming sp0 or the frame array in two thirds of the functions whose question showed
+  them: main lost the objects of every such function (4 on each gizmo build; 37, 35, 30 and 36 on
+  FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0), the fix makes as many as without the table (5;
+  57, 53, 45, 56); the compiled C without names is main's byte for byte; the gate accepts the same
+  functions with the table on main and with the fix as without it, set for set. With Haiku on GCC -Os
+  ($0.14) the model named sp0 or the frame array in 35 of the 55 functions whose question showed the
+  frame raw; under that table the fix asked the 52 with objects again ($0.03) and named 68 of their 74
+  objects, 7 of them as the source does (1 of the 49 names of frame and sp0). Names the fix's question
+  made on an older commit's C carried to main's: the objects' 21 in 12 functions, none dropped. Tests in
+  tests/test_frames.py (the entry through the printer and the gate on every gizmo build, the question,
+  the carry, the pilot asking again, the whole region under a name), also with Ubuntu 22.04's compilers.
+  Left: dread trace's frame view finds objects by their default names (stackN at sp0 - N), as it finds
+  slot variables (sN): one the table names is shown without its label there.
 - [ ] **Masks stay masks across calls.** "Negative constants by use" prints an all-ones or `~N` value as
   a negative number when it is passed to a prototyped parameter or held in a variable that a shift also
   reads, even where the value is a mask. Keep `~N` (or hex) where the callee uses the parameter only as

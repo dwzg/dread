@@ -9,6 +9,106 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The frame's objects before the variables' names, and in the naming question (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Frame
+objects under the table's names" (docs/todo.md, from a second review).
+
+- **Question.** dread.frames found the frame array and its end by the lifters' names (`frame`, `sp0`)
+  and ran after the readable_names table's names (dread.readable _named). Wherever a naming run had
+  named either, it made no objects: not in the printed C, not in the compiled C the gate builds. The
+  naming question (question_trees) never ran dread.frames: it showed the frame raw (`sp0 - 20`), so the
+  model named `frame` and `sp0` when it named anything there and never saw the objects, whose default
+  names (stackN) got no proposal. On a private firmware this caused most of a review's raw frames.
+  Public reproduction: gizmo a32's print_status with an entry made for its C naming `sp0` alone
+  (`buf_end`): `u8 stack20[12]; fmt_dec((u32)stack20, ...)` became `u32 frame[6]; u32 buf_end =
+  (u32)&frame[6]; fmt_dec(buf_end - 20, ...)`. In which order do the objects and the names go, what
+  becomes of a name of `frame` or `sp0`, and how do the objects get names of their own?
+- **Options.**
+  1. The order: (a) the names first, as before, dread.frames finding the frame by its shape (an array,
+     and a variable initialised to the address of one of its elements) instead of its names, and a
+     second naming step after it for the objects; (b) the objects first, on the lifters' names, then one
+     naming step over the variables as they are then, the objects among them.
+  2. A name of `frame` or `sp0` where the objects take those variables away: (a) dropped; (b) given to
+     the object where the region is one; (c) kept for whatever is left of them.
+  3. The question: (a) as before; (b) the C the builds make before the names, objects and all, with the
+     objects' identities in the entry (what carries a name to C made anew).
+  4. An entry made from a question that showed the frame raw, whose digest still matches: (a) left as it
+     is (the pilot calls it named already, its objects keep stackN); (b) asked again for its objects,
+     its other names shown and kept unless the answer changes one.
+- **Choice.** 1(b), 2(a) where they are gone (where the C keeps them, raw slots below the region, a name
+  of either applies as before), 3(b), 4(b). dread.readable _framed applies the globals, structures and
+  types and makes the objects (avoiding the names the entry will give); _named then applies the names
+  (dread.frames table_names drops those of the variables dread.frames took away, and those of objects
+  the C has not); question_tree makes the objects as the builds do and keeps their identities
+  (dread.frames object_identities: an array's or a structure's is its base, stack20, its offset below
+  the frame's top; a scalar's the base and the instructions that write it, as a slot variable's); dread
+  pilot's readable_jobs asks an entry made for this C again where the question shows objects it has
+  neither a name nor an identity for (dread.frames unasked); the check asks dread.frames whether a
+  failing function has objects before it tries its region as one object (it looked for stackN in the C
+  it built, which the table may have renamed).
+- **Why.** 1: a proposal's digest is taken after the stages, before every table; the objects came after
+  that point and still do, so every entry applies to the same C as before (none waits, none needs
+  carrying). dread.frames keeps working on names a table cannot give (KEYWORDS refuses `frame` and `sp0`
+  as new names) and on the raw `sp0 - N` addresses dread.tidy's frame helpers know; (a) would make those
+  helpers take the base's name wherever they look and would still name the objects in a step of their
+  own. One naming step over the final variables keeps the question, the printed C and the gate's C on
+  the same variables. 2: `sp0` is the address of the frame's top, and a model that named it saw the raw
+  code use it as an end (`buf_end`, `frame_end`); the object is the buffer, not its end, so (b) would
+  put a wrong name on it. `frame` is the whole array, the saves and the slots below the region with it;
+  a name chosen for it from raw offsets is a guess at one object at best (measured below: Haiku named it
+  after the object it held in 11 of 14 cases, ulFrame or ucFrame in 3, and named sp0 in all 14, so the
+  function is asked again anyway). Dropped, a name is lost where it named the machinery the objects
+  stand for, and the object gets one from a question that shows it (4). 3: the model names what a reader
+  sees; identities let the objects' names carry as a slot's do (to the object of the same offset; a
+  scalar with the same definitions). 4: with (a) the objects would stay stackN for good, the digest
+  matching.
+- **Measured.** On the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC
+  -Os and GCC -O0, copies), with a table a script made for main's C: every variable of each function's
+  question named, and of the functions whose question showed the frame array and sp0 (5 on each gizmo
+  build; 60, 55, 45 and 60), every third with sp0 named, every third with the frame array named, every
+  third with neither. Functions with frame objects without the table: 5 on each gizmo build, 57, 53, 45
+  and 56. With it, main made 1 and 20, 18, 15, 20 (every function whose entry named either lost its
+  objects: 4 and 37, 35, 30, 36) and left 4 and 40, 37, 30, 40 frame arrays raw; the fix makes as many
+  objects as without the table and leaves only the frames that stay raw without it (0 and 3, 2, 0, 4,
+  where no address leaves). Wherever objects were made, the frame array and sp0 went: no function kept
+  either beside objects, so a name of either applies only where the frame stays raw. The compiled C
+  without names is byte for byte main's in every function of the eight builds. Every entry applies with
+  the fix as on main; the names in the C fell by those of the frame array and sp0 in the functions whose
+  objects took them away (4 on each gizmo build, 37, 35, 30, 36), on RISC-V also by those of the saved
+  registers whose saves went with the objects (17 on gizmo rv32, 183 on the RISC-V GCC -Os build: their
+  variables are gone, as in every function whose objects were made before). The gate (dread readable
+  --check) with the table accepts the same functions on main and with the fix as without the table, set
+  for set (35, 36, 44, 31 on the gizmo builds; 317, 275, 252 and 354 of 329, 286, 259, 357); on clang
+  -O2 the fix tries prvSendFrontAndBackTest and vPrimaryBlockTimeTestTask whole, as main does without
+  the table (with it main had left their frames raw); on GCC -O0 the whole image differs with lifted C
+  alone in all three runs, as before (not decisive there).
+  With Haiku on the GCC -Os build: main's question showed the frame raw in 55 of the 317 functions it
+  named ($0.14); the model named sp0 or the frame array in 35 of them (sp0 in all 35, mostly frame_end,
+  frame_top, pxFrameEnd), and main's code then made objects in 22 functions of 57 (38 frames raw). With
+  the fix, 57 and 3; the pilot asked the 52 functions with objects again (30 s, $0.03), named 68 of
+  their 74 objects (xTimeOut in xQueueGenericSend, xQueueReceive and xStreamBufferSend, xMessage,
+  xLastWakeTime, rx_msg_buf, ucRxChunk) and kept 402 of the 403 names they had besides those of frame
+  and sp0. 7 of the 68 are the source's names of those locals (dread readable --score's measure), 1 of
+  the 49 names the table had given frame and sp0; the score's local names among the source's went from
+  101 of 1,021 to 107 of 1,076.
+  Carried across a real change of the C: names that main's question and the fix's made on an older
+  commit's C (fa47c42, before 15e82bf split parameters; every variable named), each carried by the same
+  code to main's C. The same functions carry with the fix as without (3, 2, 2, 1 on the gizmo builds;
+  20, 3, 11, 25), with the same names dropped (none on gizmo; 11, 3, 7, 15) and every other name alike,
+  but where main carried names of the frame array and sp0 (on RISC-V of the saved registers too), the
+  fix carries the objects' (21 in 12 functions): none dropped, no object left without a name.
+- **Not established.** That a name carried by an object's offset names the same thing where the region
+  is split otherwise (the readable_types table's whole makes it one object, which takes the name of the
+  object that starts where it does; a callee's structure joins objects). How often a name of `frame` or
+  `sp0` stays on what is left of them (none of the eight builds keeps either beside objects). dread
+  trace's frame view finds objects by their default names (stackN at sp0 - N), as it finds slot
+  variables (sN): one the table names is shown without its label there.
+- **How to undo.** dread/readable.py: in _named apply the names before frame_objects again (and give it
+  no avoid), question_tree without frame_objects (its ids the identities before the globals);
+  dread/pilot.py readable_jobs without unasked. The check's question to dread.frames (framed) may stay.
+- **Status.** In the code (tests/test_frames.py).
+
 ## Functions' and texts' addresses in readable C: a macro that is the number, a note beside it, by evidence of use (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20; two items of docs/todo.md,

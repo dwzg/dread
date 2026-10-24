@@ -1124,11 +1124,14 @@ def readable_jobs(target, program, context, lifter, names, callers, out=print, d
     gets its line here, in the order of names. A function whose names were carried is named already,
     unless the carry left variables without a name (new ones, or names the check refused): it is asked
     again, its question showing the carried names in its C and asking for the others (the answer may
-    change a carried name). A job: {"name", "tree", "fn", "digest", "file": the C without the
-    variables' names, as it compiles, "user": the question, "ids": its variables' identities
-    (dread.naming identities), "carried": the names carried ({variable: name}) or None}."""
+    change a carried name). So is a function whose entry was made from a question that did not show
+    its frame's objects (dread.frames unasked: before 2026-10-24 the question showed the frame raw, and
+    the builds made the objects after the names), with the names of the entry that its C's variables
+    take. A job: {"name", "tree", "fn", "digest", "file": the C without the variables' names, as it
+    compiles, "user": the question, "ids": its variables' identities (dread.readable question_trees),
+    "carried": the names it has already ({variable: name}) or None}."""
     import copy
-    from dread import cparse, naming, readable
+    from dread import cparse, frames, naming, readable
     made = readable.question_trees(program, context, lifter, names)
     if image is not None:
         carried = naming.carry_table(target, image, made, os.path.join(target.build, "pilot", image.name, "naming"),
@@ -1142,27 +1145,35 @@ def readable_jobs(target, program, context, lifter, names, callers, out=print, d
             continue
         tree, fn, digest, text, code, ids = got
         entry = context.names.get(name)
-        again = None
+        have, open_ = {}, []
         if entry and entry.get("digest") == digest:
-            if not (entry.get("carried") or {}).get("open"):
+            unasked = frames.unasked(entry, fn, ids)
+            if not (entry.get("carried") or {}).get("open") and not unasked:
                 out("%-24s named already%s" % (name, " (names carried)" if entry.get("carried") else ""))
                 known[name] = entry
                 continue
-            again = entry                   # (carried, variables left without a name: asked with the names)
-        if again is not None:
+            # carried with variables left without a name, or made from a question that showed the frame
+            # raw (before 2026-10-24: the frame's objects are new to it): asked with the names it has
+            # that this C's variables take (a name of the frame array or sp0, which the objects took away,
+            # is not among them)
+            own = set(naming.variables(fn))
+            have = naming.usable(tree, fn, {v: n for v, n in (entry.get("names") or {}).items() if v in own})
+            open_ = sorted(set((entry.get("carried") or {}).get("open") or ()) | set(unasked))
+        if have:
             shown = copy.deepcopy(fn)
-            naming.rename(shown, again["names"])
+            naming.rename(shown, have)
             code = cparse.unparse(shown, notes=False, style="readable")
         user = about(device, "The function %s (readable C):\n\n```c\n%s\n```" % (name, code))
-        if again is not None:
-            user += ("\n\nSome of its variables have names already, carried over from an earlier version of this "
-                     "C: %s. Keep them unless one is wrong, and name the others (%s)." % (
-                         ", ".join(sorted(again["names"].values())), ", ".join(again["carried"]["open"])))
+        if have:
+            user += ("\n\nSome of its variables have names already, %s: %s. Keep them unless one is wrong, and name "
+                     "the others (%s)." % ("carried over from an earlier version of this C" if entry.get("carried")
+                                           else "from a question that did not show its stack frame's objects",
+                                           ", ".join(sorted(have.values())), ", ".join(open_)))
         shown_callers = [c for c in callers.get(name, []) if may_show(target, c)][:12]
         if shown_callers:
             user += "\n\nIt is called by: %s." % ", ".join(shown_callers)
         jobs.append({"name": name, "tree": tree, "fn": fn, "digest": digest, "file": text, "user": user, "ids": ids,
-                     "carried": dict(again["names"]) if again is not None else None})
+                     "carried": dict(have) if have else None})
     return jobs, known
 
 

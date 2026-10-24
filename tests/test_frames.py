@@ -5,12 +5,17 @@ array of bytes or of the width its index or a callee's parameter says, a callee'
 structure of its own (accesses that overlap share a union); volatile only where its address may escape
 into memory (dread.frames kept_params: which parameters callees keep). dread.tidy push_room takes out a
 push's stores that only make room for locals. The C is still the dialect dread.cparse reads and
-compiles on every gizmo build, each access one of its own width."""
+compiles on every gizmo build, each access one of its own width. The objects are made before the
+readable_names table's names apply, which name them as they name other variables (the naming question
+shows them; their names carry by their offsets); a name of the frame array or sp0 no longer keeps
+them from being made."""
+import os
 import re
+import shutil
 
 import pytest
 
-from dread import build, cparse, frames, lift, readable, regflow, tidy
+from dread import build, cparse, frames, lift, naming, readable, regflow, tidy
 from dread.program import Program
 
 FRAME = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
@@ -539,23 +544,34 @@ def test_a_function_the_table_lists_whole_keeps_one_object_for_its_region():
 
 @pytest.mark.slow
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
-def test_the_gate_tries_a_function_whose_objects_fail_once_more_whole(tmp_path, monkeypatch):
+@pytest.mark.parametrize("buf", ["stack20", "digits"])
+def test_the_gate_tries_a_function_whose_objects_fail_once_more_whole(tmp_path, monkeypatch, buf):
     """A function whose readable C with its frame split into objects fails its cases (here made to fail
     while print_status's buffer is the array of its own) is tried again with its region as one object:
     accepted so (an array of bytes up to sp0, its push's stores gone all the same), listed in the
-    readable_types table's whole, and built so by the next build."""
+    readable_types table's whole, and built so by the next build. So too where the readable_names table
+    names the buffer (digits): the check asks dread.frames whether it made objects, not the C it built
+    (which looked for their default names until 2026-10-24); the whole region takes the name of the
+    object that starts where it does."""
     from test_readable import gizmo_copy
-    from dread import runner, shapes
+    from dread import lift as lift_, runner, shapes
     monkeypatch.setattr(readable, "_STORE", {})     # (what this check makes stays out of later tests' checks)
     target = gizmo_copy(tmp_path)
     image = target.image()
     work = tmp_path / "gizmo" / "m3" / "build" / "readable-check" / image.name
+    if buf != "stack20":
+        program = Program(target, image)
+        flow = regflow.load(target, image, program)
+        made = readable.question_trees(program, readable.Context(target, image, program, flow),
+                                       lift_.make_lifter(program, flow), ["print_status"])["print_status"]
+        naming.store_all(image, {"print_status": {"digest": made[2], "names": {"stack20": buf}, "ids": made[5],
+                                                  "what": "prints", "by": "test"}})
     real = runner.run
 
     def run(names, **kw):
         failed, uncovered, results = real(names, **kw)
         source = (work / "lifted" / "print_status.c")
-        if "print_status" in names and source.exists() and "u8 stack20[12];" in source.read_text():
+        if "print_status" in names and source.exists() and "u8 %s[12];" % buf in source.read_text():
             kw.get("out", print)("FAIL print_status [made to fail]")
             results = [(n, c, 1 if n == "print_status" else b) for n, c, b in results]
             failed += 1
@@ -567,7 +583,176 @@ def test_the_gate_tries_a_function_whose_objects_fail_once_more_whole(tmp_path, 
     assert any(line.startswith("whole    print_status") for line in lines), lines
     assert shapes.load_plan(image).whole == {"print_status"}
     text = (work / "lifted" / "print_status.c").read_text()     # (the last build's: the whole image's)
-    assert "volatile u8 stack20[20] __attribute__((aligned(4)));" in text, text
+    assert "volatile u8 %s[20] __attribute__((aligned(4)));" % buf in text, text
+
+
+def entry_for(text, names, name="h"):
+    """A readable_names entry made for the readable C of text before names (its digest), as dread pilot
+    keeps one."""
+    _, fn = readable.readable_tree(name, text, context=readable.Context())
+    return {"digest": naming.digest(fn), "names": dict(names), "what": "", "by": "test"}
+
+
+def named_c(text, names):
+    facts = Facts()
+    facts.names = {"h": entry_for(text, names)}
+    return readable_c(text, context=facts)
+
+
+def test_names_of_the_frame_array_and_sp0_leave_the_objects_alone():
+    """An entry made for the C that names the frame array and sp0 (what a question that showed the frame
+    raw had a model name) besides other variables: the objects are made all the same, the names of what
+    they took away dropped, the others applied. Until 2026-10-24 the names came first and dread.frames,
+    which finds the frame by the lifters' names, made nothing: u32 locals[6]; u32 frame_end =
+    (u32)&locals[6]; total = g(r0, frame_end - 12, frame_end - 8, r3)."""
+    out = named_c(FRAME, {"frame": "locals", "sp0": "frame_end", "r0_1": "total", "r2": "extra"})
+    assert "    volatile u32 stack12;\n    volatile stack8_t stack8;" in out, out
+    assert "total = g(r0, (u32)&stack12, (u32)&stack8, r3);" in out and "+ stack8.f_2 + extra;" in out, out
+    assert "locals" not in out and "frame_end" not in out and "sp0" not in out, out
+
+
+def test_a_table_names_the_objects():
+    """An entry that names the objects (made from a question that showed them): each takes its name, in
+    its uses and its addresses; a structure's type keeps its own (stack8_t). A name for an object this C
+    does not have (made where the region was split otherwise) is dropped alone; a name for a variable
+    that is none drops the whole entry, as before. An object takes no default name that the table gives
+    another variable (stack12_1)."""
+    out = named_c(FRAME, {"stack12": "count", "stack8": "pair", "r0_1": "total"})
+    assert "    volatile u32 count;\n    volatile stack8_t pair;" in out, out
+    assert "count = r1; pair.f_4 = r3;" in out and "total = g(r0, (u32)&count, (u32)&pair, r3);" in out, out
+    out = named_c(FRAME, {"stack16": "gone", "r0_1": "total"})
+    assert "total = g(r0, (u32)&stack12, (u32)&stack8, r3);" in out and "gone" not in out, out
+    out = named_c(FRAME, {"r9": "nine", "r0_1": "total"})
+    assert "total" not in out and "nine" not in out, out
+    out = named_c(FRAME, {"r1_1": "stack12"})
+    assert "volatile u32 stack12_1;" in out and "stack12 = stack12_1;" in out, out
+
+
+def test_the_question_shows_the_objects_and_their_names_carry_by_offset():
+    """The naming question's C (dread.readable question_tree) is the C the builds make before the names:
+    the objects, no frame array; an object's identity is its offset below sp0 (stack8), a scalar's with
+    the instructions that write it (stack12 0x0). Carried to C made anew, a name goes to the object of
+    the same identity; one whose object starts elsewhere now (sp0 - 16 handed out instead of sp0 - 12)
+    is dropped, the new object open (a question asks for it)."""
+    tree, fn, digest, _, code, ids = readable.question_tree("h", FRAME, Facts())
+    assert "    volatile u32 stack12;\n    volatile stack8_t stack8;" in code and "sp0" not in code, code
+    assert ids["stack12"] == "stack12 0x0" and ids["stack8"] == "stack8" and "frame" not in ids, ids
+    entry = {"digest": digest, "names": {"stack12": "count", "stack8": "pair", "r0_1": "total"}, "ids": ids,
+             "what": "", "by": "test"}
+    changed = FRAME.replace("r0 = r0 + r1 + r2 + *(volatile u32 *)(sp0 - 24);",
+                            "r0 = r0 + r1 + r2 + *(volatile u32 *)(sp0 - 24) + 0x1u;")
+    tree, fn, digest, _, _, ids = readable.question_tree("h", changed, Facts())
+    got = naming.carry(tree, fn, entry, digest, ids)
+    assert got["names"] == entry["names"] and got["carried"]["open"] == [], got
+    moved = FRAME.replace("g(r0, sp0 - 16 + 0x4u,", "g(r0, sp0 - 16,")
+    tree, fn, digest, _, code, ids = readable.question_tree("h", moved, Facts())
+    assert "volatile stack16_t stack16;" in code, code
+    got = naming.carry(tree, fn, entry, digest, ids)
+    assert got["names"] == {"stack8": "pair", "r0_1": "total"} and got["carried"]["dropped"] == {"stack12": "count"}
+    assert got["carried"]["open"] == ["stack16"], got
+
+
+def gizmo_context(target):
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+    readable.make_plan(program, context, lifter, build.read_names(image.table("lifted")), flow)
+    return image, program, lifter, context
+
+
+def test_a_name_of_sp0_leaves_print_status_s_buffer_an_object(target):
+    """gizmo's print_status with a readable_names entry made for its C naming sp0 alone (buf_end), as a
+    review found one from a question that showed the frame raw: the printed C and the compiled C the
+    gate builds declare the buffer as without it (u8 stack20[12]), no frame array, no buf_end. Until
+    2026-10-24: u32 frame[6]; u32 buf_end = (u32)&frame[6]; fmt_dec(buf_end - 20, ...)."""
+    image, program, lifter, context = gizmo_context(target)
+    text = lifter.lift(program.by_name["print_status"]).text
+    plain = readable.printed("print_status", text, context)
+    buf = re.search(r"^    u8 (stack\d+)\[12\];$", plain, re.M)
+    assert buf and "frame" not in plain and "sp0" not in plain, plain
+    _, fn = readable.readable_tree("print_status", text, context=context)
+    context.names = {"print_status": {"digest": naming.digest(fn), "names": {"sp0": "buf_end"}, "what": "prints",
+                                      "by": "test"}}
+    for out in (readable.printed("print_status", text, context), readable.transform("print_status", text,
+                                                                                    context=context)):
+        assert buf.group(0) in out and "fmt_dec((u32)%s, " % buf.group(1) in out, out
+        assert "buf_end" not in out and "frame[" not in out and "/* print_status: prints (names: test) */" in out, out
+
+
+@pytest.mark.slow
+@pytest.mark.compiles
+def test_the_gate_builds_print_status_s_buffer_under_a_name_of_sp0(variant, tmp_path, monkeypatch):
+    """The same entry through the gate (dread readable --check of print_status) on a copy of every gizmo
+    build: print_status is accepted, and the C the check built declares the buffer, no buf_end."""
+    from conftest import GIZMO, gizmo_dir
+    from dread.target import Target
+    monkeypatch.setattr(readable, "_STORE", {})     # (what this check makes stays out of later tests' checks)
+    shutil.copytree(GIZMO, tmp_path / "gizmo", ignore=shutil.ignore_patterns("build"))
+    cases = os.path.join(gizmo_dir(variant), "build", "autocases")
+    if os.path.isdir(cases):
+        shutil.copytree(cases, tmp_path / "gizmo" / variant / "build" / "autocases")
+    target = Target.load(str(tmp_path / "gizmo" / variant))
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    text = lift.make_lifter(program, flow).lift(program.by_name["print_status"]).text
+    _, fn = readable.readable_tree("print_status", text, context=readable.Context(target, image, program, flow))
+    naming.store_all(image, {"print_status": {"digest": naming.digest(fn), "names": {"sp0": "buf_end"},
+                                              "what": "prints", "by": "test"}})
+    lines = []
+    assert readable.check(target, image, names=["print_status"], out=lines.append) == ["print_status"], lines
+    built = open(os.path.join(target.build, "readable-check", image.name, "lifted", "print_status.c")).read()
+    assert re.search(r"^    u8 stack\d+\[12\];$", built, re.M) and "buf_end" not in built, built
+    assert "/* print_status: prints (names: test) */" in built, built
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_pilot_asks_for_the_objects_an_earlier_question_did_not_show(tmp_path):
+    """dread pilot --task readable on gizmo m3: print_status's entry was made for its C from a question
+    that showed the frame raw (its ids have frame and sp0, it names sp0 and r0): asked again, the question
+    showing the buffer (stack20), the name of r0 in it and not that of sp0, asking for stack20; the entry
+    then names the buffer, has its identity and no name of sp0, and the printed C declares the buffer
+    under its name. An entry made from a question that showed the objects and left one unnamed (fmt_dec's
+    stack36) is not asked again, nor one of a function without objects (strlen)."""
+    from test_carry import gizmo
+    from dread import llm, pilot
+    target, image, program, context, lifter = gizmo(tmp_path)
+    made = readable.question_trees(program, context, lifter, ["print_status", "strlen", "fmt_dec"])
+    text = lifter.lift(program.by_name["print_status"]).text
+    _, fn = readable.readable_tree("print_status", text, context=context)
+    assert made["print_status"][2] == naming.digest(fn)     # (the digest: taken before the objects, as always)
+    raw_ids = naming.identities(fn)                           # (what the question before 2026-10-24 kept)
+    assert "frame" in raw_ids and "stack20" not in raw_ids and made["print_status"][5]["stack20"] == "stack20"
+    naming.store_all(image, {
+        "print_status": {"digest": naming.digest(fn), "names": {"sp0": "buf_end", "r0": "mode_text"}, "ids": raw_ids,
+                         "what": "prints the status", "by": "test"},
+        "strlen": {"digest": made["strlen"][2], "names": {"r0": "text"}, "ids": made["strlen"][5], "what": "",
+                   "by": "test"},
+        "fmt_dec": {"digest": made["fmt_dec"][2], "names": {"r0": "value"}, "ids": made["fmt_dec"][5], "what": "",
+                    "by": "test"}})
+    assert "stack36" in made["fmt_dec"][5]                    # (its question showed its object)
+    asked = []
+
+    def answer(messages):
+        asked.append(messages[0]["content"])
+        return '```json\n{"what": "prints the mode and the volume", "names": {"stack20": "digits"}}\n```'
+    lines = []
+    named, n_asked, _ = pilot.name_variables(target, image, program, lambda: llm.Scripted(answer),
+                                             ["print_status", "strlen", "fmt_dec"], readable.Context(target, image,
+                                                                                                     program),
+                                             lifter, jobs=1, out=lines.append)
+    assert (named, n_asked) == (3, 1) and len(asked) == 1, lines
+    question = asked[0]
+    assert "u8 stack20[12];" in question and "mode_text = mode_name(" in question, question
+    assert "frame" not in question.split("Some of its")[0] and "buf_end" not in question, question
+    assert "names already, from a question that did not show its stack frame's objects: mode_text" in question
+    assert "name the others (stack20)." in question, question
+    entry = naming.load(image)["print_status"]
+    assert entry["names"] == {"r0": "mode_text", "stack20": "digits"} and entry["ids"]["stack20"] == "stack20", entry
+    out = readable.printed("print_status", text, readable.Context(target, image, program))
+    assert "u8 digits[12];" in out and "fmt_dec((u32)digits, " in out and "mode_text" in out, out
 
 
 @pytest.mark.compiles

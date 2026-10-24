@@ -1,7 +1,14 @@
 """dread.frames: the part of a function's stack frame that frame addresses handed out may reach, as the
 function's local objects in readable C. Applied to the tree after dread.tidy, dread.structure and the
-tables (dread.readable _named, before dread.polish), since what it writes is nothing the clean-up
-passes know.
+tables of globals, structures and types, before the variables' names and dread.polish (dread.readable
+_framed), since what it writes is nothing the clean-up passes know. Before the names: it finds the
+frame by the lifters' names (frame, sp0), which the readable_names table could rename (until
+2026-10-24 the names came first, and wherever a naming run had named either, no objects were made),
+and the objects are variables the table names too: the naming question shows them (dread.readable
+question_tree), an object's identity is its offset below sp0 (object_identities: what carries its name
+to C made anew), a name the table gave the frame array or sp0 is dropped where the objects took them
+away (table_names), and an entry made from a question that did not show them gets asked again for
+them (unasked).
 
 dread.tidy's frame_locals turns the frame's slots into variables (*(volatile u32 *)(sp0 - 36) becomes
 s36). When frame addresses leave the function (sp0 - 40 + 0x8u passed to a call: FreeRTOS's TimeOut_t
@@ -90,6 +97,7 @@ from dread import cparse as C
 from dread.tidy import SLOT_SIZES as SIZES, frame_address, frame_offset, index_sum, region_start
 
 FRAME, BASE = "frame", "sp0"            # the lifters' frame array and the address of its end
+OBJECT = re.compile(r"^stack\d+(?:_\d+)?$")     # the names frame_objects gives its objects (a table's may follow)
 ALIGNED = re.compile(r"aligned\s*\(\s*(\d+)\s*\)")
 DEFINE = re.compile(r"^\s*#\s*define\s+(\w+)", re.M)
 PACKED = "__attribute__((packed))"
@@ -1206,6 +1214,51 @@ def frame_objects(tree, fn, context=None, avoid=()):
 
 
 frame_struct = frame_objects            # (its name until 2026-10-23, when the region was one object)
+
+
+# --- the objects and the readable_names table ---
+
+def table_names(names, before, fn):
+    """The part of a readable_names entry's names ({variable: name}, made for the function's C before
+    frame_objects ran on it, whose variables were before) that applies to its C now: without the names
+    of the variables frame_objects took away (the frame array and sp0 where nothing reaches the frame
+    raw any more, the registers whose save stores went), whose role the objects took over, and without
+    those of objects this C does not have (OBJECT: made where the readable_types table's whole or
+    prototypes split the region otherwise); every other name as it is, for dread.naming apply to
+    check as before."""
+    from dread.naming import variables
+    now = set(variables(fn))
+    gone = set(before) - now
+    return {v: n for v, n in names.items() if v not in gone and (v in now or not OBJECT.match(v))}
+
+
+def object_identities(fn, ids, objects):
+    """The identities (dread.naming identities) of the variables of the function's C after frame_objects
+    made objects (their names) in it: ids, those taken before it ran (where a proposal's identities
+    are taken), for the variables it left, and the objects' own from the C now: a scalar by its base
+    (stack36: its offset below sp0, as s36 is the slot's) and the instructions that write it, an array or
+    a structure, whose stores go to its elements and members, by its base alone (stack20). What
+    dread.naming carry_map matches an object's name by when the C is made anew: the object of the same
+    offset (with the same definitions, for a scalar)."""
+    from dread.naming import identities, variables
+    have = set(variables(fn))
+    out = {v: i for v, i in ids.items() if v in have}
+    if objects:
+        now = identities(fn)
+        out.update((v, now[v]) for v in objects if v in now)
+    return out
+
+
+def unasked(entry, fn, ids):
+    """The objects of the function's C (fn and ids: as dread.readable question_trees makes them, the
+    frame's objects with their own names) that a readable_names entry made for that C has no name for
+    and whose identity the entry's ids do not have: the question it was made from did not show them (a
+    question before 2026-10-24 showed the frame raw, sp0 - 20 for stack20; an entry without ids is from
+    such a question). What dread pilot --task readable asks again for, the entry's other names shown."""
+    from dread.naming import variables
+    names = entry.get("names") or {}
+    seen = set(entry["ids"].values()) if isinstance(entry.get("ids"), dict) else set()
+    return [v for v in variables(fn) if OBJECT.match(v) and v not in names and ids.get(v) not in seen]
 
 
 def _unused(fn):
