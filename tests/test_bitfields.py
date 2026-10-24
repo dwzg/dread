@@ -400,8 +400,10 @@ def test_extensions_and_bit_fields_read_alike_on_every_build_and_pass_the_gate(k
     mid, low = text("bits_mid"), text("bits_low")
     assert "return (s8)(" in mid and ">> 4);" in mid and "<< 20" not in mid, mid
     assert "<< 28) >> 28;" in low, low
-    select = text("bits_sign_select")       # (a select, or a branch where the compiler made one: GCC 10 for RV32)
-    assert "bits_check(%s) < 0" % regs[0] in select and "-3" in select and ">> 31" not in select, select
+    select = text("bits_sign_select")       # (a select, or a branch where the compiler made one: GCC 10 and
+    # GCC 13 for RV32, whose bltz prints as if (bits_check(a0) >= 0) with the arms the other way round)
+    assert ("bits_check(%s) < 0" % regs[0] in select or "bits_check(%s) >= 0" % regs[0] in select) and \
+        "-3" in select and ">> 31" not in select, select
     clamp, pad = text("bits_clamp"), text("bits_pad")     # (selects, or branches: GCC 10 for RV32)
     assert ("%s >= 0 ? %s : 0;" % (regs[0], regs[0]) in clamp or "if (%s < 0)" % regs[0] in clamp) and \
         ">> 31" not in clamp and "0 - " not in clamp, clamp
