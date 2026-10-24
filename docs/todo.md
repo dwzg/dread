@@ -2011,13 +2011,77 @@ model).
   >> n) & (m >> n)`, `(x & 1) << 2`, and drop masks a known-bits pass proves redundant. Public
   example: none found (Thumb-2 has sxth and ubfx; gizmo's ARMv4T build has no signed halfwords).
   Test: a gizmo function on a32 that returns a signed short and extracts a field with a signed shift.
-- [ ] **One variable per value.** A register that holds unrelated values in turn (a pointer, then
+- [x] **One variable per value.** A register that holds unrelated values in turn (a pointer, then
   loaded bytes, then a callee's second word; a parameter, then a callee's result) stays one variable,
   and the pilot names it after one of its uses. Split variables where their live ranges do not meet
   (the webs pass, extended to the parameters' registers and to values that pass through a call).
   Public examples: FreeRTOS mps2-gcc-Os xTimerGenericCommandFromTask (`if (r0 == 0) r0 =
   vAssertCalled(0x1131u);`: the parameter variable takes vAssertCalled's result, then is passed on);
   gizmo a32 read_line (`r0 = uart_getc(r0);`).
+  Done 2026-10-24 (dread.tidy webs with split_parameter and hands_on, propagate's _moved_back;
+  docs/decisions.md, "One variable per value: a parameter kept apart from what its register hands
+  back"). Both examples were gone with the phantom arguments (2026-10-23): read_line's parameter is its
+  buffer throughout, uart_getc's result r0_1, its own result r0_2; xTimerGenericCommandFromTask reads
+  `if (r0 == 0) vAssertCalled(0x1131u);` and stores its parameter. webs already split a parameter's
+  register where the live ranges do not meet (after the clean-up no variable with two webs is left on
+  the eight builds but gizmo m4's FPU registers, which asm writes). What stayed one variable were
+  registers whose values meet in a use, among them parameters that meet a callee's result where the
+  value is only handed on: in the return of a function whose result no caller reads (a source that
+  returns nothing hands back what the register held last: gizmo's handle_key returns c on one path,
+  led_on's leftover on another; FreeRTOS's vQueueAddToRegistry, vTaskDelay, vTaskResume) or in an
+  argument its callee does not read but may hand back (vTimerSetTimerID's xTimer through
+  vPortEnterCritical(r0)). There the parameter keeps the uses only its own value reaches, and the
+  register's later values are a variable of their own declared with the parameter as its initial value
+  (`u32 r0_1 = r0;`), where a value on either side is read; nothing writes the parameter then, so the
+  copies the compiler made of it propagate into it (vTaskResume's `r4 = (volatile struct s_8 *)r0;` is
+  gone, the parameter is `volatile struct s_8 *r0` throughout, `u32 r0_3 = (u32)r0;` the value handed
+  back), and a part gets a type the whole could not: gizmo rv32's apply_config typed the text pointer
+  and the line buffer's index as one `volatile u8 *a0` (`a0[(u32)stack84] = 0;`, `a1 = a0 + 1`), now
+  `const volatile u8 *a0` and `u32 a0_2` (`stack84[a0_2] = 0;`). Where the values meet in a use that
+  reads them (a clamp, a pointer a loop advances), one variable as before; so for a register nothing
+  reads but such uses (irq_dispatch(void)). And a parameter moved back after a call (r4 = r0; f(); r0 =
+  r4;, the C's f writing no r0) is no new value: prvDeleteTCB's `r4 = (u32)r0;` and, in one arm after
+  `vPortFree(r0->f_30);`, `r0 = (volatile struct s_13 *)r4;` are gone.
+  Tests (tests/test_tidy.py): a parameter reused for a leftover result (split where no caller reads the
+  result, one variable where one does), a parameter handed on through a call (split where the callee
+  does not read the argument, not where it does), a clamp and a register only handed on (one variable),
+  a parameter that only reaches the return beside a compared result (split), a parameter moved back in
+  one arm; with Ubuntu 22.04's compilers too, as gizmo-m3's gate test (handle_key and apply_config split
+  there).
+  Measured on fresh copies of the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2,
+  RISC-V GCC -Os, GCC -O0), main at fa47c42 -> this, every lifted function's readable C as dread
+  readable prints it with the copy's tables: parameters kept apart 3, 2, 2, 1; 19, 3, 10, 25; parameters
+  written in their function 8 -> 5, 10 -> 8, 11 -> 9, 8 -> 7; 38 -> 18, 50 -> 47, 212 -> 201 (RISC-V's
+  others are the variadic calls' and the ecall's), 42 -> 17; variables (parameters and locals) 118 ->
+  121, 116 -> 118, 193 -> 195, 97 -> 98; 1,848 -> 1,856, 1,692 -> 1,692, 1,757 -> 1,760, 1,458 -> 1,468;
+  typed parameters (pointers, signed) 16 -> 17, 16 -> 17, 17 -> 18, 17 -> 17; 156 -> 161, 117 -> 117,
+  117 -> 120, 133 -> 139, typed locals 24 -> 26, 19 -> 21, 84 -> 86, 24 -> 23; 215 -> 209, 195 -> 193,
+  109 -> 106, 220 -> 216 (a parameter's typed copies go into it; rv32's index a1 is no pointer now);
+  functions whose readable C changed 3, 2, 2, 1; 20, 3, 11, 25 (the splits, prvDeleteTCB and RISC-V's
+  prints by the move back); lines 773 -> 779, 773 -> 778, 910 -> 915, 860 -> 861; 14,711 -> 14,711,
+  13,484 -> 13,482, 12,058 -> 12,055, 13,847 -> 13,852. The gate accepts the same functions name by name
+  with the same verdicts (35, 36, 44, 31; 317, 275, 252, 354); its wall time, main and this alternating,
+  the machine shared, 5 -> 5, 4 -> 4, 4 -> 5, 3 -> 3; 356 -> 369, 268 -> 259, 130 -> 141, 452 -> 433 s;
+  every GCC -Os function's readable C in one process 38.6 and 36.8 -> 37.2 and 39.3 s of CPU. Names,
+  from a table made for the measurement by main for its C (every variable named, with identities), on
+  GCC -Os 298 functions and 1,968 names: of the 20 functions whose C changed all carry, 139 names, 11
+  dropped (a parameter's copy that propagated into it: r4 in ten functions, vPortFree's r6; the
+  parameter keeps its own name), 19 with one variable without a name (the new one, for the pilot's next
+  run); gizmo a32 3 functions, 18 names, none dropped, m3 2, 14, none (dread readable --carry, and the
+  same through --check).
+  Left: other registers whose values with uses of their own meet only where the value is handed on
+  (vTaskResume's r0_1: prvTaskIsTaskSuspended's result, then the ready list's address, both handed to
+  vPortExitCritical; gizmo apply_config's parse_kv status and clamp's result, returned;
+  vPeriodicEventGroupsProcessing's results): apply_config on gizmo a32, m3 and m4, none on rv32; 13 in
+  12 functions, 10 in 10, 18 in 12, 11 in 10 on FreeRTOS GCC -Os, clang -O2, RISC-V, GCC -O0 (counted by
+  a script, not in the repository; registers asm writes among them): keeping them apart needs a copy
+  behind each value (docs/decisions.md: not done); registers asm writes are not split at all (gizmo
+  m4's FPU registers, 20 in three functions; GCC -O0's mrs of basepri into r2, a parameter in four
+  functions; RISC-V's ecall, which binds a0-a7: with the next kind 74 parameters in thirteen
+  functions), nor the argument registers a variadic call passes whole (vAssertCalled's a2-a7 on RISC-V:
+  the item "No parameters from pushes"); not established that a return regflow finds unread is
+  a leftover in the source (a function without callers, or called through pointers only, counts as
+  unread), and what the pilot names the new variables was not asked.
 - [ ] **Merged arms and hoisted statements.** Arms with identical bodies stay apart, and a statement
   common to every arm is printed in each. Merge arms with one body into one condition with ||, hoist
   what all arms begin or end with. Public example: FreeRTOS mps2-gcc-Os

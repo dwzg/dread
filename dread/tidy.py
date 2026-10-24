@@ -12,7 +12,8 @@ the same.
   not test, the zeroed registers after a call); one whose value has an effect (a call, a volatile
   load) keeps the effect;
 - propagate: a variable read where a constant or a copy of another variable is the only value that
-  reaches it (and that variable is not written in between);
+  reaches it (and that variable is not written in between); a parameter moved back (r0 = r4, r4 a copy
+  of the parameter that it still holds: GCC's r4 = r0; f(); r0 = r4;) is r0 = r0, which dead takes out;
 - fold: a temporary written once and read once, right behind its write, into its reader; one whose
   value has an effect only where the reader evaluates it before any effect of its own, and on every
   path (not into the right of && or ||, nor an arm of ?:);
@@ -551,7 +552,8 @@ def propagate(fn):
                 pass
             elif len(defs) == 1 and isinstance(value, C.Name) and value.id in g.scope and value.id != v:
                 d = next(iter(defs))
-                if reach[n.index].get(value.id) != reach[d].get(value.id) or _writes_name(s, value.id):
+                if reach[n.index].get(value.id) != reach[d].get(value.id) or \
+                        (_writes_name(s, value.id) and not _moved_back(s, v, value.id, fn)):
                     continue
             else:
                 continue
@@ -565,6 +567,21 @@ def propagate(fn):
                         C.absorb(s, g.nodes[d].stmt)
     write_back(view)
     return changed
+
+
+def _moved_back(s, v, name, fn):
+    """Whether statement s is name = v, name a parameter of fn and v a copy of it that it still holds
+    (the caller's check): a move back, name = name once v is put in, which dead takes out. GCC keeps an
+    argument in a callee-saved register across a call and moves it back for the next (r4 = r0; f();
+    r0 = r4;); the C's call whose value nobody reads does not write r0, so the move back is no new
+    value, and inside one arm it had left the parameter two definitions where the arms join
+    (prvDeleteTCB). Only the plain copy, and only into a parameter: a statement that computes name from
+    v (r4 = x << 2 behind x = r4, a flag's block) stays as the other passes leave it, and so does
+    another register moved back from its copy (GCC -O0's reload of a local from its stack slot: r3 =
+    s16 behind s16 = r3, where the slot's variable stood for the value before, and the register's
+    then, under another name)."""
+    return is_assign(s) and s.e.target.id == name and isinstance(s.e.value, C.Name) and s.e.value.id == v and \
+        any(p == name for _, p in fn.params)
 
 
 def _writes_name(s, name):
@@ -3588,14 +3605,28 @@ def replace(view, s, new=None):
     raise ValueError("a statement no longer where the view found it")
 
 
-def webs(fn):
+def webs(fn, run=None):
     """A variable that holds unrelated values in turn (a register: the first argument, later a
     callee's result) split into one variable per web: definitions that reach a common use are one
     web, and each web but the one the entry's value belongs to (or the first) gets a name of its own
     (r0_2, r0_3); a parameter keeps its name for its value at the entry. The flow is that of the
     body with its conditional blocks spread out (flat_view), so a variable written inside one is
     split too. Not for a variable written inside a statement that stays whole (a loop, a block that
-    declares) or written by asm, a chain or an increment."""
+    declares) or written by asm, a chain or an increment.
+
+    A parameter whose value at the entry meets the register's later values only where the value is
+    handed on unread (hands_on: returned where no caller reads the result, or passed in an argument
+    register the callee does not read, which it may only hand back) is split there too, with the
+    run's context (regflow's reads and kept): the parameter keeps the uses only its own value reaches,
+    and the register's later values with the uses they reach are a variable of its own that starts
+    as the parameter (u32 r0_1 = r0;), so that the parameter is never written (split_parameter). The
+    two meet in the machine's register only: a function whose source returns nothing hands back what
+    its last callee left there (gizmo's handle_key(int c) returns c on one path, led_on's leftover on
+    another), and a callee that may hand its argument back passes a parameter on to the result
+    (vTimerSetTimerID's xTimer, or vAssertCalled's leftover after it, through vPortEnterCritical(r0)):
+    one variable, the naming model named it after one of its uses. Where they meet in a use that reads
+    the value (if (v > 9) v = 9; a loop's v++), the parameter and its new values stay one variable, as
+    a source writes them."""
     g = Graph(flat_view(fn))
     reach = g.reaching()
     top_writes, nested = {}, set()
@@ -3652,6 +3683,9 @@ def webs(fn):
                 classes.setdefault(find((v, defs[0])), [])
         ptype = {n: t for t, n in fn.params}.get(v)
         if len(classes) < 2:
+            if ptype is not None and v not in decls and entry in classes and \
+                    split_parameter(fn, g, v, ptype, uses, top_writes[v], run, taken):
+                return True                 # (indices moved: the next round sees the rest)
             continue
         if v in decls:
             if decls[v][1].dims or decls[v][1].ptr:
@@ -3679,6 +3713,101 @@ def webs(fn):
         if changed:
             return True                     # (indices moved: the next round sees the rest)
     return changed
+
+
+def split_parameter(fn, g, v, ptype, uses, writes, run, taken):
+    """webs for a parameter v whose definitions are one web with its value at the entry: where every
+    use that the entry's value and a later one both reach hands the value on unread (hands_on), and
+    some use of either reads it (a use as the parameter, or of a later value: what the naming model
+    would name the parameter after: vPeriodicEventGroupsProcessing(void) compares its callees' results
+    in r0 and hands back its caller's r0 where it calls none), the later definitions and the uses they
+    reach take a new name, declared with the parameter as its initial value at the top of the body;
+    the uses only the entry's value reaches keep the parameter, which nothing writes then. The same
+    values reach every use as before: the new variable holds the parameter's value wherever the
+    register still held it. A register that is only handed on (irq_dispatch(void): if (...) r0 =
+    timer_irq(); return r0;) stays one variable. g: the graph of flat_view(fn); uses: {(variable,
+    node): the definitions reaching it, sorted, -1 the entry}; writes: the nodes that assign v (plain
+    assignments). Needs the run's context (what callees read, whose result no caller reads); False
+    without one."""
+    ctx = run.context if run is not None else None
+    if ctx is None or not writes:
+        return False
+    own, meet, later = [], [], []
+    for (u, node), defs in uses.items():
+        if u != v or not defs:
+            continue
+        (own if defs == [-1] else meet if -1 in defs else later).append(node)
+    if not meet:
+        return False
+    if not all(hands_on(g.nodes[n].stmt, v, fn.name, ctx) for n in meet):
+        return False
+    if all(hands_on(g.nodes[n].stmt, v, fn.name, ctx) for n in own + later):
+        return False                        # (no value read on either side: one variable handed on throughout)
+    name = fresh(fn, v, taken)
+    for d in writes:
+        g.nodes[d].stmt.e.target.id = name
+    for n in meet + later:
+        _rename_reads(g.nodes[n].stmt, v, name)
+    body = fn.body.body
+    k = 0
+    while k < len(body) and isinstance(body[k], C.Decl):
+        k += 1                              # (in front of every statement: a declaration further down
+    body.insert(k, C.Decl(ptype, [C.Declarator(name, init=C.Name(v))]))     # may follow one that writes it)
+    return True
+
+
+def hands_on(s, v, function, ctx):
+    """Whether statement s (a node of flat_view's graph: an expression, a return, a stand-in if's
+    condition, a conditional return) reads variable v, and only to hand its value on unread: as the value of
+    `return v;` where no caller reads the function's result (ctx.unread: regflow's kept leaves out its
+    result register), or as an argument in a register its callee does not read (ctx.reads; a callee
+    regflow knows, not variadic and without a save area: trim_calls keeps such an argument only for a
+    callee that may hand it back as its result). The value then matters only as what the register
+    holds when the function returns, which the cases compare whatever the source returned."""
+    found, handed = [0], [0]
+
+    def visit(e, unread=False):
+        if e is None:
+            return
+        if isinstance(e, C.Name):
+            if e.id == v:
+                found[0] += 1
+                handed[0] += unread
+            return
+        if isinstance(e, C.Call) and isinstance(e.f, C.Name):
+            reads = ctx.reads.get(e.f.id)
+            known = reads is not None and not ctx.unknown(e.f.id) and e.f.id not in ctx.save_areas
+            for i, a in enumerate(e.args):
+                visit(a, known and i < len(ctx.arg_regs) and ctx.arg_regs[i] not in reads and isinstance(a, C.Name))
+            return
+        if isinstance(e, C.Assign):
+            if not (isinstance(e.target, C.Name) and e.op == "="):
+                visit(e.target)
+            visit(e.value)
+            return
+        for c in _children(e):
+            visit(c)
+
+    def returned(e):
+        if isinstance(e, C.Name) and e.id == v:
+            found[0] += 1
+            handed[0] += function in ctx.unread
+        else:
+            visit(e)
+    then = s.then if isinstance(s, C.If) else None
+    while isinstance(then, C.Block) and len(then.body) == 1:
+        then = then.body[0]
+    if isinstance(s, C.Return):
+        returned(s.e)
+    elif isinstance(s, C.If) and s.orelse is None and isinstance(then, (C.Goto, C.Return)):
+        visit(s.cond)                       # (a stand-in's goto, or a conditional return: bxne lr)
+        if isinstance(then, C.Return):
+            returned(then.e)
+    elif isinstance(s, C.ExprStmt):
+        visit(s.e)
+    else:
+        return False                        # (a declaration, a statement that stays whole: not looked into)
+    return found[0] > 0 and handed[0] == found[0]
 
 
 def _rename_reads(s, old, new):
@@ -3747,7 +3876,8 @@ def group_declarations(fn):
 def tidy(fn, run=None, passes=None, rounds=8):
     """All passes, again until none changes anything (at most rounds times); then the calls' and the
     function's own arguments (trim_calls, params) and the passes once more, the calls' again while
-    that leaves values nobody reads. The conditions' answers are kept for the run (_RUN: conditions),
+    that leaves values nobody reads; last the variables one per web (webs, with the run's context: a
+    parameter apart from what its register hands back) and the passes again. The conditions' answers are kept for the run (_RUN: conditions),
     and the callees' declared result types (run.returns, the file's declarations) are what the proofs
     give their calls (_RUN.returns, read by context: cexpr.Ctx.result_type)."""
     outer, outer_returns = getattr(_RUN, "memo", None), getattr(_RUN, "returns", None)
@@ -3776,7 +3906,7 @@ def _tidy(fn, run, passes, rounds):
     if passes is None:
         split_any = False
         for _ in range(16):                 # (one variable a round: webs renumbers)
-            if not webs(fn):
+            if not webs(fn, run):
                 break
             split_any = True
         if split_any:

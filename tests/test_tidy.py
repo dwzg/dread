@@ -639,6 +639,141 @@ def test_a_parameter_both_arms_of_an_if_write_before_a_read_is_none():
     assert "u32 f(u32 a0, u32 r1)" in out and "u32 r0;" in out, out
 
 
+# Lifted files of the lifters' dialect for the parameter's webs: a parameter p in r0 is copied to r4,
+# a callee g (an assertion that may return: it reads r0 and writes its result there) is called where p
+# is 0, and p + 8 is stored through after it; r0 goes back to the caller (a function whose source
+# returns nothing hands back what the register last held: gizmo's handle_key, FreeRTOS's
+# vQueueAddToRegistry)
+WEBS_HEAD = """/* f at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 g(u32, u32, u32, u32);
+extern u32 enter(u32, u32, u32, u32);
+extern u32 leave(u32, u32, u32, u32);
+u32 f(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r12 = 0;
+    (void)r12;
+"""
+LEFTOVER = WEBS_HEAD + """    r4 = r0;  /* 0: mov r4, r0 */
+    if (r0 != 0) goto L_a;  /* 2: cbnz r0, #0xa */
+    r0 = 0x10u;  /* 4: movs r0, #16 */
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* 6: bl g */
+L_a: ;
+    r3 = 0x1u;  /* a: movs r3, #1 */
+    *(volatile u32 *)((r4 + 8)) = (u32)r3;  /* c: str r3, [r4, #8] */
+    return r0;  /* e: pop {r4, pc} */
+}
+"""
+# The same through a callee that may hand its argument back (vTimerSetTimerID: vPortEnterCritical and
+# vPortExitCritical read no r0 and leave the caller's there on some path), p + 28 stored after
+THROUGH = WEBS_HEAD + """    r4 = r0;  /* 0: mov r4, r0 */
+    r5 = r1;  /* 2: mov r5, r1 */
+    if (r0 != 0) goto L_a;  /* 4: cbnz r0, #0xc */
+    r0 = 0x10u;  /* 6: movs r0, #16 */
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* 8: bl g */
+L_a: ;
+    r0 = enter(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* c: bl enter */
+    *(volatile u32 *)((r4 + 28)) = (u32)r5;  /* 10: str r5, [r4, #0x1c] */
+    r0 = leave(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0; return r0;  /* 14: b.w leave */
+}
+"""
+
+
+def code(text):
+    """A file's C without its comments (the instructions' text names registers too)."""
+    return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+
+
+def webs_context(unread=True, enter=()):
+    """What regflow would say of the files above: g reads r0 and overwrites it, enter reads what is
+    given (nothing by default), leave nothing, and no caller reads f's result (unread)."""
+    from dread import readable
+    ctx = readable.Context()
+    ctx.arg_regs, ctx.results = ["r0", "r1", "r2", "r3"], ["r0", "r1"]
+    ctx.reads = {"g": {"r0"}, "enter": set(enter), "leave": set(), "f": {"r0", "r1"}}
+    ctx.overwritten = {"g": {"r0"}}
+    ctx.unread = {"f"} if unread else set()
+    return ctx
+
+
+def test_a_parameter_reused_for_a_leftover_result_is_a_variable_of_its_own():
+    """webs splits a parameter where its value meets the register's later ones only in a return whose
+    value no caller reads: the parameter keeps its uses (r4, its copy, goes with it: p + 8 is r0 + 8),
+    and what goes back to the caller is a variable that starts as the parameter. Where a caller reads
+    the result, the return is a use of the value and the register stays one variable."""
+    from dread import readable
+    out = readable.transform("f", LEFTOVER, context=webs_context())
+    assert "u32 f(u32 r0)" in out and "u32 r0_1 = r0;" in out, out
+    assert "if (r0 == 0) r0_1 = g(0x10u);" in out and "*(volatile u32 *)(r0 + 8) = 1;" in out, out
+    assert "return r0_1;" in out and "r4" not in code(out), out
+    assert re.search(r"\br0 = ", code(out)) is None, out    # (the parameter is never written)
+    kept = readable.transform("f", LEFTOVER, context=webs_context(unread=False))
+    assert "if (r0 == 0) r0 = g(0x10u);" in kept and "*(volatile u32 *)(r4 + 8) = 1;" in kept, kept
+    assert "return r0;" in kept and "r0_1" not in kept, kept
+
+
+def test_a_parameter_handed_on_through_a_call_is_a_variable_of_its_own():
+    """A value that passes through a call: where the parameter meets a later value only in an argument
+    the callee does not read (one it may hand back as its result), the parameter keeps its uses and
+    the handed-on value is a variable of its own; where the callee reads that argument, one variable."""
+    from dread import readable
+    out = readable.transform("f", THROUGH, context=webs_context())
+    m = re.search(r"u32 (r0_\d+) = r0;", out)
+    assert m and "u32 f(u32 r0, u32 r1)" in out, out
+    v = m.group(1)
+    assert "if (r0 == 0) %s = g(0x10u);" % v in out and "= enter(%s);" % v in out, out
+    assert "*(volatile u32 *)(r0 + 28) = r1;" in out and "return leave(r0_" in out, out
+    assert re.search(r"\br0 = ", code(out)) is None, out
+    kept = readable.transform("f", THROUGH, context=webs_context(enter={"r0"}))
+    assert "if (r0 == 0) r0 = g(0x10u);" in kept and "enter(r0);" in kept, kept
+    assert "*(volatile u32 *)(r4 + 28) = r1;" in kept, kept
+
+
+def test_a_parameter_that_meets_its_new_value_in_a_use_stays_one_variable():
+    """A clamp (if (v > 9) v = 9;) reads the merged value in a store: one variable, as its source
+    writes it; a register nothing reads but the return (irq_dispatch(void) hands back a callee's result
+    or its caller's r0) has no value to keep apart: one variable. Where the callee's result is compared,
+    the parameter is kept apart from it all the same (vPeriodicEventGroupsProcessing(void): the naming
+    model named the parameter after the results)."""
+    from dread import readable
+    clamp = WEBS_HEAD + ("    if (r0 <= 0x9u) goto L_a;  /* 0: bls */\n    r0 = 0x9u;  /* 2: movs r0, #9 */\nL_a: ;\n"
+                         "    *(volatile u32 *)0x20000000u = (u32)r0;  /* 4: str r0, [r3] */\n"
+                         "    return r0;  /* 6: bx lr */\n}\n")
+    out = readable.transform("f", clamp, context=webs_context())
+    assert "if (r0 > 9) r0 = 9;" in out and "return r0;" in out and "r0_" not in out, out
+    only = WEBS_HEAD + ("    if (r1 == 0) goto L_a;  /* 0: cbz r1 */\n    r0 = 0x10u;  /* 2: movs r0, #16 */\n"
+                        "    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* 4: bl g */\nL_a: ;\n"
+                        "    return r0;  /* 8: bx lr */\n}\n")
+    out = readable.transform("f", only, context=webs_context())
+    assert "if (r1 != 0) r0 = g(0x10u);" in out and "return r0;" in out and "r0_" not in out, out
+    compared = only.replace("L_a: ;\n", "    if (r0 == 0) goto L_a;  /* 8: cbz r0 */\n"
+                            "    *(volatile u32 *)0x20000000u = (u32)r0;  /* a: str r0, [r3] */\nL_a: ;\n")
+    out = readable.transform("f", compared, context=webs_context())
+    assert "u32 r0_1 = r0;" in out and "r0_1 = g(0x10u);" in out and "return r0_1;" in out, out
+    assert re.search(r"\br0 = ", code(out)) is None, out
+
+
+def test_a_parameter_moved_back_after_a_call_is_the_parameter():
+    """GCC keeps an argument in a callee-saved register across a call and moves it back for the next
+    (r4 = r0; ...; r0 = r4;): the C's call whose value nobody reads writes no r0, so the move back is
+    r0 = r0, and the copy goes with it; inside one arm the move back had kept r0 two definitions at the
+    call after the arms, and r4 in the C (FreeRTOS's prvDeleteTCB before its tail call of vPortFree)."""
+    from dread import readable
+    back = WEBS_HEAD + """    r3 = (u32)*(volatile u8 *)((r0 + 87));  /* 0: ldrb r3, [r0, #0x57] */
+    r4 = r0;  /* 4: mov r4, r0 */
+    if (r3 != 0) goto L_b;  /* 6: cbnz r3, #0x12 */
+    r0 = *(volatile u32 *)((r0 + 48));  /* 8: ldr r0, [r0, #0x30] */
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* a: bl g */
+    r0 = r4;  /* e: mov r0, r4 */
+L_b: ;
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0; return r0;  /* 12: b.w g */
+}
+"""
+    out = readable.transform("f", back, context=webs_context())
+    assert "if (*(volatile u8 *)(r0 + 87) == 0) g(*(volatile u32 *)(r0 + 48));" in out, out
+    assert "return g(r0);" in out and "r4" not in code(out), out
+
+
 def test_a_select_waits_for_the_merge_of_an_it_block_that_writes_its_variable():
     """ittte mi; ldrmi r0, [r3]; uxtbmi r0, r0; movpl r0, #-1 (gizmo's uart_getc): the pair of the last
     two is no select while the block before it on the same condition writes r0, which the select would

@@ -9,6 +9,60 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## One variable per value: a parameter kept apart from what its register hands back (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "One
+variable per value" (docs/todo.md).
+
+- **Question.** dread.tidy's webs splits a register into one variable per web (the definitions that
+  reach a common use), a parameter keeping its name for its value at the entry. What it left as one
+  variable were registers whose values meet in a use. A parameter and a callee's result meet where a
+  function whose source returns nothing hands back what the register held last (gizmo's
+  handle_key(int c) returns c on one path and led_on's leftover on another; FreeRTOS's
+  vQueueAddToRegistry, vTaskDelay, vTaskResume), or where a callee that does not read the register may
+  hand it back (vTimerSetTimerID's xTimer, or vAssertCalled's leftover after it, through
+  vPortEnterCritical(r0)). The naming model named the one variable after one of its uses (a queue
+  handle assigned an assertion's result). Which meetings keep one variable, and how does readable C
+  keep the others apart while its behaviour stays the same?
+- **Options.** (a) Split every web at every meeting with a copy where the values meet (SSA's copies:
+  `u32 v_1 = v; if (v > 9) v_1 = 9;`). (b) Split only where the values meet in uses that hand the value
+  on unread (a return no caller reads, an argument the callee does not read), for a parameter's
+  register, the copy being the new variable's initial value (`u32 r0_1 = r0;`): nothing added to the
+  body. (c) As (b), and also other registers whose values with uses of their own meet only at such a
+  use (vTaskResume's r0: prvTaskIsTaskSuspended's result, then the ready list's address, both handed to
+  vPortExitCritical), with a copy behind each such value. (d) Leave the C and say in a comment at the
+  return that the value is a leftover.
+- **Choice.** (b) (dread.tidy split_parameter and hands_on), where a value on either side is read (a
+  use as the parameter or of a later value); with it a parameter moved back after a call as no new
+  value (propagate's _moved_back).
+- **Why.** Where the values meet in a use that reads them (a clamp's `if (v > 9) v = 9;`, a pointer a
+  loop advances, `if (!p) p = dflt();`), a source holds one variable, and (a) would write two names and
+  a copy for it. Where they meet only in a leftover, the register is no variable of the program: the
+  source returns nothing there or the callee does not look at it, and the cases compare it because the
+  register is behaviour. (b) costs one declaration line a split and no statement, and the parameter
+  is then never written, so the copies the compiler made of it to keep it across calls (r4 = r0)
+  propagate into it: vQueueAddToRegistry reads its parameter as r0 throughout, r4 gone, and gizmo
+  a32's apply_config's text pointer is typed `const volatile u8 *` (dread.vartypes), which the variable
+  that also held parse_kv's status could not be. A split keeps every value at every use: the new
+  variable holds the parameter's value wherever the register still held it. A register nothing reads
+  but such uses (irq_dispatch(void): `if (...) r0 = timer_irq(); return r0;`) stays one variable: no
+  value to keep apart. (c) needs a statement for every value it keeps apart, which reads worse than
+  the leftover variable it removes; not done (its count is in the item). (d) is the way of the item
+  "Two-word results that are leftovers", open for one-word results too. The move back: GCC keeps an
+  argument in a callee-saved register across a call and moves it back for the next (r4 = r0; f(); r0 =
+  r4;); where the C's call writes no r0 (its value unread), `r0 = r4` is r0 = r0, but propagate did
+  not put r0 into a statement that writes r0, and inside one arm the move back left r0 two definitions
+  at the join (prvDeleteTCB). Only the plain copy into a parameter is taken so: a first version let
+  propagate into every statement that writes the copy's source (r4 = x << 2 behind x = r4, a flag
+  block's temporary), which changed the form of unrelated functions' C (gizmo m3's script_run, a test's
+  xStreamBufferIsFull); a second took every plain move back, and on GCC -O0 ten functions' reloads of
+  a local from its stack slot (r3 = s16 behind s16 = r3) moved the value from the slot's variable to
+  the register's, a line longer in pvPortMalloc and under another identity (the slot's name would not
+  carry to the register's variable).
+- **How to undo.** dread/tidy.py: webs without the split_parameter call (hands_on and split_parameter
+  gone); propagate's guard back to `or _writes_name(s, value.id)` (_moved_back gone).
+- **Status.** In the code (tests/test_tidy.py).
+
 ## A chain of assignments whose variables get different types: one assignment each (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the fix of a
