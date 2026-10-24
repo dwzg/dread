@@ -62,8 +62,10 @@ Extensions and bit fields (bits: dread.bitfields, every rewrite proved by z3 for
 shifts that sign- or zero-extends as the cast it is ((s32)(x << 16) >> 16 as (s16)x, x << 16 >> 16 as
 (u16)x: ARM state before ARMv6 and RV32 without Zbb have no sxth or uxth), a signed field of 8 or 16
 bits as a cast of the field, a mask moved to the field it selects ((x << 2) & 4 as (x & 1) << 2, (w &
-0x3fc) >> 2 as (w >> 2) & 0xff), masks and casts the known bits make redundant, and a smeared sign under
-a mask as the select it computes (((s32)x >> 31) & m as (s32)x < 0 ? m : 0).
+0x3fc) >> 2 as (w >> 2) & 0xff), masks and casts the known bits make redundant, a smeared sign under
+a mask as the select it computes (((s32)x >> 31) & m as (s32)x < 0 ? m : 0), and ARM's shift by a
+register without its first arm, as the plain shift where the amount is known below 32 (x << (i & 7);
+the known bits of a variable from all its definitions, which the proofs assume).
 
 Statements keep the instruction they came from (their addr); a statement folded into another takes
 its reader's, but an expression statement or a return that takes a call's result in names the call

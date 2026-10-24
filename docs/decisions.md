@@ -9,6 +9,59 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Facts about variables: known bits from all their definitions, assumed by the proofs (2026-10-25)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Register
+shifts with an amount known below 32" (docs/todo.md).
+
+- **Question.** ARM's shift by a register takes the amount's low byte, and 32 and more give 0 (asr: the
+  sign); the lifters write lsl r0, r1, r2 as `(s & 0xffu) == 0 ? x : (s & 0xffu) < 32 ? x << (s & 0xffu)
+  : 0`, and readable C printed it so, also where the source wrote `acc ^= p[i] << (i & 7)` (gizmo's
+  script_run, behind `r2 = r3_2 & 7`). The first arm is always the rest's value (x shifted by 0); the
+  guard is redundant where the amount is known below 32, and for a variable that knowledge comes from
+  its definitions, which dread.cexpr's proofs did not see (a variable was any value of its type). How
+  is a rewrite proved under facts about variables, where do the facts come from, and how are they kept
+  sound?
+- **Options.** The facts: (a) none, only the expression's own known bits (the first arm goes, the
+  guard stays unless the mask is written in the amount); (b) known bits of each variable over all its
+  definitions in the function, flow-insensitive, a greatest fixpoint; (c) flow-sensitive known bits per
+  statement (reaching definitions, conditions on the way: a counter below 5 in a loop). How the proof
+  takes them: (d) substitute a variable's known bits into the expression (r2 as r2 & 7); (e) an
+  assumption on the variable in cexpr (Ctx.facts: the test values keep the known bits, z3 assumes
+  them). Where: (f) in dread.bitfields' known bits, so that every rule of the pass reads them; (g) a
+  rule of its own for shifts alone.
+- **Choice: (b), (e), (f)**, with two rules for selects in dread.bitfields: a register shift's first
+  arm goes where the rest shifts by its amount (`y == 0 ? x : ...x << y...`, proved: x << 0 is x; a
+  rotation keeps it, x << 32 is undefined), and a select whose condition the known bits decide is the
+  arm it takes (decided: the guard of an amount below 32). variable_facts: every assignment, compound
+  assignment, increment and initial value of a variable in the function (nested blocks too), the
+  variables in the order of what their definitions read (strongly connected components), a component
+  whose definitions read each other met with each definition until nothing changes (optimistic: a
+  definition that reads a variable no definition has reached yet waits), a variable whose bits weaken
+  FACT_WEAKENINGS (3) times taken as unknown (a counter); nothing known of a parameter, an asm's
+  output, a variable whose address is taken, one a nested block declares without a value, and one that
+  may be read before it is written (live behind its declaration: asked only of the variables that get
+  facts, which keeps the liveness off most functions).
+- **Why.** (b): the only masks the bits pass left on variables were these amounts (the item "Extensions
+  and bit fields"), each with one definition; flow-insensitive facts hold at every use, so a proof
+  under them is sound wherever the expression is, with nothing to track per statement, and webs splits
+  a register into one variable per web, which makes the definitions of one variable few. (e): the
+  assumption is stated once, where the variables are, and the same proof machinery checks every rule
+  (d would have changed the expressions the rules match). (f): known() is where the pass reads bits, so
+  masks and narrowing casts of such variables go as well, each proved (`r4 & 1` of a value 0 or 1,
+  `(u8)(r3_1 | g)` of a byte). Unknown starting values: a fact must hold on every path that reaches the
+  use, and a parameter's value at the entry or an uninitialised read reaches some.
+- **Not established.** A bound only a comparison on the way gives (c: FreeRTOS's
+  vPrimaryBlockTimeTestTask shifts by a loop's counter below 5, __sflush_r tests r1_2 <= 29 before it
+  shifts); a variable's bits through steps of itself in sequence (gizmo's __udivsi3: r2 += 8; r2 += 4
+  before it shifts by r2 + 3, which the flow-insensitive fixpoint takes for a cycle); 16-bit int
+  (MSP430: the pass leaves it alone).
+- **How to undo.** In dread.bitfields, take the facts out of bitfields() (ctx.facts) and the Cond rules
+  out of proposals; cexpr's facts then go unused (an empty Ctx.facts changes nothing).
+- **Status.** In the code (dread/bitfields.py, dread/cexpr.py; tests/test_bitfields.py). On the eight
+  builds the gate accepts the same functions, the readable tables byte for byte, and the printed C of 77
+  functions changed; the figures are in docs/todo.md under the item.
+
 ## A link that refuses one function's C drops that function; Thumb-1 switches without GCC's helper (2026-10-25)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "dread cclab

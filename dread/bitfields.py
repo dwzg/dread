@@ -38,27 +38,39 @@ Rewrites, at every node of every statement's expressions, its children first (bo
   negated (RISC-V's sltu; neg: x & (0 - (u32)(x < 24)) is x < 24 ? x : 0) and the complement of either
   (bic r0, r0, r0, asr #31: (s32)r0 >= 0 ? r0 : 0), where the masked value reads no memory and calls
   nothing (a select evaluates its arm on one way only); a constant operation on a select of constants
-  goes into its arms ((c ? 0x10u : 0) + 0x20u as c ? 0x30u : 0x20u).
+  goes into its arms ((c ? 0x10u : 0) + 0x20u as c ? 0x30u : 0x20u);
+- ARM's shift by a register (lsl r0, r1, r2; Thumb-2's lsl.w), which the lifters write with the amount's
+  low byte and what 32 and more give, (s & 0xffu) == 0 ? x : (s & 0xffu) < 32 ? x << (s & 0xffu) : 0
+  (lsr alike, asr's (u32)((s32)x >> (s < 32 ? s : 31)) behind the same first arm): the first arm goes,
+  where the rest is x shifted by the amount (shifted by 0 it is x: since 2026-10-24), and a select
+  whose condition the known bits decide is the arm it takes (decided: the guard of an amount known
+  below 32, x << s, and the mask of one known below 256 with it); a rotation's first arm stays (x << 32
+  is undefined in C).
 
 Known bits (known): what an expression's type and operations say of its value's bits in its promoted
 type, as C computes it: bits known to be 0, known to be 1, and how many top bits are copies of the top
 bit (a value sign-extended from 16 bits has 17); from constants, the types of variables, casts and
-loads (a u16 load's top 16 bits are 0), masks, shifts, comparisons (0 or 1), selects and sums. It only
-proposes: every rewrite is proved by z3 through dread.cexpr (cexpr.equivalent: the same value, with C's
-types, wherever the lifted expression is defined: the integer promotions, the conversions to signed
-types modulo 2**n and arithmetic shifts of signed values as GCC has them) for the node it replaces, and
-a node keeps its type (a cast where the rewrite's own type would differ: a u16 promotes to int, not to
+loads (a u16 load's top 16 bits are 0), masks, shifts, comparisons (0 or 1), selects and sums; and of a
+variable, what all its definitions in the function give it (variable_facts: r2 = r3 & 7 is below 8
+wherever r2 is read; a greatest fixpoint over the assignments, flow-insensitive, nothing for a
+parameter or a variable that may be read before it is written), which the pass gives the proofs as
+facts (cexpr.Ctx facts: the test values keep them, z3 assumes them). It only proposes: every rewrite is
+proved by z3 through dread.cexpr (cexpr.equivalent: the same value, with C's types, wherever the lifted
+expression is defined and the facts hold: the integer promotions, the conversions to signed types
+modulo 2**n and arithmetic shifts of signed values as GCC has them) for the node it replaces, and a
+node keeps its type (a cast where the rewrite's own type would differ: a u16 promotes to int, not to
 unsigned int). A rewrite keeps each load and call of the node, once. The lifters' idioms through 64
 bits ((u64)x + (u32)~y + 1, (u32)((u64)x + 4 + 0)) are left whole for the passes that read them by
 their shape (sums, flags, pairs: they run after this one each round, and what they leave comes back to
 it), as are casts of a value to its own type but those between two arithmetic shifts.
 
-What is not established: a variable's bits from its definitions (r2 = r3 & 7; ... r2 & 0xffu keeps its
-mask: the proof sees r2 as any u32; on the eight builds such masks are three in each of gizmo's ARM
-builds' script_run and GCC -O0's __NVIC_EnableIRQ, all of them the amount of a register shift, (r2 &
-0xffu) == 0 ? x : (r2 & 0xffu) < 32 ? x << (r2 & 0xffu) : 0 for x << (i & 7)); the forms of 16-bit int
-(MSP430: the pass leaves its functions alone); a mask the source wrote as a mask stays one (x & 0xffff,
-never (u16)x).
+What is not established: a bound that only a comparison on the way gives (a loop's counter below 5 as
+the amount, FreeRTOS's vPrimaryBlockTimeTestTask; __sflush_r's r1_2 <= 29 && ... 0x20400001u >> r1_2:
+known bits say nothing there, a range analysis that reads the branches would); a variable's bits where
+its definitions read it in turn without a loop (gizmo's __udivsi3: r2 = c ? 16 : 0; r2 += 8; r2 += 4
+before it shifts by r2 + 3: the flow-insensitive fixpoint takes the steps for a cycle and gives up, a
+flow-sensitive one would keep them below 32); the forms of 16-bit int (MSP430: the pass leaves its
+functions alone); a mask the source wrote as a mask stays one (x & 0xffff, never (u16)x).
 """
 from dread import cexpr
 from dread import cparse as C
@@ -170,7 +182,10 @@ def known(e, ctx):
         return promoted(Known(ty[0], ty[1], ~v, v), ctx)
     if isinstance(e, C.Name):
         ty = ctx.types.get(e.id)
-        return None if ty is None else promoted(Known(*ty), ctx)
+        if ty is None:
+            return None
+        fact = ctx.fact(e.id) if isinstance(ctx, cexpr.Ctx) else None     # (variable_facts)
+        return promoted(Known(*ty) if fact is None else Known(ty[0], ty[1], fact[0], fact[1]), ctx)
     if isinstance(e, C.Cast):
         ty = ctx.ctype(e.type)
         if ty is None:
@@ -203,6 +218,55 @@ def known(e, ctx):
         return Known(ty[0], ty[1], a.zeros & b.zeros, a.ones & b.ones, min(a.signs, b.signs))
     if isinstance(e, C.Binary):
         return _binary(e, ctx)
+    return None
+
+
+def _range(k):
+    """(lowest, highest) value of a Known as its type reads its bits (signed: two's complement)."""
+    m, top = _mask(k.bits), 1 << (k.bits - 1)
+    lo, hi = k.ones, m & ~k.zeros
+    if not k.signed or k.zeros & top:
+        return lo, hi
+    if k.ones & top:
+        return lo - (1 << k.bits), hi - (1 << k.bits)
+    return (lo | top) - (1 << k.bits), hi & ~top
+
+
+def decided(c, ctx):
+    """True or False where the known bits decide comparison c of an expression with a constant ((s &
+    0xffu) < 32 where s is below 32), None where they do not (or c is no such comparison). Only a
+    proposal's guide: the proof decides."""
+    flip = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "==": "==", "!=": "!="}
+    if not (isinstance(c, C.Binary) and c.op in flip):
+        return None
+    x, n, op = c.l, _value(c.r), c.op
+    if n is None:
+        x, n, op = c.r, _value(c.l), flip[c.op]
+    if n is None:
+        return None
+    kx, kn = known(x, ctx), known(c.l if x is c.r else c.r, ctx)
+    if kx is None or kn is None:
+        return None
+    ty = cexpr.common(kx.type, kn.type, ctx)
+    kx = convert(kx, ty)
+    n = cexpr.wrap(n, ty)
+    lo, hi = _range(kx)
+    if lo > hi:
+        return None
+    if op == "<":
+        return True if hi < n else False if lo >= n else None
+    if op == "<=":
+        return True if hi <= n else False if lo > n else None
+    if op == ">":
+        return True if lo > n else False if hi <= n else None
+    if op == ">=":
+        return True if lo >= n else False if hi < n else None
+    m = _mask(kx.bits)
+    bits = n & m
+    if bits & kx.zeros or kx.ones & ~bits & m:      # (a bit known to differ from n's)
+        return op == "!="
+    if (kx.zeros | kx.ones) & m == m:               # (every bit known: n's)
+        return op == "=="
     return None
 
 
@@ -392,6 +456,13 @@ def _field(y, low, width):
     return C.Binary("&", inner, num(_mask(width)))
 
 
+def _shifts_by(e, y):
+    """Whether e shifts something by an amount that reads y (y's text inside the amount)."""
+    text = C.expr_text(y)
+    return any(isinstance(x, C.Binary) and x.op in ("<<", ">>") and _value(x.r) is None and
+               any(C.expr_text(z) == text for z in walk_expr(x.r)) for x in walk_expr(e))
+
+
 def proposals(e, ctx):
     """Simpler forms of node e (its children as they are), the strictly smaller first; each still to be
     proved."""
@@ -402,6 +473,17 @@ def proposals(e, ctx):
     def kind(x):
         got = known(x, ctx)
         return got.type if got is not None else None
+    if isinstance(e, C.Cond):
+        ke = known(e, ctx)
+        arms = []
+        c = e.c                             # (ARM's shift by a register: (s & 0xffu) == 0 ? x : (s & 0xffu) < 32 ?
+        if isinstance(c, C.Binary) and c.op == "==" and _value(c.r) == 0 and _shifts_by(e.f, c.l):
+            arms.append(e.f)                # x << (s & 0xffu) : 0, its first arm x shifted by 0, as the rest has it)
+        got = decided(c, ctx)               # (a condition the known bits decide: the amount below 32)
+        if got is not None:
+            arms.append(e.t if got else e.f)
+        if ke is not None:
+            out += [_as(a, ke.type, ctx) for a in arms]
     masked = _masked(e)
     if masked is not None:
         x, m = masked
@@ -530,6 +612,192 @@ def proposals(e, ctx):
     return out
 
 
+# --- what a variable's definitions say of its bits ---
+
+def definitions(fn):
+    """({variable: [the value each definition gives it]}, {variables of unknown value}, {variables the
+    body declares without a value}) over every statement of fn, nested ones too: an assignment's value (a
+    compound one's operation, v += k as v + k), an increment's v + 1, a declaration's initial value.
+    Unknown: a parameter (its value at the entry), an asm's output, a variable whose address is taken,
+    one a nested block declares without a value. One the body declares without a value is unknown where
+    it may be read before anything writes it (read_unset)."""
+    from dread import tidy
+    defs, unknown, unset = {}, {p for _, p in fn.params}, set()
+
+    def expr(e):
+        for x in walk_expr(e):
+            if isinstance(x, C.Assign) and isinstance(x.target, C.Name):
+                v = x.target.id
+                value = x.value if x.op == "=" else C.Binary(x.op[:-1], C.Name(v), x.value)
+                defs.setdefault(v, []).append(value)
+            elif isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--") and isinstance(x.e, C.Name):
+                defs.setdefault(x.e.id, []).append(C.Binary(x.op[0], C.Name(x.e.id), C.Num("1")))
+            elif isinstance(x, C.Unary) and x.op == "&":
+                unknown.update(y.id for y in walk_expr(x.e) if isinstance(y, C.Name))
+
+    def stmt(s, nested):
+        for st in tidy._flat(s):
+            if isinstance(st, C.Decl):
+                for d in st.items:
+                    if d.init is not None:
+                        defs.setdefault(d.name, []).append(d.init)
+                        expr(d.init)
+                    elif nested or st is not s:
+                        unknown.add(d.name)
+                    else:
+                        unset.add(d.name)
+            elif isinstance(st, C.Asm):
+                for o in st.outputs:
+                    unknown.update(y.id for y in walk_expr(o.e) if isinstance(y, C.Name))
+                for o in st.inputs:
+                    expr(o.e)
+            else:
+                for e in tidy._stmt_all_exprs(st):
+                    expr(e)
+                if isinstance(st, C.For) and isinstance(st.init, C.Decl):
+                    stmt(st.init, True)
+    for s in fn.body.body:
+        stmt(s, False)
+    return defs, unknown, unset
+
+
+def read_unset(fn, names):
+    """Those of names, variables the body declares without a value, that may be read before anything
+    writes them: live behind their declaration (dread.cflow liveness, which counts a read in a
+    conditional block's arm as the block's own); all of them where the graph cannot be made."""
+    from dread.cflow import Graph
+    try:
+        g = Graph(fn)
+        live = g.live()
+    except C.ParseError:
+        return set(names)
+    out = set()
+    for n in g.nodes:
+        if isinstance(n.stmt, C.Decl):
+            out.update(d.name for d in n.stmt.items if d.init is None and d.name in names and d.name in live[n.index])
+    return out
+
+
+FACT_WEAKENINGS = 3     # how often a variable's known bits may weaken before they count as unknown (a
+                        # counter's step loses a bit each round: 32 rounds to nothing without this)
+
+
+def _components(nodes, succ):
+    """The strongly connected components of a graph (Tarjan's, iterative), each component after every
+    one it reaches: an order in which a variable's definitions come after those of what they read."""
+    index, low, stack, on, out = {}, {}, [], set(), []
+    for root in nodes:
+        if root in index:
+            continue
+        work = [(root, iter(succ.get(root, ())))]
+        index[root] = low[root] = len(index)
+        stack.append(root)
+        on.add(root)
+        while work:
+            v, it = work[-1]
+            for w in it:
+                if w not in index:
+                    index[w] = low[w] = len(index)
+                    stack.append(w)
+                    on.add(w)
+                    work.append((w, iter(succ.get(w, ()))))
+                    break
+                if w in on:
+                    low[v] = min(low[v], index[w])
+            else:
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[v])
+                if low[v] == index[v]:
+                    comp = []
+                    while True:
+                        w = stack.pop()
+                        on.discard(w)
+                        comp.append(w)
+                        if w == v:
+                            break
+                    out.append(sorted(comp))
+    return out
+
+
+def variable_facts(fn, ctx, names):
+    """{variable: (zeros, ones)}: the bits known to be 0 and 1 of the values of the named variables and of
+    those their definitions read, from all their definitions (definitions): the greatest fixpoint of
+    known bits over the function's assignments, each definition's value taken as known() makes it with
+    the facts of what it reads. The variables go in the order of what their definitions read (strongly
+    connected components, what is read first); in a component whose definitions read each other (a
+    loop's step, i = i + 1) the facts start from the definitions that read no variable of it not yet
+    reached (optimistic: a mask of a counter keeps its bits through the counter's step) and are met with
+    each definition again until none changes, a variable whose bits have weakened FACT_WEAKENINGS times
+    taken as unknown there (a counter's). Flow-insensitive: what holds for every definition and for an
+    unknown starting value (a parameter's, one read before any write: read_unset, asked only of the
+    variables that get facts, and those made again without them where it says so) holds on every path
+    that reaches a use, which is what cexpr's proofs assume of a fact. Only variables of 32 bits or
+    fewer; a variable with nothing known is left out."""
+    defs, unknown, unset = definitions(fn)
+    facts = _facts(defs, unknown, ctx, names)
+    unread = {v for v in facts if v in unset}
+    if unread:
+        bad = read_unset(fn, unread)
+        if bad:                             # (fewer facts only: what was checked stays checked)
+            facts = _facts(defs, unknown | bad, ctx, names)
+    return facts
+
+
+def _facts(defs, unknown, ctx, names):
+    """variable_facts' fixpoint, with the variables of unknown value given."""
+    work, succ = set(), {}
+    todo = [n for n in names if n in ctx.types]
+    while todo:
+        v = todo.pop()
+        if v in work or v not in ctx.types or ctx.types[v][0] > 32:
+            continue
+        work.add(v)
+        if v in unknown:
+            continue
+        reads = {x.id for value in defs.get(v, ()) for x in walk_expr(value) if isinstance(x, C.Name)}
+        succ[v] = sorted(r for r in reads if r in ctx.types and ctx.types[r][0] <= 32)
+        todo += [r for r in succ[v] if r not in work]
+    facts = {v: (0, 0) for v in work if v in unknown or v not in defs}
+    calc = cexpr.Ctx(ctx.int_bits, ctx.long_bits, ctx.types, ctx.returns)
+    calc.facts = facts
+
+    def value_bits(v, value):
+        k = known(value, calc)
+        k = Known(*ctx.types[v]) if k is None else convert(k, ctx.types[v])     # (as the assignment converts)
+        return k.zeros, k.ones
+    for comp in _components(sorted(work), succ):
+        comp = [v for v in comp if v not in facts]
+        if not comp:
+            continue
+        inside = set(comp)
+        cyclic = len(comp) > 1 or comp[0] in succ.get(comp[0], ())
+        weak = {}
+        changed = True
+        while changed:
+            changed = False
+            for v in comp:
+                got = None
+                for value in defs[v]:
+                    if cyclic and any(isinstance(x, C.Name) and x.id in inside and x.id not in facts
+                                      for x in walk_expr(value)):
+                        continue            # (not reached yet: a later round)
+                    z, o = value_bits(v, value)
+                    got = (z, o) if got is None else (got[0] & z, got[1] & o)
+                if got is None:
+                    continue
+                old = facts.get(v)
+                new = got if old is None else (old[0] & got[0], old[1] & got[1])
+                if new != old:
+                    if old is not None:
+                        weak[v] = weak.get(v, 0) + 1
+                    facts[v] = new if weak.get(v, 0) <= FACT_WEAKENINGS else (0, 0)
+                    changed = cyclic
+        for v in comp:                      # (a component no definition reached: nothing known)
+            facts.setdefault(v, (0, 0))
+    return {v: f for v, f in facts.items() if f != (0, 0) and v in work}
+
+
 def _effects(e):
     """The texts of e's loads and calls (sorted, each as often as it is there)."""
     return sorted(C.expr_text(x) for x in walk_expr(e)
@@ -538,7 +806,7 @@ def _effects(e):
 
 class Prover:
     """cexpr.equivalent of a node and a proposal, kept by what it reads (the texts, the variables'
-    types, int's width) in memo (dread.tidy's run: the passes run again each round)."""
+    types and facts, int's width) in memo (dread.tidy's run: the passes run again each round)."""
 
     def __init__(self, ctx, memo=None):
         self.ctx, self.memo = ctx, memo if memo is not None else {}
@@ -547,8 +815,8 @@ class Prover:
         if _effects(e) != _effects(cand):
             return False
         names = sorted({x.id for y in (e, cand) for x in walk_expr(y) if isinstance(x, C.Name)})
-        key = ("bitfields", C.expr_text(e), C.expr_text(cand), tuple((n, self.ctx.types.get(n)) for n in names),
-               self.ctx.int_bits)
+        key = ("bitfields", C.expr_text(e), C.expr_text(cand),
+               tuple((n, self.ctx.types.get(n), self.ctx.fact(n)) for n in names), self.ctx.int_bits)
         if key not in self.memo:
             self.memo[key] = cexpr.equivalent(e, cand, self.ctx)
         return self.memo[key]
@@ -617,13 +885,13 @@ def _children_simplified(e, ctx, prove):
 
 
 def _shaped(e):
-    """Whether e holds a node of a shape some rule starts from (a shift by a constant, a mask, a select
-    of constants under an operation with one, a negation, a cast), by its tree alone: the statements
-    without one are left alone and a function without any needs no types (until 2026-10-24 the pass
-    made them for every function each round: half its time)."""
+    """Whether e holds a node of a shape some rule starts from (a shift, a mask, a select of constants
+    under an operation with one, a negation, a cast), by its tree alone: the statements without one are
+    left alone and a function without any needs no types (until 2026-10-24 the pass made them for every
+    function each round: half its time)."""
     for x in walk_expr(e):
         if isinstance(x, C.Binary):
-            if (x.op in ("<<", ">>") and _value(x.r) is not None) or (x.op == "-" and _value(x.l) == 0) or \
+            if x.op in ("<<", ">>") or (x.op == "-" and _value(x.l) == 0) or \
                     (x.op == "&" and (_value(x.r) is not None or _value(x.l) is not None)) or \
                     isinstance(x.l, C.Cond) or isinstance(x.r, C.Cond):
                 return True
@@ -634,8 +902,10 @@ def _shaped(e):
 
 def bitfields(fn):
     """The pass (dread.tidy PASSES): every simple statement's expressions, those inside conditional
-    blocks too (dread.tidy flat_view), simplified; whether anything changed. Nothing without z3 (the
-    extra "prove"), nothing where int is not 32 bits wide."""
+    blocks too (dread.tidy flat_view), simplified, with the facts their variables' definitions give
+    (variable_facts) as the context's (cexpr.Ctx facts: what known reads of a variable and what the
+    proofs assume); whether anything changed. Nothing without z3 (the extra "prove"), nothing where int
+    is not 32 bits wide."""
     from dread import tidy
     if cexpr.z3 is None:
         return False
@@ -646,6 +916,7 @@ def bitfields(fn):
     ctx = tidy.context(fn)
     if ctx.int_bits != 32:
         return False
+    ctx.facts = variable_facts(fn, ctx, {x.id for get, _ in work for x in walk_expr(get()) if isinstance(x, C.Name)})
     prove = Prover(ctx, getattr(tidy._RUN, "memo", None))
     changed = False
     for get, put in work:

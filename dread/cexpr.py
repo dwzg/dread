@@ -13,6 +13,13 @@ becomes a variable of its own (abstract), so that both expressions see the same 
 type C gives it (a load its pointee's, a call its callee's declared result: Ctx.returns).
 Undefined behaviour (a shift by the width or more, a division by zero) raises Undefined; such a value
 of the inputs is left out of the comparison when the lifted expression has it.
+
+Facts about variables (Ctx.facts, since 2026-10-24): bits of a variable's value known to be 0 and
+known to be 1 wherever the expressions are evaluated (dread.bitfields variable_facts: from every
+definition of the variable in its function). The test values keep them (vectors) and the proof
+assumes them, so a rewrite is proved for the values the variable can have there (x << r2 for r2 = i &
+7: its amount below 32): sound only where a fact holds on every path that reaches the expression,
+which the caller states. A variable without facts may have any value of its type.
 """
 import random
 import re
@@ -25,13 +32,25 @@ class Undefined(Exception):
 
 
 class Ctx:
-    """The target's integer widths (ARM and RISC-V: int 32 bits; MSP430: 16), the variables' types and
-    the callees' declared result types (returns: {name: type as written}, the file's declarations)."""
+    """The target's integer widths (ARM and RISC-V: int 32 bits; MSP430: 16), the variables' types,
+    the callees' declared result types (returns: {name: type as written}, the file's declarations) and
+    facts about variables (facts: {name: (zeros, ones)}, the bits of its value known to be 0 and to be
+    1 in its type's width, wherever the expressions are evaluated: the module's docstring)."""
 
-    def __init__(self, int_bits=32, long_bits=32, types=None, returns=None):
+    def __init__(self, int_bits=32, long_bits=32, types=None, returns=None, facts=None):
         self.int_bits, self.long_bits = int_bits, long_bits
         self.types = dict(types or {})
         self.returns = dict(returns or {})
+        self.facts = dict(facts or {})
+
+    def fact(self, name):
+        """(zeros, ones) of a variable with facts, masked to its type's width; None for one without."""
+        got = self.facts.get(name)
+        ty = self.types.get(name)
+        if got is None or ty is None:
+            return None
+        m = (1 << ty[0]) - 1
+        return got[0] & m, got[1] & m
 
     def result_type(self, call):
         """(bits, signed) of what a call gives, as C has it: its callee's declared result type (returns;
@@ -237,7 +256,8 @@ def abstract(exprs, ctx, prefix="__v", mapping=None, into=None):
     those variables; ctx.abstracted: {its text: the variable}). mapping and into: those of an earlier
     call, so that a second expression gets the same variables for the same subexpressions."""
     seen = {} if mapping is None else mapping
-    ctx2 = into if into is not None else Ctx(ctx.int_bits, ctx.long_bits, ctx.types, ctx.returns)
+    ctx2 = into if into is not None else Ctx(ctx.int_bits, ctx.long_bits, ctx.types, ctx.returns,
+                                             getattr(ctx, "facts", None))
     ctx2.abstracted = seen
 
     def key(x):
@@ -335,6 +355,11 @@ def vectors(names, ctx, count=400, seed=7, extra=()):
         for _ in range(count // 4):
             v = rng.getrandbits(widths[a]) & m
             out.append({a: v, b: v})
+    facts = {n: ctx.fact(n) for n in names if isinstance(ctx, Ctx) and ctx.fact(n) is not None}
+    if facts:                               # (values the variables can have where the facts hold)
+        for env in out:
+            for n, (zeros, ones) in facts.items():
+                env[n] = (env[n] & ~zeros) | ones
     return out
 
 
@@ -465,9 +490,9 @@ PROOF_MS = 3000         # z3's time for one proof; unknown when out of time coun
 
 
 def prove(e1, e2, ctx, as_bool=False):
-    """True when z3 proves that for every value of the variables where e1 is defined, e2 is defined
-    and has e1's value (as_bool: its truth); False when it finds values where not, runs out of time,
-    or is not installed."""
+    """True when z3 proves that for every value of the variables where e1 is defined (and the facts
+    about them hold: Ctx.facts), e2 is defined and has e1's value (as_bool: its truth); False when it
+    finds values where not, runs out of time, or is not installed."""
     if z3 is None:
         return False
     from dread.cflow import walk_expr
@@ -491,6 +516,15 @@ def prove(e1, e2, ctx, as_bool=False):
         same = _resize(v1, t1, bits) == _resize(v2, t2, bits)
     solver = z3.Solver()
     solver.set("timeout", PROOF_MS)
+    for n in names:                         # (what is known of a variable's bits wherever this runs)
+        fact = ctx2.fact(n)
+        if fact is not None:
+            zeros, ones = fact
+            width = ctx2.types[n][0]
+            if zeros:
+                solver.add(variables[n] & z3.BitVecVal(zeros, width) == 0)
+            if ones:
+                solver.add(variables[n] & z3.BitVecVal(ones, width) == z3.BitVecVal(ones, width))
     solver.add(d1, z3.Or(z3.Not(d2), z3.Not(same)))
     return solver.check() == z3.unsat
 

@@ -2319,7 +2319,7 @@ model).
   value to its own type only between two arithmetic shifts. Left: a variable's bits from its
   definitions (three masks each in gizmo a32, m3, m4 script_run and GCC -O0's __NVIC_EnableIRQ, all a
   register shift's amount: the next item); 16-bit int (MSP430: left alone).
-- [ ] **Register shifts with an amount known below 32.** ARM's shift by a register (lsl r0, r1, r2,
+- [x] **Register shifts with an amount known below 32.** ARM's shift by a register (lsl r0, r1, r2,
   Thumb-2's lsl.w) is lifted as `(s & 0xffu) == 0 ? x : (s & 0xffu) < 32 ? x << (s & 0xffu) : 0` (the
   amount's low byte, 32 and more giving 0), and readable C prints it so. Its first arm is always
   redundant (x << 0 is x); where the amount is known below 32 the whole is `x << s`: from its
@@ -2334,6 +2334,48 @@ model).
   2026-10-24): gizmo a32, m3, m4 2 each (script_run, gpio_set), rv32 none (RISC-V's sll takes the
   amount's low five bits: `x << (s & 31)`), FreeRTOS GCC -Os 18 in 14 functions, clang -O2 21 in 13,
   RISC-V GCC -Os none, GCC -O0 14 in 11.
+  Done 2026-10-25 (dread.bitfields: the select rules in proposals, decided, variable_facts with
+  definitions and read_unset; dread.cexpr Ctx.facts; docs/decisions.md, "Facts about variables: known bits
+  from all their definitions, assumed by the proofs"). The first arm of a register shift goes wherever the
+  rest shifts by its amount (proved: x shifted by 0 is x; asr's alike; a rotation keeps it, x << 32 being
+  undefined), and a select whose condition the known bits decide is the arm it takes, the guard of an
+  amount below 32 among them. A variable's known bits come from all its definitions in its function (a
+  greatest fixpoint over its assignments in the order of what they read, a counter's taken as unknown
+  after three weakenings; nothing for a parameter, an asm's output, an address taken or a variable that
+  may be read before it is written), and cexpr's proofs assume them (the test values keep them, z3 assumes
+  them). gizmo a32, m3, m4 script_run: `r0_1 ^= *(volatile u8 *)(r0 + r3_2) << (r3_2 & 7);` (the source's
+  `acc ^= p[i] << (i & 7)`); gpio_set keeps `(r0 & 0xffu) < 32 ? 1u << (r0 & 0xffu) : 0` (its amount a
+  parameter); GCC -O0's __NVIC_EnableIRQ reads `1u << (s9 & 0x1fu)`. On fresh copies of the eight builds
+  (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; main 6f015bc -> this;
+  the lifted tables' functions as dread readable --out prints them): first arms 2, 2, 2, 0; 18, 21, 0, 14
+  -> 0 on all; guards 2, 2, 2, 0; 18, 21, 0, 14 -> 1, 1, 1, 0; 18, 21, 0, 13 (FreeRTOS's amounts are
+  priorities loaded from a task's structure, which nothing bounds, and loop counters only a comparison
+  bounds). Of the kinds, every function that lifts has lsl by a register (2, 2, 2, 0; 22, 28, 0, 24 times)
+  and lsr once (gizmo a32's __udivsi3, newlib's __sflush_r on the three Cortex-M3 builds), no asr or ror
+  (their forms are tested on snippets). The gate accepts the same functions (35, 36, 44, 31; 317, 275,
+  252, 354) and writes the same readable tables. The printed C of 77 functions changed (every function
+  that lifts: 3, 2, 2, 0; 24, 21, 5, 20): the register shifts, and ten where a variable's facts made a
+  mask or a narrowing cast redundant or decided a select (`r4 & 1` of a value 0 or 1 in three of GCC
+  -Os's, `(u8)(r3_1 | g_200017ac_u8)` of a byte, a division's guard `r4 > 0xffffffffu ? r4 : ...` that is
+  never true; on RISC-V `a0 >> (a5 & 31)` as `a0 >> a5` in __clzsi2, `(s0 & 1) == 0` as `s0 == 0` twice,
+  `s3_24 & (0 - a0_13)` as `a0_13 != 0 ? s3_24 : 0`). The bits pass took 1.4 -> 2.2 s of every lifted
+  function's readable tree on FreeRTOS GCC -Os and 0.8 -> 1.2 s on GCC -O0 (one process, CPU time, on main
+  bc223f9 with the same code; on main 1c241ac 0.8 -> 1.5 and 1.2 -> 1.8 s): the facts and the new rules
+  cost about 0.6 s a build, less than the totals (89 -> 72 s, 42 -> 37 s) move from run to run on a
+  machine shared with other runs, and the check's times stayed (15, 4, 4, 5; 609, 439, 279, 728 s -> 15,
+  4, 4, 4; 617, 417, 279, 728 s). Names made for main's C carry (dread readable --carry, tables naming
+  every variable of the 77 changed functions with main's code): 1349 of 1357, the 8 dropped those of
+  variables the change folded away (script_run's loaded byte and amount, __NVIC_EnableIRQ's amount, a
+  temporary of RISC-V's prvQueueSetSendingTask). Tests (tests/test_bitfields.py): the shifts' forms with
+  and without facts (lsl, lsr, asr, a rotation), cexpr's proof and test values under facts, a small
+  function's facts (a mask, a counter, a mask of the counter, a byte or 1, a value that reads itself; a
+  parameter, a read before a write, an address taken, an asm's output), random functions of shifts by
+  registers cleaned up and compiled beside the originals, gizmo's script_run and gpio_set on the ARM
+  builds, and a program of our own through the gate (ARMv4T at -Os and -O0, Cortex-M3, RV32IMAC: every
+  function accepted, the masked amounts plain shifts on all four); with Ubuntu 24.04's and 22.04's
+  compilers too. Left: a bound only a comparison on the way gives (a loop's counter, `r1_2 <= 29 && ...`);
+  a variable's bits through steps of itself in sequence (gizmo's __udivsi3, `r2 += 8; r2 += 4` before the
+  shift by r2 + 3: the flow-insensitive fixpoint takes them for a cycle).
 - [x] **One variable per value.** A register that holds unrelated values in turn (a pointer, then
   loaded bytes, then a callee's second word; a parameter, then a callee's result) stays one variable,
   and the pilot names it after one of its uses. Split variables where their live ranges do not meet

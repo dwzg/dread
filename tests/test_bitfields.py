@@ -5,9 +5,14 @@ mask; the pass writes them as the casts, fields and selects they are ((s16)x, (x
 -3 : 0), each rewrite proved by z3 for C's types. Each fold on snippets, the same functions compiled by
 the host's C compiler beside the lifted C, the known bits against the values, and a program of our own
 through the gate: ARMv4T in ARM state at -Os and -O0, a Cortex-M3 (sxth, ubfx) and RV32IMAC, all four
-read alike."""
+read alike. ARM's shift by a register (its first arm gone, the plain shift where the amount is known
+below 32, from its expression or its variable's definitions: variable_facts, the facts cexpr's proofs
+assume): the forms on snippets, the facts of small functions' variables, random functions of such
+shifts cleaned up and compiled beside the originals, gizmo's script_run and gpio_set, and a program of
+our own through the gate on the same four builds."""
 import ctypes
 import random
+import re
 import shutil
 import subprocess
 
@@ -433,3 +438,259 @@ def test_gizmo_clamps_its_volume_with_a_select(variant, target, program):
     if variant == "rv32":
         kv = text("parse_kv")
         assert "parse_uint(" in kv and " < 0 ? -3 : 0;" in kv and ">> 31" not in kv, kv
+
+
+# --- ARM's shift by a register: its first arm, and an amount known below 32
+
+LSL = "(s & 0xffu) == 0 ? x : (s & 0xffu) < 32 ? x << (s & 0xffu) : 0u"     # (dread.lift REG_SHIFT)
+LSR = "(s & 0xffu) == 0 ? x : (s & 0xffu) < 32 ? x >> (s & 0xffu) : 0u"
+ASR = "(s & 0xffu) == 0 ? x : (u32)((s32)x >> ((s & 0xffu) < 32 ? (s & 0xffu) : 31))"
+ROR = "((s & 0xffu) & 31) == 0 ? x : (x >> ((s & 0xffu) & 31)) | (x << (32 - ((s & 0xffu) & 31)))"
+BELOW_8 = {"s": (0xfffffff8, 0)}            # (s's facts: its bits from 3 up known to be 0)
+BELOW_256 = {"s": (0xffffff00, 0)}
+
+# (lifted C, facts, readable C)
+SHIFTS = [
+    (LSL, {}, "(s & 0xffu) < 32 ? x << (s & 0xffu) : 0u"),               # x << 0 is x: the first arm goes
+    (LSR, {}, "(s & 0xffu) < 32 ? x >> (s & 0xffu) : 0u"),
+    (ASR, {}, "(u32)((s32)x >> ((s & 0xffu) < 32 ? s & 0xffu : 31))"),
+    (LSL, BELOW_8, "x << s"),                                               # an amount below 32: the shift
+    (LSR, BELOW_8, "x >> s"),
+    (ASR, BELOW_8, "(u32)((s32)x >> s)"),
+    (LSL, BELOW_256, "s < 32 ? x << s : 0u"),                              # below 256: its low byte is itself
+    (LSL.replace("(s & 0xffu)", "((y & 7u) & 0xffu)"), {}, "x << (y & 7u)"),  # the amount's own bits
+    (ROR, {}, "(s & 0x1fu) == 0 ? x : (x >> (s & 0x1fu)) | (x << (32 - (s & 0x1fu)))"),   # x << 32 if 0: kept
+    (ROR, {"s": (0xffffffe0, 1)}, "(x >> s) | (x << (32 - s))"),           # an odd amount below 32: never 0
+]
+
+
+def folded_with(text, facts):
+    c = cexpr.Ctx(types=TYPES, facts=facts)
+    return cparse.expr_text(bitfields.simplified(expr(text), c, bitfields.Prover(c)))
+
+
+TYPES["s"] = (32, False)
+
+
+@needs_z3
+@pytest.mark.parametrize("lifted,facts,wanted", SHIFTS)
+def test_a_shift_by_a_register(lifted, facts, wanted):
+    """The lifters' shift by a register (the amount's low byte, 32 and more giving 0, or the sign for asr):
+    its first arm (the amount 0) always goes, the guard where the amount's known bits (the expression's
+    or its variable's facts) keep it below 32; a rotation by 0 keeps its arm (x << 32 is undefined)."""
+    assert folded_with(lifted, facts) == wanted, (lifted, facts, folded_with(lifted, facts))
+    assert cexpr.prove(expr(lifted), expr(wanted), cexpr.Ctx(types=TYPES, facts=facts))
+
+
+@needs_z3
+def test_a_proof_assumes_the_facts_and_the_test_values_keep_them():
+    """cexpr's facts about a variable: x << s stands for the guarded shift where s is known below 8, not
+    without; the test values (vectors) keep the known bits, so the filter before the proof does not
+    refuse what the facts make true."""
+    guarded, plain = expr("(s & 0xffu) < 32 ? x << (s & 0xffu) : 0u"), expr("x << s")
+    assert not cexpr.prove(guarded, plain, cexpr.Ctx(types=TYPES))
+    assert not cexpr.equivalent(guarded, plain, cexpr.Ctx(types=TYPES))
+    with_facts = cexpr.Ctx(types=TYPES, facts={"s": (0xfffffff8, 0x1)})
+    assert cexpr.prove(guarded, plain, with_facts) and cexpr.equivalent(guarded, plain, with_facts)
+    values = cexpr.vectors(["s", "x"], with_facts)
+    assert values and all(v["s"] & 0xfffffff8 == 0 and v["s"] & 1 for v in values)
+    assert not cexpr.prove(expr("s"), expr("s & 1u"), cexpr.Ctx(types=TYPES, facts={"s": (0xfffffff8, 0)}))
+
+
+FACTS_FN = """extern void g(u32);
+u32 f(u32 a0, u32 a1)
+{
+    u32 r0 = a0, r1 = a1, r2, r3, r4, r5, r6, r7 = 3, r8, r9;
+    r2 = r1 & 7;  /* 0: and r2, r1, #7 */
+    r3 = 0;  /* 4: mov r3, #0 */
+L_top: ;
+    r3 = r3 + 1;  /* 8: add r3, r3, #1 */
+    r4 = r3 & 0x1fu;  /* c: and r4, r3, #0x1f */
+    if (r3 != r0) goto L_top;  /* 10: bne */
+    r5 = *(volatile u8 *)r0;  /* 14: ldrb r5, [r0] */
+    if (r1 == 0) { r5 = 1; }  /* 18: moveq r5, #1 */
+    if (r1 == 2) { r6 = 1; }  /* 1c: moveq r6, #1 */
+    g((u32)&r7);  /* 20: bl g */
+    __asm__ volatile ("mov %0, #1" : "=r"(r8));  /* 24: mov */
+    r9 = r2 << 2;  /* 28: lsl r9, r2, #2 */
+    r9 |= 1;  /* 2c: orr r9, r9, #1 */
+    return r2 + r3 + r4 + r5 + r6 + r7 + r8 + r9;  /* 30: bx lr */
+}
+"""
+
+
+def test_a_variables_facts_come_from_all_its_definitions():
+    """variable_facts: r2 = r1 & 7 is below 8; a counter (r3 = 0, r3 + 1 in a loop) has no facts, a mask
+    of it (r4 = r3 & 0x1f) has the mask's; a byte loaded or 1 is below 256; r9 = r2 << 2, then r9 |= 1
+    (its definitions read it: a fixpoint) keeps the bits neither sets. Nothing for a parameter, a
+    variable that may be read before anything writes it (r6), one whose address is taken (r7), an asm's
+    output (r8)."""
+    fn = cparse.parse(FACTS_FN).function("f")
+    facts = bitfields.variable_facts(fn, tidy.context(fn), ["r%d" % k for k in range(10)] + ["a0", "a1"])
+    assert facts == {"r2": (0xfffffff8, 0), "r4": (0xffffffe0, 0), "r5": (0xffffff00, 0), "r9": (0xffffffe2, 0)}, \
+        {k: (hex(z), hex(o)) for k, (z, o) in facts.items()}
+
+
+REG_SHIFT = {"lsl": "(%(s)s == 0 ? %(x)s : %(s)s < 32 ? %(x)s << %(s)s : 0u)",       # (dread.lift REG_SHIFT)
+             "lsr": "(%(s)s == 0 ? %(x)s : %(s)s < 32 ? %(x)s >> %(s)s : 0u)",
+             "asr": "(%(s)s == 0 ? %(x)s : (u32)((s32)%(x)s >> (%(s)s < 32 ? %(s)s : 31)))",
+             "ror": "((%(s)s & 31) == 0 ? %(x)s : (%(x)s >> (%(s)s & 31)) | (%(x)s << (32 - (%(s)s & 31))))"}
+
+
+def random_shift_function(rng, name, steps=10):
+    """A function in the lifters' dialect that shifts by registers (lsl, lsr, asr, ror as the lifters
+    write them, in an instruction's block) in a loop that runs three times: r4's amounts are masks, top
+    bits and small constants (always below 32), r5's the same or a step of its own (a counter: nothing
+    known), the other registers' anything (other shifts, sums, a parameter); some statements in
+    conditional blocks."""
+    regs = ["r0", "r1", "r2", "r3", "r12"]
+    lines = ["u32 %s(u32 a0, u32 a1, u32 a2, u32 a3)" % name, "{",
+             "    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r7 = 3, r12 = a0 ^ a3;",
+             "L_top: ;"]
+
+    def bounded(d):
+        src = rng.choice(regs)
+        r = rng.random()
+        if r < 0.5:
+            return "%s = %s & 0x%xu;" % (d, src, rng.choice([1, 3, 7, 15, 31]))
+        if r < 0.75:
+            return "%s = %s >> %d;" % (d, src, rng.choice([27, 28, 30, 31]))
+        return "%s = 0x%xu;" % (d, rng.randrange(0, 32))
+
+    def amount():
+        r = rng.random()
+        if r < 0.4:
+            return bounded("r4")
+        if r < 0.6:
+            return bounded("r5") if rng.random() < 0.6 else "r5 = r5 + 1;"
+        d, src = rng.choice(regs), rng.choice(regs)
+        return "%s = %s;" % (d, rng.choice(["%s & 0x%xu" % (src, rng.choice([7, 0xff, 0x1f0])), "%s + 1" % d,
+                                             "%s ^ %s" % (src, rng.choice(regs)), "%s >> 24" % src]))
+
+    def shift():
+        d, x, s = rng.choice(regs), rng.choice(regs + ["r4"]), rng.choice(["r4", "r4", "r5"] + regs)
+        value = REG_SHIFT[rng.choice(sorted(REG_SHIFT))] % {"x": "(x)", "s": "(a & 0xffu)"}
+        return "{ u32 x = %s, a = %s; %s = %s; }" % (x, s, d, value)
+    for k in range(steps):
+        line = amount() if rng.random() < 0.45 else shift()
+        if rng.random() < 0.2:
+            line = "if (%s < %s) { %s }" % (rng.choice(regs), rng.choice(regs), line)
+        lines.append("    %s  /* %x: i */" % (line, 4 * k))
+    lines += ["    r7 = r7 - 1;  /* fe: subs */", "    if (r7 != 0) goto L_top;  /* ff: bne */",
+              "    return r0 ^ (r1 << 1) ^ (r2 << 2) ^ (r3 << 3) ^ (r12 << 4) ^ (r4 << 5) ^ (r5 << 6);", "}"]
+    return "\n".join(lines) + "\n"
+
+
+@needs_z3
+@pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
+def test_random_shifts_by_registers_cleaned_up_compute_the_same(tmp_path):
+    """Random functions of shifts by registers (random_shift_function), cleaned up (every pass, the facts
+    of their amounts among them), compiled with the host's C compiler beside the originals and called
+    with random and boundary arguments: the same results every time (a shift by 32 or more where the
+    facts were wrong is undefined in C, and x86 takes the amount modulo 32: it would show); every first
+    arm gone but a rotation's, and the guards of the amounts known below 32 (r4's, mostly)."""
+    rng = random.Random(29)
+    count, originals, results = 60, [], []
+    for i in range(count):
+        text = random_shift_function(rng, "orig_%d" % i, steps=rng.randint(6, 14))
+        originals.append(text)
+        fn = cparse.parse(text.replace("orig_", "tidy_")).function("tidy_%d" % i)
+        tidy.tidy(fn)
+        results.append(cparse.unparse(fn, notes=False))
+    head = PRELUDE + "typedef unsigned long long u64;\ntypedef signed long long s64;\n"
+    (tmp_path / "shifts.c").write_text(head + "".join(originals) + "\n".join(results) + "\n")
+    lib = tmp_path / "shifts.so"
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(tmp_path / "shifts.c")], check=True)
+    so = ctypes.CDLL(str(lib))
+    edges = [0, 1, 7, 8, 31, 32, 33, 0xff, 0x100, 0x7fffffff, 0x80000000, 0xffffffe0, 0xffffffff]
+    for i in range(count):
+        a, b = getattr(so, "orig_%d" % i), getattr(so, "tidy_%d" % i)
+        for f in (a, b):
+            f.restype, f.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * 4
+        for _ in range(60):
+            args = [rng.choice(edges + [rng.getrandbits(32), rng.getrandbits(6)]) for _ in range(4)]
+            assert a(*args) == b(*args), (i, args, originals[i], results[i])
+    rotations = sum(t.count("& 31) == 0 ?") for t in originals)     # (a rotation by 0 keeps its first arm)
+    assert sum(t.count("== 0 ?") for t in results) <= rotations < sum(t.count("== 0 ?") for t in originals)
+    before, after = sum(t.count("< 32 ?") for t in originals), sum(t.count("< 32 ?") for t in results)
+    assert after < before * 0.7, (before, after)
+
+
+@needs_z3
+@pytest.mark.parametrize("variant", ["a32", "m3", "m4"])
+def test_gizmo_shifts_by_its_index_as_the_source(variant):
+    """gizmo's script_run (acc ^= p[i] << (i & 7)) printed ARM's shift by a register as r0_1 ^= (r2 &
+    0xffu) == 0 ? r1_1 : (r2 & 0xffu) < 32 ? r1_1 << (r2 & 0xffu) : 0, r2 = r3_2 & 7 its amount: now
+    the shift itself (r2's facts: below 8), and the amount folded in as the source writes it; gpio_set's
+    amount (1u << pin) is a parameter nothing bounds: only the first arm goes."""
+    from test_flags import gizmo_readable
+    got = gizmo_readable(variant, "script_run", "gpio_set")
+    run, gpio = got["script_run"], got["gpio_set"]
+    assert re.search(r"\^= \*\(volatile u8 \*\)\(r0 \+ (\w+)\) << \(\1 & 7\);", run), run
+    assert "< 32 ?" not in run and "== 0 ?" not in run, run
+    assert "(r0 & 0xffu) < 32 ? 1u << (r0 & 0xffu) : 0;" in gpio and "== 0 ?" not in gpio, gpio
+
+
+SHIFT_PROGRAM = """typedef unsigned int u32;
+typedef unsigned char u8;
+u32 shifts_masked(u32 x, u32 i) { return x << (i & 7); }
+u32 shifts_right(u32 x, u32 i) { return x >> (i & 15); }
+int shifts_arith(int x, u32 i) { return x >> (i & 31); }
+u32 shifts_bit(u32 flags, u32 k) { u32 b = k & 3; return (flags >> b) & 1; }
+u32 shifts_any(u32 x, u32 n) { return x << n; }
+__attribute__((noinline)) u32 shifts_mix(const u8 *p, u32 n)
+{
+    u32 acc = 0;
+    for (u32 i = 0; i < n; i++)
+        acc ^= (u32)p[i] << (i & 7);
+    return acc;
+}
+int main(void) { return 0; }
+"""
+
+# What each function returns in readable C (R the first argument's register, S the second's) on every
+# build; before, ARM state and Thumb-2 printed ARM's shift by a register whole, (r1_1 & 0xffu) == 0 ? r0 :
+# (r1_1 & 0xffu) < 32 ? r0 << (r1_1 & 0xffu) : 0 for shifts_masked behind r1_1 = r1 & 7
+SHIFT_READ = {
+    "shifts_masked": r"return R << \(S & 7\);",
+    "shifts_right": r"return R >> \(S & 0xfu\);",
+    "shifts_arith": r"return \(s32\)R >> \(S & (0x1fu|31)\);",
+    "shifts_bit": r"return \(R >> \(S & 3\)\) & 1;",
+}
+
+
+@pytest.mark.slow
+@needs_z3
+@pytest.mark.parametrize("kind,opt", [pytest.param(k, o, marks=needs_build(k)) for k, o in BUILDS])
+def test_shifts_by_registers_read_as_shifts_and_pass_the_gate(kind, opt, tmp_path):
+    """SHIFT_PROGRAM with GCC for ARMv4T in ARM state (-Os, -O0), a Cortex-M3 and RV32IMAC (whose sll
+    takes the amount's low five bits: the lifted C's x << (s & 31) was a shift already): every function
+    lifts and the gate takes every one in its readable C; an amount the code masks below 32 reads as the
+    plain shift on every build (SHIFT_READ; shifts_mix's i & 7 in a loop, through its variable's facts
+    where the mask has a register of its own), and an amount nothing bounds keeps ARM's guard, its first
+    arm gone."""
+    from dread import build, lift, regflow
+    from dread.program import Program
+    from test_statics import kind_target
+    target = kind_target(tmp_path, kind, SHIFT_PROGRAM, opt=opt)
+    image = target.image()
+    lifted = build.read_names(image.table("lifted"))
+    assert set(SHIFT_READ) | {"shifts_any", "shifts_mix"} <= set(lifted)
+    lines = []
+    assert readable.check(target, image, out=lines.append) == sorted(lifted), lines
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    context = readable.Context(target, image, program, flow)
+    lifter = lift.make_lifter(program, flow)
+    regs = ("a0", "a1") if kind == "rv32" else ("r0", "r1")
+
+    def text(name):
+        return readable.transform(name, lifter.lift(program.by_name[name]).text, context=context)
+    for name, wanted in SHIFT_READ.items():
+        out = text(name)
+        assert re.search(wanted.replace("R", regs[0]).replace("S", regs[1]), out), (name, out)
+    mix, any_ = text("shifts_mix"), text("shifts_any")
+    assert re.search(r"\^= .*<< (\w+|\(\w+ & 7\));", mix) and "< 32 ?" not in mix and "== 0 ?" not in mix, mix
+    assert "== 0 ?" not in any_, any_
+    if kind != "rv32":
+        assert "(r1 & 0xffu) < 32 ? r0 << (r1 & 0xffu) : 0;" in any_, any_
