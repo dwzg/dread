@@ -13,6 +13,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 const hex = (n) => "0x" + n.toString(16);
 const hex8 = (n) => n.toString(16).padStart(8, "0");
 const fnLink = (name, at) => "#/f/" + encodeURIComponent(name) + (at != null ? "@" + hex(at) : "");
+const viewLink = (name, view) => "#/f/" + encodeURIComponent(name) + "/" + view;     // (a view of views.js)
 const relLink = (name) => "#/r/" + encodeURIComponent(name);
 const modeLink = (name) => (S.view === "program" ? progLink(name) : S.mode === "relations" ? relLink(name) : fnLink(name));
 const modeHash = (mode, name) => (mode === "relations" ? relLink(name) : mode === "program" ? progLink(name) : fnLink(name));
@@ -332,11 +333,26 @@ async function loadPages(known) {
   pageStatus(gui.status);
 }
 
-export { $, esc, api, hex, size, ago, when, toast, showError, watch, prefs, S, GUI, register, enter, nextRender, isCurrent };
+// Views of one function from page scripts (views.js: a trace, the code left unrun, the mutation check, the
+// registers), shown under the function's header with its listing and C: show(d, {view, arg, keep}) after
+// the code view is drawn (view, arg: the address's /VIEW/ARG after the name; their places #fn-strip under
+// the header and #fn-view beside the listing and the C, in #fn-body), c(pane, source) after the C pane is
+// drawn (to mark its lines), leave() when the code view of a function is left.
+const FN_HOOKS = [];
+function functionHook(hook) { FN_HOOKS.push(hook); }
+function fnHooks(what, ...args) {
+  for (const h of FN_HOOKS) {
+    if (!h[what]) continue;
+    try { h[what](...args); } catch (e) { console.error("function view", e); }
+  }
+}
+
+export { $, esc, api, hex, hex8, size, ago, when, toast, showError, watch, prefs, S, GUI, register, enter, nextRender, isCurrent,
+  functionHook, fnLink, selectAddress };
 
 async function route(keep = false) {
   const hash = decodeURIComponent(location.hash.slice(1));
-  const m = hash.match(/^\/([fr])\/([^@]+)(?:@(0x[0-9a-f]+))?$/i);
+  const m = hash.match(/^\/([fr])\/([^@/]+)(?:\/([a-z]+)(?:\/([^@]*))?)?(?:@(0x[0-9a-f]+))?$/i);
   const p = hash.match(/^\/p(?:\/(.+))?$/);
   const t = hash.match(/^\/s(?:\/(.+))?$/);
   if (!keep) $("#side").classList.remove("open");
@@ -346,9 +362,10 @@ async function route(keep = false) {
   }
   shownPage = page;
   for (const b of document.querySelectorAll(".nav-btn")) b.classList.toggle("on", !!page && b.dataset.page === page.name);
+  if (!(m && m[1] === "f") && S.view === "function" && S.mode === "code") fnHooks("leave");
   if (page) await page.show(hash.match(page.match), keep);
   else if (!GUI.target) showNoTarget();
-  else if (m) await showFunction(m[2], m[3] ? parseInt(m[3], 16) : null, keep, m[1] === "r" ? "relations" : "code");
+  else if (m) await showFunction(m[2], m[5] ? parseInt(m[5], 16) : null, keep, m[1] === "r" ? "relations" : "code", m[3] || null, m[4] || null);
   else if (p) await showProgram(p[1] || null, keep);
   else if (t) await showTimeline(t[1] || null, keep);
   else await showOverview(keep);
@@ -507,7 +524,7 @@ function refusedCard(o) {
 
 function droppedCard(o) {
   const body = o.dropped.length ? o.dropped.map((d) =>
-    `<div class="rowline"><a href="${fnLink(d.name)}">${esc(d.name)}</a><span class="r" title="${esc(d.reason)}">${esc(d.reason)}</span></div>`).join("")
+    `<div class="rowline"><a href="${/^FAIL /.test(d.reason) ? viewLink(d.name, "trace") : /^UNCOVERED |never ran/.test(d.reason) ? viewLink(d.name, "uncovered") : fnLink(d.name)}">${esc(d.name)}</a><span class="r" title="${esc(d.reason)}">${esc(d.reason)}</span></div>`).join("")
     : `<div class="none">${o.runs.lift_check ? "Nothing dropped: every lifted function agreed and was covered." : "No lift check recorded yet."}</div>`;
   return `<div class="card"><h2>Dropped by the lift check${o.dropped.length ? ` · ${o.dropped.length}` : ""}</h2>${body}</div>`;
 }
@@ -517,8 +534,8 @@ function testsCard(o) {
   if (!o.runs.test) body = `<div class="none">No test run recorded yet (dread test writes it).</div>`;
   else if (!o.failing.length && !o.uncovered.length) body = `<div class="none good">Every tested function agrees with the original, and its cases run every instruction.</div>`;
   else {
-    body = o.failing.map((f) => `<div class="rowline"><a href="${fnLink(f.name)}">${esc(f.name)}</a><span class="r bad">${f.failed} of ${f.cases} cases fail</span></div>`).join("") +
-      o.uncovered.map((u) => `<div class="rowline"><a href="${fnLink(u.name)}">${esc(u.name)}</a><span class="r warn">${u.missed} instructions never ran</span></div>`).join("");
+    body = o.failing.map((f) => `<div class="rowline"><a href="${viewLink(f.name, "trace")}" title="its failing cases and where they part (the trace view)">${esc(f.name)}</a><span class="r bad">${f.failed} of ${f.cases} cases fail</span></div>`).join("") +
+      o.uncovered.map((u) => `<div class="rowline"><a href="${viewLink(u.name, "uncovered")}" title="why its cases leave code unrun (the uncovered view)">${esc(u.name)}</a><span class="r warn">${u.missed} instructions never ran</span></div>`).join("");
   }
   return `<div class="card"><h2>Last test run</h2>${body}</div>`;
 }
@@ -600,7 +617,7 @@ function mapHit(event) {
 
 // ---- one function ----
 
-async function showFunction(name, at, keep = false, mode = "code") {
+async function showFunction(name, at, keep = false, mode = "code", view = null, arg = null) {
   const mine = ++renders;
   let d;
   try {
@@ -620,6 +637,7 @@ async function showFunction(name, at, keep = false, mode = "code") {
   document.title = name + " · DREAD";
   if (!same) S.tab = null;
   if (mode === "relations") {
+    fnHooks("leave");
     main.innerHTML = headerHTML(d, true) + relationsHTML();
     main.scrollTop = 0;
     revealInList(name);
@@ -627,19 +645,22 @@ async function showFunction(name, at, keep = false, mode = "code") {
     return showRelations(name, mine);
   }
   stopRelations();
-  main.innerHTML = headerHTML(d) + `
+  main.innerHTML = headerHTML(d) + `<div class="fn-strip" id="fn-strip"></div>
+    <div class="fn-body" id="fn-body">
     <div class="split${S.showC ? "" : " no-c"}" id="split">
       <section class="pane">
         <div class="pane-head"><span class="title">Listing</span>${coverageLegend(d)}</div>
         <div class="listing${S.showBytes ? " show-bytes" : ""}" id="listing">${listingHTML(d)}</div>
       </section>
       <section class="pane cpane" id="cpane"></section>
-    </div>`;
+    </div>
+    <aside class="fn-view" id="fn-view" hidden></aside></div>`;
   renderC();
   revealInList(name);
   if (keep && same) { if (sel >= 0) selectRow(sel, false); main.scrollTop = scroll; }
   else if (at != null) selectAddress(at, true);
   else main.scrollTop = 0;
+  fnHooks("show", d, { view, arg, keep: keep && same });
   watch(d.status);
 }
 
@@ -804,6 +825,7 @@ function renderC() {
     body = `<div class="pane-sub">${[where, esc(how)].filter(Boolean).join(" · ")}</div><div class="code">${codeHTML(s.text, s.first)}</div>`;
   }
   pane.innerHTML = `<div class="pane-head"><span class="title">C</span>${tabs}</div>${body}`;
+  fnHooks("c", pane, s);
 }
 
 // The function's readable C in the reading form (dread readable --plain, /api/reading): without the

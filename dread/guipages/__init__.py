@@ -58,8 +58,16 @@ and dread/web/app.js; they answer through the same server.
       nav: { title: "Things (x)", href: "#/NAME", icon: "<svg ...>" },     // a button in the bar
     });
 
+   A view of one function rather than a page of its own (dread/web/views.js: the trace, the code left
+   unrun, the mutation check, the registers) hooks into the function's page instead: functionHook({show(d,
+   {view, arg, keep}), c(pane, source), leave()}) draws into #fn-strip and #fn-view when the page shows a
+   function's code (#/f/NAME/VIEW/ARG gives view and arg), marks the C pane's lines when it is drawn, and
+   stops when it is left; such a script still registers (an address that never matches) for its share
+   of /api/status.
+
    app.js exports its helpers (api: GET, or POST with the token when given a body; esc, $, toast,
-   size, ago, when, hex, prefs, S: the view's state, watch, showError, GUI: {pages, readOnly}); a
+   size, ago, when, hex, hex8, prefs, S: the view's state, watch, showError, GUI: {pages, readOnly},
+   functionHook, fnLink, selectAddress); a
    page's script imports from app.js alone, not from another page's. Its stylesheet uses app.css's
    colour variables, so that both themes hold. tests/test_gui_browser.py drives the Run page in a
    browser; a new page can be looked at the same way.

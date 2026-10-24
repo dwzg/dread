@@ -2,7 +2,7 @@
 first point where the two runs part.
 
     dread trace NAME LABEL [--target DIR] [--image NAME] [--lifted | --readable [--whole] | --recon PAYLOAD]
-                [--src DIR] [--last N] [--no-lines]
+                [--src DIR] [--last N] [--no-lines] [--json FILE]
 
 LABEL is the case's label as dread test, dread lift --check and dread readable --check print it in a
 FAIL line ("generated 3", "kept 0", "written 2", or a written case's own label; the brackets may stay).
@@ -69,6 +69,12 @@ labelled by the C's objects (as above, and dread.tidy's slot variables sN) and b
 entry saved, beside each object's bytes in the rebuilt image where the twin's debug information places
 it (at a fixed offset from the frame base or the stack pointer), "(not set)" where the frame's call
 has stored none of its bytes yet. Ends with what dread test reports for the whole case.
+
+--json FILE writes the same report as data besides (docs/formats.md, "dread trace --json"): what was
+traced, both divergences with each image's instruction, its C line or statement, where a register was
+set last, the call stacks, the last shared events and the frame's rows; or the error that stopped the
+trace. The printed report is made from that data (TraceResult.data), so the two say the same; dread
+gui's trace view reads the file.
 
 Exit status: 0 when the case agrees, 1 when it parts, 2 when it cannot be traced (no such function or
 case, a build that fails, a case whose setup fails).
@@ -1442,44 +1448,61 @@ class TraceResult:
             return last_instruction(self.tracer, ev.frame.came, which)
         return ev.pc
 
+    def instruction_data(self, which, pc):
+        """One image's instruction at pc as data: {"which", "address", "instruction" (its disassembly),
+        "where" (where()'s words), "function" (the function it lies in, by the original's name; the C
+        function for the rebuilt image's C, null outside every function)}, the rebuilt image's with
+        "built" (how its function is built there: placement kind, null for the original's code) and
+        "line" ({"path", "line", "text"}: the C line it came from, text null where the file is gone),
+        the original's with "statement" ({"path", "line", "text", "how"}: its statement in its
+        function's lifted or readable C); either null where there is none."""
+        prog, placement, sources = self.tracer.ctx.program, self.tracer.placement, self.tracer.sources
+        out = {"which": which, "address": pc, "instruction": disassemble(self.tracer, which, pc),
+               "where": self.where(which, pc)}
+        fn = prog.function_at(pc)
+        if which == "original":
+            out["function"] = fn.name if fn is not None else None
+            got = sources.statement(fn.name, pc) if fn is not None else None
+            out["statement"] = None if got is None else {"path": sources.rel(got[0]), "line": got[1],
+                                                         "text": got[2].strip(), "how": got[3]}
+            return out
+        c = placement.c_function(pc)
+        if c is not None:
+            out["function"] = c[0]
+            out["built"] = placement.kind(c[0], sources.lifter) or "a helper of the C"
+        else:
+            out["function"] = fn.name if fn is not None else None
+            out["built"] = None
+        got = sources.rebuilt_line(pc)
+        out["line"] = None if got is None else {"path": sources.rel(got[0]), "line": got[1],
+                                                "text": got[2].strip() if got[2] is not None else None}
+        return out
+
     def instruction_lines(self, which, pc):
         """The lines that show one image's instruction at pc: the original's with the statement of its
-        function's C, the rebuilt image's with the C line it came from."""
-        dis = disassemble(self.tracer, which, pc)
-        out = ["  %-9s 0x%-8x %-32s %s" % (which, pc, dis, self.where(which, pc))]
-        sources = self.tracer.sources
-        if which == "original":
-            fn = self.tracer.ctx.program.function_at(pc)
-            got = sources.statement(fn.name, pc) if fn is not None else None
-            if got is not None:
-                path, number, text, how = got
-                out.append("            its statement in the C (%s), %s:%d:" % (how, sources.rel(path), number))
-                out.append("              %s" % text.strip())
-        else:
-            got = sources.rebuilt_line(pc)
-            if got is not None:
-                path, number, text = got
-                out.append("            from the C line %s:%d:" % (sources.rel(path), number))
-                if text is not None:
-                    out.append("              %s" % text.strip())
+        function's C, the rebuilt image's with the C line it came from (instruction_data)."""
+        return instruction_text(self.instruction_data(which, pc))
+
+    def stack_data(self, which, frame):
+        """A run's call stack as data, outermost first: [{"function", "built" (the rebuilt image's: how
+        it is built there, null for the original's code), "helper" (no shared point), "from" (the
+        instruction that called it, null for the outermost)}]; [] without a frame."""
+        if frame is None:
+            return []
+        out = []
+        for f in frame.chain():
+            name = self.fname(f.entry)
+            item = {"function": name, "helper": bool(f.helper), "from": None}
+            if which == "rebuilt":
+                item["built"] = self.tracer.placement.kind(name, self.tracer.sources.lifter)
+            if f.parent is not None and f.came is not None:
+                item["from"] = last_instruction(self.tracer, f.came, which)
+            out.append(item)
         return out
 
     def stack_text(self, which, frame):
         """A run's call stack, outermost first, each callee with the instruction that called it."""
-        if frame is None:
-            return "-"
-        parts = []
-        for f in frame.chain():
-            name = self.fname(f.entry)
-            if which == "rebuilt":
-                kind = self.tracer.placement.kind(name, self.tracer.sources.lifter)
-                name += " [%s]" % kind if kind else ""
-            if f.helper:
-                name += " (no shared point)"
-            if f.parent is not None and f.came is not None:
-                name += " from 0x%x" % last_instruction(self.tracer, f.came, which)
-            parts.append(name)
-        return " > ".join(parts)
+        return stack_line(self.stack_data(which, frame))
 
     def event_text(self, ev):
         if ev.kind == "entry":
@@ -1501,85 +1524,107 @@ class TraceResult:
 
     # -- the report --
 
-    def text(self, last=LAST):
+    def data(self, last=LAST):
+        """The report as data (dread trace --json; docs/formats.md): {"agrees", "truncated" (the original's
+        run made more than MAX_EVENTS shared events), "agreed" ({"calls", "log", "stretches"} where it
+        agrees), "first" (where the runs part first: divergence_data), "then" (the calls with other
+        arguments between it and the hard one: [{"what", "original"}]), "hard" (the first difference
+        dread test compares where that is another one; null where it is the first, "same", or where
+        nothing dread test compares differs), "same", "verdict" (what dread test reports for the case)}.
+        text() is made from it."""
         pairs = self.cmp.pairs
         calls = sum(1 for a, _ in pairs if a.kind == "entry")
-        cut = ["(the original's run made more than %d shared events: the trace compared those)" % MAX_EVENTS] \
-            if self.cmp.truncated else []
+        out = {"agrees": self.agrees, "truncated": bool(self.cmp.truncated), "agreed": None, "first": None,
+               "then": [], "hard": None, "same": False, "verdict": list(self.verdict or [])}
         if self.agrees:
             roots = sum(1 for a, _ in pairs if a.kind == "entry" and a.frame is not None and a.frame.parent is None)
-            return "\n".join(cut + ["no divergence: %s, %s and %s agree, and so does the end" % (
-                plural(calls - roots, "call"), plural(len(pairs) - calls, "log entry", "log entries"),
-                plural(self.cmp.agreed_stretches, "stretch of stores", "stretches of stores"))])
-        out = cut + self.divergence_text(self.first, "first divergence", last, self.snapshots)
-        if self.hard is None:
-            out += ["", "nothing dread test compares differs after it; dread test: the case agrees"]
-        elif self.hard is not self.first:
-            out.append("")
+            out["agreed"] = {"calls": calls - roots, "log": len(pairs) - calls, "stretches": self.cmp.agreed_stretches}
+            return out
+        out["first"] = self.divergence_data(self.first, "first divergence", last, self.snapshots)
+        if self.hard is self.first:
+            out["same"] = True
+        elif self.hard is not None:
             for d in self.soft[1:SOFT_SHOWN + 1]:
                 if d.original is not None and (self.hard.original is None or d.original.seq < self.hard.original.seq):
-                    out.append("then: %s (0x%x)" % (d.what, self.site("original", d.original)))
-            out += self.divergence_text(self.hard, "the first difference dread test compares", last,
-                                        self.hard_snapshots)
-        return "\n".join(out)
+                    out["then"].append({"what": d.what, "original": self.site("original", d.original)})
+            out["hard"] = self.divergence_data(self.hard, "the first difference dread test compares", last,
+                                               self.hard_snapshots)
+        return out
 
-    def divergence_text(self, d, title, last, snapshots):
-        out = ["%s: %s" % (title, d.what)]
+    def text(self, last=LAST):
+        return report_text(self.data(last))
+
+    def divergence_data(self, d, title, last, snapshots):
+        """One divergence as data: {"title", "kind" (Divergence's), "what", "soft", "stretch" (what starts
+        the stretch of stores it falls into, for a difference in stores), "original" and "rebuilt" (the
+        instruction in each image: instruction_data; null where that run has no event there),
+        "original_none" and "rebuilt_none" (the words for a run that makes no further store in the
+        stretch), "recent" (the blocks a rebuilt run that ran into its limit ran last), "writers" (where
+        each run set a register that differs at the end last: instruction_data), "leaves" (where one
+        run's path leaves the other's: [{"which", "function", "result", "instruction"}]), "stores" (what
+        differs at the stretch's end: [{"address", "original", "original_site", "rebuilt",
+        "rebuilt_site"}], the bytes as little-endian hex, at most six; "stores_total" runs in all),
+        "notes", "stacks" ({"original", "rebuilt"}: stack_data), "events" (the last shared events before
+        it: [{"index", "text", "original", "rebuilt"}]; "events_total", "events_shown"), "frame"
+        (frame_data, or null), "verdict" (on the hard one: what dread test reports, else null)}."""
         ev_o, ev_r = d.original, d.rebuilt
+        out = {"title": title, "kind": d.kind, "what": d.what, "soft": bool(d.soft), "stretch": None,
+               "original": None, "rebuilt": None, "original_none": None, "rebuilt_none": None, "recent": None,
+               "writers": [], "leaves": [], "stores": None, "stores_total": 0, "notes": list(d.notes),
+               "stacks": None, "events": [], "events_total": 0, "events_shown": 0, "frame": None, "verdict": None}
         if d.stores is not None and (ev_o or ev_r) is not None:
-            out.append("  in the stretch of stores after %s" % self.stretch_text(ev_o or ev_r))
+            out["stretch"] = self.stretch_text(ev_o or ev_r)
         ended = d.kind in ("result", "limit", "fault", "short")
         if ev_o is not None:
-            out += self.instruction_lines("original", self.site("original", ev_o))
+            out["original"] = self.instruction_data("original", self.site("original", ev_o))
         elif ended:
-            out += self.instruction_lines("original", self.last_pc(self.orig, "original"))
+            out["original"] = self.instruction_data("original", self.last_pc(self.orig, "original"))
         elif d.stores is not None:          # (the rebuilt image stores on where the original made no store)
-            out.append("  original  makes no further store in this stretch%s" % self.stretch_last(self.orig, ev_r))
+            out["original_none"] = "makes no further store in this stretch%s" % self.stretch_last(self.orig, ev_r)
         if ev_r is not None:
-            out += self.instruction_lines("rebuilt", self.site("rebuilt", ev_r))
+            out["rebuilt"] = self.instruction_data("rebuilt", self.site("rebuilt", ev_r))
         elif d.stores is not None and not ended:
-            out.append("  rebuilt   makes no further store in this stretch%s" % self.stretch_last(self.reb, ev_o))
+            out["rebuilt_none"] = "makes no further store in this stretch%s" % self.stretch_last(self.reb, ev_o)
         elif ended:
             pc = self.end_r.pc if d.kind in ("limit", "fault") else self.last_pc(self.reb, "rebuilt")
-            out += self.instruction_lines("rebuilt", pc)
+            out["rebuilt"] = self.instruction_data("rebuilt", pc)
             if d.kind == "limit":
-                out.append("            the blocks it ran last: %s" % ", ".join(
-                    "0x%x" % a for a in sorted(set(self.reb.recent))))
+                out["recent"] = sorted(set(self.reb.recent))
         if d.writers is not None:
             for which, pc in zip(("original", "rebuilt"), d.writers):
                 if pc is not None:
-                    out.append("  where the %s run set it last:" % which)
-                    out += ["  " + line for line in self.instruction_lines(which, pc)]
+                    out["writers"].append(self.instruction_data(which, pc))
         if d.kind in ("call", "log", "extra", "short", "limit", "fault"):
             for which, frame, block, value in self.leaves(d):
-                out.append("  where the %s run's path leaves the other's: it returns from %s (0x%x), which the other "
-                           "run has not left" % (which, self.fname(frame.entry), value))
-                out += ["  " + line for line in self.instruction_lines(which, last_instruction(self.tracer, block, which))]
+                out["leaves"].append({"which": which, "function": self.fname(frame.entry), "result": value,
+                                      "instruction": self.instruction_data(
+                                          which, last_instruction(self.tracer, block, which))})
         if d.stores is not None:
             runs = store_runs(d.stores["bytes"])
-            out.append("  what differs at the stretch's end (each with the store that left it):")
-            for addr, a, b, ea, eb in runs[:6]:
-                out.append("    0x%x: original %s, rebuilt %s" % (
-                    addr, "-" if a is None else "%s (0x%x)" % (little(a), self.site("original", ea)),
-                    "-" if b is None else "%s (0x%x)" % (little(b), self.site("rebuilt", eb))))
-            if len(runs) > 6:
-                out.append("    ... %d runs of bytes in all" % len(runs))
-        out += ["  %s" % note for note in d.notes]
+            out["stores"] = [{"address": addr, "original": None if a is None else little(a),
+                              "original_site": None if a is None else self.site("original", ea),
+                              "rebuilt": None if b is None else little(b),
+                              "rebuilt_site": None if b is None else self.site("rebuilt", eb)}
+                             for addr, a, b, ea, eb in runs[:6]]
+            out["stores_total"] = len(runs)
         frames = [s.frames[-1] if s.frames else None for s in snapshots] if snapshots else [None, None]
-        out.append("  call stack, original: %s" % self.stack_text("original", ev_o.frame if ev_o else frames[0]))
-        out.append("  call stack, rebuilt:  %s" % self.stack_text("rebuilt", ev_r.frame if ev_r else frames[1]))
+        out["stacks"] = {"original": self.stack_data("original", ev_o.frame if ev_o else frames[0]),
+                         "rebuilt": self.stack_data("rebuilt", ev_r.frame if ev_r else frames[1])}
         before = self.before(d)
         if before:
-            out.append("  the last shared events before it (%d of %d):" % (min(last, len(before)), len(before)))
-            for k, (a, b) in enumerate(before[-last:], len(before) - min(last, len(before)) + 1):
-                out.append("    %4d  %-44s original 0x%x, rebuilt 0x%x" % (
-                    k, clip(self.event_text(a), 44), self.site("original", a), self.site("rebuilt", b)))
+            shown = min(last, len(before))
+            out["events_total"], out["events_shown"] = len(before), shown
+            out["events"] = [{"index": k, "text": self.event_text(a), "original": self.site("original", a),
+                              "rebuilt": self.site("rebuilt", b)}
+                             for k, (a, b) in enumerate(before[-last:], len(before) - shown + 1)]
         if snapshots is not None:
-            out += frame_text(self, d, snapshots)
+            out["frame"] = frame_data(self, d, snapshots)
         if self.hard is d:
-            out.append("  dread test: %s" % ("; ".join(self.verdict[:4]) + ("; ..." if len(self.verdict) > 4 else "")
-                                             if self.verdict else "the case agrees"))
+            out["verdict"] = list(self.verdict or [])
         return out
+
+    def divergence_text(self, d, title, last, snapshots):
+        return divergence_lines(self.divergence_data(d, title, last, snapshots))
 
     def stretch_last(self, rec, other):
         """The last store a run made in the stretch of another run's event, as words for the report."""
@@ -1619,6 +1664,106 @@ class TraceResult:
     def last_pc(self, rec, which):
         """The last instruction a run ran (its return, when it returned)."""
         return last_instruction(self.tracer, rec.prev, which) if rec.prev is not None else 0
+
+
+# ---- the report's words (made from its data: TraceResult.data) ----
+
+def report_text(data):
+    """The report as dread trace prints it, from TraceResult.data."""
+    cut = ["(the original's run made more than %d shared events: the trace compared those)" % MAX_EVENTS] \
+        if data["truncated"] else []
+    if data["agrees"]:
+        a = data["agreed"]
+        return "\n".join(cut + ["no divergence: %s, %s and %s agree, and so does the end" % (
+            plural(a["calls"], "call"), plural(a["log"], "log entry", "log entries"),
+            plural(a["stretches"], "stretch of stores", "stretches of stores"))])
+    out = cut + divergence_lines(data["first"])
+    if data["hard"] is None and not data["same"]:
+        out += ["", "nothing dread test compares differs after it; dread test: the case agrees"]
+    elif data["hard"] is not None:
+        out.append("")
+        out += ["then: %s (0x%x)" % (t["what"], t["original"]) for t in data["then"]]
+        out += divergence_lines(data["hard"])
+    return "\n".join(out)
+
+
+def instruction_text(i):
+    """The lines that show one image's instruction (TraceResult.instruction_data)."""
+    out = ["  %-9s 0x%-8x %-32s %s" % (i["which"], i["address"], i["instruction"], i["where"])]
+    s = i.get("statement")
+    if s is not None:
+        out.append("            its statement in the C (%s), %s:%d:" % (s["how"], s["path"], s["line"]))
+        out.append("              %s" % s["text"])
+    line = i.get("line")
+    if line is not None:
+        out.append("            from the C line %s:%d:" % (line["path"], line["line"]))
+        if line["text"] is not None:
+            out.append("              %s" % line["text"])
+    return out
+
+
+def stack_line(frames):
+    """A call stack (TraceResult.stack_data) in one line, outermost first."""
+    if not frames:
+        return "-"
+    parts = []
+    for f in frames:
+        name = f["function"]
+        if f.get("built"):
+            name += " [%s]" % f["built"]
+        if f["helper"]:
+            name += " (no shared point)"
+        if f["from"] is not None:
+            name += " from 0x%x" % f["from"]
+        parts.append(name)
+    return " > ".join(parts)
+
+
+def divergence_lines(d):
+    """The lines of one divergence (TraceResult.divergence_data)."""
+    out = ["%s: %s" % (d["title"], d["what"])]
+    if d["stretch"] is not None:
+        out.append("  in the stretch of stores after %s" % d["stretch"])
+    if d["original"] is not None:
+        out += instruction_text(d["original"])
+    elif d["original_none"] is not None:
+        out.append("  original  %s" % d["original_none"])
+    if d["rebuilt"] is not None:
+        out += instruction_text(d["rebuilt"])
+        if d["recent"] is not None:
+            out.append("            the blocks it ran last: %s" % ", ".join("0x%x" % a for a in d["recent"]))
+    elif d["rebuilt_none"] is not None:
+        out.append("  rebuilt   %s" % d["rebuilt_none"])
+    for w in d["writers"]:
+        out.append("  where the %s run set it last:" % w["which"])
+        out += ["  " + line for line in instruction_text(w)]
+    for leave in d["leaves"]:
+        out.append("  where the %s run's path leaves the other's: it returns from %s (0x%x), which the other run has "
+                   "not left" % (leave["which"], leave["function"], leave["result"]))
+        out += ["  " + line for line in instruction_text(leave["instruction"])]
+    if d["stores"] is not None:
+        out.append("  what differs at the stretch's end (each with the store that left it):")
+        for s in d["stores"]:
+            out.append("    0x%x: original %s, rebuilt %s" % (
+                s["address"], "-" if s["original"] is None else "%s (0x%x)" % (s["original"], s["original_site"]),
+                "-" if s["rebuilt"] is None else "%s (0x%x)" % (s["rebuilt"], s["rebuilt_site"])))
+        if d["stores_total"] > 6:
+            out.append("    ... %d runs of bytes in all" % d["stores_total"])
+    out += ["  %s" % note for note in d["notes"]]
+    out.append("  call stack, original: %s" % stack_line(d["stacks"]["original"]))
+    out.append("  call stack, rebuilt:  %s" % stack_line(d["stacks"]["rebuilt"]))
+    if d["events_total"]:
+        out.append("  the last shared events before it (%d of %d):" % (d["events_shown"], d["events_total"]))
+        for e in d["events"]:
+            out.append("    %4d  %-44s original 0x%x, rebuilt 0x%x" % (e["index"], clip(e["text"], 44), e["original"],
+                                                                     e["rebuilt"]))
+    if d["frame"] is not None:
+        out += frame_lines(d["frame"])
+    if d["verdict"] is not None:
+        v = d["verdict"]
+        out.append("  dread test: %s" % ("; ".join(v[:4]) + ("; ..." if len(v) > 4 else "") if v
+                                         else "the case agrees"))
+    return out
 
 
 def plural(n, one, many=None):
@@ -1715,16 +1860,60 @@ def frame_objects(path):
     return out
 
 
+FRAME_ROWS = 40     # rows of a frame the report shows at most
+
+
 def frame_text(result, d, snapshots):
     """The lines that show a stack frame at a divergence in both runs (the module's docstring); never
     stops the report."""
+    got = frame_data(result, d, snapshots)
+    return frame_lines(got) if got is not None else []
+
+
+def frame_data(result, d, snapshots):
+    """The stack frame at a divergence in both runs as data (the module's docstring), or None where
+    nothing of it is on the stack: {"function", "built" (how it is built in the rebuilt image, null for
+    the original's code), "sp0" (the original's stack pointer at its entry), "inuse" (down to where the
+    original's frame is in use), "rebuilt_sp0" (null where the function is not on the rebuilt image's
+    stack), "objects" (whether its C's objects label the rows; else the words from sp0 down), "rows":
+    [{"depth" (below sp0), "label", "object" (the C's object, null for a saved register or a bare word),
+    "size", "original" (its bytes there: hexbytes), "original_unset" (the frame's call has stored none
+    of them yet), "rebuilt" (the object's bytes in the rebuilt image where the twin's debug information
+    places it, else null), "rebuilt_unset", "rebuilt_missing" (the debug information has the object in
+    no memory)}], at most FRAME_ROWS, "more" (rows left out)}; {"error"} where it could not be made (the
+    frame is an aid: it never stops the report)."""
     try:
-        return _frame_text(result, d, snapshots)
+        return _frame_data(result, d, snapshots)
     except Exception as e:                  # (the frame is an aid)
-        return ["  frame: not shown (%s: %s)" % (type(e).__name__, e)]
+        return {"error": "%s: %s" % (type(e).__name__, e)}
 
 
-def _frame_text(result, d, snapshots):
+def frame_lines(f):
+    """The lines of a frame (frame_data)."""
+    if "error" in f:
+        return ["  frame: not shown (%s)" % f["error"]]
+    head = "  frame of %s (%s) at that point: original sp0 0x%x, in use down to 0x%x" % (
+        f["function"], f["built"] or "the original's code", f["sp0"], f["inuse"])
+    head += "; rebuilt sp0 0x%x" % f["rebuilt_sp0"] if f["rebuilt_sp0"] is not None else \
+        "; not on the rebuilt image's stack"
+    out = [head + ":"]
+    if not f["objects"]:
+        out.append("    (no objects of its C; the words from sp0 down)")
+    for row in f["rows"]:
+        text_o = row["original"] + (" (not set)" if row["original_unset"] else "")
+        text_r = ""
+        if row["rebuilt"] is not None:
+            text_r = row["rebuilt"] + (" (not set)" if row["rebuilt_unset"] else "")
+        elif row["rebuilt_missing"]:
+            text_r = "(not in memory)"
+        out.append(("    sp0-0x%-4x %-22s %-36s %s" % (row["depth"], row["label"], text_o,
+                                                      "| rebuilt " + text_r if text_r else "")).rstrip())
+    if f["more"]:
+        out.append("    ...")
+    return out
+
+
+def _frame_data(result, d, snapshots):
     t = result.tracer
     snap_o, snap_r = snapshots
 
@@ -1736,7 +1925,7 @@ def _frame_text(result, d, snapshots):
         return frames
     mine, theirs = callers(snap_o, d.original), callers(snap_r, d.rebuilt)
     if not mine:
-        return []
+        return None
     common = 0                              # the frames both runs have, from the outermost
     while common < min(len(mine), len(theirs)) and mine[common].entry == theirs[common].entry:
         common += 1
@@ -1760,10 +1949,8 @@ def _frame_text(result, d, snapshots):
         except Exception:
             saves = {}
     places = rebuilt_places(t, name, fr, snap_r)
-    head = "  frame of %s (%s) at that point: original sp0 0x%x, in use down to 0x%x" % (
-        name, built or "the original's code", sp0, inner)
-    head += "; rebuilt sp0 0x%x" % fr.sp if fr is not None else "; not on the rebuilt image's stack"
-    out = [head + ":"]
+    out = {"function": name, "built": built, "sp0": sp0, "inuse": inner,
+           "rebuilt_sp0": fr.sp if fr is not None else None, "objects": True, "rows": [], "more": False}
     rows = {}                               # depth -> (label, size, the C's object or None)
     for obj, depth, size in objects:
         if size is None:
@@ -1775,29 +1962,27 @@ def _frame_text(result, d, snapshots):
     if not rows:
         rows = {depth: ("", word, None) for depth in range(word, min(sp0 - inner, 16 * word) + 1, word)}
         if not rows:
-            return []                       # (nothing of it on the stack)
-        out.append("    (no objects of its C; the words from sp0 down)")
-    shown = 0
+            return None                     # (nothing of it on the stack)
+        out["objects"] = False
     for depth in sorted(rows, reverse=True):
+        if len(out["rows"]) >= FRAME_ROWS:
+            out["more"] = True
+            break
         label, size, obj = rows[depth]
-        text_o = hexbytes(snap_o.read(sp0 - depth, size))
+        row = {"depth": depth, "label": label, "object": obj, "size": size,
+               "original": hexbytes(snap_o.read(sp0 - depth, size)), "original_unset": False, "rebuilt": None,
+               "rebuilt_unset": False, "rebuilt_missing": False}
         if obj is not None and depth not in saves and snap_o.set(sp0 - depth, size, pick) is False:
-            text_o += " (not set)"          # (a save word's push stored a register: no data, but set)
-        text_r = ""
+            row["original_unset"] = True    # (a save word's push stored a register: no data, but set)
         if obj is None:
             pass
         elif obj in places or (obj.startswith("frame[") and "frame" in places):
             at = places[obj][0] if obj in places else places["frame"][0] + 4 * int(obj[6:-1])
-            text_r = hexbytes(snap_r.read(at, size if obj in places else 4))
-            if snap_r.set(at, size, fr) is False:
-                text_r += " (not set)"
+            row["rebuilt"] = hexbytes(snap_r.read(at, size if obj in places else 4))
+            row["rebuilt_unset"] = snap_r.set(at, size, fr) is False
         elif t.sources.lines is not None and fr is not None:
-            text_r = "(not in memory)"
-        out.append(("    sp0-0x%-4x %-22s %-36s %s" % (depth, label, text_o, "| rebuilt " + text_r if text_r else "")).rstrip())
-        shown += 1
-        if shown >= 40:
-            out.append("    ...")
-            break
+            row["rebuilt_missing"] = True
+        out["rows"].append(row)
     return out
 
 
@@ -1892,7 +2077,42 @@ def trace(target, image, name, label, mode="test", recon=None, whole=False, line
                "  %s is built from %s%s; rebuilt image %s" % (name, built, where, shown_path(payload, target))]
     if note:
         heading.append("  (%s)" % note)
+    result.about = {"function": name, "label": case[0], "mode": mode, "what": what,
+                    "built": placement.kind(name, lifter), "moved": bool(how.get("branch")),
+                    "address": how.get("address"), "entry": how.get("entry"), "image": shown_path(payload, target),
+                    "note": note}
     return result, "\n".join(heading)
+
+
+JSON_VERSION = 1    # of dread trace --json's record (docs/formats.md)
+
+
+def json_record(result=None, last=LAST, error=None, **about):
+    """dread trace --json's record (docs/formats.md): what was traced (TraceResult.about: the function,
+    the case's label, the mode, how the function is built and where, the rebuilt image, the note on the
+    C lines) and the report as data (TraceResult.data), or the error that stopped it; "exit" as the
+    command's exit status. No wall-clock time: the same trace gives the same bytes."""
+    out = {"version": JSON_VERSION}
+    if result is not None:
+        out.update(result.about)
+        out.update(result.data(last))
+        out.update(last=last, exit=0 if result.agrees else 1, error=None)
+    else:
+        out.update(about)
+        out.update(error=error, exit=2)
+    return out
+
+
+def write_json(path, record):
+    """Write a record whole, renamed into place (a reader never sees half of it)."""
+    import json
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    tmp = os.path.join(folder, ".%s.tmp%d" % (os.path.basename(path), os.getpid()))
+    with open(tmp, "w") as f:
+        json.dump(record, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def main(argv=None):
@@ -1908,6 +2128,7 @@ def main(argv=None):
     parser.add_argument("--last", type=int, default=LAST, help="shared events shown before the divergence")
     parser.add_argument("--no-lines", action="store_true", help="no twin build with -g for the C lines")
     parser.add_argument("--src", help="the C sources the image is built from (default: the image's src)")
+    parser.add_argument("--json", metavar="FILE", help="also write the report as JSON to FILE (docs/formats.md)")
     args = parser.parse_args(argv)
     mode = "lifted" if args.lifted else "readable" if args.readable else "test"
     try:
@@ -1916,9 +2137,13 @@ def main(argv=None):
                                 not args.no_lines, args.src)
     except (tgt.TargetError, TraceError) as e:
         print("dread trace: %s" % e, file=sys.stderr)
+        if args.json:
+            write_json(args.json, json_record(error=str(e), function=args.name, label=args.label, mode=mode))
         return 2
     print(heading)
     print(result.text(args.last))
+    if args.json:
+        write_json(args.json, json_record(result, args.last))
     return 0 if result.agrees else 1
 
 

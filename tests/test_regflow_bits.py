@@ -388,3 +388,37 @@ def test_computed_results_are_the_ones_a_source_returns():
     flow = regflow.load(t, t.image(), Program(t, t.image()))
     assert {"strlen", "memcmp", "fmt_dec", "mul64", "udiv_var"} <= set(flow.computed), flow.computed
     assert not {"timer_irq", "timer_start", "delay", "gpio_set", "handle_key"} & set(flow.computed), flow.computed
+
+
+@needs_arm
+def test_the_bits_a_read_uses_and_one_functions_facts(tmp_path):
+    """regflow 27 keeps the bits a read uses where it uses fewer than all of a register: sink stores r0's
+    low byte alone (r1's low byte is r0's, its upper bits stored nowhere), so it reads 0xff of r0 and
+    nothing of r1. RegFlow.facts (dread regflow --json, dread gui's registers view): mid's callers by call
+    site with the registers each reads after it (peek both words, relay and top the result), mid's own
+    call of leaf with the registers it reads after it (both: it hands them on), leftover and computed;
+    the cases' facts leave the bits out (no generated case changes for them)."""
+    import json
+    from dread.program import Program
+    t = left_program(tmp_path)
+    p = Program(t, t.image())
+    flow = regflow.analyse(p)
+    assert flow.bits["reads"].get("sink") == {"r0": 0xff}, flow.bits
+    facts = flow.facts("sink")
+    assert facts["reads"] == ["r0"] and facts["bits"]["reads"] == {"r0": 0xff}
+    mid = flow.facts("mid")
+    by = {c["caller"]: [r["register"] for r in c["registers"]] for c in mid["callers"]}
+    assert by == {"peek": ["r0", "r1"], "relay": ["r0"], "top": ["r0"]}, mid["callers"]
+    assert [c["callee"] for c in mid["calls"]] == ["leaf"] and [r["register"] for r in mid["calls"][0]["registers"]] \
+        == ["r0", "r1"]
+    assert mid["leftover"] is True and flow.facts("udivmod")["leftover"] is False
+    assert flow.facts("leaf")["computed"] is True and flow.facts("sink")["computed"] is False
+    assert "bits" not in flow.case_facts() and "bits" in flow.to_json()
+    again = regflow.RegFlow.from_json(json.loads(json.dumps(flow.to_json())))
+    assert again.facts("mid") == mid and again.bits == json.loads(json.dumps(flow.bits))
+    out = tmp_path / "flow.json"
+    assert regflow.main(["--target", t.root, "--json", str(out), "mid", "sink"]) == 0
+    got = json.loads(out.read_text())
+    assert got["version"] == regflow.VERSION and set(got["functions"]) == {"mid", "sink"}
+    assert got["functions"]["sink"]["bits"]["reads"] == {"r0": 255} and got["result"] == "r0"
+    assert regflow.main(["--target", t.root, "--json", str(out), "no_such"]) == 2

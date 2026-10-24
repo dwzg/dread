@@ -1,5 +1,6 @@
 """dread mutate: finding function bodies in C, the mutants, and a whole check with --kill on a copy
 of gizmo (the equivalent survivors stay, the clamp mutant a search can catch is caught)."""
+import json
 import os
 import shutil
 
@@ -65,13 +66,26 @@ def test_check_and_kill_on_a_copy(tmp_path):
     image = target.image()
     from dread import build
     build.build(target, image, quiet=True)
-    lines = []
-    caught, survivors, unbuilt, away = mutate.check(target, image, "checksum", jobs=4, out=lines.append)
+    lines, entry = [], {}
+    caught, survivors, unbuilt, away = mutate.check(target, image, "checksum", jobs=4, out=lines.append, record=entry)
     assert survivors == [] and "2 argued" in lines[0]                       # tests/argued.tsv
+    assert entry["survived"] == 0 and len(entry["argued"]) == 2 and all(a["argument"] for a in entry["argued"])
+    assert entry["file"].endswith(".c") and entry["first"] <= entry["argued"][0]["line"] <= entry["last"]
     os.remove(mutate.argued_path(image))
-    caught, survivors, unbuilt, away = mutate.check(target, image, "checksum", jobs=4, out=lines.append)
+    entry = {}
+    caught, survivors, unbuilt, away = mutate.check(target, image, "checksum", jobs=4, out=lines.append, record=entry)
     assert [what for _, _, what in survivors] == [">= -> >", "4 -> 5"]      # equivalent: the tail loop takes over
+    # dread mutate --json's entry: each survivor's line before and after, no search without --kill
+    assert [s["what"] for s in entry["survivors"]] == [">= -> >", "4 -> 5"] and entry["argued"] == []
+    assert all(s["old"] != s["new"] and s["search"] is None for s in entry["survivors"])
+    assert entry["caught"] == caught and entry["changes"] >= caught + 2 and not entry["kill"]
+    entry = {}
     caught, survivors, unbuilt, away = mutate.check(target, image, "clamp", jobs=4, out=lines.append,
-                                                    kill_survivors=True)
+                                                    kill_survivors=True, record=entry)
     assert survivors == [] and os.path.exists(os.path.join(image.extra_cases, "clamp.json"))
     assert any("compiled to the same code" in line for line in lines)
+    assert entry["kill"] and entry["killed"] and entry["survivors"] == [] and entry["same_code"] >= 1
+    out = tmp_path / "mutate.json"
+    assert mutate.main(["--target", str(copy / "a32"), "--json", str(out), "no_such_function"]) == 1
+    got = json.loads(out.read_text())
+    assert got["functions"] == {} and "no_such_function" in got["error"] and got["version"] == mutate.JSON_VERSION

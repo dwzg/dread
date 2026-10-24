@@ -410,7 +410,8 @@ sweep's cap, the loop's calls, the tail calls through a pointer) and the environ
   calls, tail calls, the fall behind its last instruction, the targets a run of an indirect jump's
   dispatch finds, transitively): its name and entry, its entries in regflow's case facts (kept, reads,
   sites, preserved, and any table by function name regflow adds there; not `overwritten` nor, since
-  regflow 26, `leftover` and `computed`, which no case reads), the registers beyond a C result its stub
+  regflow 26, `leftover` and `computed`, nor since regflow 27 `bits`, which no case reads), the registers
+  beyond a C result its stub
   answers, its `wide_results` row and its domains rows. Where a tree has a transfer no table and no
   run of its dispatch tells (a call through a function pointer), the facts of every function. They are
   digested once per strongly connected component of the call graph, bottom up.
@@ -440,7 +441,11 @@ caller reads it only on a path that cannot happen, or only bits the next callee 
 
 Written beside the rebuilt image by a complete `dread test`: `function`, `cases`, `failed`, `missed`
 (the instructions of the original no case ran, as hex addresses separated by spaces; empty when
-the cases run all of it).
+the cases run all of it), and since 2026-10-24 `failing`: the labels of the cases that failed, as their
+FAIL lines name them (dread.runner failed_labels; not `case generation` nor `unreachable`, which are no
+case), a JSON list (`["generated 3", "b'12ab'"]`: a written case's label may hold any character),
+empty where none failed. `dread gui`'s trace view offers them. An older file has no fifth column: its
+readers take the failures' count and know no labels.
 
 ### `BUILD/pilot/IMAGE/names.tsv`, `names-score.tsv`, `names-pairwise.tsv`
 
@@ -800,6 +805,87 @@ instructions, then regions, cause and source), so the same verdicts, image and c
   {register: [[value, runs], ...]}}`, the most frequent first, at most six and `["...", more]`), `ends`
   (a call's: `{how the runs that got there ended: runs}`), `forced` (`{end, ran}`: how the run sent the
   missed way ended, and how many of the region's instructions it ran).
+
+### A trace's report (`dread trace --json FILE`)
+
+One JSON object, since 2026-10-24 (dread/trace.py json_record; `version` 1), keys sorted, addresses as
+numbers, no wall-clock time: the same trace gives the same bytes. The printed report is made from the
+same data (TraceResult.data), so the two say the same.
+
+- What was traced: `function`, `label` (the case's, as the runner names it), `mode` (`test`, `lifted`,
+  `readable`), `what` (the build's words), `built` (how the function is built in the rebuilt image:
+  `C`, `lifted C`, `readable C`, null for the original's code), `moved`, `address` and `entry` (where
+  its C lies and its old entry, for a moved function), `image` (the rebuilt image, relative to the
+  target), `note` (on the C lines: why there are none), `last` (the shared events asked for), `exit` (0
+  the case agrees, 1 the runs part, 2 it could not be traced), `error` (why not, with exit 2: then the
+  record holds only `function`, `label`, `mode`, `error` and `exit`).
+- `agrees`, `truncated` (the original's run made more than MAX_EVENTS shared events: those were
+  compared), `agreed` (where it agrees: `calls`, `log`, `stretches`, the shared events that agreed),
+  `first` (where the runs part first), `hard` (the first difference dread test compares where that is
+  another one; null where it is `first`, which `same` says, or where nothing dread test compares
+  differs), `then` (`[{"what", "original"}]`: the calls with other arguments between the two), `verdict`
+  (what dread test reports for the case: its difference lines).
+- A divergence: `title`, `kind` (`call`, `log`, `stores`, `extra`, `short`, `limit`, `fault`, `result`,
+  `arguments`), `what`, `soft`, `stretch` (what starts the stretch of stores it falls into), `original`
+  and `rebuilt` (each image's instruction, or null), `original_none` and `rebuilt_none` (the words for a
+  run that makes no further store there), `recent` (the blocks a rebuilt run that ran into its limit
+  ran last), `writers` (where each run set a register that differs at the end last), `leaves` (`[{"which",
+  "function", "result", "instruction"}]`: where one run's path leaves the other's), `stores` (at most
+  six runs of bytes that differ at the stretch's end: `{"address", "original", "original_site",
+  "rebuilt", "rebuilt_site"}`, the bytes as little-endian hex strings, null where a run left none;
+  `stores_total` runs in all), `notes`, `stacks` (`{"original", "rebuilt"}`, outermost first: `[{"function",
+  "built" (the rebuilt image's), "helper" (no shared point), "from" (the calling instruction, null for
+  the outermost)}]`), `events` (the last shared events before it: `[{"index", "text", "original",
+  "rebuilt"}]`; `events_total`, `events_shown`), `frame`, `verdict` (on the hard one; else null).
+- An instruction: `which`, `address`, `instruction` (its disassembly), `where`, `function` (the function
+  it lies in by the original's names, null outside every function); the original's `statement` (`{"path",
+  "line", "text", "how"}`: its statement in its function's lifted or readable C, or null), the rebuilt
+  image's `built` and `line` (`{"path", "line", "text"}`: the C line it came from by the twin build's
+  line table, or null). Paths are relative to the rebuilt image's directory where they lie in it
+  (`lifted/NAME.c`), else to the target.
+- A frame: `function`, `built`, `sp0`, `inuse`, `rebuilt_sp0` (null where the function is not on the
+  rebuilt image's stack), `objects` (whether its C's objects label the rows, else the words from sp0
+  down), `rows` (`[{"depth", "label", "object", "size", "original", "original_unset", "rebuilt",
+  "rebuilt_unset", "rebuilt_missing"}]`, at most 40), `more`; or `{"error"}` where it could not be made.
+
+### What dread mutate found (`dread mutate --json FILE`)
+
+`{"version": 1, "names", "functions": {NAME: ENTRY}, "error"}`, since 2026-10-24 (dread/mutate.py
+json_entry), keys sorted; `error` is why the run stopped (a function without cases, an unchanged source
+that fails its cases), with the entries of the functions done before it. An entry: `file` (the C file,
+relative to the target), `first`, `last` (its body's lines), `static`, `cases_of` (the functions whose
+cases ran), `changes` (variants made), `caught` (with those the --kill search caught), `survived`,
+`unbuilt`, `same_code`, `ran_away`, `kill`, `seconds`, `lines` (`--lines`, or null), and the changes as
+`{"line", "old", "new", "what"}` (the line as written before and after; `new` empty for a removed
+statement): `survivors` (each with `search`: null without --kill, `none` where it found no input,
+`suspect` where its input separates the original from the unchanged C too, with that `input`, `refused`
+where its input touched the image), `argued` (each with its `argument` from argued.tsv), `killed` (caught
+by a written case the search kept). Which case comes closest to noticing a survivor is not known to the
+tool, and the entry does not say.
+
+### Registers per function (`dread regflow --json FILE`)
+
+`{"version" (regflow's VERSION), "names" (the register names), "result" (the first result register),
+"functions": {NAME: FACTS}}`, since 2026-10-24, for every function or the named ones (RegFlow.facts,
+the same dread gui's registers view shows): `reads`, `kept`, `preserved`, `overwritten` (null where the
+analysis predates it), `leftover` and `computed` (whether the function is one; null where not known),
+`bits` (`{"reads", "kept"}`: `{register: mask}` of the bits a read uses where fewer than all of the
+register's count, as a number; null before regflow 27), `callers` (each call site after which its
+registers are read: `[{"caller", "address", "registers": [{"register", "always"}]}]`, `always` false
+where it is read on some paths only; a caller that stands for others, `callers through a pointer`, `the
+ABI` or `the compiler's profile`, has address 0 and comes last) and `calls` (its own calls after which
+it reads a callee's registers: `[{"address", "callee", "registers"}]`). Since regflow 27 the cache
+(`BUILD/regflow/IMAGE.json`, `{"key", "flow"}`) holds `bits` beside kept and reads; a cache of another key
+is made anew.
+
+### `BUILD/gui/views/IMAGE/` (dread gui's views of one function)
+
+The records the function page's views read, each written by its tool's `--json` in a job the page
+started (dread/guipages/views.py), and by the same command typed in a terminal: `trace/NAME/MODE-KEY.json`
+(dread trace's report; KEY the first twelve hex digits of the SHA-1 of the case's label, which the record
+holds), `uncovered/NAME.json` (dread uncovered's), `mutate/NAME.json` (dread mutate's), `callconv/NAME.json`
+(dread callconv's). Each is replaced whole when the job runs again; the page takes a record for stale
+where a file its tool read is newer (by the files' times), and says which. Nothing else reads them.
 
 ### `BUILD/relations/IMAGE/NAME.json`
 

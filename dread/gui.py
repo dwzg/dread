@@ -76,14 +76,20 @@ the tools know and decided, and runs nothing heavy itself:
   it is made, its first analyses as a chain of jobs (the functions where the image has none yet, dread
   regflow, dread lift --check, dread readable --check), and the language-model providers (llm.toml set
   up line by line, a key written into a key file of mode 600 and never shown back, a provider tried
-  with one question as a job).
+  with one question as a job);
 - the pilot page (#/pilot, key l; dread/guipages/pilot.py): dread pilot started from a short form (the
   task, the provider with its prices, the budget, all functions or some, Message Batches, the task's few
   options; the Run page's form has every option), its estimate (the dry run's count, an earlier run's
   tokens a function at the provider's prices), a run followed live from its events (the stage, the
   questions answered of those planned, the batches out and their age, the spend against the budget, the
   names as they come) and stopped as its job; the runs before, what the answers cost a month, the
-  pilot's comparisons of names.
+  pilot's comparisons of names;
+- a function's views (dread/guipages/views.py, views.js: #/f/NAME/trace, /uncovered, /mutation,
+  /registers): under its header a strip with what each knows, and the one that is open beside the listing
+  and the C, its instructions marked in the listing and its lines in the C: where a failing case parts
+  (dread trace), why its cases leave code unrun (dread uncovered), the changes to its C no case notices
+  (dread mutate), its registers (dread.regflow's facts, dread callconv's measurement); each from its
+  tool's --json record in BUILD/gui/views, run as a job from the page where it is missing or stale.
 A server started where there is no target (no --target, no $DREAD_TARGET, no dread.toml above the
 working directory) comes up with the Setup page alone: the browsing views wait for a target, its jobs
 (dread new, a provider's test) run in the directory it started in with their records in the user's
@@ -100,9 +106,11 @@ background; the page fills them in when they are ready.
 
 Pages of their own: the Run page is the first page that is a module of dread/guipages (its API routes
 registered from it, imported at start) with a script of its own in dread/web (run.js, imported by
-app.js and registered with its router); the Setup page (setup.py, setup.js) the second. Later pages are
-added the same way without touching the lines of another; dread/guipages/__init__.py says how. The pages
-of browsing above stay here and in app.js.
+app.js and registered with its router); the Setup page (setup.py, setup.js) the second, the pilot page
+(pilot.py, pilot.js) the third; a function's views (views.py, views.js) are part of the function's page,
+through its hooks in app.js (functionHook). Later
+pages are added the same way without touching the lines of another; dread/guipages/__init__.py says how.
+The pages of browsing above stay here and in app.js.
 
 The answers, JSON, all computed here from the tables and the tools' records (the page computes
 nothing; what the names give is kept until a names table changes):
@@ -115,6 +123,8 @@ nothing; what the names give is kept until a names table changes):
   Run page's dread.jobs status), "target" (the root of the target shown: the page reloads when it
   changes; null without a target, when the browsing answers say 409 with "setup": true)};
 - the Setup page's: /api/setup/... (dread/guipages/setup.py says what each answers);
+- a function's views': /api/views, /api/views/trace, /uncovered, /mutation, /registers and POST
+  /api/views/run (dread/guipages/views.py says what each answers);
 - the Run page's: /api/commands, /api/command, /api/command-line, /api/jobs, /api/job, /api/job-log,
   POST /api/jobs/start and /api/jobs/stop (dread/guipages/run.py says what each answers);
 - the pilot page's: /api/pilot, /api/pilot/runs, /api/pilot/job, /api/pilot/follow, /api/pilot/usage,

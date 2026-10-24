@@ -136,3 +136,44 @@ def test_a_read_only_page(browser, server):
     finally:
         viewer.shutdown()
         viewer.server_close()
+
+
+def test_the_views_of_a_function_in_a_browser(browser, tmp_path):
+    """The function page's views on a copy of gizmo whose parse_uint is written wrong (tests/
+    test_gui_views.py): the strip says its cases fail; the trace view opened by its address traces the
+    first failing case as a job at once and shows where the runs part, marked in the listing; another
+    case traced by its chip; the registers and the mutation views open from the strip and the address
+    keeps the view; at phone width nothing scrolls sideways. No script error."""
+    from dread import guipages
+    if "views" not in guipages.load():
+        pytest.skip("no views page")
+    from test_gui_views import planted_copy
+    if not shutil.which("arm-none-eabi-gcc"):
+        pytest.skip("needs arm-none-eabi-gcc")
+    target = planted_copy(tmp_path, lift_check=False)
+    srv = serving(target)
+    errors = []
+    try:
+        page, url = opened(browser, srv, errors)
+        page.goto(url + "#/f/parse_uint/trace")
+        text_has(page, '.vw-tab[data-view="trace"] .vw-sum', "failing")
+        page.wait_for_selector(".vw-div", timeout=WAIT)          # (traced at once: the job's record)
+        text_has(page, ".vw-div h3", "first divergence")
+        assert page.locator("#listing .ln.vw-at").count() >= 1
+        page.click(".vw-case:nth-child(2)")                     # (another case: traced by its chip)
+        page.wait_for_function("() => [...document.querySelectorAll('.vw-case')].filter((c) => "
+                               "c.textContent.includes('parts')).length >= 2", timeout=WAIT)
+        page.click('.vw-tab[data-view="registers"]')
+        page.wait_for_selector(".vw-facts")
+        text_has(page, "#fn-view", "reads at its entry")
+        assert page.evaluate("location.hash") == "#/f/parse_uint/registers"
+        page.click('.vw-tab[data-view="mutation"]')
+        page.wait_for_selector('.vw-run[data-view="mutation"]')
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.goto(url + "#/f/parse_uint/trace")
+        page.wait_for_selector(".vw-div")
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        assert not errors, errors
+    finally:
+        srv.shutdown()
+        srv.server_close()

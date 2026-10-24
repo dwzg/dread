@@ -3,6 +3,7 @@ C changed on purpose (a constant, a stored value, a call's argument, a loop that
 the instruction and the C line where the runs part, a case that agrees has no divergence, a moved
 function is entered through its old entry, and readable C's frame objects are compared where their
 addresses reach a call."""
+import importlib.util
 import os
 import re
 import shutil
@@ -285,3 +286,49 @@ def test_a_long_run_is_compared_as_far_as_its_events_are_kept(gizmo, monkeypatch
     result, _, text = traced(target, image, "print_status", "generated 0")
     assert result.cmp.truncated and result.agrees, text
     assert "the original's run made more than 5 shared events" in text
+
+
+@pytest.mark.slow
+def test_the_report_as_data_says_what_the_text_says(gizmo, monkeypatch, tmp_path):
+    """dread trace --json: the report as data (TraceResult.data), from which the printed report is made:
+    the changed stored value's divergence with the original's instruction and its statement, the rebuilt
+    image's C line, both call stacks, the last shared events and the frame; the record written by --json
+    holds it with what was traced; a case that agrees and one that is not there have records too."""
+    import json
+    target, image = gizmo
+    _, store = call_and_store(target, image)
+    plant(monkeypatch, NAME, change_line(store, lambda line: line.replace(";", " + 1u;", 1)))
+    labels = failing(target, image, NAME)
+    assert labels
+    result, heading, text = traced(target, image, NAME, labels[0])
+    data = result.data()
+    assert trace.report_text(data) == result.text()
+    d = data["first"]
+    assert not data["agrees"] and data["same"] and data["hard"] is None and d["kind"] == "stores", text
+    assert d["original"]["address"] == store and d["original"]["function"] == NAME
+    assert d["original"]["statement"]["path"] == "lifted/%s.c" % NAME
+    assert "/* %x: " % store in d["original"]["statement"]["text"]
+    assert d["rebuilt"]["function"] == NAME and d["rebuilt"]["built"] == "lifted C"
+    assert d["stacks"]["original"][-1]["function"] == NAME and d["stacks"]["rebuilt"][-1]["built"] == "lifted C"
+    assert d["stores"] and d["stores"][0]["original_site"] == store and d["verdict"]
+    assert d["events_total"] >= len(d["events"]) and all(e["text"] for e in d["events"])
+    if d["frame"] is not None:
+        assert "error" in d["frame"] or d["frame"]["function"] and d["frame"]["rows"]
+    if importlib.util.find_spec("elftools"):
+        assert d["rebuilt"]["line"]["path"] == "lifted/%s.c" % NAME and "+ 1u" in d["rebuilt"]["line"]["text"]
+    record = trace.json_record(result)
+    assert record["function"] == NAME and record["label"] == labels[0].strip("[]") and record["mode"] == "lifted"
+    assert record["exit"] == 1 and record["built"] == "lifted C" and record["moved"]
+    path = tmp_path / "out" / "trace.json"
+    trace.write_json(str(path), record)
+    assert json.loads(path.read_text()) == json.loads(json.dumps(record))
+    monkeypatch.undo()
+    out = tmp_path / "agrees.json"
+    assert trace.main(["--target", target.root, "print_status", "generated 0", "--lifted", "--no-lines",
+                       "--json", str(out)]) == 0
+    agreed = json.loads(out.read_text())
+    assert agreed["agrees"] and agreed["exit"] == 0 and agreed["first"] is None and agreed["agreed"]["calls"] >= 0
+    missing = tmp_path / "missing.json"
+    assert trace.main(["--target", target.root, "clamp", "no such case", "--lifted", "--json", str(missing)]) == 2
+    got = json.loads(missing.read_text())
+    assert got["exit"] == 2 and "no case labelled" in got["error"] and got["function"] == "clamp"

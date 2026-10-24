@@ -9,6 +9,73 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## A function's views: a trace, the code left unrun, the mutation check, the registers (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), for the first part of step 4
+of "The GUI for everything" (docs/todo.md): the views a reader of one function needs, each fed by its
+tool's own output and run as a job from the page, never computed by the page.
+
+- **Question.** Where do the four views live, what feeds them, when is a record stale, and what do the
+  tools have to give that they did not?
+- **Options and choices.**
+  1. Where: (a) pages of their own (#/trace/NAME, ...) that draw the listing and the C again, (b) part of
+     the function's page through a few hooks in app.js. **(b)**: the views are about the listing and the C
+     the page already draws (a trace's instruction marked there, a region's code, a survivor's line), and a
+     second drawing of both would be app.js's code copied. app.js gains functionHook (show, c, leave), the
+     address #/f/NAME/VIEW[/ARG], the strip's and the pane's places, and three exports; views.js and
+     views.css are files of their own, and views.py a module of dread/guipages, as the other pages are.
+     Undo: delete the three files and the hooks.
+  2. Layout: the open view (a) above the listing, (b) beside it, (c) beside from 1600 px of window, above
+     below that. **(c)**: beside, the listing and the C stay in sight while the view says where to look
+     (the trace's instruction scrolled to and marked); below 1600 px a third column leaves the listing too
+     narrow, so the view sits above it at most 64 % of the window high, and the listing is not scrolled to
+     (the view would leave the screen). At phone width everything stacks; wide tables scroll sideways
+     inside the view, the page never.
+  3. What feeds them: (a) the tools write a record of their own by default (BUILD/trace, BUILD/mutate),
+     (b) a `--json FILE` for each tool that lacks one (dread trace, dread mutate, dread regflow; dread
+     uncovered and dread callconv had one), the page choosing the file (BUILD/gui/views/IMAGE/...). **(b)**,
+     as the user asked ("add a --json to a tool where it lacks one"): no tool gains a side effect, a
+     command typed in a terminal with the same file shows on the page too, and the JSON says what the
+     printed report says. dread trace's printed report is made from its data now (TraceResult.data,
+     report_text), so the two cannot drift; tests/test_trace.py's 33 tests passed unchanged on the text
+     (one difference left on purpose: a frame of exactly 40 rows no longer ends in "...", which said
+     rows were left out where none were).
+  4. Which cases fail: dread test's tests.tsv had counts only. (a) parse a job's log, (b) a fifth column,
+     `failing`, the labels of the failing cases as a JSON list (a written case's label may hold any
+     character). **(b)**, a format change with its note in docs/formats.md; older files have four columns
+     and their readers go on. The lift check's and the readable check's failing case is the FAIL line of
+     the verdict, with the labels of the last round file that names the function's FAIL lines.
+  5. The bits: regflow's analysis follows a register bit for bit since regflow 26 but kept only which
+     registers. (a) run the analysis again in a job for the bits, (b) keep them in its result (`bits`,
+     regflow 27: kept's and reads' fields where fewer than all bits count). **(b)**: the page's server
+     already loads the analysis; the bits cost nothing to keep. RegFlow.case_facts leaves them out, so no
+     generated case is made anew for them (any edit of regflow.py makes the cache anew anyway: its key
+     holds the module's source; relations' and groups' caches follow it). Per call site the bits are not
+     kept (sites' format is part of the cases' key); the call sites show which registers, always or on
+     some paths.
+  6. Stale: (a) digests of what a tool read, kept in its record, (b) the files' times against the
+     record's. **(b)**: cheap and enough to offer the job again; the view names the newer files. Not seen:
+     a change of DREAD's own code, a file's contents changed back to an older time.
+  7. When a job runs: (a) only on a button, (b) a trace at once where a case was chosen on purpose (its
+     chip, the trace view opened by its tab, or an address that names it) and its record is missing; the
+     other views on a button. **(b)**: "one click from a failing case to its trace"; a trace is quick (a
+     second on gizmo; on FreeRTOS's GCC -Os build a lifted trace took 53 s the first time, compiling the
+     objects and the twin with -g, and 9 s after) where a mutation check is not, and walking from function to function with the view open starts nothing (each case at most
+     once a page). A read-only server starts nothing.
+  8. A job's exit status: dread trace's 1 is a case that parts and dread mutate's a survivor, which
+     dread.jobs records as failed. The view shows a job's state while it runs, and after it only where it
+     wrote no record (its log says why).
+  9. What the tools do not say is not made up: dread mutate does not know which case comes closest to
+     noticing a survivor (it runs each variant's cases to their verdict), so the view says why no case
+     notices in the tool's words (no case's outcome changed; what the --kill search found); dread
+     uncovered suggests no action, so the view shows its forced run's outcome with what its docstring
+     says that outcome means ("the condition alone stands in the way", "the region needs more of its
+     inputs").
+- **Status.** In the code: dread/guipages/views.py, dread/web/views.js and views.css, app.js's hooks; the
+  tools' --json (docs/formats.md), tests.tsv's failing column, regflow 27's bits. Tried in headless
+  Chrome on a copy of gizmo with parse_uint written wrong on purpose and on a copy of FreeRTOS's GCC -Os
+  build, light and dark, 1360, 1920 and 390 px wide.
+
 ## The lift check's retries: each function once, no fixed number of passes (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), found on the private

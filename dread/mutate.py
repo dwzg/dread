@@ -43,8 +43,14 @@ argument no longer matches and the mutant counts again.
 
 Output per function: `NAME  N changes caught, M survived, K did not build`, then one line per
 survivor `  FILE:LINE  text   [what was changed]`. Exit status 1 when a survivor is not argued.
+--json FILE writes the same per function besides (docs/formats.md, "dread mutate --json"): every
+survivor as its line before and after the change, with what the --kill search found where it ran,
+the argued ones with their argument, those the search caught, and the counts; dread gui's mutation
+view reads it. Which case comes closest to noticing a survivor is not known to the tool: it runs each
+variant's cases to their verdict and keeps no more.
 
-    dread mutate [--target DIR] [--image NAME] [--lines FIRST-LAST] [--seconds N] [--jobs N] NAME...
+    dread mutate [--target DIR] [--image NAME] [--lines FIRST-LAST] [--seconds N] [--jobs N] [--kill]
+                 [--json FILE] NAME...
 """
 import argparse
 import hashlib
@@ -463,8 +469,10 @@ def append_case(image, name, case, label):
         json.dump({"cases": old + [keep]}, f, indent=1, sort_keys=True)
 
 
-def check(target, image, name, line_range=None, seconds=300, jobs=None, out=print, kill_survivors=False):
-    """Mutate one function; returns (caught, survivors [(line, text, what)], unbuilt, ran away)."""
+def check(target, image, name, line_range=None, seconds=300, jobs=None, out=print, kill_survivors=False,
+          record=None):
+    """Mutate one function; returns (caught, survivors [(line, text, what)], unbuilt, ran away). record: a
+    dict filled with the function's entry of dread mutate --json (json_entry)."""
     origins = sources(image.src)
     path, lines, start, end, static = find_function([p for p, _, _ in origins], name)
     origin = next(o for o in origins if o[0] == path)
@@ -512,7 +520,7 @@ def check(target, image, name, line_range=None, seconds=300, jobs=None, out=prin
     same = [k for k in range(1, len(tasks)) if results[k] == "same code"]
     survivors = [variants[k - 1] for k in range(1, len(tasks)) if results[k] == "alive"]
     rel = os.path.relpath(path, target.root)
-    killed = []
+    killed, searched = [], {}             # searched: survivor -> ("none" or "suspect", the input found)
     if kill_survivors and survivors:
         from dread import autocase
         gen = autocase.generator_for(runner.RUN)
@@ -536,6 +544,9 @@ def check(target, image, name, line_range=None, seconds=300, jobs=None, out=prin
                 elif result == "suspect":
                     out("  the input found for [%s] separates the original from the unchanged C too: %s"
                         % (what, json.dumps(case)[:300]))
+                    searched[(i, new, what)] = ("suspect", case)
+                else:
+                    searched[(i, new, what)] = (result, case)
         finally:
             shutil.rmtree(work2, ignore_errors=True)
         survivors = [s for s in survivors if s not in killed]
@@ -555,7 +566,51 @@ def check(target, image, name, line_range=None, seconds=300, jobs=None, out=prin
         out("  %s:%d  %s   [%s]" % (rel, i + 1, lines[i].strip(), what))
     for i, new, what, why in argued:
         out("  argued %s:%d  [%s]: %s" % (rel, i + 1, what, why))
+    if record is not None:
+        record.update(json_entry(rel, lines, start, end, static, names, variants, results, caught, survivors, argued,
+                                 killed, searched, kill_survivors, seconds, line_range))
     return len(caught), survivors, len(unbuilt), len(away)
+
+
+JSON_VERSION = 1    # of dread mutate --json's record (docs/formats.md)
+
+
+def json_entry(rel, lines, start, end, static, names, variants, results, caught, survivors, argued, killed, searched,
+               kill, seconds, line_range):
+    """One function's entry of dread mutate --json (docs/formats.md): where its body is, whose cases ran,
+    the changes made and what came of each kind, every survivor as the line before and after with why
+    no case notices it (what the --kill search found, where it ran), the argued ones with their
+    argument, those the search caught."""
+    def change(i, new, what):
+        return {"line": i + 1, "old": lines[i], "new": new, "what": what}
+    kinds = {}
+    for k in range(1, len(variants) + 1):
+        kinds[results[k]] = kinds.get(results[k], 0) + 1
+    shown = []
+    for i, new, what in survivors:
+        item = change(i, new, what)
+        got = searched.get((i, new, what))
+        item["search"] = got[0] if got else None
+        item["input"] = got[1] if got and got[0] == "suspect" else None
+        shown.append(item)
+    return {"file": rel, "first": start + 1, "last": end, "static": bool(static), "cases_of": list(names),
+            "changes": len(variants), "caught": len(caught), "killed": [change(*k) for k in killed],
+            "survived": len(survivors), "survivors": shown,
+            "argued": [dict(change(i, new, what), argument=why) for i, new, what, why in argued],
+            "unbuilt": kinds.get("unbuilt", 0), "same_code": kinds.get("same code", 0),
+            "ran_away": kinds.get("ran away", 0), "kill": bool(kill), "seconds": seconds,
+            "lines": list(line_range) if line_range else None}
+
+
+def write_json(path, data):
+    """Write the record whole, renamed into place (a reader never sees half of it)."""
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    tmp = os.path.join(folder, ".%s.tmp%d" % (os.path.basename(path), os.getpid()))
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def main(argv=None):
@@ -565,21 +620,32 @@ def main(argv=None):
     parser.add_argument("--seconds", type=int, default=300, help="time a variant may take (default 300)")
     parser.add_argument("--jobs", type=int, help="worker processes (default: the polite share of the cores)")
     parser.add_argument("--kill", action="store_true", help="search inputs that catch the survivors and keep them")
+    parser.add_argument("--json", metavar="FILE", help="also write what came of each function to FILE as JSON "
+                        "(docs/formats.md)")
     parser.add_argument("names", nargs="+")
     args = parser.parse_args(argv)
     polite()
     line_range = tuple(int(x) for x in args.lines.split("-")) if args.lines else None
+    done = {}
+    failed = None
     try:
         target, image = tgt.from_args(args)
         if not os.path.exists(os.path.join(build.recon_dir(target, image), "payload.bin")):
             build.build(target, image, quiet=True)
         alive = 0
         for name in args.names:
+            entry = {}
             _, survivors, _, _ = check(target, image, name, line_range, args.seconds, args.jobs,
-                                       kill_survivors=args.kill)
+                                       kill_survivors=args.kill, record=entry)
+            done[name] = entry
             alive += len(survivors)
     except (tgt.TargetError, KeyError, RuntimeError, overlay.OverlayError) as e:
-        print("dread mutate: %s" % e, file=sys.stderr)
+        failed = str(e.args[0]) if isinstance(e, KeyError) and e.args else str(e)
+        print("dread mutate: %s" % failed, file=sys.stderr)
+    if args.json:
+        write_json(args.json, {"version": JSON_VERSION, "functions": done, "error": failed,
+                               "names": list(args.names)})
+    if failed is not None:
         return 1
     return 1 if alive else 0
 

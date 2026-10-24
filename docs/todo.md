@@ -4547,9 +4547,43 @@ reimplement them.
   dread.namereview keeps a challenge whose questions were held back as one without a candidate); the
   estimate on other models and tasks; a first run's first batch of a kind (no answers yet) is weighed at
   4,000 tokens out, so a small budget takes several rounds.
-- [ ] 4. Result views for the tools the GUI does not show yet: bench results, cclab profiles, a trace's
-  first difference, uncovered regions, mutation survivors, callconv and regflow per function,
-  leakcheck's hits.
+- [x] 4a. The views a reader of one function needs, on its page (2026-10-24; docs/decisions.md, "A
+  function's views"): under the function's header a strip with what each view knows, and the one that is
+  open beside the listing and the C (above them below 1600 px), its instructions marked in the listing
+  and its lines in the C, each read from its tool's --json record in BUILD/gui/views and run as a job
+  from the page where the record is missing or stale (a newer file the tool reads, by the files' times):
+  - Trace: the failing cases of dread test's tests.tsv (a new column, `failing`: the cases' labels), of
+    the lift check's and the readable check's verdicts (with the last round file's labels), each traced
+    in its mode (dread trace, --lifted, --readable) with `dread trace --json` (new: the report as data,
+    the printed report made from it): where the runs part, both images' instructions with the C line or
+    the statement, where a register was set last, the call stacks, the frame as both images have it,
+    the last shared events, the stores that differ, the first difference dread test compares where it
+    is another; a case chosen on purpose traced at once; any case by its label in either mode; a failing
+    function of the overview opens here.
+  - Uncovered: dread uncovered NAME --json, its regions marked in the listing (the region, its way in,
+    what decides it), each with its way in, the sources, the values its runs saw, how a run sent the
+    missed way ended and what that means in the tool's words; the search's notes.
+  - Mutation: `dread mutate --json` (new), for C of src, with or without --kill: each survivor as its line
+    before and after, marked in the C, what the search found; argued ones with their argument; counts.
+  - Registers: dread.regflow's facts (RegFlow.facts, also `dread regflow --json`, new) with the bits a
+    read uses where fewer than all count (regflow 27 keeps them), per call site of its callers and of its
+    own calls, leftover and computed; dread callconv NAME --json's measurement against them.
+  - Checked: tests/test_gui_views.py (the API on a copy of gizmo with parse_uint written wrong: the
+    failing cases of both records, traces run as jobs in both modes and read back, a record made stale,
+    the mutation check's refusal, failure and argued survivors, uncovered, regflow and callconv, the
+    token, a read-only server, wrong requests), test_gui_browser.py (the views in headless Chrome: a trace
+    at once, another by its chip, the listing marked, the registers and mutation views, phone width), the
+    tools' JSON in test_trace.py, test_mutate.py, test_regflow_bits.py, test_runner.py; by eye in headless
+    Chrome on that copy and on a copy of FreeRTOS's GCC -Os build (uncovered regions with forced runs,
+    a register read 16 bits wide), light and dark, 1360, 1920 and 390 px wide.
+  - Not established: staleness by the files' times misses a change of DREAD's own code; the bits per
+    call site are not kept (sites are part of the cases' key); which case comes closest to noticing a
+    survivor is not known to dread mutate and not shown; a trace's C line needs the twin build to be byte
+    for byte the traced image (a rebuilt image older than the tables has none: the view shows the note);
+    tried with a few hundred functions, not a large target's thousands of failing cases (the view lists
+    eight before "all").
+- [ ] 4. Result views for the tools the GUI does not show yet: bench results, cclab profiles, leakcheck's
+  hits.
 
 ## Browser view (`dread gui`; asked for by the user on 2026-10-18)
 

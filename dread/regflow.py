@@ -62,12 +62,16 @@ indirect call reads, paths through code the function table does not cover, and c
 registers (a function that reads one its caller left: `caller_regs` in the case files).
 
 Output: each function whose kept registers go beyond the first result register, with the call sites
-that read them; with --all every function's reads, kept and overwritten. Cached in BUILD/regflow/IMAGE.json,
+that read them; with --all every function's reads, kept and overwritten. --json FILE writes every
+function's facts besides, or the named functions' (docs/formats.md, "dread regflow --json"): reads,
+kept, preserved, overwritten, leftover, computed, the bits a read uses where it uses fewer than all,
+the call sites after which its callers read its registers, and its own calls after which it reads a
+callee's; dread gui's registers view shows the same facts (RegFlow.facts). Cached in BUILD/regflow/IMAGE.json,
 keyed by the image, its tables, its startup copies, the ABI and the source of the analysis (this module,
 dread.switches, dread.program's decoder, the arch layer and its package's helpers) as the process read it
 when it imported this module, not when it stores (a run that imported older code keys by that code).
 
-    dread regflow [--target DIR] [--image NAME] [--all] [NAME...]
+    dread regflow [--target DIR] [--image NAME] [--all] [--why] [--json FILE] [NAME...]
 """
 import argparse
 import collections
@@ -79,7 +83,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 26                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 27                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -147,6 +151,9 @@ VERSION = 26                # 3: entry spills (variadic functions) are no use; 4
                             # that only computes registers reads what its used results need, bit for bit
                             # where the layer has a rule; a store of a byte the low byte); a function a
                             # pointer may call has its result read (pointer_entries); leftover and computed
+                            # 27: the bits a read uses kept beside the registers (bits: kept's and reads'
+                            # fields where fewer than all of a register's bits are used); the analysis is
+                            # the one of 26
 
 
 class RegFlow:
@@ -159,15 +166,21 @@ class RegFlow:
     (nothing is known overwritten then). leftover: the functions whose second result register their
     callers read but holds only a constant or what a callee left there (Analysis.leftovers); computed:
     the functions whose first result register may hold at a return a value their own instructions
-    wrote (Analysis.computed); both None before version 26."""
+    wrote (Analysis.computed); both None before version 26. bits: {"kept": {name: {register: mask}},
+    "reads": {...}}, the bits of each register a read uses where they are fewer than all of it (bic r1,
+    r1, #0xff whose result's low byte alone is stored: none of r1's low byte; a byte's store: 0xff), a
+    register absent where every bit counts; None before version 27."""
 
-    def __init__(self, names, kept, reads, sites, preserved=None, overwritten=None, leftover=None, computed=None):
+    def __init__(self, names, kept, reads, sites, preserved=None, overwritten=None, leftover=None, computed=None,
+                 bits=None):
         self.names = names                  # register names in bit order
         self.kept, self.reads, self.sites = kept, reads, sites
         self.preserved = preserved or {}
         self.overwritten = overwritten
         self.leftover = leftover
         self.computed = computed
+        self.bits = bits
+        self._by_caller = None              # caller -> {(address, callee): {register: always}} (calls_of)
 
     def _regs(self, value):
         return [n for i, n in enumerate(self.names) if value >> i & 1]
@@ -222,21 +235,71 @@ class RegFlow:
             out["leftover"] = self.leftover
         if self.computed is not None:
             out["computed"] = self.computed
+        if self.bits is not None:
+            out["bits"] = self.bits
         return out
 
     @classmethod
     def from_json(cls, data):
         return cls(data["names"], data["kept"], data["reads"], data["sites"], data.get("preserved"),
-                   data.get("overwritten"), data.get("leftover"), data.get("computed"))
+                   data.get("overwritten"), data.get("leftover"), data.get("computed"), data.get("bits"))
 
     def case_facts(self):
         """What a function's generated cases depend on of the result (dread.autocase's environment):
-        to_json without overwritten, leftover and computed, which no case reads, so that version 25 kept
-        every image's cases (version 26 changed kept, reads and sites)."""
+        to_json without overwritten, leftover, computed and bits, which no case reads, so that version 25
+        kept every image's cases (version 26 changed kept, reads and sites; 27 added bits alone)."""
         out = self.to_json()
-        for field in ("overwritten", "leftover", "computed"):
+        for field in ("overwritten", "leftover", "computed", "bits"):
             out.pop(field, None)
         return out
+
+    def _order(self, reg):
+        return (self.names.index(reg) if reg in self.names else len(self.names), reg)
+
+    def calls_of(self, name):
+        """The calls a function makes after which it reads a callee's register, from sites: [{"address",
+        "callee", "registers": [{"register", "always"}]}] by address (a tail call that passes a register
+        on counts as reading it)."""
+        if self._by_caller is None:
+            index = {}
+            for callee, by_reg in self.sites.items():
+                for reg, entries in by_reg.items():
+                    for e in entries:
+                        regs = index.setdefault(e[0], {}).setdefault((e[1], callee), {})
+                        regs[reg] = bool(regs.get(reg) or (len(e) > 2 and e[2]))
+            self._by_caller = index
+        return [{"address": address, "callee": callee, "registers": self._listed(regs)}
+                for (address, callee), regs in sorted(self._by_caller.get(name, {}).items())]
+
+    def _listed(self, regs):
+        """[{"register", "always"}] of {register: always}, in the registers' order."""
+        return [{"register": r, "always": a} for r, a in sorted(regs.items(), key=lambda kv: self._order(kv[0]))]
+
+    def facts(self, name):
+        """What the result says of one function (dread regflow --json, dread gui's registers view):
+        {"reads", "kept", "preserved", "overwritten" (null where not known: before version 25),
+        "leftover", "computed" (whether it is one; null where not known), "bits" ({"reads", "kept"}: the
+        bits used where fewer than all, as bits; null before version 27), "callers" (each call site after
+        which its registers are read: [{"caller", "address", "registers": [{"register", "always"}]}]; a
+        caller that stands for others, such as POINTER_CALLERS or "the ABI", with address 0), "calls"
+        (calls_of)}."""
+        callers = {}
+        for reg, entries in self.sites.get(name, {}).items():
+            for e in entries:
+                regs = callers.setdefault((e[0], e[1]), {})
+                regs[reg] = bool(regs.get(reg) or (len(e) > 2 and e[2]))
+        bits = None
+        if self.bits is not None:
+            bits = {k: dict(sorted(self.bits.get(k, {}).get(name, {}).items(), key=lambda kv: self._order(kv[0])))
+                    for k in ("reads", "kept")}
+        return {"reads": self.read_regs(name), "kept": self.kept_regs(name), "preserved": self.preserved_regs(name),
+                "overwritten": self.overwritten_regs(name) if self.overwritten is not None else None,
+                "leftover": name in self.leftover if self.leftover is not None else None,
+                "computed": name in self.computed if self.computed is not None else None,
+                "bits": bits,
+                "callers": [{"caller": c, "address": a, "registers": self._listed(regs)}
+                            for (c, a), regs in sorted(callers.items(), key=lambda kv: (kv[0][1] == 0, kv[0]))],
+                "calls": self.calls_of(name)}
 
 
 def argued_path(image):
@@ -1768,7 +1831,24 @@ class Analysis:
                             {k: dict(v) for k, v in sites.items() if v}, preserved, overwritten)
         flow.leftover = sorted(self.leftovers())
         flow.computed = sorted(self.computed())
+        flow.bits = {"kept": self.partial_bits(kept), "reads": self.partial_bits(self.reads)}
         return flow
+
+    def partial_bits(self, masks):
+        """{name: {register: mask}} of the masks' registers of which fewer than all bits are set (general
+        registers alone: a flag is read whole)."""
+        out = {}
+        for name, m in masks.items():
+            got = {}
+            for reg in self.names:
+                if reg.startswith("flags"):
+                    continue
+                field = (m >> self.shift[reg]) & self.field
+                if field and field != self.field:
+                    got[reg] = field
+            if got:
+                out[name] = got
+        return out
 
     def _folded(self, names, kept, reads, sites, preserved, overwritten=None):
         """The RegFlow, with flags followed one by one folded into "flags" (a flag read is the flags
@@ -2151,6 +2231,8 @@ def main(argv=None):
     parser.add_argument("--all", action="store_true", help="every function's reads and kept")
     parser.add_argument("--why", action="store_true",
                         help="for the named functions: the instructions behind each kept register")
+    parser.add_argument("--json", metavar="FILE", help="also write every function's facts (or the named ones') to "
+                        "FILE as JSON (docs/formats.md)")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     try:
@@ -2161,6 +2243,12 @@ def main(argv=None):
         return 1
     result = target.abi.result[0] if target.abi.result else None
     names = args.names or sorted(set(flow.kept) | set(flow.reads))
+    if args.json:
+        missing = [n for n in args.names if n not in flow.kept and n not in flow.reads]
+        if missing:
+            print("dread regflow: no function %s" % ", ".join(missing), file=sys.stderr)
+            return 2
+        write_json(args.json, json_record(flow, names, result))
     analysis = None
     if args.why:
         from dread.program import Program
@@ -2195,6 +2283,32 @@ def main(argv=None):
         print("dread regflow: %d functions keep a register besides %s for their callers"
               % (sum(1 for n in flow.kept if [r for r in flow.kept_regs(n) if r != result]), result))
     return 0
+
+
+def json_record(flow, names, result):
+    """dread regflow --json's record (docs/formats.md): the version of the analysis, the register names,
+    the result register and each named function's facts (RegFlow.facts)."""
+    leftover, computed = flow.leftover, flow.computed
+    if leftover is not None:                # (as sets for the facts of many functions)
+        flow.leftover = set(leftover)
+    if computed is not None:
+        flow.computed = set(computed)
+    try:
+        return {"version": VERSION, "names": [n for n in flow.names], "result": result,
+                "functions": {name: flow.facts(name) for name in names}}
+    finally:
+        flow.leftover, flow.computed = leftover, computed
+
+
+def write_json(path, data):
+    """Write a record whole, renamed into place (a reader never sees half of it)."""
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    tmp = os.path.join(folder, ".%s.tmp%d" % (os.path.basename(path), os.getpid()))
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 _read_sources()

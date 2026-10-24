@@ -56,7 +56,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick); each run kept as a record: both device logs with the function behind each entry, and who entered whom (calls through pointers, tasks started by their scheduler, exceptions) | done |
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
 | Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order, the functions in groups found from their code alone, the subsystems a reader would see (`dread groups`: shared memory, texts and devices, neighbours in memory); renaming everywhere at once (`dread rename`) | done |
-| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes; the system run's device logs of both images side by side; every command from a form made from its own options, run as a job with its log followed; a Setup page: what this machine has, a new target from an ELF or a raw image (a path or an upload), its first analyses as a chain of jobs, the language-model providers with their keys in key files; the pilot started from a short form with an estimate, followed live within its budget, stopped, its runs, costs per month and comparisons | done |
+| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes; the system run's device logs of both images side by side; every command from a form made from its own options, run as a job with its log followed; a Setup page: what this machine has, a new target from an ELF or a raw image (a path or an upload), its first analyses as a chain of jobs, the language-model providers with their keys in key files; the pilot started from a short form with an estimate, followed live within its budget, stopped, its runs, costs per month and comparisons; a function's views beside its listing and C: where a failing case parts (`dread trace`), why its cases leave code unrun (`dread uncovered`), the changes to its C no case notices (`dread mutate`), its registers (`dread regflow`, `dread callconv`) | done |
 | Setting up (`dread doctor`, `dread new`, `dread llm set`/`key`): the prerequisites with what to install for this system's package manager; a target directory and its `dread.toml` from an ELF (architecture, image, startup copies, memory map, compiler and its flags from the debug information, the tables from the symbols) or from a raw image (an architecture of a list, a load address), each guess marked; providers added and changed in `llm.toml` with its comments kept, keys in files of mode 600 | first version |
 | Relations (`dread relations`, and in the browser): a function's callers, callees, memory, texts and structures as a graph, each piece marked by how sure its name is (its vote's agreement, and the name review's suspects); the whole program as a graph of its groups (`dread groups --json`), a group opening into its functions, a search lighting the functions and groups it finds; both laid out by a force simulation as they are drawn | first version |
 | Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
@@ -208,6 +208,25 @@ The pilot page (`l`, or the dial in the bar) runs `dread pilot` and watches it:
   (`--vs`).
 
 Keys stay out of the page: it says whether a provider's key is there, never what it is.
+
+A function's page has four views under its header, the one that is open beside the listing and the C
+(above them on a screen narrower than 1600 px), each read from its tool's own record (its `--json`, kept
+in BUILD/gui/views) and run as a job from the page where the record is missing or older than what the
+tool reads:
+- **Trace**: the cases the records say fail (dread test's tests.tsv, the lift check's and the readable
+  check's verdicts), each traced in the image it failed in (`dread trace`, `--lifted`, `--readable`):
+  where the runs part, the instruction in both images with its C line, where a register was set last,
+  both call stacks, the frame as both images have it, the last shared events. The instruction is marked
+  in the listing and its statement in the C. A case chosen on purpose is traced at once; a failing
+  function in the overview opens here.
+- **Uncovered** (`dread uncovered`): the regions its cases leave unrun, marked in the listing, each with
+  its way in, what decides it and where that comes from, the values its runs saw there and how a run sent
+  the missed way ended.
+- **Mutation** (`dread mutate`, for C of src): each change no case notices as the line before and after,
+  with what the `--kill` search found; the argued ones with their argument.
+- **Registers**: what dread.regflow knows (what it reads at its entry and what its callers read after it,
+  with the bits where fewer than all count, what it leaves alone, leftovers and computed results), per
+  call site of its callers and of its own calls, and what `dread callconv` measured against it.
 
 A function's relations are the pieces of the puzzle around it, as a graph:
 - its callers above and callees below, to a depth of 1 to 3;

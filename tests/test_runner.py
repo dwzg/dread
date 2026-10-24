@@ -702,3 +702,15 @@ def test_more_shifts_of_the_stack_find_what_one_leaves_alone(tmp_path, monkeypat
     else:
         assert "FAIL place [once]: refused for where the stack lies" in text and \
             "but it differs where the lower stack moves nothing: memory 0x%x" % bits in text, text
+
+
+def test_the_labels_of_the_failing_cases():
+    """tests.tsv's failing column (runner.failed_labels): the labels of the FAIL lines of one function, with
+    or without the refusal's words after them, each once and in order; not another function's (whose name
+    starts the same), nor the summary line, [case generation] or [unreachable]."""
+    lines = ["FAIL clamp [generated 3]\n     result: 0x1 vs 0x2", "FAIL clamp [kept 0]: refused for a stack address, "
+             "but it differs in r0: 0x1 vs 0x2", "FAIL clamp_all [generated 1]", "FAIL clamp [generated 3]",
+             "FAIL clamp [a case [of mine]]", "FAIL clamp [unreachable]: 2 instructions declared unreachable did run",
+             "FAIL clamp [case generation]: no inputs", "FAIL clamp                      2/9 cases agree"]
+    assert runner.failed_labels("clamp", lines) == ["generated 3", "kept 0", "a case [of mine]"]
+    assert runner.failed_labels("clamp_all", lines) == ["generated 1"] and runner.failed_labels("other", lines) == []

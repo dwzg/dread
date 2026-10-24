@@ -68,12 +68,15 @@ Output, one block per function, in this form (other tools read it):
     UNTESTED NAME
 
 Exit status 1 when anything failed, is uncovered or untested. Functions run in parallel worker
-processes (fork; Linux and macOS), slowest of the previous run first. With names given, only those
-run and no summary file is written; DREAD_ALL_MISSED=1 lists every missed address.
+processes (fork; Linux and macOS), slowest of the previous run first. A complete run writes tests.tsv
+beside the rebuilt image (docs/formats.md): each function's cases and failures, the instructions no
+case ran and the labels of its failing cases (dread gui's trace view offers those). With names given,
+only those run and no summary file is written; DREAD_ALL_MISSED=1 lists every missed address.
 
     dread test [--target DIR] [--image NAME] [--recon PAYLOAD] [--keep-failing] [NAME...]
 """
 import argparse
+import json
 import multiprocessing
 import os
 import sys
@@ -682,11 +685,28 @@ def prepare(target, image, recon_path, keep_failing=False):
     return suite
 
 
+def failed_labels(name, lines):
+    """The labels of the cases a function's FAIL lines name ("FAIL NAME [label]", with or without the
+    words after it), in their order; not [case generation] nor [unreachable], which are no case."""
+    prefix, out = "FAIL %s [" % name, []
+    for text in lines:
+        for line in text.splitlines():
+            if not line.startswith(prefix):
+                continue
+            rest = line[len(prefix):]
+            end = len(rest) - 1 if rest.endswith("]") else rest.find("]: ")
+            label = rest[:end] if end > 0 else None
+            if label and label not in ("case generation", "unreachable") and label not in out:
+                out.append(label)
+    return out
+
+
 def run(names, only=False, out=print, jobs=None):
     """Run the functions `names` (RUN prepared); returns (failed, uncovered, results). RUN["missed"]
-    keeps, per function, the instructions of the original no case ran."""
+    keeps, per function, the instructions of the original no case ran, RUN["failing"] the labels of
+    its cases that failed (failed_labels)."""
     failed, uncovered, results = 0, [], []
-    RUN["missed"] = {}
+    RUN["missed"], RUN["failing"] = {}, {}
     times = os.path.join(RUN["target"].build, "times", "tests-%s%s.json" % (RUN["image"].name, "-some" if only else ""))
     with multiprocessing.get_context("fork").Pool(jobs or workers(memory_each=resident()), initializer=die_with_parent) as pool:
         for name, count, bad, lines, missed in longest_first(pool, run_function, names, str, times):
@@ -694,6 +714,8 @@ def run(names, only=False, out=print, jobs=None):
             failed += bad
             results.append((name, count, bad))
             RUN["missed"][name] = missed
+            if bad:
+                RUN["failing"][name] = failed_labels(name, lines)
             if missed:
                 uncovered.append(name)
     return failed, uncovered, results
@@ -731,8 +753,9 @@ def main(argv=None):
             print("UNTESTED %s" % n)
         return 1 if failed or missing or uncovered else 0
     with open(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "tests.tsv"), "w") as f:
-        f.write("function\tcases\tfailed\tmissed\n")
-        f.writelines("%s\t%d\t%d\t%s\n" % (n, c, b, " ".join("0x%x" % a for a in RUN["missed"].get(n, ())))
+        f.write("function\tcases\tfailed\tmissed\tfailing\n")
+        f.writelines("%s\t%d\t%d\t%s\t%s\n" % (n, c, b, " ".join("0x%x" % a for a in RUN["missed"].get(n, ())),
+                                                 json.dumps(RUN["failing"][n]) if RUN["failing"].get(n) else "")
                      for n, c, b in results)
     system = RUN.get("system", set())
     for fn in sorted(system & set(RUN["built"])):
