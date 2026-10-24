@@ -7,6 +7,49 @@ under way) and MIPS (MIPS32r2 little endian, `dread.arch.mips`, under way). Anot
 """
 
 
+M32 = 0xFFFFFFFF
+
+
+def low_bits(d):
+    """The bits from bit 0 up to the highest bit of d: what bits d of a sum, a difference or a product
+    depend on in each operand (a carry goes upwards only); 0 for 0. dread.regflow's bits (the layers'
+    bit_demand)."""
+    return (1 << d.bit_length()) - 1 if d else 0
+
+
+def unshift(d, kind, k):
+    """The bits of a 32-bit x that bits d of x shifted by k depend on: kind "lsl", "lsr", "asr" or
+    "ror" (k of 32 and more: "lsl" and "lsr" leave nothing of x, "asr" copies of bit 31; "ror" by k
+    modulo 32). dread.regflow's bits (the layers' bit_demand)."""
+    d &= M32
+    if kind == "lsl":
+        return d >> k if k < 32 else 0
+    if kind == "lsr":
+        return (d << k) & M32 if k < 32 else 0
+    if kind == "asr":
+        k = min(k, 32)
+        if not k:
+            return d
+        out = (d << k) & M32
+        if d >> (32 - k):                   # (the result's top k bits are copies of bit 31)
+            out |= 1 << 31
+        return out
+    if kind == "ror":
+        k %= 32
+        return ((d << k) | (d >> (32 - k))) & M32 if k else d
+    raise ValueError("no shift %r" % (kind,))
+
+
+def extend_bits(d, width, signed):
+    """The bits of x that bits d of x's low `width` bits extended to 32 depend on (zero extension:
+    those bits; sign extension: and the sign bit wherever a bit above is used)."""
+    mask = (1 << width) - 1
+    out = d & mask
+    if signed and d & ~mask & M32:
+        out |= 1 << (width - 1)
+    return out
+
+
 def sum_value(a, b, add=True):
     """a + b, or a - b, of two register values of a layer's value_step ((value, indexed), indexed True
     for a constant plus something not known), either of them None when not known: a known value plus

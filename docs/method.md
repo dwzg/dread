@@ -136,7 +136,12 @@ does not touch it, and hand-written assembly returns values anywhere. `dread reg
 every function, the registers its callers read after it returns; the tests compare them, and C that
 cannot keep them is refused before anyone writes it. It also finds the registers a function reads at
 its entry and those it overwrites (written on every path to its return, what its caller left there
-never read first): readable C passes a callee only the arguments it can read or hand back.
+never read first): readable C passes a callee only the arguments it can read or hand back. It follows
+a register bit for bit, and a read counts only where its bits matter (a caller that keeps a register's
+upper bits through a bic and stores a byte of it reads none of them); the result registers count as
+the program reads them (callers through a pointer counted), every other register as the comparison
+needs it. Readable C prints a function whose result nobody reads void, and a second result register
+that holds only what a callee left one-word, handed back through dread.h's RETURN2.
 
 What regflow reads from the code is checked by measuring: `dread callconv` runs each function's
 cases on the original once more for every register with another value in it at the entry, and lists

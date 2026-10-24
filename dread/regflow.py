@@ -16,8 +16,16 @@ For every function F this finds:
   kept         the scratch registers and flags some caller reads after a call to F before writing
                them. F's value of them at the return is behaviour (a result, or a register F must
                leave as it found it). dread test and dread integration compare them at the return.
+               The result registers (the first, with hard float the FPU's) as the program reads them:
+               where some caller's behaviour depends on them, or a pointer may call F (pointer_entries);
+               every other register as the comparison needs it: where the outputs some caller's cases
+               compare depend on it, its result at every return among them (Analysis.solve).
   reads        the scratch registers and flags F reads at its entry before writing them: its
                register arguments, and anything else its callers have to set up.
+  leftover     the functions whose second result register their callers read (kept, and F writes
+               it: the lifted C returns two words) where it holds only a constant F put there or what
+               a callee left there that is itself such a value: no result of the source's
+               (Analysis.leftovers; dread readable hands it back through dread.h's RETURN2).
   overwritten  the scratch registers F writes on every path from its entry to a return without
                reading first what its caller left there: what F hands back in them is its own,
                whatever its caller passed (dread readable passes no argument in a result register of
@@ -35,7 +43,14 @@ Method: register liveness over each function's instructions, solved for all func
 return passes on kept[F]; a call to G uses reads[G] and ends the registers G may write on any path
 (its callees included), so a register G never writes flows through the call; a branch to another
 function's entry is a tail call (G returns to F's caller, so kept[G] includes kept[F]).
-Conditional instructions read the flags and end nothing.
+Conditional instructions read the flags and end nothing. Since regflow 26 bit for bit, and a read
+counts only where its bits matter: an instruction that only computes registers reads what its used
+results need (Analysis.refinement: bic r1, r1, #0xff whose result's low byte alone is stored reads none
+of r1; one whose result nobody uses reads nothing; the layers' bit_demand rules, checked against the
+emulator), a store of a byte the low byte. Before, every read counted, and a caller that kept the upper
+bits of a register a callee left and stored none of them made that register a second result. What a
+function computes for a callee the analysis does not see (a call through a pointer, a variadic
+function's unnamed arguments, a way out it cannot follow) stays read (Analysis._handed).
 
 It errs on the side of finding less, so that what it finds can be compared without false alarms:
 pushes do not count as reads (push {r3, lr} that only keeps the stack aligned would make r3 an
@@ -49,7 +64,8 @@ registers (a function that reads one its caller left: `caller_regs` in the case 
 Output: each function whose kept registers go beyond the first result register, with the call sites
 that read them; with --all every function's reads, kept and overwritten. Cached in BUILD/regflow/IMAGE.json,
 keyed by the image, its tables, its startup copies, the ABI and the source of the analysis (this module,
-dread.switches and the arch layer).
+dread.switches, dread.program's decoder, the arch layer and its package's helpers) as the process read it
+when it imported this module, not when it stores (a run that imported older code keys by that code).
 
     dread regflow [--target DIR] [--image NAME] [--all] [NAME...]
 """
@@ -58,11 +74,12 @@ import collections
 import hashlib
 import json
 import os
+import struct
 import sys
 
 from dread import target as tgt
 
-VERSION = 25                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 26                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -126,21 +143,31 @@ VERSION = 25                # 3: entry spills (variadic functions) are no use; 4
                             # 25: overwritten, the registers a function writes on every path to its return
                             # without reading what its caller left there first (dread readable passes no
                             # phantom argument in a result register); kept, reads and preserved as before
+                            # 26: a read of bits nobody uses is no read (Analysis.refinement: an instruction
+                            # that only computes registers reads what its used results need, bit for bit
+                            # where the layer has a rule; a store of a byte the low byte); a function a
+                            # pointer may call has its result read (pointer_entries); leftover and computed
 
 
 class RegFlow:
     """The result: kept, reads and preserved per function name, with the call sites behind kept
     (sites: name -> register -> [[caller, address, always]], always: read on every path after the
-    call). preserved: the kept registers the function never writes, its callees included: its
-    callers rely on it leaving them alone. overwritten: the registers whose value at a return is
-    the function's own, never what its caller left there (the module's docstring); None where the
-    result came from before version 25 (nothing is known overwritten then)."""
+    call; [POINTER_CALLERS, 0, False] for the result of a function a pointer may call). preserved: the
+    kept registers the function never writes, its callees included: its callers rely on it leaving them
+    alone. overwritten: the registers whose value at a return is the function's own, never what its
+    caller left there (the module's docstring); None where the result came from before version 25
+    (nothing is known overwritten then). leftover: the functions whose second result register their
+    callers read but holds only a constant or what a callee left there (Analysis.leftovers); computed:
+    the functions whose first result register may hold at a return a value their own instructions
+    wrote (Analysis.computed); both None before version 26."""
 
-    def __init__(self, names, kept, reads, sites, preserved=None, overwritten=None):
+    def __init__(self, names, kept, reads, sites, preserved=None, overwritten=None, leftover=None, computed=None):
         self.names = names                  # register names in bit order
         self.kept, self.reads, self.sites = kept, reads, sites
         self.preserved = preserved or {}
         self.overwritten = overwritten
+        self.leftover = leftover
+        self.computed = computed
 
     def _regs(self, value):
         return [n for i, n in enumerate(self.names) if value >> i & 1]
@@ -181,23 +208,34 @@ class RegFlow:
             text += "; the original leaves it unchanged"
         return text
 
+    def is_leftover(self, name):
+        """Whether the function's second result register, which its callers read, holds only a constant
+        or what a callee left there (leftover; False where that is not known)."""
+        return bool(self.leftover) and name in self.leftover
+
     def to_json(self):
         out = {"names": self.names, "kept": self.kept, "reads": self.reads, "sites": self.sites,
                "preserved": self.preserved}
         if self.overwritten is not None:
             out["overwritten"] = self.overwritten
+        if self.leftover is not None:
+            out["leftover"] = self.leftover
+        if self.computed is not None:
+            out["computed"] = self.computed
         return out
 
     @classmethod
     def from_json(cls, data):
         return cls(data["names"], data["kept"], data["reads"], data["sites"], data.get("preserved"),
-                   data.get("overwritten"))
+                   data.get("overwritten"), data.get("leftover"), data.get("computed"))
 
     def case_facts(self):
         """What a function's generated cases depend on of the result (dread.autocase's environment):
-        to_json without overwritten, which no case reads, so that version 25 kept every image's cases."""
+        to_json without overwritten, leftover and computed, which no case reads, so that version 25 kept
+        every image's cases (version 26 changed kept, reads and sites)."""
         out = self.to_json()
-        out.pop("overwritten", None)
+        for field in ("overwritten", "leftover", "computed"):
+            out.pop(field, None)
         return out
 
 
@@ -221,12 +259,15 @@ def load_argued(image):
 
 
 Row = collections.namedtuple("Row", "address size kind target falls uses kills writes conditional stack written covered "
-                                   "fall_covered", defaults=(0,))
+                                   "fall_covered demand", defaults=(0, None))
 
 
-def _rows(program, fn, mask, entry_name):
+def _rows(program, fn, an, entry_name):
     """The function's instructions as Rows: control flow (arch.flow), and the scratch registers
-    each one reads (uses) and certainly writes (kills), as masks.
+    each one reads (uses) and certainly writes (kills), as masks (Analysis: a field of bits for each
+    register). demand: what of uses counts, where that depends on more than the instruction itself
+    (Analysis.refinement): an instruction that only computes registers reads what its used results
+    need, a store of a byte or a halfword the bits it stores; None where every bit of uses counts.
 
     Predication: a register written under a condition counts as written for later reads under
     the same condition, and a write under the opposite condition completes it to a write that
@@ -234,6 +275,7 @@ def _rows(program, fn, mask, entry_name):
     (ldrls r3, =table; ldrls r0, [r3, r0, lsl #2] reads no r3 of the caller; ite eq; moveq r0, #1;
     movne r0, #0 ends r0.)"""
     arch = program.arch
+    mask = an.mask
     insns = [program.insn(a) for a in fn.insns]
     joins = {fn.entry}
     for insn in insns:
@@ -251,6 +293,8 @@ def _rows(program, fn, mask, entry_name):
     entry, written = True, set()
     frames = Frames(program, fn) if hasattr(arch, "store_slots") else None
     save_area = variadic_save_area(program, fn, insns, joins, frames) if frames is not None else set()
+    if save_area or pushed_save_area(program, insns):
+        an.variadic.add(fn.name)
     for a, insn in zip(fn.insns, insns):
         if a != fn.entry and a in joins:
             entry = False
@@ -286,8 +330,9 @@ def _rows(program, fn, mask, entry_name):
             if kind == "jump":                  # a conditional branch: what its fall-through edge knows written
                 fall_covered = state.get(arch.complement(pred), 0)
             state[pred] = covered | wm
+        demand = an.refinement(insn, reads, writes, pred is not None, rm) if rm else None
         out.append(Row(a, insn.size, kind, target, falls, uses, kills, wm, pred is not None, stack, writes, covered,
-                       fall_covered))
+                       fall_covered, demand))
         if kind in ("call", "icall"):
             state = {}
         elif wm & flags:
@@ -402,6 +447,35 @@ class Frames:
         return self._addressed
 
 
+SAVE_AREA_LEAD = 2      # the most instructions in front of a save area's push that write neither sp nor an
+                        # argument register (APCS's mov ip, sp: pushed_save_area)
+
+
+def pushed_save_area(program, insns):
+    """Whether a function's first push stores argument registers only, the last of them among them (the
+    arch layer's stack_kind and pushed_registers): a variadic function's save area as GCC's newlib
+    keeps it (printf pushes r0-r3, sprintf r1-r3, before it saves anything else), which
+    variadic_save_area does not find (it leaves pushes to the rows). The push is the first instruction,
+    or follows at most SAVE_AREA_LEAD instructions that write neither sp nor an argument register and go
+    on to the next (an APCS frame keeps the entry's stack pointer first: mov ip, sp; push {r1, r2, r3};
+    push {r4, ip, lr}). insns: the function's instructions in order (None for a word that is none).
+    False where the layer has no pushes. (dread.readable entry_save_areas: the functions so.)"""
+    arch = program.arch
+    if not (hasattr(arch, "stack_kind") and hasattr(arch, "pushed_registers")):
+        return False
+    args = list(program.target.abi.arg_regs)
+    for insn in insns[:SAVE_AREA_LEAD + 1]:
+        if insn is None:
+            return False
+        if arch.stack_kind(insn) == "push":
+            regs = [r for r in arch.pushed_registers(insn) if r is not None]
+            return bool(regs and args and set(regs) <= set(args) and args[-1] in regs)
+        if not hasattr(arch, "reg_effects") or arch.flow(insn)[0] != "next" or \
+                arch.reg_effects(insn)[1] & (set(args) | {"sp"}):
+            return False
+    return False
+
+
 def save_area_reads(program, fn, insns, frames=None):
     """The argument registers a function pushes at its entry together with the last one (a variadic
     function's save area, which may hold named arguments too) and later loads back from their slots
@@ -509,21 +583,170 @@ def scratch_names(target, arch):
 
 
 POOL_REACH = 0x1000         # how far behind a function's last instruction its pool may lie
+POINTER_CALLERS = "callers through a pointer"   # the site that stands for them in sites (why: "read after
+                                                # the call by callers through a pointer (its result)")
+
+
+VECTORS_MAX = 512           # entries an M-profile vector table has at most (16 for the core, 496 interrupts)
+
+
+def vector_words(program, entries):
+    """The addresses of the words of an M-profile vector table (the image's vectors: the stack pointer's
+    word, then the handlers' entries with bit 0 set, or 0 for a reserved one, up to the first word that is
+    neither): the core enters a handler and discards its result (the exception's return puts back r0 as
+    it was), so they are no pointers whose callers read a result (pointer_entries). Empty for other
+    profiles: an A-profile vector holds an instruction (a handler's address in a literal pool counts)."""
+    if getattr(program.arch, "profile", None) != "m":
+        return set()
+    base = program.image.vectors
+    out = set()
+    for k in range(1, VECTORS_MAX):
+        a = base + 4 * k
+        if not program.in_image(a, 4):
+            break
+        word = program.word(a)
+        if word and not (word & 1 and (word & ~1) in entries):
+            break
+        out.add(a)
+    return out
+
+
+def pointer_entries(program):
+    """The names of the functions a pointer may call: those whose entry the image holds as an aligned
+    word (in a literal pool, a table; a Thumb function's with bit 0 set or clear; not an M-profile vector
+    table's: vector_words), whose address their code makes from the pc or from a pair of instructions
+    (the layer's pc_address: adr, auipc or lui with addi behind it; wide_constants: movw with movt), or
+    from another value it knows with other instructions between (made_pointers: GCC's RISC-V code puts
+    a lui and its addi apart). Not the image's entry: the reset enters it and reads no result (a loader
+    that does is not seen). A call through a register reads nothing for the analysis (its callee is not
+    known), so these are the functions whose result a caller may read unseen (Analysis seeds their kept
+    with the first result register). More than are called so (a word that only happens to equal an
+    entry), and not every one: an address made by arithmetic the layers do not follow (an offset added
+    to a table's base the code loads) is missed (not confirmed on any target)."""
+    entries = {fn.entry & ~1: fn.name for fn in program.functions}
+    found = set()
+    data, arch = program.data, program.arch
+    skip = (-program.base) % 4
+    usable = (len(data) - skip) // 4 * 4
+    table = vector_words(program, entries)
+    for k, (word,) in enumerate(struct.iter_unpack("<I", bytes(data[skip:skip + usable]))):
+        name = entries.get(word & ~1)
+        if name is not None and program.base + skip + 4 * k not in table:
+            found.add(name)
+    pc_address = getattr(arch, "pc_address", None)
+    wide = getattr(arch, "wide_constants", None)
+    for fn in program.functions:
+        insns = [program.insn(a) for a in fn.insns]
+        made = list(wide(insns)) if wide is not None else []
+        if pc_address is not None:
+            made += [pc_address(insn, program.isa_at(insn.address)) for insn in insns if insn is not None]
+        for value in made:
+            if value is not None and (value & ~1) in entries:
+                found.add(entries[value & ~1])
+    return found | made_pointers(program, entries)
+
+
+def made_pointers(program, entries):
+    """The names of the functions whose entry (entries: address without bit 0 -> name) a function's code
+    makes from another value it knows and uses as a pointer is used: stores it, hands it to a call or a
+    tail call, returns it. The layer's value_step follows the values (an addi to the register a lui or
+    an auipc set: GCC's RISC-V code puts other instructions between, which pc_address, joining
+    neighbours, does not see: FreeRTOS's RISC-V GCC -Os demo makes 72 of its tasks' and callbacks'
+    addresses so). Not a bare immediate (a count or a mask equals an entry in an image that starts at 0
+    or at a round address: FreeRTOS's mps2 demos pass 140, which is strlen's entry, and RISC-V's lui of
+    0x80000000 is its _start), nor a word loaded (pointer_entries reads the image's words). A walk in
+    address order: a value lasts until something else writes its register, a call ends the scratch
+    registers' values, a way out without a fall-through ends every value but the target's fixed
+    registers'; more than the control flow allows where paths join (a function counted as called
+    through a pointer that is not: its result then counts as read). Empty without a value_step."""
+    arch = program.arch
+    step = getattr(arch, "value_step", None)
+    effects = getattr(arch, "reg_effects", None)
+    if step is None or effects is None:
+        return set()
+    abi = program.target.abi
+    fixed = {r: (v & 0xFFFFFFFF, False) for r, v in program.image.fixed.items()}
+    keep = set(abi.callee_saved) | set(fixed)
+    args, results = list(abi.arg_regs), list(abi.result)
+    found = set()
+    for fn in program.functions:
+        inside = set(fn.insns)
+        known, made = dict(fixed), set()        # made: registers whose value was made from another known
+
+        def used(regs):
+            for r in regs:
+                v = known.get(r)
+                if r in made and v is not None and not v[1] and (v[0] & ~1) in entries:
+                    found.add(entries[v[0] & ~1])
+        for a in fn.insns:
+            insn = program.insn(a)
+            if insn is None:
+                known, made = dict(fixed), set()
+                continue
+            kind, target, falls = arch.flow(insn)
+            if kind in ("call", "icall"):
+                used(args)
+            elif kind == "return":
+                used(results)
+            elif kind == "ijump" or (kind == "jump" and isinstance(target, int) and target not in inside
+                                     and (target & ~1) not in inside):
+                used(args)                      # (a tail call)
+            try:
+                values, _, stored = step(insn, program.isa_at(insn.address), known, program)
+            except Exception:                   # (an instruction the layer's step does not take: no value)
+                values, stored = {}, []
+            used(stored)
+            reads, writes = effects(insn)
+            from_known = any(r in known and r != "zero" for r in reads)
+            for r in writes:
+                if r not in values:
+                    known.pop(r, None)
+                    made.discard(r)
+            for r, v in values.items():
+                if v is None or v[1]:
+                    known.pop(r, None)
+                    made.discard(r)
+                else:
+                    known[r] = v
+                    if from_known:
+                        made.add(r)
+                    else:
+                        made.discard(r)
+            if kind in ("call", "icall"):
+                known = {r: v for r, v in known.items() if r in keep}
+                made &= set(known)
+            elif kind in ("return", "jump", "ijump") and not falls:
+                known, made = dict(fixed), set()
+    return found
 
 
 class Analysis:
     """The analysis of one program: per-instruction rows and control flow, what each function may
-    write, and the solution (kept, reads). Kept in memory for explanations (readers())."""
+    write, and the solution (kept, reads). Kept in memory for explanations (readers()).
+
+    A mask holds a field of the layer's reg_bits bits for each name (bit for bit: which bits of the
+    register a read uses), bit[name] the whole field: a write ends a register whole, a read uses the
+    bits its instruction's used results depend on (refinement). The result (RegFlow) names a register
+    where any bit of its field is set."""
 
     def __init__(self, program):
         self.program = program
         arch = program.arch
         self.names = scratch_names(program.target, arch)
-        self.bit = {n: 1 << i for i, n in enumerate(self.names)}
+        self.width = getattr(arch, "reg_bits", 32)
+        self.field = (1 << self.width) - 1
+        self.shift = {n: self.width * i for i, n in enumerate(self.names)}
+        self.bit = {n: self.field << k for n, k in self.shift.items()}
         flag_bits = [b for n, b in self.bit.items() if n.startswith("flags:")]
         if flag_bits:                       # "flags" stands for them all (the layer's and callers' name)
             self.bit["flags"] = sum(flag_bits)
-        self.everything = (1 << len(self.names)) - 1
+        self.everything = (1 << (self.width * len(self.names))) - 1
+        abi = program.target.abi
+        self.result_reg = abi.result[0] if abi.result else None
+        # a C function's result: the first result register, and with hard float the FPU's (s0, or s0:s1
+        # for a double: the first two of fp_arg_regs). solve's comparison view passes them on at every
+        # return; result takes them from the program's view
+        self.results = self.mask([self.result_reg] + list(abi.fp_arg_regs[:2]))
         # the registers a call may leave its return address in (the layer's link_regs: RISC-V's ra and
         # t0): what the call writes there the callee reads from the call, not from the caller. Only
         # those: the MSP430 layer counts what a call clobbers as its writes, which the callee reads
@@ -534,7 +757,8 @@ class Analysis:
         def entry_name(address):
             return entries.get(address & ~1) if address is not None else None
 
-        self.rows = {fn.name: _rows(program, fn, self.mask, entry_name) for fn in program.functions}
+        self.variadic = set()               # functions whose unnamed arguments a va_list reads (_rows)
+        self.rows = {fn.name: _rows(program, fn, self, entry_name) for fn in program.functions}
         ordered = sorted(fn.entry for fn in program.functions)
         following = {a: b for a, b in zip(ordered, ordered[1:])}
         self.leaves = {}                    # name -> the rows that may go where the analysis cannot follow
@@ -550,6 +774,8 @@ class Analysis:
         for fn in program.functions:
             self._dead_saved_writes(fn)
         self.may = self._may_write()
+        self._must = None
+        self.handed = self._handed()
         # a runtime helper's result by the ABI is read, whatever the original's callers do with it:
         # compiled C calls the helper by that contract (the layer's abi_results)
         abi = getattr(arch, "abi_results", None)
@@ -563,7 +789,20 @@ class Analysis:
                 self.abi[name] = by_abi | by_profile
                 self.abi_label[name] = {reg: "the ABI" if by_abi & self.bit[reg] else "the compiler's profile"
                                         for reg in self.names if (by_abi | by_profile) & self.bit[reg]}
-        self.kept = {name: self.abi.get(name, 0) for name in self.rows}
+        # a function whose entry the image holds or its code makes may be called through a pointer, by
+        # callers the analysis does not see: its result counts as read (pointer_entries)
+        self.pointers = pointer_entries(program) if self.result_reg in self.bit else set()
+        self.seed = 0                       # what every return passes on besides kept (solve: compared)
+        self.kept = self.reads = None
+        self._start()
+        self._final = {}                    # name -> (uses as the solution has them, kills, exits), after solve
+
+    def _start(self):
+        """kept and reads as a solution starts from: the ABI's and the compiler profile's results, and the
+        result of every function a pointer may call."""
+        result = self.result_reg
+        self.kept = {name: self.abi.get(name, 0) | (self.bit[result] if name in self.pointers else 0)
+                     for name in self.rows}
         self.reads = {name: 0 for name in self.rows}
 
     def mask(self, regs):
@@ -571,6 +810,77 @@ class Analysis:
         for r in regs:
             m |= self.bit.get(r, 0)
         return m
+
+    def registers(self, m):
+        """The names of the registers of which mask m has a bit, in bit order."""
+        return [n for n in self.names if m & self.bit[n]]
+
+    def compress(self, m):
+        """Mask m with one bit for each name whose field has a bit (the RegFlow's masks)."""
+        out = 0
+        for i, n in enumerate(self.names):
+            if m & self.bit[n]:
+                out |= 1 << i
+        return out
+
+    def refinement(self, insn, reads, writes, conditional, used):
+        """What of a row's uses (used: the registers it reads, as a mask) counts, beyond reading them at
+        all: a function of what is used of its results after it, a mask, or None (all of it).
+          - An instruction that only computes registers (the layer's register_only), all of which the
+            analysis follows (scratch registers, flags): its results are all it does, so it reads only
+            what its used results need (a register whose result nobody uses reads nothing), bit for bit
+            where the layer has a rule (bit_demand: bic r1, r1, #0xff whose result's low byte alone is
+            used reads none of r1; lsl #16 reads the low half), else every bit once any result bit is
+            used; every flag it reads where it runs under a condition (the condition decides whether
+            the result is written), every bit where a flag it sets is used.
+          - A store of a byte or a halfword (the layer's store_demand): those bits of the register.
+        A read of bits nobody uses is no read: until regflow 26 every read counted, and a register
+        whose upper bits a caller kept through a bic and an orr but stored nowhere looked read after
+        the call (what its callee left there a second result)."""
+        arch = self.program.arch
+        only = getattr(arch, "register_only", None)
+        if only is not None and writes and all(w in self.bit for w in writes) and only(insn):
+            return self._computed(insn, writes, conditional, used)
+        store = getattr(arch, "store_demand", None)
+        got = store(insn) if store is not None else None
+        if got:
+            keep = self.everything
+            for r, bits in got.items():
+                if r in self.shift:
+                    keep = (keep & ~self.bit[r]) | ((bits & self.field) << self.shift[r])
+            return keep if keep != self.everything else None
+        return None
+
+    def _computed(self, insn, writes, conditional, used):
+        """refinement's function for an instruction that only computes registers: live (the mask of what
+        is used behind it) -> the bits of `used` it reads."""
+        precise = getattr(self.program.arch, "bit_demand", None)
+        outs = [(w, self.shift[w]) for w in sorted(writes) if w in self.shift]
+        flags = [w == "flags" or w.startswith("flags:") for w, _ in outs]
+        under = used & self.bit.get("flags", 0) if conditional else 0
+        field, shift, memo = self.field, self.shift, {}
+
+        def demand(live):
+            key = tuple((live >> k) & field for _, k in outs)
+            got = memo.get(key)
+            if got is None:
+                if not any(key):
+                    got = 0
+                elif precise is None or any(v for v, flag in zip(key, flags) if flag):
+                    got = used
+                else:
+                    want = precise(insn, {w: v for (w, _), v, flag in zip(outs, key, flags) if not flag})
+                    if want is None:
+                        got = used
+                    else:
+                        got = under
+                        for r, bits in want.items():
+                            if r in shift:
+                                got |= (bits & field) << shift[r]
+                        got &= used
+                memo[key] = got
+            return got
+        return demand
 
     @staticmethod
     def _edge_masks(code, succ):
@@ -986,6 +1296,81 @@ class Analysis:
                 continue
             code[i] = code[i]._replace(uses=0)
 
+    def _handed(self):
+        """{name: {row: registers}}: what counts as read at the rows where a value goes to code whose reads
+        the analysis does not see: a call through a pointer (or an svc, an ecall), a call or tail call of
+        a variadic function (its unnamed arguments, which a va_list reads, are no use in its save area),
+        a way out the analysis cannot follow (self.leaves). An argument register there whose value the
+        function computed itself is read where it was computed: those instructions read their operands
+        whatever is used behind them (their demand is dropped: _rows' refinement would take their result
+        for unused); one that holds a callee's result on every path counts as read at the row, so that
+        the callee's result is used. A register that holds what the function got from its caller on some
+        path, or what a callee merely left there, reads nothing there, as before regflow 26: counted, every
+        callee in front of such a call looked as if its callers read the scratch registers it leaves
+        alone, and a function as if it read every argument register (printf's save area)."""
+        args = [r for r in self.program.target.abi.arg_regs if r in self.bit]
+        entries = {fn.name: fn.entry for fn in self.program.functions}
+        out = {}
+        for name, (succ, _, calls, tails, _) in self.graphs.items():
+            sinks = [i for i, c in calls if c is None or c in self.variadic] + \
+                [i for i, c in tails if c in self.variadic] + sorted(self.leaves.get(name, ()))
+            if not sinks or not args:
+                continue
+            code = self.rows[name]
+            start = next((i for i, row in enumerate(code) if row.address == entries.get(name)), 0)
+            preds = [[] for _ in code]
+            for i, nexts in enumerate(succ):
+                for j in nexts:
+                    preds[j].append(i)
+            call_at = dict(calls)
+            for sink in sinks:
+                for reg in args:
+                    rows, by_call = self._definitions(code, preds, call_at, start, sink, self.bit[reg])
+                    if by_call:
+                        out.setdefault(name, {})[sink] = out.get(name, {}).get(sink, 0) | self.bit[reg]
+                    for j in rows:
+                        code[j] = code[j]._replace(demand=None)
+        return out
+
+    def _definitions(self, code, preds, call_at, start, sink, bit):
+        """(rows, by_call) of the register bit in front of row sink: the rows of the function that write it
+        last on some path there; by_call where a callee's result writes it last on every path (a call of
+        a function that writes it on every path, _must_write) and no path from the entry reaches the sink
+        without a write; (set(), False) where some path brings what the function got from its caller or
+        what a callee merely left there (a callee that may write it but not on every path)."""
+        must = self._must_write()
+        result = self.bit.get(self.result_reg, 0)
+        rows, calls_seen, entry = set(), False, False
+        seen, work = set(), list(preds[sink])
+        if sink == start:
+            return set(), False
+        while work:
+            j = work.pop()
+            if j in seen:
+                continue
+            seen.add(j)
+            row = code[j]
+            if j in call_at:
+                callee = call_at[j]
+                if callee is None or self.may[callee] & bit:
+                    if callee is None or not must[callee] & bit & result or row.conditional:
+                        return set(), False         # (what a callee leaves there, or the caller's)
+                    calls_seen = True
+                    continue
+            elif row.writes & bit:
+                if row.stack == "pop":
+                    return set(), False
+                rows.add(j)
+                if not row.conditional:
+                    continue
+            if j == start:
+                entry = True
+                continue
+            work.extend(preds[j])
+        if entry:
+            return set(), False
+        return rows, calls_seen and not rows
+
     def _may_write(self):
         """Registers each function may write, its callees included (least fixpoint)."""
         may = {}
@@ -1015,6 +1400,12 @@ class Analysis:
         return callers
 
     def _must_write(self):
+        """_must_sets, made once."""
+        if self._must is None:
+            self._must = self._must_sets()
+        return self._must
+
+    def _must_sets(self):
         """{name: the registers the function writes on every path from its entry to a return} (the
         first part of overwritten, the module's docstring), all functions together: each function's
         own analysis (_must_of) uses its callees' sets at its calls and tail calls, and a function
@@ -1038,7 +1429,7 @@ class Analysis:
                         work.append(caller)
         return must
 
-    def _must_of(self, name, entry, must):
+    def _must_of(self, name, entry, must, rows=False, results_only=False):
         """What one function writes on every path to a return, given its callees' sets (must): a
         forward analysis over its rows, what is written on every path to a row being the intersection
         of what its predecessors pass on (a conditional branch's edge adds what was written under its
@@ -1056,11 +1447,14 @@ class Analysis:
         code was seen to pop a scratch register so). A load that reads back a slot a push filled is a
         write here (as a push is no use to reads): compiled code reads no such slot before it writes it
         (a push of r0-r3 makes room for locals or keeps the stack aligned, and a variadic function's
-        save area is kept from the trimming, readable.Context.unknown)."""
+        save area is kept from the trimming, readable.Context.unknown). rows: also what is written on
+        every path to each row (in front of it). results_only: a call writes only its callee's first
+        result register (what the function has its callee compute for it; the scratch registers a
+        callee leaves changed are none of its values: _handed)."""
         code = self.rows[name]
         n = len(code)
         if not n:
-            return 0
+            return (0, []) if rows else 0
         succ, returns, calls, tails, _ = self.graphs[name]
         every, link = self.everything, self.link_mask
         cond_popped = 0
@@ -1078,9 +1472,10 @@ class Analysis:
             gen[i] = g & ~cond_popped if row.conditional else g
         for i, (j, bit) in self.copies.get(name, {}).items():
             out_of[j] |= bit
+        by_calls = self.bit.get(self.result_reg, 0) if results_only else self.everything
         for i, callee in calls:
             if callee is not None and not code[i].conditional:
-                gen[i] |= must[callee]
+                gen[i] |= must[callee] & by_calls
         edges = self.edges.get(name, {})
         preds = [[] for _ in range(n)]
         for i in range(n):
@@ -1117,7 +1512,7 @@ class Analysis:
                 result &= outs[i]
             if not succ[i] and i not in returning and i not in tail_at and i not in leaves:
                 result &= outs[i]
-        return result
+        return (result, ins) if rows else result
 
     def _reads_first(self, must):
         """{name: the registers whose value from its caller may reach what the function reads}: reads,
@@ -1189,17 +1584,18 @@ class Analysis:
         return live_in[next((i for i, row in enumerate(code) if row.address == entry), 0)]
 
     def effects(self, name, own=False):
-        """(uses, kills, exits) per instruction of a function with the current solution: calls use
+        """(uses, kills, exits, demand) per instruction of a function with the current solution: calls use
         what the callee reads and end what it may write; returns and tail calls pass on what the
         function's callers read afterwards (exits). With own, returns pass nothing on: what the
         function itself reads, not what flows through it to its callers' later reads (a call site
-        lets those through by not ending them)."""
+        lets those through by not ending them). demand: the rows' refinements (Row.demand)."""
         code = self.rows[name]
         _, returns, calls, tails, _ = self.graphs[name]
         uses = [row.uses for row in code]
         kills = [row.kills for row in code]
+        demand = [row.demand for row in code]
         exits = [0] * len(code)
-        passed = 0 if own else self.kept[name]
+        passed = 0 if own else self.kept[name] | self.seed
         for i in returns:
             exits[i] |= passed
         for i, callee in tails:
@@ -1210,12 +1606,14 @@ class Analysis:
                 kills[i] = 0 if code[i].conditional else self.may[callee]
             else:
                 kills[i] = 0 if code[i].conditional else self.everything
-        return uses, kills, exits
+        for i, args in self.handed.get(name, {}).items():
+            uses[i] |= args
+        return uses, kills, exits, demand
 
-    def liveness(self, name, own=False):
-        """(live at the entry, [(call index, callee, live after it)], tails)"""
-        succ, _, calls, tails, _ = self.graphs[name]
-        uses, kills, exits = self.effects(name, own)
+    def _live(self, name, uses, kills, exits, demand):
+        """(live in, live out) per instruction: what is used before and behind each, bit for bit (a row's
+        uses as far as its demand takes them from what is used behind it)."""
+        succ = self.graphs[name][0]
         edges = self.edges.get(name, {})
         copies = self.copies.get(name, {})
         n = len(uses)
@@ -1227,17 +1625,69 @@ class Analysis:
                 o = exits[i]
                 for j in succ[i]:
                     o |= live_in[j] & ~edges.get((i, j), 0)
-                v = uses[i] | (o & ~kills[i])
+                u, d = uses[i], demand[i]
+                if d is not None:
+                    u &= d if d.__class__ is int else d(o)
+                v = u | (o & ~kills[i])
                 if i in copies:             # a save: it reads what the restore's readers read (_neutral_saves)
                     j, bit = copies[i]
                     v |= live_out[j] & bit
                 if o != live_out[i] or v != live_in[i]:
                     live_out[i], live_in[i], changed = o, v, True
-        shadow = self.shadowed.get(name, {})
-        return (live_in[0] if n else 0), [(i, c, live_out[i] & ~shadow.get(i, 0)) for i, c in calls if c is not None], \
-            tails
+        return live_in, live_out
 
-    def solve(self):
+    def liveness(self, name, own=False):
+        """(live at the entry, [(call index, callee, live after it)], tails). With own, live at the entry
+        is what the function itself reads (_both)."""
+        entry, own_entry, calls, tails = self._both(name)
+        return (own_entry if own else entry), calls, tails
+
+    def _both(self, name):
+        """(live at the entry, what the function itself reads at its entry, [(call index, callee, live
+        after it)], tails). What the function itself reads: its returns pass nothing on (a register that
+        only flows through it to its callers' later reads is no read of its own), but each row reads what
+        it reads with what is used behind it as its callers use it (the liveness that passes kept on): an
+        instruction that computes the function's result reads its operands as far as the callers use the
+        result."""
+        _, _, calls, tails, _ = self.graphs[name]
+        uses, kills, exits, demand = self.effects(name)
+        live_in, live_out = self._live(name, uses, kills, exits, demand)
+        if any(d is not None for d in demand):
+            used = [u if d is None else u & (d if d.__class__ is int else d(o))
+                    for u, d, o in zip(uses, demand, live_out)]
+        else:
+            used = uses
+        own = self.effects(name, own=True)[2]
+        own_in, _ = self._live(name, used, kills, own, [None] * len(used))
+        shadow = self.shadowed.get(name, {})
+        return (live_in[0] if uses else 0), (own_in[0] if uses else 0), \
+            [(i, c, live_out[i] & ~shadow.get(i, 0)) for i, c in calls if c is not None], tails
+
+    def final(self, name):
+        """(uses, kills, exits) of a function with the solution, each row's uses as far as what is used
+        behind it takes them (its demand): what read_always and readers walk. Made once a function
+        (after solve)."""
+        if name not in self._final:
+            uses, kills, exits, demand = self.effects(name)
+            _, live_out = self._live(name, uses, kills, exits, demand)
+            used = [u if d is None else u & (d if d.__class__ is int else d(o))
+                    for u, d, o in zip(uses, demand, live_out)]
+            self._final[name] = (used, kills, exits)
+        return self._final[name]
+
+    def solve(self, compared=False):
+        """The solution, from the start (_start): what each function's callers read after it (kept) and
+        what it reads at its entry (reads), all functions together. compared: every return passes on the
+        function's result (results: the first result register, with hard float the FPU's) besides what
+        its callers read (seed), as the comparison reads the result register at every return
+        (dread.runner compares it whether a caller reads it or not): a value that flows into a function's
+        result is then used, so the callee that makes it keeps it (a caller that
+        moves a callee's second register into its own result needs it whether its callers read that
+        result or not). Without, the program's own view: the result counts where a caller's behaviour
+        depends on it (or a pointer may call the function)."""
+        self._start()
+        self.seed = self.results if compared else 0
+        self._final = {}
         callers = collections.defaultdict(set)
         for name, (_, _, calls, tails, _) in self.graphs.items():
             for _, callee in calls + tails:
@@ -1248,8 +1698,7 @@ class Analysis:
         while work:
             name = work.popleft()
             queued.discard(name)
-            entry_live = self.liveness(name, own=True)[0]
-            _, calls, tails = self.liveness(name)
+            _, entry_live, calls, tails = self._both(name)
             touched = []
             if entry_live != self.reads[name]:
                 self.reads[name] = entry_live
@@ -1259,16 +1708,20 @@ class Analysis:
                     self.kept[callee] |= live
                     touched.append(callee)
             for _, callee in tails:
-                if self.kept[name] & ~self.kept[callee]:
-                    self.kept[callee] |= self.kept[name]
+                passed = self.kept[name] | self.seed
+                if passed & ~self.kept[callee]:
+                    self.kept[callee] |= passed
                     touched.append(callee)
             for t in touched:
                 if t not in queued:
                     queued.add(t)
                     work.append(t)
+        self._final = {}
         return self
 
-    def result(self):
+    def sites(self):
+        """{callee: {register: [[caller, address, always]]}} of the current solution: the calls after which
+        the register is read, and the tail calls that pass it on."""
         sites = collections.defaultdict(lambda: collections.defaultdict(list))
         for name, code in self.rows.items():
             _, calls, tails = self.liveness(name)
@@ -1278,17 +1731,44 @@ class Analysis:
                         sites[callee][reg].append([name, code[i].address, self.read_always(name, i, reg)])
             for i, callee in tails:
                 for reg in self.names:
-                    if self.kept[name] & self.bit[reg]:
+                    if (self.kept[name] | self.seed) & self.bit[reg]:
                         sites[callee][reg].append([name, code[i].address, True])
+        return sites
+
+    def result(self, program=None):
+        """The RegFlow of the current solution; program: (kept, sites) of the program's own view (solve
+        without compared), whose result registers (results) they take: kept and sites of the comparison's
+        view for every other register (what a function must hand back so that every comparison of its
+        callers agrees), the program's for the result (whether any caller's behaviour depends on it:
+        dread readable prints a function none reads void)."""
+        sites = self.sites()
+        kept = dict(self.kept)
+        if program is not None and self.results:
+            rbit = self.results
+            program_kept, program_sites = program
+            kept = {name: (kept[name] & ~rbit) | (program_kept[name] & rbit) for name in kept}
+            for name in set(sites) | set(program_sites):
+                regs = sites[name]
+                for reg in self.registers(rbit):
+                    regs.pop(reg, None)
+                    if program_sites.get(name, {}).get(reg):
+                        regs[reg] = program_sites[name][reg]
         for name, labels in self.abi_label.items():
             for reg, label in labels.items():
                 sites[name][reg].append([label, 0, True])
-        preserved = {name: self.kept[name] & ~self.may[name] for name in self.rows if self.kept[name] & ~self.may[name]}
+        for name in sorted(self.pointers):
+            sites[name][self.result_reg].append([POINTER_CALLERS, 0, False])
+        preserved = {name: self.compress(kept[name] & ~self.may[name])
+                     for name in self.rows if kept[name] & ~self.may[name]}
         must = self._must_write()
         first = self._reads_first(must)
-        overwritten = {name: must[name] & ~first[name] for name in self.rows}
-        return self._folded(self.names, dict(self.kept), dict(self.reads), {k: dict(v) for k, v in sites.items()},
-                            preserved, overwritten)
+        overwritten = {name: self.compress(must[name] & ~first[name]) for name in self.rows}
+        flow = self._folded(self.names, {k: self.compress(v) for k, v in kept.items()},
+                            {k: self.compress(v) for k, v in self.reads.items()},
+                            {k: dict(v) for k, v in sites.items() if v}, preserved, overwritten)
+        flow.leftover = sorted(self.leftovers())
+        flow.computed = sorted(self.computed())
+        return flow
 
     def _folded(self, names, kept, reads, sites, preserved, overwritten=None):
         """The RegFlow, with flags followed one by one folded into "flags" (a flag read is the flags
@@ -1330,13 +1810,199 @@ class Analysis:
                        folded_sites, {k: fold(v) for k, v in preserved.items() if fold(v)},
                        None if overwritten is None else {k: fold_all(v) for k, v in overwritten.items()})
 
+    def leftovers(self):
+        """The functions whose second result register (the target's [abi] result[1]: r1, a1) their
+        callers read and that write it, their callees included (kept, not preserved: the lifted C returns
+        two words), where what it holds at every return is a constant they put there or what a callee
+        left there that is itself such a value (_origins): a value no C function returns, a scratch
+        register a callee used and its caller hands on, as far as the machine code tells. Not a runtime
+        helper whose result the ABI or the compiler's profile gives (abi), nor a function whose second
+        register may hold its own computation, a value it loads, its caller's value (a path from its
+        entry that writes none: a division's remainder where it divides by 0) or what a pointer's callee
+        or a pop left there. A greatest fixpoint over the call graph: a function's callees decide whether
+        what it hands on of theirs is a leftover. Not established: a real second result that is a
+        constant on every path (a 64-bit function that returns a small number: its high word 0) counts
+        as a leftover; a constant built by a pair of instructions (movw and movt) as the function's own
+        computation."""
+        abi = self.program.target.abi
+        if len(abi.result) < 2 or abi.result[1] not in self.bit:
+            return set()
+        reg = abi.result[1]
+        b = self.bit[reg]
+        origins = {}
+        for name in self.rows:
+            if self.kept[name] & b and self.may[name] & b and name not in self.abi:
+                got = self._origins(name, reg)
+                if got is not None:
+                    origins[name] = got
+        left = set(origins)
+        changed = True
+        while changed:
+            changed = False
+            for name in sorted(left):
+                if any(c not in left for c in origins[name]):
+                    left.discard(name)
+                    changed = True
+        return left
+
+    def computed(self):
+        """The functions whose first result register holds at a return (or behind a tail call of a
+        function that leaves it alone) a value one of their own instructions computed for it alone: an
+        instruction that writes it and whose value nothing reads before it reaches the return (a strlen's
+        count, a memcmp's difference), on some path. Not a callee's value (a call of a function that may
+        write the register ends the search), not the caller's (a path from the entry), not one a pop puts
+        back, and not a value the function also uses itself (a constant it stores through the register
+        and leaves there: the register as a scratch register to the end). Such a function likely returns
+        what its source computes, whether a caller reads it or not; dread readable keeps its result
+        (printed void, its C would not compute the value, which the cases compare at the return: the gate
+        turned such functions down, gizmo's memcmp and strlen among them)."""
+        reg = self.result_reg
+        if reg not in self.bit:
+            return set()
+        b = self.bit[reg]
+        out = set()
+        for fn in self.program.functions:
+            code = self.rows[fn.name]
+            if not code:
+                continue
+            succ, returns, calls, tails, _ = self.graphs[fn.name]
+            start = next((i for i, row in enumerate(code) if row.address == fn.entry), 0)
+            preds = [[] for _ in code]
+            for i, nexts in enumerate(succ):
+                for j in nexts:
+                    preds[j].append(i)
+            call_at = dict(calls)
+            tail_at = dict(tails)
+            exits = set(returns) | set(tail_at)
+
+            def only_returned(d):
+                """Whether nothing reads what row d writes into the register before a way out (a tail call
+                of a function that reads it reads it: an argument)."""
+                seen, work = set(), list(succ[d])
+                while work:
+                    j = work.pop()
+                    if j in seen:
+                        continue
+                    seen.add(j)
+                    row = code[j]
+                    if row.uses & b and j not in exits:
+                        return False
+                    if j in tail_at and self.reads[tail_at[j]] & b:
+                        return False
+                    if j in call_at:
+                        callee = call_at[j]
+                        if callee is None or self.reads[callee] & b:
+                            return False
+                        if self.may[callee] & b and not row.conditional:
+                            continue
+                    elif row.kills & b:
+                        continue
+                    work.extend(succ[j])
+                return True
+            work = list(returns)
+            for i, callee in tails:
+                if not self.may[callee] & b and i != start:
+                    work.extend(preds[i])
+            seen = set()
+            while work:
+                i = work.pop()
+                if i in seen:
+                    continue
+                seen.add(i)
+                row = code[i]
+                if i in call_at:
+                    callee = call_at[i]
+                    if callee is None or self.may[callee] & b:
+                        if not row.conditional:
+                            continue
+                elif row.writes & b:
+                    if row.stack != "pop" and only_returned(i):
+                        out.add(fn.name)
+                        break
+                    if not row.conditional:
+                        continue
+                if i != start:
+                    work.extend(preds[i])
+        return out
+
+    def _origins(self, name, reg):
+        """The callees whose value of reg the function may hand back at its returns and tail calls, when
+        every other value it may hand back there is a constant it writes itself (the layer's value_step
+        knows it without any register's value but the target's fixed ones); None when it may hand back
+        anything else: its own computation, a value loaded, its caller's (a path from its entry that
+        writes none), what a call through a pointer or a pop left there, or where a way out cannot be
+        followed (self.leaves)."""
+        code = self.rows[name]
+        succ, returns, calls, tails, _ = self.graphs[name]
+        if self.leaves.get(name) or not code:
+            return None
+        arch, program = self.program.arch, self.program
+        step = getattr(arch, "value_step", None)
+        fixed = {r: (v & 0xFFFFFFFF, False) for r, v in program.image.fixed.items()}
+        fn = program.by_name.get(name)
+        start = next((i for i, row in enumerate(code) if fn is not None and row.address == fn.entry), 0)
+        b = self.bit[reg]
+        preds = [[] for _ in code]
+        for i, out in enumerate(succ):
+            for j in out:
+                preds[j].append(i)
+        call_at = dict(calls)
+        found, seen, work = set(), set(), []
+
+        def before(i):                      # the value in front of row i: behind each of its predecessors
+            if i == start:
+                return False                # (the caller's value reaches a way out)
+            work.extend(preds[i])
+            return True
+
+        def constant(i):
+            if step is None:
+                return False
+            insn = program.insn(code[i].address)
+            try:
+                values = step(insn, program.isa_at(insn.address), dict(fixed), program)[0]
+            except Exception:
+                return False
+            v = values.get(reg)
+            return v is not None and not v[1]
+        for i in returns:
+            work.append(i)
+        for i, callee in tails:
+            if self.may[callee] & b:
+                found.add(callee)
+            elif code[i].kind != "jump":
+                work.append(i)              # (falls into the next function: its own write counts)
+            elif not before(i):
+                return None
+        while work:
+            i = work.pop()
+            if i in seen:
+                continue
+            seen.add(i)
+            row = code[i]
+            if i in call_at:
+                callee = call_at[i]
+                if callee is None:
+                    return None             # (a call through a pointer: its callee's value is not known)
+                if self.may[callee] & b:
+                    found.add(callee)
+                    if not row.conditional:
+                        continue
+            elif row.writes & b:
+                if row.stack == "pop" or not constant(i):
+                    return None
+                if not row.conditional:
+                    continue
+            if not before(i):
+                return None
+        return found
+
     def read_always(self, name, start, reg):
         """Whether every path from the instruction behind index `start` reads `reg` before
         something ends it or the function is left without passing it on (a return passes it on
         when the function's own callers read it)."""
-        code = self.rows[name]
         succ, returns, _, tails, _ = self.graphs[name]
-        uses, kills, exits = self.effects(name)
+        uses, kills, exits = self.final(name)
         b = self.bit[reg]
         returns, tail_at = set(returns), dict(tails)
         seen, stack = set(), list(succ[start])
@@ -1369,7 +2035,7 @@ class Analysis:
         succ, returns, calls, tails, _ = self.graphs[name]
         index = {row.address: i for i, row in enumerate(code)}
         b = self.bit[reg]
-        uses, kills, _ = self.effects(name)
+        uses, kills, _ = self.final(name)
         returns, tail_at = set(returns), dict(tails)
         start = index[address]
         if start in tail_at:
@@ -1394,19 +2060,52 @@ class Analysis:
 
 
 def analyse(program):
-    """RegFlow of a Program (see the module's docstring)."""
-    return Analysis(program).solve().result()
+    """RegFlow of a Program (see the module's docstring): the program's own view of the first result
+    register, the comparison's of the rest (Analysis.solve, result)."""
+    analysis = Analysis(program).solve()
+    program_view = (dict(analysis.kept), analysis.sites())
+    return analysis.solve(compared=True).result(program_view)
+
+
+# module name -> the bytes of its source as this process read them (_source); read when this module is
+# imported for every module cache_key holds (_read_sources)
+_SOURCES = {}
+
+
+def _source(name):
+    """The bytes of module NAME's source as this process read them first."""
+    if name not in _SOURCES:
+        import importlib.util
+        module = sys.modules.get(name)
+        path = module.__file__ if module is not None else importlib.util.find_spec(name).origin
+        with open(path, "rb") as f:
+            _SOURCES[name] = f.read()
+    return _SOURCES[name]
+
+
+def _read_sources():
+    """Read the sources cache_key holds now, as this module is imported: a process keys its analysis by
+    the code it runs, not by what the files hold when it stores the analysis. Read in cache_key, a suite
+    that had imported the old code stored its analysis under the key of an edit made meanwhile, and the
+    runs after it took the old analysis for the new code (2026-10-24). What a module imported later
+    reads in the moment between is not seen (unknown whether it matters in practice)."""
+    import importlib.util
+    import pkgutil
+    with open(__file__, "rb") as f:
+        _SOURCES[__name__] = f.read()
+    for name in ("dread.switches", "dread.program", "dread.arch"):
+        _source(name)
+    for m in pkgutil.iter_modules(importlib.util.find_spec("dread.arch").submodule_search_locations):
+        _source("dread.arch." + m.name)
 
 
 def cache_key(target, image):
     h = hashlib.sha1()
     h.update(b"dread regflow %d\0" % VERSION)
-    from dread import switches
-    from dread import program as program_module
-    for module in (__name__, switches.__name__, type(image.arch).__module__, program_module.__name__):
-        # the analysis, the arch layer and the decoder (it marks calls through a register)
-        with open(sys.modules[module].__file__, "rb") as f:
-            h.update(f.read())
+    for module in (__name__, "dread.switches", type(image.arch).__module__, "dread.arch", "dread.program"):
+        # the analysis, the arch layer (and the helpers of its bit rules) and the decoder (it marks calls
+        # through a register), as this process read them when it imported this module (_read_sources)
+        h.update(_source(module))
     h.update(image.payload())
     for table in ("functions", "code_ranges"):
         path = image.table(table)
@@ -1465,7 +2164,7 @@ def main(argv=None):
     analysis = None
     if args.why:
         from dread.program import Program
-        analysis = Analysis(Program(target, image)).solve()
+        analysis = Analysis(Program(target, image)).solve(compared=True)
     for name in names:
         kept = flow.kept_regs(name)
         extra = [r for r in kept if r != result]
@@ -1497,6 +2196,8 @@ def main(argv=None):
               % (sum(1 for n in flow.kept if [r for r in flow.kept_regs(n) if r != result]), result))
     return 0
 
+
+_read_sources()
 
 if __name__ == "__main__":
     sys.exit(main())

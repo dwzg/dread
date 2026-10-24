@@ -31,6 +31,14 @@ either). Last, constants and casts are written by their use (dread.polish: -1 fo
 for 0x20u compared with a character, 0 for (u8)0x0u stored into a byte, x++); the naming questions'
 C gets it too, after the digest their names are made for.
 
+Results as the source has them (since 2026-10-24): a function whose result no caller reads (dread.regflow
+over the whole image, callers through a pointer counted as reading) is void, its calls statements where
+their value goes nowhere (dread.tidy void_results, results); the cases still compare what it leaves in
+the result register, and one they reject so is tried once more with its result (the readable_types
+table's results, which the builds read). A second result register that holds only a leftover (regflow's
+leftover: a constant or what a callee left there) is handed back through dread.h's RETURN2, the function
+printed one-word, a caller that reads it calling through CALL2; a real second result stays u64.
+
 A build from readable C (dread.build with a chooser: the check's rounds and its whole image, dread
 recon on an image with a readable table, dread pilot's builds) makes the readable C of every chosen
 function at once, before it writes the first file (readable_texts): in a pool of worker processes,
@@ -88,6 +96,10 @@ class Context:
         self.results = []               # the registers a result comes back in (the target's [abi])
         self.overwritten = {}           # function -> what it writes on every path, its caller's never read
         self.unread = set()             # functions whose result no caller reads (dread.shapes analyse)
+        self.void = set()               # ... and that readable C prints void (dread.tidy void_results)
+        self._void_all = set()          # (... where the plan's results do not keep it: what check starts from)
+        self.leftover = set()           # functions whose second result register holds a leftover (results)
+        self.leftover_why = {}          # ... and who reads it (dread.regflow why)
         self.names = {}                 # the image's readable_names table (dread.naming): functions
         self.globals = {}               # and memory at fixed addresses
         self.memory = None              # the target's [memory] (default names for fixed addresses)
@@ -121,8 +133,31 @@ class Context:
         self.overwritten = {fn.name: set(flow.overwritten_regs(fn.name)) for fn in program.functions}
         result = target.abi.result[0] if target.abi.result else None
         self.unread = {fn.name for fn in program.functions if result not in flow.kept_regs(fn.name)}
+        # printed void: no caller reads a result register (the first, with hard float the FPU's), every
+        # other register a caller reads it leaves alone (no second word, nothing beyond), and its own code
+        # does not compute what the result register holds at a return (regflow's computed: its void C
+        # would leave another value there, which the cases compare; the gate tries the others void)
+        firsts = set(self.results[:1]) | set(target.abi.fp_arg_regs[:2])
+        computed = set(getattr(flow, "computed", None) or ())
+        for fn in program.functions:
+            kept = set(flow.kept_regs(fn.name))
+            if not kept & firsts and not kept - set(flow.preserved_regs(fn.name)) and fn.name not in computed:
+                self._void_all.add(fn.name)
+        self.void = self._void_all - self.plan.results
+        second = self.results[1] if len(self.results) > 1 else None
+        two = getattr(program.arch, "name", None) in ("arm", "riscv")     # (dread.h's RETURN2 and CALL2)
+        for name in (getattr(flow, "leftover", None) or ()) if two else ():
+            if second in flow.kept_regs(name) and second not in flow.preserved_regs(name):
+                self.leftover.add(name)
+                self.leftover_why[name] = flow.why(name, second)
         self.variadic = variadic_reach(program)
         self.save_areas = entry_save_areas(program)
+
+    def keep_results(self, names):
+        """Print these functions with their result again (the plan's results: dread readable --check puts
+        a function there whose cases rejected it void)."""
+        self.plan.results |= set(names)
+        self.void -= set(names)
 
     def struct_names(self):
         """{s_N: (name, {offset: field name})} for the plan's structures the table names (computed
@@ -198,44 +233,29 @@ class Context:
         return [r for r in results if r in self.arg_regs and r not in own]
 
 
-SAVE_AREA_LEAD = 2      # the most instructions in front of a save area's push that write neither sp nor an
-                        # argument register (APCS's mov ip, sp: entry_save_areas)
+SAVE_AREA_LEAD = 2      # the most instructions in front of a save area's push (entry_save_areas;
+                        # dread.regflow pushed_save_area)
 
 
 def entry_save_areas(program):
-    """The functions whose first push stores argument registers only, the last of them among them (the
-    arch layer's stack_kind and pushed_registers; the lifter's save_area): a variadic function's save
-    area as GCC's newlib keeps it (printf pushes r0-r3, sprintf r1-r3, before it saves anything else),
-    which variadic_reach does not find (regflow's variadic_save_area leaves pushes to its rows). The
-    push is the first instruction, or follows at most SAVE_AREA_LEAD instructions that write neither
-    sp nor an argument register and go on to the next: an APCS frame keeps the entry's stack pointer
-    first (mov ip, sp; push {r1, r2, r3}; push {r4, ip, lr}: a variadic function of a private
-    firmware, until 2026-10-24 not found: its callers' calls lost the arguments its va_list reads, and
-    push_room took its pushes out). A call of one keeps all its arguments (Context.arity): trimmed to
-    what regflow says it reads, FreeRTOS's GCC -Os tasks called sprintf(buf, fmt) without the value it
-    prints, and the whole image agreed only as long as the C compiler happened to leave that value in
-    r2 (2026-10-23, when dread.frames changed their frames' layout). Not propagated to their callers'
-    callers as variadic_reach does (a function that hands its arguments on to printf, vAssertCalled,
-    keeps its trimmed calls): empty where the layer has no pushes."""
-    arch = program.arch
-    if not (hasattr(arch, "stack_kind") and hasattr(arch, "pushed_registers")):
-        return set()
-    args = list(program.target.abi.arg_regs)
-    out = set()
-    for fn in program.functions:
-        for a in fn.insns[:SAVE_AREA_LEAD + 1]:
-            insn = program.insn(a)
-            if insn is None:
-                break
-            if arch.stack_kind(insn) == "push":
-                regs = [r for r in arch.pushed_registers(insn) if r is not None]
-                if regs and args and set(regs) <= set(args) and args[-1] in regs:
-                    out.add(fn.name)
-                break
-            if not hasattr(arch, "reg_effects") or arch.flow(insn)[0] != "next" or \
-                    arch.reg_effects(insn)[1] & (set(args) | {"sp"}):
-                break
-    return out
+    """The functions whose first push stores argument registers only, the last of them among them
+    (dread.regflow pushed_save_area: the arch layer's stack_kind and pushed_registers; the lifter's
+    save_area): a variadic function's save area as GCC's newlib keeps it (printf pushes r0-r3, sprintf
+    r1-r3, before it saves anything else), which variadic_reach does not find (regflow's
+    variadic_save_area leaves pushes to its rows). The push is the first instruction, or follows at most
+    SAVE_AREA_LEAD instructions that write neither sp nor an argument register and go on to the next: an
+    APCS frame keeps the entry's stack pointer first (mov ip, sp; push {r1, r2, r3}; push {r4, ip, lr}: a
+    variadic function of a private firmware, until 2026-10-24 not found: its callers' calls lost the
+    arguments its va_list reads, and push_room took its pushes out). A call of one keeps all its
+    arguments (Context.arity): trimmed to what regflow says it reads, FreeRTOS's GCC -Os tasks called
+    sprintf(buf, fmt) without the value it prints, and the whole image agreed only as long as the C
+    compiler happened to leave that value in r2 (2026-10-23, when dread.frames changed their frames'
+    layout). Not propagated to their callers' callers as variadic_reach does (a function that hands its
+    arguments on to printf, vAssertCalled, keeps its trimmed calls): empty where the layer has no
+    pushes."""
+    from dread.regflow import pushed_save_area
+    return {fn.name for fn in program.functions
+            if pushed_save_area(program, [program.insn(a) for a in fn.insns[:SAVE_AREA_LEAD + 1]])}
 
 
 def variadic_reach(program):
@@ -285,19 +305,34 @@ def transform(name, text, stages=None, context=None):
     while it lives (weakly: its results go with it) and for the stages themselves; until 2026-10-23 by
     the ids of both, and a context made where one had died got the dead one's results, made with its
     tables (38 of 50 new contexts in a row did)."""
-    key = (name, text, None if stages is None else tuple(stages))
+    key = (name, text, None if stages is None else tuple(stages), void_key(context, name, text))
     memo = _MEMO if context is None else _MEMO_OF.setdefault(context, {})
     if key not in memo:
         memo[key] = _transform(name, text, stages, context)
     return memo[key]
 
 
+EXTERN_NAME = re.compile(r"^extern \w+ (\w+)\(", re.M)
+
+
+def void_key(context, name, text):
+    """What a function's readable C reads of the context's void (dread.tidy void_results): whether it is
+    void itself and which of the callees its lifted C declares are; readable_texts and transform key
+    their results by it, so that the check's next round, when it gave some functions their results back
+    (keep_results), makes only those and their callers anew (context_key leaves void out)."""
+    void = getattr(context, "void", None)
+    if not void:
+        return ()
+    return (name in void, tuple(sorted(c for c in EXTERN_NAME.findall(text) if c in void)))
+
+
 EXTERN = re.compile(r"^extern (\w+) (\w+)\(([^)]*)\);$")
 
 
-def readable_tree(name, text, stages=None, context=None):
+def readable_tree(name, text, stages=None, context=None, with_results=True):
     """(tree, function) of a lifted file after the stages, before names (dread.naming): what a
-    names proposal is made for. None when the text is not the lifters' dialect."""
+    names proposal is made for. None when the text is not the lifters' dialect. with_results: and,
+    where the clean-up ran, the results as the source has them (results) behind the last stage."""
     try:
         tree = cparse.parse(text)
     except cparse.ParseError:
@@ -312,7 +347,8 @@ def readable_tree(name, text, stages=None, context=None):
         m = EXTERN.match(item.text) if isinstance(item, cparse.Raw) else None
         if m:
             run.returns[m.group(2)] = m.group(1)
-    for _, stage in (STAGES if stages is None else stages):
+    ran = STAGES if stages is None else stages
+    for _, stage in ran:
         stage(fn, run)
     for item in tree.items:
         m = EXTERN.match(item.text) if isinstance(item, cparse.Raw) else None
@@ -320,7 +356,75 @@ def readable_tree(name, text, stages=None, context=None):
             params = [p.strip() for p in m.group(3).split(",")]
             item.text = "extern %s %s(%s);" % (m.group(1), m.group(2),
                                                 ", ".join(params[:run.trimmed[m.group(2)]]) or "void")
+    if with_results and any(stage is tidy.tidy for _, stage in ran):
+        results(tree, fn, run.context)
     return tree, fn
+
+
+RETURN2 = "RETURN2"     # dread.h: return a value and leave a second word where the original leaves it
+CALL2 = "CALL2"         # dread.h: call a one-word function for the two words it leaves
+
+
+def results(tree, fn, context):
+    """The results as the source has them, after the clean-up (dread.tidy void_results made the functions
+    nobody reads the result of void): their extern declarations void where no call of them in the file
+    keeps its value (one may: a function printed with its result hands on a void callee's leftover, a
+    caller keeps bits of it nobody uses, and the file's other functions, which stay as the lifter wrote
+    them, assign every call's value: printf's body behind its naked entry), and a void function's last
+    `return;` gone; a function whose second result register its callers read where it holds only a
+    leftover (the context's leftover: dread.regflow, a constant or what a callee left there) one-word:
+    u32 f(...), each return `return RETURN2(lo, hi);` (dread.h: hi left in the second result register,
+    as the original leaves it), a comment above it naming the reader regflow found; a call of one whose
+    second word is read `CALL2(f, ...)` (dread.h: the call for both words, a u64 as before), one whose
+    first word alone is read a plain call (its (u32) gone), its extern u32. The lifters return two words
+    from such a function (the cases compare the second at the return, its callers read it), and readable
+    C printed u64 f(...) with `return ((u64)hi << 32) | lo;`: a pair the source never returned, and a
+    parameter or constant made a high word for it. The macros keep the behaviour: the gate checks it as
+    for every transformation."""
+    if context is None:
+        return
+    void = getattr(context, "void", set())
+    leftover = getattr(context, "leftover", set())
+    valued = {c.f.id for c, used in tidy.all_calls(fn) if used and isinstance(c.f, cparse.Name)}
+    # (the file's other functions stay as the lifter wrote them: a naked entry's body assigns r0)
+    for other in tree.items:
+        if isinstance(other, cparse.Function) and other is not fn:
+            valued |= set(re.findall(r"\b(\w+)\(", other.raw or ""))
+    for item in tree.items:
+        m = EXTERN.match(item.text) if isinstance(item, cparse.Raw) else None
+        if m and m.group(2) in void and m.group(1) == "u32" and m.group(2) not in valued:
+            item.text = "extern void %s(%s);" % (m.group(2), m.group(3))
+        elif m and m.group(2) in leftover and m.group(1) == "u64":
+            item.text = "extern u32 %s(%s);" % (m.group(2), m.group(3))
+    if function_results(fn, context):
+        why = getattr(context, "leftover_why", {}).get(fn.name)
+        if why:
+            k = tree.items.index(fn)
+            tree.items.insert(k, cparse.Raw("/* %s at its returns (%s): no result of its own, %s (dread regflow) */"
+                                            % (context.results[1] if len(context.results) > 1 else "the second word",
+                                               RETURN2, why)))
+
+
+def function_results(fn, context):
+    """What results changes in the function itself (its file's declarations aside): a void function's
+    last `return;` gone, the calls of the functions whose second word is a leftover, and the function
+    one-word where it is one of them (True then). Also for the analysis trees (_analysis_one), behind
+    their structure as in the printed C: run in front of it, the digest the readable_types table's types
+    are kept for differed from the printed C's, and a void function lost its parameters' types (2026-10-24,
+    tests/test_vartypes.py's spool_fill)."""
+    void = getattr(context, "void", set())
+    leftover = getattr(context, "leftover", set())
+    if fn.name in void:
+        tidy.drop_final_return(fn)
+    if leftover:
+        tidy.leftover_calls(fn, leftover, CALL2)
+        tidy.narrowed_pairs(fn, leftover, CALL2)
+    head = re.match(r"^u64 (\w+)\((.*)\)$", fn.head.strip())
+    if fn.name in leftover and head and head.group(1) == fn.name:
+        fn.head = "u32 %s(%s)" % (fn.name, head.group(2))
+        tidy.leftover_returns(fn, RETURN2)
+        return True
+    return False
 
 
 POOL_MIN = 64       # functions from which the trees are made in a pool of worker processes
@@ -399,13 +503,15 @@ def _analysis_one(name):
     text = _lifted_text(name)
     context = _G["context"]
     early = [st for st in STAGES if st[0] != "structure"]
-    made = readable_tree(name, text, stages=early, context=context) if text is not None else None
+    made = readable_tree(name, text, stages=early, context=context, with_results=False) if text is not None else None
     if made is None:
         return None
     tree, fn = made
     full = copy.deepcopy(fn)
     if not tidy.fixed_registers(tree):
         structure.structure(full, Run(context))
+        function_results(full, context)     # (behind the structure, as the printed C has them: its digest)
+        function_results(fn, context)
     digest = naming.digest(full)
     chosen = naming.apply_globals(tree, fn, _G["named"], context.memory if context is not None else None)
     return tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}, digest
@@ -908,7 +1014,8 @@ def context_key(context):
     (regflow's registers, the variadic functions, the readable_names and readable_types tables, the
     memory map: every attribute not starting with _), whatever object holds them. Two contexts with
     the same tables have the same key (a build's context made anew from the same tables, the next
-    round's); a table changed in place changes it. "" without a context."""
+    round's); a table changed in place changes it. "" without a context. Not the void functions (void) nor
+    the plan's results: each function's readable C is keyed by what it reads of them (void_key)."""
     if context is None:
         return ""
     import hashlib
@@ -922,7 +1029,9 @@ def context_key(context):
         if hasattr(x, "__dict__"):          # (the target's Memory, its regions)
             return [type(x).__name__, {k: v for k, v in vars(x).items() if not k.startswith("_")}]
         return repr(x)
-    tables = {k: v for k, v in vars(context).items() if not k.startswith("_")}
+    tables = {k: v for k, v in vars(context).items() if not k.startswith("_") and k != "void"}
+    if "plan" in tables and getattr(tables["plan"], "results", None):
+        tables["plan"] = {k: v for k, v in tables["plan"].to_json().items() if k != "results"}
     try:
         text = json.dumps(tables, sort_keys=True, default=plain).encode()
     except (TypeError, ValueError):         # (keys that do not sort, or no JSON key: kept apart all the same)
@@ -952,7 +1061,7 @@ def readable_texts(texts, context=None, jobs=None):
     _STORE[key] = store                     # (the latest used last: dicts keep their order)
     while len(_STORE) > STORE_KEEP:
         del _STORE[next(iter(_STORE))]
-    digests = {n: hashlib.sha1(t.encode()).digest() for n, t in texts.items()}
+    digests = {n: (hashlib.sha1(t.encode()).digest(), void_key(context, n, t)) for n, t in texts.items()}
     # The longest lifted C first, one at a time: a pool that took them in the table's order, four at a
     # time, ended on a few large functions (FreeRTOS's GCC -Os demo: 7.4 s simulated for its 316 with
     # eight workers, 6.5 s so, 6.3 s ideal; the largest takes 3.9 s alone)
@@ -1106,6 +1215,26 @@ def mask_plan(program, context, lifter, names, trees):
     return {name: ix for name, ix in found.items() if name in analysed or ix}
 
 
+RETURNED = "return value "  # (dread.emu Result diff: the value a function returns differs)
+
+
+def returned_only(lines):
+    """The functions whose every difference in a round's output (lines, as dread.runner run writes them:
+    `FAIL NAME [case]` and the differences indented under it) is the value they return: what a void
+    form changes (dread.tidy void_results), so the check tries such a function with its result first.
+    An UNCOVERED line is no difference: cases refused for differing after the original touched its own
+    saved registers leave instructions unrun (FreeRTOS's clang -O2 xNotifyTaskFromISR, void, whose
+    region went whole for it before its result came back)."""
+    seen, other, current = set(), set(), None
+    for text in lines:
+        for line in text.splitlines():
+            if not line[:1].isspace():
+                current = line.split()[1] if line.startswith("FAIL ") and len(line.split()) > 1 else None
+            elif current is not None and line.strip():
+                (seen if line.strip().startswith(RETURNED) else other).add(current)
+    return seen - other
+
+
 def check(target, image, names=None, out=print, jobs=None):
     """The acceptance loop for readable C (see the module's docstring); returns the accepted names.
     names: functions of the lifted table to try (default: all of it). A build that dropping functions
@@ -1121,6 +1250,8 @@ def check(target, image, names=None, out=print, jobs=None):
     lifted = build.read_names(image.table("lifted"))
     from dread import shapes
     digests = {}
+    # every function nobody reads the result of void first: the plan made anew keeps no results
+    context.void = set(context._void_all)
     make_plan(program, context, lifter, lifted, flow, digests=digests)
     shapes.store_plan(image, context.plan)
     out("dread readable --check: %d structures, pointers to them in %d functions; %d structures and %d arrays of "
@@ -1222,20 +1353,35 @@ def check(target, image, names=None, out=print, jobs=None):
             f.write("\n".join(lines) + "\n")
         failing = {name for name, count, bad in results if bad}
         gone = failing | set(uncovered)
-        # A function whose frame's region readable C split into objects (dread.frames) is tried once more
-        # with the region as one object, as before 2026-10-23: a callee given one of its objects may reach
-        # past it where the original reached the next (a generated case's queue with another item size),
-        # which the cases see and the split cannot keep (the readable_types table's whole). Asked of
-        # dread.frames, not of the C built: there the readable_names table may have named the objects
-        whole = {n for n in gone if n not in context.plan.whole and n in texts and framed(n, texts[n], context)}
         # A function whose code reaches another that went wrong in this round is tried once more with that
         # one built from lifted C: its cases run its callees for real, so one callee's wrong readable C
         # fails every caller whose cases reach it (2026-10-24, on a private firmware: one function's
         # comparison of a two-word result sent its callers back with it, whose own readable C was
         # right). Not where every function that went wrong reaches another (recursion): then all go,
-        # as before. Every round sends one back at least, so the rounds end.
+        # as before. Every round sends one back at least, so the rounds end. The others, one change a
+        # round, the likelier cause first:
+        # - A function printed void (dread.tidy void_results: no caller reads its result) whose cases
+        #   differ in the value it returns alone is tried once more with its result: the cases compare
+        #   what it leaves in the result register, and the compiler's C leaves another value there where
+        #   the original's was one the void C does not compute. Its callers' calls of it are assignments
+        #   again (void_key: it and its callers are made anew).
+        # - A function whose frame's region readable C split into objects (dread.frames) is tried once
+        #   more with the region as one object, as before 2026-10-23: a callee given one of its objects
+        #   may reach past it where the original reached the next (a generated case's queue with another
+        #   item size), which the cases see and the split cannot keep (the readable_types table's whole).
+        #   Asked of dread.frames, not of the C built: there the readable_names table may have named the
+        #   objects.
+        # - A void function that differs otherwise and has no objects, or whose region is one already,
+        #   is tried with its result.
+        # (Until 2026-10-24 the frame came first, also for a function that reached a failing callee; with
+        # void functions failing in the first round, gizmo-m3's handle_key went whole for its callees'.)
         culprits = {n for n in gone if not (reaches(n) & (gone - {n}))}
-        again = {n: sorted(reaches(n) & (gone - {n})) for n in gone - culprits - whole} if culprits else {}
+        again = {n: sorted(reaches(n) & (gone - {n})) for n in gone - culprits} if culprits else {}
+        rest = gone - set(again)
+        returned = returned_only(lines)
+        objects = {n for n in rest if n not in context.plan.whole and n in texts and framed(n, texts[n], context)}
+        with_result = {n for n in rest if n in context.void and (n in returned or n not in objects)}
+        whole = objects - with_result
         told = set()                        # (one line a function tried again, its first failure)
         for text in lines:
             for line in text.splitlines():
@@ -1243,6 +1389,10 @@ def check(target, image, names=None, out=print, jobs=None):
                     if line.startswith(("FAIL %s " % name, "UNCOVERED %s:" % name)) and name in accepted:
                         if name in whole:
                             out("whole    %-24s %s" % (name, ("its frame as one object again: " + line)[:200]))
+                        elif name in with_result:
+                            if name not in told:
+                                told.add(name)
+                                out("result   %-24s %s" % (name, ("with its result again: " + line)[:200]))
                         elif name in again:
                             if name not in told:
                                 told.add(name)
@@ -1253,7 +1403,16 @@ def check(target, image, names=None, out=print, jobs=None):
                             drop([name], line)
         if whole:
             context.plan.whole |= whole         # (in context_key: the next round's readable C is made anew)
-        accepted = [n for n in accepted if n not in gone - whole - set(again)]
+        if with_result:
+            context.keep_results(with_result)
+            # The readable_types table keeps each function's types for the digest of its C, made for the
+            # void forms: made anew for what these functions and their callers print now (the check's whole
+            # and results kept), else they lost their parameters' types
+            keep = (set(context.plan.whole), set(context.plan.results))
+            make_plan(program, context, lifter, lifted, flow, digests=digests)
+            context.plan.whole, context.plan.results = keep
+            shapes.store_plan(image, context.plan)
+        accepted = [n for n in accepted if n not in gone - whole - set(again) - with_result]
         if not gone:
             break
     runs = target.scenarios and hasattr(program.arch, "reset")
@@ -1298,8 +1457,8 @@ def check(target, image, names=None, out=print, jobs=None):
         found = whole(accepted) if accepted else None
     for name in accepted:
         verdicts[name] = ("readable", "")
-    if context.plan.whole:
-        context.plan.whole &= set(accepted)
+    if context.plan.whole or context.plan.results:
+        context.plan.whole &= set(accepted)     # (results stay whole: their callers' readable C reads them)
         from dread import shapes
         shapes.store_plan(image, context.plan)  # (the functions whose frame is one object: the builds read it)
     os.makedirs(work, exist_ok=True)

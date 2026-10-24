@@ -186,20 +186,28 @@ def test_the_compilers_first_error_is_one_line():
 def test_the_clean_up_passes_the_gate_and_is_shorter(tmp_path, monkeypatch):
     """With the clean-up (dread.tidy): every lifted function of gizmo-m3 is accepted, the whole image
     agrees, and the readable C has fewer lines than the lifted (the flags, the (void)s, the zeroed
-    registers after calls are gone). No function's readable C is made twice from the same lifted C in
-    the whole check: the rounds' builds and the whole image's take what its first pass made
-    (readable_texts)."""
+    registers after calls are gone). No function's readable C is made twice from the same lifted C with
+    the same tables in the whole check: the rounds' builds and the whole image's take what its first
+    pass made (readable_texts). A round that gives functions their results back (void the first time:
+    dread.tidy void_results) makes the readable_types table anew (its types are kept for the digest of
+    each function's C) and with it every function's readable C; a function's own is made anew when
+    what it reads of the void functions changes (void_key)."""
     target = gizmo_copy(tmp_path)
     image = target.image()
     lifted = build.read_names(image.table("lifted"))
     made, real = [], readable._transform
-    monkeypatch.setattr(readable, "_transform", lambda name, text, *rest: made.append((name, text)) or
-                        real(name, text, *rest))
+
+    def counted(name, text, stages, context=None):
+        made.append((name, text, readable.context_key(context), readable.void_key(context, name, text)))
+        return real(name, text, stages, context)
+    monkeypatch.setattr(readable, "_transform", counted)
     monkeypatch.setattr(readable, "POOL_MIN", 10 ** 6)          # (made in this process, where they are counted)
     lines = []
     accepted = readable.check(target, image, out=lines.append)
     assert accepted == sorted(lifted), lines
-    assert len(made) == len(set(made)) and {n for n, _ in made} == set(lifted), sorted(made)
+    twice = sorted({m[0] for m in made if made.count(m) > 1})
+    assert not twice, twice
+    assert {m[0] for m in made} == set(lifted), sorted(m[0] for m in made)
     before = after = 0
     for name in lifted:
         text = lifted_text(target, image, name, tmp_path)
@@ -504,8 +512,11 @@ use:
     mov     r4, r0
     bl      fits
     add     r0, r0, r4
+    ldr     r1, =0x40000110     @ (what it computes is read: nothing is void, dread.tidy void_results)
+    str     r0, [r1]
     pop     {r4, lr}
     bx      lr
+    .ltorg
     .size use, . - use
 """
 WIDE_NAMES = ["fits", "remainder_of", "store_mean", "udivmod", "use"]
@@ -629,8 +640,11 @@ use:
     push    {r4, lr}
     bl      sum3
     add     r0, r0, #1
+    ldr     r1, =0x40000110     @ (what it computes is read: nothing is void, dread.tidy void_results)
+    str     r0, [r1]
     pop     {r4, lr}
     bx      lr
+    .ltorg
     .size use, . - use
 """
 
@@ -691,14 +705,15 @@ def test_no_argument_in_a_result_register_the_callee_overwrites(tmp_path):
     assert "extern u32 gauge_now(void);" in poll, poll
     since = text("gauge_since")
     assert "u32 gauge_since(u32 r0)" in since and "return gauge_now() - r0;" in since, since
-    assert "u32 gauge_relay(void)" in text("gauge_relay") and "= gauge_via();" in text("gauge_relay")
+    # (gauge_main reads none of these callers' results: they are void, dread.tidy void_results)
+    assert "void gauge_relay(void)" in text("gauge_relay") and "= gauge_via();" in text("gauge_relay")
     for name, callee in (("gauge_keep", "gauge_hold"), ("gauge_try", "gauge_maybe"), ("gauge_reback", "gauge_back"),
                          ("gauge_rebump", "gauge_bump")):
         c = text(name)
-        assert "u32 %s(u32 r0)" % name in c and "%s(r0);" % callee in c, c
+        assert "void %s(u32 r0)" % name in c and "%s(r0);" % callee in c, c
         assert "extern u32 %s(u32);" % callee in c, c
     pair = text("gauge_pair")
-    assert "u32 gauge_pair(void)" in pair and "    gauge_hold();" in pair and "= gauge_now();" in pair, pair
+    assert "void gauge_pair(void)" in pair and "    gauge_hold();" in pair and "= gauge_now();" in pair, pair
 
 
 def test_read_line_calls_uart_getc_without_an_argument(target):
@@ -878,7 +893,7 @@ def test_the_image_s_structures_once_in_a_header_the_printed_form_includes(tmp_p
     assert "/* struct s_1: u32 f_20 at 0x20, u32 f_24 at 0x24 */" in ring, ring
     irq = readable.printed("timer_irq", lifter.lift(program.by_name["timer_irq"]).text, context)
     assert "#define g_%x (*(volatile struct g_%x_t *)0x%xu)" % ((min(p.statics),) * 3) in irq, irq
-    assert "extern u32 ring_put(" in irq, irq
+    assert "extern void ring_put(" in irq, irq        # (nobody reads its result: dread.tidy void_results)
     main = readable.printed("main", lifter.lift(program.by_name["main"]).text, context)
     assert re.search(r"^    volatile u8 stack\d+\[12\];$", main, re.M), main     # (its frame's buffer: its own)
     flags = target.compiler.generated_cflags()

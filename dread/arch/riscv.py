@@ -20,7 +20,7 @@ import capstone as cs
 import unicorn as uc
 from unicorn import riscv_const as ur
 
-from dread.arch import sum_value
+from dread.arch import M32, low_bits, sum_value, unshift
 
 NAMES = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1"] + ["a%d" % i for i in range(8)] + \
         ["s%d" % i for i in range(2, 12)] + ["t3", "t4", "t5", "t6"]
@@ -440,6 +440,59 @@ class RiscV:
         """Whether the instruction only computes registers from registers: no memory, no branch, no
         CSR (dread.regflow: one whose results are dead reads nothing)."""
         return fields(insn).op in self.REGISTER_OPS
+
+    def bit_demand(self, insn, out):
+        """{register: bits} of the registers an instruction that only computes registers (register_only)
+        reads, the bits of each that bits `out` ({register: bits} of what it writes) of its result depend
+        on; None where this layer has no rule (dread.regflow then takes every bit of every register it
+        reads once any bit of the result is used). Rules: andi (the bits where the immediate has ones),
+        ori (where it has zeros), xori, and, or, xor (the same bits), slli, srli, srai (the bits the
+        shift moves there), add, addi, sub, mul (the bits up to the highest used: a carry goes upwards),
+        slt, sltu, slti, sltiu (every bit where bit 0 is used, none else), lui and auipc (none). Not the
+        shifts by a register, mulh*, div*, rem*. Checked against the emulator on every rule
+        (tests/test_regflow_bits.py)."""
+        f = fields(insn)
+        if not f.rd:
+            return None
+        d = out.get(NAMES[f.rd], 0) & M32
+        r1 = NAMES[f.rs1] if f.rs1 else None
+        r2 = NAMES[f.rs2] if f.rs2 else None
+        k = f.imm & M32
+        need = {}
+
+        def add(reg, bits):
+            if reg is not None:
+                need[reg] = need.get(reg, 0) | (bits & M32)
+        op = f.op
+        if op in ("lui", "auipc"):
+            return need
+        if op in ("andi", "ori", "xori"):
+            add(r1, d & k if op == "andi" else d & ~k if op == "ori" else d)
+        elif op in ("and", "or", "xor"):
+            add(r1, d)
+            add(r2, d)
+        elif op in ("slli", "srli", "srai"):
+            add(r1, unshift(d, {"slli": "lsl", "srli": "lsr", "srai": "asr"}[op], f.imm & 31))
+        elif op in ("add", "addi", "sub", "mul"):
+            add(r1, low_bits(d))
+            add(r2, low_bits(d))
+        elif op in ("slt", "sltu", "slti", "sltiu"):
+            add(r1, M32 if d & 1 else 0)
+            add(r2, M32 if d & 1 else 0)
+        else:
+            return None
+        return need
+
+    STORE_BITS = {"sb": 0xFF, "sh": 0xFFFF}
+
+    def store_demand(self, insn):
+        """{register: bits} of what sb and sh take of the register they store, for dread.regflow; None for
+        every other instruction, and where that register is also the base (sb a0, 0(a0))."""
+        f = fields(insn)
+        width = self.STORE_BITS.get(f.op)
+        if width is None or not f.rs2 or f.rs2 == f.rs1:
+            return None
+        return {NAMES[f.rs2]: width}
 
     def store_slots(self, insn):
         """[(register, base register, displacement)] of what sw, sh or sb stores, else [] (dread.regflow:

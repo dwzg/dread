@@ -9,6 +9,118 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Results as the source has them: reads of bits nobody uses, results nobody reads, second words that are leftovers (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Two-word
+results that are leftovers" (docs/todo.md), the only source of false statements left in the readable C
+of a private firmware after the second review.
+
+- **Question.** dread.regflow counted every read. A caller that kept the upper bits of a register a
+  callee left (a bic and an orr) and stored a byte of it, or handed it to a callee that did, made that
+  register a second result of the callee and of every function that passed it on; the lifters return
+  two words from those, and readable C printed `u64 f(...)` with `return ((u64)hi << 32) | lo;`, its
+  callers `(u32)(f(...) >> 32)`, with phantom arguments and a constant made a high word behind it. And
+  readable C printed every function's r0 as a result (gizmo's `u32 timer_start(u32 r0) { ...; return
+  r0; }`, `u32 delay(u32 r0) { r0_1 = timer_start(r0); ...; return r0_1; }` for two void functions): the
+  lifters return r0 from every function, since dread.runner compares it at every return, whether a
+  caller reads it or not (checked: emu.Result compares the return value always, two stack addresses
+  aside). How does regflow find the reads that matter, and how does readable C print results as the
+  source has them, without taking anything from the comparison (rule 6)?
+- **Options.**
+  1. Reads: (a) every read, as before; (b) an instruction that only computes registers reads its
+     operands only where a result it writes is used; (c) (b) bit for bit: the bits of each operand its
+     used result bits depend on (the layers' rules), a byte's store the low byte.
+  2. Whose results count as read: (a) a direct caller's read after the call, as before; (b) and every
+     function a pointer may call (its entry in a word of the image or made by its code); (c) every
+     function's (nothing is void).
+  3. With (1b) a function whose result nobody reads makes the computations behind it dead, also a
+     callee's second register that flows into that result, which the cases compare all the same: the
+     lifted caller then returns garbage there and fails. (a) one solution, as the program reads; (b)
+     two: the comparison's (every return passes on its result registers, as the runner reads r0 at
+     every return) for every register but the result, the program's for the result registers.
+  4. Void in readable C: (a) never; (b) where no caller reads the result, the gate deciding; (c) (b),
+     with the register's value at the return handed back through a macro where the void C leaves
+     another (LEAVE(x)); (d) (b), but a function that computes its result for the return alone kept
+     (a strlen nobody reads returns one in its source), and one the gate rejects void tried once more
+     with its result.
+  5. A leftover second word: (a) u64 as before; (b) one-word, `return RETURN2(lo, hi);` (dread.h), a
+     caller that reads both words through CALL2; (c) a comment only.
+  6. Which second words are leftovers: (a) all; (b) none but by the ABI; (c) by data flow: only
+     constants the function writes and what callees that are leftovers themselves left there, on every
+     path (a greatest fixpoint); a function that computes it, loads it or passes its caller's on has a
+     result.
+- **Choice.** (1c), (2b) without M-profile vector tables and the image's entry, (3b), (4d), (5b), (6c).
+- **Why.** (1c) is what the item asks and what the private review needs: a read of bits nobody uses is
+  no read. The layers' rules (dread.arch arm and riscv bit_demand, store_demand) are checked against the
+  emulator instruction by instruction (tests/test_regflow_bits.py: no operand bit outside a rule's
+  changes a used result bit, no unlisted register changes a result); the check found capstone 5's
+  missing second source of uxtab, uxtah, sxtab and sxtah, a read that mattered and had been missed
+  (now in the layer's operand_roles). What a function computes for a callee the analysis does not see
+  stays read: a call through a pointer, a variadic function's unnamed arguments, a way out it cannot
+  follow (Analysis._handed: the defining instructions keep every read; its own values only, else every
+  callee in front of such a call looked as if its callers read the scratch registers it leaves alone:
+  a first version gave FreeRTOS RISC-V GCC -Os some 200 kept registers more, and without the rule
+  vAssertCalled read no line number for printf). (2b): a pointer's callers are unseen, so their reads
+  are assumed; an M-profile vector table's handlers are left out (the exception return puts r0 back),
+  as is the image's entry (the reset reads nothing back; counted, test programs whose first function
+  lies at the base got its result read). The entries come from the image's words, from what the layers
+  join into an address (adr, auipc or lui with the addi next to it, movw with movt) and from values the
+  code makes from others it knows and stores, passes or returns (made_pointers, the layer's value_step):
+  GCC's RISC-V code puts a lui and its addi apart, and without them FreeRTOS's RISC-V GCC -Os demo
+  printed 81 functions more void (170 of 312 against 89), with nothing to show that the callers through a
+  pointer ignore their result: its 72 tasks and callbacks found so are void in their source, but
+  tests/test_results.py's twice, which printed void so, is not. A bare immediate does not count (140 in
+  FreeRTOS's mps2 demos is strlen's entry, a lui of 0x80000000 the RISC-V demo's _start). (3b) keeps the comparison where it was: r0 compared at every
+  return as before, kept beyond it what some caller's compared outputs depend on; a register leaves
+  kept only where no compared output depends on any of its bits. (4d): the plain void form passes where
+  the compiler leaves what the original left (timer_start, delay); where the original's own code put a
+  value in r0 for the return alone (regflow's computed: memcmp, strlen, mul64 on gizmo), the void C
+  would not compute it, so it is kept, as the source has it; where the value is the register used to
+  the end for something else (gizmo's gpio_set) or a parameter handed back (memcpy's destination), the
+  gate tries void and turns down what leaves another value: tried once more with its result, it passes
+  as before. One change a round, the likelier cause first: a function whose code reaches another that
+  failed too is tried with that one from lifted C (as before) and keeps its void form where that was
+  all; then a void function whose cases differ in the value it returns alone with its result; then
+  the frame's region as one object; then a void function that differs otherwise with its result
+  (until 2026-10-24 the frame came first, also for a function that reached a failing callee: with void
+  forms failing in the first round, gizmo-m3's handle_key went whole for its callees' failures; and a
+  void function whose objects failed took its result first, which made its C anew under another digest,
+  without the names the readable_names table had for it, so that its objects were never tried whole:
+  tests/test_frames.py's print_status with a name for its buffer). A round that gives functions their
+  results back makes the readable_types table anew, and with it every function's readable C: the table
+  keeps each function's types for the digest of its C, and the first was made for the void forms (the
+  functions printed with their result lost their parameters' types: gizmo-m3's strncpy printed `u32
+  strncpy(u32 r0, u32 r1, u32 r2)`); else only the functions whose void status changed and their
+  callers are made anew between the rounds (readable_texts keys each function's readable C by what it
+  reads of the void set: void_key).
+  (4c) would print `LEAVE(1u << r0)` in gpio_set and the like, a statement about a register in every
+  such function: not done. (5b) keeps the behaviour exact (the second word left by an asm with
+  register variables; the call through a two-word function type, which GCC folds into the direct bl
+  with one warning), checked with GCC 16 (ARM state, Thumb-1, Thumb-2), clang 23 (Thumb-2) and GCC on
+  RISC-V; (5c) would keep the false u64. (6c): a constant in a scratch register and a callee's leftover
+  are no results, a division's remainder is (also where it hands the dividend back unwritten).
+- **Not established.** A real two-word result that is a constant on every path (a 64-bit function that
+  returns a small number: its high word 0) counts as a leftover; a constant built by movw and movt as
+  computed. A function whose result an accumulator in r0 computes (read in its own loop) is no computed
+  one, and goes through the gate's retry. A pointer made by arithmetic the walk does not follow (an
+  offset added to a table's base the code loads) is missed, its function maybe printed void (the cases
+  still compare its r0). The other way round, a function whose entry the image holds keeps its result
+  whether the callers through the pointer read it or not, and so do the functions it hands its result
+  on to through a tail call: FreeRTOS's tasks and timer callbacks, void in their source, print with a
+  result (with the gate's retries, 26 or 27 of the 81 to 83 readable functions prefixed v on each mps2
+  build); where every call through a
+  register in the image ignores the result could be told (not done: newlib's stdio reads what its
+  FILE's functions return, so it would gain nothing there). A function whose source returns a callee's
+  value that nobody reads prints void (FreeRTOS's xTaskCatchUpTicks): its machine code is a void
+  function's. A void function the gate rejects void (it leaves another r0 than the original, which the
+  cases compare) prints with the result the lifters return (option 4c would keep it void).
+- **How to undo.** dread/regflow.py: Analysis.refinement returning None (every read counts), _handed
+  returning {}, pointer_entries returning set(), analyse taking the comparison's view alone; dread/tidy.py:
+  void_results returning False; dread/readable.py: results returning at once and Context.leftover empty.
+- **Status.** In the code (regflow 26; dread.tidy void_results, leftover_calls, leftover_returns,
+  narrowed_pairs; dread.readable results, the check's results retry; dread.h RETURN2, CALL2;
+  tests/test_regflow_bits.py, tests/test_results.py). Figures in docs/todo.md.
+
 ## An entry without names carries its sentence (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), found on the private

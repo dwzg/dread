@@ -93,7 +93,22 @@ def test_cache_follows_the_tables(target, tmp_path, monkeypatch):
     assert regflow.cache_key(target, image) != first
 
 
-CLOBBER = ("HWREG(UART_BASE) = (u8)c;", 'HWREG(UART_BASE) = (u8)c;\n    __asm__ volatile("mov r1, #0" ::: "r1");')
+def test_the_cache_key_holds_the_code_this_process_runs(target, tmp_path, monkeypatch):
+    """The key holds the analysis's sources as this process read them when it imported dread.regflow,
+    not as the files are when it stores: a suite that had imported the old code stored its analysis
+    under the key of an edit made meanwhile, and the runs after it took that analysis for the new code
+    (2026-10-24). Here every source the key holds is 'edited' after the import; the key stays."""
+    import sys
+    image = target.image()
+    first = regflow.cache_key(target, image)
+    edited = tmp_path / "edited.py"
+    edited.write_text("# an edit made after the import\n")
+    for name in ("dread.regflow", "dread.switches", "dread.program", "dread.arch", type(image.arch).__module__):
+        monkeypatch.setattr(sys.modules[name], "__file__", str(edited))
+    assert regflow.cache_key(target, image) == first
+
+
+CLOBBER =("HWREG(UART_BASE) = (u8)c;", 'HWREG(UART_BASE) = (u8)c;\n    __asm__ volatile("mov r1, #0" ::: "r1");')
 
 
 @pytest.mark.slow
@@ -1095,6 +1110,8 @@ gauge_spin:                 @ never returns
 gauge_main:
         push    {r4, lr}
         bl      gauge_since
+        ldr     r3, =0x2000010c     @ (its result read: not void, dread.tidy void_results)
+        str     r0, [r3]
         bl      gauge_poll
         bl      gauge_keep
         bl      gauge_try
@@ -1103,6 +1120,7 @@ gauge_main:
         bl      gauge_rebump
         bl      gauge_pair
         bl      gauge_spin
+    .ltorg
     .size gauge_main, . - gauge_main
 """
 

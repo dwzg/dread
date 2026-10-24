@@ -267,7 +267,12 @@ part: every object of the frame is volatile, as before. `whole` (left out when e
 2026-10-23): `[FUNCTION, ...]`, the functions whose frame's region dread.frames writes as one volatile
 object, as before that day, instead of an object at each address handed out: the check puts a
 function there whose objects its cases rejected (a callee reaching past the object it was given), and
-keeps it there when it is accepted so; the builds read it.
+keeps it there when it is accepted so; the builds read it. `results` (left out when empty; since
+2026-10-24): `[FUNCTION, ...]`, the functions readable C prints with the result the lifters return
+although no caller reads it (dread.tidy void_results prints such a function void otherwise): the check
+puts a function there whose cases rejected its void C (the register it leaves at the return differs),
+and keeps every function it put there, accepted or not (their callers' readable C calls them so); the
+builds read it. A file from before has none: every function nobody reads the result of is void.
 
 `takes` (since 2026-10-24; written whenever the check runs, also empty) lists the parameters that take
 texts' or functions' addresses (dread.naming taken_kinds): `{FUNCTION: {"INDEX": "text" | "function"}}`,
@@ -400,11 +405,11 @@ sweep's cap, the loop's calls, the tail calls through a pointer) and the environ
 - by function, the facts of every function the function's runs can reach (dread.autocase reaches: its
   calls, tail calls, the fall behind its last instruction, the targets a run of an indirect jump's
   dispatch finds, transitively): its name and entry, its entries in regflow's case facts (kept, reads,
-  sites, preserved, and any table by function name regflow adds there; not `overwritten`, which no case
-  reads), the registers beyond a C result its stub answers, its `wide_results` row and its domains
-  rows. Where a tree has a transfer no table and no run of its dispatch tells (a call through a
-  function pointer), the facts of every function. They are digested once per strongly connected
-  component of the call graph, bottom up.
+  sites, preserved, and any table by function name regflow adds there; not `overwritten` nor, since
+  regflow 26, `leftover` and `computed`, which no case reads), the registers beyond a C result its stub
+  answers, its `wide_results` row and its domains rows. Where a tree has a transfer no table and no
+  run of its dispatch tells (a call through a function pointer), the facts of every function. They are
+  digested once per strongly connected component of the call graph, bottom up.
 
 So a change of one function's facts makes anew only the cases of the functions whose trees hold it,
 and of those whose trees call through a pointer; a change of anything whole, every case of the image.
@@ -845,7 +850,12 @@ structures to one header and includes it:
   0x0, struct s_24 *f_10 at 0x10 */`), and the first comment saying it is readable C (`/* NAME at
   0xADDR: readable C from its lifted C (dread readable) */`). Its frame's structure (`stackN_t`), its
   extern declarations and its macros (`#define g_...`) stay in it. Compiled with the header beside it
-  (and dread.h), it is the compiled form's code.
+  (and dread.h), it is the compiled form's code. Both forms (since 2026-10-24) print a function nobody
+  reads the result of `void` and a callee's extern so where no call keeps its value; a function whose
+  second result register holds a leftover (dread.regflow) one-word, `return RETURN2(lo, hi);` with a
+  comment above it naming the reader (`/* r1 at its returns (RETURN2): no result of its own, read after
+  the call by NAME 0xADDR (dread regflow) */`), and a call of one that reads both words `CALL2(f,
+  ...)`; RETURN2 and CALL2 are dread.h's.
 - With `--plain`, the reading form: each line behind a margin with an address in hex (blank where the
   line has none), the instructions' comments and their notes left out, and dread.build's lines for the
   compiler (`/* dread: ... */`). A statement's address is its first instruction (dread.cparse

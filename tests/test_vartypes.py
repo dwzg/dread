@@ -689,7 +689,8 @@ def test_gizmos_char_pointers_are_pointers(variant):
     got = {n: code(readable.transform(n, lifter.lift(program.by_name[n]).text, context=context))
            for n in ("strncpy", "read_line", "parse_kv")}
     copy = got["strncpy"]
-    assert re.search(r"u32 strncpy\(volatile u8 \*\w+, const volatile u8 \*\w+, u32 \w+\)", copy), copy
+    # (void: nobody reads its result, and no gate ran to give it back: dread.tidy void_results)
+    assert re.search(r"void strncpy\(volatile u8 \*\w+, const volatile u8 \*\w+, u32 \w+\)", copy), copy
     assert "*(volatile u8 *)" not in copy, copy
     line = got["read_line"]
     assert re.search(r"s32 read_line\(volatile u8 \*\w+, u32 \w+\)", line), line
@@ -705,9 +706,11 @@ def test_gizmos_char_pointers_are_pointers(variant):
 def test_gizmos_negative_values_are_s32(variant):
     """gizmo's ring_get (not lifted: printed on request) returns -1 or a byte: s32 ring_get as main, which
     compares its result signed, declares it, and the variable that holds -1 s32 where there is one;
-    uart_getc's likewise; cmd_mode (0 or -1) is s32 where a caller reads its result only by return (ARM
-    state's apply_config); udiv_var, which returns 0xFFFFFFFFu beside an unsigned quotient and no caller
-    reads, stays u32; every gizmo build."""
+    uart_getc's likewise; udiv_var, which returns 0xFFFFFFFFu beside an unsigned quotient and no caller
+    reads, stays u32; so does cmd_mode (0 or -1), which ARM state's apply_config handed back until
+    2026-10-24 (a reader only by return, and cmd_mode s32 then): apply_config is void now, as in its
+    source (dread.tidy void_results), and a negative return without a reader is no evidence; every gizmo
+    build."""
     from dread import readable
     program, context, lifter = gizmo_plan(variant)
 
@@ -722,8 +725,8 @@ def test_gizmos_negative_values_are_s32(variant):
         assert re.search(r"s32 %s\((u32 \w+|void)\)" % name, t) and not unsigned_negative(t), t
     assert re.search(r"extern s32 ring_get\(u32\);", text("main"))
     assert re.search(r"u32 udiv_var\(u32 \w+, u32 \w+\)", text("udiv_var"))
-    if variant == "a32":                    # (apply_config reads cmd_mode's result only by return)
-        assert "s32 cmd_mode(u32 r0)" in text("cmd_mode") and "extern s32 cmd_mode(u32);" in text("apply_config")
+    if variant == "a32":                    # (apply_config no longer hands cmd_mode's result back)
+        assert "u32 cmd_mode(u32 r0)" in text("cmd_mode") and "void apply_config(" in text("apply_config")
 
 
 # --- a program of our own through the gate ---

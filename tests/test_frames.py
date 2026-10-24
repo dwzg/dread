@@ -513,7 +513,7 @@ def test_print_status_s_buffer_is_its_own_array_and_its_parameters_are_gone(targ
     def text(name):
         return readable.transform(name, lifter.lift(program.by_name[name]).text, context=context)
     status = text("print_status")
-    assert "u32 print_status(void)" in status, status
+    assert "void print_status(void)" in status, status      # (nobody reads its result: dread.tidy void_results)
     assert "    u8 stack20[12];" in status and "fmt_dec((u32)stack20, " in status, status
     assert "uart_puts((u32)stack20);" in status and "stack20_t" not in status, status
     config = text("apply_config")

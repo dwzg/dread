@@ -350,6 +350,303 @@ def split_typed(fn, names):
     return changed
 
 
+def void_results(fn, run=None):
+    """A function whose result nobody reads returns nothing: the run's context's void (dread.readable
+    Context: dread.regflow found no caller over the whole image whose behaviour depends on its result
+    registers, callers through a pointer counted as reading). The lifters return r0 from every function
+    (the cases compare it at the return, whether a caller reads it or not), so a function whose source
+    returns nothing printed u32 f(...) and handed back what the register held last: its parameter
+    (gizmo's timer_start), a callee's result (delay's r0 = timer_start(r0)). Its head becomes void
+    f(...), each `return v;` `return;` (a value with an effect stays as a statement in front of it: a
+    tail call through a pointer); the clean-up then takes out what only made the value handed back (dead
+    makes a call whose value nobody reads a statement: delay's timer_start(r0)), and readable's results
+    declares a callee void where every call of it is such a statement. What the register holds at the
+    return is then the compiler's, which the cases still compare (rule 6): the gate keeps a function's
+    readable C only where it leaves what the original leaves, and tries one that fails once more with
+    its result (the plan's results). Run first. Only a head of the lifters' form (u32 f(...))."""
+    ctx = run.context if run is not None else None
+    void = getattr(ctx, "void", None)
+    if not void:
+        return False
+    m = re.match(r"^u32 (\w+)\((.*)\)$", fn.head.strip())
+    if fn.name not in void or not m or m.group(1) != fn.name:
+        return False
+
+    def bare(s):
+        if isinstance(s, C.Return) and s.e is not None:
+            if has_effects(s.e):
+                return C.Block([C.ExprStmt(s.e, s.addr), C.Return(None, s.addr)], s.addr)
+            s.e = None
+            return s
+        if isinstance(s, C.Block):
+            s.body[:] = [bare(x) for x in s.body]
+        elif isinstance(s, C.If):
+            s.then = bare(s.then)
+            if s.orelse is not None:
+                s.orelse = bare(s.orelse)
+        elif isinstance(s, (C.While, C.DoWhile, C.For, C.Switch)):
+            s.body = bare(s.body)
+        return s
+    fn.head = "void %s(%s)" % (fn.name, m.group(2))
+    bare(fn.body)
+    return True
+
+
+def drop_final_return(fn):
+    """The `return;` a function that returns nothing ends with, gone (void_results leaves the lifters'
+    last return in place): a note in its place keeps its instruction among the comments (bx lr), as the
+    clean-up keeps a push's."""
+    body = fn.body.body
+    if fn.head.split()[:1] == ["void"] and body and isinstance(body[-1], C.Return) and body[-1].e is None:
+        if body[-1].addr is not None and not (len(body) > 1 and body[-2].addr == body[-1].addr):
+            body[-1] = C.Note("", body[-1].addr)
+        else:
+            del body[-1]                    # (a tail call's: the call statement in front keeps the instruction)
+        return True
+    return False
+
+
+def _u32_num(v):
+    v &= 0xffffffff
+    return C.Num("0x%xu" % v if v > 9 else "%du" % v, v)
+
+
+def _map(e, f):
+    """e with f applied to every expression in it, children first (f returns the node to put in its place)."""
+    if e is None:
+        return None
+    if isinstance(e, (C.Unary, C.Post, C.Cast)):
+        e.e = _map(e.e, f)
+    elif isinstance(e, C.Binary):
+        e.l, e.r = _map(e.l, f), _map(e.r, f)
+    elif isinstance(e, C.Cond):
+        e.c, e.t, e.f = _map(e.c, f), _map(e.t, f), _map(e.f, f)
+    elif isinstance(e, C.Assign):
+        e.target, e.value = _map(e.target, f), _map(e.value, f)
+    elif isinstance(e, C.Call):
+        e.f = _map(e.f, f)
+        e.args = [_map(a, f) for a in e.args]
+    elif isinstance(e, C.Index):
+        e.base, e.index = _map(e.base, f), _map(e.index, f)
+    elif isinstance(e, C.Member):
+        e.base = _map(e.base, f)
+    elif isinstance(e, (C.Comma, C.InitList)):
+        e.items = [_map(x, f) for x in e.items]
+    elif isinstance(e, C.Designated):
+        e.value = _map(e.value, f)
+    elif isinstance(e, C.Compound):
+        e.init = _map(e.init, f)
+    elif isinstance(e, C.Sizeof) and e.e is not None:
+        e.e = _map(e.e, f)
+    return f(e)
+
+
+def _map_statements(s, f):
+    """f applied (_map) to every expression of statement s and of the statements inside it."""
+    if isinstance(s, C.ExprStmt):
+        s.e = _map(s.e, f)
+    elif isinstance(s, C.Return):
+        s.e = _map(s.e, f)
+    elif isinstance(s, C.If):
+        s.cond = _map(s.cond, f)
+    elif isinstance(s, (C.While, C.DoWhile)):
+        s.cond = _map(s.cond, f)
+    elif isinstance(s, C.For):
+        s.init, s.cond, s.step = _map(s.init, f), _map(s.cond, f), _map(s.step, f)
+    elif isinstance(s, C.Switch):
+        s.e = _map(s.e, f)
+    elif isinstance(s, C.Decl):
+        for d in s.items:
+            d.init = _map(d.init, f)
+    elif isinstance(s, C.Asm):
+        for o in list(s.outputs) + list(s.inputs):
+            o.e = _map(o.e, f)
+    for inner in _inner(s):
+        _map_statements(inner, f)
+
+
+def leftover_calls(fn, leftover, macro):
+    """The calls of the functions whose second result register holds a leftover (dread.readable results:
+    printed one-word) as their callers use them: one whose value a (u32) takes the first word of is a
+    plain call (the callee returns one word now), one whose value is read otherwise (both words: a u64
+    variable, >> 32) goes through the macro (macro(f, arguments): the call for two words), one whose value
+    nobody reads stays as it is."""
+    def two(e):
+        return isinstance(e, C.Call) and isinstance(e.f, C.Name) and e.f.id == macro and e.args and \
+            isinstance(e.args[0], C.Name) and e.args[0].id in leftover
+
+    def one(e):                             # (children first: a call is the macro's when its cast comes)
+        if isinstance(e, C.Cast) and e.type == "u32" and two(e.e):
+            return C.Call(e.e.args[0], list(e.e.args[1:]))
+        if isinstance(e, C.Call) and isinstance(e.f, C.Name) and e.f.id in leftover:
+            return C.Call(C.Name(macro), [C.Name(e.f.id)] + list(e.args))
+        return e
+
+    def visit(s):
+        if isinstance(s, C.ExprStmt) and isinstance(s.e, C.Call) and isinstance(s.e.f, C.Name) and \
+                s.e.f.id in leftover:
+            s.e.args = [_map(a, one) for a in s.e.args]   # (a call whose value nobody reads)
+            return
+        if isinstance(s, (C.Block, C.If, C.While, C.DoWhile, C.For, C.Switch)):
+            for inner in _inner(s):             # (the inner statements, then its own expressions)
+                visit(inner)
+            if isinstance(s, C.If):
+                s.cond = _map(s.cond, one)
+            elif isinstance(s, (C.While, C.DoWhile)):
+                s.cond = _map(s.cond, one)
+            elif isinstance(s, C.For):
+                s.init, s.cond, s.step = _map(s.init, one), _map(s.cond, one), _map(s.step, one)
+            elif isinstance(s, C.Switch):
+                s.e = _map(s.e, one)
+            return
+        _map_statements(s, one)
+    visit(fn.body)
+
+
+def _split64(e):
+    """(low word, high word) of a two-word value written as one: (u64)hi << 32 | lo, a constant, (u64)lo;
+    None for anything else."""
+    if isinstance(e, C.Binary) and e.op == "|":
+        for hi_part, lo in ((e.l, e.r), (e.r, e.l)):
+            if isinstance(hi_part, C.Binary) and hi_part.op == "<<" and isinstance(hi_part.r, C.Num) and \
+                    hi_part.r.value == 32 and isinstance(hi_part.l, C.Cast) and hi_part.l.type == "u64":
+                return lo, hi_part.l.e
+    if isinstance(e, C.Num) and isinstance(e.value, int):
+        return _u32_num(e.value), _u32_num(e.value >> 32)
+    if isinstance(e, C.Cast) and e.type == "u64":
+        return e.e, _u32_num(0)
+    return None
+
+
+def leftover_returns(fn, macro):
+    """Each `return v;` of a two-word function printed one-word (dread.readable results) as `return
+    macro(lo, hi);`: lo returned, hi left in the second result register. A value that is not written as
+    its two words (_split64) is split through its variable, or through a new one where it is no variable
+    (a call: computed once), assigned in front of the return."""
+    taken = all_names(fn)
+    new_decls = []
+
+    def split(s):
+        """[statements] for a return (one, or the new variable's assignment and the return)."""
+        got = _split64(s.e)
+        if got is not None:
+            s.e = C.Call(C.Name(macro), [got[0], got[1]])
+            return [s]
+        out = []
+        if isinstance(s.e, C.Name):
+            v = s.e.id
+        else:
+            v = fresh(fn, "t", taken)
+            new_decls.append(v)
+            out.append(C.ExprStmt(C.Assign("=", C.Name(v), s.e), s.addr))
+        s.e = C.Call(C.Name(macro), [C.Cast("u32", C.Name(v)), C.Cast("u32", C.Binary(">>", C.Name(v), C.Num("32")))])
+        return out + [s]
+
+    def one(s):
+        """s with its returns split; a block where a return becomes two statements outside a list."""
+        if isinstance(s, C.Return) and s.e is not None:
+            got = split(s)
+            return got[0] if len(got) == 1 else C.Block(got, s.addr)
+        if isinstance(s, C.Block):
+            s.body[:] = listed(s.body)
+        elif isinstance(s, C.If):
+            s.then = one(s.then)
+            if s.orelse is not None:
+                s.orelse = one(s.orelse)
+        elif isinstance(s, (C.While, C.DoWhile, C.For, C.Switch)):
+            s.body = one(s.body)
+        return s
+
+    def listed(stmts):
+        out = []
+        for s in stmts:
+            if isinstance(s, C.Return) and s.e is not None:
+                out += split(s)
+            else:
+                out.append(one(s))
+        return out
+    fn.body.body[:] = listed(fn.body.body)
+    if new_decls:
+        k = 0
+        while k < len(fn.body.body) and isinstance(fn.body.body[k], C.Decl):
+            k += 1
+        fn.body.body.insert(k, C.Decl("u64", [C.Declarator(t) for t in new_decls]))
+
+
+def narrowed_pairs(fn, leftover, macro):
+    """A u64 variable that only takes calls of the functions whose second word is a leftover
+    (leftover_calls: macro(f, ...)) and that nothing reads but its low word ((u32)t) is the u32 the
+    one-word call returns: `t = macro(f, x); ... (u32)t` as `t = f(x); ... t`, declared u32."""
+    decls = {}
+    for st in fn.body.body:
+        if isinstance(st, C.Decl) and " ".join(st.specs.split()) == "u64":
+            for d in st.items:
+                if not d.dims and not d.ptr and not d.asm and d.init is None:
+                    decls[d.name] = st
+    if not decls:
+        return False
+    ok = dict.fromkeys(decls, True)
+
+    def two(e):
+        return isinstance(e, C.Call) and isinstance(e.f, C.Name) and e.f.id == macro and e.args and \
+            isinstance(e.args[0], C.Name) and e.args[0].id in leftover
+
+    def check(e, parent=None):
+        if e is None:
+            return
+        if isinstance(e, C.Assign):
+            if isinstance(e.target, C.Name) and e.target.id in ok:
+                if e.op != "=" or not two(e.value):
+                    ok[e.target.id] = False
+            else:
+                check(e.target, e)
+            check(e.value, e)
+            return
+        if isinstance(e, C.Name) and e.id in ok:
+            if not (isinstance(parent, C.Cast) and parent.type == "u32"):
+                ok[e.id] = False
+            return
+        for c in _children(e):
+            check(c, e)
+
+    def visit(s):
+        if isinstance(s, C.Decl):
+            for d in s.items:
+                check(d.init)
+        elif isinstance(s, C.Asm):
+            for o in list(s.outputs) + list(s.inputs):
+                if isinstance(o.e, C.Name) and o.e.id in ok:
+                    ok[o.e.id] = False
+                check(o.e)
+        else:
+            for e in _stmt_all_exprs(s):
+                check(e)
+        for inner in _inner(s):
+            visit(inner)
+    visit(fn.body)
+    names = {v for v, good in ok.items() if good}
+    if not names:
+        return False
+
+    def one(e):
+        if isinstance(e, C.Cast) and e.type == "u32" and isinstance(e.e, C.Name) and e.e.id in names:
+            return e.e
+        if isinstance(e, C.Assign) and isinstance(e.target, C.Name) and e.target.id in names and two(e.value):
+            e.value = C.Call(e.value.args[0], list(e.value.args[1:]))
+        return e
+    for st in fn.body.body:
+        _map_statements(st, one)
+    for v in names:
+        st = decls[v]
+        st.items[:] = [d for d in st.items if d.name != v]
+    fn.body.body[:] = [st for st in fn.body.body if not (isinstance(st, C.Decl) and not st.items)]
+    k = 0
+    while k < len(fn.body.body) and isinstance(fn.body.body[k], C.Decl):
+        k += 1
+    fn.body.body.insert(k, C.Decl("u32", [C.Declarator(v) for v in sorted(names)]))
+    return True
+
+
 def unvoid(fn):
     before = len(fn.body.body)
     fn.body.body[:] = [s for s in fn.body.body if not (
@@ -3889,7 +4186,8 @@ def group_declarations(fn):
 
 
 def tidy(fn, run=None, passes=None, rounds=8):
-    """All passes, again until none changes anything (at most rounds times); then the calls' and the
+    """The results nobody reads dropped first (void_results); all passes, again until none changes
+    anything (at most rounds times); then the calls' and the
     function's own arguments (trim_calls, params) and the passes once more, the calls' again while
     that leaves values nobody reads; last the variables one per web (webs, with the run's context: a
     parameter apart from what its register hands back) and the passes again. The conditions' answers are kept for the run (_RUN: conditions),
@@ -3912,6 +4210,8 @@ def _tidy(fn, run, passes, rounds):
                 changed = p(fn) or changed
             if not changed:
                 break
+    if passes is None:
+        void_results(fn, run)               # (first: the clean-up takes out what made the value handed back)
     settle()
     if passes is None and (trim_calls(fn, run) | params(fn, run)):
         settle()

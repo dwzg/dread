@@ -20,7 +20,7 @@ import unicorn as uc
 from capstone import arm as csarm
 from unicorn import arm_const as ua
 
-from dread.arch import sum_value
+from dread.arch import M32, extend_bits, low_bits, sum_value, unshift
 
 REGS = tuple("r%d" % i for i in range(13)) + ("sp", "lr", "pc")
 ALIASES = {"sb": "r9", "sl": "r10", "fp": "r11", "ip": "r12", "r13": "sp", "r14": "lr", "r15": "pc"}
@@ -78,9 +78,14 @@ ACCUMULATE_PAIR = {getattr(csarm, "ARM_INS_" + n) for n in (
 # vpush's and vpop's as both (operand_roles replaces its lists for these)
 FPU_BLOCK = {getattr(csarm, "ARM_INS_" + n) for n in "VLDMIA VLDMDB VSTMIA VSTMDB VPUSH VPOP".split()
              if hasattr(csarm, "ARM_INS_" + n)}
+# Extend and add (uxtab r1, r2, r3: r2 + the byte of r3): capstone 5 does not list their second source
+# as read (found by tests/test_regflow_bits.py's check of every bit rule against the emulator, 2026-10-24)
+EXTEND_ADDS = {getattr(csarm, "ARM_INS_" + n) for n in "UXTAB UXTAH SXTAB SXTAH".split()
+               if hasattr(csarm, "ARM_INS_" + n)}
 # Where capstone's own access lists are wrong (operand_roles): the accumulating pairs, which it
-# lists as written only, ssat16 and usat16, whose source it does not list at all, and FPU_BLOCK
-OWN_ROLES = DSP_IDS | ACCUMULATE_PAIR | FPU_BLOCK
+# lists as written only, ssat16 and usat16, whose source it does not list at all, EXTEND_ADDS and
+# FPU_BLOCK
+OWN_ROLES = DSP_IDS | ACCUMULATE_PAIR | FPU_BLOCK | EXTEND_ADDS
 CONDITION_NAMES = {
     csarm.ARM_CC_EQ: "eq", csarm.ARM_CC_NE: "ne", csarm.ARM_CC_HS: "hs", csarm.ARM_CC_LO: "lo",
     csarm.ARM_CC_MI: "mi", csarm.ARM_CC_PL: "pl", csarm.ARM_CC_VS: "vs", csarm.ARM_CC_VC: "vc",
@@ -717,6 +722,126 @@ class Arm:
         if insn.id in self.NOT_REGISTER_ONLY or self.flow(insn)[0] != "next":
             return False
         return not any(o.type == csarm.ARM_OP_MEM for o in insn.operands)
+
+    # The instructions bit_demand knows: ids -> what kind of rule
+    BIT_MOVES = _id_set("MOV MOVS MVN")
+    BIT_SHIFTS = {getattr(csarm, "ARM_INS_" + n): n.lower() for n in ("LSL", "LSR", "ASR", "ROR")}
+    BIT_LOGIC = _id_set("AND BIC ORR EOR ORN")
+    BIT_SUMS = _id_set("ADD ADDW SUB SUBW RSB MUL MLA MLS")     # (not adc, sbc, rsc: they read the carry)
+    BIT_EXTENDS = {getattr(csarm, "ARM_INS_" + n): (w, s) for n, w, s in (
+        ("UXTB", 8, False), ("UXTH", 16, False), ("SXTB", 8, True), ("SXTH", 16, True),
+        ("UXTAB", 8, False), ("UXTAH", 16, False), ("SXTAB", 8, True), ("SXTAH", 16, True))
+        if hasattr(csarm, "ARM_INS_" + n)}
+    SHIFT_KINDS = {csarm.ARM_SFT_LSL: "lsl", csarm.ARM_SFT_LSR: "lsr", csarm.ARM_SFT_ASR: "asr",
+                   csarm.ARM_SFT_ROR: "ror"}    # (by a constant; by a register and rrx: every bit)
+
+    def bit_demand(self, insn, out):
+        """{register: bits} of the registers an instruction that only computes registers (register_only)
+        reads, the bits of each that bits `out` ({register: bits} of the registers it writes) of its
+        result depend on; None where this layer has no rule for the instruction (dread.regflow then takes
+        every bit of every register it reads once any bit of a result is used). Rules: moves and shifts
+        by a constant (lsl #k: the bits k places lower), the bitwise operations (and #K: the bits where K
+        has ones; bic #K, orr #K: where K has zeros; eor and the operations of two registers: the same
+        bits), sums, differences and products (the bits up to the highest used: a carry goes upwards),
+        the extensions (uxtb: the low byte; sxtb: and bit 7 where a bit above is used), the bit fields
+        (ubfx, sbfx, bfi, bfc) and movt (the low half of the register it keeps). A flexible second
+        operand's shift by a constant is followed; by a register, rrx, and the operations that read the
+        carry (adc, sbc, rsc), none. The flags an instruction writes are regflow's (it takes every bit
+        read where they are used). Checked against the emulator on every rule (tests/test_regflow_bits.py:
+        a bit outside what a rule names changes no used bit of the result)."""
+        ops = insn.operands
+        if not ops or ops[0].type != csarm.ARM_OP_REG:
+            return None
+        i = insn.id
+        regs = csarm.ARM_OP_REG
+
+        def name(o):
+            return self._name(insn.reg_name(o.reg))
+        d = out.get(name(ops[0]), 0) & M32
+        src = list(ops[1:])
+        need = {}
+
+        def add(o, bits, shifted=True):
+            """The bits of register operand o (through its shift by a constant), or False."""
+            if o.type != regs:
+                return o.type == csarm.ARM_OP_IMM
+            if o.shift.type:
+                kind = self.SHIFT_KINDS.get(o.shift.type) if shifted else None
+                if kind is None:
+                    return False
+                bits = unshift(bits, kind, o.shift.value)
+            r = name(o)
+            need[r] = need.get(r, 0) | (bits & M32)
+            return True
+        if i in self.BIT_MOVES:
+            return need if len(src) == 1 and add(src[0], d) else None
+        if i in self.BIT_SHIFTS:
+            if len(src) == 1 and src[0].type == regs and src[0].shift.type:     # (ARM state: lsl r1, r2, #k)
+                return need if add(src[0], d) else None
+            if len(src) == 2 and src[0].type == regs and not src[0].shift.type and src[1].type == csarm.ARM_OP_IMM:
+                return need if add(src[0], unshift(d, self.BIT_SHIFTS[i], src[1].imm)) else None   # (Thumb)
+            return None                     # (by a register)
+        if i in self.BIT_LOGIC or i in self.BIT_SUMS:
+            if i in self.BIT_SUMS:
+                d = low_bits(d)
+                ins = src if len(src) >= 2 else [ops[0]] + src      # (adds r1, #4: r1 is read too)
+                return need if all(add(o, d) for o in ins) else None
+            if len(src) == 2:
+                first, second = src
+            elif len(src) == 1:
+                first, second = ops[0], src[0]                      # (ands r1, r2: r1 &= r2)
+            else:
+                return None
+            if first.type != regs or first.shift.type:
+                return None
+            if second.type == csarm.ARM_OP_IMM:
+                k = second.imm & M32
+                keep = {csarm.ARM_INS_AND: k, csarm.ARM_INS_ORN: k, csarm.ARM_INS_BIC: ~k & M32,
+                        csarm.ARM_INS_ORR: ~k & M32}.get(i, M32)
+                return need if add(first, d & keep) else None
+            return need if add(first, d) and add(second, d) else None
+        if i in self.BIT_EXTENDS:
+            width, signed = self.BIT_EXTENDS[i]
+            if i in EXTEND_ADDS:            # (uxtab r1, r2, r3: r2 + the byte of r3)
+                if len(src) != 2:
+                    return None
+                d = low_bits(d)
+                return need if add(src[0], d, shifted=False) and add(src[1], extend_bits(d, width, signed)) else None
+            return need if len(src) == 1 and add(src[0], extend_bits(d, width, signed)) else None
+        imms = [o.imm for o in src if o.type == csarm.ARM_OP_IMM]
+        if i in (csarm.ARM_INS_UBFX, csarm.ARM_INS_SBFX) and len(src) == 3 and len(imms) == 2:
+            lsb, width = imms
+            bits = extend_bits(d, width, i == csarm.ARM_INS_SBFX)
+            return need if add(src[0], (bits << lsb) & M32, shifted=False) else None
+        if i in (csarm.ARM_INS_BFI, csarm.ARM_INS_BFC) and len(imms) == 2:
+            lsb, width = imms
+            field = (((1 << width) - 1) << lsb) & M32
+            if not add(ops[0], d & ~field, shifted=False):
+                return None
+            if i == csarm.ARM_INS_BFI:
+                return need if len(src) == 3 and add(src[0], (d & field) >> lsb, shifted=False) else None
+            return need
+        if i == csarm.ARM_INS_MOVT and len(src) == 1 and src[0].type == csarm.ARM_OP_IMM:
+            return need if add(ops[0], d & 0xFFFF, shifted=False) else None
+        return None
+
+    BIT_STORES = {csarm.ARM_INS_STRB: 0xFF, csarm.ARM_INS_STRH: 0xFFFF}
+
+    def store_demand(self, insn):
+        """{register: bits} of what a store of a byte or a halfword (strb, strh) takes of the register it
+        stores, for dread.regflow; None for every other instruction, and where that register also forms
+        the address (strb r0, [r0]: every bit of it then)."""
+        width = self.BIT_STORES.get(insn.id)
+        ops = insn.operands
+        if width is None or len(ops) < 2 or ops[0].type != csarm.ARM_OP_REG:
+            return None
+        reg = ops[0].reg
+        for o in ops[1:]:
+            if o.type == csarm.ARM_OP_MEM and reg in (o.mem.base, o.mem.index):
+                return None
+            if o.type == csarm.ARM_OP_REG and o.reg == reg:      # (a post-indexed register offset)
+                return None
+        return {self._name(insn.reg_name(reg)): width}
 
     def store_slots(self, insn):
         """[(register, base register, displacement)] of each register a store writes: str, strh, strb,

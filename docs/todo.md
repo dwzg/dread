@@ -1844,7 +1844,7 @@ model).
   tests/test_readable.py (ARM assembly of our own through both gates: the comparison, a store, a
   caller tried again, the APCS save area). Not mended: written cases whose stub masks log a register
   the callee does not read (the private target's carried cases; its decision). Figures in the commit.
-- [ ] **Two-word results that are leftovers.** A function whose callers, or their callers through
+- [x] **Two-word results that are leftovers.** A function whose callers, or their callers through
   returns, read r1 after it returns is lifted with a u64 result; its readable C reassigns both words
   in every arm, and its callers show `(u32)(f(...) >> 32)`. When the second word is only what a callee
   left, the reader sees a function that returns a pair. Keep the behaviour but print it as a one-word
@@ -1854,6 +1854,84 @@ model).
   bits nobody uses stops counting. Public example: none found (GCC code does not read r1 after a call
   of a one-word function); test with gizmo assembly: a callee that leaves r1, a caller that passes it
   on, a reader at the top.
+  Done 2026-10-24 (dread.regflow 26: Analysis.refinement, _handed, pointer_entries and made_pointers,
+  solve's two views, leftovers, computed; the layers' bit_demand and store_demand; dread.tidy
+  void_results, leftover_calls, leftover_returns, narrowed_pairs; dread.readable results, void_key, the
+  check's results retry; dread.h RETURN2 and CALL2; docs/decisions.md, "Results as the source has them").
+  regflow follows a register bit for bit, and a read counts only where its bits matter: an instruction
+  that only computes registers reads what its used results need (rules per instruction, checked against
+  the emulator: tests/test_regflow_bits.py, which found capstone's missing second source of uxtab and its
+  kin, a read that mattered), a byte's store the low byte; what a function computes for a callee the
+  analysis cannot see (a call through a pointer, a variadic function's unnamed arguments) stays read. The
+  comparison is the same: r0 at every return, and beyond it what some caller's compared outputs depend on
+  (the comparison's view, which passes every function's result on at its returns); the result registers
+  as the program reads them (callers through a pointer counted: a function whose entry a word of the
+  image holds or its code makes, also by a lui and an addi apart). A second word that holds only a
+  constant or what a leftover callee left (leftover) prints one-word through RETURN2, its readers through
+  CALL2; a division's remainder stays u64. A function nobody reads the result of prints void, unless its
+  own code computes the result for the return alone (computed: a strlen nobody reads keeps it, as its
+  source); one whose void C the cases reject (it leaves another value in r0, which they compare) is tried
+  once more with its result (the readable_types table's results; the table made anew then, so that such a
+  function keeps its parameters' types). Public form fixed: gizmo's timer_start and delay print `void
+  timer_start(u32 r0)` and `void delay(u32 r0) { timer_start(r0); ... }`. The program of our own with a
+  leaf that leaves 0x55 in r1 printed `u64 leaf(u32 r0)` with `return ((u64)0x55u << 32) | (r0 + 1);`,
+  `u64 mid`, `u32 top(u32 r0)` with the high word in the byte it stores and `return sink((u32)t_1,
+  (u32)(t_1 >> 32));` in relay; where no caller reads the whole word, `u32 leaf(u32 r0)` with `return r0
+  + 1;`, `void top(u32 r0)` storing `mid(r0) & 0xffu`, relay handing mid's one word to sink, and where
+  one does, `return RETURN2(r0 + 1, 0x55u);` with the reader named. Figures (eight builds; before the
+  parent commit, after this change): the lift check and the readable gate accept the same functions on
+  every build (gizmo a32 36 lifted and 35 readable, m3 36 and 36, m4 44 and 44, rv32 32 and 31; FreeRTOS
+  mps2 GCC -Os 341 and 328, clang -O2 300 and 288, virt RISC-V GCC -Os 272 and 265, mps2 GCC -O0 382 and
+  378), the whole image agreeing in both. Printed void, none before: gizmo a32 18 of its 51 functions (15
+  of the 35 readable), m3 21 of 50 (18 of 36), m4 22 of 58 (19 of 44), rv32 18 of 46 (15 of 31); GCC -Os
+  102 of 362 (95 of 328), clang -O2 83 of 339 (74 of 288), RISC-V 90 of 312 (83 of 265), GCC -O0 150 of
+  433 (125 of 378). Against FreeRTOS's naming convention (v: void in the source; x, ux, pv and their kin:
+  a value): of the readable functions with a value's prefix, 4 print void on GCC -Os, 2 on clang -O2, 3
+  on RISC-V and 3 on -O0, all void in their source (xPortSysTickHandler, xNotifyTaskFromISR,
+  xNotifyArrayTaskFromISR) but xTaskCatchUpTicks, whose result nobody reads and whose value is
+  xTaskResumeAll's; of those prefixed v, 59 of 83 print void on GCC -Os, 54 of 81 on clang -O2, 56 of 73
+  on RISC-V, 55 of 82 on -O0, the others with a result: tasks and callbacks (callers through a pointer
+  count as reading), what they hand on through tail calls, and the gate's retries. u64 results and `>>
+  32`: the same on every build (gizmo a32's __aeabi_uidivmod stays u64, its remainder real; what `>> 32`
+  remains is 64-bit arithmetic, umull and adc); leftovers: none on these builds (the false pairs were a
+  private firmware's). regflow: kept beyond the result registers the same on all eight; kept r0 grew
+  (callers through a pointer: +4 on each gizmo ARM build, +1 on rv32, +104 GCC -Os, +101 clang -O2, +88
+  RISC-V, +105 GCC -O0) and fell once (GCC -O0's tiny_print, which printf and sprintf hand on as theirs,
+  read by nobody); reads dropped: newlib's _read_r, _write_r, _lseek_r, _close_r, __sread and __sseek
+  (r1-r3, 14 a build, on each mps2 build: stubs that read no argument) and xQueueCreateMutex's r0 on GCC
+  -Os, every one measured by dread callconv: all agree (8 of 8 functions on GCC -Os, 6 of 6 on clang -O2,
+  7 of 7 on -O0 with tiny_print). Case keys regenerated (the case facts hold kept): gizmo a32 8 of 56
+  functions, m3 9 of 54, m4 9 of 61, rv32 1 of 50; GCC -Os 277 of 362, clang -O2 264 of 339, RISC-V 246
+  of 308, GCC -O0 342 of 439. Gate rounds: 1 to 3 (gizmo a32, m3, GCC -Os), 1 to 2 (m4, rv32, RISC-V), 2
+  to 4 (clang -O2), 1 to 4 (GCC -O0). Times (warm, the builds one after another on a machine shared with
+  other work): the readable gate takes two to three times as long (gizmo a32 5 to 25 s, m3 5 to 12, m4 5
+  to 8, rv32 3 to 5; GCC -Os 38 to 80 s, clang -O2 58 to 144, RISC-V 26 to 38, GCC -O0 49 to 166): more
+  rounds, and a round that gives results back makes the readable_types table and every function's
+  readable C anew (14 s and 8 s on clang -O2: the open item below); the lift check and the printing take
+  as long as before (GCC -Os 72 and 69 s, 61 and 62 s; clang -O2 79 and 78 s, 79 and 90 s; the first lift
+  check after a change of the code is slower, caches are keyed by it); regflow's analysis about a quarter
+  longer, its two solutions (GCC -Os 2.9 to 3.6 s, clang -O2 3.8 to 4.9, RISC-V 1.1 to 1.5, -O0 5.7 to
+  7.0). Tests: tests/test_regflow_bits.py (every bit rule and the narrow stores against the emulator on
+  ARM state, Thumb-2 and RISC-V; an assembly program of our own: a callee that leaves a constant in r1, a
+  caller that hands it on, callers that keep its upper bits and store a byte, a reader at the top that
+  stores it whole, a division whose remainder is a result, a callback and its caller; computed on
+  gizmo-m3), tests/test_results.py (that program's readable C and both gates on ARM and RISC-V; a wrong
+  RETURN2 caught by the cases; gizmo's timer_start and delay void on every build; a void function the
+  cases reject kept with its result and its types, a computed result kept; a pointer made by a lui and an
+  addi apart; a void callee of a body behind a naked entry), tests/test_regflow.py (the cache key holds
+  the code a process imported: a suite that had imported the old code stored its analysis under the key
+  of an edit made meanwhile). Not established: a real 64-bit result that is a constant on every path
+  counts as a leftover; an accumulator in r0 is no computed result (the gate's retry decides); a pointer
+  made by arithmetic the walk does not follow; a function whose entry the image holds keeps its result
+  whether its callers through the pointer read it or not; MSP430 and MIPS keep every read (no
+  register_only) and print no void (their heads are not the lifters' u32 form).
+- [ ] **A cheaper round for results given back.** dread readable --check makes the readable_types table
+  anew after a round that gave functions their results back (it keeps each function's types for the
+  digest of its C, and the first table was made for the void forms), and with it every function's
+  readable C, which readable_texts keys by the whole context: 14 s and 8 s a round on FreeRTOS's clang
+  -O2 demo, whose gate went from 58 s to 144 s with that and two more rounds. Make only the functions
+  whose void status changed and their callers anew (their analysis trees, their entries of the table), or
+  key each function's readable C by the entries it reads. Public example: FreeRTOS mps2-clang-O2.
 - [ ] **Bound calls in one line.** A call whose callee reads registers its caller left, or behind
   which the caller reads scratch registers, prints as an inline-asm block that binds every register,
   plus asm reads of those registers at the function's entry: many lines for one call. Print it as one
