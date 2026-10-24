@@ -190,16 +190,17 @@ def test_the_clean_up_passes_the_gate_and_is_shorter(tmp_path, monkeypatch):
     the same tables in the whole check: the rounds' builds and the whole image's take what its first
     pass made (readable_texts). A round that gives functions their results back (void the first time:
     dread.tidy void_results) makes the readable_types table anew (its types are kept for the digest of
-    each function's C) and with it every function's readable C; a function's own is made anew when
-    what it reads of the void functions changes (void_key)."""
+    each function's C); a function's readable C is made anew where what its view of the context holds
+    changed (scope_key: its entries and its callees', which of them are void; plan_key)."""
     target = gizmo_copy(tmp_path)
     image = target.image()
     lifted = build.read_names(image.table("lifted"))
     made, real = [], readable._transform
 
-    def counted(name, text, stages, context=None):
-        made.append((name, text, readable.context_key(context), readable.void_key(context, name, text)))
-        return real(name, text, stages, context)
+    def counted(name, text, stages, context=None, cleaned=None):
+        made.append((name, text, readable.tables_key(context), readable.plan_key(context),
+                     readable.scope_key(context, name, text)))
+        return real(name, text, stages, context, cleaned)
     monkeypatch.setattr(readable, "_transform", counted)
     monkeypatch.setattr(readable, "POOL_MIN", 10 ** 6)          # (made in this process, where they are counted)
     lines = []
@@ -214,6 +215,62 @@ def test_the_clean_up_passes_the_gate_and_is_shorter(tmp_path, monkeypatch):
         before += text.count("\n")
         after += readable.transform(name, text).count("\n")
     assert after < before * 0.8, (before, after)
+
+
+@pytest.mark.slow
+@needs_gcc
+def test_the_rounds_make_anew_only_what_changed_and_what_a_full_remake_makes(tmp_path, monkeypatch):
+    """dread readable --check --verify on gizmo-m3, whose rounds give functions their results back (void,
+    their C leaves another r0 than the original; with GCC 16: memcpy, memset, strncpy, gpio_set,
+    handle_key): every round's readable_types table and every readable C its builds take are the same
+    as made anew from nothing (verify: VerifyFailed else), byte for byte; the tables after the first are
+    made from the analysis trees kept but those of the functions given their results back (made anew
+    once each), and the builds after the first pass make anew only the readable C whose entries changed:
+    those functions' among it. Until 2026-10-24 every such round made every tree and every function's
+    readable C anew."""
+    target = gizmo_copy(tmp_path)
+    image = target.image()
+    lifted = build.read_names(image.table("lifted"))
+    trees, texts, plans = [], [], []
+    real_tree, real_text, real_plan = readable._analysis_kept, readable._text_one, readable.make_plan
+    monkeypatch.setattr(readable, "_analysis_kept", lambda name: trees.append(name) or real_tree(name))
+    monkeypatch.setattr(readable, "_text_one", lambda name: (readable._SCOPE and texts.append(name)) or
+                        real_text(name))       # (not those --verify makes anew from the whole context)
+
+    def plan(*args, **kwargs):
+        got = real_plan(*args, **kwargs)
+        if kwargs.get("kept") is not None:
+            plans.append(len(trees))
+        return got
+    monkeypatch.setattr(readable, "make_plan", plan)
+    monkeypatch.setattr(readable, "_STORE", {})     # (not the readable C an earlier test made of this program)
+    monkeypatch.setattr(readable, "POOL_MIN", 10 ** 6)          # (made in this process, where they are counted)
+    lines = []
+    accepted = readable.check(target, image, out=lines.append, verify=True)
+    assert accepted == sorted(lifted), lines
+    given = sorted({line.split()[1] for line in lines if line.startswith("result ")})
+    assert given and len(plans) >= 2, (given, plans, lines)
+    assert sorted(trees[plans[0]:]) == given, (trees[plans[0]:], given)
+    later = texts[len(lifted):]
+    assert set(given) <= set(later) and len(later) < len(lifted), (sorted(later), given)
+    assert sorted(texts[:len(lifted)]) == sorted(lifted)
+    assert any("as made anew from nothing (--verify)" in line for line in lines), lines
+
+
+@pytest.mark.slow
+@needs_gcc
+def test_verify_finds_a_view_that_leaves_out_what_a_function_reads(tmp_path, monkeypatch):
+    """--verify is what shows a view of the context too narrow: with each function's view cut to its own
+    name (its callees' void status and their entries of the readable_types table left out, so that a
+    caller of a void function declares it u32), the first pass's readable C differs from the C the whole
+    context gives, and the check stops with VerifyFailed (dread readable --check --verify exits 1)."""
+    target = gizmo_copy(tmp_path)
+    monkeypatch.setattr(readable, "scope_names", lambda name, text: {name})
+    monkeypatch.setattr(readable, "_STORE", {})
+    monkeypatch.setattr(readable, "POOL_MIN", 10 ** 6)
+    with pytest.raises(readable.VerifyFailed) as e:
+        readable.check(target, target.image(), out=[].append, verify=True)
+    assert "differs from the one made anew from nothing" in str(e.value), e.value
 
 
 @needs_gcc
@@ -342,6 +399,54 @@ def test_readable_c_is_made_again_only_where_its_inputs_changed(monkeypatch):
     named = readable.readable_texts(texts, context)
     assert sorted(made) == sorted(texts) and "UART_DATA = " in named["uart_putc"], named["uart_putc"]
     assert readable.context_key(context) != readable.context_key(readable.Context(target, image, program, flow))
+
+
+def test_a_function_s_readable_c_is_made_again_only_where_its_entries_changed(monkeypatch):
+    """readable_texts keeps each function's readable C by what its view of the context holds (scoped,
+    scope_key: the readable_types table's entries of the names its lifted C uses and which of them are
+    void; plan_key: the table's parts that are no function's): a function given its result back (the
+    check's keep_results) makes it and the functions whose C names it anew, another function's entry the
+    same, a structure added to the table every function; and every time the C kept is the C made anew
+    from the whole context (remade)."""
+    from dread import lift, regflow
+    from dread.program import Program
+    from dread.target import Target
+    target = Target.load(gizmo_dir("m3"))
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    texts = {n: lifter.lift(program.by_name[n]).text
+             for n in ("timer_start", "delay", "uart_putc", "uart_puts", "keys_read", "strlen", "checksum")}
+    made, real = [], readable._transform
+    monkeypatch.setattr(readable, "_transform", lambda name, *rest: made.append(name) or real(name, *rest))
+    monkeypatch.setattr(readable, "_STORE", {})
+    monkeypatch.setattr(readable, "POOL_MIN", 10 ** 6)          # (made in this process, where they are counted)
+    context = readable.Context(target, image, program, flow)
+    assert "timer_start" in context.void
+
+    def naming(name):
+        return {n for n, t in texts.items() if re.search(r"\b%s\b" % name, t)}
+
+    def round_(change):
+        change()
+        del made[:]
+        kept = readable.readable_texts(texts, context)
+        got = sorted(made)
+        assert readable.remade(texts, context) == kept      # (as made anew from nothing, from the whole context)
+        return got, kept
+    got, first = round_(lambda: setattr(context.plan, "masks", {}))    # (None: "the table does not say")
+    assert got == sorted(texts) and "void timer_start(" in first["timer_start"], first["timer_start"]
+    assert naming("timer_start") == {"timer_start", "delay"} and "timer_start(r0);" in first["delay"], first["delay"]
+    got, again = round_(lambda: context.keep_results(["timer_start"]))
+    assert got == ["delay", "timer_start"] and "u32 timer_start(" in again["timer_start"], again["timer_start"]
+    assert {n: t for n, t in again.items() if n not in got} == {n: t for n, t in first.items() if n not in got}
+    got, _ = round_(lambda: setattr(context.plan, "masks", dict(context.plan.masks, uart_putc=[0])))
+    assert got == sorted(naming("uart_putc")) and "uart_puts" in got, got
+    got, _ = round_(lambda: setattr(context.plan, "structs", dict(context.plan.structs, s_99=[(0, "u32")])))
+    assert got == sorted(texts), got
+    got, _ = round_(lambda: None)
+    assert got == [], got
 
 
 def test_a_new_context_gets_readable_c_made_with_its_own_tables():

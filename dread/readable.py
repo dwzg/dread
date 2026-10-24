@@ -42,11 +42,22 @@ printed one-word, a caller that reads it calling through CALL2; a real second re
 A build from readable C (dread.build with a chooser: the check's rounds and its whole image, dread
 recon on an image with a readable table, dread pilot's builds) makes the readable C of every chosen
 function at once, before it writes the first file (readable_texts): in a pool of worker processes,
-and kept in this process by the context's tables (context_key), the stages and each function's
-lifted C, so that the check's next round, its whole image and the next build with the same tables
-take it as it was. The check's first pass makes them so too. Until 2026-10-23 each was made in the
-building process, one after another (48 s of a 55 s build of FreeRTOS's GCC -Os demo; 97 % of that
-the clean-up); a build in a process with another thread running still does so (in_pool).
+and kept in this process by what each function's C is made of: the stages, its lifted C, the
+context's tables that stay the same while a check runs (tables_key), the readable_types table's parts
+that are no function's (plan_key) and of its parts kept per function the entries of the names its
+lifted C uses, with which of them are void (scope_key); its C is made from a view of the context that
+holds no more (scoped). So the check's next round, its whole image and the next build with the same
+tables take it as it was, and a round that gave some functions their results back, which makes the
+readable_types table anew, makes anew only the C of the functions whose entries changed (theirs, their
+callers'), every other function's being the C a remake would make. The check also keeps the analysis
+trees its tables are made from, by each function's lifted C and whether it is void (kept_trees), and
+their cleaned trees (cleaned_tree), from which its builds make a function's readable C without the
+clean-up (from_cleaned). The check's first pass makes them so too. Until 2026-10-23 each was made in
+the building process, one after another (48 s of a 55 s build of FreeRTOS's GCC -Os demo; 97 % of that
+the clean-up); a build in a process with another thread running still does so (in_pool). Until
+2026-10-24 they were kept by the whole table, and a round that gave results back made every tree and
+every function's readable C anew. `--check --verify` makes every round's table and readable C anew
+from nothing beside and stops at the first difference.
 
 Where the image with lifted C alone already differs from the original in the scenarios (the system
 run's clock on some builds until 2026-10-22; a lifted table the lift check wrote since agrees), the
@@ -74,6 +85,7 @@ Since 2026-10-23; before, every form was the compiled one (docs/decisions.md).
 Not yet: functions that never return and were accepted by the system run (they stay lifted).
 """
 import argparse
+import copy
 import os
 import re
 import sys
@@ -294,7 +306,7 @@ class Run:
 
 
 _MEMO = {}                              # (name, text, stages) -> readable C made without a context, and
-_MEMO_OF = weakref.WeakKeyDictionary()  # context -> {(name, text, stages): readable C}: a check's rounds
+_MEMO_OF = weakref.WeakKeyDictionary()  # context -> {(name, text, stages, ...): readable C}: a check's rounds
                                         # build the same again
 
 
@@ -302,28 +314,135 @@ def transform(name, text, stages=None, context=None):
     """The readable C of a lifted file (text) whose function is name, or None when it is not the
     lifters' dialect (it then stays lifted). The file's other functions (an MSP430 file's helpers)
     are printed as they were written. context: a Context (the calls' arguments). Kept for each context
-    while it lives (weakly: its results go with it) and for the stages themselves; until 2026-10-23 by
-    the ids of both, and a context made where one had died got the dead one's results, made with its
-    tables (38 of 50 new contexts in a row did)."""
-    key = (name, text, None if stages is None else tuple(stages), void_key(context, name, text))
+    while it lives (weakly: its results go with it), for the stages themselves and for what the
+    function reads of the context's parts that change while it lives (the readable_types table: plan_key
+    and scope_key; until 2026-10-24 only of the void functions, and C made before a check made its table
+    anew in the same context would have been taken for C of the new table); until 2026-10-23 by the ids
+    of the context and the stages, and a context made where one had died got the dead one's results,
+    made with its tables (38 of 50 new contexts in a row did)."""
+    key = (name, text, None if stages is None else tuple(stages), plan_key(context), scope_key(context, name, text))
     memo = _MEMO if context is None else _MEMO_OF.setdefault(context, {})
     if key not in memo:
         memo[key] = _transform(name, text, stages, context)
     return memo[key]
 
 
-EXTERN_NAME = re.compile(r"^extern \w+ (\w+)\(", re.M)
+# What a function's readable C reads of the context, and the view it is made from. The readable_types
+# table (shapes.Plan) is made anew between the check's rounds, and keep_results changes the void
+# functions; each function reads of both only its own entries and its callees' (the names of its lifted
+# C), besides the parts that are no function's (the structures, the static data). A function's readable
+# C is made from a view of the context that holds no more (scoped), and kept by exactly what the view
+# holds (scope_key, plan_key): a round that gave some functions their results back makes only those
+# whose entries changed anew, every other function's C is the one it had, by construction the C a check
+# without its stores makes (until 2026-10-24 a function's readable C was kept by the whole table, and
+# every round that gave results back made every function's anew; dread readable --check --verify makes
+# every round's table and C anew from nothing beside, and stops at the first difference).
+
+IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+SCOPED = ("typed", "digests", "params", "variables", "prototypes", "keeps", "returns", "takes", "masks", "whole",
+          "results")        # the readable_types table's parts kept per function (shapes.Plan's attributes)
+_SCOPE = True               # False: every function made from the whole context (remade: what --verify compares)
 
 
-def void_key(context, name, text):
-    """What a function's readable C reads of the context's void (dread.tidy void_results): whether it is
-    void itself and which of the callees its lifted C declares are; readable_texts and transform key
-    their results by it, so that the check's next round, when it gave some functions their results back
-    (keep_results), makes only those and their callers anew (context_key leaves void out)."""
+def scope_names(name, text):
+    """The names whose entries of the context's per-function parts (SCOPED, the void functions) a
+    function's readable C may read: its own and every identifier of its lifted C (text), which names its
+    callees (the file declares each), its calls and the file's other functions."""
+    return set(IDENTIFIER.findall(text or "")) | {name}
+
+
+def _scoped_parts(plan, keep):
+    """{part: the plan's part (SCOPED) cut to the names keep, in the order of their names; None (or what
+    the plan holds that is no dict or set) where it has none}."""
+    names = sorted(keep)
+    out = {}
+    for attr in SCOPED:
+        part = getattr(plan, attr, None)
+        if isinstance(part, dict):
+            out[attr] = {k: part[k] for k in names if k in part}
+        elif isinstance(part, (set, frozenset)):
+            out[attr] = {k for k in names if k in part}
+        else:
+            out[attr] = part
+    return out
+
+
+def scoped(context, name, text):
+    """The view of context one function's readable C is made from: a shallow copy whose readable_types
+    table holds of the parts kept per function (SCOPED) only the entries of the names its lifted C uses
+    (scope_names), and whose void functions are only those among them; its other tables, the table's
+    structures and static data, and the names the context makes of the whole table (struct_names, which
+    reads every function's typed variables, and static_names: made first, the view shares them) as they
+    are. The context itself where it has no table (or while remade makes C from the whole context)."""
+    plan = getattr(context, "plan", None)
+    if plan is None or not _SCOPE:
+        return context
+    keep = scope_names(name, text)
+    for made in ("struct_names", "static_names", "pointed"):
+        if callable(getattr(context, made, None)):
+            getattr(context, made)()
+    view = copy.copy(context)
+    view.plan = copy.copy(plan)
+    for attr, part in _scoped_parts(plan, keep).items():
+        if hasattr(plan, attr):
+            setattr(view.plan, attr, part)
     void = getattr(context, "void", None)
-    if not void:
-        return ()
-    return (name in void, tuple(sorted(c for c in EXTERN_NAME.findall(text) if c in void)))
+    if isinstance(void, (set, frozenset)):
+        view.void = {n for n in keep if n in void}
+    return view
+
+
+def _plain(x):
+    """JSON for what the context's tables hold besides plain data (context_key, plan_key, scope_key)."""
+    if isinstance(x, (set, frozenset)):
+        return sorted(repr(v) for v in x)
+    if hasattr(x, "to_json"):               # (shapes.Plan)
+        return x.to_json()
+    if hasattr(x, "__dict__"):              # (the target's Memory, its regions)
+        return [type(x).__name__, {k: v for k, v in vars(x).items() if not k.startswith("_")}]
+    return repr(x)
+
+
+def _digest(data):
+    """A digest of data as JSON (keys sorted), or of its pickle where it is no JSON (keys that do not
+    sort): equal data, an equal digest."""
+    import hashlib
+    import json
+    try:
+        text = json.dumps(data, sort_keys=True, default=_plain).encode()
+    except (TypeError, ValueError):
+        import pickle
+        text = pickle.dumps(data, protocol=4)
+    return hashlib.sha1(text).hexdigest()
+
+
+def scope_key(context, name, text):
+    """A digest of what a function's readable C reads of the context's parts that change while it lives
+    (the check's rounds): the readable_types table's entries of the names its lifted C uses (the parts
+    kept per function, SCOPED: its own, its callees') and which of them are void: what scoped holds of
+    them. "" where the context has no table."""
+    plan = getattr(context, "plan", None)
+    if plan is None:
+        return ""
+    keep = scope_names(name, text)
+    parts = _scoped_parts(plan, keep)
+    void = getattr(context, "void", None)
+    parts["void"] = sorted(n for n in keep if n in void) if isinstance(void, (set, frozenset)) else None
+    return _digest(parts)
+
+
+def plan_key(context):
+    """A digest of what every function's readable C may read of the context's readable_types table: its
+    parts but those kept per function (SCOPED: the structures, the static data, any part not listed
+    there) and the names the context makes of the whole table (struct_names, static_names; made here
+    where they are not yet). "" where the context has no table."""
+    plan = getattr(context, "plan", None)
+    if plan is None:
+        return ""
+    shared = {k: v for k, v in vars(plan).items() if k not in SCOPED and not k.startswith("_")}
+    names = [getattr(context, made)() if callable(getattr(context, made, None)) else None
+             for made in ("struct_names", "static_names")]
+    return _digest([shared, names])
 
 
 EXTERN = re.compile(r"^extern (\w+) (\w+)\(([^)]*)\);$")
@@ -332,7 +451,9 @@ EXTERN = re.compile(r"^extern (\w+) (\w+)\(([^)]*)\);$")
 def readable_tree(name, text, stages=None, context=None, with_results=True):
     """(tree, function) of a lifted file after the stages, before names (dread.naming): what a
     names proposal is made for. None when the text is not the lifters' dialect. with_results: and,
-    where the clean-up ran, the results as the source has them (results) behind the last stage."""
+    where the clean-up ran, the results as the source has them (results) behind the last stage. The
+    stages run with the function's stage_view of the context (whether it is void, the tables), the
+    results with the context itself (since 2026-10-24: the check keeps the clean-up's trees by that)."""
     try:
         tree = cparse.parse(text)
     except cparse.ParseError:
@@ -342,7 +463,7 @@ def readable_tree(name, text, stages=None, context=None, with_results=True):
         return None
     if tidy.fixed_registers(tree):
         stages = []
-    run = Run(context)
+    run = Run(stage_view(context, name))
     for item in tree.items:
         m = EXTERN.match(item.text) if isinstance(item, cparse.Raw) else None
         if m:
@@ -357,7 +478,7 @@ def readable_tree(name, text, stages=None, context=None, with_results=True):
             item.text = "extern %s %s(%s);" % (m.group(1), m.group(2),
                                                 ", ".join(params[:run.trimmed[m.group(2)]]) or "void")
     if with_results and any(stage is tidy.tidy for _, stage in ran):
-        results(tree, fn, run.context)
+        results(tree, fn, context if context is not None else run.context)
     return tree, fn
 
 
@@ -479,6 +600,7 @@ def readable_one(program, context, lifter, name, named=None, statics=False):
     processes of a pool too: dread pilot global_uses), or None where it does not lift or is not the
     dialect."""
     text = lifted_text(program, lifter, name)
+    context = scoped(context, name, text) if text is not None else context
     made = readable_tree(name, text, context=context) if text is not None else None
     if made is None:
         return None
@@ -498,14 +620,50 @@ def _readable_one(name):
     return readable_one(_G["program"], _G["context"], _G["lifter"], name, _G["named"], _G.get("statics"))
 
 
-def _analysis_one(name):
-    import copy
-    text = _lifted_text(name)
-    context = _G["context"]
-    early = [st for st in STAGES if st[0] != "structure"]
-    made = readable_tree(name, text, stages=early, context=context, with_results=False) if text is not None else None
-    if made is None:
-        return None
+def analysis_one(name, text, context, named=None):
+    """(tree, function, macros, digest) of one function's analysis tree (analysis_trees) from its lifted
+    C (text), or None where text is None or not the dialect."""
+    made = cleaned_tree(name, text, context) if text is not None else None
+    return analysis_rest(made, context, named) if made is not None else None
+
+
+def early_stages():
+    """The stages an analysis tree runs: all but the structure."""
+    return [st for st in STAGES if st[0] != "structure"]
+
+
+def split_stages():
+    """Whether readable C is the early stages' tree (cleaned_tree) and then the structure (as STAGES has
+    them: the structure last, once), so that it can be made from a kept cleaned tree (from_cleaned)."""
+    return bool(STAGES) and STAGES[-1][0] == "structure" and all(st[0] != "structure" for st in STAGES[:-1])
+
+
+def cleaned_tree(name, text, context):
+    """(tree, function) of a lifted file after the early stages (the clean-up: early_stages), the calls'
+    trimmed declarations, no results; None when it is not the dialect. What an analysis tree is made of
+    and, with the structure and the results behind it, the readable C (from_cleaned): the clean-up is
+    nearly all the time either takes (FreeRTOS's GCC -Os demo: the same seconds as the whole readable C,
+    function by function). The stages run with the function's stage_view of the context, which holds of
+    the parts that change while a check runs only whether the function is void (dread.tidy void_results
+    reads that), so the check keeps it by that."""
+    return readable_tree(name, text, stages=early_stages(), context=context, with_results=False)
+
+
+def from_cleaned(tree, fn, context):
+    """readable_tree's (tree, function) from a cleaned tree (cleaned_tree, split_stages): the structure, then
+    the results as the source has them; nothing where the function keeps fixed registers (readable_tree
+    runs no stage there)."""
+    if tidy.fixed_registers(tree):
+        return tree, fn
+    for _, stage in STAGES[-1:]:
+        stage(fn, Run(stage_view(context, fn.name)))
+    if any(stage is tidy.tidy for _, stage in STAGES):
+        results(tree, fn, context)
+    return tree, fn
+
+
+def analysis_rest(made, context, named=None):
+    """analysis_one's tuple from a cleaned tree (cleaned_tree: (tree, function), changed here)."""
     tree, fn = made
     full = copy.deepcopy(fn)
     if not tidy.fixed_registers(tree):
@@ -513,8 +671,44 @@ def _analysis_one(name):
         function_results(full, context)     # (behind the structure, as the printed C has them: its digest)
         function_results(fn, context)
     digest = naming.digest(full)
-    chosen = naming.apply_globals(tree, fn, _G["named"], context.memory if context is not None else None)
+    chosen = naming.apply_globals(tree, fn, named, context.memory if context is not None else None)
     return tree, fn, {n: (int(k.split()[0], 16), k.split()[1]) for k, n in chosen.items()}, digest
+
+
+def stage_view(context, name):
+    """The view of context the stages run with (readable_tree: the clean-up, the structure) and one
+    function's analysis tree is made from (kept_trees): a shallow copy with an empty readable_types table
+    and of the void functions at most the function itself (dread.tidy void_results and readable's
+    function_results read whether it is void; the table is made from the trees), its tables as they are;
+    so that the stages' trees and the analysis trees are, by construction, what a function's lifted C,
+    whether it is void and the tables make, and the check keeps them by that. The context itself while
+    remade makes C from the whole context (_SCOPE); None without a context."""
+    if context is None or not _SCOPE:
+        return context
+    from dread import shapes
+    view = copy.copy(context)
+    if getattr(context, "plan", None) is not None:
+        view.plan = shapes.Plan()
+    void = getattr(context, "void", None)
+    if isinstance(void, (set, frozenset)):
+        view.void = {name} & void
+    return view
+
+
+def _analysis_one(name):
+    return analysis_one(name, _lifted_text(name), _G["context"], _G["named"])
+
+
+def _analysis_kept(name):
+    """(the cleaned tree's pickle, the analysis tree's pickle) of one function (kept_trees), (None, None)
+    where it does not lift or is not the dialect."""
+    import pickle
+    text, context = _G["texts"][name], stage_view(_G["context"], name)
+    made = cleaned_tree(name, text, context) if text is not None else None
+    if made is None:
+        return None, None
+    cleaned = pickle.dumps(made, protocol=pickle.HIGHEST_PROTOCOL)
+    return cleaned, pickle.dumps(analysis_rest(made, context, _G["named"]), protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def _view_one(name):
@@ -537,6 +731,7 @@ def _question_one(name):
 def question_tree(name, text, context):
     """One function's tuple of question_trees from its lifted C (text), or why there is none."""
     from dread import shapes
+    context = scoped(context, name, text)   # (what the builds make its readable C from)
     made = readable_tree(name, text, context=context)
     if made is None:
         return "its lifted C is not the dialect"
@@ -592,8 +787,10 @@ def warm(lifter):
 def _trees(work, program, context, lifter, names, named, digests, jobs, statics=False):
     out = []
     warm(lifter)
-    if statics and context is not None:
-        context.static_names()              # (once, before the pool forks)
+    if work is _readable_one and context is not None:
+        context.struct_names()              # (once, before the pool forks: each view shares them, scoped)
+        context.static_names()
+        context.pointed()
     for made in in_pool(work, list(names), jobs, program=program, context=context, lifter=lifter, named=named,
                         statics=statics):
         if made is not None:
@@ -614,11 +811,59 @@ def readable_trees(program, context, lifter, names, named=None, digests=None, jo
     return _trees(_readable_one, program, context, lifter, names, named, digests, jobs, statics)
 
 
-def analysis_trees(program, context, lifter, names, named=None, digests=None, jobs=None):
+def analysis_trees(program, context, lifter, names, named=None, digests=None, jobs=None, kept=None):
     """As readable_trees, but before the structure stage, for dread.shapes: every statement a node of
     the flow graph, so that it follows definitions, not names; digests: of the C after every stage,
-    what the plan is made for (the structure stage moves statements, it renames nothing)."""
-    return _trees(_analysis_one, program, context, lifter, names, named, digests, jobs)
+    what the plan is made for (the structure stage moves statements, it renames nothing). kept, a dict
+    (the check's, for its rounds): made as kept_trees makes them, taken from it where made before."""
+    if kept is None:
+        return _trees(_analysis_one, program, context, lifter, names, named, digests, jobs)
+    return kept_trees(program, context, lifter, names, named, digests, jobs, kept)
+
+
+def kept_trees(program, context, lifter, names, named, digests, jobs, kept):
+    """analysis_trees from the lifted C the lifter keeps (dread.build lifted_result: lifted here, once for
+    the check's builds too), each made from its view of the context (stage_view: no readable_types
+    table, of the void functions at most itself) and kept in kept (a dict) as its pickle, by what the
+    view holds of what changes while a check runs: its lifted C and whether it is void (the tables
+    beside, which do not); a tree made before is taken from there, a copy of its own each time. Its
+    cleaned tree (cleaned_tree: what it is made of) is kept beside it, ("cleaned", name, ...), for the
+    check's readable C (readable_texts' kept). The check's rounds make the readable_types table anew
+    after they gave functions their results back (make_plan), and until 2026-10-24 every function's tree
+    was made anew for it (the clean-up again: most of the table's time)."""
+    import hashlib
+    import pickle
+    from dread import build, cexpr, lift
+    void = getattr(context, "void", None)
+    void = void if isinstance(void, (set, frozenset)) else ()
+    tables, stages, z3, named_key = tables_key(context), tuple(STAGES), cexpr.z3 is not None, _digest(named)
+    texts, keys, cleaned = {}, {}, {}
+    for name in names:
+        fn = program.by_name.get(name)
+        try:
+            texts[name] = build.lifted_result(lifter, fn).text if fn is not None else None
+        except lift.Refused:
+            texts[name] = None
+        text = texts[name]
+        own = (name, hashlib.sha1(text.encode()).digest() if text is not None else None, name in void)
+        keys[name] = ("analysis",) + own + (tables, named_key, stages, z3)
+        cleaned[name] = cleaned_key(context, name, text, (tables, stages, z3)) if text is not None else None
+    todo = sorted({n for n in names if keys[n] not in kept}, key=lambda n: (-len(texts[n] or ""), n))
+    if todo:
+        got = in_pool(_analysis_kept, todo, jobs, chunksize=1, texts=texts, context=context, named=named)
+        for n, (tree, made) in zip(todo, got):
+            kept[keys[n]] = made
+            if tree is not None and cleaned[n] is not None:
+                kept[cleaned[n]] = tree
+    out = []
+    for name in names:
+        made = kept[keys[name]]
+        if made is not None:
+            tree, fn, macros, digest = pickle.loads(made)
+            if digests is not None:
+                digests[fn.name] = digest
+            out.append((tree, fn, macros))
+    return out
 
 
 def views(program, context, lifter, names, jobs=None):
@@ -900,14 +1145,16 @@ def margin_text(lines):
                    for a, line in lines)
 
 
-def _framed(name, text, stages, context=None, names=True):
+def _framed(name, text, stages, context=None, names=True, cleaned=None):
     """(tree, function, stages, the frame's objects, then) of the readable C with the tables applied but
     the variables' names: the globals' names, the structures, the types, then the frame's region that
     addresses handed out reach as the function's objects (dread.frames: their names, None where it
     made none); then: what _named needs to apply the variables' names after them (None where it runs
     no stage); None when the lifted C is not the dialect. names: False leaves the readable_names table
-    out (the objects then never avoid its names)."""
-    made = readable_tree(name, text, stages, context)
+    out (the objects then never avoid its names). context: the function's view (scoped, as its callers
+    make it). cleaned: its cleaned tree (cleaned_tree, a copy of its own) to make the readable C from
+    (from_cleaned: the stages as STAGES, split_stages)."""
+    made = from_cleaned(*cleaned, context) if cleaned is not None else readable_tree(name, text, stages, context)
     if made is None:
         return None
     tree, fn = made
@@ -942,24 +1189,53 @@ def _framed(name, text, stages, context=None, names=True):
     return tree, fn, stages, objects, (made_for, int_bits, entry, before)
 
 
-def framed(name, text, context=None):
+def framed(name, text, context=None, kept=None):
     """The names dread.frames gives the objects it makes of the function's frame in its readable C under
     the context, before the readable_names table renames them ([] where it makes none), or None when
     the lifted C is not the dialect: what the check asks before it tries a function's region as one
-    object (the readable C it built may have the objects under the table's names)."""
-    made = _framed(name, text, None, context, names=False)
+    object (the readable C it built may have the objects under the table's names). kept: the check's
+    (kept_trees), whose cleaned tree of the function it is made from where it holds one (kept_cleaned)."""
+    cleaned = kept_cleaned(kept, context, name, text) if kept is not None else None
+    made = _framed(name, text, None, scoped(context, name, text), names=False, cleaned=cleaned)
     return None if made is None else made[3] or []
 
 
-def _named(name, text, stages, context=None):
+def cleaned_key(context, name, text, common=None):
+    """The key a function's cleaned tree has in the check's kept (kept_trees): its lifted C, whether it is
+    void, and common: the context's tables, the stages, whether z3 is there (cleaned_common)."""
+    import hashlib
+    void = getattr(context, "void", None)
+    own = isinstance(void, (set, frozenset)) and name in void
+    return ("cleaned", name, hashlib.sha1(text.encode()).digest(), own) + (common or cleaned_common(context))
+
+
+def cleaned_common(context):
+    """The part of cleaned_key that is every function's: the context's tables (tables_key), the stages,
+    whether z3 is there."""
+    from dread import cexpr
+    return (tables_key(context), tuple(STAGES), cexpr.z3 is not None)
+
+
+def kept_cleaned(kept, context, name, text):
+    """A copy of the function's cleaned tree from kept (kept_trees), (tree, function), or None where it
+    holds none for this lifted C, void status, tables and stages, or the stages do not split there
+    (split_stages)."""
+    import pickle
+    got = kept.get(cleaned_key(context, name, text)) if split_stages() and text is not None else None
+    return pickle.loads(got) if got is not None else None
+
+
+def _named(name, text, stages, context=None, cleaned=None):
     """(tree, function, stages) of the readable C with the tables applied: the globals' names, the
     structures, the types, the frame's region that addresses handed out reach as the function's objects
     (dread.frames), then the variables' names (each only for the C it was made for: its digest; the
     names of the frame array and sp0 that the objects took away dropped, dread.frames table_names);
     None when the lifted C is not the dialect. stages: [] when the function keeps fixed registers (left
     as the lifter wrote it). Until 2026-10-24 the names came before the objects, and dread.frames, which
-    finds the frame by the lifters' names, made none wherever the table named frame or sp0."""
-    made = _framed(name, text, stages, context)
+    finds the frame by the lifters' names, made none wherever the table named frame or sp0. cleaned: as
+    for _framed."""
+    context = scoped(context, name, text)   # (the function's view: what it reads of the context, scope_key)
+    made = _framed(name, text, stages, context, cleaned=cleaned)
     if made is None:
         return None
     tree, fn, stages, _, then = made
@@ -985,8 +1261,8 @@ def polish_tree(tree, fn, context=None, int_bits=None):
     polish.polish(tree, fn, int_bits=int_bits, io=getattr(memory, "io", ()) or (), masks=masks, pointed=pointed)
 
 
-def _transform(name, text, stages, context=None):
-    made = _named(name, text, stages, context)
+def _transform(name, text, stages, context=None, cleaned=None):
+    made = _named(name, text, stages, context, cleaned)
     return print_file(*made) if made is not None else None
 
 
@@ -1006,7 +1282,8 @@ def view(name, text, context=None):
 
 
 STORE_KEEP = 4      # contexts (by their tables) whose readable C readable_texts keeps, the latest used
-_STORE = {}         # (context_key, the stages, whether z3 is there) -> {(name, sha1 of its lifted C): readable C}
+_STORE = {}         # (tables_key, the stages, whether z3 is there) -> {(name, (sha1 of its lifted C, plan_key,
+                    # scope_key)): readable C}
 
 
 def context_key(context):
@@ -1015,72 +1292,127 @@ def context_key(context):
     memory map: every attribute not starting with _), whatever object holds them. Two contexts with
     the same tables have the same key (a build's context made anew from the same tables, the next
     round's); a table changed in place changes it. "" without a context. Not the void functions (void) nor
-    the plan's results: each function's readable C is keyed by what it reads of them (void_key)."""
+    the plan's results. readable_texts keeps a function's readable C by tables_key (this without the
+    readable_types table), plan_key and its scope_key instead."""
     if context is None:
         return ""
-    import hashlib
-    import json
-
-    def plain(x):
-        if isinstance(x, (set, frozenset)):
-            return sorted(repr(v) for v in x)
-        if hasattr(x, "to_json"):           # (shapes.Plan)
-            return x.to_json()
-        if hasattr(x, "__dict__"):          # (the target's Memory, its regions)
-            return [type(x).__name__, {k: v for k, v in vars(x).items() if not k.startswith("_")}]
-        return repr(x)
     tables = {k: v for k, v in vars(context).items() if not k.startswith("_") and k != "void"}
     if "plan" in tables and getattr(tables["plan"], "results", None):
         tables["plan"] = {k: v for k, v in tables["plan"].to_json().items() if k != "results"}
-    try:
-        text = json.dumps(tables, sort_keys=True, default=plain).encode()
-    except (TypeError, ValueError):         # (keys that do not sort, or no JSON key: kept apart all the same)
-        import pickle
-        text = pickle.dumps(sorted(tables.items()), protocol=4)
-    return hashlib.sha1(text).hexdigest()
+    return _digest(tables)
+
+
+def tables_key(context):
+    """context_key without the readable_types table (plan): the tables that stay the same while a check
+    runs (regflow's registers, the variadic functions, the readable_names table, the memory map). ""
+    without a context."""
+    if context is None:
+        return ""
+    return _digest({k: v for k, v in vars(context).items() if not k.startswith("_") and k not in ("void", "plan")})
+
+
+class VerifyFailed(Exception):
+    """dread readable --check --verify: what the check kept differs from what it makes anew from nothing."""
 
 
 def _text_one(name):
+    kept = (_G.get("cleaned") or {}).get(name)
+    if kept is not None:
+        import pickle
+        return _transform(name, _G["texts"][name], None, _G["context"], cleaned=pickle.loads(kept))
     return _transform(name, _G["texts"][name], None, _G["context"])
 
 
-def readable_texts(texts, context=None, jobs=None):
+def remade(texts, context=None, jobs=None):
+    """{name: its readable C, or None} for texts ({name: lifted C}) made anew from nothing: from the whole
+    context (no view: scoped is left out), nothing taken from before, in a pool (in_pool): what a check
+    without its stores makes, and what --verify compares with."""
+    global _SCOPE
+    names = sorted(texts, key=lambda n: -len(texts[n]))
+    if context is not None:
+        context.struct_names()
+        context.static_names()
+        context.pointed()
+    old, _SCOPE = _SCOPE, False
+    try:
+        got = in_pool(_text_one, names, jobs, chunksize=1, texts=texts, context=context)
+    finally:
+        _SCOPE = old
+    return dict(zip(names, got))
+
+
+def differences(kept, made):
+    """The names whose values differ in two dicts of the same names ({name: text}), sorted."""
+    return sorted(n for n in made if kept.get(n) != made[n])
+
+
+def readable_texts(texts, context=None, jobs=None, verify=False, stats=None, kept=None):
     """{name: its readable C, or None where its lifted C is not the dialect} for texts ({name: lifted
-    C}): what transform makes, all at once. Those made before in this process from the same lifted C
-    with a context of the same tables (context_key) and the same stages are taken as they were (a
-    check's next round, its whole image, the next build of the same image: dread pilot builds again
-    and again); the others are made in a pool of worker processes (in_pool, jobs workers at most;
-    in this process for fewer than POOL_MIN). Until 2026-10-23 a build made every function's
-    readable C in its own process, one after another: 48 s of a 55 s build of FreeRTOS's GCC -Os
-    demo, 97 % of it the clean-up (dread.tidy), more than half its conditions pass. Kept for the
-    STORE_KEEP contexts used last."""
+    C}): what transform makes, all at once. Those made before in this process from the same lifted C,
+    with a context of the same tables (tables_key), the same parts of its readable_types table that are
+    no function's (plan_key) and the same entries of the names the function uses (scope_key: its own,
+    its callees', which of them are void), and the same stages are taken as they were (a check's next
+    round, its whole image, the next build of the same image: dread pilot builds again and again); the
+    others are made in a pool of worker processes (in_pool, jobs workers at most; in this process for
+    fewer than POOL_MIN), each from its view of the context (scoped), which holds what its key says. Until
+    2026-10-23 a build made every function's readable C in its own process, one after another: 48 s of a
+    55 s build of FreeRTOS's GCC -Os demo, 97 % of it the clean-up (dread.tidy), more than half its
+    conditions pass. Until 2026-10-24 kept by the whole readable_types table (context_key): a check's
+    round that gave functions their results back made the table anew and every function's readable C
+    with it. Kept for the STORE_KEEP contexts used last. verify: also every one made anew from nothing
+    (remade), VerifyFailed where one differs. stats, a dict: "texts" (asked for), "made" and "cleaned"
+    (made from a kept cleaned tree) counted up. kept: the check's (kept_trees): a function whose cleaned
+    tree it holds for the same lifted C, void status, tables and stages is made from it (from_cleaned:
+    the structure, the results and the tables, a few milliseconds), not from its lifted C (the clean-up:
+    seconds for a large one); a check's round that gave a function its result back so makes its callers'
+    readable C anew at no cost, and its first pass every function's from the trees its readable_types
+    table was made from."""
     import hashlib
     from dread import cexpr
-    key = (context_key(context), tuple(STAGES), cexpr.z3 is not None)
+    key = (tables_key(context), tuple(STAGES), cexpr.z3 is not None)
     store = _STORE.pop(key, None) or {}
     _STORE[key] = store                     # (the latest used last: dicts keep their order)
     while len(_STORE) > STORE_KEEP:
         del _STORE[next(iter(_STORE))]
-    digests = {n: (hashlib.sha1(t.encode()).digest(), void_key(context, n, t)) for n, t in texts.items()}
+    if context is not None:                 # (once, before the keys and the pool forks: the workers share them)
+        context.struct_names()
+        context.static_names()
+        context.pointed()
+    shared = plan_key(context)
+    digests = {n: (hashlib.sha1(t.encode()).digest(), shared, scope_key(context, n, t)) for n, t in texts.items()}
     # The longest lifted C first, one at a time: a pool that took them in the table's order, four at a
     # time, ended on a few large functions (FreeRTOS's GCC -Os demo: 7.4 s simulated for its 316 with
     # eight workers, 6.5 s so, 6.3 s ideal; the largest takes 3.9 s alone)
     todo = sorted((n for n in texts if (n, digests[n]) not in store), key=lambda n: -len(texts[n]))
+    cleaned = {}
+    if kept is not None and todo and split_stages():
+        common = cleaned_common(context)
+        for n in todo:
+            got = kept.get(cleaned_key(context, n, texts[n], common))
+            if got is not None:
+                cleaned[n] = got
     if todo:
-        if context is not None:             # (once, before the pool forks: the workers share them)
-            context.struct_names()
-            context.static_names()
-            context.pointed()
-        for n, made in zip(todo, in_pool(_text_one, todo, jobs, chunksize=1, texts=texts, context=context)):
+        for n, made in zip(todo, in_pool(_text_one, todo, jobs, chunksize=1, texts=texts, context=context,
+                                         cleaned=cleaned)):
             store[(n, digests[n])] = made
-    return {n: store[(n, digests[n])] for n in texts}
+    if stats is not None:
+        stats["made"] = stats.get("made", 0) + len(todo)
+        stats["cleaned"] = stats.get("cleaned", 0) + len(cleaned)
+        stats["texts"] = stats.get("texts", 0) + len(texts)
+    out = {n: store[(n, digests[n])] for n in texts}
+    if verify:
+        bad = differences(out, remade(texts, context, jobs))
+        if bad:
+            raise VerifyFailed("the readable C of %d function%s differs from the one made anew from nothing: %s" % (
+                len(bad), "s"[len(bad) == 1:], ", ".join(bad[:10]) + (", ..." if len(bad) > 10 else "")))
+    return out
 
 
-def chooser(names, context=None, jobs=None):
+def chooser(names, context=None, jobs=None, verify=False, stats=None, kept=None):
     """build.build's transform for the functions of names (the others stay lifted). dread.build
     lift_sources hands its prepare every function's lifted C before it writes the first file: the
     readable C of those of names is then made at once (readable_texts: kept from before, or in a pool
-    of jobs workers at most), and the transform takes it from there."""
+    of jobs workers at most; verify, stats and kept as there), and the transform takes it from there."""
     names = set(names)
     made = {}                               # name -> (its lifted C, its readable C or None)
 
@@ -1093,7 +1425,7 @@ def chooser(names, context=None, jobs=None):
 
     def prepare(texts):
         chosen = {n: t for n, t in texts.items() if n in names}
-        for n, out in readable_texts(chosen, context, jobs).items():
+        for n, out in readable_texts(chosen, context, jobs, verify=verify, stats=stats, kept=kept).items():
             made[n] = (chosen[n], out)
     change.prepare = prepare
     return change
@@ -1131,14 +1463,16 @@ def static_spans(found, arrays):
 
 
 def carry(target, image, names=None, out=print, jobs=None, program=None, flow=None, lifter=None, context=None,
-          digests=None):
+          digests=None, verify=False):
     """dread readable --carry, and the end of --check: the readable_names table's entries that were
     made for other C carried to the functions' C as it is now (dread.naming carry_table: each name to
     the variable of the same identity, kept where the C with them compiles to the same code; no
     question is asked). names: the functions to look at (default: every function the table names);
     digests ({name: digest}, the check's) leaves out those whose entry was made for that digest
     without making their C again. An entry without identities (made before 2026-10-23) is left as it
-    is. Returns {name: the entry carried}."""
+    is. Returns {name: the entry carried}. verify: the question trees made from the functions' views of
+    the context against those the whole context gives (their digests, files, code and identities),
+    VerifyFailed where they differ (the check's --verify)."""
     entries = naming.load(image)
     names = [n for n in (names or sorted(entries)) if n in entries]
     if digests is not None:
@@ -1153,6 +1487,20 @@ def carry(target, image, names=None, out=print, jobs=None, program=None, flow=No
     lifter = lifter or lift.make_lifter(program, flow)
     context = context or Context(target, image, program, flow)
     made = question_trees(program, context, lifter, names, jobs)
+    if verify:
+        global _SCOPE
+
+        def told(m):
+            return {n: v if isinstance(v, str) else (v[2], v[3], v[4], v[5]) for n, v in m.items()}
+        old, _SCOPE = _SCOPE, False
+        try:
+            whole = question_trees(program, context, lifter, names, jobs)
+        finally:
+            _SCOPE = old
+        bad = differences(told(made), told(whole))
+        if bad:
+            raise VerifyFailed("the question trees of %s differ from those the whole context gives" % ", ".join(
+                bad[:10]))
     other = [n for n in names if not isinstance(made[n], str) and entries[n].get("digest") != made[n][2]]
     got = naming.carry_table(target, image, made, os.path.join(target.build, "readable-check", image.name, "naming"),
                              jobs, out)
@@ -1167,7 +1515,7 @@ def carry(target, image, names=None, out=print, jobs=None, program=None, flow=No
     return got
 
 
-def make_plan(program, context, lifter, names, flow=None, digests=None):
+def make_plan(program, context, lifter, names, flow=None, digests=None, kept=None):
     """The readable_types table of the functions names (the lifted table's) into context.plan, as the
     check makes it before any function is checked, and returned: the structures and arrays of static
     data (dread.statics), then the structures behind pointers (dread.shapes), from every function's
@@ -1176,30 +1524,39 @@ def make_plan(program, context, lifter, names, flow=None, digests=None):
     keep or return (dread.frames kept_params); which ones every call gives texts' or functions'
     addresses (dread.naming taken_kinds: what apply_globals writes such an argument as). The builds
     read the table too. digests, a dict: filled with each function's digest (what the check's carry of
-    names compares with)."""
+    names compares with). kept, a dict (the check's, for its rounds): the analysis trees and the static
+    data's evidence made before (kept_trees: a round that gave functions their results back makes only
+    their trees anew); the table is made from all of them as from trees made anew."""
     from dread import frames, shapes, vartypes
     digests = {} if digests is None else digests
-    trees = analysis_trees(program, context, lifter, names, named=context.globals, digests=digests)
-    found, arrays, s = static_plan(program, context, trees, flow)
+    trees = analysis_trees(program, context, lifter, names, named=context.globals, digests=digests, kept=kept)
+    evidence = None
+    if kept is not None:                    # (of the machine code alone: the same in every round)
+        from dread import statics
+        if ("evidence",) not in kept:
+            kept[("evidence",)] = statics.gather(program, flow=flow)
+        evidence = kept[("evidence",)]
+    found, arrays, s = static_plan(program, context, trees, flow, evidence=evidence)
     context.plan = shapes.plan(s, trees, digests)
     context.plan.statics, context.plan.arrays = found, arrays
     context.plan.params = shapes.pointer_params(s, trees)
     context._struct_names = context._static_names = None
     vartypes.plan(context.plan, trees, digests, context)
-    context.plan.masks = mask_plan(program, context, lifter, names, trees)
+    context.plan.masks = mask_plan(program, context, lifter, names, trees, kept=kept)
     context.plan.keeps, context.plan.returns = frames.kept_params(trees, context)
     pointed = context.pointed()
     context.plan.takes = naming.taken_kinds(trees, pointed) if pointed is not None else None
     return context.plan
 
 
-def mask_plan(program, context, lifter, names, trees):
+def mask_plan(program, context, lifter, names, trees, kept=None):
     """The readable_types table's masks (dread.polish mask_params): {function: [indices of the parameters
     it uses only as masks]} of the analysed functions (trees), and of the callees outside them that one
     of them passes a constant dread.polish would print as a negative number (one within dread.polish
     NEGATIVE of the top), read from their own C where they lift (their machine code, through the lifter:
     a callee not in the lifted table); a callee that does not lift says nothing (its argument stays a
-    number). What a function printed on request passes to a callee outside both stays a number too."""
+    number). What a function printed on request passes to a callee outside both stays a number too.
+    kept: as for analysis_trees."""
     from dread import cflow, polish, vartypes
     analysed = {fn.name for _, fn, _ in trees}
     wanted = set()
@@ -1210,7 +1567,8 @@ def mask_plan(program, context, lifter, names, trees):
                 if isinstance(x, cparse.Call) and isinstance(x.f, cparse.Name) and x.f.id not in analysed and \
                         x.f.id in program.by_name and any(polish.near_top(a) for a in x.args):
                     wanted.add(x.f.id)
-    extra = analysis_trees(program, context, lifter, sorted(wanted), named=context.globals) if wanted else []
+    extra = analysis_trees(program, context, lifter, sorted(wanted), named=context.globals, kept=kept) if wanted \
+        else []
     found = polish.mask_params(list(trees) + extra)
     return {name: ix for name, ix in found.items() if name in analysed or ix}
 
@@ -1235,11 +1593,62 @@ def returned_only(lines):
     return seen - other
 
 
-def check(target, image, names=None, out=print, jobs=None):
+def verify_plan(program, context, lifter, names, flow, digests):
+    """--verify: the readable_types table made from the check's kept analysis trees (make_plan with kept)
+    against the one made anew from nothing (make_plan without, in a copy of the context: every tree made
+    again from the whole context, the static data's evidence gathered again), the check's own parts
+    (whole, results) as the context has them, and the digests ({name: digest}) the same; VerifyFailed
+    where they differ."""
+    global _SCOPE
+    full = copy.copy(context)
+    again = {}
+    old, _SCOPE = _SCOPE, False             # (the stages from the whole context too: stage_view)
+    try:
+        make_plan(program, full, lifter, names, flow, digests=again)
+    finally:
+        _SCOPE = old
+    full.plan.whole, full.plan.results = set(context.plan.whole), set(context.plan.results)
+    a, b = context.plan.to_json(), full.plan.to_json()
+    parts = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+    names_ = sorted(n for n in again if digests.get(n) != again[n])
+    if parts or names_:
+        raise VerifyFailed("the readable_types table differs from the one made anew from nothing: %s%s" % (
+            ", ".join(parts) or "its parts the same", "; the digests of " + ", ".join(names_[:10]) if names_ else ""))
+
+
+def verify_framed(names, texts, context, kept=None):
+    """--verify: the frame's objects (framed) of the functions names as their views give them (from the
+    check's kept cleaned trees, kept) and as the whole context gives them from their lifted C; VerifyFailed
+    where they differ."""
+    global _SCOPE
+    mine = {n: framed(n, texts[n], context, kept) for n in names}
+    old, _SCOPE = _SCOPE, False
+    try:
+        whole = {n: framed(n, texts[n], context) for n in names}
+    finally:
+        _SCOPE = old
+    bad = differences(mine, whole)
+    if bad:
+        raise VerifyFailed("the frame's objects of %s differ from those the whole context gives" % ", ".join(bad))
+
+
+def check(target, image, names=None, out=print, jobs=None, verify=False):
     """The acceptance loop for readable C (see the module's docstring); returns the accepted names.
     names: functions of the lifted table to try (default: all of it). A build that dropping functions
     cannot mend raises dread.build BuildFailed, the readable table as it was (dread readable --check
-    exits 1; until 2026-10-23 it exited 0 with the old table in place)."""
+    exits 1; until 2026-10-23 it exited 0 with the old table in place).
+
+    The rounds keep what does not change (since 2026-10-24): the analysis trees, by each function's
+    lifted C and whether it is void (make_plan's kept: kept_trees), the static data's evidence, and each
+    function's readable C by what it reads of the context (readable_texts: tables_key, plan_key,
+    scope_key). A round that gave functions their results back makes the readable_types table anew (it
+    keeps each function's types for the digest of its C, and the first was made for the void forms):
+    from their trees made anew and every other tree as it was; then the readable C of the functions whose
+    entries of the table or whose callees' changed is made anew, every other function's taken as it was.
+    Until then such a round made every tree and every function's readable C anew: FreeRTOS's clang -O2
+    gate went from 58 s to 144 s with void results, two thirds of it that remaking. verify: every round's
+    table and readable C made anew from nothing beside (verify_plan, readable_texts' verify,
+    verify_framed, carry's), VerifyFailed at the first difference (dread readable --check --verify)."""
     from dread import build, lift, overlay, regflow, runner
     from dread.program import Program
     program = Program(target, image)
@@ -1250,9 +1659,14 @@ def check(target, image, names=None, out=print, jobs=None):
     lifted = build.read_names(image.table("lifted"))
     from dread import shapes
     digests = {}
+    trees = {}                              # analysis trees and the static data's evidence, for the rounds
+    stats = {}                              # (readable_texts: the readable C the builds asked for and made)
+    plans = 1
     # every function nobody reads the result of void first: the plan made anew keeps no results
     context.void = set(context._void_all)
-    make_plan(program, context, lifter, lifted, flow, digests=digests)
+    make_plan(program, context, lifter, lifted, flow, digests=digests, kept=trees)
+    if verify:
+        verify_plan(program, context, lifter, lifted, flow, digests)
     shapes.store_plan(image, context.plan)
     out("dread readable --check: %d structures, pointers to them in %d functions; %d structures and %d arrays of "
         "static data (readable_types)" % (len(context.plan.structs), len(context.plan.typed),
@@ -1273,7 +1687,8 @@ def check(target, image, names=None, out=print, jobs=None):
                 verdicts[name] = ("lifted", "no longer lifts: %s" % e)
     # Every candidate's readable C at once, in a pool (readable_texts); the rounds' builds and the whole
     # image's take it from there as long as the context's tables and the lifted C stay the same.
-    made = readable_texts({n: t for n, t in texts.items() if t is not None}, context, jobs)
+    made = readable_texts({n: t for n, t in texts.items() if t is not None}, context, jobs, verify=verify,
+                          stats=stats, kept=trees)
     candidates = []
     for name, text in texts.items():
         if text is None or made[name] is None:
@@ -1313,7 +1728,8 @@ def check(target, image, names=None, out=print, jobs=None):
         rounds += 1
         try:
             payload = build.build(target, image, out=work, lifted=base, quiet=True, lifter=lifter,
-                                  transform=chooser(accepted, context, jobs))
+                                  transform=chooser(accepted, context, jobs, verify=verify, stats=stats,
+                                                    kept=trees))
         except overlay.OverlayError as e:
             if e.function in accepted:
                 drop([e.function], "the overlay: %s" % e)
@@ -1379,7 +1795,11 @@ def check(target, image, names=None, out=print, jobs=None):
         again = {n: sorted(reaches(n) & (gone - {n})) for n in gone - culprits} if culprits else {}
         rest = gone - set(again)
         returned = returned_only(lines)
-        objects = {n for n in rest if n not in context.plan.whole and n in texts and framed(n, texts[n], context)}
+        if verify:
+            verify_framed(sorted(n for n in rest if n not in context.plan.whole and n in texts), texts, context,
+                          trees)
+        objects = {n for n in rest if n not in context.plan.whole and n in texts and framed(n, texts[n], context,
+                                                                                          trees)}
         with_result = {n for n in rest if n in context.void and (n in returned or n not in objects)}
         whole = objects - with_result
         told = set()                        # (one line a function tried again, its first failure)
@@ -1407,10 +1827,14 @@ def check(target, image, names=None, out=print, jobs=None):
             context.keep_results(with_result)
             # The readable_types table keeps each function's types for the digest of its C, made for the
             # void forms: made anew for what these functions and their callers print now (the check's whole
-            # and results kept), else they lost their parameters' types
+            # and results kept), else they lost their parameters' types. From the trees kept but theirs
+            # (kept_trees), and the next round's builds make anew only the readable C whose entries changed
             keep = (set(context.plan.whole), set(context.plan.results))
-            make_plan(program, context, lifter, lifted, flow, digests=digests)
+            make_plan(program, context, lifter, lifted, flow, digests=digests, kept=trees)
+            plans += 1
             context.plan.whole, context.plan.results = keep
+            if verify:
+                verify_plan(program, context, lifter, lifted, flow, digests)
             shapes.store_plan(image, context.plan)
         accepted = [n for n in accepted if n not in gone - whole - set(again) - with_result]
         if not gone:
@@ -1424,7 +1848,8 @@ def check(target, image, names=None, out=print, jobs=None):
         key = tuple(sorted(names))
         if key not in tried:
             tried[key] = lift.whole_image(target, image, program, lifted, out, lifter,
-                                          transform=chooser(key, context, jobs))
+                                          transform=chooser(key, context, jobs, verify=verify, stats=stats,
+                                                            kept=trees))
         return tried[key]
     found = whole(accepted) if runs and accepted else None
     baseline = whole([]) if found else None
@@ -1476,10 +1901,15 @@ def check(target, image, names=None, out=print, jobs=None):
     out("dread readable --check: %d of %d lifted functions readable after %d rounds (%d stay lifted; the whole "
         "image %s), into %s" % (len(kept), len(lifted), rounds, len(lifted) - len(kept),
                                 whole_note if runs and candidates else "not run", os.path.relpath(path)))
+    out("dread readable --check: the builds asked for readable C %d times, %d made (%d of them from their cleaned "
+        "trees), the rest as made before; %d analysis trees made for %d readable_types table%s of %d functions%s" % (
+            stats.get("texts", 0), stats.get("made", 0), stats.get("cleaned", 0),
+            sum(1 for k in trees if k[0] == "analysis"), plans, "s"[plans == 1:], len(lifted),
+            "; every round's table and readable C the same as made anew from nothing (--verify)" if verify else ""))
     # The names proposed for C that the transformations have changed since go to this C where their
     # variables are still there (carry): the check is what runs after the transformations change.
     carry(target, image, out=out, jobs=jobs, program=program, flow=flow, lifter=lifter, context=context,
-          digests=digests)
+          digests=digests, verify=verify)
     return kept
 
 
@@ -1488,6 +1918,9 @@ def main(argv=None):
     tgt.add_arguments(parser)
     parser.add_argument("--check", action="store_true", help="test the readable C and write the readable table "
                         "(then carry the names, as --carry)")
+    parser.add_argument("--verify", action="store_true", help="with --check: make every round's readable_types table "
+                        "and readable C anew from nothing beside what the check keeps between its rounds, and stop "
+                        "at the first difference (slower; what the kept trees and C must not change)")
     parser.add_argument("--carry", action="store_true", help="carry the readable_names table's names that were made "
                         "for other C to the variables of the same identity in the C as it is now (dread.naming "
                         "carry_table: kept where the C still compiles to the same code; no question asked)")
@@ -1524,10 +1957,13 @@ def main(argv=None):
         polite()
         from dread import build
         try:
-            check(target, image, args.names or None)
+            check(target, image, args.names or None, verify=args.verify)
         except build.BuildFailed:
             print("dread readable --check: the build failed (above); the readable table is as it was",
                   file=sys.stderr)
+            return 1
+        except VerifyFailed as e:
+            print("dread readable --check --verify: %s" % e, file=sys.stderr)
             return 1
         return 0
     if args.carry:

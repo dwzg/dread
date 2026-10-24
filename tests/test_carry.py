@@ -281,6 +281,30 @@ def test_the_pilot_asks_again_only_where_a_carry_left_variables_without_names(tm
     assert os.path.exists(os.path.join(target.build, "pilot", image.name, "checksum.readable.md"))
 
 
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_the_carry_s_question_trees_are_those_the_whole_context_gives(tmp_path, monkeypatch):
+    """The carry's verify (dread readable --check --verify): the question trees made from each function's
+    view of the context (dread.readable scoped: its own entries and its callees') are those the whole
+    context gives, digest, file, code and identities; with the view cut to the function's own name,
+    delay's question declares its void callee timer_start u32, and the carry stops with VerifyFailed."""
+    from dread import readable
+    target, image, program, context, lifter = gizmo(tmp_path)
+    made = readable.question_trees(program, context, lifter, ["delay", "fmt_dec"])
+    assert "timer_start" in context.void and "extern void timer_start(" in made["delay"][3], made["delay"][3]
+    naming.store_all(image, {"delay": made_for_other_c(made, "delay", {"r0": "ticks"}),
+                             "fmt_dec": made_for_other_c(made, "fmt_dec", {"r0": "out"})})
+    lines = []
+    got = readable.carry(target, image, out=lines.append, program=program, lifter=lifter, context=context,
+                         verify=True)
+    assert sorted(got) == ["delay", "fmt_dec"], lines
+    naming.store_all(image, {"delay": made_for_other_c(made, "delay", {"r0": "ticks"})})
+    monkeypatch.setattr(readable, "scope_names", lambda name, text: {name})
+    with pytest.raises(readable.VerifyFailed) as e:
+        readable.carry(target, image, out=lines.append, program=program, lifter=lifter,
+                       context=readable.Context(target, image, program), verify=True)
+    assert "delay" in str(e.value), e.value
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_the_check_carries_names_at_its_end(tmp_path, monkeypatch):

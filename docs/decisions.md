@@ -9,6 +9,81 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Readable C kept by what it is made of: the check's rounds make anew only what changed (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "A cheaper
+round for results given back" (docs/todo.md).
+
+- **Question.** Since void results, dread readable --check makes the readable_types table anew after a
+  round that gave functions their results back (the table keeps each function's types for the digest of
+  its C, and the first was made for the void forms), and with it every analysis tree and every
+  function's readable C, which readable_texts kept by the whole context: FreeRTOS's clang -O2 gate went
+  from 58 s to 144 s, GCC -O0's from 49 to 166 s, and on a large private firmware a quarter of an hour
+  became most of an hour. How does such a round make only what changed, and still give, function for
+  function, the C a check that keeps nothing gives?
+- **Options.**
+  1. The table after such a round: (a) made from trees made anew, as before; (b) made from the analysis
+     trees kept by what each reads of what changes while a check runs (its lifted C, whether it is
+     void), only the trees of the functions given their results back made anew, the analyses over all
+     of them as before; (c) an incremental table, only the given functions' and their callers' entries
+     made anew. The analyses are global (dread.shapes unifies across functions and numbers its
+     structures by the first variable that points to one, dread.vartypes decides prototypes in a
+     fixpoint over the call graph, pointer_params spreads over callers, naming.struct_names reads every
+     function's typed variables): a change can travel past the callers, and an incremental result is the
+     full one only where that was shown each time.
+  2. A function's readable C: (a) kept by the whole context, as before (all made anew when the table
+     changes); (b) kept by a key that names the table's entries it reads (an entry it reads that the
+     key misses: C made for another table taken, silently, and the builds after the check make other C
+     than the gate checked); (c) made from a view of the context that holds only what the key holds:
+     the table's parts kept per function cut to the names its lifted C uses (its own entries, its
+     callees'), the void functions among them, the parts that are no function's (structures, static
+     data, the names made of the whole table) whole; the key is then by construction what the C is made
+     of, and a view too narrow makes other C than the whole context, which a comparison shows.
+  3. A caller of a function given its result back (its extern declaration changes): (a) made anew from
+     its lifted C (the clean-up again: as long as the whole readable C, seconds for a large function);
+     (b) made from its cleaned tree, kept from the table's making, the stages run with a view that holds
+     of what changes only whether the function itself is void (what dread.tidy void_results reads).
+  4. How it is shown: (a) the eight builds' gates compared with main's, outputs byte for byte; (b) and an
+     option that makes every round's table and readable C anew from nothing beside what the check kept
+     and stops at the first difference (dread readable --check --verify): run on the eight builds, in
+     tests on gizmo, and there for a private target.
+- **Choice.** (1b), (2c), (3b), (4b).
+- **Why.** Before (main, eight workers, the machine shared): of a later round on FreeRTOS's clang -O2
+  demo, 17 s went to the table (the clean-up of all 300 functions for their analysis trees 9 s, of the
+  six callees outside the lifted table the masks look at 3.5-4.5 s, the analyses 4.5 s) and 7.5-8 s to the
+  builds' readable C (every function's clean-up again), of about 30 s; now 3.7-5 s and 0.1-0.7 s (the
+  analyses, the trees of the functions given back, readable C from cleaned trees). The gates (seconds,
+  main -> this): clang -O2 148 -> 72, GCC -O0 172 -> 110, GCC -Os 93 -> 56, RISC-V GCC -Os 48 -> 30,
+  gizmo a32 27.5 -> 16, m3 14 -> 4, m4 9.3 -> 3.7, rv32 6.4 -> 2.7 (docs/todo.md). (1c) would save the
+  analyses too (now the larger part of such a round, 3.5 s on clang -O2), but its result is not the full
+  one by construction; (1b) leaves the table exactly as a full remake makes it (--verify compares it,
+  part by part, with the digests). (2c) cannot take C made for another table: what the view holds is
+  what the key says, so a missing entry shows as a difference from the whole context (the test with a
+  view cut to the function's own name finds one at once), never as stale C, and the builds after the
+  check make the same C as the gate checked. (3b) made the rounds after the first nearly free: with the
+  clean-up kept, a caller's C is the structure, the results and the tables (milliseconds); the first
+  pass takes every function's from the trees its table was made from, which until then ran the clean-up
+  a second time (FreeRTOS: 4.6-8.3 s a gate).
+- **Not established.** That a function's readable C reads of the table's per-function parts only the
+  entries of the identifiers of its lifted C, and that the stages read of the void functions only the
+  function itself and nothing of the table: shown on the eight builds (every round, --verify, and the
+  outputs byte for byte main's) and on gizmo in the tests, and by reading the code (dread.naming
+  apply_globals: the pointers and takes of the callees it calls; dread.vartypes apply: its own entry and
+  its externs' prototypes; dread.frames: its callees' keeps, returns and prototypes, its own whole;
+  dread.polish: its callees' masks; dread.tidy void_results and readable's results: itself and its
+  externs; naming.struct_names reads every function's typed variables, so the names are made of the
+  whole table and shared); not proved for every target. A target where it fails gives other C than
+  main's, the same in the gate and in the builds after it, and --verify there says so. The analyses over
+  all trees still run in every such round; the first table now lifts every function in the check's
+  process (main lifted them there after it), and keeps two pickles a function (about twice its lifted C
+  each).
+- **How to undo.** dread/readable.py: scoped and stage_view returning their context (or _SCOPE False),
+  check calling make_plan and chooser without kept; readable_texts keyed by context_key again.
+- **Status.** In the code (dread.readable scoped, scope_names, scope_key, plan_key, tables_key,
+  stage_view, kept_trees, cleaned_tree, from_cleaned, kept_cleaned, readable_texts' kept and verify,
+  remade, verify_plan, verify_framed, carry's verify, check's verify and its summary line; `dread
+  readable --check --verify`; tests/test_readable.py, tests/test_carry.py). Figures in docs/todo.md.
+
 ## Pages of the tools' results: the bench, the compiler lab, the leak check (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), for the rest of step 4 of
@@ -928,7 +1003,9 @@ of a private firmware after the second review.
   functions printed with their result lost their parameters' types: gizmo-m3's strncpy printed `u32
   strncpy(u32 r0, u32 r1, u32 r2)`); else only the functions whose void status changed and their
   callers are made anew between the rounds (readable_texts keys each function's readable C by what it
-  reads of the void set: void_key).
+  reads of the void set: void_key). Since the same day such a round makes anew only what changed: the
+  trees of the functions given their results back, and the readable C whose entries changed (the entry
+  "Readable C kept by what it is made of" above; void_key is its scope_key now).
   (4c) would print `LEAVE(1u << r0)` in gpio_set and the like, a statement about a register in every
   such function: not done. (5b) keeps the behaviour exact (the second word left by an asm with
   register variables; the call through a two-word function type, which GCC folds into the direct bl

@@ -1953,13 +1953,67 @@ model).
   made by arithmetic the walk does not follow; a function whose entry the image holds keeps its result
   whether its callers through the pointer read it or not; MSP430 and MIPS keep every read (no
   register_only) and print no void (their heads are not the lifters' u32 form).
-- [ ] **A cheaper round for results given back.** dread readable --check makes the readable_types table
+- [x] **A cheaper round for results given back.** dread readable --check makes the readable_types table
   anew after a round that gave functions their results back (it keeps each function's types for the
   digest of its C, and the first table was made for the void forms), and with it every function's
   readable C, which readable_texts keys by the whole context: 14 s and 8 s a round on FreeRTOS's clang
   -O2 demo, whose gate went from 58 s to 144 s with that and two more rounds. Make only the functions
   whose void status changed and their callers anew (their analysis trees, their entries of the table), or
   key each function's readable C by the entries it reads. Public example: FreeRTOS mps2-clang-O2.
+  Done 2026-10-24 (dread.readable scoped, scope_key, plan_key, tables_key, stage_view, kept_trees,
+  cleaned_tree, from_cleaned, readable_texts' kept and verify, the check's verify and summary line,
+  `dread readable --check --verify`; docs/decisions.md, "Readable C kept by what it is made of").
+  Profiled first, timers around the gate's parts (main 3186afb, eight workers): a round that gave results
+  back made the table from trees made anew (the clean-up of every lifted function, and of the callees
+  outside the lifted table whose constants the masks look at) and then every function's readable C
+  (its clean-up again): on clang -O2 16.7-17.3 s and 7.5-8.0 s a round (the trees 8.8-9.4 s, the
+  masks' trees 3.5-4.5 s, the analyses 4.5 s: vartypes 1.6-2.0, static data 1.6-1.9 with the machine
+  code's evidence gathered again, shapes, pointer parameters, kept parameters 0.7), of a round's 30 s;
+  of the gate's 148 s, 71 s tables and 31 s readable C. Now a function's readable C is made from a view
+  of the context (scoped) that holds of the table's parts kept per function only the entries of the
+  names its lifted C uses and which of them are void, the rest whole, and kept by exactly what the view
+  holds: a round makes anew only the C of the functions given back and of those that name them. The
+  check keeps the analysis trees, their cleaned trees (the stages run with a view that holds of what
+  changes only whether the function is void) and the evidence, and makes readable C from a kept cleaned
+  tree without the clean-up. A later round on clang -O2: the table 3.7-5.0 s (the analyses 3.5 s:
+  vartypes 1.6-1.9, static data 0.75, the rest 0.7; the given functions' trees up to 1.5 s), the readable
+  C 0.1-0.7 s. Seconds (rounds; main -> this, every gate on a fresh copy of the same lifted table and
+  cases, main and this one after the other, eight workers, the machine shared with other work):
+      build (rounds)                gate             tables          readable C    the later tables
+      gizmo a32 (3)                  27.5 ->  16.1     7.5 ->  3.3    6.8 -> 0.2   2.6/2.4 -> 0.2/0.3
+      gizmo m3 (3)                   14.3 ->   3.9     6.1 ->  2.4    6.3 -> 0.1   1.9/1.9 -> 0.2/0.3
+      gizmo m4 (2)                    9.3 ->   3.7     4.2 ->  2.4    3.7 -> 0.1   2.0 -> 0.3
+      gizmo rv32 (2)                  6.4 ->   2.7     2.8 ->  1.7    2.5 -> 0.2   1.4 -> 0.3
+      FreeRTOS GCC -Os (3)           92.7 ->  55.9    38.1 -> 26.8   20.5 -> 1.2   12.2/12.5 -> 4.5/5.7
+      FreeRTOS clang -O2 (4)        148.4 ->  72.4    70.8 -> 33.8   30.8 -> 1.6   17.3/16.9/16.7 -> 5.0/3.7/3.8
+      FreeRTOS RISC-V GCC -Os (2)    48.1 ->  30.1    22.2 -> 13.8    9.0 -> 0.5   10.3 -> 3.9
+      FreeRTOS GCC -O0 (4)          172.4 -> 109.5    63.3 -> 39.8   33.2 -> 1.6   15.2/14.9/14.7 -> 6.6/4.2/5.1
+  (The table is of the code before its last step, which runs the stages with a view of their own,
+  stage_view: the same work. With the final code, the test suite running beside: gizmo 27.4 -> 15.9,
+  12.9 -> 4.2, 9.7 -> 3.9, 6.8 -> 2.9; FreeRTOS GCC -Os 101.9 -> 58.7, clang -O2 157.2 -> 83.0, RISC-V
+  GCC -Os 38.8 -> 26.1, GCC -O0 149.1 -> 94.3; the later tables on clang -O2 17.2-18.5 -> 4.1-5.4 s.)
+  The first table takes longer than main's (GCC -Os 13.5 -> 16.6 s, clang -O2 19.9 -> 21.4, -O0 18.5 ->
+  23.8): it lifts every function in the check's process, which main did right after it (outside the
+  timers there), and makes the cleaned trees the first pass then takes (6.4 -> 0.5 s on GCC -Os). Byte
+  for byte: on all eight builds the gate's readable and readable_types tables, its verdicts, every
+  round's runner output, the last build's files and image, and every function's printed readable C
+  (`dread readable --out`: 51, 50, 58, 46 and 363, 340, 313, 434 files) are main's; `dread readable
+  --check --verify` (every round's table against one made anew from nothing, every readable C the
+  builds take against the one made anew from the whole context, the frame's objects of the functions
+  it asks about; the carry's question trees where the readable_names table has entries made for other
+  C, none on these builds: tests/test_carry.py) passes on all eight. The builds asked for readable C 175, 180, 176, 124 and 1640,
+  1728, 1060, 2268 times and made it 46, 47, 55, 38 and 372, 326, 267, 452 times, every one from a
+  cleaned tree; 40, 40, 49, 37 and 348, 316, 276, 399 analysis trees for 3, 3, 2, 2 and 3, 4, 2, 4
+  tables. Tests (tests/test_readable.py, tests/test_carry.py): readable_texts makes anew only the
+  functions whose entries changed (a function given its result back and the function that names it, a
+  callee's entry, a structure every function) and each time what remade makes from the whole context;
+  the gate on gizmo-m3 with --verify (trees made anew only for the functions given back, the later
+  builds' readable C fewer than the functions); --verify finds a view cut to the function's own name;
+  the carry's question trees as the whole context gives them. Left: the analyses over all trees in every
+  such round (vartypes.plan about half: its copies of every tree with the static data and structures
+  applied, and its planner, which rebuilds the prototypes of every function for each decision, quadratic
+  in the functions: not measured on a large target); the first table's lifting in one process (7.9 s for
+  GCC -Os's 341 functions).
 - [ ] **Bound calls in one line.** A call whose callee reads registers its caller left, or behind
   which the caller reads scratch registers, prints as an inline-asm block that binds every register,
   plus asm reads of those registers at the function's entry: many lines for one call. Print it as one
