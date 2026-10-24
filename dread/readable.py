@@ -1685,9 +1685,11 @@ def verify_framed(names, texts, context, kept=None):
 
 def check(target, image, names=None, out=print, jobs=None, verify=False):
     """The acceptance loop for readable C (see the module's docstring); returns the accepted names.
-    names: functions of the lifted table to try (default: all of it). A build that dropping functions
-    cannot mend raises dread.build BuildFailed, the readable table as it was (dread readable --check
-    exits 1; until 2026-10-23 it exited 0 with the old table in place).
+    names: functions of the lifted table to try (default: all of it). A function whose readable C calls
+    what the original does not is kept from the link, and one whose object a refused link names is
+    dropped before the build links again (since 2026-10-25: foreign, dread.overlay blame). A build that
+    dropping functions cannot mend raises dread.build BuildFailed, the readable table as it was (dread
+    readable --check exits 1; until 2026-10-23 it exited 0 with the old table in place).
 
     The rounds keep what does not change (since 2026-10-24): the analysis trees, by each function's
     lifted C and whether it is void (make_plan's kept: kept_trees), the static data's evidence, and each
@@ -1775,16 +1777,30 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
                         todo.append(callee)
             reach[name] = seen - {name}
         return reach[name]
+    def foreign():
+        """Before each link (dread.build build's vet): the readable functions whose compiled C calls what
+        the original does not call (dread.lift foreign_calls: a loop GCC turns into memcpy, a helper),
+        kept from the link. Until 2026-10-25 this was asked after the link, which failed first, and with
+        it the whole check, where the image lacks what the C calls (the lift check's way since the same
+        day)."""
+        return {name: "its readable C calls %s, which the original does not call" % ", ".join(sorted(symbols))
+                for name, symbols in lift.foreign_calls(program, work, accepted, lifter).items()}
     while accepted:
         rounds += 1
         try:
             payload = build.build(target, image, out=work, lifted=base, quiet=True, lifter=lifter,
                                   transform=chooser(accepted, context, jobs, verify=verify, stats=stats,
-                                                    kept=trees))
+                                                    kept=trees), vet=foreign)
         except overlay.OverlayError as e:
             if e.function in accepted:
                 drop([e.function], "the overlay: %s" % e)
                 accepted = [n for n in accepted if n != e.function]
+                continue
+            blamed = {n: why for n, why in e.blamed.items() if n in accepted}
+            if blamed:                      # what the vet keeps out, or whose object or section the linker's
+                for n, why in sorted(blamed.items()):    # errors name (dread.overlay blame): link again
+                    drop([n], why)
+                accepted = [n for n in accepted if n not in blamed]
                 continue
             files = {os.path.basename(c)[:-2]: c for c in e.failed if c.endswith(".c")}
             bad = [n for n in accepted if n in files]
@@ -1807,12 +1823,6 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
                     continue
             out("dread readable: the build failed: %s" % e)
             raise build.BuildFailed(str(e))
-        foreign = lift.foreign_calls(program, work, accepted, lifter)
-        if foreign:
-            for name, symbols in sorted(foreign.items()):
-                drop([name], "its readable C calls %s, which the original does not call" % ", ".join(sorted(symbols)))
-            accepted = [n for n in accepted if n not in foreign]
-            continue
         runner.prepare(target, image, payload)
         lines = []
         _, uncovered, results = runner.run(accepted, only=True, out=lines.append, jobs=jobs)

@@ -4840,12 +4840,17 @@ reimplement them.
   - Not established: other linkers' message forms (they fail the check as before); readable C on Thumb-1
     gets the flag too, and the readable gate was not run on a Thumb-1 build; an image whose [arch] differs
     from the target's gets the target's flags (docs/decisions.md lists the rest).
-- [ ] dread readable --check takes a link that its readable C makes the linker refuse for the end of the gate
+- [x] dread readable --check takes a link that its readable C makes the linker refuse for the end of the gate
   (dread.build BuildFailed), as the lift check did until 2026-10-25: readable C that calls what the original
   does not (a loop GCC turns into a memcpy, a helper) is dropped only where the image has the callee, and
   checked only after the link. The lift check's way fits it: foreign_calls as build's vet before each link,
   the functions OverlayError.blamed names dropped (dread.lift check). Left with the lift check's item, which
   kept out of dread.readable.
+  Done 2026-10-25 (dread.readable check: foreign as build's vet, OverlayError.blamed's readable functions
+  dropped with the linker's words, the after-link check gone): a function whose readable C calls what
+  nothing defines is kept from the link, or dropped through the linker's message where the vet misses, and
+  the others are checked as before (tests/test_readable_link.py: both fail on the code before, with the
+  whole check ended by "the link failed").
 - [ ] A function whose original dispatches through GCC's Thumb-1 switch helper (bl __gnu_thumb1_case_uqi, the
   table behind the call) gets no case that runs the dispatch: the helper, another function, loads a byte of
   the caller's extent, which dread.emu trace_reads takes for code loaded as data (the extent owners' rule), so
