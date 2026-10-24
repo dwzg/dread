@@ -46,6 +46,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | Target description, function tables, ARM and Thumb layer, ELF import | done |
 | Listing generator and byte-identical rebuild, Ghidra pipeline | done |
 | Emulator, differential test runner, overlay linker | done |
+| A failing case traced to the first point where the images part (`dread trace`): calls with their arguments and the bytes behind stack pointers, the device log, stores by stretch, the return; the instruction and C line in both, the call stacks, the frame by the C's objects | first version |
 | Case generator (coverage- and compare-guided, pointer learning, a dictionary for parsers, answers for the branches all cases take one way: a callee's result at one call, memory a load reads) | done |
 | Why cases leave code unrun (`dread uncovered`): each missed region's way in, what decides it traced back to its source (an argument, a callee's result, a global, a device register, a field, a loop), what the cases saw there and a run sent that way | first version |
 | Mutation check with survivor search and argued survivors | done |
@@ -87,6 +88,7 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
 bin/dread info --target examples/gizmo/m3
 bin/dread recon --target examples/gizmo/m3      # gizmo's rewritten functions over the original
 bin/dread test --target examples/gizmo/m3       # each one against the original, in the emulator
+bin/dread trace --target examples/gizmo/m3 clamp "generated 3"    # one case in both images, to where they part
 bin/dread mutate --target examples/gizmo/m3 --kill checksum   # would the cases notice a wrong one?
 bin/dread integration --target examples/gizmo/m3 --callers    # the same with real callees, and through callers
 bin/dread sysrun --target examples/gizmo/m3                   # the whole firmware from reset, both images

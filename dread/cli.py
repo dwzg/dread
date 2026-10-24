@@ -35,6 +35,7 @@ COMMANDS = {
     "lift": ("dread.lift", "translate functions to C instruction by instruction"),
     "uncovered": ("dread.uncovered", "why the lift check's cases leave code unrun: each region's way in and its source"),
     "readable": ("dread.readable", "turn lifted C into readable C, each function checked as lifted C is"),
+    "trace": ("dread.trace", "one case in the original and the rebuilt image, to the first point where they part"),
     "liftfuzz": ("dread.liftfuzz", "check the lifter on random instructions against the emulator"),
     "pilot": ("dread.pilot", "the reconstruction loop run by code, a language model only for the judgement"),
     "llm": ("dread.llm", "the language-model providers: list them, or ask one a question"),

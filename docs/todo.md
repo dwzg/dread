@@ -1733,12 +1733,42 @@ model).
   keeps the original's order of volatile stores; readable C may merge or move stores between calls:
   measure how often they part on the bench before relying on it). Public test: a store, then the
   function's own loop writing past a local, with C that stores another value.
-- [ ] **One case in both images, to the first divergence.** Tracing a FAIL took one-off scripts: run a
+- [x] **One case in both images, to the first divergence.** Tracing a FAIL took one-off scripts: run a
   case in the original and the rebuilt image side by side and stop at the first point where they part
   (a callee entered with other arguments, a store of another value or to another place, a return
   value), naming the instruction and, for the rebuilt image, the C line. A tool (`dread trace NAME
   LABEL`, the label as the runner prints it: "generated 3", "written 0"), on the runner's machinery,
   for lifted and readable C alike, with the stack frame's words shown by their objects.
+  Done 2026-10-24 (dread/trace.py; what it takes for the point where the runs part: docs/decisions.md).
+  The image is `dread test`'s, or built as a lift check's round (`--lifted`) or a readable check's
+  (`--readable`, `--whole`); the case is set up by the runner's own code. The original runs first with
+  hooks that keep its shared points (calls with the registers the callee reads and its stack
+  arguments, and the bytes behind an argument that points into a frame object; the log in order;
+  stores outside the stack, by stretch between calls), the rebuilt image after it, compared event by
+  event and stopped at the first difference `dread test` compares; a call with other arguments is
+  reported as where the runs part first and the trace goes on. The report: the instruction in both
+  images, the rebuilt image's C line (a twin build with -g, used only where its image is byte for
+  byte the traced one, read with pyelftools), the statement of the lifted or readable C for the
+  original's instruction, both call stacks, where one run's path left the other's (its first return
+  from a function the other had not left), the last shared events, the instruction that set a
+  register that differs at the end, and the frame, both runs made again to that point: the original's
+  words by the C's objects (lifted C's frame array, readable C's stackN objects, the save words) beside
+  the rebuilt image's (the twin's variable locations), "(not set)" where nothing was stored yet.
+  Tests (tests/test_trace.py, every gizmo build): a changed constant, a stored value, a call argument
+  and a loop that never ends in apply_config's lifted C (moved behind a branch on every build) are each
+  named at the original's instruction and the changed C line; readable C that writes a frame buffer
+  wrong parts at the call the buffer goes to; an agreeing case; the event cap. All 6,907 gizmo cases
+  with lifted C and 4,978 with every function readable (a32, m3, rv32) trace as `dread test` judges
+  them, without a call with other arguments in a case that agrees. On FreeRTOS's GCC -Os demo (332
+  lifted functions) a readable trace of xQueueGenericSend with a planted fault (a frame object stored
+  one more) took 15 to 20 s, 12 to 15 of them the two builds (lifting every function); `dread test`'s
+  image without C lines 6 s; the run of `dread test` on that copy showed one real FAIL
+  (prvRegTestTaskEntry1, a case that may hang: within the same limit the lifted register test made
+  more rounds of its loop than the original, its counter 0x4e1e against 0x148e), which the trace named
+  at the store of that counter, with both runs' block counts.
+  Not established: the runner's refusals and excuses are not checked again; a fall-through into a
+  function is no call; a register or byte the callee does not read on this path parts the runs
+  without consequence (the report then shows the first difference `dread test` compares, or none).
 - [ ] **A frame object over the saves.** On the private real-life test one function's readable C with
   today's frame objects (1404c72) returns into a string written over its saved return address; its
   split objects and the whole-region fallback both failed its cases, so it stays lifted (nothing wrong

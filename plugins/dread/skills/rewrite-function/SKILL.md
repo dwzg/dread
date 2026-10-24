@@ -59,8 +59,13 @@ what was learned and what is still not confirmed.
 
 ## When it fails
 
-- FAIL: read the first difference (return value, a memory byte, the device log); compare with
-  `dread flat`; for a lifted version of the same function, `dread lift NAME` shows the C the lifter
-  makes, statement by statement next to each instruction.
+- FAIL: `dread trace NAME "LABEL"` with the label the FAIL line shows (`--lifted` or `--readable`
+  for a failure of `dread lift --check` or `dread readable --check`) runs that one case in both images
+  and stops where they part: a call with other arguments or other bytes behind a pointer, another log
+  entry, another store, the end. It names the instruction in both images, the C line the rebuilt
+  image's came from, the call stacks and the frame by the C's objects; no one-off scripts. Read the
+  first divergence, then the first difference `dread test` compares when the report gives one after
+  it; compare with `dread flat`; for a lifted version of the same function, `dread lift NAME` shows the
+  C the lifter makes, statement by statement next to each instruction.
 - A function that never returns gets no case that ends: `dread lift --check` decides it with the
   system run, and so does a hand-written one through `dread sysrun` (see the system-run skill).

@@ -9,6 +9,35 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## What dread trace takes for the point where two runs part (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the tool that traces
+one case to the first divergence (docs/todo.md).
+
+- **Question.** C keeps its own frame and its own registers, so the two runs of a case cannot be
+  compared instruction by instruction. At which points are they compared, and how strictly, so that
+  the first divergence the tool names is where the C went wrong and not where it merely differs?
+- **Options.** (a) Only what `dread test` compares (the log, the stores outside the stack, the end),
+  in order. (b) Those, and every call: the callee, its arguments and what they point to. (c) Also the
+  locals, mapped through the debug information.
+- **Choice.** (b), with these rules: a call's arguments are the registers the callee reads at its
+  entry (dread.regflow) and its stack arguments; two values that both point into the stack count as
+  the same, and the bytes behind them are compared instead, within the frame object they point into
+  and only those the caller's call stored; a call with other arguments is reported as where the runs
+  part first, but as soft (the callee may not read the value on this path): the tool goes on to the
+  first difference `dread test` compares and reports both. Stores outside the stack are compared by
+  stretch between two calls (what the stretch leaves in memory), so C that stores in another order or
+  width does not part; the first store in order whose bytes differ is named. Calls into the
+  architecture's run-time helpers and into shared code a lifted function's C holds are no shared points.
+  A branch back to the entry of the function that runs is a loop, not a call.
+- **Why.** (a) names a store or a log entry long after the cause where a wrong argument or a wrong
+  local reached a callee; (c) would part at every local the C keeps in a register. The final
+  comparison is always `dread test`'s own (dread.emu Result.diff), so nothing it fails traces as
+  agreeing (rule 6 holds: the trace only adds what it reports).
+- **How to undo.** dread/trace.py: Compare (the order and strictness), argument_differences and
+  pointed_differences (the soft points), Context.transparent (the calls left out).
+- **Status.** In the code (dread/trace.py, tests/test_trace.py).
+
 ## A refusal stands only where it explains every difference (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20). It makes the comparison

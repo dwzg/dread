@@ -72,6 +72,21 @@ those outputs, which the report names, and counts for coverage (decided 2026-10-
 FreeRTOS's timer commands carry a union member nobody set into the timer queue so. A difference the
 fills do not move keeps the case failed.
 
+A FAIL is traced to the instruction behind it with `dread trace NAME LABEL` (the label as the FAIL
+line prints it; `--lifted` or `--readable` builds the image as the lift check or the readable check
+built it, the default takes `dread test`'s). It runs that one case in both images as the runner does
+and compares them at the points both share, which C cannot have elsewhere: each call (the callee, the
+registers it reads, its stack arguments, and the bytes behind an argument that points into a frame,
+within the frame object it points to), each entry of the log, the stores outside the stack (what each
+stretch between two calls leaves in memory) and the end. It stops where they part and names the
+instruction in both images, the C line the rebuilt image's came from, the statement of the lifted or
+readable C for the original's instruction, the call stacks, the shared events before it and the
+frame, the original's words by the C's objects beside the rebuilt image's. A call with other
+arguments is where the runs part first but may not matter (the callee need not read them on this
+path), so the trace goes on to the first difference `dread test` compares and shows both. Locals
+count only where they reach a call; a register's value only where a callee reads it or the end
+compares it. A difference is traced to its instruction before anything is concluded from it.
+
 ## 4. Where inputs come from
 
 - **Generated** (`auto()` in a case file, `dread.autocase`): random inputs, kept when they reach new
