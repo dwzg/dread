@@ -52,6 +52,13 @@ as comparisons"):
 - pairs: a two-word addition (adds; adc) as one 64-bit sum, its words read as the halves of it; a
   two-word compare (cmp; sbcs) is one 64-bit comparison among conditions' candidates (chained).
 
+Extensions and bit fields (bits: dread.bitfields, every rewrite proved by z3 for C's types): a pair of
+shifts that sign- or zero-extends as the cast it is ((s32)(x << 16) >> 16 as (s16)x, x << 16 >> 16 as
+(u16)x: ARM state before ARMv6 and RV32 without Zbb have no sxth or uxth), a signed field of 8 or 16
+bits as a cast of the field, a mask moved to the field it selects ((x << 2) & 4 as (x & 1) << 2, (w &
+0x3fc) >> 2 as (w >> 2) & 0xff), masks and casts the known bits make redundant, and a smeared sign under
+a mask as the select it computes (((s32)x >> 31) & m as (s32)x < 0 ? m : 0).
+
 Statements keep the instruction they came from (their addr); a statement folded into another takes
 its reader's, but an expression statement or a return that takes a call's result in names the call
 in its comment (return f(); names the bl, not the bx lr after it: cparse.take, which keeps the
@@ -3031,8 +3038,10 @@ def peephole(e, ctx):
             return l
         if (e.op == ">>" and isinstance(r, C.Num) and isinstance(l, C.Binary) and l.op == "<<"
                 and isinstance(l.r, C.Num) and isinstance(r.value, int) and isinstance(l.r.value, int)
-                and 0 < l.r.value <= r.value < 32 and type_of_expr(l.l, ctx) == (32, False)):
-            # x << a >> b of a 32-bit unsigned x is a field of it: (x >> (b - a)) & mask
+                and 0 < l.r.value <= r.value < 32 and type_of_expr(l.l, ctx) == (32, False)
+                and not (l.r.value == r.value and 32 - r.value in (8, 16))):
+            # x << a >> b of a 32-bit unsigned x is a field of it: (x >> (b - a)) & mask (x << 16 >> 16
+            # and x << 24 >> 24 are its low halfword and byte: dread.bitfields writes them as casts)
             shift, mask = r.value - l.r.value, (1 << (32 - r.value)) - 1
             inner = l.l if shift == 0 else C.Binary(">>", l.l, C.Num("%d" % shift))
             return C.Binary("&", inner, C.Num("0x%xu" % mask if mask > 9 else "%du" % mask))
@@ -3055,6 +3064,12 @@ def peephole(e, ctx):
     if isinstance(e, C.Cond):
         return C.Cond(peephole(e.c, ctx), peephole(e.t, ctx), peephole(e.f, ctx))
     return e
+
+
+def bits(fn):
+    """Extensions and bit fields as C writes them, every rewrite proved (dread.bitfields)."""
+    from dread import bitfields
+    return bitfields.bitfields(fn)
 
 
 def fold_constants(op, l, r, ctx):
@@ -3246,7 +3261,7 @@ PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("dead", d
           ("propagate", propagate),
           ("selects", selects), ("merge", merge_ifs), ("chains", chains), ("fold", fold), ("arms", empty_arms), ("spread", spread),
           ("addresses", addresses),
-          ("expressions", tidy_expressions),
+          ("expressions", tidy_expressions), ("bits", bits),
           ("pairs", pairs), ("values", values), ("flags", flags),
           ("conditions", conditions), ("sums", sums), ("literals", literals),
           ("declarations", tidy_declarations)]

@@ -9,6 +9,75 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Extensions and bit fields: casts, fields and selects, each rewrite proved where it is made (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Extensions
+and bit fields" (docs/todo.md), which the second review of 2026-10-24 found the most frequent thing a
+reader decodes by hand.
+
+- **Question.** Where the machine has no sign- or zero-extending instruction and no bit-field extract
+  (ARM state before ARMv6, RV32 without Zbb), a cast to short is lsl #16; asr #16, a signed bit field
+  lsl #20; asr #24, and GCC and clang compute a select without a branch from a smeared sign (srai a0,
+  a0, 31; andi a0, a0, -3 for `return f() < 0 ? -3 : 0`, bic r0, r0, r0, asr #31 for a clamp at 0). The
+  lifters write asr as (u32)((s32)x >> n), so readable C printed (s32)(x << 16) >> 16, (r0 << 2) & 4,
+  ((s32)r0 >> 2) & 0xffu, r0 & ~(u32)((s32)r0 >> 31), and the same source read differently on Thumb-2
+  (sxth: (s16)x) and on ARM state or RV32. Where are they rewritten, into what, and how is each
+  rewrite kept exact for C's types (the promotions of u8 and u16 to int, conversions to signed types
+  modulo 2**n, arithmetic shifts of signed values)?
+- **Options.** Where: (a) dread.polish, on the finished tree: its types are those vartypes gave (s32
+  variables, pointers), the lifters' u32 registers gone, and conditions and vartypes would not see the
+  results (a select's condition, a cast that types a variable); (b) a pass of dread.tidy among the
+  others, on the lifters' types, every round. How: (c) rules per pattern that print the form (fast,
+  each rule argued once, a mistake wrong everywhere); (d) rules that only propose, guided by an analysis
+  of known bits, each proposal proved by z3 for the node it replaces (dread.cexpr, as the flags pass
+  proves its rewrites). Extensions: (e) as masks (x & 0xffffu), (f) as casts ((u16)x), as the
+  extending instructions read on Thumb-2. Selects: (g) leave smears as they are, (h) the select they
+  compute, where the selected value is evaluated on one way only (no load, no call).
+- **Choice: (b), (d), (f), (h)** (dread.bitfields, tidy's "bits" pass after "expressions"). A sign
+  extension by shifts of a field of 8 or 16 bits is a cast of the field ((u32)(s16)x, (u32)(s8)(x >>
+  4)), a logical pair from bit 0 (u32)(u16)x or (u32)(u8)x; a field whose top bit the known bits show 0
+  is the unsigned field; other pairs and masks move to the field they select ((y >> k) & mask, (x &
+  1) << 2, (w >> 2) & 0xff); masks and narrowing casts the known bits make redundant go; under a cast
+  to 8 or 16 bits what only changes higher bits goes; a smeared sign (or a negated truth value, RISC-V's
+  sltu; neg) under a mask is a select of the masked value and 0 where that value reads no memory and
+  calls nothing, with constants folded into a select of constants ((c ? 0x10 : 0) + 0x20 as c ? 0x30 :
+  0x20). Fields of widths C has no type for keep their shifts.
+- **Why.** (b): the proofs need the lifters' types (each register a u32, each load its width) and the
+  later passes read the results (conditions turns a select's (s32)~x < 0 into x >= 0; vartypes types a
+  clamp's parameter s32: `u32 bits_clamp(s32 r0) { return r0 >= 0 ? r0 : 0; }`). (d): with z3 checking
+  each node, a rule can only fail to apply, and the analysis that guides them (known: zeros, ones and
+  copies of the top bit, from constants, types, casts, loads, masks, shifts, sums, comparisons and
+  selects) may be approximate; a node keeps its promoted type (a cast where a rewrite's own type would
+  differ: a u16 promotes to int, not to unsigned int), and each load and call of the node stays, once.
+  The proof is per node: small, and memoized for the tidy run (each round asks again). (f): the same
+  source then reads the same on ARMv4T, Thumb-2 and RV32 (a test program at -Os and -O0 does), and a
+  mask the source wrote (and #0xff) stays a mask: only shift pairs become casts. (h): a select is what
+  the source said (gizmo's clamp(level, 0, 9), parse_kv's `parse_uint(...) < 0 ? -3 : 0`), and a
+  select evaluates its arm on one way only, so a value with an effect keeps the smear. Cautions found
+  on the way: a node that goes through 64 bits (a cast or a variable of 64 bits) is left to the passes
+  that read the lifters' idioms there by their shape, sums, flags and pairs, which run after this one
+  each round (a first version dropped the (u32) of a byte store's (u8)(u32)((u64)r6 + 1 + 0), and sums
+  no longer read the add: clang -O2 printed (u8)(r6 + 1); it dropped the (u8) of GCC -O0's flag select
+  (u32)(u8)(!(u32)(t_3 >> 32) || ... ? 0x1u : 0x0u), and flags left r3_1 = r0_1 <= s24 ? 0x1u : 0x0u
+  for the comparison); a cast of a value to its own type is dropped only between two arithmetic shifts
+  (a first version dropped the (u32) of the compare idiom, (u64)x + (u32)~y + 1, and two gizmo
+  conditions changed form); a mask is moved into a left shift only where it is one run of ones below
+  the top ((x << 2) & 0xfffffff0u stays: (x & 0x3ffffffcu) << 2 reads no better). dread.tidy
+  peephole's unproved field rule for a plain variable (x << a >> b, b > a) stays; x << 16 >> 16 and x
+  << 24 >> 24 it leaves to this pass.
+- **Not established.** A variable's bits from its definitions (r2 = r3 & 7; ... r2 & 0xffu keeps its
+  mask: the proof sees r2 as any u32; on the eight builds three such masks in each of gizmo's ARM
+  builds' script_run and GCC -O0's __NVIC_EnableIRQ, all the amount of a register shift: the item
+  "Register shifts with an amount known below 32"); 16-bit int (MSP430: the pass leaves its functions
+  alone); whether a mask that GCC made of a cast (ARM state's and #0xff for a u8) should read as the
+  cast too: it stays a mask, as one the source wrote.
+- **How to undo.** Take ("bits", bits) out of tidy.PASSES and the narrowing of peephole's field rule
+  (`and not (l.r.value == r.value and 32 - r.value in (8, 16))`); dread/bitfields.py then serves
+  nothing.
+- **Status.** In the code (dread/bitfields.py, dread/tidy.py; tests/test_bitfields.py). On the eight
+  builds the gate accepts the same functions, the readable tables byte for byte, and the printed C of
+  24 functions changed; the figures are in docs/todo.md under the item.
+
 ## The frame's objects before the variables' names, and in the naming question (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Frame

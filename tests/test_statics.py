@@ -699,8 +699,8 @@ cflags = ["-march=rv32imac_zicsr", "-mabi=ilp32", "-Os"]
 }
 
 
-def kind_target(tmp_path, kind, source, ram=None, rodata=False):
-    """The target of a C program (source) built with GCC -Os for kind ("a32": ARMv4T in ARM state,
+def kind_target(tmp_path, kind, source, ram=None, rodata=False, opt="-Os"):
+    """The target of a C program (source) built with GCC -Os (opt) for kind ("a32": ARMv4T in ARM state,
     "m3": a Cortex-M3, "rv32": RV32IMAC), its code in flash and its data in RAM at ram (default the
     kind's) in the order of their names, imported from its ELF with its startup's ranges; its lift check
     run. rodata: the read-only data in a section of its own behind the code (dread import-elf takes the
@@ -709,6 +709,7 @@ def kind_target(tmp_path, kind, source, ram=None, rodata=False):
     from dread import elfimport, lift
     from dread.target import Target
     toml, cc, text, data = KIND_TOML[kind]
+    toml = toml.replace('"-Os"', '"%s"' % opt)
     ram = data if ram is None else ram
     if cc is None:
         cc = [RISCV_CROSS + "gcc", "-march=" + RISCV_MARCH, "-mabi=ilp32"]
@@ -719,7 +720,7 @@ def kind_target(tmp_path, kind, source, ram=None, rodata=False):
                                    "{ *(SORT_BY_NAME(.data*)) } .bss : { *(SORT_BY_NAME(.bss*)) *(COMMON) } }\n"
                                    % (text, code, ram))
     elf = str(tmp_path / "t.elf")
-    subprocess.run(cc + ["-Os", "-ffreestanding", "-nostdlib", "-fno-common", "-ffunction-sections", "-fdata-sections",
+    subprocess.run(cc + [opt, "-ffreestanding", "-nostdlib", "-fno-common", "-ffunction-sections", "-fdata-sections",
                          "-g", "-T", str(tmp_path / "t.ld"), "-Wl,-e,main", "-o", elf, str(tmp_path / "t.c")],
                    check=True)
     (tmp_path / "original").mkdir()

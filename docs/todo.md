@@ -2005,12 +2005,83 @@ model).
   on GCC -Os). `~0x` 12, 5, 5, 0, 29, 28, 0, 18 -> 4, 3, 3, 0, 25, 24, 0, 15 (masks and the compare
   idiom's), negative literals 0 -> 10, 9, 9, 7, 66, 51, 43, 67. Left: the compare idiom's complements
   ((u64)x + ~0x5fu + 1) go with "Flags as comparisons".
-- [ ] **Extensions and bit fields.** `(s32)(x << 16) >> 16` for a halfword's sign extension, `(x &
+- [x] **Extensions and bit fields.** `(s32)(x << 16) >> 16` for a halfword's sign extension, `(x &
   0xffff) << 16 >> 16`, `(u32)((s32)(w & m) >> n)` for a field whose mask clears the sign bit, `(x <<
   2) & 4` for `(x & 1) << 2`, a final mask the bits already satisfy. Fold to `(s16)x`, `(u16)x`, `(w
   >> n) & (m >> n)`, `(x & 1) << 2`, and drop masks a known-bits pass proves redundant. Public
   example: none found (Thumb-2 has sxth and ubfx; gizmo's ARMv4T build has no signed halfwords).
   Test: a gizmo function on a32 that returns a signed short and extracts a field with a signed shift.
+  Done 2026-10-24 (dread.bitfields, dread.tidy's pass "bits" after "expressions"; docs/decisions.md,
+  "Extensions and bit fields: casts, fields and selects, each rewrite proved where it is made"). Rules
+  propose, guided by known bits (zeros, ones, copies of the top bit, from constants, types, casts,
+  loads, masks, shifts, sums, comparisons, selects), and z3 proves each rewrite for the node it
+  replaces with C's types (cexpr.equivalent), the node keeping its promoted type; a sign extension of 8
+  or 16 bits by shifts is a cast ((u32)(s16)x, a signed field (u32)(s8)(x >> 4)), a logical pair from
+  bit 0 (u32)(u16)x, a field whose top bit is known 0 the unsigned field, other pairs and masks the
+  field they select ((x >> k) & m, (x & 1) << 2), two shifts or masks one, masks and narrowing casts
+  the known bits make redundant, and a smeared sign or a negated truth value under a mask the select
+  it computes (where the masked value reads no memory and calls nothing). Public examples after all,
+  on RV32 (no sext.h, sext.b, zext.h without Zbb), in Thumb-2's sbfx (lifted as the same pair) and in
+  GCC's branchless selects: FreeRTOS virt-gcc-Os prvUnlockQueue (int8_t cTxLock--: `s2 = (s32)(((u32)s2
+  - 1) << 24) >> 24;` now `s2 = (s8)(s2 - 1);`, as mps2-gcc-Os prints its sxtb), vPolledQueueConsumer
+  and vCounterControlTask (uint16_t counters: `(a5 + 1) & 0xffffu`, `(s3 - 1) << 16 >> 16` now `(u16)(a5
+  + 1)`, `(u16)(s3 - 1)`), prints (`(((s32)(a3 << 30) >> 31) & 0x10u) + 0x20u` now `(a3 & 2) != 0 ? 0x30u
+  : 0x20u`, its clamp `((s32)(s0 ^ 0xffffffffu) >> 31) & s0` now `s0 >= 0 ? s0 : 0`) and three FromISR
+  functions' wrap-arounds (`a5_1 & (0 - (u32)(a5_1 < 24))` now `a5_1 < 24 ? a5_1 : 0`); gizmo's
+  cmd_volume (clamp(level, 0, 9): a32, m3, m4 `r0 & ~(u32)(r0 >> 31)`, rv32 `a0 & (0 - (u32)(a0 > 0))`,
+  now `r0 >= 0 ? r0 : 0`) and rv32's parse_kv (`((s32)parse_uint(...) >> 31) & 0xfffffffdu` now
+  `(s32)parse_uint(...) < 0 ? -3 : 0`). A test program (tests/test_bitfields.py BITS_PROGRAM: a short, a
+  signed char, unsigned shorts, sums of them, a signed byte of a word, bit fields of 8 and 4 bits, a bit
+  moved, a field of a mask, a select by a sign, a pad character, a clamp) with GCC for ARMv4T at -Os and
+  -O0, a Cortex-M3 and RV32IMAC: the casts, fields and selects read the same on all four, and the gate
+  takes every function, also with Ubuntu 22.04's compilers (whose RV32 GCC 10 branches where GCC 16
+  smears a sign). Its patterns (16 functions, main -> this): signed shift pairs 6 -> 1 on ARM state at
+  -Os and on RV32, 8 -> 1 at -O0, 3 -> 1 on the Cortex-M3 (its sbfx; the one left is the 4-bit field),
+  smeared signs 2, 1, 2, 2 -> 0, logical pairs and masks of a shift gone; 11, 11, 5 and 12 of its
+  functions read differently. Measured on copies of the eight builds (main -> this; the gate, then
+  every lifted function's printed C): the gate accepts the same functions on all eight (gizmo a32 35,
+  m3 36, m4 44, rv32 31; FreeRTOS GCC -Os 317, clang -O2 275, RISC-V GCC -Os 252, GCC -O0 354; the
+  readable tables byte for byte); the printed C of 24 functions changed (gizmo 1, 1, 1, 3; FreeRTOS 2,
+  0, 7, 9). The patterns (statements of the printed C, counted alike on both): signed shift pairs 3 ->
+  0 and logical pairs 1 -> 0 on RISC-V GCC -Os (casts to s8 12 -> 14, to u16 0 -> 2 there); smeared
+  signs and negated truth values under a mask 1, 1, 1, 2 -> 0 on gizmo and 1, 0, 6, 0 -> 0 on FreeRTOS,
+  selects now; two masks 1 -> 0 on gizmo rv32; on GCC -O0 shifts by 0 4 -> 0 (prvRand's lsrs; ubfx #0)
+  and casts to u8 the known bits make redundant 11 -> 5 (`prvCheckExpectedState((u8)(stack32.f_8 == 0 ?
+  1 : 0))`, `(u8)(r3_2->f_24 & ~0x1u)` of a byte field); on GCC -Os only prints' clamp and a redundant
+  `& 1` of a select of 1 and 0 (xAreDynamicPriorityTasksStillRunning), on clang -O2 nothing (Thumb-2
+  has sxth, ubfx and IT blocks). The check took 10, 5, 7, 3, 608, 303, 152, 447 s -> 6, 4, 5, 3, 469,
+  334, 152, 459 s and printing every lifted function in one process 3.3, 2.7, 2.4, 1.4, 54, 46, 24, 49
+  s -> 2.4, 1.9, 2.0, 1.4, 45, 48, 27, 46 s, on a machine shared with other runs: no change beyond its
+  noise; the pass itself is 2.0 % of making the readable C (2.4 s of 122 s on RISC-V GCC -Os, 3.4 s of
+  173 s on GCC -O0, every lifted function in one process, profiled; half of a first version's time
+  went to the types of functions without a shift or a mask, which it now skips). Names made for the C
+  before carry to it (dread readable --carry, which the check runs): tables naming every variable of
+  changed functions with main's code (gizmo a32's and rv32's, RISC-V GCC -Os's seven, GCC -O0's
+  nine), 113 names in the 15 that have variables, carried whole. Found on the way: three of the
+  lifters' idioms that later passes read by their shape must stay whole (the compare's (u64)x +
+  (u32)~y + 1 lost its (u32) to a first version and two gizmo conditions changed form; a byte store of
+  an add with its carry, (u8)(u32)((u64)r6 + 1 + 0), lost the (u32) sums reads and printed (u8)(r6 + 1)
+  on clang -O2; GCC -O0's flag select of 1 and 0 through a 64-bit temporary, (u32)(u8)(!(u32)(t_3 >>
+  32) || ... ? 0x1u : 0x0u), lost its (u8), and flags left `r3_1 = r0_1 <= s24 ? 0x1u : 0x0u` for the
+  comparison): no rewrite of a node that goes through 64 bits (a cast or a variable), and casts of a
+  value to its own type only between two arithmetic shifts. Left: a variable's bits from its
+  definitions (three masks each in gizmo a32, m3, m4 script_run and GCC -O0's __NVIC_EnableIRQ, all a
+  register shift's amount: the next item); 16-bit int (MSP430: left alone).
+- [ ] **Register shifts with an amount known below 32.** ARM's shift by a register (lsl r0, r1, r2,
+  Thumb-2's lsl.w) is lifted as `(s & 0xffu) == 0 ? x : (s & 0xffu) < 32 ? x << (s & 0xffu) : 0` (the
+  amount's low byte, 32 and more giving 0), and readable C prints it so. Its first arm is always
+  redundant (x << 0 is x); where the amount is known below 32 the whole is `x << s`: from its
+  expression's known bits (dread.bitfields known), and for a variable from all its definitions (known
+  bits over a function's assignments, a greatest fixpoint, given to the proof as an assumption on the
+  variable, which cexpr has no way to state yet). Follow-up of "Extensions and bit fields": the only
+  masks its known bits left on variables are these amounts. Public examples: gizmo a32, m3, m4
+  script_run (`acc ^= p[i] << (i & 7)`: `r2 = r3_2 & 7; r0_1 ^= (r2 & 0xffu) == 0 ? r1_1 : (r2 & 0xffu) <
+  32 ? r1_1 << (r2 & 0xffu) : 0;`), FreeRTOS mps2-gcc-O0 __NVIC_EnableIRQ (`1UL << (IRQn & 0x1FUL)`);
+  the ready-priority bitmaps of the Cortex-M3 port (`uxReadyPriorities |= 1UL << uxPriority`, an amount
+  nothing bounds: there only the first arm goes). Lines with the idiom on the eight builds (main,
+  2026-10-24): gizmo a32, m3, m4 2 each (script_run, gpio_set), rv32 none (RISC-V's sll takes the
+  amount's low five bits: `x << (s & 31)`), FreeRTOS GCC -Os 18 in 14 functions, clang -O2 21 in 13,
+  RISC-V GCC -Os none, GCC -O0 14 in 11.
 - [x] **One variable per value.** A register that holds unrelated values in turn (a pointer, then
   loaded bytes, then a callee's second word; a parameter, then a callee's result) stays one variable,
   and the pilot names it after one of its uses. Split variables where their live ranges do not meet
