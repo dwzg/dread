@@ -384,22 +384,42 @@ def parse(answer, numbers, sentence=True):
     return out
 
 
+def heard(where, last, got, numbers, error=None):
+    """A judge's answer (or its failed question) as an event of the run (dread.pilotlog "outcome"): the
+    source batch and run it was about, whether it gave every verdict asked for, its tokens and cost."""
+    from dread import llm, pilotlog
+    last = last or {}
+    if error is not None:
+        pilotlog.note("outcome", function=where, result="not asked" if isinstance(error, llm.BudgetReached)
+                      else "failed", why=str(error)[:300])
+        return
+    missing = len([k for k in numbers if k not in got])
+    pilotlog.note("outcome", n=last.get("answer"), function=where, result="refused" if missing else "accepted",
+                  why="%d verdicts missing" % missing if missing else None, names=len(numbers) - missing,
+                  input=last.get("input"), output=last.get("tokens"), cost=last.get("cost"))
+
+
 def judge_talk(provider, store, messages, numbers, sentence=True, tries=2, where=""):
     """One run's question of a batch as a dread.llm conversation: asked again (up to tries) while
     verdicts are missing, each attempt answered from store (a dread.llm.AnswerCache, or None) where it
     holds the answer and kept in it when asked (keyed by provider's kind and model). Returns ({number:
-    verdict}, None) or (what it got, why it stopped: the provider's error, said with where)."""
+    verdict}, None) or (what it got, why it stopped: the provider's error, said with where). Each answer
+    asked is an event of the run (heard)."""
     got = {}
     for attempt in range(max(1, tries)):
         key = store.key(provider, SYSTEM, messages, attempt) if store is not None else None
         answer = store.get(key) if store is not None else None
         if answer is None:
-            answer, _, error = yield (SYSTEM, messages, None)
+            answer, last, error = yield (SYSTEM, messages, None)
             if error is not None:
+                heard(where, last, got, numbers, error)
                 return got, "no verdicts for %s: %s" % (where, error)
             if store is not None:
                 store.put(key, answer)
-        got.update(parse(answer, [k for k in numbers if k not in got], sentence))
+            got.update(parse(answer, [k for k in numbers if k not in got], sentence))
+            heard(where, last, got, numbers)
+        else:
+            got.update(parse(answer, [k for k in numbers if k not in got], sentence))
         if len(got) == len(numbers):
             break
     return got, None
@@ -494,11 +514,15 @@ def judge(provider, runs, sources, sentence=True, out=print, tries=2, jobs=1, ca
                     try:
                         answer = asker().ask(SYSTEM, messages)
                     except ProviderError as e:
+                        heard("%s (%s)" % (path, label), {}, got, numbers, e)
                         out("dread pilot --grounded: no verdicts for %s (%s): %s" % (path, label, e))
                         break
                     if store is not None:
                         store.put(key, answer)
-                got.update(parse(answer, [k for k in numbers if k not in got], sentence))
+                    got.update(parse(answer, [k for k in numbers if k not in got], sentence))
+                    heard("%s (%s)" % (path, label), getattr(asker(), "last", {}), got, numbers)
+                else:
+                    got.update(parse(answer, [k for k in numbers if k not in got], sentence))
                 if len(got) == len(numbers):
                     break
             got_all.append((label, {entries[k - 1]: verdict for k, verdict in got.items()}))

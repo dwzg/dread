@@ -4316,7 +4316,34 @@ reimplement them.
   come), stop it (its batches cancelled: a job's stop is SIGTERM to its process group, which makes the
   pilot cancel its batches; start_command's grace gives it longer than 30 s where that takes longer),
   its history and the cost per month (the usage log), two runs compared (--score, the judge). The
-  pilot's side (structured progress events) is another agent's, in parallel.
+  pilot's side (structured progress events, the budget) is done: 3a; the page reads dread.pilotlog.
+- [x] 3a. The pilot's side of 3: a run followed live and kept within a budget. Done when every run
+  writes structured events as they happen, `dread pilot --budget DOLLARS` stops a run where its
+  estimates say the budget ends with the tables as for a normal end, `dread pilot --status [--follow]`
+  and `--list` show a run from its events, a stopped run says so, each measured on FreeRTOS GCC -Os.
+  Done 2026-10-24 (dread/pilotlog.py, dread.llm Meter; docs/formats.md, three entries of
+  docs/decisions.md). Every run that may ask a provider has an id and BUILD/pilot/runs/ID/events.jsonl
+  (start, stages with the questions planned, rounds, Message Batches submitted, looked at and ended,
+  each answer with its tokens, cost and the spend so far, what the pilot made of it, each function
+  settled, the budget reached, warnings, the end: done, stopped, failed or budget reached), and two
+  lines in BUILD/pilot/runs/index.jsonl; the GUI reads them through pilotlog runs, state and events (by
+  byte offset). Every question goes through the run's meter (Provider.ask, ask_batch): estimated from
+  its text and its kind's answers (the larger of their mean and their tokens out a token in times its
+  input; else earlier runs'; else 4,000 tokens out), admitted only while it fits; the pilot weighs a
+  function's or group's samples before it begins them, a batch's rest is weighed again after its first
+  part. A vote cut short keeps the answers it got. SIGTERM cancels the batches and the questions not
+  begun and waits 20 s at most for those being asked (llm.thread_pool: dread gui kills a job 30 s after
+  its SIGTERM), so that the end event "stopped" is written. Measured (Haiku 5.5): events 230-275 bytes
+  each (a readable run 294 KB, a 40-function name run 181 KB), no measurable cost (a played run of 1,830
+  answers, five pairs, within the machine's spread); `--task readable` $0.106 whole, with `--budget
+  0.05` $0.0498 (104 of 317 functions; a first version passed it, $0.0577, the estimate's mean taken
+  from the smallest functions' answers); a 40-function `--task name` $0.0585 whole, with `--budget
+  0.029` $0.0264 (14 of 29 groups), $0.0277 with an earlier run's estimates (20 groups); a run stopped
+  by SIGTERM while its batch was out: the batch cancelled (none of its 145 questions billed), the end
+  event "stopped". Spent: $0.35 of Haiku 5.5. Open: `--budget` with `--task review` (refused:
+  dread.namereview keeps a challenge whose questions were held back as one without a candidate); the
+  estimate on other models and tasks; a first run's first batch of a kind (no answers yet) is weighed at
+  4,000 tokens out, so a small budget takes several rounds.
 - [ ] 4. Result views for the tools the GUI does not show yet: bench results, cclab profiles, a trace's
   first difference, uncovered regions, mutation survivors, callconv and regflow per function,
   leakcheck's hits.

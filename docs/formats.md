@@ -600,6 +600,53 @@ text). The conversation is kept in `device.md` beside it. The naming tasks (`--t
 target states one (`[llm] device`, docs/target.md), the device is `unknown`, or `--no-device` is
 given.
 
+### `BUILD/pilot/runs/ID/events.jsonl`, `BUILD/pilot/runs/index.jsonl` (a pilot run's events)
+
+Written by every `dread pilot` run that may ask a provider (each task; `--score` with `--judge` or
+`--grounded`), since 2026-10-24 (dread.pilotlog `RunLog`; the provider's side, dread.llm `Meter`). Read
+by `dread pilot --status [ID] [--follow]` and `--list`, and by the GUI through dread.pilotlog: `runs(build)`
+(the runs, newest first, with how each ended or `running`/`gone`), `state(build, run)` (one run folded:
+its stage, the questions answered of those planned, the batches waiting and their age, the spend
+against the budget, the rate and the time left, the last answers), `events(build, run, offset)` (the
+events since a byte offset of the file, and the next offset: what a page polls).
+
+A run's id is its start time, its task and four hex digits (`20261024-153012-name-1a2b`, unique within
+the target: its directory is made with an exclusive `mkdir`); the run prints it when it begins. Its
+`events.jsonl` is one JSON object a line, each with `t` (seconds since the epoch, three decimals) and
+`event` (its kind), written as it happens with one `write()` of the whole line to the file opened for
+appending, so a reader sees whole lines (the last one may still be on its way: readers take lines up
+to the last newline). Fields that do not apply are left out. Readers skip a line they cannot parse and
+ignore kinds and fields they do not know; the start event's `format` (1) changes only with a note here.
+
+| `event` | when | fields |
+|---|---|---|
+| `start` | the run begins, before anything is asked | `format`, `run`, `task` (`name`, `readable`, `globals`, `subsystems`, `device`, `review`, `input`, `write`, `score`), `image`, `target` (its root), `provider` and `model` (the run's provider), `settings` (the options given, as JSON values: `samples`, `passes`, `jobs`, `batch`, `budget`, ...; `thinking` as the task's questions get it; `names` as a count beyond 20), `budget` (US dollars; absent without one), `functions` (the functions the task takes, where known as it begins), `pid`, `host`, `argv` |
+| `stage` | a stage begins (`state` `start`) and ends (`end`) | `stage` (`groups`, `pass N`, `refine`, `globals`, `structures`, `variables`, `device`, `inputs`, `write`, `review`, `judge`). At its start: `questions` (the first questions it plans; a question asked again within its conversation is not counted; for `pass 2` and later at most so many, with `at_most` true; absent where not known: `review`, `judge`), `functions` (and `groups`, `globals`, `structures` where they apply), `waves` (true where `--task name`'s passes go in waves of Message Batches). At its end what it did (`asked`, `proposed`, `named`, `changed`, `accepted`, ...) and `seconds` |
+| `round` | a round of questions (dread.llm `converse_all`) | `questions`, `batch` (true: they go as Message Batches) |
+| `batch` | a Message Batch, by `state`: `submitted` (`id`, `requests`, `estimate` in US dollars), `looked` (`id`, `status`: the API's processing status, `counts`: its request counts, `age`: seconds since it was submitted; when the status or the counts changed, else at most every 60 s, BATCH_LOOK), `ended` (`id`, `requests`, `succeeded`, `errored`, `canceled`, `expired`, `missing`, `seconds`), `cancelled` (`id`, `why`: `batch_wait` or `interrupted`), `failed` (`requests`, `error`: it could not be submitted) | |
+| `answer` | a provider's answer, recorded (every question of the run, whatever asked it) | `n` (its number in the run: 1, 2, ...), `provider`, `model`, `mode` (`batch`, or empty), `input`, `output` (tokens), `cache_read`, `cache_write` (where any), `finish`, `cost` (US dollars at the usage ledger's prices; absent without prices), `spent` (the run's spend so far), `estimate` (what the meter weighed the question at), `turn` (1 for a conversation's first question, 2 and more for one asked again) |
+| `outcome` | what the pilot made of an answer, or of a question that failed | `stage`, `function` (what it was about: a function, `group N`, `globals N`, `structures N`, `device`, a judge's `FILE (RUN)`), `result` (`accepted`, `refused`, `declined`, `failed`, `not asked`: the budget held it back, `answered`: a globals' or structures' answer, checked in its `settled`), `why`, `name` (the name it gave) or `names` (a readable answer's map; a judge's count of verdicts), `n` (its `answer` event's), `input`, `output`, `cost` |
+| `settled` | a function, group, batch of globals or the device done | `stage`, `function`, `result` (`proposed`, `named`, `none`, `unasked`: the budget held back a question of it and nothing was kept; for `--task write` `accepted`, `rejected`, `refused`; `inputs`), and where they apply `name`, `confidence`, `what`, `why`, `changed`, `names`, `named`, `of`, `refused`, `ran`, `answers` |
+| `budget` | the first question the budget holds back | `state` (`reached`), `budget`, `spent`, `reserved`, `estimate` (of what was held back), `questions`, `words` |
+| `warning`, `error` | what the run warned of | `text` |
+| `end` | the run ends | `how` (`done`; `stopped`: SIGTERM, SIGHUP or SIGINT; `failed`: an exception; `budget reached`), `exit` (the command's status; absent when it did not return), `error` (how it was stopped, or the exception), `seconds`, `answers`, `batch`, `input`, `output`, `cache_read`, `cache_write`, `cost`, `asked` (questions admitted), `held` (questions held back by the budget), `outputs` (`{kind: {"out": tokens out of an answer, "chars": characters of a question a token, "per_in": tokens out a token in}}` of its answers: a later run's first estimates; a kind is a digest of the model, whether it asks without reasoning and the question's instructions) |
+
+`index.jsonl` (beside the runs' directories) has two lines a run, appended under a lock of the file
+(`flock`: runs of one target may start and end at once): `{"run", "state": "start", "t", "task",
+"image", "provider", "model", "budget", "pid", "host"}` and `{"run", "state": "end", "t", "how",
+"seconds", "answers", "cost", "outputs"}`. A run without an end line was killed outright (SIGKILL, a
+crash) or is running: `runs()` tells them apart by the pid on the same host and that process's start
+time (`gone` or `running`; a run of another host stays `running`). A run directory the index lacks is
+read from its events.
+
+What the events do not establish: anything after the process was killed outright (no end event); the
+time left (`state`'s estimate is the questions planned so far over the rate since the first stage
+began, and Message Batches answer in bursts). Times are the wall clock's: the events are a log, not a
+deterministic output; the run's tables do not depend on them. Size, measured on FreeRTOS GCC -Os with
+Haiku 5.5 (2026-10-24): 230-275 bytes an event; a `--task readable` run 1,076 events, 294 KB (364
+answers); a `--task name` run of 40 functions 782 events, 181 KB (345 answers); a whole `--task name` run
+(about 3,300 answers) would write about 1.7 MB.
+
 ### `BUILD/lift-check/IMAGE/verdicts.tsv`
 
 Written by `dread lift --check`: one line per function it looked at, `function`, `verdict`

@@ -143,7 +143,7 @@ def test_provider_wire_formats(monkeypatch):
         path, headers, body = Fake.seen[-1]
         assert body["messages"][0] == {"role": "system", "content": "be brief"} and body["model"] == "m"
         assert body["temperature"] == 0.2                       # (the configuration's, by default)
-        assert local.last == {"finish": "stop", "tokens": 12, "reasoning": 3, "input": None}
+        assert local.last == {"finish": "stop", "tokens": 12, "reasoning": 3, "input": None, "cost": None}
         github = llm.OpenAICompatible("gh", {"url": url + "/inference/", "path": "/chat/completions", "model": "o/m",
                                              "headers": {"x-github-api-version": "2022-11-28"}})
         assert github.ask("be brief", [{"role": "user", "content": "hello"}]) == "openai says hi"
@@ -163,7 +163,7 @@ def test_provider_wire_formats(monkeypatch):
         remote.ask("be brief", [{"role": "user", "content": "hello"}], temperature=1.0)
         assert Fake.seen[-1][2]["temperature"] == 1.0
         assert remote.last == {"finish": "max_tokens", "tokens": 34, "reasoning": 4, "input": 57, "cache_read": 7,
-                               "cache_write": 0, "cache_write_1h": 0}
+                               "cache_write": 0, "cache_write_1h": 0, "cost": None}     # (no prices: no cost)
         assert {k.lower(): v for k, v in headers.items()}["x-api-key"] == "secret"
         parts = [{"text": "the sources", "cache": True}, {"text": "the names"}]
         remote.ask("be brief", [{"role": "user", "content": parts}])     # (a part to cache: Anthropic's block;

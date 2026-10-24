@@ -1,6 +1,7 @@
 """dread.llm's command provider (a command line that answers: an agent's headless mode, a local
 model's wrapper) and the dread llm command, with a stand-in program that reports what it was given."""
 import json
+import os
 import sys
 
 import pytest
@@ -379,3 +380,111 @@ def test_the_llm_command_lists_and_cancels_batches(tmp_path, monkeypatch, capsys
         assert llm.main(["batches", "--provider", "local"]) == 1
     finally:
         server.close()
+
+
+PRICES = {"price_in": 1.0, "price_out": 5.0, "price_batch": 0.5}    # (US dollars per million tokens)
+
+
+def test_a_meter_asks_only_what_fits_the_budget_and_counts_the_runs_spend():
+    """A run's meter (llm.Meter, metered): a question's estimate takes its input from its text (3 characters
+    a token) and its output from OUT_TOKENS before an answer of its kind, then from the mean of its kind's
+    answers; Provider.ask admits a question only when the estimate fits what is left of the budget after
+    the spend, counts its answer's cost (the ledger's price) into the spend, numbers the answer and makes
+    it an event; the first question that does not fit is not asked (BudgetReached), marks the budget
+    reached and is an event once; a provider's error frees what its question reserved."""
+    events = []
+    p = llm.Scripted(lambda messages: {"text": "ok", "input": 1000, "tokens": 200}, prices=PRICES)
+    meter = llm.Meter(budget=0.03, emit=lambda kind, **fields: events.append((kind, fields)))
+    system, question = "s" * 300, [{"role": "user", "content": "x" * 2700}]    # (3,000 characters: 1,000 tokens)
+    assert meter.estimate(p, system, question) == pytest.approx((1000 * 1.0 + llm.OUT_TOKENS * 5.0) / 1e6)
+    with llm.metered(meter):
+        assert llm.METER is meter and p.ask(system, question) == "ok"
+        assert meter.spent == pytest.approx((1000 + 200 * 5) / 1e6) and meter.reserved == pytest.approx(0)
+        assert p.last["cost"] == pytest.approx(0.002) and p.last["answer"] == 1
+        assert meter.estimate(p, system, question) == pytest.approx((1000 + 200 * 5.0) / 1e6)   # (its kind's mean)
+        for _ in range(14):
+            p.ask(system, question)
+        with pytest.raises(llm.BudgetReached) as refused:     # (0.030 spent, 0.002 more would pass 0.03)
+            p.ask(system, question)
+        assert str(refused.value).startswith("not asked") and meter.reached == str(refused.value)
+        with pytest.raises(llm.BudgetReached):
+            p.ask(system, question)
+    assert llm.METER is None and len(p.asked) == 15 and meter.spent <= 0.03 + 1e-12
+    answers = [f for kind, f in events if kind == "answer"]
+    assert [a["n"] for a in answers] == list(range(1, 16)) and answers[-1]["spent"] == pytest.approx(0.03)
+    assert answers[0]["estimate"] == pytest.approx(0.021) and answers[1]["estimate"] == pytest.approx(0.002)
+    assert {a["turn"] for a in answers} == {1} and answers[0]["input"] == 1000 and answers[0]["output"] == 200
+    reached = [f for kind, f in events if kind == "budget"]
+    assert len(reached) == 1 and reached[0]["budget"] == 0.03 and reached[0]["state"] == "reached"
+    assert meter.totals()["answers"] == 15 and meter.totals()["held"] == 2 and meter.totals()["asked"] == 15
+    assert p.spent()["answers"] == 15 and not os.path.exists(llm.USAGE)     # (played: never in the ledger)
+    assert meter.outputs() == {llm.kind_of(p, system): {"out": 200.0, "chars": 3.0, "per_in": 0.2}}   # (the next
+    longer = [{"role": "user", "content": "x" * 5700}]      # run's prior; a question twice as long: the answers' tokens
+    assert meter.estimate(p, system, longer) == pytest.approx((2000 + 400 * 5.0) / 1e6)  # out a token in, 0.2)
+    failing = llm.Scripted([], prices=PRICES)               # (no answer left: the provider's error)
+    with llm.metered(llm.Meter(budget=1.0)) as m:
+        with pytest.raises(llm.ProviderError):
+            failing.ask(system, question)
+        assert m.reserved == pytest.approx(0) and m.spent == 0
+    prior = llm.Meter(prior={llm.kind_of(p, system): {"out": 300, "chars": 2.0}})    # (an earlier run's answers)
+    assert prior.estimate(p, system, question) == pytest.approx((1500 + 300 * 5.0) / 1e6)
+    assert llm.Meter().estimate(llm.Scripted([]), system, question) is None    # (no prices: no estimate)
+
+
+def test_a_batch_asks_the_questions_that_fit_and_its_events_say_how_it_went():
+    """ask_batch under a meter: the questions are admitted in their order at the batch rate while they fit
+    the budget; those that do not are weighed again once the first are answered (the answers' lengths
+    known then) and go in a batch of their own, until none fits: those fail unasked (BudgetReached), and
+    only then is the budget reached. Each batch is an event when it is submitted (with its estimate),
+    looked at and ended (its counts), each answer one; a round of converse_all is an event too."""
+    events = []
+    p = llm.Scripted(lambda messages: {"text": "ok", "input": 1000, "tokens": 200}, batches=True, prices=PRICES)
+    meter = llm.Meter(budget=0.0115, emit=lambda kind, **fields: events.append((kind, fields)))
+    questions = [("s" * 300, [{"role": "user", "content": "x" * 2700}], None) for _ in range(12)]
+    with llm.metered(meter):    # (each estimated at (1,000 + 4,000 * 5) / 1e6 * 0.5 = 0.0105 first: one fits;
+        replies = llm.ask_batch(p, questions, out=lambda *a: None)     # then at 0.001: ten more fit)
+    assert [r[0] for r in replies] == ["ok"] * 11 + [None] and isinstance(replies[11][2], llm.BudgetReached)
+    assert [len(b["requests"]) for b in p.submitted] == [1, 10]
+    assert meter.spent == pytest.approx(11 * (1000 + 200 * 5) / 1e6 * 0.5) and meter.reserved == pytest.approx(0)
+    assert meter.spent <= meter.budget
+    batch = [f for kind, f in events if kind == "batch"]
+    assert [b["state"] for b in batch] == ["submitted", "looked", "ended"] * 2, batch
+    assert batch[0]["requests"] == 1 and batch[0]["estimate"] == pytest.approx(0.0105)
+    assert batch[3]["requests"] == 10 and batch[3]["estimate"] == pytest.approx(0.010)
+    assert batch[1]["status"] == "ended" and batch[1]["counts"]["succeeded"] == 1
+    assert batch[5]["succeeded"] == 10 and batch[5]["errored"] == 0
+    assert [f["mode"] for kind, f in events if kind == "answer"] == ["batch"] * 11
+    assert [f["questions"] for kind, f in events if kind == "budget"] == [1] and meter.reached
+    events.clear()
+    with llm.metered(llm.Meter(emit=lambda kind, **fields: events.append((kind, fields)))):
+        upper = llm.Scripted(lambda messages: messages[0]["content"].upper(), batches=True)
+        assert llm.converse_all(upper, [talk(q, q.upper()) for q in "ab"], batch=1) == ["A", "B"]
+    assert [f for kind, f in events if kind == "round"][0] == {"questions": 2, "batch": True}
+
+
+def test_a_stopped_pool_asks_nothing_more():
+    """llm.thread_pool: a block ended by an exception (a run stopped by SIGTERM) cancels the questions
+    not begun and waits only for the one being asked."""
+    import time
+    started = []
+
+    def work(k):
+        started.append(k)
+        time.sleep(0.2)
+    with pytest.raises(KeyboardInterrupt):
+        with llm.thread_pool(1) as pool:
+            futures = [pool.submit(work, k) for k in range(5)]
+            while not started:
+                time.sleep(0.01)
+            raise KeyboardInterrupt
+    assert started == [0] and [f.cancelled() for f in futures] == [False] + [True] * 4
+    with llm.thread_pool(2) as pool:            # (ended normally: everything asked)
+        assert list(pool.map(abs, [-1, -2, -3])) == [1, 2, 3]
+    began = time.time()                         # (a question longer than stop_wait: the block ends without it,
+    with pytest.raises(KeyboardInterrupt):      # its thread going on)
+        with llm.thread_pool(1, stop_wait=0.1) as pool:
+            slow = pool.submit(time.sleep, 1.0)
+            time.sleep(0.05)
+            raise KeyboardInterrupt
+    assert time.time() - began < 0.9 and not slow.done()
+    slow.result(5)

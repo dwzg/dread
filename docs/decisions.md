@@ -9,6 +9,141 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## A pilot run's events: a JSON-lines file per run in the target's build directory, an index beside it (2026-10-24)
+
+**Decided by recommendation**, on the user's request of 2026-10-24 ("Can the GUI be extended to support
+all of DREADs features and also provides an easy way to set everything up and run and monitor the
+pilot?"): the pilot's side, so that a run can be followed live, from the GUI and from the command line.
+
+- **Question.** Where and in what form does a run say what it does, as it does it: its stages, the
+  questions planned and answered, the batches out, each answer with its cost, the spend, how it ended?
+- **Options.** (a) The lines it prints, parsed by whoever watches (they are for people, change with every
+  wording, and are lost unless someone captured them). (b) A database per target (SQLite: concurrency
+  handled, but a schema to migrate for every new field, a binary file, a dependency of every reader).
+  (c) JSON lines, one file per run, appended as things happen, and a small index of the runs. (d) The
+  usage ledger extended (one file for every run of every target on the machine, no run's structure).
+- **Choice: (c).** `BUILD/pilot/runs/ID/events.jsonl` and `BUILD/pilot/runs/index.jsonl` (docs/formats.md;
+  dread/pilotlog.py writes and reads them). A run's id is its start time, its task and four hex digits,
+  its directory made with an exclusive mkdir. Each event is one line, written with one `write()` to the
+  file opened for appending: a reader polling by byte offset (`pilotlog.events(build, run, offset)`, what
+  the GUI's page calls) sees whole lines, the threads of the run share it through a lock, runs of two
+  targets never share a file, and runs of one target share only the index, appended under `flock`. New
+  fields and kinds need no migration: readers ignore what they do not know (the start event's `format`
+  says when that would not do). The provider's side (each answer, round, batch, the budget) comes from
+  dread.llm's run meter (Meter.emit), the pilot's side (stages, what an answer gave, each function
+  settled) from pilotlog.note, both into the same file. The build directory is the place: generated,
+  per target, not committed; the runs of all of a target's images in one list (the image is in each
+  start event).
+- **Measured** (FreeRTOS GCC -Os, Haiku 5.5; the runs below, "Runs within a budget"): 230-275 bytes an
+  event; a readable run (364 answers) wrote 1,076 events, 294 KB, a name run of 40 functions (345
+  answers) 782 events, 181 KB (a whole name run, about 3,300 answers, would write about 1.7 MB). The writer
+  takes about 23 µs an event alone (an answer and what the pilot made of it, two events, 45 µs). A name
+  run of all 366 functions with a played provider (1,830 answers, five samples, no network), five times
+  with events and five without, alternately: 18.6-20.6 s against 16.0-21.7 s, the paired differences
+  -1.7 to +4.6 s (mean +1.0, s.d. 2.4): nothing measurable beside the machine's own spread (load 16;
+  the events of such a run, about 4,000, take 0.1-0.2 s to write).
+- **Not established.** Anything after a process was killed outright (no end event: `runs()` calls the run
+  `gone` once its pid is no more on this host, the pid checked against the process's start time where
+  Linux's /proc tells it; a run of another host stays `running`); other systems than Linux (flock and
+  /proc are used where they exist).
+- **Undo.** The run wrapper (dread.pilot `logged`) is one function; without it nothing is written and
+  nothing else changes.
+- **Status.** In the code (dread/pilotlog.py; dread/pilot.py logged, heard, the stage and settled events;
+  dread/llm.py Meter.emit, ask_batch's and converse_all's events; dread/namejudge.py heard).
+
+## Runs within a budget: every question weighed before it is asked, groups whole, a batch's rest weighed again (2026-10-24)
+
+**Decided by recommendation** (the same request): `dread pilot --budget DOLLARS`.
+
+- **Question.** How does a run keep within a budget, when what an answer costs is known only after it?
+  And what does it do with the rest?
+- **Options for the estimate.** (a) The worst case (max_tokens out: 16,000 tokens for Haiku 5.5 where a name
+  answer takes about 470): a run would stop at a small part of its budget. (b) The input from the
+  question's text (CHARS_PER_TOKEN) and the output from the answers of the same kind so far in the run,
+  else from earlier runs, else a stated default. (c) A fixed price a question (the ledger's mean).
+- **Choice: (b)**, by dread.llm's run meter (Meter): a question's kind is its model, whether it is asked
+  without reasoning and its instructions. Its output comes from the last OUT_WINDOW (50) answers of its
+  kind: the larger of their mean and their tokens out a token in times the question's input (a constant
+  answer's length and one that grows with the question both come out at or above the truth); else from
+  the earlier runs' answers (their end events' outputs, pilotlog.prior_outputs); else OUT_TOKENS (4,000:
+  about the longest answers measured, the globals' and structures' of a readable run, 3,818 and 3,948
+  tokens on FreeRTOS; an answer longer than its estimate can take the spend past the budget, a shorter
+  one only makes the run weigh again). Its input comes from its characters at the characters a token its
+  kind's answers took (the provider's input tokens against the questions' characters), else
+  CHARS_PER_TOKEN (3). It is priced as the usage ledger prices (answer_cost: the batch rate in a batch),
+  no prompt cache assumed. The spend is the run's own answers at those prices (Meter.answered, from
+  Provider.record): what this run spent, whatever runs beside it.
+- **Where it is weighed.** Every question, in Provider.ask (the kinds implement _ask): the guarantee,
+  whatever code asks; a batch's questions in ask_batch, in their order while they fit; what does not fit
+  is weighed again once those that fit are answered (the estimates know the answers' lengths then), and
+  only a batch of which nothing fits marks the budget reached. The pilot weighs what belongs together
+  before it begins it, so that it is asked whole: a function's samples (one_pass begins a component of
+  the call graph only when a thread is free, with a budget, so that it is weighed with the spend so
+  far; a wave of batches goes in parts that fit), a group's samples, the device question's. Once the
+  budget is reached the pilot begins nothing new, asks the questions of what it has begun, and the run
+  ends with "budget reached". A question of a group begun that the meter holds back after all (its
+  estimate grew while the group was asked: answers that wrote the prompt cache cost more than their
+  estimates, the characters a token learned) counts as a failed question: the vote takes the answers
+  there are, so that every answer paid for is kept (a first version dropped such a vote with its
+  answers; on FreeRTOS that lost four paid answers of a group). A function or group none of whose
+  questions was asked has no row, no conversation and no line of results.tsv: a run started again
+  asks it. The tables are written as for a run that ends normally.
+- **Measured** on copies of FreeRTOS GCC -Os (mps2), Haiku 5.5, the defaults (`--batch 100`, the cache,
+  five samples, two passes), `--no-device --jobs 16`:
+
+      run                                   cost     answers  how                 what was named
+      name, 40 functions (whole)            $0.0585  345      done, 6.5 min       29 groups, 40 functions
+        --budget 0.029, first run           $0.0262  69       budget reached      14 groups (in parts, one at a time)
+        --budget 0.029, an earlier run's    $0.0277  100      budget reached      20 groups
+          index copied (its estimates)
+      readable, 317 functions (whole)       $0.1062  364      done, 5.3 min       317 functions
+        --budget 0.05, first version        $0.0577  162      budget reached      135 functions: 15 % over
+        --budget 0.05                       $0.0498  124      budget reached      104 functions (batches of 19, 90)
+
+  The first version's readable run passed its budget: its variables' second batch (130 questions) was
+  weighed at the mean answer of the first batch, the 18 smallest functions (370 tokens out, 538 in),
+  where its own took 589 and 856: 1.46 times its estimate. An answer's output is now the larger of its
+  kind's mean and its kind's tokens out a token in times the question's input. With the first default
+  of 1,000 tokens out, the globals' and structures' questions of a first run (all asked at once) cost
+  3.0 and 3.5 times their estimates; with 4,000, 1.0 and 0.87 times. Estimates against costs otherwise:
+  the groups' questions 1.9-2.6 times their cost (most of their input read from the prompt cache, which
+  the estimate does not assume), a first batch of a kind not seen before about twice. A name run stopped
+  by SIGTERM five seconds after its groups' batch was submitted: exit 143, the batch cancelled (none of
+  its 145 questions answered or billed), its end event "stopped" (ended by SIGTERM), `--status` showing
+  it, the grouping written and no proposal. Spent on the measurements: $0.33 of Haiku 5.5.
+- **Not established.** The estimate's accuracy on other models, compilers and tasks (measured on Haiku 5.5
+  and FreeRTOS only); a run can pass its budget by what its admitted questions cost beyond their
+  estimates (an answer that reasons longer, a cache write, a question asked again); `--task review`
+  is refused with a budget, since dread.namereview keeps a challenge whose questions were held back as
+  one without a candidate (and then does not challenge that name again for the same reasons).
+- **Undo.** Leave out `--budget`: the meter still counts, nothing is held back.
+- **Status.** In the code (dread/llm.py Meter, Ticket, metered, BudgetReached, OUT_TOKENS, ask_batch's
+  rounds; dread/pilot.py --budget, logged, Tally, fitting, the schedulers' weighing).
+
+## The run's progress: `dread pilot --status [ID] [--follow]` and `--list`, the reading in dread.pilotlog (2026-10-24)
+
+**Decided by recommendation** (the same request).
+
+- **Question.** How does one look at a run from the command line: options of `dread pilot`, a subcommand
+  of it, or a command of its own?
+- **Options.** (a) `dread pilot --status [ID]`, `--follow`, `--list`, as `--usage` and `--dry-run` are
+  modes of dread pilot that ask nothing. (b) `dread pilot status ...`: dread pilot takes function names as
+  its positional arguments, and a subcommand would be one more word a function could be named. (c) A
+  command `dread runs`: one more command for one tool's files.
+- **Choice: (a).** The target is the pilot's (`--target`), the run the latest without an id. `--status`
+  prints the run's state (pilotlog.state: the stage, the questions answered of those planned so far,
+  the batches waiting and their age and progress, the spend against the budget, the rate, an estimate
+  of the time left, the last answers, the warnings); `--follow` prints it, then a line for each stage,
+  round, batch, function settled and warning as the events come, a progress line every 30 s, and the
+  state again when the run ends (or says so when its process is gone without an end); `--list` lists
+  the runs with how each ended and what it cost. The reading is a module of its own (dread/pilotlog.py:
+  runs, state, events, status_lines, follow) that the GUI calls.
+- **Not established.** The time left is the questions planned so far over the rate since the first stage
+  began: rough while a Message Batch is out (its answers come at once), and a later pass of `--task
+  name` plans its questions only when it begins (its stage says "at most").
+- **Undo.** The options are a few lines of pilot_main; the module stays for the GUI.
+- **Status.** In the code (dread/pilot.py status_main; dread/pilotlog.py).
+
 ## The GUI runs every command: jobs, forms from the commands' parsers, pages as modules (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), for step 1 of "The GUI for

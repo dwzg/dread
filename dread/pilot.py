@@ -178,15 +178,41 @@ on FreeRTOS (2026-10-24). It is not the default of any task (THINKING): without 
 half, but its names were judged against the source 0.645 against 0.784 (five runs a side, p 0.008),
 and the readable names lost too (docs/decisions.md).
 
+Runs, followed and kept within a budget (since 2026-10-24; dread.pilotlog, dread.llm Meter;
+docs/decisions.md). Every run that may ask a provider (each task; --score with a judge) is a run with an
+id, printed as it begins, and events written as they happen to BUILD/pilot/runs/ID/events.jsonl (the
+run's start with its settings and the functions planned, each stage with the questions it plans, each
+round and Message Batch, each answer with its tokens, cost and the spend so far, what the pilot made of
+it, each function settled, the budget reached, warnings, and the end: done, stopped, failed or budget
+reached, with the totals; docs/formats.md), and a line in BUILD/pilot/runs/index.jsonl at its start
+and end (logged). --status [ID] prints a run's progress from its events (the latest run by default:
+the stage, the questions answered of those planned, the batches waiting and their age, the spend
+against the budget, the rate and the time left, the last answers), --follow keeps printing as it goes
+until it ends, --list lists the runs with how each ended and what it cost; the GUI reads the same
+events (pilotlog runs, state, events). --budget DOLLARS asks no question whose estimated cost would
+take the run's spend past DOLLARS: the run's meter weighs every question before it is asked (its input
+from its text, its output from the answers of its kind so far, else from earlier runs, else
+llm.OUT_TOKENS), the spend counts the run's own answers at the usage ledger's prices, and what does not
+fit is left unasked: the run ends with "budget reached", every answer so far kept and the tables
+written as for a run that ends normally, so that a run started again goes on where it stopped. What
+belongs together is weighed before it is begun (a function's samples, a group's: Tally, fitting), so
+that it is asked whole; a question the meter holds back after all (its estimate grew meanwhile) counts
+as a failed one, the vote taking the answers there are. A batch's questions that do not fit are
+weighed again once the first ones are answered. SIGTERM, SIGHUP and SIGINT stop a run in order: the
+batches it waits for are cancelled, the questions not begun are not asked and those being asked are
+waited for llm.STOP_WAIT (20) seconds at most (llm.thread_pool: dread gui kills a job 30 s after its
+SIGTERM), its end event says "stopped", its tables are as it left them.
+
     dread pilot [--target DIR] [--image NAME] [--provider NAME] [--tries N] [--limit N] [--no-lifted]
                 [--no-mutate] [--no-integration] [--dry-run]
                 [--task write|input|name|readable|globals|subsystems|device|review] [--no-device] [--jobs N]
-                [--batch N] [--[no-]thinking] [--refine] [--behaviour]
+                [--batch N] [--[no-]thinking] [--budget DOLLARS] [--refine] [--behaviour]
                 [--[no-]subsystems] [--samples K] [--temperature T] [--gate C] [--passes N] [--ablate]
                 [--score TRUTH [--judge PROVIDER] [--grounded PROVIDER [--source DIR] [--names-only]
                                                    [--no-judge-cache]]
                                [--upto-pass N] [--against NAMES_TSV... [--vs NAMES_TSV...]]]
                 [--decider PROVIDER] [--margin M] [--rounds N] [--threshold S] [NAME...]
+    dread pilot [--target DIR] --status [ID] [--follow] | --list
 """
 import argparse
 import collections
@@ -198,6 +224,7 @@ import sys
 import time
 
 from dread import llm
+from dread import pilotlog
 from dread import target as tgt
 
 # The prompts say "binary image", not "firmware image": Anthropic's API refused (stop reason
@@ -495,11 +522,116 @@ def ended(info):
     return ", ".join(parts)
 
 
+# ---- the run's events (dread.pilotlog) and its budget (dread.llm Meter) ----
+
+def failed_why(error):
+    """A failed question's words in a conversation's result: a question the run's budget held back has
+    its own ("not asked: ...", llm.BudgetReached), anything else "the provider: ERROR"."""
+    return str(error) if isinstance(error, llm.BudgetReached) else "the provider: %s" % error
+
+
+def unasked(why):
+    """Whether a conversation's failure is a question the run's budget held back (failed_why)."""
+    return isinstance(why, str) and why.startswith("not asked")
+
+
+def budget_reached():
+    """The words of the run's budget reached (llm.Meter: the first question it held back), or None."""
+    meter = llm.METER
+    return meter.reached if meter is not None else None
+
+
+def heard(what, last, result, why=None, name=None, names=None):
+    """An answer's outcome as an event of the run (pilotlog "outcome"): what it was about (a function, a
+    group, a batch of globals), what came of it (accepted, refused, declined, failed, not asked), why, the
+    names it gave, its number in the run, its tokens in and out and its cost (from last:
+    llm.Provider.record)."""
+    last = last or {}
+    pilotlog.note("outcome", n=last.get("answer"), function=what, result=result, why=why, name=name, names=names,
+                  input=last.get("input"), output=last.get("tokens"), cost=last.get("cost"))
+
+
+def failed_talk(what, last, error):
+    """A conversation's failed question: its outcome event and its words (failed_why)."""
+    why = failed_why(error)
+    heard(what, last, "not asked" if unasked(why) else "failed", why)
+    return why
+
+
+def warn(out, text):
+    """A warning the run prints, also an event of the run."""
+    out(text)
+    pilotlog.note("warning", text=text)
+
+
+def weigh(meter, provider, system, contents, mode=None):
+    """The estimated cost of questions (contents: each one's text or parts, asked alone with system) at
+    the run's meter (llm.Meter.estimate; 0 where they cannot be priced)."""
+    return sum(meter.estimate(provider, system, [{"role": "user", "content": c}], mode) or 0.0 for c in contents)
+
+
+class Tally:
+    """A stage's weighing of its questions against the run's budget before it begins them, where threads
+    ask them (a function's samples, one function's question): fits() whether questions estimated at a
+    cost fit what is left after the run's spend and the estimates of the questions begun and not ended
+    (open), add() a question begun, end() one ended (its cost is in the spend then); hold() marks the
+    budget reached for what does not fit (llm.Meter.hold). A question asked again within its
+    conversation is not weighed here: the meter's own gate weighs every question as it is asked
+    (llm.Provider.ask), this only keeps the groups whole. Without a budget everything fits. The main
+    thread alone uses it."""
+
+    def __init__(self):
+        meter = llm.METER
+        self.meter = meter if meter is not None and meter.budget is not None else None
+        self.open, self.costs = 0.0, {}
+
+    def weigh(self, provider, system, contents, mode=None):
+        return weigh(self.meter, provider, system, contents, mode) if self.meter is not None else 0.0
+
+    def fits(self, cost):
+        return self.meter is None or self.meter.spent + self.open + cost <= self.meter.budget + 1e-12
+
+    def add(self, key, cost):
+        if self.meter is not None:
+            self.costs[key] = self.costs.get(key, 0.0) + cost
+            self.open += cost
+
+    def end(self, key):
+        self.open -= self.costs.pop(key, 0.0)
+
+    def hold(self, cost, questions, what):
+        if self.meter is not None:
+            self.meter.hold(cost, questions, what)
+
+
+def fitting(tally, items, cost, size, batched):
+    """The items, in their order, whose questions fit the run's budget together (Tally.fits), the first
+    that does not and every one after it left out: cost(item, mode) the estimate of an item's questions
+    (mode "batch": at the batch rate), size(item) their number, batched(count) whether so many questions
+    go as a Message Batch. Weighed at the batch rate when all of them would go as one; when those that
+    fit are too few for a batch (they then go one at a time), weighed again at the full price."""
+    kept = []
+    for mode in (("batch", None) if batched(sum(size(item) for item in items)) else (None,)):
+        kept, total = [], 0.0
+        for item in items:
+            need = cost(item, mode)
+            if not tally.fits(total + need):
+                break
+            kept.append(item)
+            total += need
+        if mode is None or batched(sum(size(item) for item in kept)):
+            break
+    return kept
+
+
 def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_lifted=True, mutate_check=True,
               integration_check=True, out=print, jobs=None, endless=None):
     """Ask, check and ask again until accepted or out of tries; returns (outcome, answers, stage).
     The survivors question gets an answer of its own when it comes with the last try (it only asks
-    for arguments). endless: the never-returning functions, when known (for the lifter)."""
+    for arguments). endless: the never-returning functions, when known (for the lifter). A first
+    question the run's budget holds back (llm.BudgetReached) leaves the function as it was, with no
+    conversation and no line of results.tsv: ("unasked", 0, "budget"); one held back later rejects it
+    (stage "budget"). Each answer's outcome and the function's are events of the run (pilotlog)."""
     from dread import build, lift
     fn = program.by_name[name]
     text = None
@@ -522,18 +654,21 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
             answer = provider.ask(system, messages)
         except Exception as e:              # the provider failed: no point in trying again now
             log.append("## Provider error\n\n%s" % e)
-            stage = "provider"
+            stage = "budget" if isinstance(e, llm.BudgetReached) else "provider"
+            failed_talk(name, {}, e)
             break
         info = getattr(provider, "last", {}) or {}
         log.append("## Answer %d%s\n\n%s" % (answers, " (%s)" % ended(info) if ended(info) else "", answer))
         if info.get("finish") in llm.Provider.REFUSED:
             outcome, stage = "refused", "provider refusal"      # another model may answer it
+            heard(name, info, "declined")
             break
         code = extract_c(answer)
         if code is None and not pending and info.get("finish") in llm.Provider.CUT:
             spent = ended(info).split(", ", 1)[-1] if info.get("tokens") or info.get("reasoning") else "the token limit"
             feedback = CUT.format(spent=spent)
             stage = "cut"
+            heard(name, info, "refused", "cut")
             log.append("## The tools, after answer %d (%s)\n\n%s" % (answers, stage, feedback))
             messages += [{"role": "assistant", "content": answer or "(empty)"}, {"role": "user", "content": feedback}]
             continue
@@ -541,6 +676,7 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
             missing = argue(image, name, pending, answer, provider.label())
             if not missing:
                 outcome, stage = "accepted", "argued"
+                heard(name, info, "accepted", "argued")
                 break
             ok, stage, report = False, "argue", "\n".join(missing)
             numbers = [int(line.split(".", 1)[0]) for line in missing]
@@ -549,6 +685,7 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
         else:
             work.put(name, fn.entry, provider.label(), code)
             ok, stage, report, pending = check(target, image, name, mutate_check, integration_check, jobs)
+        heard(name, info, "accepted" if ok else "refused", None if ok else stage)
         if ok:
             outcome = "accepted"
             break
@@ -564,6 +701,10 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
             feedback = FEEDBACK[stage].format(text=report, template=argue_template(numbers) if stage == "argue" else "")
         log.append("## The tools, after answer %d (%s)\n\n%s" % (answers, stage, feedback))
         messages += [{"role": "assistant", "content": answer}, {"role": "user", "content": feedback}]
+    if stage == "budget" and answers == 1:  # (nothing asked: nothing to undo, nothing to keep)
+        out("%-24s not asked (the run's budget)" % name)
+        pilotlog.note("settled", function=name, result="unasked", why="the budget")
+        return "unasked", 0, stage
     if outcome != "accepted":
         work.remove(name)
         unargue(image, name)
@@ -582,6 +723,7 @@ def pilot_one(target, image, program, provider, name, tries=3, flow=None, use_li
             f.write("function\toutcome\tanswers\tstage\tseconds\tprovider\n")
         f.write("%s\t%s\t%d\t%s\t%.0f\t%s\n" % (name, outcome, answers, stage, time.time() - started, provider.label()))
     out("%-24s %s after %d answer%s (%s)" % (name, outcome, answers, "" if answers == 1 else "s", stage))
+    pilotlog.note("settled", function=name, result=outcome, why=stage, answers=answers)
     return outcome, answers, stage
 
 
@@ -803,31 +945,36 @@ def shared_parts(provider, system, questions):
     return out
 
 
-def one_talk(system, user):
+def one_talk(system, user, what=None):
     """One question asked once (a dread.llm conversation): returns (answer or None, failure: None,
-    "declined" or "the provider: ERROR")."""
+    "declined", "the provider: ERROR" or "not asked: ..." for a question the run's budget held back).
+    what: what it is about, for its outcome event (heard)."""
     answer, last, error = yield (system, [{"role": "user", "content": user}], None)
     if error is not None:
-        return None, "the provider: %s" % error
-    return answer, "declined" if (last or {}).get("finish") in llm.Provider.REFUSED else None
+        return None, failed_talk(what, last, error)
+    declined = (last or {}).get("finish") in llm.Provider.REFUSED
+    heard(what, last, "declined" if declined else "answered")
+    return answer, "declined" if declined else None
 
 
-def ask_batches(providers, system, users, jobs=1, batch=0, out=print):
+def ask_batches(providers, system, users, jobs=1, batch=0, out=print, what=None):
     """Ask each question of users once (with system), jobs at a time in threads, each with a provider
     of providers (Providers) while it is asked, the next one asked as soon as one ends. Yields (k,
     answer, label, failure) in the order of users, each once it and every question before it have ended,
     so that the thread that iterates settles the answers in that order whatever order they end in:
-    failure None, "declined" (the provider declined: llm.Provider.REFUSED) or "the provider: ERROR"
-    (answer None); label the provider's. After a failure no question is asked that was not asked by
-    then (one after another stops there); those asked end and are yielded. Only the threads ask: the
-    caller writes, and no thread is left when it ends (the caller may fork then). With batch, as many
-    questions or more go together as a Message Batch (batching; llm.converse_all), all of them asked
-    at once and yielded in their order once it has ended."""
+    failure None, "declined" (the provider declined: llm.Provider.REFUSED), "the provider: ERROR" or
+    "not asked: ..." (the run's budget; answer None); label the provider's. After a failure no question is
+    asked that was not asked by then (one after another stops there); those asked end and are yielded.
+    Only the threads ask: the caller writes, and no thread is left when it ends (the caller may fork
+    then). With batch, as many questions or more go together as a Message Batch (batching;
+    llm.converse_all), all of them asked at once and yielded in their order once it has ended. what: a
+    word for what the questions are about ("globals"), their outcome events naming "what k"."""
     import concurrent.futures
     batcher = batching(providers, batch, len(users))
+    label = (lambda k: "%s %d" % (what, k)) if what else (lambda k: None)
     if batcher is not None:
-        got = llm.converse_all(providers, [one_talk(system, user) for user in users], batch=batch, jobs=jobs,
-                               out=out)
+        got = llm.converse_all(providers, [one_talk(system, user, label(k)) for k, user in enumerate(users)],
+                               batch=batch, jobs=jobs, out=out)
         for k, (answer, failure) in enumerate(got):
             yield k, answer, batcher.label(), failure
         return
@@ -840,13 +987,14 @@ def ask_batches(providers, system, users, jobs=1, batch=0, out=print):
             try:
                 answer = p.ask(system, [{"role": "user", "content": users[k]}])
             except Exception as e:
-                return k, None, p.label(), "the provider: %s" % e
+                return k, None, p.label(), failed_talk(label(k), {}, e)
             finish = (getattr(p, "last", {}) or {}).get("finish")
+            heard(label(k), getattr(p, "last", {}), "declined" if finish in llm.Provider.REFUSED else "answered")
             return k, answer, p.label(), "declined" if finish in llm.Provider.REFUSED else None
         finally:
             providers.give(p)
     ended, asked, settled, stopped = {}, 0, 0, False
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+    with llm.thread_pool(jobs) as pool:
         running = set()
         while True:
             while asked < len(users) and len(running) < jobs and not stopped:
@@ -922,20 +1070,26 @@ def name_globals(target, image, program, provider, keys, uses, batch=None, shown
         users.append(about(device, "\n".join(lines)))
     providers = provider if isinstance(provider, Providers) else Providers(provider)
     named = 0
-    for k, answer, label, failure in ask_batches(providers, GLOBALS_SYSTEM, users, jobs, batched, out):
+    started = time.time()
+    pilotlog.note("stage", state="start", stage="globals", questions=len(users), globals=len(todo))
+    for k, answer, label, failure in ask_batches(providers, GLOBALS_SYSTEM, users, jobs, batched, out, "globals"):
         part = parts[k]
         if answer is None:
             out("dread pilot: the globals' names: %s" % failure)
+            pilotlog.note("settled", function="globals %d" % k, result="unasked" if unasked(failure) else "none",
+                          why=failure)
             continue
         with open(os.path.join(folder, "globals-%d.md" % k), "w") as f:
             f.write("# Globals, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s\n\n## Answer\n\n%s\n" % (
                 label, GLOBALS_SYSTEM, users[k], answer))
         if failure:
             out("dread pilot: the globals' names: the provider declined")
+            pilotlog.note("settled", function="globals %d" % k, result="none", why="declined")
             continue
         proposed = json_block(answer)
         if not isinstance(proposed, dict):
             out("dread pilot: the globals' names: no ```json block in the answer")
+            pilotlog.note("settled", function="globals %d" % k, result="none", why="no ```json block")
             continue
         by_default = {uses[key]["name"]: key for key in part}
         refused = []
@@ -954,9 +1108,12 @@ def name_globals(target, image, program, provider, keys, uses, batch=None, shown
             taken.add(new)
             naming.store(image, key, {"name": new, "by": label}, part="globals")
             named += 1
+        have = sum(1 for key in part if key in naming.load(image, "globals"))
         out("dread pilot: the globals' names: %d of %d named%s" % (
-            sum(1 for key in part if key in naming.load(image, "globals")), len(part),
-            "; refused %s" % ", ".join(refused[:8]) if refused else ""))
+            have, len(part), "; refused %s" % ", ".join(refused[:8]) if refused else ""))
+        pilotlog.note("settled", function="globals %d" % k, result="named", named=have, of=len(part),
+                      refused=refused[:8] or None)
+    pilotlog.note("stage", state="end", stage="globals", named=named, seconds=round(time.time() - started, 1))
     return named
 
 
@@ -1068,20 +1225,26 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
         users.append(about(device, "\n\n".join(blocks)))
     providers = provider if isinstance(provider, Providers) else Providers(provider)
     named = 0
-    for b, answer, label, failure in ask_batches(providers, STRUCTS_SYSTEM, users, jobs, batched, out):
+    started = time.time()
+    pilotlog.note("stage", state="start", stage="structures", questions=len(users), structures=len(todo))
+    for b, answer, label, failure in ask_batches(providers, STRUCTS_SYSTEM, users, jobs, batched, out, "structures"):
         part = parts[b]
         if answer is None:
             out("dread pilot: the structures' names: %s" % failure)
+            pilotlog.note("settled", function="structures %d" % b, result="unasked" if unasked(failure) else "none",
+                          why=failure)
             continue
         with open(os.path.join(folder, "structs-%d.md" % b), "w") as f:
             f.write("# Structures, asked %s\n\n## System\n\n%s\n\n## Question\n\n%s\n\n## Answer\n\n%s\n" % (
                 label, STRUCTS_SYSTEM, users[b], answer))
         if failure:
             out("dread pilot: the structures' names: the provider declined")
+            pilotlog.note("settled", function="structures %d" % b, result="none", why="declined")
             continue
         proposed = json_block(answer)
         if not isinstance(proposed, dict):
             out("dread pilot: the structures' names: no ```json block in the answer")
+            pilotlog.note("settled", function="structures %d" % b, result="none", why="no ```json block")
             continue
         for k in part:
             entry = proposed.get(k)
@@ -1100,8 +1263,10 @@ def name_structs(target, image, program, provider, plan, uses, wanted, taken=(),
             table = candidate
             naming.store(image, anchors[0], table[anchors[0]], part="structs")
             named += 1
-        out("dread pilot: the structures' names: %d of %d named" % (
-            sum(1 for k in part if k in naming.struct_names(plan, table, taken)), len(part)))
+        have = sum(1 for k in part if k in naming.struct_names(plan, table, taken))
+        out("dread pilot: the structures' names: %d of %d named" % (have, len(part)))
+        pilotlog.note("settled", function="structures %d" % b, result="named", named=have, of=len(part))
+    pilotlog.note("stage", state="end", stage="structures", named=named, seconds=round(time.time() - started, 1))
     return named
 
 
@@ -1269,14 +1434,16 @@ def readable_talk(target, image, job, tries, work, label):
     for _ in range(tries):
         answer, last, error = yield (READABLE_SYSTEM, messages, None)
         if error is not None:
-            why = "the provider: %s" % error
+            why = failed_talk(name, last, error)
             break
         finish = (last or {}).get("finish")
         log.append("## Answer\n\n%s" % answer)
         if finish in llm.Provider.REFUSED:
             why = "the provider declined"
+            heard(name, last, "declined")
             break
         parsed = parse_names(answer)
+        names = None
         if parsed is None:
             problems = ['no ```json block with "what" (a sentence) and "names" (an object)']
         else:
@@ -1294,9 +1461,11 @@ def readable_talk(target, image, job, tries, work, label):
                     entry = {"digest": job["digest"], "names": names, "what": what, "by": label}
                     if job.get("ids") is not None:
                         entry["ids"] = job["ids"]
+                    heard(name, last, "accepted", names=names)
                     break
                 problems = ["with these names the C compiles to other code"]
         why = "; ".join(problems)
+        heard(name, last, "refused", why[:300], names=names)
         messages += [{"role": "assistant", "content": answer},
                      {"role": "user", "content": "These names cannot be used: %s. Answer again with the whole "
                                                   "```json block." % why}]
@@ -1306,17 +1475,22 @@ def readable_talk(target, image, job, tries, work, label):
 
 def keep_readable(image, folder, name, entry, why, log, out=print):
     """What a function's conversation ends with, written by one thread alone: the conversation in
-    folder/NAME.readable.md, the entry in the readable_names table, the function's line. Returns the
-    entry."""
+    folder/NAME.readable.md, the entry in the readable_names table, the function's line (and its
+    settled event). Returns the entry. A function whose question the run's budget held back gets no
+    conversation (nothing was asked)."""
     from dread import naming
     if entry is not None:
         naming.store(image, name, entry)
-    with open(os.path.join(folder, name + ".readable.md"), "w") as f:
-        f.write("\n\n".join(log) + "\n")
+    if entry is not None or not unasked(why) or len(log) > 1:
+        with open(os.path.join(folder, name + ".readable.md"), "w") as f:
+            f.write("\n\n".join(log) + "\n")
     if entry is None:
         out("%-24s no names: %s" % (name, why[:160]))
+        pilotlog.note("settled", function=name, result="unasked" if unasked(why) and len(log) == 1 else "none",
+                      why=why[:300])
         return None
     out("%-24s %d names: %s" % (name, len(entry["names"]), entry["what"][:120]))
+    pilotlog.note("settled", function=name, result="named", names=len(entry["names"]), what=entry["what"][:200])
     return entry
 
 
@@ -1357,7 +1531,12 @@ def name_variables(target, image, program, make_provider, names, context, lifter
     provider permitting: batching), every function's conversation the same as asked alone
     (readable_talk); the answers that fail their checks ask again in the next round (another batch when
     they are as many, else one at a time), the checks jobs at a time; the main thread then writes the
-    table, the conversations and the lines in the order of the functions."""
+    table, the conversations and the lines in the order of the functions.
+
+    With a budget (the run's llm.Meter) a function is asked only when its question fits what is left
+    (Tally; in a batch the meter admits the questions in their order while they fit); the rest are left
+    unasked, without an entry or a conversation: a run started again asks them. The stage is an event
+    of the run ("variables")."""
     import concurrent.futures
     import threading
     started = time.time()
@@ -1371,6 +1550,9 @@ def name_variables(target, image, program, make_provider, names, context, lifter
     os.makedirs(folder, exist_ok=True)
     pool_of = Providers(make_provider)
     batcher = batching(pool_of, batch, len(todo))
+    asking = time.time()
+    pilotlog.note("stage", state="start", stage="variables", functions=len(todo), questions=len(todo),
+                  named_already=len(known))
     if batcher is not None:
         local, slots = threading.local(), iter(range(1 << 30))
 
@@ -1380,11 +1562,22 @@ def name_variables(target, image, program, make_provider, names, context, lifter
             return local.dir
         got = llm.converse_all(pool_of, [readable_talk(target, image, job, tries, work, batcher.label())
                                          for job in todo], batch=batch, jobs=max(1, jobs), out=out)
-        named = len(known)
+        named, asked = len(known), 0
         for job, (entry, why, log, finish) in zip(todo, got):
             named += keep_readable(image, folder, job["name"], entry, why, log, out) is not None
-        return named, len(todo), pool_of.spent()
+            asked += not (unasked(why) and len(log) == 1)
+        pilotlog.note("stage", state="end", stage="variables", named=named - len(known), asked=asked,
+                      seconds=round(time.time() - asking, 1))
+        return named, asked, pool_of.spent()
     local, providers, lock = threading.local(), [], threading.Lock()
+    tally, probe = Tally(), []
+
+    def estimate(job):                      # (a provider of the run to weigh with, made once if needed)
+        if tally.meter is None:
+            return 0.0
+        if not probe:
+            probe.append(make_provider())
+        return tally.weigh(probe[0], READABLE_SYSTEM, [job["user"]])
 
     def one(job):
         if getattr(local, "provider", None) is None:
@@ -1398,16 +1591,25 @@ def name_variables(target, image, program, make_provider, names, context, lifter
 
     named, asked, declined, failed, stopped = len(known), 0, 0, 0, False
     jobs = max(1, jobs)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+    with llm.thread_pool(jobs) as pool:
         running, k = set(), 0
         while running or (k < len(todo) and not stopped):
             while k < len(todo) and len(running) < jobs and not stopped:
+                need = estimate(todo[k])
+                if not tally.fits(need) or budget_reached():
+                    tally.hold(need, len(todo) - k, "the questions of %d functions" % (len(todo) - k))
+                    stopped = True
+                    break
+                tally.add(todo[k]["name"], need)
                 running.add(pool.submit(one, todo[k]))
                 k += 1
+            if not running:
+                break
             done, running = concurrent.futures.wait(running, return_when=concurrent.futures.FIRST_COMPLETED)
             for future in done:
                 name, label, entry, why, log, finish = future.result()
-                asked += 1
+                tally.end(name)
+                asked += not (unasked(why) and len(log) == 1)
                 named += keep_readable(image, folder, name, entry, why, log, out) is not None
                 if entry is None:
                     declined = declined + 1 if finish in llm.Provider.REFUSED else 0
@@ -1415,14 +1617,18 @@ def name_variables(target, image, program, make_provider, names, context, lifter
                 else:
                     declined = failed = 0
                 if not stopped and declined >= DECLINED_IN_A_ROW:
-                    out("dread pilot: %s declined %d questions in a row; the rest are not asked of it (its "
-                        "classifiers decline the same kind of question again; another provider may answer: "
-                        "--provider)" % (label, declined))
+                    warn(out, "dread pilot: %s declined %d questions in a row; the rest are not asked of it (its "
+                              "classifiers decline the same kind of question again; another provider may answer: "
+                              "--provider)" % (label, declined))
                     stopped = True
                 if not stopped and failed >= FAILED_IN_A_ROW:
-                    out("dread pilot: the provider failed %d questions in a row; no more are asked (the run "
-                        "goes on where it stopped when started again)" % failed)
+                    warn(out, "dread pilot: the provider failed %d questions in a row; no more are asked (the run "
+                              "goes on where it stopped when started again)" % failed)
                     stopped = True
+                if not stopped and budget_reached():
+                    stopped = True
+    pilotlog.note("stage", state="end", stage="variables", named=named - len(known), asked=asked,
+                  seconds=round(time.time() - asking, 1))
     return named, asked, summed(p.spent() for p in providers)
 
 
@@ -1498,7 +1704,8 @@ FAILED_IN_A_ROW = 20        # questions that failed on the provider's side (afte
 class Asking:
     """Counts what a provider declines over a run: go_on() before each function's questions says
     whether to ask them, asked() after them notes how the last answer ended; after DECLINED_IN_A_ROW
-    declined in a row nothing more is asked (see the module's docstring)."""
+    declined in a row nothing more is asked (see the module's docstring), nor once the run's budget is
+    reached (budget_reached)."""
 
     def __init__(self, provider, out=print):
         self.provider, self.out = provider, out
@@ -1506,7 +1713,7 @@ class Asking:
 
     @property
     def stopped(self):
-        return self.row >= DECLINED_IN_A_ROW
+        return self.row >= DECLINED_IN_A_ROW or budget_reached() is not None
 
     def go_on(self):
         if self.stopped:
@@ -1514,31 +1721,42 @@ class Asking:
         self.provider.last = {}             # (a provider error leaves no finish: not a refusal)
         return True
 
-    def asked(self):
-        self.done += 1
+    def asked(self, counted=True):
+        self.done += counted
         if (getattr(self.provider, "last", {}) or {}).get("finish") not in llm.Provider.REFUSED:
             self.row = 0
             return
         self.row += 1
         self.declined += 1
-        if self.stopped:
-            self.out("dread pilot: %s declined %d questions in a row; the rest are not asked of it (its "
-                     "classifiers decline the same kind of question again; another provider may answer: "
-                     "--provider)" % (self.provider.label(), self.row))
+        if self.row >= DECLINED_IN_A_ROW:
+            warn(self.out, "dread pilot: %s declined %d questions in a row; the rest are not asked of it (its "
+                           "classifiers decline the same kind of question again; another provider may answer: "
+                           "--provider)" % (self.provider.label(), self.row))
 
 
 def input_task(target, image, program, provider, asked, tries=3, flow=None, out=print):
-    """--task input over [(name, missed addresses)]; returns the summary line (without the cost)."""
+    """--task input over [(name, missed addresses)]; returns the summary line (without the cost). The
+    stage and each function are events of the run ("inputs"); a function whose first question the
+    run's budget holds back is left as it was, and nothing more is asked."""
     asking = Asking(provider, out)
     whole = ran = total = 0
+    started = time.time()
+    pilotlog.note("stage", state="start", stage="inputs", functions=len(asked), questions=len(asked),
+                  missed=sum(len(a) for _, a in asked))
     for name, addresses in asked:
         if not asking.go_on():
             break
         still = find_inputs(target, image, program, provider, name, addresses, tries, flow, out)
+        if still is None:                   # (not asked: the budget)
+            asking.asked(counted=False)
+            continue
         asking.asked()
         whole += not still
         ran += len(addresses) - len(still)
         total += len(addresses)
+        pilotlog.note("settled", function=name, result="inputs", ran=len(addresses) - len(still), of=len(addresses))
+    pilotlog.note("stage", state="end", stage="inputs", asked=asking.done, whole=whole, ran=ran,
+                  seconds=round(time.time() - started, 1))
     return "%d functions%s, %d with every missed instruction run, %d of %d missed instructions run%s" % (
         asking.done, " of %d" % len(asked) if asking.done < len(asked) else "", whole, ran, total,
         ", %d declined by the provider" % asking.declined if asking.declined else "")
@@ -1594,7 +1812,8 @@ def find_inputs(target, image, program, provider, name, missed, tries=3, flow=No
     """Ask for inputs that run the missed instructions; each one that runs some becomes a written
     case of the function (extra_cases, "by" the pilot). The question holds the function's listing and
     its callees' (callee_listings); an input that does not finish gets back where and why it stopped
-    (Generator.attempt). Returns the addresses still unrun."""
+    (Generator.attempt). Returns the addresses still unrun, or None when the run's budget held back the
+    first question (nothing asked, nothing written)."""
     import json
     from dread import autocase, flat
     fn = program.by_name[name]
@@ -1622,15 +1841,23 @@ def find_inputs(target, image, program, provider, name, missed, tries=3, flow=No
         try:
             answer = provider.ask(system, messages)
         except Exception as e:
+            failed_talk(name, {}, e)
+            if k == 1 and isinstance(e, llm.BudgetReached):     # (nothing asked: nothing to keep)
+                out("%-24s not asked (the run's budget)" % name)
+                pilotlog.note("settled", function=name, result="unasked", why="the budget")
+                return None
             log.append("## Provider error\n\n%s" % e)
             break
         log.append("## Answer %d\n\n%s" % (k, answer))
-        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+        info = getattr(provider, "last", {}) or {}
+        if info.get("finish") in llm.Provider.REFUSED:
             log.append("## The provider declined to answer")
+            heard(name, info, "declined")
             break
         case = parse_input(answer)
         if case is None:
             feedback = "The answer has no ```json block with an input of the form given. Answer with one."
+            heard(name, info, "refused", "no ```json block with an input")
         else:
             ran, why = gen.attempt(fn.entry, fn.insns, case, case["limit"], check_image=True)
             new = ran & still if not why else set()
@@ -1640,14 +1867,17 @@ def find_inputs(target, image, program, provider, name, missed, tries=3, flow=No
                 feedback = ("The input does not finish: %s.%s Give another one." % (
                     why, " Before it stopped it ran %s of the marked ones (an input counts only when it "
                     "finishes)." % " ".join("0x%x" % a for a in reached) if reached else ""))
+                heard(name, info, "refused", "does not finish: %s" % str(why)[:200])
             elif not new:
                 feedback = "The input runs, but none of the marked instructions. Give another one."
+                heard(name, info, "refused", "runs none of the marked instructions")
             elif wild is not None:
                 owner = program.function_at(wild)
                 feedback = ("The input makes %s call 0x%x through a pointer it gave: %s, not a function's entry. "
                             "The rebuilt image has other code there. A pointer to code must be a function's "
                             "entry. Give another one." % (name, wild, "inside %s" % owner.name if owner else
                                                           "outside every function"))
+                heard(name, info, "refused", "calls 0x%x through a pointer, not a function's entry" % wild)
             else:
                 still -= new
                 case.update({"by": "dread pilot (%s)" % provider.label(),
@@ -1657,6 +1887,7 @@ def find_inputs(target, image, program, provider, name, missed, tries=3, flow=No
                 os.makedirs(image.extra_cases, exist_ok=True)
                 with open(path, "w") as f:
                     json.dump({"cases": old + [case]}, f, indent=1, sort_keys=True)
+                heard(name, info, "accepted", "runs %d of the marked instructions" % len(new))
                 feedback = ("It runs %s and is kept. %s" % (
                     " ".join("0x%x" % a for a in sorted(new)),
                     "Still never run: %s. Give another input." % " ".join("0x%x" % a for a in sorted(still))
@@ -1873,22 +2104,27 @@ def ask_name(provider, program, name, user, tries=2, temperature=None, own=None)
 
 
 def name_talk(program, name, user, tries=2, temperature=None, own=None, label="?"):
-    """ask_name's conversation (a dread.llm conversation; label: the provider's, for its log)."""
+    """ask_name's conversation (a dread.llm conversation; label: the provider's, for its log). Each
+    answer's outcome is an event of the run (heard); a question the run's budget held back ends it with
+    "not asked: ..." (failed_why)."""
     messages = [{"role": "user", "content": user}]
     log = ["# %s, asked %s\n\n## Question\n\n%s" % (name, label, llm.content_text(user))]
     why = "no answer"
     for _ in range(tries):
         answer, last, error = yield (NAME_SYSTEM, messages, temperature)
         if error is not None:
-            return None, None, log, "the provider: %s" % error
+            return None, None, log, failed_talk(name, last, error)
         log.append("## Answer\n\n%s" % answer)
         if (last or {}).get("finish") in llm.Provider.REFUSED:
+            heard(name, last, "declined")
             return None, None, log, "the provider declined"
         parsed = parse_name(answer)
         why = "no two lines name: and what:" if parsed is None else \
             None if own is not None and parsed[0] == own else name_problem(program, parsed[0])
         if why is None:
+            heard(name, last, "accepted", name=parsed[0])
             return parsed[0], parsed[1], log, None
+        heard(name, last, "refused", why, name=parsed[0] if parsed else None)
         messages += [{"role": "assistant", "content": answer},
                      {"role": "user", "content": "That name cannot be used: %s. Answer again with the two lines."
                                                  % why}]
@@ -2267,29 +2503,35 @@ def subsystem_problem(prefix):
     return None
 
 
-def ask_subsystem(provider, user, tries=2, temperature=None):
+def ask_subsystem(provider, user, tries=2, temperature=None, what=None):
     """((name, prefix, what) or None, log, why) of asking for one group's name: an answer without the
     three lines or with a prefix that cannot be used goes back with the reason, up to tries answers.
-    user: the question's text or its parts (dread.llm). The conversation is subsystem_talk's."""
-    return llm.converse(provider, subsystem_talk(user, tries, temperature, provider.label()))
+    user: the question's text or its parts (dread.llm). The conversation is subsystem_talk's (what: the
+    group, for its outcome events)."""
+    return llm.converse(provider, subsystem_talk(user, tries, temperature, provider.label(), what))
 
 
-def subsystem_talk(user, tries=2, temperature=None, label="?"):
-    """ask_subsystem's conversation (a dread.llm conversation; label: the provider's, for its log)."""
+def subsystem_talk(user, tries=2, temperature=None, label="?", what=None):
+    """ask_subsystem's conversation (a dread.llm conversation; label: the provider's, for its log; what:
+    the group, "group 3", for each answer's outcome event, heard)."""
     messages = [{"role": "user", "content": user}]
     log = ["## Question, asked %s\n\n%s" % (label, llm.content_text(user))]
     why = "no answer"
+    what = what or "group"
     for _ in range(tries):
         answer, last, error = yield (SUBSYSTEM_SYSTEM, messages, temperature)
         if error is not None:
-            return None, log, "the provider: %s" % error
+            return None, log, failed_talk(what, last, error)
         log.append("## Answer\n\n%s" % answer)
         if (last or {}).get("finish") in llm.Provider.REFUSED:
+            heard(what, last, "declined")
             return None, log, "the provider declined"
         parsed = parse_subsystem(answer)
         why = "no three lines name:, prefix: and what:" if parsed is None else subsystem_problem(parsed[1])
         if why is None:
+            heard(what, last, "accepted", name="%s (%s)" % (parsed[0], parsed[1]))
             return parsed, log, None
+        heard(what, last, "refused", why, name=parsed[1] if parsed else None)
         messages += [{"role": "assistant", "content": answer},
                      {"role": "user", "content": "That cannot be used: %s. Answer again with the three lines." % why}]
         log.append("## Back to the model\n\n%s" % messages[-1]["content"])
@@ -2312,8 +2554,14 @@ def name_subsystems(target, image, program, provider, found, namer, touched, sam
     group is asked before the others, which read it. batch (with pool, a Providers): when the samples of
     all the groups are as many questions or more, they go as one Message Batch (llm.converse_all; the
     first samples first, the cache then is the API's best effort), each conversation as asked alone
-    (subsystem_talk)."""
-    import concurrent.futures
+    (subsystem_talk).
+
+    With a budget (the run's llm.Meter) the groups go in parts: those whose samples fit what is left, in
+    their order (weighed at the batch rate when they go as a batch: fitting), then the rest weighed again
+    once their answers are in (the estimates know the answers' lengths then), until none fits; a sample
+    the meter held back after all (its estimate grew while the group was asked) counts as a failed one,
+    the vote taking the answers there are. The stage ("groups"), each answer and each group are events
+    of the run."""
     from dread import naming
     write_groups(target, image, program, found)
     known = read_subsystems(subsystems_path(target, image))
@@ -2327,34 +2575,62 @@ def name_subsystems(target, image, program, provider, found, namer, touched, sam
     probe = provider() if todo and n > 1 else None
     for k, _, _, user in todo:
         asked[k] = shared_parts(probe, SUBSYSTEM_SYSTEM, [(user, len(user))] * n)[0][0] if n > 1 else user
-    order = [(k, j) for j in range(n) for k, _, _, _ in todo]   # (the first samples first: they write the cache)
+    started = time.time()
+    pilotlog.note("stage", state="start", stage="groups", functions=sum(len(g) for _, g, _, _ in todo),
+                  questions=len(todo) * n, groups=len(todo))
 
     def one(item):
         k, sample, user = item
         p = provider()
-        got, log, why = ask_subsystem(p, user, tries, temperature)
+        got, log, why = ask_subsystem(p, user, tries, temperature, "group %d" % k)
         return k, sample, got, log, why, p
     results = {}
-    batcher = batching(pool, batch, len(order)) if pool is not None else None
-    if batcher is not None:
-        got = llm.converse_all(pool, [subsystem_talk(asked[k], tries, temperature, batcher.label())
-                                      for k, _ in order], batch=batch, jobs=jobs, out=out,
-                               leads=[None if j == 0 or not isinstance(asked[k], list) else order.index((k, 0))
-                                      for k, j in order], strict=False)
-        for (k, sample), (parsed, log, why) in zip(order, got):
-            results.setdefault(k, {})[sample] = (parsed, log, why, batcher)
-    elif todo:
-        cached = any(isinstance(asked[k], list) for k in asked)
-        rounds = [[(k, 0, asked[k]) for k, _, _, _ in todo], [(k, j, asked[k]) for k, _, _, _ in todo
-                                                                for j in range(1, n)]] \
-            if cached else [[(k, j, asked[k]) for k, _, _, _ in todo for j in range(n)]]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool_:
-            for items in rounds:            # (with a cache the first samples, then the others: they read it)
-                for k, sample, got, log, why, p in pool_.map(one, items):
-                    results.setdefault(k, {})[sample] = (got, log, why, p)
+
+    def ask_groups(part):                   # (all the samples of the groups of part, into results)
+        order = [(k, j) for j in range(n) for k, _, _, _ in part]   # (the first samples first: they write the cache)
+        batcher = batching(pool, batch, len(order)) if pool is not None else None
+        if batcher is not None:
+            got = llm.converse_all(pool, [subsystem_talk(asked[k], tries, temperature, batcher.label(),
+                                                         "group %d" % k) for k, _ in order],
+                                   batch=batch, jobs=jobs, out=out,
+                                   leads=[None if j == 0 or not isinstance(asked[k], list) else order.index((k, 0))
+                                          for k, j in order], strict=False)
+            for (k, sample), (parsed, log, why) in zip(order, got):
+                results.setdefault(k, {})[sample] = (parsed, log, why, batcher)
+        elif part:
+            cached = any(isinstance(asked[k], list) for k, _, _, _ in part)
+            rounds = [[(k, 0, asked[k]) for k, _, _, _ in part], [(k, j, asked[k]) for k, _, _, _ in part
+                                                                    for j in range(1, n)]] \
+                if cached else [[(k, j, asked[k]) for k, _, _, _ in part for j in range(n)]]
+            with llm.thread_pool(jobs) as pool_:
+                for items in rounds:        # (with a cache the first samples, then the others: they read it)
+                    for k, sample, got, log, why, p in pool_.map(one, items):
+                        results.setdefault(k, {})[sample] = (got, log, why, p)
+    tally, rest, done = Tally(), todo, []
+    weigher = (probe or provider()) if tally.meter is not None and todo else None
+    while rest:                             # (with a budget: the groups whose samples fit, in their order, then
+        part = rest                         # the rest weighed again, the answers' lengths known; until none fits)
+        if tally.meter is not None:
+            part = fitting(tally, rest, lambda item, mode: tally.weigh(weigher, SUBSYSTEM_SYSTEM, [asked[item[0]]] * n,
+                                                                      mode),
+                           lambda item: n, lambda count: pool is not None and batching(pool, batch, count) is not None)
+            if not part:
+                tally.hold(sum(tally.weigh(weigher, SUBSYSTEM_SYSTEM, [asked[k]] * n) for k, _, _, _ in rest),
+                           len(rest) * n, "the questions of %d groups" % len(rest))
+                out("dread pilot: %d of %d groups not asked (the run's budget)" % (len(rest), len(todo)))
+                break
+        ask_groups(part)
+        done += part
+        rest = rest[len(part):]
+    todo = done
     folder = os.path.join(target.build, "pilot", image.name, "subsystems")
+    named = 0
     for k, group, key, user in todo:
         got = [results[k][j] for j in range(max(1, samples))]
+        if all(unasked(r[2]) for r in got):     # (none of its samples asked: the budget; asked again later)
+            out("group %d (%d functions): not asked (the run's budget)" % (k, len(group)))
+            pilotlog.note("settled", function="group %d" % k, result="unasked", why="the budget")
+            continue
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, "group-%d.md" % k), "w") as f:
             f.write("# Group %d (%s)\n\n%s\n" % (k, key, "\n\n".join(
@@ -2364,6 +2640,8 @@ def name_subsystems(target, image, program, provider, found, namer, touched, sam
         if voted is None:
             out("group %d (%d functions): no proposal: %s" % (k, len(group), next((r[2] for r in got if r[2]),
                                                                                   "no answer")))
+            pilotlog.note("settled", function="group %d" % k, result="none",
+                          why=next((r[2] for r in got if r[2]), "no answer"))
             continue
         prefix, agreement, index = voted
         name, _, what = got[index][0]
@@ -2374,8 +2652,13 @@ def name_subsystems(target, image, program, provider, found, namer, touched, sam
             values["confidence"] = "%.2f" % (agreement / len(got))
             values["samples"] = " ".join(r[0][1] if r[0] else "-" for r in got)
         known[key] = keep_subsystem(target, image, values)
+        named += 1
         out("group %d (%d functions): %s, prefix %s%s: %s" % (
             k, len(group), name, prefix, " (%d of %d agree)" % (agreement, len(got)) if len(got) > 1 else "", what))
+        pilotlog.note("settled", function="group %d" % k, result="named", name="%s (%s)" % (name, prefix),
+                      confidence=values.get("confidence"), what=what[:200])
+    pilotlog.note("stage", state="end", stage="groups", named=named, asked=len(todo),
+                  seconds=round(time.time() - started, 1))
     return {n: (len(group), known[members_key(program, group)]) for group in found
             if members_key(program, group) in known for n in group}
 
@@ -2517,7 +2800,18 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
     subsystems: before the first question the image's functions are grouped by their code (dread.groups)
     and each group not named yet is asked for its name, prefix and sentence (name_subsystems, samples
     questions each, the proposals so far shown), and each function's question then shows its group's
-    (SUBSYSTEM_LINE)."""
+    (SUBSYSTEM_LINE).
+
+    With a budget (the run's llm.Meter, dread pilot --budget) a component of the call graph is begun only
+    when all of its functions' questions fit what is left (Tally), and one at a time, while fewer than
+    jobs questions are being asked, so that it is weighed with the spend so far (without a budget every
+    component ready is begun at once, its questions queued); a wave of batches keeps the components that
+    fit, in its order (fitting). Once one does not fit the pass begins no other, the questions of those
+    begun are asked, and the passes end. A question the meter holds back after all (its estimate grew
+    while the function was asked) counts as a failed one (settle: the vote takes the answers there are);
+    a function none of whose questions was asked has no row, and a run started again asks it. Each pass
+    is a stage of the run's events ("pass N", "refine"), each answer and each function an event
+    (pilotlog)."""
     import concurrent.futures
     import threading
     from dread import naming
@@ -2565,7 +2859,7 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
             touched = grouping.evidence(target, image, program, flow)
             found = grouping.find(target, image, program, flow, touched=touched)
         except Exception as e:              # (the names do without: said, not fatal)
-            out("dread pilot: no subsystems, the grouping failed: %s: %s" % (type(e).__name__, e))
+            warn(out, "dread pilot: no subsystems, the grouping failed: %s: %s" % (type(e).__name__, e))
             found = None
         if found is not None:
             namer.prepare_code([fn.name for fn in program.functions if may_show(target, fn.name)])     # (the
@@ -2583,9 +2877,16 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
 
     def settle(name, job, number, kind):
         """Vote over a function's answers, keep the proposal, update what questions show; returns
-        whether the name its callers' and callees' questions show changed (None: no proposal)."""
+        whether the name its callers' and callees' questions show changed (None: no proposal). A
+        question the run's budget held back counts as a failed one: the vote takes the answers there are
+        (the samples column shows "-"); a function none of whose questions was asked is left as it was
+        (no row: a run started again asks it)."""
         fn = job["fn"]
         results = job["results"]
+        if results and all(unasked(r[3]) for r in results.values()):
+            out("%-24s not asked (the run's budget)" % name)
+            pilotlog.note("settled", function=name, result="unasked", why="the budget")
+            return None
         log = []
         for (qkind, k) in sorted(results, key=lambda q: (q[0] != "shown", q[1])):
             if len(results) > 1:
@@ -2599,6 +2900,7 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
         voted = naming.vote(got, old["proposed"] if old is not None and kind == "again" else None)
         if voted is None:
             out("%-24s no proposal: %s" % (name, next((r[3] for r in shown if r), "no answer")))
+            pilotlog.note("settled", function=name, result="none", why=next((r[3] for r in shown if r), "no answer"))
             return None
         proposed, agreement, index = voted
         if index is None:                   # (the name stays: the sentence of the sample most like it)
@@ -2634,6 +2936,8 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
         if more.get("depends") == "yes":
             notes.append("alone: %s" % hidden)
         out("%-24s proposed %s (%s): %s" % (name, proposed, ", ".join(notes), what))
+        pilotlog.note("settled", function=name, result="proposed", name=proposed, confidence=more.get("confidence"),
+                      what=" ".join(what.split())[:200], changed=before != now)
         return before != now
 
     def wanted(kind, row, key):
@@ -2692,12 +2996,14 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
         else:
             run["declined"] = run["failed"] = 0
         if not run["stopped"] and run["declined"] >= DECLINED_IN_A_ROW:
-            out("dread pilot: the provider declined %d questions in a row; no more are asked" % run["declined"])
+            warn(out, "dread pilot: the provider declined %d questions in a row; no more are asked" % run["declined"])
             run["stopped"] = True
         if not run["stopped"] and run["failed"] >= FAILED_IN_A_ROW:
-            out("dread pilot: the provider failed %d questions in a row; no more are asked (the run goes on where "
-                "it stopped when started again)" % run["failed"])
+            warn(out, "dread pilot: the provider failed %d questions in a row; no more are asked (the run goes on "
+                      "where it stopped when started again)" % run["failed"])
             run["stopped"] = True
+        if not run["stopped"] and budget_reached():
+            run["stopped"], run["why"] = True, "budget"
 
     def one_pass(number, kind):
         """kind: "first" (callees first, the functions without a proposal), "again" (callers first on
@@ -2718,12 +3024,25 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                 if not waiting[d]:
                     ready.append(d)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        tally = Tally()                     # (the run's budget: a component begins whole or not at all)
+
+        def free():                         # (with a budget, only when a thread is free to ask: weighed with
+            return tally.meter is None or len(running) < max(1, jobs)      # the spend so far)
+        with llm.thread_pool(jobs) as pool:
             running = {}
             while (ready and not run["stopped"]) or running:
-                while ready and not run["stopped"]:
+                while ready and not run["stopped"] and free():
                     c = ready.pop(0)
                     items = build(c, kind)
+                    need = {(n, qk, k): tally.weigh(probe(), NAME_SYSTEM, [content]) for n, _, _, _, questions, _
+                            in items for qk, k, content, _ in questions} if tally.meter is not None else {}
+                    if not tally.fits(sum(need.values())):
+                        tally.hold(sum(need.values()), len(need), "the questions of %s" % ", ".join(
+                            item[0] for item in items))
+                        run["stopped"], run["why"] = True, "budget"
+                        break
+                    for q, cost in need.items():
+                        tally.add(q, cost)
                     left[c] = len(items)
                     if not items:
                         finished(c)
@@ -2741,12 +3060,15 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                 for future in done:
                     n = running.pop(future)
                     _, qkind, k, got, what, log, why, p, finish = future.result()
+                    tally.end((n, qkind, k))
                     job = jobs_of[n]
                     job["results"][(qkind, k)] = (got, what, log, why, p)
                     counted(got, why, finish)
-                    for q in job["held"].pop((qkind, k), []):     # (the questions that read its cache)
-                        if not run["stopped"]:
+                    for q in job["held"].pop((qkind, k), []):     # (the questions that read its cache: those of a
+                        if not run["stopped"] or run.get("why") == "budget":    # function begun are asked)
                             running[pool.submit(one, q)] = n
+                        else:
+                            tally.end(q[:3])
                     if len(job["results"]) == job["questions"]:
                         counts["asked"] += 1
                         changed = settle(n, job, number, kind)
@@ -2756,8 +3078,8 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                         left[job["component"]] -= 1
                         if not left[job["component"]]:
                             finished(job["component"])
-                if run["stopped"]:              # (the questions not begun yet are not asked)
-                    for future in [f for f in running if f.cancel()]:
+                if run["stopped"] and run.get("why") != "budget":   # (the questions not begun yet are not asked;
+                    for future in [f for f in running if f.cancel()]:   # the budget weighed them: they are)
                         running.pop(future)
         return counts["proposed"], counts["asked"], counts["changed"]
 
@@ -2767,7 +3089,8 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
         are batch or more, else one at a time, the questions that read a cache after the one that writes
         it), and the wave's functions are settled in their order before the next wave is taken. The same
         questions, conversations (name_talk) and votes as one_pass; a function waits for the slowest
-        question of its wave, not only for its own dependencies."""
+        question of its wave, not only for its own dependencies. With a budget a wave goes in parts: the
+        components that fit (fitting), then the rest weighed again, until none fits."""
         down = kind == "refine" or (kind == "again" and number % 2 == 0)
         deps, then = (callers, callees) if down else (callees, callers)
         waiting = [len(d) for d in deps]
@@ -2780,17 +3103,16 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                 if not waiting[d]:
                     ready.append(d)
         label = probe()
-        while ready and not run["stopped"]:
-            wave = []
-            while ready:                    # (what asks nothing ends at once: what waits on it joins the wave)
-                c = ready.pop(0)
-                items = build(c, kind)
-                if items:
-                    wave.append((c, items))
-                else:
-                    finished(c)
-            if not wave:
-                break
+        tally = Tally()
+
+        def cost_of(item, mode):            # (a component's questions, weighed at the run's meter)
+            return tally.weigh(label, NAME_SYSTEM, [content for _, _, _, _, questions, _ in item[1]
+                                                    for _, _, content, _ in questions], mode)
+
+        def size_of(item):
+            return sum(len(i[4]) for i in item[1])
+
+        def ask_wave(wave):                 # (one round of converse_all, its functions settled in their order)
             where, talks, leads = [], [], []
             for first in (True, False):     # (the questions that write a cache before those that read it)
                 for c, items in wave:
@@ -2818,6 +3140,28 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
                         counts["proposed"] += 1
                         counts["changed"] += changed
                 finished(c)
+        while ready and not run["stopped"]:
+            wave = []
+            while ready:                    # (what asks nothing ends at once: what waits on it joins the wave)
+                c = ready.pop(0)
+                items = build(c, kind)
+                if items:
+                    wave.append((c, items))
+                else:
+                    finished(c)
+            while wave and not run["stopped"]:
+                part = wave                 # (with a budget: the components that fit, in the wave's order, the
+                if tally.meter is not None:     # rest weighed again after them, the answers' lengths known then)
+                    part = fitting(tally, wave, cost_of, size_of, lambda count: batching(pool_of, batch, count)
+                                   is not None)
+                    if not part:
+                        left_out = [q for _, items in wave for i in items for q in i[4]]
+                        tally.hold(tally.weigh(label, NAME_SYSTEM, [q[2] for q in left_out]), len(left_out),
+                                   "the questions of %d functions" % sum(len(items) for _, items in wave))
+                        run["stopped"], run["why"] = True, "budget"
+                        break
+                ask_wave(part)
+                wave = wave[len(part):]
         return counts["proposed"], counts["asked"], counts["changed"]
 
     per_function = samples * (2 if ablate else 1)
@@ -2828,7 +3172,20 @@ def name_functions(target, image, program, make_provider, names, flow=None, jobs
             "of %d questions or more as a Message Batch (%s)" % (batch, pool_of.batcher().label()))
     order = [("refine", 2)] if refine else [("first", 1)] + [("again", k) for k in range(2, passes + 1)]
     for kind, number in order:
+        stage, begun = "refine" if kind == "refine" else "pass %d" % number, time.time()
+        if kind == "first":                 # (the questions planned: the first pass's and --refine's exactly,
+            planned = [n for n in names if program.by_name[n].entry not in state]   # a later pass's at most)
+        elif kind == "refine":
+            planned = [n for n in names if program.by_name[n].entry in state and
+                       program.by_name[n].entry not in refined]
+        else:
+            planned = list(names)
+        pilotlog.note("stage", state="start", stage=stage, functions=len(planned),
+                      questions=len(planned) * (per_function if kind == "first" else samples),
+                      at_most=True if kind == "again" else None, waves=waves or None)
         made, asked, changed = (one_pass_waves if waves else one_pass)(number, kind)
+        pilotlog.note("stage", state="end", stage=stage, asked=asked, proposed=made, changed=changed,
+                      seconds=round(time.time() - begun, 1))
         run["proposed"] += made
         run["asked"] += asked
         if len(order) > 1:
@@ -3596,7 +3953,9 @@ def device_task(target, image, program, provider, samples=NAME_SAMPLES, dry_run=
     device most answers agree with (choose_device) as a row of BUILD/pilot/IMAGE/device.tsv: the
     device, the share of answers that agree as its confidence, every answer's device, the provider,
     a digest of the texts shown and the question's key; the conversation goes to device.md beside it.
-    Returns 0, or 1 when no device was named."""
+    Returns 0, or 1 when no device was named. With a budget (the run's llm.Meter) the samples are asked
+    only when all of them fit; a sample the meter holds back after all ends the samples, as a provider's
+    failure does."""
     import hashlib
     texts = device_texts(target, program)
     user = device_question(target, program, texts)
@@ -3613,18 +3972,30 @@ def device_task(target, image, program, provider, samples=NAME_SAMPLES, dry_run=
     asked = user                            # (the samples ask one question one after another: where the
     if samples > 1:                         # provider keeps it, the first writes its cache, the others read it)
         asked = shared_parts(provider, DEVICE_SYSTEM, [(user, len(user))] * 2)[0][0]
+    tally = Tally()                         # (the run's budget: all the samples or none)
+    need = tally.weigh(provider, DEVICE_SYSTEM, [asked] * max(1, samples))
+    if not tally.fits(need):
+        tally.hold(need, max(1, samples), "the device question's %d samples" % max(1, samples))
+        out("dread pilot --task device: not asked (the run's budget)")
+        return 1
+    pilotlog.note("stage", state="start", stage="device", questions=max(1, samples), texts=len(texts))
     for k in range(max(1, samples)):
         provider.last = {}
         try:
             answer = provider.ask(DEVICE_SYSTEM, [{"role": "user", "content": asked}])
-        except Exception as e:
-            out("dread pilot --task device: the provider: %s" % e)
+        except Exception as e:              # (the vote takes the answers there are)
+            out("dread pilot --task device: %s" % failed_talk("device", {}, e))
             break
         log.append("## Answer %d\n\n%s" % (k + 1, answer))
-        if (getattr(provider, "last", {}) or {}).get("finish") in llm.Provider.REFUSED:
+        info = getattr(provider, "last", {}) or {}
+        if info.get("finish") in llm.Provider.REFUSED:
             out("dread pilot --task device: the provider declined")
+            heard("device", info, "declined")
             break
         answers.append(parse_device(answer))
+        heard("device", info, "accepted" if answers[-1] else "refused", None if answers[-1] else "no device: line",
+              name=answers[-1])
+    pilotlog.note("stage", state="end", stage="device", asked=len(answers))
     path = device_path(target, image)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(os.path.join(os.path.dirname(path), "device.md"), "w") as f:
@@ -3643,6 +4014,7 @@ def device_task(target, image, program, provider, samples=NAME_SAMPLES, dry_run=
         if new:
             f.write("\t".join(DEVICE_COLUMNS) + "\n")
         f.write("\t".join(" ".join(values[k].split()) for k in DEVICE_COLUMNS) + "\n")
+    pilotlog.note("settled", function="device", result="named", name=device, confidence=values["confidence"])
     spent = provider.spent()
     out("dread pilot --task device: %s (%d of %d answers agree; %d texts shown; %s)%s; %d answers, %d tokens in, "
         "%d out%s" % (device, agreement, len(answers), len(texts), path,
@@ -3712,6 +4084,8 @@ def review_task(target, image, program, flow, args, provider, device):
         return first.pop() if first else naming_provider(args)
     make_decider = (lambda: naming_provider(args, args.decider)) if args.decider else None
     started = time.time()
+    if not args.dry_run:
+        pilotlog.note("stage", state="start", stage="review")
     totals = namereview.review(
         target, image, program, make_provider, make_decider, flow, names=names, jobs=args.jobs,
         samples=args.samples, margin=namereview.MARGIN if args.margin is None else args.margin,
@@ -3720,6 +4094,8 @@ def review_task(target, image, program, flow, args, provider, device):
         tries=min(args.tries, 3), dry_run=args.dry_run)
     if args.dry_run:
         return 0
+    pilotlog.note("stage", state="end", stage="review", rounds=totals["rounds"], group_outcomes=dict(totals["groups"]),
+                  function_outcomes=dict(totals["functions"]), seconds=round(time.time() - started, 1))
     counts = lambda c: ", ".join("%s %d" % (k, c[k]) for k in namereview.OUTCOMES if c.get(k)) or "none"
     spent = totals["spent"]
     print("dread pilot --task review: %d round%s; groups: %s; functions: %s (%s, %.0f s); %s" % (
@@ -3774,9 +4150,104 @@ def naming_provider(args, name=None):
 
 def main(argv=None):
     """dread pilot (the module's docstring); SIGTERM and SIGHUP end it in order (llm.ending_on_signals:
-    the Message Batches it waits for are cancelled)."""
+    the Message Batches it waits for are cancelled, and the run's end event says "stopped")."""
     with llm.ending_on_signals():
         return pilot_main(argv)
+
+
+def settings_of(args):
+    """A run's settings for its start event: the options given (JSON values; the names as their number
+    beyond 20) and the thinking the task's questions get."""
+    out = {}
+    for k, v in sorted(vars(args).items()):
+        if k in ("status", "follow", "list", "usage", "dry_run") or v is None or v is False or v == [] or v == "":
+            continue
+        out[k] = "%d names" % len(v) if k == "names" and len(v) > 20 else v
+    out["thinking"] = thinking(args)
+    return out
+
+
+def stop_words(e):
+    """How a run was stopped, from the exception that ended it (SystemExit of llm.ending_on_signals: 128
+    plus the signal; KeyboardInterrupt)."""
+    import signal
+    if isinstance(e, KeyboardInterrupt):
+        return "interrupted (SIGINT)"
+    code = getattr(e, "code", None)
+    if isinstance(code, int) and code > 128:
+        try:
+            return "ended by %s" % signal.Signals(code - 128).name
+        except ValueError:
+            pass
+    return "exit %s" % code
+
+
+def logged(target, image, args, provider, body, functions=None, task=None, argv=None):
+    """body() as a run of the pilot, and its return value: a run id with its events (pilotlog.RunLog
+    under BUILD/pilot/runs/: the start with the task, provider, settings, budget and the functions
+    planned, the end with how it ended and its totals), and the run's meter (llm.Meter, metered: every
+    question admitted against --budget, every answer counted; its first estimates from earlier runs'
+    answers, pilotlog.prior_outputs). How it ended: "done", "budget reached" (the meter held a question
+    back), "stopped" (SIGTERM, SIGHUP or SIGINT: the tables as the run left them, the batches it waited
+    for cancelled), "failed" (an exception, its words in the end event). A budget needs a provider with
+    prices (refused otherwise: 1)."""
+    budget = args.budget
+    if budget is not None and (provider is None or llm.prices_of(provider.config, provider.kind) is None):
+        print("dread pilot: --budget needs a provider with prices in llm.toml (price_in, price_out); %s has none" % (
+            provider.label() if provider is not None else "the run"), file=sys.stderr)
+        return 1
+    log = pilotlog.RunLog.start(target.build, task or args.task, image.name,
+                                provider.name if provider is not None else None,
+                                provider.model if provider is not None else None, settings_of(args), budget,
+                                functions, sys.argv[1:] if argv is None else argv, target.root)
+    meter = llm.Meter(budget, emit=log.event, prior=pilotlog.prior_outputs(target.build))
+    print("dread pilot: run %s (its events: dread pilot --status %s)" % (log.run, log.run))
+    how, rc, error = "done", None, None
+    try:
+        with pilotlog.current(log), llm.metered(meter):
+            rc = body()
+        return rc
+    except (SystemExit, KeyboardInterrupt) as e:
+        how, error = "stopped", stop_words(e)
+        raise
+    except BaseException as e:
+        how, error = "failed", "%s: %s" % (type(e).__name__, str(e)[:500])
+        raise
+    finally:
+        if how == "done" and meter.reached is not None:
+            how = "budget reached"
+        totals = meter.totals()
+        log.end(how, exit=rc, error=error, outputs=meter.outputs() or None, **totals)
+        if how == "budget reached":
+            print("dread pilot: budget reached: $%.4f spent of %s, %d questions held back and the rest not asked; "
+                  "a run started again goes on where this one stopped (run %s)" % (totals["cost"], llm.usd(budget),
+                                                                                    totals["held"], log.run))
+
+
+def status_main(target, args):
+    """dread pilot --status [ID] [--follow] and --list: a run's progress from its events (the latest run
+    without ID; pilotlog.state, status_lines), followed until it ends (pilotlog.follow), or the runs of
+    the target (pilotlog.runs). Asks nothing."""
+    build = target.build
+    if args.list:
+        found = pilotlog.runs(build)
+        if not found:
+            print("dread pilot: no run in %s" % pilotlog.runs_dir(build))
+            return 1
+        print("\n".join(pilotlog.list_lines(found)))
+        return 0
+    run = args.status or None
+    if run is not None and not os.path.isfile(pilotlog.events_path(build, run)):
+        print("dread pilot: no run %s in %s" % (run, pilotlog.runs_dir(build)), file=sys.stderr)
+        return 1
+    if args.follow:
+        return pilotlog.follow(build, run)
+    st = pilotlog.state(build, run)
+    if st is None:
+        print("dread pilot: no run in %s" % pilotlog.runs_dir(build))
+        return 1
+    print("\n".join(pilotlog.status_lines(st)))
+    return 0
 
 
 def pilot_main(argv=None):
@@ -3882,6 +4353,18 @@ def pilot_main(argv=None):
                         help="--task name, readable, globals and subsystems: the questions do not say what the image "
                              "is for (by default they begin with the target's [llm] device, or with what --task "
                              "device read from its texts)")
+    parser.add_argument("--budget", type=float, metavar="DOLLARS",
+                        help="ask no question whose estimated cost would take the run's spend (its answers at the "
+                             "usage ledger's prices) past DOLLARS; the rest is left unasked, the answers so far kept, "
+                             "and the run ends with 'budget reached' (needs prices in llm.toml; not --task review)")
+    parser.add_argument("--status", nargs="?", const="", metavar="ID",
+                        help="print a run's progress from its events (default: the latest run): its stage, the "
+                             "questions answered, the batches waiting, the spend, the rate and the time left; ask "
+                             "nothing")
+    parser.add_argument("--follow", action="store_true",
+                        help="with --status: keep printing as the run goes, until it ends")
+    parser.add_argument("--list", action="store_true",
+                        help="list the target's runs, newest first, with how each ended and what it cost; ask nothing")
     parser.add_argument("names", nargs="*")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):  # a line a function as it ends, also into a file (a run its
@@ -3892,6 +4375,13 @@ def pilot_main(argv=None):
         target, image = tgt.from_args(args)
     except tgt.TargetError as e:
         print("dread pilot: %s" % e, file=sys.stderr)
+        return 1
+    if args.status is not None or args.follow or args.list:
+        return status_main(target, args)
+    if args.budget is not None and (args.budget < 0 or args.task == "review"):
+        print("dread pilot: %s" % ("--budget is an amount of US dollars, 0 or more" if args.budget < 0 else
+                                   "--budget is not for --task review: dread.namereview would keep a challenge whose "
+                                   "questions the budget held back as one without a candidate"), file=sys.stderr)
         return 1
     from dread import llm, regflow
     from dread.program import Program
@@ -3918,21 +4408,32 @@ def pilot_main(argv=None):
             return 1
         cache = llm.AnswerCache(judge_cache_path(target, image)) if grounded is not None and \
             not args.no_judge_cache else None
-        if args.vs:
-            return 0 if compare_runs(target, image, args.score, args.against, args.vs, grounded,
-                                     upto_pass=args.upto_pass, sources=args.source, sentences=not args.names_only,
-                                     jobs=args.jobs, cache=cache, batch=args.batch)["judged"] else 1
-        if args.against:
-            if judge is None and grounded is None:
-                print("dread pilot: --against needs --grounded or --judge (a provider that judges the pairs)",
-                      file=sys.stderr)
-                return 1
-            return 0 if compare_names(target, image, args.score, args.against[0], judge, upto_pass=args.upto_pass,
+        if args.against and judge is None and grounded is None:
+            print("dread pilot: --against needs --grounded or --judge (a provider that judges the pairs)",
+                  file=sys.stderr)
+            return 1
+
+        def score():
+            pilotlog.note("stage", state="start", stage="judge")
+            if args.vs:
+                rc = 0 if compare_runs(target, image, args.score, args.against, args.vs, grounded,
+                                       upto_pass=args.upto_pass, sources=args.source, sentences=not args.names_only,
+                                       jobs=args.jobs, cache=cache, batch=args.batch)["judged"] else 1
+            elif args.against:
+                rc = 0 if compare_names(target, image, args.score, args.against[0], judge, upto_pass=args.upto_pass,
+                                        grounded=grounded, sources=args.source, sentences=not args.names_only,
+                                        jobs=args.jobs, cache=cache, batch=args.batch)["both"] else 1
+            else:
+                rc = 0 if score_names(target, image, args.score, judge=judge, upto_pass=args.upto_pass,
                                       grounded=grounded, sources=args.source, sentences=not args.names_only,
-                                      jobs=args.jobs, cache=cache, batch=args.batch)["both"] else 1
-        return 0 if score_names(target, image, args.score, judge=judge, upto_pass=args.upto_pass, grounded=grounded,
-                                sources=args.source, sentences=not args.names_only, jobs=args.jobs,
-                                cache=cache, batch=args.batch)["functions"] else 1
+                                      jobs=args.jobs, cache=cache, batch=args.batch)["functions"] else 1
+            pilotlog.note("stage", state="end", stage="judge")
+            if budget_reached():
+                warn(print, "dread pilot --score: the budget held questions back: the verdicts are partial")
+            return rc
+        if judge is None and grounded is None:     # (asks nothing: no run)
+            return score()
+        return logged(target, image, args, grounded or judge, score, task="score", argv=argv)
     if args.task == "name" and args.gate and args.samples < 2:
         print("dread pilot: --gate needs --samples 2 or more (one question's proposal has no confidence)",
               file=sys.stderr)
@@ -3950,16 +4451,25 @@ def pilot_main(argv=None):
                 print("dread pilot: %s" % e, file=sys.stderr)
                 return 1
         if args.task == "device":
-            return device_task(target, image, program, provider, args.samples, args.dry_run)
+            if args.dry_run:
+                return device_task(target, image, program, provider, args.samples, args.dry_run)
+            return logged(target, image, args, provider, lambda: device_task(target, image, program, provider,
+                                                                             args.samples), argv=argv)
         device = "" if args.no_device else known_device(target, image)
         if not device and not args.no_device and not args.dry_run and args.task in (
                 "name", "readable", "globals", "subsystems", "review"):
             print("dread pilot: the questions do not say what the image is for (dread pilot --task device reads it "
                   "from its texts; [llm] device in dread.toml states it)", file=sys.stderr)
         if args.task == "subsystems":
-            return subsystems_task(target, image, program, flow, args, provider)
+            if args.dry_run:
+                return subsystems_task(target, image, program, flow, args, provider)
+            return logged(target, image, args, provider, lambda: subsystems_task(target, image, program, flow, args,
+                                                                                 provider), argv=argv)
         if args.task == "review":
-            return review_task(target, image, program, flow, args, provider, device)
+            if args.dry_run:
+                return review_task(target, image, program, flow, args, provider, device)
+            return logged(target, image, args, provider, lambda: review_task(target, image, program, flow, args,
+                                                                             provider, device), argv=argv)
         if args.task in ("readable", "globals"):
             from dread import build, lift, readable
             # readable: the functions of the readable table, whose C is built; globals: every function,
@@ -3974,34 +4484,37 @@ def pilot_main(argv=None):
                 print("dread pilot --task %s --dry-run: %s%d functions would be asked about; nothing asked" % (
                     args.task, "the globals and structures of " if args.task == "globals" else "", len(names)))
                 return 0
-            context = readable.Context(target, image, program, flow)
-            lifter = lift.make_lifter(program, flow)
-            proposals = {program.by_entry[a].name: p for a, (p, _) in read_proposals(target, image).items()
-                         if a in program.by_entry} if args.task == "globals" else None
-            first = [provider]
+            def shared_and_variables():
+                context = readable.Context(target, image, program, flow)
+                lifter = lift.make_lifter(program, flow)
+                proposals = {program.by_entry[a].name: p for a, (p, _) in read_proposals(target, image).items()
+                             if a in program.by_entry} if args.task == "globals" else None
+                first = [provider]
 
-            def make_provider():            # (the first question takes the provider already loaded)
-                return first.pop() if first else naming_provider(args)
-            begun = time.time()
-            made = name_shared(target, image, program, make_provider, context, lifter, names, everything,
-                               shown_as=proposals, device=device, jobs=args.jobs, batch=args.batch)
-            if args.task == "globals":
-                spent = made[2]
-                print("dread pilot --task globals: %d globals and %d structures named (the table has %d and %d), %d "
-                      "questions at a time (%.0f s); %s" % (
-                          made[0], made[1], len(context.globals), len(context.structs), max(1, args.jobs),
-                          time.time() - begun, spent_words(spent)))
+                def make_provider():        # (the first question takes the provider already loaded)
+                    return first.pop() if first else naming_provider(args)
+                begun = time.time()
+                made = name_shared(target, image, program, make_provider, context, lifter, names, everything,
+                                   shown_as=proposals, device=device, jobs=args.jobs, batch=args.batch)
+                if args.task == "globals" or budget_reached():
+                    spent = made[2]
+                    print("dread pilot --task %s: %d globals and %d structures named (the table has %d and %d), %d "
+                          "questions at a time (%.0f s); %s%s" % (
+                              args.task, made[0], made[1], len(context.globals), len(context.structs),
+                              max(1, args.jobs), time.time() - begun, spent_words(spent),
+                              "; the variables not asked (the run's budget)" if args.task == "readable" else ""))
+                    return 0
+                started = time.time()
+                named, asked, spent = name_variables(target, image, program, lambda: naming_provider(args), names,
+                                                     context, lifter, jobs=args.jobs, tries=args.tries, device=device,
+                                                     batch=args.batch)
+                spent = summed([made[2], spent])        # (the globals' and structures' answers too)
+                print("dread pilot --task readable: %d of %d functions named, %d asked, %d at a time (%.0f s; the "
+                      "globals and structures before them %.0f s); %s" % (
+                          named, len(names), asked, max(1, args.jobs), time.time() - started, started - begun,
+                          spent_words(spent)))
                 return 0
-            started = time.time()
-            named, asked, spent = name_variables(target, image, program, lambda: naming_provider(args), names,
-                                                 context, lifter, jobs=args.jobs, tries=args.tries, device=device,
-                                                 batch=args.batch)
-            spent = summed([made[2], spent])        # (the globals' and structures' answers too)
-            print("dread pilot --task readable: %d of %d functions named, %d asked, %d at a time (%.0f s; the globals "
-                  "and structures before them %.0f s); %s" % (
-                      named, len(names), asked, max(1, args.jobs), time.time() - started, started - begun,
-                      spent_words(spent)))
-            return 0
+            return logged(target, image, args, provider, shared_and_variables, functions=len(names), argv=argv)
         if args.task == "name":
             from dread.samecode import UNNAMED
             names = shown(target, args.names) if args.names else [
@@ -4021,15 +4534,18 @@ def pilot_main(argv=None):
                                                    len(names) - len(todo), "refined or without a first proposal"
                                                    if args.refine else "proposed"))
                 return 0
-            made, asked, spent = name_functions(target, image, program, lambda: naming_provider(args), names,
-                                                flow, jobs=args.jobs, tries=min(args.tries, 3), refine=args.refine,
-                                                behaviour=args.behaviour, samples=args.samples,
-                                                temperature=args.temperature, gate=args.gate, passes=passes,
-                                                ablate=args.ablate, subsystems=args.subsystems, device=device,
-                                                batch=args.batch)
-            print("dread pilot --task name: %d of %d asked functions got a proposal%s (%s); %s" % (
-                made, asked, ", over the passes" if passes > 1 else "", names_path(target, image), spent_words(spent)))
-            return 0
+            def propose():
+                made, asked, spent = name_functions(target, image, program, lambda: naming_provider(args), names,
+                                                    flow, jobs=args.jobs, tries=min(args.tries, 3), refine=args.refine,
+                                                    behaviour=args.behaviour, samples=args.samples,
+                                                    temperature=args.temperature, gate=args.gate, passes=passes,
+                                                    ablate=args.ablate, subsystems=args.subsystems, device=device,
+                                                    batch=args.batch)
+                print("dread pilot --task name: %d of %d asked functions got a proposal%s (%s); %s" % (
+                    made, asked, ", over the passes" if passes > 1 else "", names_path(target, image),
+                    spent_words(spent)))
+                return 0
+            return logged(target, image, args, provider, propose, functions=len(names), argv=argv)
         missed = missed_instructions(target, image, args.names or [fn.name for fn in program.functions])
         for name, addresses in lift_missed(target, image, program).items():      # what the lifter left
             if not args.names or name in args.names:
@@ -4042,13 +4558,15 @@ def pilot_main(argv=None):
             print("dread pilot --task input --dry-run: %d functions, %d missed instructions would be asked "
                   "about; nothing asked" % (len(asked), sum(len(a) for _, a in asked)))
             return 0
-        started = time.time()
-        line = input_task(target, image, program, provider, asked, args.tries, flow)
-        spent = provider.spent()            # (its own answers: the ledger also holds runs beside it)
-        print("dread pilot --task input: %s; %d answers, %d tokens in, %d out%s, %.0f s" % (
-            line, spent["answers"], spent["input"], spent["output"],
-            ", $%.2f" % spent["cost"] if spent["cost"] is not None else "", time.time() - started))
-        return 0
+        def inputs():
+            started = time.time()
+            line = input_task(target, image, program, provider, asked, args.tries, flow)
+            spent = provider.spent()        # (its own answers: the ledger also holds runs beside it)
+            print("dread pilot --task input: %s; %d answers, %d tokens in, %d out%s, %.0f s" % (
+                line, spent["answers"], spent["input"], spent["output"],
+                ", $%.2f" % spent["cost"] if spent["cost"] is not None else "", time.time() - started))
+            return 0
+        return logged(target, image, args, provider, inputs, functions=len(asked), argv=argv)
     names = shown(target, args.names) if args.names else candidates(target, image, program, args.limit)
     if not names:
         print("dread pilot: nothing to do (no lifted function that src does not define)")
@@ -4075,18 +4593,25 @@ def pilot_main(argv=None):
         return 1
     from dread.util.polite import polite
     polite()
-    accepted, asking = 0, Asking(provider)
-    for name in names:
-        if not asking.go_on():
-            break
-        outcome, _, _ = pilot_one(target, image, program, provider, name, args.tries, flow, not args.no_lifted,
-                                  not args.no_mutate, not args.no_integration, endless=endless)
-        asking.asked()
-        accepted += outcome == "accepted"
-    print("dread pilot: %d of %d accepted%s; conversations in %s" % (
-        accepted, asking.done, ", %d declined by the provider" % asking.declined if asking.declined else "",
-        os.path.relpath(os.path.join(target.build, "pilot", image.name))))
-    return 0
+
+    def write():
+        accepted, asking = 0, Asking(provider)
+        started = time.time()
+        pilotlog.note("stage", state="start", stage="write", functions=len(names), questions=len(names))
+        for name in names:
+            if not asking.go_on():
+                break
+            outcome, _, _ = pilot_one(target, image, program, provider, name, args.tries, flow, not args.no_lifted,
+                                      not args.no_mutate, not args.no_integration, endless=endless)
+            asking.asked(counted=outcome != "unasked")
+            accepted += outcome == "accepted"
+        pilotlog.note("stage", state="end", stage="write", asked=asking.done, accepted=accepted,
+                      seconds=round(time.time() - started, 1))
+        print("dread pilot: %d of %d accepted%s; conversations in %s" % (
+            accepted, asking.done, ", %d declined by the provider" % asking.declined if asking.declined else "",
+            os.path.relpath(os.path.join(target.build, "pilot", image.name))))
+        return 0
+    return logged(target, image, args, provider, write, functions=len(names), argv=argv)
 
 
 if __name__ == "__main__":
