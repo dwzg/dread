@@ -4851,7 +4851,7 @@ reimplement them.
   nothing defines is kept from the link, or dropped through the linker's message where the vet misses, and
   the others are checked as before (tests/test_readable_link.py: both fail on the code before, with the
   whole check ended by "the link failed").
-- [ ] A function whose original dispatches through GCC's Thumb-1 switch helper (bl __gnu_thumb1_case_uqi, the
+- [x] A function whose original dispatches through GCC's Thumb-1 switch helper (bl __gnu_thumb1_case_uqi, the
   table behind the call) gets no case that runs the dispatch: the helper, another function, loads a byte of
   the caller's extent, which dread.emu trace_reads takes for code loaded as data (the extent owners' rule), so
   every input that reaches the call is refused, the generator's and written ones alike ("the input loads
@@ -4860,6 +4860,13 @@ reimplement them.
   gizmo built for the Cortex-M0 in a scratch directory (handle_key, script_run): since their C compiles
   without the helper (2026-10-25), this is what drops them. The helper's loads of the table behind a call the
   layer marks as a dispatch (insn.dispatch_call) are the caller's constants.
+  Done 2026-10-25 (dread.program extent_owners): the table behind a call the layer marks as a dispatch, from
+  behind the call to the function's next instruction (the first case: the call does not fall through), is
+  nobody's, like a pool another function loads from, so the helper's loads of it are the caller's constants.
+  tests/test_thumb1_dispatch.py: a switch of our own in C, GCC for the Cortex-M0 at -Os with libgcc (the image
+  has __gnu_thumb1_case_uqi): on the code before, the lift check dropped it with 27 of its 34 instructions
+  never run; now it is accepted. Not measured again: the compiler lab's Cortex-M0 -Os op_switch_jump and
+  gizmo built for the Cortex-M0.
 
 ## Browser view (`dread gui`; asked for by the user on 2026-10-18)
 

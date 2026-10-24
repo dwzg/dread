@@ -318,7 +318,9 @@ class Program:
         of FreeRTOS that pointed into another function's pool, or behind the image, read other bytes
         in the rebuilt image. A pool another function loads from with a pc-relative load or adr (a
         compiler's constant tables shared by several functions) ends the extent in front of it: the
-        overlay keeps such a pool while a reader is original, and its loads are constants, not code."""
+        overlay keeps such a pool while a reader is original, and its loads are constants, not code; so
+        is the table behind a call of a switch helper (insn.dispatch_call), which the helper reads for
+        its caller."""
         if getattr(self, "_owners", None) is None:
             import array
             from dread.overlay import EXTENT_TAIL
@@ -375,6 +377,21 @@ class Program:
                     if 0 <= h < len(owners) and owners[h] not in (0, ROOM) and a not in self.code \
                             and ks - {owners[h] - 1}:
                         owners[h] = 0
+            # The table behind a call of a switch helper (insn.dispatch_call: GCC's Thumb-1
+            # __gnu_thumb1_case_*, another function, reads it on its caller's behalf through lr) is no
+            # part of the extent either: the helper's loads of it are the caller's constants, not code.
+            # It runs from behind the call to the function's next instruction, the first case (the call
+            # does not fall through). Until 2026-10-25 every input that reached such a dispatch was
+            # refused as one that loads instructions as data, and no case ran the switch.
+            for k, f in enumerate(self.functions):
+                for i, a in enumerate(f.insns[:-1]):
+                    insn = self.insn(a)
+                    if insn is None or not getattr(insn, "dispatch_call", False):
+                        continue
+                    for b in range(a + self.code[a][0], f.insns[i + 1], 2):
+                        h = (b - self.base) >> 1
+                        if 0 <= h < len(owners) and owners[h] == min(k + 1, ROOM - 1) and b not in self.code:
+                            owners[h] = 0
             self._owners = owners
         return self._owners
 
