@@ -73,7 +73,8 @@ by where its value goes, its use, and only where C gives the printed form the sa
   + x is x - y in unsigned arithmetic of int's width, (x - 4) + 1 is x - 3;
 - increments: x = x op y is x op= y, x = x + 1 is x++ (statements and a for loop's step; x a
   variable, or a field, an element, a memory access whose address reads no memory); x = x of a local
-  variable goes.
+  variable goes; an access through a pointer and the pointer's step behind it are one (fold_steps:
+  *p = c; p++; is *p++ = c;, c = p[1]; p++; is c = *++p;), where nothing between reads the pointer.
 
 What the pass decides from is the function alone, but for its callees' mask parameters (the
 readable_types table's masks, made by the check from every lifted function's C and from the C of the
@@ -1675,7 +1676,198 @@ def polish(tree, fn, int_bits=None, io=(), masks=None, pointed=None):
     for s in fn.body.body:
         p.stmt(s)
     _drop_self_assignments(fn.body, p)
+    fold_steps(fn, p)
     return p.changed
+
+
+STEP_BETWEEN = 2        # the most statements between an access and its pointer's step that fold_steps moves the step
+                        # over (a compiler schedules it a few instructions behind; further away it reads worse)
+
+
+def fold_steps(fn, p):
+    """An access through a pointer and the pointer's step behind it as one: *(volatile u8 *)r3 = r12;
+    r3++; is *(volatile u8 *)r3++ = r12; (post-increment: the access used the address before the step),
+    r12 = r1[1]; r1++; is r12 = *++r1; and *(volatile u8 *)(r6 - 1) with r6--; is *(volatile u8 *)--r6
+    (pre-increment: the access used the address after it). Only where: the step is a statement x++ or
+    x-- (what x = x + 1 became: increments; a typed pointer's step of one element, a u32's of one
+    byte), the access is in an expression statement before it with nothing between but expression
+    statements that neither read nor write x (at most STEP_BETWEEN), that statement reads x once, as the whole address of a
+    memory access (*p, *(T *)p, p[0], p[1], *(T *)(p + 1)), evaluated on every path through it (not in the
+    right of && or ||, nor an arm of ?:), and writes no x; x is a variable that is not volatile and
+    whose address the function never takes (nothing else can see when it changes); the pre-increment
+    only for a pointer or a variable of int's width or wider (++x is x + 1 converted to x's type). The
+    step is not a volatile access, so the volatile accesses keep their order; C sequences the one read
+    and write of x in the statement. The statement keeps its instruction and absorbs the step's. p: the
+    Polisher (the file's types); returns whether anything changed."""
+    taken = set()
+    for s in _all_statements(fn.body.body):
+        for e in _stmt_exprs(s):
+            for x in _walk(e):
+                if isinstance(x, C.Unary) and x.op == "&":
+                    taken |= {y.id for y in _walk(x.e) if isinstance(y, C.Name)}
+
+    def visit(stmts):
+        for s in stmts:
+            for inner in _inner(s):
+                visit(inner.body if isinstance(inner, C.Block) else [inner])
+        k = 0
+        while k < len(stmts):
+            got = _step_statement(stmts[k])
+            k += 1
+            if got is None or got[0] in taken or got[0] not in p.types.vars or _volatile_object(fn, got[0]):
+                continue
+            x, op = got
+            j, between = k - 2, 0
+            while j >= 0:
+                t = stmts[j]
+                if isinstance(t, (C.Note, C.Empty)):
+                    j -= 1
+                    continue
+                if not isinstance(t, C.ExprStmt):
+                    j = -1
+                elif any(isinstance(y, C.Name) and y.id == x for y in _walk(t.e)):
+                    break
+                elif between == STEP_BETWEEN:
+                    j = -1
+                between += 1
+                j -= 1
+            if j < 0:
+                continue
+            new = _stepped(stmts[j].e, x, op, p.types)
+            if new is None:
+                continue
+            stmts[j].e = new
+            C.absorb(stmts[j], stmts[k - 1])
+            del stmts[k - 1]
+            k -= 1
+            p.changed = True
+    visit(fn.body.body)
+    return p.changed
+
+
+def _volatile_object(fn, name):
+    """Whether the variable name itself is volatile (volatile u32 x, u8 *volatile p; not a pointer to
+    volatile memory, volatile u8 *p, whose accesses are volatile and itself is not)."""
+    for s in _all_statements(fn.body.body):
+        if isinstance(s, C.Decl):
+            for d in s.items:
+                if d.name == name:
+                    return "volatile" in (d.ptr.split() if d.ptr else s.specs.split())
+    for ptype, pname in fn.params:
+        if pname == name:
+            words = ptype.replace("*", " * ").split()
+            return "volatile" in (words[len(words) - words[::-1].index("*"):] if "*" in words else words)
+    return False
+
+
+def _all_statements(stmts):
+    for s in stmts:
+        yield s
+        for inner in _inner(s):
+            yield from _all_statements(inner.body if isinstance(inner, C.Block) else [inner])
+        if isinstance(s, C.For) and isinstance(s.init, C.Decl):
+            yield s.init
+
+
+def _step_statement(s):
+    """(x, "++" or "--") of an expression statement x++, x--, ++x or --x, x a variable; None otherwise."""
+    if isinstance(s, C.ExprStmt) and isinstance(s.e, (C.Post, C.Unary)) and s.e.op in ("++", "--") and \
+            isinstance(s.e.e, C.Name):
+        return s.e.e.id, s.e.op
+    return None
+
+
+def _stepped(e, x, op, types):
+    """e with its one read of x, the whole address of a memory access, stepped (fold_steps): x++ there
+    (post), or the address x + 1 (x - 1 for --) as ++x; None where e is no such expression."""
+    names = [y for y in _walk(e) if isinstance(y, C.Name) and y.id == x]
+    if len(names) != 1 or _assigns(e, x) or _conditional(e, names[0]):
+        return None
+    read = names[0]
+    d = types.of(read)
+    pointer = d is not None and d[0] == "ptr"
+    wide = pointer or (d is not None and d[0] == "int" and d[1][0] >= types.ctx.int_bits)
+    one = "+" if op == "++" else "-"
+    plan = {}
+
+    def address(a):
+        """What the access's address a becomes, or None."""
+        while isinstance(a, C.Cast) and a.type.rstrip().endswith("*"):
+            if a.e is read:
+                plan[id(read)] = C.Post(op, C.Name(x))
+                return True
+            a = a.e
+        if a is read:
+            plan[id(read)] = C.Post(op, C.Name(x))
+            return True
+        if wide and isinstance(a, C.Binary) and a.op == one and a.l is read and _plain_number(a.r) == 1:
+            plan[id(a)] = C.Unary(op, C.Name(x))
+            return True
+        return False
+    for y in _walk(e):
+        if isinstance(y, C.Unary) and y.op == "*" and address(y.e):
+            break
+        if isinstance(y, C.Index) and y.base is read and pointer and _index_value(y.index) == 0:
+            plan[id(y)] = C.Unary("*", C.Post(op, C.Name(x)))
+            break
+        if isinstance(y, C.Index) and y.base is read and pointer and _index_value(y.index) == (1 if op == "++" else -1):
+            plan[id(y)] = C.Unary("*", C.Unary(op, C.Name(x)))
+            break
+    if not plan:
+        return None
+    return _rebuilt(e, plan)
+
+
+def _index_value(e):
+    if _plain_number(e) is not None:
+        return _plain_number(e)
+    if isinstance(e, C.Unary) and e.op == "-" and _plain_number(e.e) is not None:
+        return -_plain_number(e.e)
+    return None
+
+
+def _assigns(e, x):
+    return any((isinstance(y, C.Assign) and isinstance(y.target, C.Name) and y.target.id == x) or
+               (isinstance(y, (C.Post, C.Unary)) and y.op in ("++", "--") and isinstance(y.e, C.Name) and y.e.id == x)
+               for y in _walk(e))
+
+
+def _conditional(e, node, sure=True):
+    """Whether node is evaluated only on some ways through e: in the right of && or ||, an arm of ?:."""
+    if e is node:
+        return not sure
+    if isinstance(e, C.Binary) and e.op in ("&&", "||"):
+        return _conditional(e.l, node, sure) or _conditional(e.r, node, False)
+    if isinstance(e, C.Cond):
+        return _conditional(e.c, node, sure) or _conditional(e.t, node, False) or _conditional(e.f, node, False)
+    return any(_conditional(c, node, sure) for c in _children(e))
+
+
+def _rebuilt(e, plan):
+    """e with the nodes plan names (by id) replaced."""
+    if id(e) in plan:
+        return plan[id(e)]
+    if isinstance(e, C.Unary):
+        return C.Unary(e.op, _rebuilt(e.e, plan))
+    if isinstance(e, C.Post):
+        return C.Post(e.op, _rebuilt(e.e, plan))
+    if isinstance(e, C.Cast):
+        return C.Cast(e.type, _rebuilt(e.e, plan))
+    if isinstance(e, C.Binary):
+        return C.Binary(e.op, _rebuilt(e.l, plan), _rebuilt(e.r, plan))
+    if isinstance(e, C.Cond):
+        return C.Cond(_rebuilt(e.c, plan), _rebuilt(e.t, plan), _rebuilt(e.f, plan))
+    if isinstance(e, C.Assign):
+        return C.Assign(e.op, _rebuilt(e.target, plan), _rebuilt(e.value, plan))
+    if isinstance(e, C.Call):
+        return C.Call(_rebuilt(e.f, plan), [_rebuilt(a, plan) for a in e.args])
+    if isinstance(e, C.Index):
+        return C.Index(_rebuilt(e.base, plan), _rebuilt(e.index, plan))
+    if isinstance(e, C.Member):
+        return C.Member(_rebuilt(e.base, plan), e.name, e.arrow)
+    if isinstance(e, C.Comma):
+        return C.Comma([_rebuilt(y, plan) for y in e.items])
+    return e
 
 
 def _drop_self_assignments(block, p):

@@ -396,10 +396,14 @@ class DoWhile(Stmt):
 
 
 class For(Stmt):
-    __slots__ = _stmt_slots("init", "cond", "step", "body")     # init: an Expr, a Decl or None
+    """init: an Expr, a Decl or None. init_addr, step_addr: the instructions of the statements the init
+    and the step were (dread.structure counted), where dread.naming identities finds the definitions
+    they make; None for a for loop made otherwise (the loop's own addr then stands for them)."""
+    __slots__ = _stmt_slots("init", "cond", "step", "body", "init_addr", "step_addr")
 
-    def __init__(self, init, cond, step, body, addr=None):
+    def __init__(self, init, cond, step, body, addr=None, init_addr=None, step_addr=None):
         self.init, self.cond, self.step, self.body, self.addr = init, cond, step, body, addr
+        self.init_addr, self.step_addr = init_addr, step_addr
 
 
 class Switch(Stmt):

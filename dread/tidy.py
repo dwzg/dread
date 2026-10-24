@@ -14,6 +14,9 @@ the same.
 - propagate: a variable read where a constant or a copy of another variable is the only value that
   reaches it (and that variable is not written in between); a parameter moved back (r0 = r4, r4 a copy
   of the parameter that it still holds: GCC's r4 = r0; f(); r0 = r4;) is r0 = r0, which dead takes out;
+- steps: a step made through a copy (w = v + 1; r2 = *v; v = w;, a post-indexed access's writeback or
+  a register a compiler scheduled the increment into) as a step of the variable itself, v = v + 1, the
+  reads of w where v holds its value reading v (a loop's test: while (w != end) is while (v != end));
 - fold: a temporary written once and read once, right behind its write, into its reader; one whose
   value has an effect only where the reader evaluates it before any effect of its own, and on every
   path (not into the right of && or ||, nor an arm of ?:);
@@ -871,6 +874,72 @@ def propagate(fn):
                         C.absorb(s, g.nodes[d].stmt)
     write_back(view)
     return changed
+
+
+def steps(fn):
+    """A step made through a copy: w = v + k; ...; v = w; (the writeback of a post-indexed access, ldrb
+    r2, [r0], #1: w = r0 + 1; r2 = *(volatile u8 *)r0; r0 = w;, or a register a compiler scheduled the
+    increment into, RISC-V's addi a5, a3, 1; sb a4, 0(a3); mv a3, a5), k a constant or a variable,
+    becomes ...; v = v + k; where control goes from the step to the copy along one path on which
+    nothing writes v, w or k nor reads w, every other read of w is in a simple statement that only
+    the copy's v and the step's w reach (so that v holds w's value there: a loop's test behind the
+    access, while (w != end), which propagate had written from v): those read v, and w is gone. Only
+    where v's new value meets another of v's values at a read (a loop's pointer, at the loop's head):
+    elsewhere webs would make it a variable of its own (a pre-indexed load's base used once more
+    behind it: r4_1 = r4 + 36 for w_2 = r4 + 36, w under another name, whose name would not carry).
+    dread.polish then folds the step into the access (*p++) where the variables' types allow. One
+    rewrite at a time, whole: written as the copy is, propagate would put w back."""
+    g = Graph(plain_view(fn))
+    reach = g.reaching()
+    readers = {}
+    for m in g.nodes:
+        for x in m.reads:
+            readers.setdefault(x, []).append(m)
+    for n in g.nodes:
+        s = n.stmt
+        if not is_assign(s):
+            continue
+        w, value = s.e.target.id, s.e.value
+        if not (isinstance(value, C.Binary) and value.op in ("+", "-") and isinstance(value.l, C.Name)):
+            continue
+        v = value.l.id
+        k = value.r
+        if v == w or w not in g.scope or v not in g.scope or not (
+                isinstance(k, C.Num) or (isinstance(k, C.Name) and k.id not in (v, w))):
+            continue
+        guarded = {v, w} | ({k.id} if isinstance(k, C.Name) else set())
+        copy_node, i = None, n.index
+        while copy_node is None:
+            if g.nodes[i].succ != [i + 1] or i + 1 >= len(g.nodes) or g.nodes[i + 1].pred != [i]:
+                break
+            i += 1
+            m = g.nodes[i]
+            if is_assign(m.stmt) and m.stmt.e.target.id == v and isinstance(m.stmt.e.value, C.Name) and \
+                    m.stmt.e.value.id == w:
+                copy_node = m
+            elif w in m.reads or m.writes & guarded or isinstance(m.stmt, (C.Label, C.Case)):
+                break
+        if copy_node is None or reach[copy_node.index].get(w) != {n.index}:
+            continue
+        if not any(copy_node.index in (reach[m.index].get(v) or ()) and len(reach[m.index].get(v)) > 1
+                   for m in readers.get(v, ())):
+            continue                        # (v's new value meets no other: webs would make it a variable of
+                                            # its own, w under another name)
+        others = [m for m in readers.get(w, ()) if m is not copy_node]
+        if not all(simple(m.stmt) and reach[m.index].get(w) == {n.index} and
+                   reach[m.index].get(v) == {copy_node.index} and
+                   (not _writes_name(m.stmt, v) or (is_assign(m.stmt) and m.stmt.e.target.id == v))
+                   for m in others):
+            continue
+        copy_node.stmt.e = C.Assign("=", C.Name(v), C.Binary(value.op, C.Name(v), _leaf_copy(k)))
+        C.absorb(copy_node.stmt, s)
+        for m in others:
+            for get, put in stmt_exprs(m.stmt):
+                if reads_count(get(), w):
+                    put(substitute(get(), w, C.Name(v)))
+        fn.body.body[:] = [x for x in fn.body.body if x is not s]
+        return True
+    return False
 
 
 def _moved_back(s, v, name, fn):
@@ -3555,7 +3624,7 @@ def literals(fn):
 
 PASSES = [("split", split), ("unvoid", unvoid), ("flatten", flatten), ("dead", dead), ("frame", frame_stores),
           ("locals", frame_locals),
-          ("propagate", propagate),
+          ("propagate", propagate), ("steps", steps),
           ("selects", selects), ("merge", merge_ifs), ("chains", chains), ("fold", fold), ("arms", empty_arms), ("spread", spread),
           ("addresses", addresses),
           ("expressions", tidy_expressions), ("bits", bits),

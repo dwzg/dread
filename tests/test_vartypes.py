@@ -45,7 +45,8 @@ def test_a_byte_walk_is_a_pointer_to_bytes_const_where_nothing_is_stored():
     """gizmo a32's strncpy as the stages leave it: the destination's group (the parameter, its copy and
     the end pointer made from it) is volatile u8 *, the source's (the parameter one below its first
     byte, advanced) const volatile u8 *; the accesses p[k] and *p, the advances element counts, the
-    result (u32)r0 (the result stays u32)."""
+    result (u32)r0 (the result stays u32); each advance behind its access folded into it (dread.polish
+    fold_steps: r12 = *++r1_1;, *r3++ = r12;)."""
     out, p = typed(HEAD + """u32 f(u32 r0, u32 r1, u32 r2)
 {
     u32 r1_1, r2_1, r3, r12;
@@ -71,8 +72,8 @@ def test_a_byte_walk_is_a_pointer_to_bytes_const_where_nothing_is_stored():
                                          "r1": "const volatile u8 *", "r1_1": "const volatile u8 *"}, p.variables
     assert p.prototypes["f"] == [None, "volatile u8 *", "const volatile u8 *", None], p.prototypes
     for line in ("u32 f(volatile u8 *r0, const volatile u8 *r1, u32 r2)", "const volatile u8 *r1_1;",
-                 "volatile u8 *r2_1, *r3;", "r1_1 = r1 - 1;", "r12 = r1_1[1];", "r1_1++;", "*r3 = r12;", "r3++;",
-                 "r2_1 = r3 + r2;", "if (r3 == r2_1) return (u32)r0;", "*r3 = 0;"):
+                 "volatile u8 *r2_1, *r3;", "r1_1 = r1 - 1;", "r12 = *++r1_1;", "*r3++ = r12;",
+                 "r2_1 = r3 + r2;", "if (r3 == r2_1) return (u32)r0;", "*r3++ = 0;"):
         assert line in out, (line, out)
     assert "volatile u8 *)" not in out.split("{", 1)[1], out      # (no raw access left)
     assert out.startswith("/* dread: overflow wraps */\n/* dread: null checks kept */\n"), out
@@ -429,7 +430,7 @@ u32 by_number(u32 r0)
     out, p = typed(text, name="by_number")
     assert "by_number" not in p.variables and "extern u32 fill(u32, u32, u32);" in out, (p.variables, out)
     out, _ = typed(text, name="fill")
-    assert "u32 fill(volatile u8 *r0, u32 r1, u32 r2)" in out and "*r3 = r1;" in out, out
+    assert "u32 fill(volatile u8 *r0, u32 r1, u32 r2)" in out and "*r3++ = r1;" in out, out
 
 
 def test_a_structure_parameter_takes_a_held_members_address_and_hands_on_a_type():

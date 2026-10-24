@@ -9,6 +9,64 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Loops in their source shape: tests at the head as the condition, loops proved entered, steps folded into their accesses (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Loops in
+their source shape" (docs/todo.md).
+
+- **Question.** dread.structure emits every loop as `for (;;)` and refined it into a while loop only
+  where its one way out was a test at its head, into a do-while where the test was at its end. A loop
+  whose source tests two things at its head (gizmo's strncpy, `while (n && *src)`: the load of `*src`
+  comes between the tests) or leaves it by a return there (strncpy's second loop, memset, memcpy and
+  checksum on gizmo's ARM builds: `for (;;) { if (p == end) return d; ... }`) stayed `for (;;)` with
+  ifs that break or return; a loop a compiler rotated behind a test of its bound (`if (n == 0) return;
+  p = s; do { ...; p++; } while (p != end);`, GCC -Os's counted loops) stayed a do-while; the steps of
+  post-indexed accesses read as a copy and an add (`w = r0 + 1; r2 = *r0; r0 = w;`, `*r3 = r12; r3++;`).
+  What should become a while or for loop and an access with its pointer's step, and where may each
+  rewrite be made so that it keeps the C's meaning?
+- **Options.** For the tests: (a) the run of `if (c) break;` at a loop's head as the while condition,
+  `!a && !b` (each test evaluated only where those before it failed, as && does), other breaks staying
+  in the body (they leave the while as they left the for), and a head test that leaves by a return, or
+  by a break behind statements, as the condition with those statements behind the loop where the loop
+  has no other way out that falls on; (b) also tests behind statements (`while (n && (c = *++s) != 0)`:
+  assignments in conditions). For rotated loops: (c) a do-while is a while loop where its condition is
+  proved to hold whenever control reaches it (a weakest precondition through the statements before it,
+  the tests of the ifs around it and the head of a loop around it, then z3), a for loop where an init
+  before it and its body's last statement, a step of a variable its condition reads, make it a counted
+  one; (d) every do-while behind a test that skips it, by pattern; (e) leave do-whiles. For the steps:
+  (f) in dread.tidy, a step made through a copy (`w = v + k; ...; v = w;`) as a step of v, where w's
+  other reads see v's value and v's new value meets its others (a loop's pointer); (g) the step folded
+  into its access in dread.tidy, before the types; (h) in dread.polish, after the types: `*p = x; p++;`
+  as `*p++ = x;` and `x = p[1]; p++;` as `x = *++p;`, where nothing between reads p.
+- **Choice: (a), (c), (f) and (h).** (b) would write assignments into conditions, which readable C has
+  nowhere else (not tried). (c) is sound by construction (only conditions of variables without an
+  effect: the while loop evaluates it once more; nothing in a function that keeps a label), and the
+  gate checks it besides; (d) would convert loops whose test reads values other than those tested
+  before (a pointer advanced in between). (g) hides the pointer from dread.vartypes, whose pointer
+  groups are addresses that are a variable plus constants (`*(volatile u8 *)r3++` is none: the variable
+  would stay u32 with casts), folds only byte steps (a u32's ++ adds one; a word pointer's step of four
+  is one element only once vartypes typed it) and changes the digests and identities the readable_names
+  entries are made for; (h) does neither (polish runs after both). (f) only where the copy's v meets
+  another of v's values: a pre-indexed load's base used again behind it (`w_2 = r4 + 36` on clang -O2)
+  became a variable of its own under webs, w under another name whose name did not carry. A for loop
+  takes its init and step from statements: cparse's For remembers their instructions (init_addr,
+  step_addr) and dread.naming identities counts the variable's definitions there, so names carry
+  (without it the definitions moved to the loop's branch and a counter's name would not carry).
+- **Not done.** A loop whose exit sits at its end behind a return (`for (;;) { ...; if (n == 0) return
+  d; }`, none without another break on the eight builds) stays `for (;;)`; a loop entered only where
+  something proved about a loop before it holds (gizmo's fmt_dec, whose second loop's count the first
+  made at least 1) stays a do-while; an index's step (`x = a[i]; i++;`, a counter's) is not folded; an
+  if that only guards a while loop on its own test (`if (n != 0) { while (n != 0) ... }`, three functions
+  of the eight builds: RISC-V's newlib memcpy and memset, gizmo rv32's memcmp) keeps its test; two steps
+  of one pointer in one round become an offset and one step (`*(r0 + 2)`, `r0 += 3`: webs splits the
+  pointer between them).
+- **How to undo.** dread/structure.py: refine_loops back to its single leading break (leading_breaks and
+  leading_exit gone), structure without the entered and counted calls; dread/tidy.py: ("steps", steps)
+  out of PASSES; dread/polish.py: polish without the fold_steps call; dread/naming.py: identities without
+  the For case (and cparse For's init_addr, step_addr).
+- **Status.** In the code (tests/test_loops.py; tests/test_polish.py's and tests/test_vartypes.py's
+  expected lines of strncpy and fill).
+
 ## A pilot run's events: a JSON-lines file per run in the target's build directory, an index beside it (2026-10-24)
 
 **Decided by recommendation**, on the user's request of 2026-10-24 ("Can the GUI be extended to support

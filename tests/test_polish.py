@@ -625,7 +625,7 @@ def code(text):
 def test_gizmos_text_functions_read_as_their_source():
     """gizmo-a32's parse_kv returns -1, -2 and -3 (its source's errors) and compares characters; read_line
     compares the line ends and terminates the buffer with 0; cmd_mode returns 0 or -1; strncpy stores
-    and counts without casts. Characters on the other builds too (Thumb, RISC-V)."""
+    (through r3++) and counts without casts. Characters on the other builds too (Thumb, RISC-V)."""
     got = {n: code(t) for n, t in gizmo_texts("a32", ["parse_kv", "read_line", "cmd_mode", "strncpy"]).items()}
     kv = got["parse_kv"]
     for want in ("= -1;", "= -2;", "== -1 ? -3 : 0;", "== '\\t' || ", " == ' '", " != '=') "):
@@ -638,7 +638,7 @@ def test_gizmos_text_functions_read_as_their_source():
     assert re.search(r"\*\(volatile u8 \*\)\(\w+ \+ r4\) = 0;", line) and "= -1;" in line, line
     assert "-1;" in got["cmd_mode"] and "~0x0u" not in got["cmd_mode"], got["cmd_mode"]
     copy = got["strncpy"]
-    assert "*(volatile u8 *)r3 = 0; r3++;" in copy and "r2--;" in copy and "(u8)" not in copy, copy
+    assert "*(volatile u8 *)r3++ = 0;" in copy and "r2--;" in copy and "(u8)" not in copy, copy
     for variant in ("m3", "m4", "rv32"):
         kv = code(gizmo_texts(variant, ["parse_kv"])["parse_kv"])
         assert "' '" in kv and "'\\t'" in kv and "'='" in kv and "~0x1u" not in kv, (variant, kv)

@@ -2290,12 +2290,53 @@ model).
   12 lines for its 22; the header 694 lines (9,035 bytes), 770 (9,981), 362 (4,676), 593 (7,670).
   Gizmo's builds have no structure in the gate's plan: unchanged (35 to 44 functions, a median of 3
   declaration lines).
-- [ ] **Loops in their source shape.** Several exits at a loop's head print as `for (;;) { if (c)
+- [x] **Loops in their source shape.** Several exits at a loop's head print as `for (;;) { if (c)
   break; ... }`, a counted loop whose first test holds as a do-while after its initialisation, and
   post-increments as a copy and an add. Make leading breaks the while condition, a do-while whose
   condition holds on entry a for loop, and a use of the copy made before an increment `*p++`. Public
   example: gizmo a32 strncpy (`for (;;) { if (r2 == 0) break; ... if (r12 == 0) break; ...}` for
   `while (n && *src)`; `*(volatile u8 *)r3 = (u8)r12; r3 = r3 + 1;` for `*d++ = *src++`).
+  Done 2026-10-24 (dread.structure refine_loops, leading_breaks, leading_exit, Entry, entered, counted;
+  dread.tidy steps; dread.polish fold_steps; cparse For's init_addr and step_addr, read by dread.naming
+  identities; docs/decisions.md, "Loops in their source shape"). The run of tests at a loop's head that
+  leave it is its while condition (`!a && !b`, a break further in staying), a head test that leaves by
+  a return (or a break behind statements) where the loop has no other way out is the condition with
+  those statements behind the loop; a do-while whose condition is proved to hold wherever control
+  reaches it (written back through the statements before it and the tests around it, z3) is a while
+  loop, and a while loop whose body ends with a step of a variable its condition reads, behind an init
+  of it, a for loop; a step made through a copy (`w = r0 + 1; r2 = *r0; r0 = w;`) is a step of the
+  variable, and an access with its pointer's step behind it is one, `*p++` or `*++p` (after the types:
+  a word pointer's step of one element too). gizmo a32 strncpy, as the check types it: `while (r2 !=
+  0) { r12 = *++r1_1; if (r12 == 0) break; *r3++ = r12; r2--; }` and `while (r3 != r2_1) *r3++ = 0;`;
+  RISC-V's memcpy and checksum `for (a3 = a0; a3 != a2_1; a3++)`; FreeRTOS GCC -Os's prvSingleTaskTests
+  (MessageBufferDemo.c) `for (r8 = 48; r8 != 53; r8++)` for `for (xItem = 0; xItem < xMax6ByteMessages;
+  xItem++)` with `'0' + xItem`, newlib's memcpy on RISC-V `*a3++ = *a1++;`. Measured on fresh copies of
+  the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0), main
+  at 95511db -> this, every function's readable C as `dread readable --out` prints it (counted by a
+  script on the trees, not in the repository): loops with tests at their head that break 2, 2, 2, 1,
+  2, 1, 1, 6 -> 0 everywhere, gizmo a32's four with a return at their head -> 0 (clang -O2's one and GCC
+  -O0's two have another way out); do-whiles behind an assignment their condition reads 2, 2, 2, 6, 59,
+  24, 67, 0 -> 1, 1, 1, 3, 8, 14, 21, 0 (do-whiles 13, 8, 8, 18, 100, 90, 95, 14 -> 10, 7, 7, 9, 24, 71,
+  37, 11; for loops with an init and a step 0 -> 4, 5, 5, 4, 54, 10, 41, 47); an access and its
+  pointer's step apart (the step behind a statement whose one read of the pointer is the access's
+  whole address) 18, 22, 22, 7, 23, 6, 1, 6 -> 0 everywhere (any read and a step of one 19, 23, 24, 14,
+  34, 30, 14, 16 -> 0, 0, 1, 7, 11, 23, 12, 4: counters compared, indices); `for (;;)` never left 2, 3,
+  3, 1, 78, 74, 69, 81, unchanged. The gate accepts the same functions, set for set (35, 36, 44, 31,
+  317, 275, 252, 354); the readable C of 13, 15, 15, 11, 42, 19, 31, 43 functions changed; every GCC -Os
+  function's readable C in one process 66.4 and 67.7 s of CPU on main, 69.2 and 69.8 s with this (the
+  entry proofs, the folds; a shared machine). Names a script made for main's C (every variable of every
+  lifted function) carry to this C: of 6, 5, 5, 5, 27, 9, 17, 26 functions whose C changed under them,
+  all (44, 36, 35, 36, 365, 125, 225, 189 names), 1, 1, 1, 4, 5, 3, 0, 2 dropped, each of a copy the
+  steps took out (w_1, RISC-V's a5), no variable left without a name. Tests (tests/test_loops.py): each
+  shape and what refuses it, the identities of a for loop's init and step, gizmo's strncpy, memcpy and
+  checksum on every build, random loops structured and random pointer walks through every stage, each
+  compiled by the host beside its original and run (the walks on a memory of their own); also with
+  Ubuntu 24.04's and 22.04's compilers.
+  Left: a loop whose exit is a return at its end stays `for (;;)` (none without another break here);
+  one entered only by what a loop before it proved stays a do-while (gizmo's fmt_dec); an index's step
+  (`x = a[i]; i++;`) is not folded; an if that only guards a while loop on its own test (`if (n != 0) {
+  while (n != 0) ... }`: RISC-V's newlib memcpy and memset, gizmo rv32's memcmp) keeps its test; two
+  steps of one pointer in a round are an offset and one step (webs splits the pointer between them).
 - [x] **A reading form without the instruction comments.** Every statement carries its instruction,
   pushes, pops and stack adjustments are comment lines, and a statement made of several instructions
   carries one of them (a call can carry the mov after it). An option (`--plain`, and the GUI's

@@ -9,8 +9,15 @@ post-dominators (endless_ends): without them no branch there had a join.
 
 - a loop (a header that dominates a block jumping back to it) is `for (;;) { ... }`, with `continue`
   for the jumps back and `break` for the jumps to the block after it (the target most of its exits
-  go to), and refined afterwards: a test at its top that leaves it makes it a `while`, one at its end
-  that goes back makes it a `do ... while`;
+  go to), and refined afterwards (refine_loops): the run of tests at its top that leave it makes it a
+  `while` with their negations joined by && (strncpy's `while (n != 0)`, a break further in staying),
+  a test at its top that leaves by a return, or by a break behind statements, where the loop has no
+  other way out that falls on, makes it a `while` with those statements behind it (`while (p != end)
+  ...; return d;`), a test at its end that goes back makes it a `do ... while`; then a do-while whose
+  condition is proved to hold whenever control reaches it is a `while` (entered: the condition
+  written back through the statements before it and the tests around it, given to z3: GCC's loops
+  rotated behind a test of their bound), and a while loop whose body ends with a step of a variable
+  its condition reads, behind an init of it, is a `for` loop (counted: `for (p = s; p != end; p++)`);
 - a conditional jump is `if (...) { ... } else { ... }`, both arms emitted up to the branch's
   immediate post-dominator, where they meet; where they never meet (each way ends in a return or
   goes round a loop), the blocks the branch dominates that several ways reach follow the if, in
@@ -926,9 +933,62 @@ def arrange_if(s, way=None, copies=False):
     return best
 
 
+def _break_if(s):
+    """Whether s is if (c) break; (the break alone in its arm, no else)."""
+    return isinstance(s, C.If) and s.orelse is None and len(_list(s.then)) == 1 and \
+        isinstance(_list(s.then)[0], C.Break)
+
+
+def leading_breaks(body):
+    """(tests, k) of a loop's body: the run of if (c) break; it begins with (comments and empty
+    statements among them), and the index of the first statement after the run."""
+    tests, k, j = [], 0, 0
+    while j < len(body):
+        s = body[j]
+        if isinstance(s, (C.Note, C.Empty)):
+            j += 1
+            continue
+        if not _break_if(s):
+            break
+        tests.append(s)
+        j += 1
+        k = j
+    return tests, k
+
+
+def leading_exit(body):
+    """(k, test, after) of a loop's body that begins (after comments) with if (c) A, A never falling
+    through, where the body has no other break and A no break or continue of this loop but a last
+    break: the loop's only way out that falls on is that test, so the loop is while (!c) { the rest }
+    and A, its last break left out, follows it. None for any other body."""
+    k = 0
+    while k < len(body) and isinstance(body[k], (C.Note, C.Empty)):
+        k += 1
+    if k >= len(body):
+        return None
+    s = body[k]
+    if not isinstance(s, C.If) or s.orelse is not None:
+        return None
+    arm = list(_list(s.then))
+    if not ends(arm) or _breaks_inside(body[k + 1:]):
+        return None
+    j = len(arm)
+    while j and isinstance(arm[j - 1], (C.Note, C.Empty)):
+        j -= 1
+    after = arm[:j - 1] + arm[j:] if isinstance(arm[j - 1], C.Break) else arm
+    if _breaks_inside(after) or _continues_inside(after):
+        return None
+    return k, s, after
+
+
 def refine_loops(stmts):
-    """for (;;) { if (c) break; body }  ->  while (!c) { body };
-    for (;;) { body; if (c) continue; break; } and for (;;) { body; if (!c) break; } -> do { body } while (c)."""
+    """for (;;) { if (a) break; if (b) break; body }  ->  while (!a && !b) { body } (other breaks may
+    follow in the body: they leave the while as they left the for);
+    for (;;) { if (c) { A } body }, A never falling through and the body without a break -> while (!c)
+    { body } A (A's last break left out: the loop's only way out that falls on is the test);
+    for (;;) { body; if (c) continue; break; } and for (;;) { body; if (!c) break; } -> do { body } while (c).
+    The run of tests at the head becomes the condition in its order, each tested only where those
+    before it failed, as && evaluates them; comments among them go in front of the loop."""
     out = []
     for s in stmts:
         if isinstance(s, C.If):
@@ -941,12 +1001,21 @@ def refine_loops(stmts):
             body = refine_loops(_list(s.body))
             while body and isinstance(body[-1], C.Continue):
                 body.pop()
-            first = body[0] if body else None
             last = body[-1] if body else None
-            if isinstance(first, C.If) and first.orelse is None and _list(first.then) and \
-                    isinstance(_list(first.then)[-1], C.Break) and len(_list(first.then)) == 1 and \
-                    not _breaks_inside(body[1:]):
-                s = C.While(negate(first.cond), C.Block(body[1:]), first.addr)
+            tests, k = leading_breaks(body)
+            exit_ = leading_exit(body) if not tests else None
+            if tests:
+                cond = negate(tests[0].cond)
+                for t in tests[1:]:
+                    cond = C.Binary("&&", cond, negate(t.cond))
+                out.extend(x for x in body[:k] if isinstance(x, C.Note))
+                s = C.While(cond, C.Block(body[k:]), tests[0].addr)
+            elif exit_ is not None:
+                k, test, after = exit_
+                out.extend(x for x in body[:k] if isinstance(x, C.Note))
+                out.append(C.While(negate(test.cond), C.Block(body[k + 1:]), test.addr))
+                out.extend(after)
+                continue
             elif isinstance(last, C.If) and last.orelse is None and len(_list(last.then)) == 1 and \
                     isinstance(_list(last.then)[0], C.Break) and not _breaks_inside(body[:-1]) and \
                     not _continues_inside(body[:-1]):
@@ -982,6 +1051,353 @@ def refine_loops(stmts):
             s = C.While(s.cond, C.Block([]), s.addr)            # test c first)
         out.append(s)
     return out
+
+
+# --- do-while loops entered with their condition true, counted loops ---
+
+ENTRY_NODES = 240       # the most nodes of what an entry proof asks (the loop's condition written back through
+                        # the statements before it): beyond it the loop stays a do-while
+
+
+class _Refused(Exception):
+    pass
+
+
+class _Stop(Exception):
+    """A case label met on the way back: what must hold there must hold whatever the switch saw (g)."""
+
+    def __init__(self, g):
+        Exception.__init__(self)
+        self.g = g
+
+
+class Entry:
+    """Whether a do-while's condition holds whenever control reaches the loop, proved: the condition
+    written back through the statements before it (a weakest precondition: an assignment's value put
+    for its variable, an if's two ways each with its test, what a loop or an asm writes, or an
+    assignment from memory or a call, any value at all), through the if arms around it (the arm's test
+    holds there) up to the function's start, the head of a loop around it (its condition holds there,
+    nothing more) or a case label, then given to z3 (dread.cexpr: true for every value of what is left,
+    and defined). Only conditions of variables and constants without an effect (the while loop
+    evaluates it once more: at its entry), only variables whose address the function never takes (a
+    call could write them), and only in a function without labels (a goto would bring other values
+    to the loop). What cannot be followed refuses the loop (it stays a do-while)."""
+
+    def __init__(self, fn):
+        from dread import tidy
+        self.fn = fn
+        self.ctx = tidy.context(fn)
+        self.decls = tidy.declarations(fn)
+        self.fresh = 0
+        self.taken = address_taken(fn.body.body)
+
+    def condition(self, cond):
+        """Whether a loop's condition may be followed: variables and constants, no effect."""
+        from dread.cflow import has_effects, reads_memory
+        return not has_effects(cond) and not reads_memory(cond) and not (_names(cond) & self.taken)
+
+    def havoc(self, g, v):
+        """g with v any value: a fresh variable of v's type for it."""
+        from dread import tidy
+        if v not in _names(g):
+            return g
+        if v in self.taken or v not in self.ctx.types:
+            raise _Refused(v)
+        self.fresh += 1
+        name = "__entry%d" % self.fresh
+        self.ctx.types[name] = self.ctx.types[v]
+        return tidy.substitute(g, v, C.Name(name))
+
+    def assigned(self, g, v, value):
+        """g with v given value (converted to v's declared type, as the assignment converts it)."""
+        from dread import tidy
+        from dread.cflow import has_effects, reads_memory
+        if v not in _names(g):
+            return g
+        t = tidy.type_of(self.fn, v, self.decls)
+        if t is None or v in self.taken or has_effects(value) or reads_memory(value) or \
+                self.ctx.ctype(t) is None:
+            return self.havoc(g, v)
+        return self._small(tidy.substitute(g, v, C.Cast(" ".join(t.split()), value)))
+
+    def _small(self, g):
+        from dread.cflow import walk_expr
+        if sum(1 for _ in walk_expr(g)) > ENTRY_NODES:
+            raise _Refused("too large")
+        return g
+
+    def back(self, stmts, g):
+        """What must hold at the start of stmts for g to hold at their end (control falling off it);
+        None where control never falls off a statement on the way (the end is not reached)."""
+        from dread import tidy
+        from dread.cflow import expr_writes, has_effects, reads_memory
+        if ends(stmts):
+            return None
+        for s in reversed(stmts):
+            if isinstance(s, (C.Note, C.Empty)):
+                continue
+            if isinstance(s, C.Case):
+                raise _Stop(g)
+            if isinstance(s, (C.Label, C.Goto, C.Return, C.Break, C.Continue)) or \
+                    (isinstance(s, C.For) and s.cond is None and not _has_break(s.body)):
+                raise _Refused("control")       # (no labels in the function: a statement nothing reaches)
+            if isinstance(s, C.ExprStmt):
+                e = s.e
+                if tidy.is_assign(s) and not expr_writes(e.value, set()):
+                    g = self.assigned(g, e.target.id, e.value)
+                    continue
+                for v in sorted(expr_writes(e, set())):
+                    g = self.havoc(g, v)
+                continue
+            if isinstance(s, C.Decl):
+                for d in reversed(s.items):
+                    g = self.assigned(g, d.name, d.init) if d.init is not None and not d.dims else \
+                        self.havoc(g, d.name)
+                continue
+            if isinstance(s, C.Block):
+                if any(isinstance(x, C.Decl) for x in s.body):     # (its own variables: their names may
+                    for v in sorted(_written_in(s)):                # hide the function's)
+                        g = self.havoc(g, v)
+                else:
+                    g = self.back(s.body, g)
+                if g is None:
+                    return None
+                continue
+            if isinstance(s, C.If):
+                c = s.cond
+                written = expr_writes(c, set())
+                then = self.back(_list(s.then), g)
+                orelse = self.back(_list(s.orelse), g) if s.orelse is not None else g
+                if then is None and orelse is None:
+                    return None
+                pure = not has_effects(c) and not reads_memory(c) and not written and \
+                    not (_names(c) & self.taken)
+                if then is g and orelse is g:
+                    pass                        # (neither way writes what g reads)
+                elif not pure:
+                    g = then if orelse is None else orelse if then is None else \
+                        C.Binary("&&", then, orelse)
+                elif then is None:
+                    g = C.Binary("||", c, orelse)
+                elif orelse is None:
+                    g = C.Binary("||", negate(c), then)
+                else:
+                    g = C.Binary("&&", C.Binary("||", negate(c), then), C.Binary("||", c, orelse))
+                for v in sorted(written):
+                    g = self.havoc(g, v)
+                g = self._small(g)
+                continue
+            if isinstance(s, (C.While, C.DoWhile, C.For, C.Switch, C.Asm)):
+                for v in sorted(_written_in(s)):
+                    g = self.havoc(g, v)
+                continue
+            raise _Refused(type(s).__name__)
+        return g
+
+    def valid(self, g):
+        """Whether g holds for every value of its variables (and is defined there): tested, then proved."""
+        from dread import cexpr
+        return cexpr.equivalent(C.Num("1"), g, self.ctx, as_bool=True)
+
+
+def entered(fn, stmts):
+    """The do-while loops of the statements (nested ones too) whose condition holds whenever control
+    reaches them (Entry) as while loops: do { B } while (c) is while (c) { B } where the first test
+    holds, and c is evaluated once more without an effect. Nothing in a function with a label."""
+    if _has_label(stmts):
+        return stmts
+    entry = Entry(fn)
+
+    def obligation(prefix, g, up):
+        try:
+            got = entry.back(prefix, g)
+        except _Refused:
+            return None
+        except _Stop as stop:
+            return stop.g
+        return None if got is None else up(got)
+
+    def walk(stmts, up):
+        for k, s in enumerate(stmts):
+            def here(g, k=k):
+                return obligation(stmts[:k], g, up)
+            if isinstance(s, C.DoWhile) and entry.condition(s.cond):
+                g = here(copy.deepcopy(s.cond))
+                try:
+                    if g is not None and entry.valid(g):
+                        stmts[k] = s = C.While(s.cond, s.body, s.addr)
+                except _Refused:
+                    pass
+            if isinstance(s, C.If):
+                c = s.cond
+                if entry.condition(c):
+                    walk(_list(s.then), lambda g, c=c, here=here: here(C.Binary("||", negate(c), g)))
+                    if s.orelse is not None:
+                        walk(_list(s.orelse), lambda g, c=c, here=here: here(C.Binary("||", c, g)))
+                else:
+                    from dread.cflow import expr_writes
+                    inner = here if not expr_writes(c, set()) else (lambda g: None)
+                    walk(_list(s.then), inner)
+                    if s.orelse is not None:
+                        walk(_list(s.orelse), inner)
+            elif isinstance(s, (C.While, C.For)) and s.cond is not None and entry.condition(s.cond):
+                walk(_list(s.body), lambda g, c=s.cond: C.Binary("||", negate(c), g))
+            elif isinstance(s, (C.While, C.DoWhile, C.For, C.Switch)):
+                walk(_list(s.body), lambda g: g)
+            elif isinstance(s, C.Block):
+                walk(s.body, here)
+    walk(stmts, lambda g: g)
+    return stmts
+
+
+def counted(stmts, taken=frozenset()):
+    """init; while (c) { body; step; } as for (init; c; step) { body }, in every statement list: the
+    step the body's last statement, an assignment to a variable v whose value reads v without a call (v
+    = v + 1, p = *(volatile u32 *)(p + 4)), c reads v, the body has no continue of the loop (a continue
+    of the for loop would run the step), and the init the last statement before the loop that writes
+    v, an assignment of a value that does not read v; statements between them are moved over only where
+    they are expressions that neither read nor write v nor write what the init reads, and have no
+    effect where the init's value has one; v is no variable whose address the function takes (taken: a
+    call between could read it). The for statement keeps the loop's instruction and absorbs
+    the init's and the step's (the reading form's margin shows the init's), and remembers both
+    (init_addr, step_addr: what dread.naming identities says their variable is defined at). Every
+    path runs what it ran, in its order."""
+    from dread import tidy
+    from dread.cflow import has_effects, walk_expr
+    out = list(stmts)
+    for s in out:
+        if isinstance(s, C.If):
+            s.then = C.Block(counted(_list(s.then), taken))
+            if s.orelse is not None:
+                s.orelse = C.Block(counted(_list(s.orelse), taken))
+        elif isinstance(s, (C.While, C.DoWhile, C.For, C.Switch)):
+            s.body = C.Block(counted(_list(s.body), taken))
+        elif isinstance(s, C.Block):
+            s.body = counted(s.body, taken)
+    k = 0
+    while k < len(out):
+        s = out[k]
+        k += 1
+        if not isinstance(s, C.While):
+            continue
+        body = _list(s.body)
+        j = len(body)
+        while j and isinstance(body[j - 1], (C.Note, C.Empty)):
+            j -= 1
+        if not j:
+            continue
+        step = body[j - 1]
+        if not tidy.is_assign(step):
+            continue
+        v = step.e.target.id
+        if v in taken or not tidy.reads_count(step.e.value, v) or any(isinstance(x, (C.Call, C.Assign, C.Post)) or (
+                isinstance(x, C.Unary) and x.op in ("++", "--")) for x in walk_expr(step.e.value)):
+            continue
+        if not tidy.reads_count(s.cond, v) or _continues_inside(body[:j - 1]):
+            continue
+        i, between = k - 2, []
+        while i >= 0:
+            x = out[i]
+            if isinstance(x, (C.Note, C.Empty)):
+                i -= 1
+                continue
+            if tidy.is_assign(x) and x.e.target.id == v:
+                break
+            if not isinstance(x, C.ExprStmt) or tidy.reads_count(x.e, v) or v in _writes(x.e):
+                i = -1
+                break
+            between.append(x)
+            i -= 1
+        if i < 0:
+            continue
+        init = out[i]
+        value = init.e.value
+        if tidy.reads_count(value, v) or _writes(value):
+            continue
+        reads = _names(value)
+        if any(_writes(x.e) & reads or (has_effects(value) and has_effects(x.e)) for x in between):
+            continue
+        f = C.For(init.e, s.cond, step.e, C.Block(body[:j - 1] + body[j:]), s.addr,
+                  init_addr=init.addr, step_addr=step.addr)
+        C.absorb(f, init)
+        C.absorb(f, step)
+        out[k - 1] = f
+        del out[i]
+        k -= 1
+    return out
+
+
+def _names(e):
+    from dread.cflow import walk_expr
+    return {x.id for x in walk_expr(e) if isinstance(x, C.Name)}
+
+
+def address_taken(stmts):
+    """The variables whose address the statements take (&v, &v.f, &v[k]: a call may reach them)."""
+    from dread.cflow import walk_expr
+    out = set()
+    for s in _all_stmts(stmts):
+        for e in _stmt_exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Unary) and x.op == "&":
+                    out |= _names(x.e)
+    return out
+
+
+def _writes(e):
+    from dread.cflow import expr_writes
+    return expr_writes(e, set())
+
+
+def _stmt_exprs(s):
+    """The expressions a statement holds itself (not those of the statements inside it)."""
+    if isinstance(s, (C.ExprStmt, C.Return)):
+        return [s.e] if s.e is not None else []
+    if isinstance(s, (C.If, C.While, C.DoWhile)):
+        return [s.cond]
+    if isinstance(s, C.For):
+        return [x for x in (s.init if not isinstance(s.init, C.Decl) else None, s.cond, s.step) if x is not None]
+    if isinstance(s, C.Switch):
+        return [s.e]
+    if isinstance(s, C.Decl):
+        return [d.init for d in s.items if d.init is not None]
+    if isinstance(s, C.Asm):
+        return [o.e for o in s.outputs + s.inputs]
+    return []
+
+
+def _all_stmts(stmts):
+    """Every statement of the list and of those inside them."""
+    for s in stmts:
+        yield s
+        if isinstance(s, C.If):
+            yield from _all_stmts(_list(s.then))
+            if s.orelse is not None:
+                yield from _all_stmts(_list(s.orelse))
+        elif isinstance(s, (C.While, C.DoWhile, C.For, C.Switch)):
+            yield from _all_stmts(_list(s.body))
+            if isinstance(s, C.For) and isinstance(s.init, C.Decl):
+                yield s.init
+        elif isinstance(s, C.Block):
+            yield from _all_stmts(s.body)
+
+
+def _written_in(s):
+    """The variables a statement (and those inside it) may write."""
+    out = set()
+    for x in _all_stmts([s]):
+        if isinstance(x, C.Asm):
+            out |= {o.e.id for o in x.outputs if isinstance(o.e, C.Name)}
+            continue
+        if isinstance(x, C.Decl):
+            out |= {d.name for d in x.items}
+        for e in _stmt_exprs(x):
+            out |= _writes(e)
+    return out
+
+
+def _has_label(stmts):
+    return any(isinstance(s, C.Label) for s in _all_stmts(stmts))
 
 
 def _breaks_inside(stmts):
@@ -1148,6 +1564,8 @@ def structure(fn, run=None):
         return fn
     out = refine_loops(out)
     fn.body.body[:] = head + out
+    entered(fn, fn.body.body)
+    fn.body.body[:] = counted(fn.body.body, address_taken(fn.body.body))
     return fn
 
 

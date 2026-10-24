@@ -118,8 +118,10 @@ the source's (the ELF's debug information).
 (dread.naming identities), one string a variable: a parameter `"param N"`, N its position in the head
 (the head lists the argument registers in order); a local `"BASE DEF..."`, BASE the register or frame
 slot it lives in (its name without the numbers of its webs: r4 for r4_2, s36 for s36_1), each DEF an
-instruction that writes it (`0x1a2b`, in order; `entry` for a declaration's initial value), BASE alone
-for a local nothing writes. When the transformations change the C, the names go to the variables of
+instruction that writes it (`0x1a2b`, in order; `entry` for a declaration's initial value; a for
+loop's init and step at the instructions of the statements they were made from, since 2026-10-24,
+when dread.structure began to make for loops of them: an older entry has those statements' own,
+which is the same), BASE alone for a local nothing writes. When the transformations change the C, the names go to the variables of
 the new C with the same identity (carrying): a parameter's to the parameter at its position, a
 local's to the local of the same base whose definitions it shares most, more than half of all the two
 have (Jaccard, dread.naming CARRY_OVERLAP), where each is the other's only best match. Every carried
