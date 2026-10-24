@@ -198,7 +198,7 @@ def plan(target, image, pairs, outside=False):
             edit(record, column(0))
         for folder, suffix in ((img.extra_cases, ".json"), (img.kept_cases, ".json"), (img.record_specs, ".py"),
                                (os.path.join(img.src, "pilot"), ".c"),
-                               (os.path.join(target.build, "autocases", img.name), ".json")):
+                               (target.cases_dir(img), ".json")):
             for old, new in mine.items():
                 path = os.path.abspath(os.path.join(folder, old + suffix))
                 if os.path.isfile(path):

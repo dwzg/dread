@@ -5751,6 +5751,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## Scale and robustness
 
+- [x] **Copies of one target share their generated cases** (2026-10-25, from the private real-life
+  test: a naming experiment's copy of a target made every case anew after the target's own lift check
+  had just made them, hours of work). `[paths] cases` puts the case cache where a target says (default
+  `BUILD/autocases`; Target.cases_dir, used by every reader of the cache); copies that point it at one
+  directory share it, each entry still checked by its key (docs/target.md; tests/test_shared_cases.py).
+  Not shared: the regflow cache (minutes, not hours), and nothing across images whose functions share
+  names (they would keep replacing each other's entries).
 - [x] **Case keys scoped to a function's call tree** (2026-10-23; docs/decisions.md). The generated
   cases' key held one environment for the whole image (dread.autocase Generator.environment): a change
   of what dread.regflow found anywhere, or of the stubs' answers beyond a C result, made every case of

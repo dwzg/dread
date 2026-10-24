@@ -425,7 +425,7 @@ def cached_cases(gen, name, fn, options=None):
     if options.get("loop") and not frame:
         frame = gen.loop_frame(name)        # (as cases_for gives it)
     key, _ = autocase.case_key(gen, name, fn, options, calls, frame)
-    cached = autocase.cache_load(os.path.join(gen.target.build, "autocases", gen.image.name, name + ".json"))
+    cached = autocase.cache_load(os.path.join(gen.target.cases_dir(gen.image), name + ".json"))
     return cached["cases"] if cached and cached.get("key") == key else None
 
 

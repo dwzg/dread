@@ -341,7 +341,7 @@ class State:
                 "placement": os.path.join(recon, "placement.json"), "recon_lifted": os.path.join(recon, "lifted.json"),
                 "check_lifted": os.path.join(check, "lifted.json"), "recon_c": os.path.join(recon, "lifted"),
                 "check_c": os.path.join(check, "lifted"), "lift_c": os.path.join(build, "lifted", img.name),
-                "autocases": os.path.join(build, "autocases", img.name), "pilot": os.path.join(img.src, "pilot"),
+                "autocases": self.target.cases_dir(img), "pilot": os.path.join(img.src, "pilot"),
                 "payload": os.path.join(recon, "payload.bin")}
 
     def watched(self):

@@ -79,7 +79,7 @@ def cases_of(target, image, name):
     (whatever their key: inputs only)."""
     from dread import autocase
     out = list(autocase.extra_load(image, name)) + list(autocase.kept_load(image, name))
-    cached = autocase.cache_load(os.path.join(target.build, "autocases", image.name, name + ".json"))
+    cached = autocase.cache_load(os.path.join(target.cases_dir(image), name + ".json"))
     if cached:
         out += [c for c in cached.get("cases") or () if isinstance(c, dict)]
     return [c for c in out if isinstance(c.get("args"), list)]

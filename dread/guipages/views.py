@@ -139,7 +139,7 @@ def shown_path(request, path):
 def case_inputs(request, name):
     """The files a function's cases come from: generated, kept, written, and the cases directory's."""
     image = request.target.image(request.image)
-    out = [os.path.join(request.target.build, "autocases", image.name, name + ".json"),
+    out = [os.path.join(request.target.cases_dir(image), name + ".json"),
            os.path.join(image.extra_cases, name + ".json"), os.path.join(image.kept_cases, name + ".json")]
     out += sorted(glob.glob(os.path.join(image.cases, "**", "*.py"), recursive=True))
     return out

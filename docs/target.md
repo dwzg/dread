@@ -190,7 +190,12 @@ address faults before the run can stop.
 
 ### `[paths]`, `[host]`, `[llm]`, `[plugins]`
 
-- `[paths]`: `build` (default `build`) and `src` (default `src`).
+- `[paths]`: `build` (default `build`), `src` (default `src`) and `cases`, where generated cases are
+  cached (default `BUILD/autocases`). Copies of one target (a naming experiment's copy beside it) can
+  point `cases` at one directory, so that one copy's lift check spares the others the generation: each
+  entry carries its key, and one made for other code is made anew, never taken. Share it only between
+  copies of one image: entries are kept by image and function name, so two images whose functions share
+  names would keep replacing each other's.
 - `[llm]`: `only`, the names of the functions a language model may be shown; `dread pilot` asks
   about no other function (a `dread cclab` build of a proprietary toolchain lists its probes there,
   so that the toolchain's runtime library never reaches a model). Without it, any function may be.

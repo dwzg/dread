@@ -126,7 +126,7 @@ def inputs_for(name):
     gen, image = G["gen"], G["image"]
     prog = gen.program
     fn = prog.by_name[name]
-    path = os.path.join(G["target"].build, "autocases", image.name, "integration-" + name + ".json")
+    path = os.path.join(G["target"].cases_dir(image), "integration-" + name + ".json")
     key = autocase.cache_key(gen.payload, image.base, fn.insns, {a: prog.insn_size(a) for a in fn.insns}, fn.entry,
                              {"integration": True, "seconds": GENERATE_SECONDS}, prog.arch, gen.environment(name))
     cached = autocase.cache_load(path)

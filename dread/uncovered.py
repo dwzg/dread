@@ -976,7 +976,7 @@ def case_notes(name, fn, loop):
     except Exception as e:                  # (a case file that does not load)
         notes["failed"] = "%s: %s" % (type(e).__name__, e)
         return [], notes
-    path = os.path.join(RUN["target"].build, "autocases", RUN["image"].name, name + ".json")
+    path = os.path.join(RUN["target"].cases_dir(RUN["image"]), name + ".json")
     if not any(c[0].startswith("generated") for c in cases) and os.path.exists(path):
         cached = autocase.cache_load(path) or {}
         if cached.get("cases"):

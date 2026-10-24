@@ -58,7 +58,7 @@ SCHEMA = {
                  "cxxflags": list,
                  "ldflags": list,
                  "include": list, "idioms": str, "tools": dict, "profile": str},
-    "paths": {"build": str, "src": str},
+    "paths": {"build": str, "src": str, "cases": str},
     "host": {"jobs": int, "free_cores": int, "nice": int},
     "llm": {"only": list, "device": str},
 }
@@ -536,6 +536,11 @@ class Target:
         paths = data.get("paths", {})
         self.paths = {"build": paths.get("build", "build"), "src": paths.get("src", "src")}
         self.build = self.path(self.paths["build"])
+        # where generated cases are cached (dread.autocase; the cases property): BUILD/autocases unless
+        # [paths] cases says otherwise; copies of one target (a naming experiment's copy beside the target)
+        # can share it, so that one's lift check spares the other's the generation (each entry carries its
+        # key: an entry made for other code is made anew, never taken)
+        self.cases_path = self.path(paths["cases"]) if "cases" in paths else None
         self.compiler = Compiler(data.get("compiler", {}), self)
         try:
             self.abi.set_float(self.compiler.cflags, self.arch)
@@ -581,6 +586,17 @@ class Target:
                 raise TargetError("no %s here or above %s (use --target or $DREAD_TARGET)"
                                   % (FILE, os.path.abspath(start or os.getcwd())))
             here = parent
+
+    @property
+    def cases(self):
+        """The case cache's directory: [paths] cases, else BUILD/autocases of the build directory as it is
+        now (a tool or a test that points build elsewhere moves the default with it)."""
+        return self.cases_path or os.path.join(self.build, "autocases")
+
+    def cases_dir(self, image):
+        """The directory of an image's cached generated cases ([paths] cases, default BUILD/autocases;
+        IMAGE under it)."""
+        return os.path.join(self.cases, image.name)
 
     def path(self, p):
         """A path of the description, relative to the target directory."""

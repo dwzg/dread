@@ -87,7 +87,8 @@ callee may return is tried once more with it stubbed, for the code behind the ca
 case like any other (marked "answer"), compared under its stubs in both images; nothing is answered
 that the run would not take as an input (a local, the image). Bounded by ANSWER_RUNS runs a function.
 
-Generated cases are cached per function (BUILD/autocases/IMAGE/NAME.json), keyed by the function's
+Generated cases are cached per function (BUILD/autocases/IMAGE/NAME.json; [paths] cases moves the
+directory, which copies of one target may share: Target.cases_dir), keyed by the function's
 bytes, the generator VERSION, the options and the environment (Generator.environment): what does not
 belong to one function (the image's bytes, the startup copies, the memory map, the code's layout, the
 convention) whole, and what does (what dread.regflow found of it, its stub's answers beyond a C result,
@@ -3281,7 +3282,7 @@ def _generated(run, name, fn, gen, image, prog, options, calls, frame, make=True
     """The generated cases of cases_for, from the cache or made and cached (make=False: none when
     the cache holds none for this key)."""
     key, calls = case_key(gen, name, fn, options, calls, frame)
-    path = os.path.join(run["target"].build, "autocases", image.name, name + ".json")
+    path = os.path.join(run["target"].cases_dir(image), name + ".json")
     cached = cache_load(path)
     if (not cached or cached.get("key") != key) and not make:
         return {"cases": []}
