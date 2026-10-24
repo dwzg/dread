@@ -1653,6 +1653,33 @@ model).
   the entry's straight run (a shrink-wrapped save later is local bytes). Not established: that a callee
   stays inside the object it is given, that an index stays inside its array (the cases and the whole
   image decide, as for every transformation; where the cases see otherwise, whole).
+- [ ] **A refused case must not hide a difference.** On the private real-life test the gate accepted
+  readable C that had lost an argument of a formatting call: 21 of the function's 30 cases differed,
+  every one refused as "the input makes the original touch its own saved registers", and the 9 that
+  agreed still ran every instruction. A refusal says the case's input is one the C cannot reproduce;
+  it should stand only where every difference of the case is one that refusal explains (the touched
+  saved registers, what is computed from them, the stack words), and a difference beyond that (a stub
+  call's logged arguments before the first touch, a store elsewhere) fails the function as any
+  difference does (rule 6). The same question for the other refusals (stale stack data, stack-moved
+  outcomes, wild calls): each with the differences it may explain, said in its line. Public
+  reproduction: a function whose input makes it write past a local into its saves and that also
+  passes a value to a stubbed callee, with C that passes another.
+- [ ] **One case in both images, to the first divergence.** Tracing a FAIL took one-off scripts: run a
+  case in the original and the rebuilt image side by side and stop at the first point where they part
+  (a callee entered with other arguments, a store of another value or to another place, a return
+  value), naming the instruction and, for the rebuilt image, the C line. A tool (`dread trace NAME
+  LABEL`, the label as the runner prints it: "generated 3", "written 0"), on the runner's machinery,
+  for lifted and readable C alike, with the stack frame's words shown by their objects.
+- [ ] **A frame object over the saves.** On the private real-life test one function's readable C with
+  today's frame objects (1404c72) returns into a string written over its saved return address; its
+  split objects and the whole-region fallback both failed its cases, so it stays lifted (nothing wrong
+  accepted). Save words are found only before the first branch or call (frames' docstring): a save
+  behind a branch may be one. Not traced; a public reproduction first (a prologue that saves behind a
+  branch, a buffer below).
+- [ ] **Calls read narrower than declared, elsewhere.** The two-word fix typed calls by their
+  declarations in the conditions' proofs and in fold (2026-10-24); whether any other pass still takes
+  a call for a u32 (a u64 result, a signed result since the pointer and signed types) is not checked.
+
 - [x] **Regressions of 2026-10-23 on a private firmware: two-word results, callers of a function that
   fails, save areas behind a frame copy.** After the day's readable C changes the readable gate kept
   many times as many functions of the private real-life test lifted, most of them readable the day
