@@ -25,6 +25,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -108,11 +109,40 @@ def compile_stamp(command, flags):
     return "\n".join([_COMPILERS[exe]] + list(command) + list(flags)) + "\n"
 
 
+ERROR = re.compile(r"^(?P<file>[^:\n]+):(?P<line>\d+):(?:(?P<col>\d+):)?\s*(?:fatal )?error: (?P<message>.*)$")
+DIAGNOSTIC = re.compile(r"^[^:\n]+:\d+(?::\d+)?:\s*(?:fatal error|error|warning|note)\b|^In file included from |"
+                        r"^[^:\n]+: In function |^(?:cc1\w*|clang|gcc|collect2|compilation terminated)\b")
+
+
+def compiler_error(output):
+    """The first error a compiler's output names, as one line for a verdict: its file (by name, without
+    the directory), line, column and message, and after " | " the line of code it quotes (GCC 9 and
+    later and clang 15 and later print it behind its number and a bar, older ones as it is); "" where
+    the output names no error (a compiler that crashed, a linker's message)."""
+    lines = output.splitlines()
+    for k, line in enumerate(lines):
+        m = ERROR.match(line)
+        if not m:
+            continue
+        where = "%s:%s%s" % (os.path.basename(m.group("file").strip()), m.group("line"),
+                             ":" + m.group("col") if m.group("col") else "")
+        text = "%s: error: %s" % (where, m.group("message").strip())
+        quoted = lines[k + 1] if k + 1 < len(lines) else ""
+        bar = re.match(r"^\s*\d*\s*\|(.*)$", quoted)
+        code = bar.group(1).strip() if bar else quoted.strip()
+        if code and not DIAGNOSTIC.match(quoted) and not re.fullmatch(r"[\s^~|+-]*", code):
+            text += " | " + code
+        return text
+    return ""
+
+
 def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=False, flags=()):
     """Compile the sources under `src` into `objdir`; returns the object paths. extra_include:
     further include directories (dread mutate compiles a copy elsewhere and still needs the
     headers beside the original); quiet: no compiler messages (variants that do not compile);
-    flags: further flags after the target's (the lifted C's [compiler] lifted_cflags)."""
+    flags: further flags after the target's (the lifted C's [compiler] lifted_cflags). A source that
+    does not compile raises dread.overlay OverlayError with the sources that failed and, for each, the
+    first error the compiler named (compiler_error), quiet or not."""
     sources = sorted(f for suffix in SOURCES for f in glob.glob(os.path.join(src, "**", "*" + suffix), recursive=True))
     include = [INCLUDE, src] + list(extra_include) + target.compiler.include
     headers = [h for d in include for suffix in HEADERS
@@ -144,16 +174,17 @@ def compile_all(target, image, src, objdir, jobs=None, extra_include=(), quiet=F
         command = cxx[0] + cxx[1] if is_cxx(c) else target.compiler.command("cc") + flags
         procs.append((c, subprocess.Popen(command + file_flags(target, c) + ["-c", "-o", obj, c],
                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)))
-    failed = []
+    failed, errors = [], {}
     for c, p in procs:
         out = p.communicate()[0]
         if out and not quiet:
             sys.stderr.write(out)
         if p.returncode:
             failed.append(c)
+            errors[c] = compiler_error(out or "")
     if failed:
         raise overlay.OverlayError("compiling failed: %s" % ", ".join(os.path.relpath(c) for c in failed),
-                                   failed=failed)
+                                   failed=failed, errors=errors)
     if not same:                        # written last: an interrupted run leaves the old stamp
         os.makedirs(objdir, exist_ok=True)
         with open(stamp_path, "w") as f:

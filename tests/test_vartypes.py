@@ -430,6 +430,84 @@ def test_the_lifters_stack_arguments_stay_integers():
         assert line in out, (line, out)
 
 
+needs_gcc = pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+STRICT = ["-Werror=int-conversion", "-Werror=incompatible-pointer-types"]   # (errors in GCC 14 and later)
+
+
+def compiled(text, tmp_path, name):
+    """(whether arm-none-eabi-gcc compiles a readable file with STRICT, its messages)."""
+    from dread.build import INCLUDE
+    src = tmp_path / (name + ".c")
+    src.write_text(text)
+    r = subprocess.run(["arm-none-eabi-gcc", "-mthumb", "-mcpu=cortex-m3", "-std=gnu11", "-Os", "-ffreestanding",
+                        "-fno-delete-null-pointer-checks", "-fno-strict-overflow"] + STRICT +
+                       ["-I", INCLUDE, "-c", "-o", str(tmp_path / (name + ".o")), str(src)],
+                       capture_output=True, text=True)
+    return r.returncode == 0, r.stderr
+
+
+def in_order(out, lines):
+    at = [out.find(line) for line in lines]
+    return -1 not in at and at == sorted(at)
+
+
+CHAIN = HEAD + """u32 f(u32 r0, u32 r1, u32 r2, u32 r3)
+{
+    u32 r12;
+    r12 = *(volatile u32 *)r2 + *(volatile u32 *)(r3 + 8);
+    if (r0 != 0)
+    {
+        r0 = sink(r12, r1);
+        r1 = r2 = r3 = r12 = 0;
+    }
+    return r0;
+}
+"""
+
+
+@needs_gcc
+def test_a_chain_that_assigns_structure_pointers_is_one_assignment_each(tmp_path, monkeypatch):
+    """The lifter's chain of the scratch registers a call leaves, where the clean-up left it whole (a
+    conditional call's block, until 2026-10-24), r2 and r3 dread.shapes' structure pointers: one
+    assignment per variable, innermost first (dread.tidy split_typed), and the file compiles with
+    int-conversion and incompatible pointer types as errors (as GCC 14 and later have them). Before,
+    dread.shapes rewrote the chain whole, r1 = r2 = (volatile struct s_1 *)(r3 = (volatile struct s_1
+    *)(r12 = 0)): the assignment to r2 has a pointer's value, assigned to the u32 r1 (a private
+    firmware's function stayed lifted so: "its readable C does not compile")."""
+    from dread import tidy
+
+    def plan():
+        p = shapes.Plan()
+        p.structs = {"s_1": [(0, "u32"), (8, "u32")]}
+        p.typed = {"f": {"r2": "s_1", "r3": "s_1"}}
+        return p
+    out, _ = typed(CHAIN, p=plan())
+    assert "u32 f(u32 r0, u32 r1, volatile struct s_1 *r2, volatile struct s_1 *r3)" in out, out
+    assert in_order(out, ["r12 = r2->f_0 + r3->f_8;", "r0 = sink(r12, r1);", "r12 = 0;",
+                          "r3 = (volatile struct s_1 *)0;", "r2 = (volatile struct s_1 *)0;", "r1 = 0;"]), out
+    ok, messages = compiled(out, tmp_path, "split")
+    assert ok, messages
+    monkeypatch.setattr(tidy, "split_typed", lambda fn, names: False)     # (as before: the chain whole)
+    out, _ = typed(CHAIN, p=plan())
+    assert "r1 = r2 = (volatile struct s_1 *)(r3 = (volatile struct s_1 *)(r12 = 0));" in out, out
+    ok, messages = compiled(out, tmp_path, "whole")
+    assert not ok and "int-conversion" in messages, messages
+
+
+@needs_gcc
+def test_a_chain_that_assigns_typed_registers_costs_no_cast(tmp_path):
+    """r2 and r3 read as bytes beside the lifter's chain: the plan's trials count the chain as apply
+    writes it (Rewriter.top: one assignment each, the pointers given 0), so each pointer saves its
+    load's cast and the chain costs none: both typed, the chain split, the file compiling with STRICT.
+    Before, a trial counted (u32)(r2 = (const volatile u8 *)((u32)(r3 = ...))) and both stayed u32."""
+    out, p = typed(CHAIN.replace("*(volatile u32 *)r2 + *(volatile u32 *)(r3 + 8)",
+                                 "*(volatile u8 *)r2 + *(volatile u8 *)(r3 + 1)"))
+    assert p.variables["f"]["types"] == {"r2": "const volatile u8 *", "r3": "const volatile u8 *"}, p.variables
+    assert in_order(out, ["r12 = *r2 + r3[1];", "r12 = 0;", "r3 = 0;", "r2 = 0;", "r1 = 0;"]), out
+    ok, messages = compiled(out, tmp_path, "typed")
+    assert ok, messages
+
+
 def test_the_plan_keeps_its_variables_and_prototypes():
     """The readable_types table's variables (with the externs' parameters) and prototypes survive
     writing and reading; a table without them (older) reads as none."""
@@ -608,6 +686,68 @@ def test_a_program_of_typed_pointers_through_the_gate(kind, tmp_path):
     t = found["spool_copy"]
     assert re.search(r"spool_copy\((volatile u8 \*|u32 )\w+, const volatile u8 \*\w+", t), t
     assert "*(volatile u8 *)" not in t, t
+
+
+PAIR = """typedef unsigned int u32;
+%s
+struct pair_cell { u32 key; u32 value; u32 hits; };
+struct pair_cell pair_cells[4];
+u32 pair_total;
+NOIPA u32 pair_note(u32 v) { return v * 3 + 1; }
+NOIPA u32 pair_touch(u32 flag, u32 add, struct pair_cell *c, u32 x)
+{
+    u32 s = c->key + c->value + add;
+    c->hits = s;
+    s = pair_note(s);
+    if (flag)
+        s = pair_note(s + x);
+    return s + 1;
+}
+int main(void)
+{
+    pair_total = pair_touch(1, 2, &pair_cells[1], 5) + pair_touch(0, 3, &pair_cells[2], 7);
+    return 0;
+}
+"""
+
+
+@pytest.mark.slow
+@_kind("a32")
+def test_a_conditional_call_beside_a_structure_pointer_through_the_gate(tmp_path, monkeypatch):
+    """pair_touch, GCC -Os in ARM state: its structure pointer arrives in r2, and its second call is
+    conditional (blne), the lifter's chain of the scratch registers behind it inside the conditional
+    block. Until 2026-10-24 the clean-up's split left that chain whole, dread.shapes typed r2 as the
+    structure pointer, and the readable C, r1_1 = r2 = (volatile struct s_1 *)(r3 = r12 = 0), handed
+    it to a u32: GCC 14 and later refused it, and pair_touch stayed lifted ("its readable C does not
+    compile"). Now the split takes the chain apart and dead its registers, and the gate accepts every
+    function; with the split confined to the body's list as before, dread.shapes' own split of the
+    chain (dread.tidy split_typed) gives C the gate accepts too."""
+    from conftest import NOIPA_DEF
+    from test_statics import kind_target
+    from dread import build, lift, readable, regflow, tidy
+    from dread.program import Program
+
+    def gate(where):
+        (tmp_path / where).mkdir()
+        target = kind_target(tmp_path / where, "a32", PAIR % NOIPA_DEF)
+        image = target.image()
+        lines = []
+        accepted = readable.check(target, image, out=lines.append)
+        lifted = sorted(build.read_names(image.table("lifted")))
+        assert accepted == lifted and "pair_touch" in lifted, (accepted, lifted, lines)
+        program = Program(target, image)
+        flow = regflow.load(target, image, program)
+        context = readable.Context(target, image, program, flow)
+        text = lift.make_lifter(program, flow).lift(program.by_name["pair_touch"]).text
+        assert re.search(r"if \(!z\) \{ r0 = pair_note\([^;]*\); r1 = r2 = r3 = r12 = 0; \}", text), text
+        return code(readable.transform("pair_touch", text, context=context))
+    out = gate("split")
+    assert re.search(r"pair_touch\(u32 \w+, u32 \w+, volatile struct s_\d+ \*r2", out), out
+    assert not re.search(r"\w+ = \w+ = ", out) and not re.search(r"\b(r1|r2|r3|r12)\w* = 0;", out), out
+    monkeypatch.setattr(tidy, "every_list", lambda fn: [fn.body.body])      # (the split as before)
+    monkeypatch.setattr(readable, "_STORE", {})                             # (nothing kept from the first)
+    out = gate("guard")
+    assert re.search(r"r2 = \(volatile struct s_\d+ \*\)0;", out) and not re.search(r"\w+ = \w+ = ", out), out
 
 
 # --- random functions, typed and lifted, compiled by the host in 32 bits ---

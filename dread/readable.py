@@ -1096,9 +1096,12 @@ def check(target, image, names=None, out=print, jobs=None):
                 drop([e.function], "the overlay: %s" % e)
                 accepted = [n for n in accepted if n != e.function]
                 continue
-            bad = [n for n in accepted if any(os.path.basename(c) == n + ".c" for c in e.failed)]
-            if bad:                         # (a function whose readable C does not compile stays lifted)
-                drop(bad, "its readable C does not compile")
+            files = {os.path.basename(c)[:-2]: c for c in e.failed if c.endswith(".c")}
+            bad = [n for n in accepted if n in files]
+            if bad:                         # (a function whose readable C does not compile stays lifted,
+                for n in bad:               # with the compiler's first error: dread.build compiler_error)
+                    error = e.errors.get(files[n], "")
+                    drop([n], "its readable C does not compile" + (": " + error if error else ""))
                 accepted = [n for n in accepted if n not in bad]
                 continue
             if e.room:                      # no room for all: the largest readable ones without room go

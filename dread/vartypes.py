@@ -63,7 +63,11 @@ integer, the same address where it is a pointer:
 - an s32 variable reads the same 32 bits wherever only they count (assigned, stored, passed, returned,
   compared for equality, in a sum or a mask whose result is used so, a cast to 32 bits or narrower);
   elsewhere (an ordered comparison the lifted C made unsigned, a right shift, a division, a 64-bit
-  conversion) it is (u32)v, and (s32)v is v.
+  conversion) it is (u32)v, and (s32)v is v;
+- a chain of assignments that assigns a typed variable (r1 = r2 = r3 = r12 = 0 where dread.tidy's split
+  left it) is one assignment per variable, innermost first (dread.tidy split_typed: r12 = 0; r3 = 0;
+  r2 = 0; r1 = 0): the value of an assignment to a pointer is a pointer, and the chain would hand it
+  on to an integer, or need (u32)(r2 = ...) at every link.
 
 The C stays volatile: a typed pointer is `volatile T *`, so every access through it is the one access
 it was (the open Memory item: whether accesses to RAM need volatile is not decided here). Files with
@@ -621,8 +625,15 @@ class Rewriter:
         return False
 
     def top(self, e):
-        """An expression whose value is not used (a statement's, a for loop's step)."""
+        """An expression whose value is not used (a statement's, a for loop's step). A chain of
+        assignments that assigns a typed variable is one assignment per variable (dread.tidy
+        chain_parts, written as a comma here: apply has split such statements before, split_typed;
+        the plan's trials count it so)."""
         if isinstance(e, C.Assign):
+            from dread.tidy import chain_parts
+            parts = chain_parts(e, self.typing)
+            if parts is not None:
+                return C.Comma([self.assign(x) for x in parts])
             return self.assign(e)
         if isinstance(e, C.Call):
             return self.call(e)
@@ -1356,6 +1367,7 @@ def apply(tree, fn, p, made_for=None, names=None, int_bits=None):
         isinstance(st, C.Decl) and any(d.ptr for d in st.items) for st in fn.body.body)
     if not typing and not protos and not result and not shaped:
         return False
+    tidy.split_typed(fn, set(typing))       # (a chain that assigns a typed variable: one statement each)
     types = polish.Types(tree, fn, int_bits)
     sizes = {"struct " + names.get(k, (k, {}))[0] if names else "struct " + k: p.size(k) for k in p.structs}
     r = Rewriter(fn, typing, types, protos, result, sizes)

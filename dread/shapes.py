@@ -2333,9 +2333,11 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     structure it holds; with a cast where the access reads another type of the field's size, as raw
     access where the structure has no such field), the address of a structure held inside one as
     &p->f_4, every other use cast to u32; the structures defined above the function, a held one
-    before its holder. Only when the plan was made for this C (made_for: its digest before names).
-    names: {s_N: (name, {offset: field name})} from the readable_names table (dread.naming
-    struct_names). Returns the names of the structures it defined."""
+    before its holder. A chain of assignments that assigns one of them is one assignment per variable
+    first (dread.tidy split_typed: r3 = 0; r2 = 0; r1_1 = 0; for r1_1 = r2 = r3 = 0, whose r2 = r3 = 0
+    would have a pointer's value for the u32 r1_1). Only when the plan was made for this C (made_for:
+    its digest before names). names: {s_N: (name, {offset: field name})} from the readable_names table
+    (dread.naming struct_names). Returns the names of the structures it defined."""
     names = names or {}
 
     def cname(k):
@@ -2481,6 +2483,8 @@ def apply_types(tree, fn, p, made_for=None, names=None):
         if isinstance(e, C.Name) and e.id in typed:
             return C.Cast("u32", C.Name(e.id))
         return None
+    from dread.tidy import split_typed
+    split_typed(fn, set(typed))
     for st in fn.body.body:
         _rewrite_stmt(st, f)
     # the declarations: parameters' types, locals out of their u32 lines into pointer lines

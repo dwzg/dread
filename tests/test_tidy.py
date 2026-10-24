@@ -4,6 +4,7 @@ comparison it stands for; a proposal that holds on the values tried but not on a
 range check of gizmo's parse_kv, which testing alone let through)."""
 import ctypes
 import random
+import re
 import shutil
 import subprocess
 
@@ -531,6 +532,66 @@ def test_a_variable_written_inside_a_conditional_block_is_split_too():
     assert "if (r5 == 0)" in out and "r5_1 = r1 + 2u;" in out and "(r0 + 4) = r5_1;" in out, out
     assert "r5_2 = *(volatile u32 *)(r0 + 8);" in out and "return r5_2 + 1u;" in out, out
     assert not tidy.webs(fn)
+
+
+CONDITIONAL_CALL = """#include "dread.h"
+extern u32 g(u32, u32, u32, u32);
+u32 f(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0;
+    u32 n = 0, z = 0, c = 0, v = 0;
+    (void)n; (void)z; (void)c; (void)v; (void)r12;
+    r0 = *(volatile u32 *)r2;  /* 0: ldr r0, [r2] */
+    *(volatile u32 *)(r2 + 8) = r1;  /* 4: str r1, [r2, #8] */
+    { u32 x = r3, y = 0x0u; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 8: cmp r3, #0 */
+    if (!z) { r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0; }  /* c: blne g */
+    return r0;  /* 10: bx lr */
+}
+"""
+
+
+def test_a_chain_in_a_conditional_calls_block_is_split_and_its_dead_registers_go():
+    """ARM's blne: the lifter's chain of the scratch registers a call leaves stands in the conditional
+    block. split takes it apart there too (until 2026-10-24 only in the body's own list), and dead takes
+    out the registers nobody reads. Left whole, the chain kept r2 under the parameter's name (webs
+    leaves a variable a chain writes inside it), and where dread.shapes typed r2 as a structure pointer
+    the readable C handed it to the u32 r1: r1_1 = r2 = (volatile struct s_1 *)(r3 = r12 = 0), an
+    error since GCC 14."""
+    tree = cparse.parse(CONDITIONAL_CALL)
+    fn = tree.function("f")
+    assert tidy.split(fn)
+    block = [s for s in fn.body.body if isinstance(s, cparse.If)][0].then
+    assert [cparse.unparse(s, notes=False).strip() for s in block.body] == [
+        "r0 = g(r0, r1, r2, r3);", "r1 = 0;", "r2 = 0;", "r3 = 0;", "r12 = 0;"]
+    assert all(s.addr == block.body[0].addr for s in block.body)      # (one line, the call's)
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "g(" in out and not re.search(r"\b(r1|r2|r3|r12) = ", out), out
+
+
+def test_a_chain_that_assigns_a_variable_about_to_be_typed_is_split_by_its_conversions():
+    """split_typed (dread.shapes and dread.vartypes, before they type variables): a chain that assigns
+    one of the names is one statement per variable, innermost first, each 0 where that is the chain's
+    value, else the variable inside it (the chain converts its value at each link); a lone arm that
+    is such a chain becomes a block; a chain of other variables stays."""
+    tree = cparse.parse("u32 f(u32 r0, u32 r1, u32 r2, u32 r3)\n{\n    u32 r5, r12;\n"
+                        "    r1 = r2 = r3 = r12 = 0;  /* 0: bl g */\n"
+                        "    r1 = r2 = r5 = r0 + 4u;  /* 4: adds r5, r0, #4 */\n"
+                        "    if (r0) r2 = r3 = 0x0u;\n"
+                        "    r5 = r12 = 0;\n"
+                        "    return r1;\n}\n")
+    fn = tree.function("f")
+    assert tidy.split_typed(fn, {"r2"})
+    out = cparse.unparse(fn, notes=False)
+    for line in ("r12 = 0; r3 = 0; r2 = 0; r1 = 0;", "r5 = r0 + 4u; r2 = r5; r1 = r2;",
+                 "r5 = r12 = 0;"):
+        assert line in out, (line, out)
+    arm = [s for s in fn.body.body if isinstance(s, cparse.If)][0].then
+    assert isinstance(arm, cparse.Block) and [cparse.unparse(s, notes=False).strip() for s in arm.body] == [
+        "r3 = 0x0u;", "r2 = 0x0u;"], cparse.unparse(fn, notes=False)
+    assert not tidy.split_typed(fn, {"r2"}) and not tidy.split_typed(fn, set())
+    assert tidy.chain_parts(cparse.parse("void f(void)\n{\n    a = b = *p = 0;\n}\n").function("f").body.body[0].e,
+                            {"a"}) is None      # (an assignment to memory inside: left as it is)
 
 
 def test_a_parameter_keeps_its_name_for_its_value_at_the_entry_only():

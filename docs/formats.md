@@ -760,8 +760,13 @@ lifted`: a name not in the lifted table), `reason` (why it stays lifted, in the 
 system run accepted it, it no longer lifts, its lifted C is not the dialect dread.cparse reads, the
 overlay's refusal or lack of room, its readable C does not compile or calls what the original does
 not, the FAIL or UNCOVERED line of its cases, the whole image differs with it; a FAIL line may name a
-refusal that did not explain every difference since 2026-10-24, as in the lift check's). `dread bench`'s
-readable step counts the reasons by category (dread.bench readable_reason).
+refusal that did not explain every difference since 2026-10-24, as in the lift check's). Since
+2026-10-24 `its readable C does not compile` is followed by the compiler's first error, as the round's
+output line has it too: `: NAME.c:LINE:COLUMN: error: MESSAGE | CODE` (dread.build compiler_error: the
+file by name, the code the compiler quotes, cut as every reason is, to 300 characters here and 200 in
+the output); a reason without it (older, or a compiler that named no error) is the words alone.
+`dread bench`'s readable step counts the reasons by category (dread.bench readable_reason, by their
+start).
 
 ### Figures of readable C (`dread readable --figures FILE`) and `BUILD/work/readable.tsv`
 

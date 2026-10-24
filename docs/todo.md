@@ -1778,6 +1778,49 @@ model).
 - [ ] **Calls read narrower than declared, elsewhere.** The two-word fix typed calls by their
   declarations in the conditions' proofs and in fold (2026-10-24); whether any other pass still takes
   a call for a u32 (a u64 result, a signed result since the pointer and signed types) is not checked.
+- [x] **A chain of assignments that hands a pointer to an integer; the compiler's reason with the
+  verdict.** On a private firmware one function's readable C did not compile: the lifter's line after a
+  call stood whole in it with two of its registers structure pointers, `r1_3 = r2 = (volatile struct
+  s_N *)(r3 = (volatile struct s_N *)(r12 = 0));`, the assignment to r2 a pointer's value assigned to
+  a u32 (int-conversion, an error of GCC 14 and later); and the gate's line said only "its readable C
+  does not compile", so a person rebuilt the file by hand to see why.
+  Done 2026-10-24 (docs/decisions.md, "A chain of assignments whose variables get different types: one
+  assignment each"). Who wrote it: dread.shapes apply_types, which casts every other use of a typed
+  variable to u32 but rewrote the chain whole; not dread.vartypes (its Rewriter casts an assignment to
+  its own pointers where an integer is needed, (u32)(r2 = ...)) nor dread.polish (it keeps that cast).
+  How such a chain gets there: dread.tidy's split, which takes such chains apart, looked only at the
+  body's own list, and ARM's conditional call (blne) puts the chain into an instruction's block, `if
+  (!z) { r0 = f(...); r1 = r2 = r3 = r12 = 0; }`, where dead keeps it (its value has effects) and webs
+  leaves r2 under the parameter's name (that the private function's chain stood in such a block is
+  not confirmed: its C was not looked at here; dread.shapes' own split covers it either way). Now
+  split works on every statement list but a block that binds registers and dead takes the zeroed
+  registers out (gizmo a32's timer_irq: `if (r0 != -1) r0 = ring_put(0x4000007cu, r0 & 0xffu);`, the
+  four registers' declarations gone); dread.shapes and
+  dread.vartypes split a chain that assigns a variable they type before they type it (dread.tidy
+  split_typed: innermost first, each variable 0 where that is the chain's value, else the variable
+  inside it), and the plan's trials count it so (Rewriter.top: r2 and r3 read as bytes beside such a
+  chain stayed u32 for its casts). The gate keeps the compiler's first error with the verdict, in the
+  round's line and in verdicts.tsv: `its readable C does not compile: NAME.c:LINE:COLUMN: error: MESSAGE
+  | CODE`, cut at 200 and 300 characters (dread.build compiler_error, dread.overlay OverlayError's
+  errors; docs/formats.md). Public reproduction: pair_touch, an ARM-state program of our own (its
+  structure pointer in r2, a conditional call), stayed lifted on the old code with `error: assignment
+  to 'u32' {aka 'unsigned int'} from 'volatile struct s_1 *' makes integer from pointer without a cast
+  [-Wint-conversion] | r1_1 = r2 = (volatile struct s_1 *)(r3 = r12 = 0);` and is readable now, also
+  with dread.shapes' split alone. Tests: tests/test_tidy.py (the split in a conditional call's block,
+  split_typed), tests/test_vartypes.py (a chain with dread.shapes' structure pointers and one with
+  dread.vartypes' pointers compiled with -Werror=int-conversion and -Werror=incompatible-pointer-types,
+  the chain whole failing so; pair_touch through the gate, with and without the clean-up's split),
+  tests/test_readable.py (an undeclared variable planted: the verdict with the compiler's error;
+  compiler_error on GCC's and clang's output). Measured on the eight builds (base -> now): the gate
+  accepts the same functions name by name, its verdicts.tsv the same (gizmo a32 35, m3 36, m4 44, rv32
+  31; FreeRTOS GCC -Os 317, clang -O2 275, RISC-V GCC -Os 252, GCC -O0 354); the readable C of three
+  functions changed, each without the zeroed registers (gizmo a32's timer_irq, clang -O2's
+  prvUnlockQueue with two conditional calls and vStreamBufferDelete with a call behind a branch), every
+  other file byte for byte the same; every lifted function's readable C, those the system run accepted
+  too (1,379 files), compiles with -Werror=int-conversion and -Werror=incompatible-pointer-types.
+  Not established: a chain that assigns memory inside (a = b = *p = 0) is left as it is (none known);
+  the split registers of a block flat_view does not spread (one that declares, labels or loops) stay,
+  one statement each on the call's line.
 
 - [x] **Regressions of 2026-10-23 on a private firmware: two-word results, callers of a function that
   fails, save areas behind a frame copy.** After the day's readable C changes the readable gate kept

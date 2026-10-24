@@ -9,6 +9,54 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## A chain of assignments whose variables get different types: one assignment each (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the fix of a
+readable C that did not compile on a private firmware (docs/todo.md).
+
+- **Question.** The lifters clear the scratch registers a call leaves in one chain, `r1 = r2 = r3 =
+  r12 = 0;`. Where that chain reaches the typing passes and one of its variables becomes a pointer
+  (dread.shapes' structure pointer, dread.vartypes' pointer), the value of the assignment to it is a
+  pointer, and the chain hands it to an integer: `r1_1 = r2 = (volatile struct s_1 *)(r3 = r12 =
+  0);` is an error of GCC 14 and later (int-conversion), a warning before. How does readable C write
+  such a chain?
+- **Options.** (a) Keep the chain and cast each link where the type changes: `r1_1 = (u32)(r2 =
+  (volatile struct s_1 *)(r3 = r12 = 0));`, as dread.vartypes' Rewriter already did for its own
+  pointers. (b) Split it into one assignment per variable, innermost first, where it assigns a
+  variable that gets another type: `r12 = 0; r3 = 0; r2 = (volatile struct s_1 *)0; r1_1 = 0;`
+  (dread.shapes writes the 0 it gives a structure pointer so; dread.vartypes' pointers take a plain
+  0). (c) Make the chain not reach the typing passes: the clean-up's split, which takes such chains
+  apart in the function's body, also inside an instruction's block, where dead then takes out the
+  registers nobody reads.
+- **Choice.** (c), with (b) as the typing passes' guard. dread.tidy split works on every statement list
+  but a block that binds registers (every_list); dread.shapes apply_types and dread.vartypes apply
+  split a chain that assigns a variable they type before they write any type (dread.tidy split_typed:
+  each variable gets 0 where that is the chain's value, else the variable inside it), and the plan's
+  trials count such a chain as split (vartypes Rewriter.top).
+- **Why.** On the public reproduction the chain survived because the split looked only at the body's
+  own list (dread.tidy's stmt_lists: "nested blocks are the instructions' own"), and ARM's conditional
+  call is one such block, `if (!z) { r0 = f(...); r1 = r2 = r3 = r12 = 0; }`: dead keeps an assignment
+  whose value has an effect (the chain's inner assignments), and webs leaves the variables a chain
+  writes inside it under their old names, so r2 there was the parameter that dread.shapes typed (that
+  the private function's chain stood in such a block is not confirmed). With the split there, the
+  line reads `if (r0 != 0) r0_4 = pair_note(r0_4 + r3);` (the public reproduction, an ARM-state
+  program in tests/test_vartypes.py; gizmo a32's timer_irq lost its four zeroed registers the same
+  way). (a) compiles but reads worse than both, and its casts counted against typing a variable that
+  stands in a chain in the plan's trials (r2 and r3 read as bytes stayed u32 for it). A split
+  assigns what the chain assigns: each variable the value converted to its type, 0 staying 0 in every
+  integer and pointer type, else the next variable's value as the chain passes it on; the variables
+  are the function's own, neither volatile nor read in between. Compiled with optimisation, as DREAD's
+  C is (lifted_cflags, -Os by default), the line split and the chain with (a)'s casts made the same
+  code in pair_touch (GCC 16 in ARM state and Thumb-2, clang 23 in Thumb-2, at -Os and -O2; GCC -O0
+  orders its stack stores otherwise), and the gate checks the behaviour as for every transformation.
+  The guard keeps the typing passes from writing a pointer into an integer whatever the clean-up
+  leaves (a chain of variables of different types, a value that is neither a constant nor a
+  variable).
+- **How to undo.** dread/tidy.py: split over stmt_lists again instead of every_list; drop the calls
+  of split_typed in dread/shapes.py apply_types and dread/vartypes.py apply and of chain_parts in
+  Rewriter.top.
+- **Status.** In the code (tests/test_tidy.py, tests/test_vartypes.py).
+
 ## What dread trace takes for the point where two runs part (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the tool that traces

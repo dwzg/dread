@@ -135,6 +135,54 @@ def test_a_stage_that_breaks_a_function_leaves_it_lifted(tmp_path, monkeypatch):
 
 @pytest.mark.slow
 @needs_gcc
+def test_readable_c_that_does_not_compile_stays_lifted_with_the_compilers_first_error(tmp_path, monkeypatch):
+    """A stage that writes an undeclared variable into fmt_dec: its readable C does not compile, so it
+    stays lifted, and the gate's line and verdicts.tsv give the compiler's first error with the code
+    it quotes (dread.build compiler_error); until 2026-10-24 they said only that it did not compile,
+    and a person rebuilt the file by hand to see why. The others are readable."""
+    target = gizmo_copy(tmp_path)
+    image = target.image()
+
+    def plant(fn, run=None):
+        if fn.name == "fmt_dec":
+            fn.body.body.append(cparse.ExprStmt(cparse.Assign("=", cparse.Name("planted_undeclared"), cparse.Num("1"))))
+    monkeypatch.setattr(readable, "STAGES", readable.STAGES + [("plant", plant)])
+    lifted = build.read_names(image.table("lifted"))
+    lines = []
+    accepted = readable.check(target, image, out=lines.append)
+    assert "fmt_dec" in lifted and accepted == sorted(n for n in lifted if n != "fmt_dec"), lines
+    why = re.compile(r"its readable C does not compile: fmt_dec\.c:\d+:\d+: error: [^|]*planted_undeclared[^|]* \| "
+                     r"planted_undeclared = 1;")
+    assert any(line.startswith("lifted   fmt_dec") and why.search(line) for line in lines), lines
+    verdicts = open(os.path.join(target.build, "readable-check", image.name, "verdicts.tsv")).read()
+    assert re.search(r"^fmt_dec\tlifted\t" + why.pattern, verdicts, re.M), verdicts
+
+
+def test_the_compilers_first_error_is_one_line():
+    """compiler_error: GCC's and clang's first error, with and without the code's line numbers (GCC 9 and
+    clang 15 on, and older or -fno-diagnostics-show-line-numbers), and without the code
+    (-fno-diagnostics-show-caret); nothing where the output names no error."""
+    gcc = ("/w/lifted/f.c: In function 'f':\n"
+           "/w/lifted/f.c:7:10: error: assignment to 'u32' {aka 'unsigned int'} from 'volatile struct s_1 *' makes "
+           "integer from pointer without a cast [-Wint-conversion]\n"
+           "    7 |     r1 = r2 = (volatile struct s_1 *)(r3 = 0);\n      |        ^\n"
+           "/w/lifted/f.c:9:5: error: 'x' undeclared (first use in this function)\n")
+    assert build.compiler_error(gcc) == (
+        "f.c:7:10: error: assignment to 'u32' {aka 'unsigned int'} from 'volatile struct s_1 *' makes integer from "
+        "pointer without a cast [-Wint-conversion] | r1 = r2 = (volatile struct s_1 *)(r3 = 0);")
+    clang = ("/w/lifted/f.c:7:10: error: incompatible pointer to integer conversion assigning to 'u32' (aka 'unsigned "
+             "int') from 'volatile struct s_1 *' [-Wint-conversion]\n"
+             "    r1 = r2 = (volatile struct s_1 *)(r3 = 0);\n       ^ ~~~~~~~~~~~~~~~~~~\n1 error generated.\n")
+    assert build.compiler_error(clang).endswith("[-Wint-conversion] | r1 = r2 = (volatile struct s_1 *)(r3 = 0);")
+    assert build.compiler_error(clang).startswith("f.c:7:10: error: incompatible pointer to integer conversion")
+    assert build.compiler_error("/w/f.c:2:10: fatal error: x.h: No such file or directory\ncompilation terminated.\n") \
+        == "f.c:2:10: error: x.h: No such file or directory"
+    assert build.compiler_error("/w/f.c: In function 'f':\n/w/f.c:3:1: warning: unused [-Wunused]\n") == ""
+    assert build.compiler_error("") == ""
+
+
+@pytest.mark.slow
+@needs_gcc
 def test_the_clean_up_passes_the_gate_and_is_shorter(tmp_path, monkeypatch):
     """With the clean-up (dread.tidy): every lifted function of gizmo-m3 is accepted, the whole image
     agrees, and the readable C has fewer lines than the lifted (the flags, the (void)s, the zeroed

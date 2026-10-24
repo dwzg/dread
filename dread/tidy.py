@@ -3,7 +3,8 @@ needed. Each transformation keeps the function's behaviour by itself (a variable
 a copy, a constant, a temporary used once); the gate (dread readable --check) checks the result all
 the same.
 
-- split: a chain of assignments of one value (r1 = r2 = r3 = r12 = 0, after a call) into one each;
+- split: a chain of assignments of one value (r1 = r2 = r3 = r12 = 0, after a call) into one each,
+  a conditional call's block too (ARM's blne);
 - unvoid: the (void)x statements that kept the compiler quiet about unused variables;
 - flatten: an instruction's block ({ u32 x = r1, y = r3; ... } for a compare's flags) into the body,
   its own variables renamed to fresh ones of the function;
@@ -222,24 +223,122 @@ def type_of(fn, name, decls=None):
 
 # --- the passes; each returns whether it changed something ---
 
+def chain(e):
+    """(variables, value) of a chain of plain assignments, r1 = r2 = r3 = r12 = 0 (the variables
+    outermost first, and the value the innermost takes), or None for an expression with fewer than two."""
+    names = []
+    while isinstance(e, C.Assign) and e.op == "=" and isinstance(e.target, C.Name):
+        names.append(e.target.id)
+        e = e.value
+    return (names, e) if len(names) > 1 else None
+
+
+def _leaf_copy(e):
+    return C.Name(e.id) if isinstance(e, C.Name) else C.Num(e.text, value=e.value)
+
+
+def binds_registers(block):
+    """Whether a block declares a variable bound to a register (__asm__("r0")): its registers are
+    behaviour, and the clean-up leaves it alone."""
+    return any(isinstance(x, C.Decl) and any(d.asm for d in x.items) for x in block.body)
+
+
+def every_list(fn):
+    """Every statement list of fn: the body's and those of the blocks inside it (an instruction's own,
+    a conditional instruction's: ARM's blne, if (!z) { r0 = f(...); r1 = r2 = r3 = r12 = 0; }), but
+    not those of a block that binds registers (binds_registers) nor of what it holds."""
+    out = []
+
+    def visit(s):
+        if isinstance(s, C.Block):
+            if s is not fn.body and binds_registers(s):
+                return
+            out.append(s.body)
+        for inner in _inner(s):
+            visit(inner)
+    visit(fn.body)
+    return out
+
+
 def split(fn):
+    """A chain of assignments of one value to variables of one type (r1 = r2 = r3 = r12 = 0, the
+    scratch registers a call leaves) as one assignment each, in every statement list (every_list: a
+    conditional call's block too, whose chain dead then takes apart; until 2026-10-24 the body's alone,
+    and such a chain stayed whole: dead keeps an assignment whose value has an effect, webs leaves the
+    variables a chain writes inside it under their old names, and a variable dread.shapes typed as a
+    structure pointer handed its pointer to an integer, r1_1 = r2 = (struct s *)(r3 = r12 = 0),
+    which GCC 14 and later refuse to compile)."""
     changed = False
-    for body in stmt_lists(fn):
+    for body in every_list(fn):
         out = []
         for s in body:
-            chain, e = [], s.e if isinstance(s, C.ExprStmt) else None
-            while isinstance(e, C.Assign) and e.op == "=" and isinstance(e.target, C.Name):
-                chain.append(e.target.id)
-                e = e.value
-            if len(chain) > 1 and isinstance(e, (C.Num, C.Name)) and len({type_of(fn, n) for n in chain}) == 1 \
-                    and type_of(fn, chain[0]) is not None:
-                for name in chain:
-                    x = C.ExprStmt(C.Assign("=", C.Name(name), e), s.addr)
-                    out.append(x)
+            got = chain(s.e) if isinstance(s, C.ExprStmt) else None
+            if got is not None and isinstance(got[1], (C.Num, C.Name)) and \
+                    len({type_of(fn, n) for n in got[0]}) == 1 and type_of(fn, got[0][0]) is not None:
+                out.extend(C.ExprStmt(C.Assign("=", C.Name(name), _leaf_copy(got[1])), s.addr) for name in got[0])
                 changed = True
             else:
                 out.append(s)
         body[:] = out
+    return changed
+
+
+def chain_parts(e, names):
+    """A chain of assignments (chain) that assigns one of names, as one assignment per variable,
+    innermost first: each the constant 0 where that is the chain's value (every integer and pointer
+    type keeps it: r12 = 0; r3 = 0; r2 = 0; r1 = 0), else the value to the innermost and to every other
+    the variable inside it (y = z: what the chain assigns it, converted to its type); None for anything
+    else (no chain, none of names in it, a value that is itself an assignment)."""
+    got = chain(e)
+    if got is None or not set(got[0]) & set(names) or isinstance(got[1], C.Assign):
+        return None
+    variables, value = got
+    zero = isinstance(value, C.Num) and value.value == 0 and not isinstance(value.value, float)
+    out, inner = [], None
+    for name in reversed(variables):
+        if inner is None:
+            out.append(C.Assign("=", C.Name(name), value))
+        else:
+            out.append(C.Assign("=", C.Name(name), C.Num(value.text, value=0) if zero else C.Name(inner)))
+        inner = name
+    return out
+
+
+def split_typed(fn, names):
+    """Every chain of assignments that assigns one of names (variables a pass is about to give other
+    types: dread.shapes' structure pointers, dread.vartypes' pointers and s32) as one statement per
+    variable (chain_parts), each with the chain's instruction (the printer keeps them on its line),
+    in every statement of fn; a lone arm or loop body that is such a chain becomes a block of them. A
+    chain of variables of different types computes its conversions in turn, and the value of an
+    assignment to a pointer is a pointer, which the chain would hand to an integer: an error of GCC 14
+    and later (int-conversion), a warning before. split leaves such chains where its variables'
+    types differ, or the value is no variable or constant; dread.shapes and dread.vartypes split them
+    before typing. Returns whether it split one."""
+    changed = False
+
+    def visit(s):
+        nonlocal changed
+        if isinstance(s, C.ExprStmt):
+            parts = chain_parts(s.e, names)
+            if parts is not None:
+                changed = True
+                return [C.ExprStmt(p, s.addr) for p in parts]
+            return [s]
+        if isinstance(s, C.Block):
+            s.body[:] = [x for y in s.body for x in visit(y)]
+        elif isinstance(s, C.If):
+            s.then = one(s.then)
+            if s.orelse is not None:
+                s.orelse = one(s.orelse)
+        elif isinstance(s, (C.While, C.DoWhile, C.For, C.Switch)) and s.body is not None:
+            s.body = one(s.body)
+        return [s]
+
+    def one(s):
+        got = visit(s)
+        return got[0] if len(got) == 1 else C.Block(got)
+    if names:
+        visit(fn.body)
     return changed
 
 

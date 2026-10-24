@@ -55,13 +55,15 @@ class OverlayError(Exception):
     """The link cannot be made; `function` names the one function at fault when there is one,
     `room`, when the room for the C is full, says (bytes over, the functions with C there largest
     first, {function: its bytes there}: itself when no slot or hole took it, and its object's helpers),
-    and `failed` the sources that did not compile."""
+    `failed` the sources that did not compile, and `errors` {source: the first error its compiler
+    named, one line (dread.build compiler_error), "" where it named none}."""
 
-    def __init__(self, message, function=None, room=None, failed=()):
+    def __init__(self, message, function=None, room=None, failed=(), errors=None):
         super().__init__(message)
         self.function = function
         self.room = room
         self.failed = list(failed)
+        self.errors = dict(errors or {})
 
 
 TAIL_SECTIONS = (".text", ".rodata", ".srodata", ".glue_7", ".v4_bx", ".vfp11_veneer", ".iplt")
