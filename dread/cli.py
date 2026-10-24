@@ -29,7 +29,7 @@ COMMANDS = {
     "sysrecord": ("dread.sysrecord", "written cases recorded from a system run, for the functions it enters"),
     "flat": ("dread.flat", "one function's code as a flat listing to read"),
     "rename": ("dread.rename", "give functions new names, everywhere a name is written"),
-    "gui": ("dread.gui", "browse an image in the web browser: listings, C, coverage, verdicts"),
+    "gui": ("dread.gui", "the web browser view: browse an image (listings, C, coverage, verdicts), run every command as a job"),
     "callsites": ("dread.callsites", "the calls of functions with the constant arguments at each"),
     "relations": ("dread.relations", "a function's neighbourhood as a graph: calls, memory, texts, structures"),
     "groups": ("dread.groups", "the functions grouped by their code alone: the subsystems a reader would see"),
