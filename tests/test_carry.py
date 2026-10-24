@@ -167,6 +167,21 @@ def test_a_carried_name_the_checks_refuse_is_dropped_alone():
     assert got["carried"]["dropped"] == {"r4_1": "handle_irq"} and got["carried"]["open"] == ["r4"]
 
 
+def test_an_entry_without_names_carries_its_sentence():
+    """An entry with a sentence and no names (the C had nothing the model renamed) carries its sentence
+    to the new C; a variable the new C has that the old one did not is open (what a new proposal would
+    name). Before 2026-10-24 such an entry was left for a new proposal and counted as carrying nothing."""
+    old = entry_for(OLD, {})
+    _, fn, got = carried(NEW, old)
+    assert got["names"] == {} and got["what"] == "adds" and got["digest"] == naming.digest(fn), got
+    assert got["carried"] == {"from": old["digest"], "names": 0, "dropped": {}, "open": []}, got
+    new = NEW.replace("u32 r4, r4_1;", "u32 r4, r5;").replace("r4_1 = r4 + r0;  /* c: adds r4, r4, r0 */",
+                                                              "r5 = r4 + r0;  /* c: adds r5, r4, r0 */") \
+        .replace("return r4_1;", "return r5;")
+    _, _, got = carried(new, old)
+    assert got["names"] == {} and got["carried"]["open"] == ["r5"], got
+
+
 def gizmo(tmp_path):
     """(target, image, program, context, lifter) of a fresh copy of gizmo's m3 build."""
     from conftest import GIZMO
@@ -197,23 +212,27 @@ def test_dread_readable_carries_names_only_where_the_code_stays_the_same(tmp_pat
     r3 named memcpy); one without identities is left alone."""
     from dread import readable
     target, image, program, context, lifter = gizmo(tmp_path)
-    made = readable.question_trees(program, context, lifter, ["fmt_dec", "strlen", "fmt_hex", "memcpy"])
+    made = readable.question_trees(program, context, lifter, ["fmt_dec", "strlen", "fmt_hex", "memcpy", "led_on"])
     good = {v: "n_" + v for v in made["fmt_dec"][5] if v not in ("frame", "sp0")}
     table = {"fmt_dec": made_for_other_c(made, "fmt_dec", good),
              "strlen": made_for_other_c(made, "strlen", {"r0": "text", "r3": "DREAD_H"}),
              "memcpy": made_for_other_c(made, "memcpy", {"r3": "memcpy"}),
-             "fmt_hex": {"digest": "0" * 16, "names": {"r0": "value"}, "what": "", "by": "test"}}
+             "fmt_hex": {"digest": "0" * 16, "names": {"r0": "value"}, "what": "", "by": "test"},
+             "led_on": made_for_other_c(made, "led_on", {})}
     naming.store_all(image, table)
     assert readable.main(["--target", target.root, "--carry"]) == 0
     out = capsys.readouterr().out
     assert re.search(r"fmt_dec +%d names carried, 0 dropped" % len(good), out), out
     assert re.search(r"strlen +no names carried: with them the C compiles to other code", out), out
     assert re.search(r"memcpy +no names carried: the check refused every one", out), out
-    assert "of 4 functions named for other C, 1 carried (%d names, 0 dropped; 0 with variables left without a " \
+    assert re.search(r"led_on +the sentence carried \(it had no names\)", out), out
+    assert "of 5 functions named for other C, 2 carried (%d names, 0 dropped; 0 with variables left without a " \
            "name), 1 without identities, 2 carried nothing" % len(good) in out, out
     after = naming.load(image)
     assert after["fmt_dec"]["digest"] == made["fmt_dec"][2] and after["fmt_dec"]["names"] == good
     assert after["fmt_dec"]["carried"]["from"] == "0" * 16
+    assert after["led_on"]["digest"] == made["led_on"][2] and after["led_on"]["names"] == {}
+    assert after["led_on"]["what"] == "does its thing"
     assert all(after[n] == table[n] for n in ("strlen", "memcpy", "fmt_hex"))
     text = readable.transform("fmt_dec", lifter.lift(program.by_name["fmt_dec"]).text,
                               context=readable.Context(target, image, program))

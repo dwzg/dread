@@ -379,8 +379,10 @@ def carry(tree, fn, entry, made_for, ids, bar=CARRY_OVERLAP):
     its digest before the names, ids its identities() there) made from an entry that was made for
     other C: each name goes to the variable carry_map takes its variable to, of those the problems()
     check lets through (usable). None when the entry has no identities (a table from before
-    2026-10-23: it waits for a new proposal, as before), was made for this C, or carries no name. The
-    new entry keeps the sentence and who proposed it, has this C's identities, and "carried": {"from":
+    2026-10-23: it waits for a new proposal, as before), was made for this C, or had names and carries
+    none of them. An entry without names (a sentence alone: the C had nothing the model renamed) carries
+    its sentence, with nothing to lose (until 2026-10-24 it was left for a new proposal, and dread
+    readable --carry counted it as carrying nothing). The new entry keeps the sentence and who proposed it, has this C's identities, and "carried": {"from":
     the digest it was made for, "names": how many came over, "dropped": {old variable: name} of those
     that did not, "open": the variables of this C left without a name that the old C did not have or
     whose name the check refused here (what a new proposal would name)}. Whether the C with the names
@@ -391,7 +393,7 @@ def carry(tree, fn, entry, made_for, ids, bar=CARRY_OVERLAP):
     names = entry.get("names") or {}
     moves = carry_map(old_ids, ids, bar)
     got = usable(tree, fn, {moves[v]: names[v] for v in moves if v in names})
-    if not got:
+    if not got and names:
         return None
     came = {v for v in moves if v in names and moves[v] in got}
     named_before = {moves[v] for v in moves if v in names}
@@ -408,7 +410,8 @@ def carry_table(target, image, made, work, jobs=None, out=print):
     is now: made, {name: dread.readable question_trees' tuple} of the functions to look at. Each entry
     with identities whose digest is not its function's goes through carry(), and is kept only where the
     function's C with the carried names compiles to the same code as without them (same_code, a thread
-    a function, jobs at a time, each in a directory of its own under work); the kept ones replace the
+    a function, jobs at a time, each in a directory of its own under work; an entry that carries no
+    name, its sentence alone, needs no compile); the kept ones replace the
     old entries in the table. An entry that does not carry stays as it was (it waits for a new
     proposal). Returns {name: the entry carried}."""
     import concurrent.futures
@@ -436,6 +439,8 @@ def carry_table(target, image, made, work, jobs=None, out=print):
 
     def check(job):
         _, tree, fn, text, new = job
+        if not new["names"]:
+            return True
         if getattr(local, "slot", None) is None:
             with lock:
                 local.slot = len(slots)
@@ -454,9 +459,11 @@ def carry_table(target, image, made, work, jobs=None, out=print):
             continue
         kept[name] = new
         c = new["carried"]
-        out("%-24s %d names carried, %d dropped%s" % (name, c["names"], len(c["dropped"]), ", %d variable%s without "
-                                                       "a name" % (len(c["open"]), "s"[len(c["open"]) == 1:])
-                                                       if c["open"] else ""))
+        left = (", %d variable%s without a name" % (len(c["open"]), "s"[len(c["open"]) == 1:]) if c["open"] else "")
+        if not c["names"] and not c["dropped"]:
+            out("%-24s the sentence carried (it had no names)%s" % (name, left))
+        else:
+            out("%-24s %d names carried, %d dropped%s" % (name, c["names"], len(c["dropped"]), left))
     store_all(image, kept)
     return kept
 

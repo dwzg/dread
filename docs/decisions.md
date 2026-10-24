@@ -9,6 +9,27 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## An entry without names carries its sentence (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), found on the private
+real-life test: after a day's printing rules changed many functions' readable C, dread readable --carry
+reported a number of functions as "carried nothing", every one with the reason "none has its variable
+in this C". Their entries held a sentence and no names: the C had nothing the model renamed (a
+function without locals, or one whose variables the model kept as they were).
+
+- **Question.** Is an entry without names that was made for other C carried, or left for a new
+  proposal?
+- **Options.** (a) Left, as before: dread pilot asks the model about the function again, for a
+  sentence it already has, and the report counts a failure where nothing was lost. (b) Carried: the
+  sentence goes to the new C, with the new C's identities, and a variable the new C has that the old
+  did not is open, so that a new proposal names only that.
+- **Choice.** (b): dread.naming carry returns None only when an entry had names and none carries;
+  carry_table skips the compile check for an entry that applies no name (the code cannot change), and
+  prints "the sentence carried (it had no names)".
+- **Undo.** `if not got and names` in dread.naming carry back to `if not got`, and the early return in
+  carry_table's check.
+- **Status.** In the code (tests/test_carry.py).
+
 ## Masks across calls, one radix per object, signed variables from negative values (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with three items of
