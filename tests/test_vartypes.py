@@ -289,6 +289,111 @@ u32 f(u32 r0)
     assert "s32 getc_like(void)" in head and "return -1;" in head, head
 
 
+NEGATIVES = HEAD + """extern u32 get_like(u32);
+extern u32 sat_like(u32, u32);
+u32 get_like(u32 r0)
+{
+    u32 r0_1, r1, r3;
+    r1 = *(volatile u32 *)(r0 + 32);
+    r3 = *(volatile u32 *)(r0 + 36);
+    if (r1 == r3)
+    {
+        r0_1 = ~0x0u;
+    }
+    else
+    {
+        r0_1 = *(volatile u8 *)(r0 + r3);
+        *(volatile u32 *)(r0 + 36) = (r3 + 1) & 0x1fu;
+    }
+    return r0_1;
+}
+u32 sat_like(u32 r0, u32 r1)
+{
+    u32 r2;
+    r2 = ~0x0u;
+    if (r1 != 0) r2 = r0 + r1;
+    return r2;
+}
+u32 f(u32 r0)
+{
+    u32 r1, r2, r3, r4, r5;
+    r1 = get_like(r0);
+    if (r1 == 0xffffffffu) return 0;
+    r2 = ~0x1u;
+    if (r0 == 7) r2 = 9;
+    if (r2 == 9) sink(r0, 1);
+    r3 = ~0x2u;
+    if (r0 == 8) r3 = 4;
+    r4 = r3 + r0;
+    r5 = ~0x0u;
+    if (r5 < r0) r4++;
+    sink(r4, r5);
+    return r4;
+}
+"""
+
+
+def test_a_variable_given_negative_values_is_s32():
+    """A variable given a constant readable C prints negative (-1 for ~0x0u) and read only by ==, by
+    return or by signed comparisons is s32 (get_like's result variable, ring_get's shape; f's r2); one
+    read otherwise (a sum: r3; an unsigned order: r5) stays u32. A function's result is s32 where its own
+    returns give negative values and a caller reads it only so (get_like: compared with -1); without a
+    caller that reads it (sat_like: a saturated sum, its source's u32) it stays u32, and so does the
+    variable it returns (an s32 one would contradict it)."""
+    out, p = typed(NEGATIVES, name="get_like")
+    assert p.variables["get_like"]["types"] == {"r0_1": "s32"}, p.variables
+    assert p.variables["f"]["types"] == {"r2": "s32"}, p.variables
+    assert p.prototypes.get("get_like") == ["s32", None] and "sat_like" not in p.prototypes, p.prototypes
+    for line in ("s32 get_like(u32 r0)", "s32 r0_1;", "r0_1 = -1;", "r0_1 = *(volatile u8 *)(r0 + r3);",
+                 "return r0_1;"):
+        assert line in out, (line, out)
+    out, _ = typed(NEGATIVES, name="f")
+    for line in ("extern s32 get_like(u32);", "extern u32 sat_like(u32, u32);", "s32 r2;", "r2 = -2;",
+                 "if (r2 == 9) sink(r0, 1);", "u32 r1, r3, r4, r5;", "if (r1 == -1) return 0;", "r3 = -3;",
+                 "r5 = -1;", "if (r5 < r0) r4++;"):
+        assert line in out, (line, out)
+    out, _ = typed(NEGATIVES, name="sat_like")
+    assert "u32 sat_like(u32 r0, u32 r1)" in out and "u32 r2;" in out and "r2 = -1;" in out, out
+
+
+def test_a_callee_outside_the_plan_compared_signed_returns_s32():
+    """A callee the plan does not analyse (not lifted: its C printed on request) whose result an
+    analysed caller compares signed returns s32 in the table, so in the caller's extern and in its own
+    C, which takes the negative rule on its own (gizmo's ring_get beside main); one the plan analyses
+    nothing of keeps everything as it was when the table says nothing of it (made before: no params)."""
+    caller = HEAD + """extern u32 get_like(u32);
+u32 f(u32 r0)
+{
+    u32 r1;
+    r1 = get_like(r0);
+    if ((s32)r1 < 0) return 0;
+    return r1 + 1;
+}
+"""
+    p = shapes.Plan()
+    tree = cparse.parse(caller)
+    vartypes.plan(p, [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)])
+    p.params = {"f": []}                    # (the analysed functions: shapes.pointer_params lists them all)
+    assert p.prototypes.get("get_like") == ["s32"], p.prototypes
+    tree = cparse.parse(caller)
+    fn = tree.function("f")
+    vartypes.apply(tree, fn, p)
+    polish.polish(tree, fn)
+    out = cparse.unparse(tree, notes=False, style="readable")
+    assert "extern s32 get_like(u32);" in out and "s32 r1;" in out and "if (r1 < 0) return 0;" in out, out
+    tree = cparse.parse(NEGATIVES)
+    fn = tree.function("get_like")
+    vartypes.apply(tree, fn, p)
+    polish.polish(tree, fn)
+    out = cparse.unparse(fn, notes=False, style="readable")
+    assert "s32 get_like(u32 r0)" in out and "s32 r0_1;" in out and "r0_1 = -1;" in out, out
+    old = shapes.Plan()                     # (a table without params: nothing decided on the function's own)
+    tree = cparse.parse(NEGATIVES)
+    fn = tree.function("get_like")
+    vartypes.apply(tree, fn, old)
+    assert "u32 r0_1, r1, r3;" in cparse.unparse(fn, notes=False, style="readable")
+
+
 def test_an_extern_takes_a_pointer_type_where_its_calls_fit_it():
     """A callee that walks bytes takes volatile u8 *; a caller that hands it the address of static data
     declares the extern so and passes &g_x[0] (no (u32)& cast), one that hands it a number keeps the
@@ -592,8 +697,33 @@ def test_gizmos_char_pointers_are_pointers(variant):
     assert "(s32)" not in line, line
     assert re.search(r"\w+\[\w+\] = 0;", line) and "*(volatile u8 *)" not in line, line
     kv = got["parse_kv"]
-    assert re.search(r"u32 parse_kv\(const volatile u8 \*\w+, volatile u8 \*\w+, u32 \w+, u32 \w+\)", kv), kv
+    # (its result is s32 where it returns its errors through one variable: -1, -2, -3, its source's int)
+    assert re.search(r"[us]32 parse_kv\(const volatile u8 \*\w+, volatile u8 \*\w+, u32 \w+, u32 \w+\)", kv), kv
     assert "*(volatile u8 *)" not in kv and re.search(r"\w+\[\w+\] = \w+;", kv), kv
+
+
+def test_gizmos_negative_values_are_s32(variant):
+    """gizmo's ring_get (not lifted: printed on request) returns -1 or a byte: s32 ring_get as main, which
+    compares its result signed, declares it, and the variable that holds -1 s32 where there is one;
+    uart_getc's likewise; cmd_mode (0 or -1) is s32 where a caller reads its result only by return (ARM
+    state's apply_config); udiv_var, which returns 0xFFFFFFFFu beside an unsigned quotient and no caller
+    reads, stays u32; every gizmo build."""
+    from dread import readable
+    program, context, lifter = gizmo_plan(variant)
+
+    def text(name):
+        return code(readable.transform(name, lifter.lift(program.by_name[name]).text, context=context))
+
+    def unsigned_negative(t):
+        names = {n.strip() for line in re.findall(r"(?m)^    u32 ([\w, ]+);$", t) for n in line.split(",")}
+        return [n for n in names if re.search(r"\b%s = -\d+;" % n, t)]
+    for name in ("ring_get", "uart_getc"):
+        t = text(name)
+        assert re.search(r"s32 %s\((u32 \w+|void)\)" % name, t) and not unsigned_negative(t), t
+    assert re.search(r"extern s32 ring_get\(u32\);", text("main"))
+    assert re.search(r"u32 udiv_var\(u32 \w+, u32 \w+\)", text("udiv_var"))
+    if variant == "a32":                    # (apply_config reads cmd_mode's result only by return)
+        assert "s32 cmd_mode(u32 r0)" in text("cmd_mode") and "extern s32 cmd_mode(u32);" in text("apply_config")
 
 
 # --- a program of our own through the gate ---
@@ -905,3 +1035,111 @@ int main(void)
     r = subprocess.run([str(exe)], capture_output=True, text=True)
     bad = [int(line.split()[1]) for line in r.stdout.splitlines()]
     assert r.returncode == 0, [(originals[i], results[i]) for i in sorted(set(bad))[:2]]
+
+
+def random_negative_function(rng, i):
+    """A callee and its caller in the lifted dialect: the callee's variables given negative constants
+    (~0x0u, 0xfffffffeu) and other values (bytes, sums, a parameter), read by ==, by return, by signed
+    and by unsigned comparisons and in sums; the caller reads the callee's result by ==, by a signed
+    comparison or in a sum. What dread.vartypes' negative rule may type s32 there, and the result."""
+    neg = lambda: rng.choice(["~0x0u", "~0x1u", "~0x2u", "0xfffffffeu", "0xffffff00u"])     # noqa: E731
+    other = lambda: rng.choice(["a1 & 0xffu", "a1 + a2", "a2", "7", "*(volatile u8 *)(a3 + 1)"])   # noqa: E731
+    lines = ["u32 neg_%d(u32 a0, u32 a1, u32 a2, u32 a3)" % i, "{", "    u32 v, w, x, r;", "    r = 0;"]
+    for name in ("v", "w", "x"):
+        lines.append("    %s = %s;" % (name, neg()))
+        lines.append("    if ((s32)a0 > %d) %s = %s;" % (rng.randrange(-3, 4), name, other()))
+    for _ in range(rng.randint(1, 4)):
+        lines.append(rng.choice(["    if (w == %s) r = r + 1;" % neg(), "    if ((s32)x < %d) r = r + 2;" % rng.randrange(-2, 3),
+                                 "    if (x == 7) r = r ^ 4;", "    if (w != 0) r = r + 8;"]))
+    lines.append(rng.choice(["    r = r + (x >> 3);", "    r = r + (w < a2);", "    r = r + 0;"]))
+    lines.append("    sink(r, a0);")
+    lines.append("    return %s;" % rng.choice(["v", "v", "r", "w"]))
+    lines.append("}")
+    lines.append("u32 use_%d(u32 a0, u32 a1, u32 a2, u32 a3)" % i)
+    lines.append("{")
+    lines.append("    u32 t;")
+    lines.append("    t = neg_%d(a0, a1, a2, a3);" % i)
+    lines.append(rng.choice(["    if (t == 0xffffffffu) return 1;", "    if ((s32)t < 0) return 2;",
+                             "    if (t != 3) return t;", "    t = t + a1;"]))
+    lines.append("    return t;")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+@pytest.mark.skipif(HOST32 is None, reason="needs the host's C compiler with -m32")
+def test_random_negative_values_typed_compute_the_same(tmp_path):
+    """Random callees and callers (random_negative_function) typed as the plan types them (the negative
+    rule's s32 variables and results among them) and polished, each function in a file of its own as the
+    builds compile them, compiled by the host in 32 bits beside the lifted C and run with boundary and
+    random arguments: the same results; the rule types something in most of them."""
+    from dread.build import INCLUDE
+    rng = random.Random(53)
+    count = 150
+    originals, files, typed_any = [], [], 0
+    for i in range(count):
+        text = random_negative_function(rng, i)
+        originals.append(text.replace("neg_", "orig_neg_").replace("use_", "orig_use_"))
+        externs = "extern u32 sink(u32, u32);\nextern u32 neg_%d(u32, u32, u32, u32);\n" % i
+        p = shapes.Plan()
+        tree = cparse.parse(externs + text)
+        vartypes.plan(p, [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)])
+        typed_any += bool(p.variables or p.prototypes)
+        for name in ("neg_%d" % i, "use_%d" % i):
+            tree = cparse.parse(externs + text)
+            fn = tree.function(name)
+            vartypes.apply(tree, fn, p)
+            polish.polish(tree, fn)
+            raw = "\n".join(item.text for item in tree.items if isinstance(item, cparse.Raw))
+            body = cparse.unparse(fn, notes=False, style="readable")
+            files.append(('#include "dread.h"\n' + raw + "\n" + body).replace("neg_", "typed_neg_")
+                         .replace("use_", "typed_use_"))
+    assert typed_any > count * 0.6, typed_any
+    calls = "".join("    run((fn_t)%s_use_%d, %d, %d);\n" % (k, i, i, k == "typed") for i in range(count)
+                    for k in ("orig", "typed"))
+    driver = r"""
+#include <stdio.h>
+typedef u32 (*fn_t)(u32, u32, u32, u32);
+static u8 buf[64];
+static u32 got[%(count)d][2][12];
+static const u32 edges[] = {0, 1, 2, 3, 7, 0x7f, 0x80, 0xff, 0x7fffffff, 0x80000000, 0xfffffffd, 0xfffffffe, 0xffffffff};
+static void run(fn_t f, int i, int k)
+{
+    int j;
+    u32 seed = 777u + i;
+    for (j = 0; j < 12; j++) {
+        seed = seed * 1103515245u + 12345u;
+        buf[1] = (u8)(seed >> 9);
+        trace = 0;
+        got[i][k][j] = f(j < 6 ? edges[(i + j) %% 13] : seed, j < 6 ? edges[(i * 5 + j) %% 13] : seed * 7u,
+                         j < 6 ? edges[(i * 3 + j * 2) %% 13] : seed >> 3, (u32)&buf[0]) ^ trace;
+    }
+}
+int main(void)
+{
+    int i, j, bad = 0;
+%(calls)s    for (i = 0; i < %(count)d; i++)
+        for (j = 0; j < 12; j++)
+            if (got[i][0][j] != got[i][1][j]) { printf("result %%d %%d\n", i, j); bad++; }
+    return bad != 0;
+}
+""" % {"count": count, "calls": calls}
+    main = tmp_path / "negative.c"
+    main.write_text('#include "dread.h"\nu32 trace;\nu32 sink(u32 a, u32 b)\n{\n    trace = trace * 33u + a + 5u * b;\n'
+                    "    return trace ^ 0x5au;\n}\n" + "".join("u32 orig_neg_%d(u32, u32, u32, u32);\n" % i
+                                                          for i in range(count)) +
+                    "".join("u32 typed_use_%d();\n" % i for i in range(count)) + "".join(originals) + driver)
+    sources = [str(main)]
+    for k, text in enumerate(files):
+        path = tmp_path / ("typed_%d.c" % k)
+        path.write_text(text)
+        sources.append(str(path))
+    exe = tmp_path / "negative"
+    built = subprocess.run([HOST32, "-m32", "-O2", "-std=gnu11", "-w", "-fno-strict-overflow",
+                            "-fno-delete-null-pointer-checks", "-I", INCLUDE, "-o", str(exe)] + sources,
+                           capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr[-3000:]
+    r = subprocess.run([str(exe)], capture_output=True, text=True)
+    bad = [int(line.split()[1]) for line in r.stdout.splitlines()]
+    assert r.returncode == 0, [(originals[i], files[2 * i], files[2 * i + 1]) for i in sorted(set(bad))[:2]]
+    text = "\n".join(files)
+    assert re.search(r"(?m)^\s+s32 [vwx]\b", text) and re.search(r"(?m)^s32 typed_neg_", text), text[:3000]

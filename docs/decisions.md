@@ -9,6 +9,100 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Masks across calls, one radix per object, signed variables from negative values (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with three items of
+docs/todo.md, "From a second review": Masks stay masks across calls, One radix per object and stores
+through pointers, Signed variables from negative values.
+
+- **Question.** Three of 2026-10-23's printing rules read a few lines worse than the lifter's form. A
+  mask handed to a callee or kept in a variable that a shift reads printed as a negative number
+  (FreeRTOS's `xTaskGenericNotifyWait(0, -1, ...)` for `ulBitsToClearOnEntry = notifyUINT32_MAX`; gizmo's
+  ram_crc `r3 = -1;` for `crc = 0xFFFFFFFFu`). The radix was decided per place, so one object came out
+  in two radices (the bytes of a colour triple `0x96u, 0x35u, 15`; a variable compared with `63` and
+  `0xffu`; sizes stored through a pointer as `0x40u` beside the bounds `r0 <= 63` that select them).
+  And `u32 ret = -10; ... return ret;` stayed u32 (gizmo's ring_get, `u32 r0_1; ... r0_1 = -1;` for
+  `int ring_get`). How are masks recognised across calls, what is one object for the radix, and when
+  is a variable or a result s32 from its negative values?
+- **Options and choices.**
+  1. A callee's mask parameter: (a) from its machine code (an instruction-level flow of the argument
+     register into and, orr, eor, bic, mvn: one per architecture); (b) from its C: the plan's analysis
+     trees for the lifted functions, and for a callee outside them that a lifted function passes a
+     constant that would read negative, its own lifted C (the lifter is the machine code's flow,
+     written once for every architecture); (c) by the constant alone (all ones is always a mask): wrong
+     for portMAX_DELAY's -1 (a count), FreeRTOS's most frequent all-ones argument. **(b)**, a table key of
+     its own (the readable_types table's `masks`, dread.polish mask_params): a parameter never assigned
+     whose every read, also through copies, is an operand of &, |, ^ or ~ (also &=, |=, ^=), the value
+     returned as it is (a void function's leftover register), or an argument for a callee's mask
+     parameter (over the functions until nothing changes); a value it stores is no mask's use (what
+     memory does with it is not followed), nor a shift (x << 2 scales FreeRTOS's stack depth; the
+     lifters' 1 << (r0 & 0xffu) masks a count). A variable read only by bit operations and
+     shifts (ram_crc's crc: ^=, >>, &, ~) gets no negative number either; all ones as such a mask prints
+     0xffffffffu whatever the lifter wrote (ARM state's ~0x0u, Thumb-2's and RISC-V's all ones: the
+     sources write 0xFFFFFFFFu), another complement keeps its form (~0x20u: the bits it clears).
+     Compound assignments now count as reads (x ^= y reads x as a mask's operand; x++ as a number), so
+     a counter that & also reads is no mask any more.
+  2. One object for the radix: (a) every place a structure's or an object's: a structure's fields hold
+     unrelated things (a count beside flags), and static data's structures are inferred groupings of
+     globals; (b) a variable; an array's elements (a local's, static data's, a typed pointer's: x[k], *p)
+     as one object; a structure's field its own; joined through copies (x = y, *p = v, v = p[k], a
+     declaration's initialiser: one value in both), not through an access at an address the code computes
+     (`*(volatile u32 *)a5` stands for other memory later: a RISC-V function that keeps its registers had
+     joined a0 with the pointer a5 so). **(b)**. The object holds numbers where a use makes one of its
+     places one (as before), where its places together are given (a select's constant arms each: GCC 13
+     makes selects of tally's sizes on Thumb-2) or compared with two or more distinct plain numbers (as
+     one place's were), or where it takes a number the function writes in decimal elsewhere (a bound of
+     an ordered comparison or its neighbour on the side the compiler moved it to, x <= 63 for x < 64; a
+     divisor; a multiplier; a constant of an object that holds numbers). Never one that holds a pointer
+     (a counted address: RISC-V's walk over the ready lists, `s4 += 0x14u`, now hex as the pointer it is
+     copied into), or only texts' starts and functions' entries (dread.constants Pointed: FreeRTOS's
+     prvCheckTask stores its status message's texts, which lie at small addresses on an image at 0; main
+     printed them as numbers by the old place rule, clang -O2 `g_20000000 = 379;`, now `0x17bu`; line
+     numbers stored beside them elsewhere fall on such a text now and then and stay numbers: all of an
+     object's values must be addresses), nor by a number taken where one of its own values looks like a
+     bit pattern (0x55, 0xf0: clang -O2's prvSanityCheckCreatedEventGroup keeps an event group's 0x55 and
+     a line number in one register). Then all its constants below WIDE print decimal, a run of ones from
+     bit 0 too (255 beside 63: the bound of x < 256), unless all its constants of 10 or more look like
+     masks (x <= 0xffu alone stays as it was); a shifted run (0xff00) stays hex. A sum's constant is a
+     number also where the sum goes into such an object (RISC-V's branchless select `(...) + 15` stored
+     into the colour's byte), and a complement stored into a narrower place is the value it leaves there
+     (~0x69u into a byte: 150, or 0x96u where the object stays hex).
+  3. Signed variables: (a) every variable given a negative constant; (b) one read only by == or !=, a
+     truth test or return (the item's rule), kept where it adds no casts (the plan's trial). **(b)**,
+     and one the function returns only where the function's result is s32: gizmo's udiv_var returns
+     0xFFFFFFFFu beside an unsigned quotient, a saturated sum likewise; a u32 function with an s32
+     variable returned would say two things. Results: (a) s32 wherever a return gives a negative value;
+     (b) where a caller reads the result too, and every caller only as the rule reads a variable (==,
+     return, a signed comparison, a variable read only so: through dread.cflow's reaching definitions,
+     the reads the call's definition reaches). **(b)**: (a) typed udiv_var (no caller) and dispatch-like
+     functions whose other returns are full-width values. A callee the plan does not analyse (not
+     lifted) whose result an analysed caller compares signed is s32 in the table too (its result alone
+     in `prototypes`): main declares `extern s32 ring_get(u32)` and ring_get printed on request says
+     `s32 ring_get`, as the item's example asks; such a function gets the negative variables on its own
+     C (local_types: p.params lists the functions the plan analysed).
+- **Why.** Each rule changes how a constant or a declaration reads, never what the C computes: the
+  literals are chosen by dread.polish's exact checks (same_in) as before, the s32 typing goes through
+  dread.vartypes' rewriter as the signed rule does, and the gate checks every function. Tests compile
+  the printed forms beside the originals on the host (random functions with masks, an array's elements
+  and copies; random callees and callers whose negative values the plan types, each in a file of its
+  own, in 32 bits).
+- **Measured.** See the three items in docs/todo.md (the eight builds' gate counts, the patterns before
+  and after, the functions whose C changed).
+- **Not established.** That a negative value read only by == is the source's int (a u32 sentinel
+  compared with 0xFFFFFFFFu reads the same); a function only called through pointers keeps u32 (no
+  caller reads it); a mask parameter of a callee that neither lifts nor is reached from a lifted
+  function's constant argument stays unknown (a function printed on request passes -1 to it); the
+  value evidence of a bound's neighbour may make a coincident flag decimal in the same function (none
+  seen on the eight builds' changed lines).
+- **Undo.** Masks: take `masks=` out of readable.polish_tree (and mask_plan out of make_plan); the
+  variable rule: Polisher.bitwise empty. Objects: Polisher._objects making every place its own object
+  and no `known` values. Negative values: candidates() without the "negative" kind, decide_result's
+  second path and the outside callees in Planner.run, local_types not called from apply.
+- **Status.** Done (dread/polish.py: mask_params, _objects, placed, near_top; dread/vartypes.py:
+  negative_variables, returns_negative, read_as_negative, Facts.reads/results/result_kinds,
+  local_types, Planner.decide_outside; dread/readable.py: mask_plan, polish_tree; dread/shapes.py:
+  Plan.masks; docs/formats.md; tests/test_polish.py, tests/test_vartypes.py).
+
 ## Extensions and bit fields: casts, fields and selects, each rewrite proved where it is made (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Extensions

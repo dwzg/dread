@@ -31,7 +31,17 @@ table's `variables` and `prototypes`):
   gets that type with those parameters in the file's externs;
 - signed integers: a variable compared in order only by signed comparisons ((s32)v > 4) is s32, a
   function's result s32 where a caller compares it signed (uart_getc's int: (s32)f() compared, or a
-  variable every definition of which that reaches the comparison is the call);
+  variable every definition of which that reaches the comparison is the call), also a callee the plan
+  does not analyse (not lifted: its extern, and its own C printed on request, gizmo a32's ring_get
+  beside main);
+- negative values: a variable given a constant dread.polish prints as a negative number (ret = -1)
+  and read only by == or !=, a truth test or return is s32 (negative_variables; one it returns only in a
+  function whose result is s32, which a u32 function's variable would contradict), and a function's
+  result s32 where its own returns give negative values (return -1, return c ? 0 : -1, or such a
+  variable) and a caller reads it, every caller only so (by ==, return, a signed comparison, or a
+  variable read only so: the reads the call's definition reaches, dread.cflow); without a caller that
+  reads it a negative return is no evidence (gizmo's udiv_var returns 0xFFFFFFFFu beside an unsigned
+  quotient). A function the plan does not analyse gets the variables on its own C (local_types);
 - a file's externs: a callee's parameter has the type of the callee's own readable C where the file's
   calls pass what C takes for it without a cast (a pointer of that type, the address of an object of
   it, 0); elsewhere it stays u32 as the lifter declared it (an integer, a queue handle a u32 global
@@ -82,7 +92,10 @@ and memcpy's destination, returned twice, stays u32 by the count of casts), an a
 structure through its pointer (raw, as dread.shapes leaves it: r0[2].f_0 would need the field's
 name), pointers into the stack frame (dread.frames' object), variables the lifter declares other than
 u32 (MSP430's u16 registers: its pointers are 16 bits), globals that hold pointers (a queue handle in
-a u32 global stays a number, so its calls keep the extern's u32), names (the pilot's).
+a u32 global stays a number, so its calls keep the extern's u32), names (the pilot's). Not
+established: that a negative value read only by == is the source's int (a u32 sentinel compared with
+0xFFFFFFFFu reads the same), and the result of a function only called through pointers (no caller
+reads it: it keeps u32).
 """
 import re
 
@@ -824,11 +837,17 @@ def terms(e, sign=1):
     return [(sign, e)]
 
 
+NEGATIVE_READS = ("eq", "ret", "scmp")      # what reads a variable the negative rule types: ==, return, (s32) <
+
+
 class Facts:
     """One function's variables as the plan reads them: definitions (defs: {variable: [value, None
     where it is no plain value]}), memory accesses ((type, address, store)), the arguments of calls
-    ((callee, index, expression)), signed and unsigned ordered comparisons of each variable, and the
-    expression slots that name each variable (atoms)."""
+    ((callee, index, expression)), signed and unsigned ordered comparisons of each variable, the
+    expression slots that name each variable (atoms), what reads each variable (reads: {variable: {kind}}:
+    "eq" an operand of == or != or a truth test, "ret" a return's whole value, "scmp" a (s32) cast of it
+    compared in order, "other" anything else) and what each call's result goes to (results: {callee:
+    [kind]}: those kinds, "unused", ("var", v) a variable assigned the call, "other")."""
 
     def __init__(self, fn, exclude=(), pointer_params=()):
         from dread.cflow import walk_expr
@@ -839,6 +858,7 @@ class Facts:
         self.plain = eligible(fn) - set(exclude)
         self.defs, self.accesses, self.calls = {}, [], []
         self.signed, self.unsigned = {}, set()
+        self.reads, self.results = {}, {}
         self.atoms = []                     # [(statement, slot)]
         self.named = {}                     # variable -> [indices into atoms]
         self.call_atoms = {}                # callee -> [indices into atoms]
@@ -846,6 +866,7 @@ class Facts:
             e = st.items[int(name)].init if isinstance(st, C.Decl) else getattr(st, name)
             k = len(self.atoms)
             self.atoms.append((st, name))
+            self._uses(e, _slot_context(st, name))
             for x in walk_expr(e):
                 if isinstance(x, C.Name):
                     self.named.setdefault(x.id, []).append(k)
@@ -877,6 +898,143 @@ class Facts:
             self.named[k] = sorted(set(self.named[k]))
         for k in self.call_atoms:
             self.call_atoms[k] = sorted(set(self.call_atoms[k]))
+
+    def _uses(self, x, ctx):
+        """Records what reads each variable and what takes each call's result in expression x, whose
+        value goes to ctx: "eq" (compared for equality, or a truth), "ret" (returned), "unused", "order"
+        (an operand of an ordered comparison), ("assign", v) (assigned to the variable v), "other"."""
+        if x is None:
+            return
+        if isinstance(x, C.Name):
+            kind = ctx if ctx in ("eq", "ret") else "other"
+            self.reads.setdefault(x.id, set()).add(kind)
+            return
+        if isinstance(x, C.Call):
+            if isinstance(x.f, C.Name):
+                kind = ("var", ctx[1]) if isinstance(ctx, tuple) else ctx if ctx in ("eq", "ret", "unused", "scmp") \
+                    else "other"
+                self.results.setdefault(x.f.id, []).append(kind)
+            else:
+                self._uses(x.f, "other")
+            for a in x.args:
+                self._uses(a, "other")
+            return
+        if isinstance(x, C.Cast):
+            if ctx == "order" and " ".join(x.type.split()) == "s32" and isinstance(x.e, C.Name):
+                self.reads.setdefault(x.e.id, set()).add("scmp")
+                return
+            if ctx == "order" and " ".join(x.type.split()) == "s32" and isinstance(x.e, C.Call):
+                self._uses(x.e, "scmp")
+                return
+            self._uses(x.e, "other")
+            return
+        if isinstance(x, C.Binary):
+            sub = {"==": "eq", "!=": "eq", "&&": "eq", "||": "eq", "<": "order", "<=": "order", ">": "order",
+                   ">=": "order"}.get(x.op, "other")
+            self._uses(x.l, sub)
+            self._uses(x.r, sub)
+            return
+        if isinstance(x, C.Unary) and x.op == "!":
+            self._uses(x.e, "eq")
+            return
+        if isinstance(x, C.Cond):
+            self._uses(x.c, "eq")
+            self._uses(x.t, ctx)
+            self._uses(x.f, ctx)
+            return
+        if isinstance(x, C.Assign):
+            if isinstance(x.target, C.Name):
+                if x.op != "=":
+                    self.reads.setdefault(x.target.id, set()).add("other")
+                self._uses(x.value, ("assign", x.target.id) if x.op == "=" else "other")
+            else:
+                self._uses(x.target, "other")
+                self._uses(x.value, "other")
+            return
+        if isinstance(x, C.Comma):
+            for y in x.items[:-1]:
+                self._uses(y, "unused")
+            if x.items:
+                self._uses(x.items[-1], ctx)
+            return
+        if isinstance(x, (C.Unary, C.Post)):
+            self._uses(x.e, "other")
+            return
+        if isinstance(x, C.Index):
+            self._uses(x.base, "other")
+            self._uses(x.index, "other")
+            return
+        if isinstance(x, C.Member):
+            self._uses(x.base, "other")
+            return
+        from dread.cflow import walk_expr
+        for y in list(walk_expr(x))[1:]:
+            if isinstance(y, C.Name):
+                self.reads.setdefault(y.id, set()).add("other")
+
+    def _flow(self):
+        """(dread.cflow Graph, its reaching definitions) of the function, made once; (None, None) where
+        the flow cannot be made."""
+        if getattr(self, "_graph", None) is None:
+            from dread.cflow import Graph
+            try:
+                g = Graph(self.fn)
+                self._graph = (g, g.reaching())
+            except Exception:
+                self._graph = (None, None)
+        return self._graph
+
+    def result_kinds(self, callee, skip=()):
+        """{kind} of what reads callee's result in this function (Facts.results): where a variable is
+        assigned the call, the kinds of its reads that this definition reaches (dread.cflow's reaching
+        definitions: a variable that holds the result and then other values, read otherwise only after
+        another definition, reads the result only as these do), else every read of the variable; the
+        variables of skip left out."""
+        out = set()
+        wanted = {}
+        for kind in self.results.get(callee, ()):
+            if isinstance(kind, tuple):
+                if kind[1] not in skip:
+                    wanted[kind[1]] = wanted.get(kind[1], 0) + 1
+            else:
+                out.add(kind)
+        if not wanted:
+            return out
+        g, reach = self._flow()
+        defs = {}                           # variable -> {node index of v = callee(...)}
+        if g is not None:
+            for n in g.nodes:
+                st = n.stmt
+                if isinstance(st, C.ExprStmt) and isinstance(st.e, C.Assign) and st.e.op == "=" and \
+                        isinstance(st.e.target, C.Name) and isinstance(st.e.value, C.Call) and \
+                        isinstance(st.e.value.f, C.Name) and st.e.value.f.id == callee:
+                    defs.setdefault(st.e.target.id, set()).add(n.index)
+        for v, count in wanted.items():
+            if g is None or len(defs.get(v, ())) != count:
+                out |= self.reads.get(v, {"other"})     # (a definition the flow does not see: every read)
+                continue
+            for n in g.nodes:
+                if not (reach[n.index].get(v) or set()) & defs[v]:
+                    continue
+                one = Facts.__new__(Facts)
+                one.reads, one.results = {}, {}
+                for st, name in slots(n.stmt):
+                    e = st.items[int(name)].init if isinstance(st, C.Decl) else getattr(st, name)
+                    one._uses(e, _slot_context(st, name))
+                out |= one.reads.get(v, set())
+        return out
+
+    def negative(self, v):
+        """Whether a variable is assigned a constant within NEGATIVE of the top of 32 bits (one dread.polish
+        prints as a negative number where it is a value: ~0x0u, 0xfffffffeu), also as an arm of a select."""
+        from dread.polish import NEGATIVE
+
+        def near_top(x):
+            if isinstance(x, C.Cond):
+                return near_top(x.t) or near_top(x.f)
+            k = constant(x) if x is not None else None
+            return k is not None and (1 << 32) - NEGATIVE <= k & 0xffffffff
+        return any(near_top(x) for x in self.defs.get(v, ()))
 
     def signed_results(self):
         """The callees whose result this function compares signed: (s32)f(...) in an ordered
@@ -1031,6 +1189,21 @@ def slots_of(fn):
     return out
 
 
+def _slot_context(st, name):
+    """Where the value of a statement's expression slot goes (Facts._uses): a return's is returned, an
+    expression statement's and a for loop's init and step are unused, a condition is a truth (compared
+    with 0), a switch's is compared for equality with its cases, a declaration's initialiser is assigned."""
+    if isinstance(st, C.Return):
+        return "ret"
+    if isinstance(st, C.ExprStmt) or (isinstance(st, C.For) and name != "cond"):
+        return "unused"
+    if isinstance(st, (C.If, C.While, C.DoWhile, C.For, C.Switch)):
+        return "eq"
+    if isinstance(st, C.Decl):
+        return ("assign", st.items[int(name)].name)
+    return "other"
+
+
 def _framed(e):
     from dread.cflow import walk_expr
     return any(isinstance(x, C.Name) and x.id in FRAME for x in walk_expr(e))
@@ -1046,12 +1219,13 @@ class Candidate:
         self.members, self.types, self.kind, self.params = sorted(members), types, kind, sorted(params)
 
 
-def candidates(facts, protos):
+def candidates(facts, protos, signed_result=False):
     """The candidates of one function, in the order the plan tries them: pointer groups by their
     accesses (most accesses first), groups handed to callees' pointer parameters (protos: {callee:
     (result, [parameter types])} of the callees' own readable C) with those parameters, variables
-    compared signed, then each callee's pointer parameter alone (its extern declares it so where the
-    calls pass what C takes for it without a cast)."""
+    compared signed, variables given negative values (negative_variables: those the function returns
+    only where its result is s32, signed_result), then each callee's pointer parameter alone (its extern
+    declares it so where the calls pass what C takes for it without a cast)."""
     group, roots = facts.groups()
     members = {}
     for v, r in group.items():
@@ -1102,6 +1276,8 @@ def candidates(facts, protos):
     for v in sorted(facts.signed):
         if v in facts.plain and v not in taken and v not in facts.unsigned:
             out.append(Candidate([v], ["s32"], "signed"))
+    for v in negative_variables(facts, taken, returning=signed_result):
+        out.append(Candidate([v], ["s32"], "negative"))
     for callee in sorted(facts.call_atoms):
         if callee == own:
             continue
@@ -1110,6 +1286,65 @@ def candidates(facts, protos):
             if t is not None and parse_pointer(t) is not None:
                 out.append(Candidate([], [t], "extern", {(callee, i)}))
     return out
+
+
+def negative_variables(facts, taken=(), returning=True):
+    """The variables the negative rule types s32 (if that adds no casts: the plan's trial): eligible, given
+    a constant dread.polish prints as a negative number (Facts.negative: ret = -1), read only by == or !=
+    (a truth test too) and by return (Facts.reads; one compared in order signed is the signed rule's, one
+    compared unsigned no candidate), none of a pointer group (taken). One the function returns only with
+    returning (where the function's result is s32: a u32 function's s32 variable would contradict it, as
+    a saturated sum's -1 beside r0 + r1 would)."""
+    out = []
+    for v in sorted(facts.plain):
+        if v in taken or v in facts.signed or v in facts.unsigned:
+            continue
+        kinds = facts.reads.get(v)
+        if kinds and kinds <= set(NEGATIVE_READS) and facts.negative(v) and (returning or "ret" not in kinds):
+            out.append(v)
+    return out
+
+
+def returns_negative(facts, typing):
+    """Whether a function's own C makes its result a negative value's: a return of a constant dread.polish
+    prints as a negative number (also an arm of a select returned: return c ? 0 : -1), or of a variable
+    given one that the negative rule would type (negative_variables) or the plan typed s32."""
+    from dread.polish import NEGATIVE
+    named = set(negative_variables(facts)) | {v for v, t in typing.items() if t == "s32" and facts.negative(v)}
+
+    def negative(e):
+        if isinstance(e, C.Cond):
+            return negative(e.t) or negative(e.f)
+        k = constant(e)
+        if k is not None and (1 << 32) - NEGATIVE <= k & 0xffffffff:
+            return True
+        return isinstance(e, C.Name) and e.id in named
+    return any(isinstance(st, C.Return) and st.e is not None and negative(st.e) for st, _ in facts.atoms)
+
+
+def read_as_negative(facts, typing, callee):
+    """Whether this function reads callee's result only as the negative rule reads a variable: unused,
+    returned, compared for equality or signed in order, also through a variable assigned the call
+    (Facts.result_kinds), or assigned to a variable typed s32."""
+    typed = {v for v, t in typing.items() if t == "s32"}     # (an s32 variable reads it as an int)
+    return facts.result_kinds(callee, skip=typed) <= {"unused", "ret", "eq", "scmp"}
+
+
+def local_types(fn, types, protos=None, result=None, sizes=None):
+    """The typing of a function the plan did not analyse (outside the lifted table: printed on request,
+    as gizmo a32's ring_get): the negative rule alone, decided on its own C as the plan decides (a
+    variable kept s32 where its statements hold no more casts so; result: its result type as the plan
+    gave it, s32 where an analysed caller compares it signed). Its own result is not decided here: no
+    caller of it is known."""
+    facts = Facts(fn)
+    typing = {}
+    for v in negative_variables(facts, returning=result == "s32"):
+        atoms = [facts.atoms[k] for k in facts.named.get(v, ())]
+        before = Rewriter(fn, typing, types, protos, result, sizes).count(atoms)
+        trial = dict(typing, **{v: "s32"})
+        if Rewriter(fn, trial, types, protos, result, sizes).count(atoms) <= before:
+            typing = trial
+    return typing
 
 
 # --- the plan ---
@@ -1197,7 +1432,7 @@ class Planner:
         with it than without."""
         fx = self.facts[name]
         typing, calls = {}, {}
-        for cand in candidates(fx, protos):
+        for cand in candidates(fx, protos, signed_result=self.results.get(name) == "s32"):
             ks = {k for v in cand.members for k in fx.named.get(v, ())}
             ks |= {k for f, _ in cand.params for k in fx.call_atoms.get(f, ())}
             atoms = [fx.atoms[k] for k in sorted(ks)]
@@ -1213,10 +1448,27 @@ class Planner:
         return typing, calls
 
     def decide_result(self, name, protos, callers):
-        """Whether the function's result is s32: a caller compares it signed (Facts.signed_results), and
-        its callers' C holds no more casts so."""
-        if self.results.get(name) or not any(name in self.facts[c].signed_results() for c in callers):
+        """Whether the function's result is s32: a caller compares it signed (Facts.signed_results), or
+        its own returns give negative values (returns_negative: return -1, or a variable the negative
+        rule typed) where a caller reads it and every caller reads it only as that rule reads a variable
+        (read_as_negative), and its own returns hold no more casts so; and its callers' C holds no more
+        casts so. Without a caller that reads it (gizmo's udiv_var, whose source returns 0xFFFFFFFFu
+        beside an unsigned quotient) a negative return is no evidence."""
+        if self.results.get(name):
             return False
+        if not any(name in self.facts[c].signed_results() for c in callers):
+            fx = self.facts[name]
+            typing = self.typing.get(name, {})
+            read = any(k != "unused" for c in callers for k in self.facts[c].results.get(name, ()))
+            if not returns_negative(fx, typing) or not read or \
+                    not all(read_as_negative(self.facts[c], self.typing[c], name) for c in callers):
+                return False                # (a caller that reads it, every caller as the rule reads)
+            atoms = [(st, slot) for st, slot in fx.atoms if isinstance(st, C.Return)]
+            fn = self.trees[name][1]
+            own = self.file_protos(protos, self.calls[name])
+            if Rewriter(fn, typing, self.types[name], own, "s32", self.sizes).count(atoms) > \
+                    Rewriter(fn, typing, self.types[name], own, None, self.sizes).count(atoms):
+                return False
         before = after = 0
         trial = dict(protos)
         trial[name] = ("s32", protos[name][1])
@@ -1225,6 +1477,25 @@ class Planner:
             atoms = [fx.atoms[k] for k in fx.call_atoms.get(name, ())]
             before += self.cost(c, self.typing[c], self.file_protos(protos, self.calls[c]), atoms)
             after += self.cost(c, self.typing[c], self.file_protos(trial, self.calls[c]), atoms)
+        return after <= before
+
+    def decide_outside(self, name, callers):
+        """Whether a callee the plan did not analyse (not lifted: its own C printed on request) returns
+        s32 as its externs declare it: an analysed caller compares its result signed (Facts.signed_results,
+        as for an analysed callee), and every caller's C holds no more casts so."""
+        before = after = 0
+        protos = self.protos()
+        for c in callers:
+            ext = self.types[c].functions.get(name)
+            if ext is None or ext[0] != ("int", (32, False)):
+                return False
+            fx = self.facts[c]
+            atoms = [fx.atoms[k] for k in fx.call_atoms.get(name, ())]
+            base = self.file_protos(protos, self.calls[c])
+            trial = dict(base)
+            trial[name] = ("s32", [None] * len(ext[1] or ()))
+            before += self.cost(c, self.typing[c], base, atoms)
+            after += self.cost(c, self.typing[c], trial, atoms)
         return after <= before
 
     def run(self, rounds=ROUNDS):
@@ -1244,14 +1515,27 @@ class Planner:
                 self.typing[name], self.calls[name] = self.decide(name, self.protos())
                 if self.prototype(name) != old:
                     changed.add(name)
+            again = set()                   # (a result now s32: the variables it returns may be too)
             for name in order:
                 if self.trees[name][1].head.split()[0] == "u32" and \
                         self.decide_result(name, self.protos(), sorted(callers.get(name, ()))):
                     self.results[name] = "s32"
                     changed.add(name)
-            dirty = {c for f in changed for c in callers.get(f, ())}
+                    again.add(name)
+            dirty = {c for f in changed for c in callers.get(f, ())} | again
             if not dirty:
                 break
+        # callees the plan does not analyse (outside the lifted table) whose result an analysed caller
+        # compares signed: s32 in their externs, and in their own C printed on request (prototypes)
+        outside = {}
+        for f, fx in self.facts.items():
+            for c in fx.call_atoms:
+                if c not in self.facts and c != f:
+                    outside.setdefault(c, set()).add(f)
+        for c in sorted(outside):
+            if any(c in self.facts[f].signed_results() for f in outside[c]) and \
+                    self.decide_outside(c, sorted(outside[c])):
+                self.results[c] = "s32"
         return self
 
 
@@ -1299,6 +1583,9 @@ def plan(p, trees, digests=None, context=None):
         res, params = planner.prototype(name)
         if res or any(params):
             p.prototypes[name] = [key(res)] + [key(t) for t in params]
+    for name, res in sorted(planner.results.items()):
+        if name not in planner.facts:       # (a callee not analysed: its result alone)
+            p.prototypes[name] = [res]
     return p
 
 
@@ -1342,6 +1629,9 @@ def apply(tree, fn, p, made_for=None, names=None, int_bits=None):
         typing = {v: _named_structs(t, names) for v, t in entry.get("types", {}).items() if v in allowed}
         calls = {f: {int(i): _named_structs(t, names) for i, t in ps.items()}
                  for f, ps in (entry.get("calls") or {}).items()}
+    # a function the plan did not analyse (p.params lists every one it did; outside the lifted table:
+    # printed on request) gets the negative rule on its own C (local_types)
+    alone = getattr(p, "params", None) is not None and fn.name not in p.params
     protos = {}                             # callee -> (result, [parameters]) where its extern is in the file
     externs = {}
     for k, item in enumerate(tree.items):
@@ -1357,6 +1647,9 @@ def apply(tree, fn, p, made_for=None, names=None, int_bits=None):
             externs[f] = k
     own = prototypes.get(fn.name)
     result = own[0] if own else None
+    sizes = {"struct " + names.get(k, (k, {}))[0] if names else "struct " + k: p.size(k) for k in p.structs}
+    if alone and not typing:
+        typing = local_types(fn, polish.Types(tree, fn, int_bits), protos, result, sizes)
     if result or any(n in typing for _, n in fn.params):
         for k, item in enumerate(tree.items):   # (a function that calls itself declares itself: its head's types)
             m = EXTERN.match(item.text.strip()) if isinstance(item, C.Raw) else None
@@ -1369,7 +1662,6 @@ def apply(tree, fn, p, made_for=None, names=None, int_bits=None):
         return False
     tidy.split_typed(fn, set(typing))       # (a chain that assigns a typed variable: one statement each)
     types = polish.Types(tree, fn, int_bits)
-    sizes = {"struct " + names.get(k, (k, {}))[0] if names else "struct " + k: p.size(k) for k in p.structs}
     r = Rewriter(fn, typing, types, protos, result, sizes)
     for st in fn.body.body:
         r.stmt(st)

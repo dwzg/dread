@@ -19,20 +19,35 @@ by where its value goes, its use, and only where C gives the printed form the sa
   (or a negative value of a signed type, a byte's too) is -k where it is a value: assigned, stored,
   returned, passed, a converted select's arm, compared for equality, compared in order where the
   comparison is signed (x < -2 with an unsigned x would read wrong), added (x + 0xfffffff8u is x - 8);
-  it stays where it is a mask (an operand of &, |, ^, ~, a variable whose every read is one), in an
-  unsigned byte (0xff), and in the lifters' compare idiom ((u64)x + (u32)~y + 1: no other literal keeps
-  its type, and a complement inside a cast that stays is never made negative);
+  it stays where it is a mask (an operand of &, |, ^, ~, also of &=, |=, ^=, a variable whose every
+  read is one; a variable whose every read is one or a shift's left operand, ram_crc's crc; an argument
+  for a callee's parameter that it uses only as a mask: mask_params, the readable_types table's masks,
+  FreeRTOS's xTaskGenericNotifyWait(0, 0xffffffffu, ...)), in an unsigned byte (0xff), and in the
+  lifters' compare idiom ((u64)x + (u32)~y + 1: no other literal keeps its type, and a complement inside
+  a cast that stays is never made negative); all ones as such a mask is 0xffffffffu whatever the lifter
+  wrote (~0x0u), another complement keeps its form (~0x20u);
 - decimal: a constant below DECIMAL wherever the check lets a plain int stand (0 and 1 for 0x0u and
   0x1u; 1u where only an unsigned literal keeps the type); a larger one where its use is a number: a
   divisor, a modulus, a multiplier (multiplier: not a division's reciprocal, x * 0x5556u >> 16), a
   shift's count, a bound in an ordered comparison, or a constant assigned to, stored into, compared
-  with or added to a place (a variable, a field, memory at a fixed address) that one of those makes a
-  number in the same function, that is counted (x += k), or that is given or compared with two or more
-  distinct such constants (line numbers stored into one error variable); never for a place that is a
-  pointer (a counted address: r6 = 0x908u; *r6; r6++), a device register (io: the target's device
-  regions), constants that look like a mask or an address (hexy: WIDE or more, a run of eight ones or
-  more), and evidence from values that look like bit patterns or are all printable characters (a pad
-  character's ' ' and '0') counts for nothing;
+  with or added to a place (a variable, a field, memory at a fixed address; a sum's constant also by
+  the place the sum goes into) whose object holds numbers. One radix per object (_objects): the places
+  of one object (a variable; an array's elements, a local's, static data's or a typed pointer's, x[k]
+  and *p; a structure's field) and those a copy joins (x = y, *p = v) are decided together: an object
+  holds numbers where a use makes one of its places a number (one of those uses, x += k), where its
+  places are given (a select's constant arms each) or compared with two or more distinct such
+  constants (line numbers stored into one error variable, a colour triple's 150 and 53), or where it
+  takes a number the function writes in decimal elsewhere (a bound or its neighbour on the side it
+  stands for, x <= 63 for x < 64; a divisor; a constant of an object that holds numbers: sizes stored
+  through a pointer after the argument was compared with them); its constants below WIDE are all decimal
+  then, a run of ones from bit 0 too (255 beside 63), unless all of them look like masks (x <= 0xffu
+  alone stays). Never for a place that is a pointer (a counted address: r6 = 0x908u; *r6; r6++), an
+  object given only texts' starts or functions' entries (pointed: a status message's texts on an image
+  at 0), a device register (io: the target's device regions), constants that look like a mask or an
+  address elsewhere (hexy: WIDE or more, a run of eight ones or more), and evidence from values that look
+  like bit patterns or are all printable characters (a pad character's ' ' and '0') counts for nothing; a
+  complement stored into a narrower place is the value it leaves there (~0x69u into a byte: 0x96u, or
+  150);
 - characters: a printable or common-escape constant as a character literal where a function handles
   text (it compares values that hold characters with two or more distinct such constants): compared
   with such a value, added to it or subtracted from it (c - '0', (c & ~0x20u) - 'A'), stored into a
@@ -60,11 +75,15 @@ by where its value goes, its use, and only where C gives the printed form the sa
   variable, or a field, an element, a memory access whose address reads no memory); x = x of a local
   variable goes.
 
-What the pass decides from is the function alone: a character that arrives as a parameter (gizmo's
-handle_key compares its key with letters) is a number there; a place stored once in this function and
-in decimal company elsewhere stays hex here. A function's address and a text's are dread.naming
-apply_globals's, before this pass ((u32)&name, and a text's number with the text in a note, which
-keeps its literal as it is). Not done: a constant's name (an enumeration, a macro the source had).
+What the pass decides from is the function alone, but for its callees' mask parameters (the
+readable_types table's masks, made by the check from every lifted function's C and from the C of the
+callees outside them that one passes a constant that would read negative): a character that arrives as
+a parameter (gizmo's handle_key compares its key with letters) is a number there; a place stored once
+in this function and in decimal company elsewhere stays hex here; what a callee does with a value it
+stores is not followed (a mask kept for later is no mask). A function's address and a text's are
+dread.naming apply_globals's, before this pass ((u32)&name, and a text's number with the text in a
+note, which keeps its literal as it is). Not done: a constant's name (an enumeration, a macro the
+source had).
 """
 import re
 
@@ -349,6 +368,17 @@ def patterned(v):
     return len(set(digits)) == 1
 
 
+def masklike(v):
+    """Whether v looks like a bit pattern and like no number (patterned, but not one bit: 64, 1024 are
+    sizes as often, nor a run of ones from bit 0: 255 is a bound as often): 0x55, 0xaa, 0xf0."""
+    return patterned(v) and v & (v - 1) != 0 and not low_run(v)
+
+
+def low_run(v):
+    """Whether v is a run of ones from bit 0 (255, 0x3ff, 0xffff: 2^k - 1, the bound x < 2^k becomes)."""
+    return v > 0 and v & (v + 1) == 0
+
+
 def hexy(v):
     """Whether v looks like a mask or an address where a number is expected, and stays hex: WIDE or
     more, or a run of eight ones or more (0xff, 0x3ff, 0xff00). One bit is a number there (256, 4096: a
@@ -402,23 +432,27 @@ class Use:
     a compared one is compared with (radix and characters); byte: a conversion into a byte in memory;
     top: the conversion of an assignment, a return or an argument (where a cast the target's width
     implies goes); neg: whether a negative number may stand for the value (not inside a cast that
-    stays: (u32)-96 in the compare idiom would read worse than (u32)~0x5fu)."""
-    __slots__ = ("kind", "t", "op", "other", "left", "place", "byte", "top", "neg")
+    stays: (u32)-96 in the compare idiom would read worse than (u32)~0x5fu); mask: an argument for a
+    callee's parameter that it uses only as a mask (mask_params)."""
+    __slots__ = ("kind", "t", "op", "other", "left", "place", "byte", "top", "neg", "mask")
 
-    def __init__(self, kind, t=None, op=None, other=None, left=False, place=None, byte=False, top=False, neg=True):
+    def __init__(self, kind, t=None, op=None, other=None, left=False, place=None, byte=False, top=False, neg=True,
+                 mask=False):
         self.kind, self.t, self.op, self.other, self.left = kind, t, op, other, left
-        self.place, self.byte, self.top, self.neg = place, byte, top, neg
+        self.place, self.byte, self.top, self.neg, self.mask = place, byte, top, neg, mask
 
 
 SAME = Use("same")
 
 
 class Polisher:
-    def __init__(self, tree, fn, int_bits=None, io=()):
+    def __init__(self, tree, fn, int_bits=None, io=(), masks=None, pointed=None):
         self.fn = fn
         self.types = Types(tree, fn, int_bits)
         self.ctx = self.types.ctx
         self.io = list(io)
+        self.masks_of = masks or {}         # callee -> the indices of its parameters it uses only as masks
+        self.pointed = pointed              # (dread.constants Pointed: texts' starts and functions' entries)
         self.changed = False
         self.switch_t = None                # (the controlling expression's type of the switch around)
         self._facts()
@@ -426,20 +460,30 @@ class Polisher:
     # -- what the function says of its places: masks, numbers, characters --
 
     def _facts(self):
-        """Per variable: whether every read is a mask's operand; per place: whether a use makes it a
-        number; the variables that hold characters, and whether the function handles text."""
-        reads, bit_reads = {}, {}
+        """Per variable: whether every read is a mask's operand (an operand of &, |, ^ or ~, also of &=, |=
+        and ^=: masks), or a mask's operand or a shift's left operand (bitwise, ram_crc's crc: no negative
+        number for it); per place: whether a use makes it a number; the variables that hold characters,
+        and whether the function handles text."""
+        reads, bit_reads, shift_reads = {}, {}, {}
         pointers = set()                    # variables a memory access reads through
         valued = {}                         # place -> {constants stored into it or compared with it for equality}
         assigned = {}                       # variable -> [values assigned]
         numbers = set()                     # places (texts) a use makes numbers
         byte_stored = set()                 # variables stored into a byte in memory
         compared = []                       # (other, constant value) of the comparisons with a constant
+        objects = {}                        # place -> the object it belongs to (_object_key)
+        links = []                          # (place, place) of copies: x = y, *p = v, v = p[k]
+        bounds = {}                         # place -> {constants it is compared with in order}
+        direct = set()                      # constants a use makes numbers: bounds and their neighbours,
+                                            # divisors, multipliers
 
         def place_of(x):
             x = _strip_int_casts(x)
             if isinstance(x, (C.Name, C.Member, C.Index)) or (isinstance(x, C.Unary) and x.op == "*"):
-                return C.expr_text(x)
+                text = C.expr_text(x)
+                if text not in objects:
+                    objects[text] = _object_key(x) or text
+                return text
             return None
 
         def address(x):
@@ -462,15 +506,25 @@ class Polisher:
                 address(e.base)
             if isinstance(e, C.Name):
                 reads[e.id] = reads.get(e.id, 0) + 1
-                if bits:
+                if bits == "shift":
+                    shift_reads[e.id] = shift_reads.get(e.id, 0) + 1
+                elif bits:
                     bit_reads[e.id] = bit_reads.get(e.id, 0) + 1
                 return
             if isinstance(e, C.Assign):
                 t = e.target
                 k = value_of(e.value, self.ctx) if e.op == "=" else None
                 p = place_of(t)
-                if k is not None and p is not None:
-                    valued.setdefault(("stored", p), set()).add(k[0])
+                if p is not None and e.op == "=":
+                    pt = self.types.int(t)      # (the value the place gets: ~0x69u into a byte is 0x96; a
+                    for arm in _arms(e.value):  # select's constant arms, c ? 0x40u : 0x100u, each one)
+                        ka = value_of(arm, self.ctx)
+                        if ka is not None:
+                            valued.setdefault(("stored", p), set()).add(wrap(ka[0], pt) if pt else ka[0])
+                if e.op == "=" and p is not None and k is None:
+                    q = place_of(e.value)   # (a copy: one value in both places; not through an access at an
+                    if q is not None and not _raw(t) and not _raw(e.value):    # address the code computes:
+                        links.append((p, q))                                  # *(u32 *)a5 now and later)
                 if isinstance(t, C.Name):
                     if e.op == "=":
                         assigned.setdefault(t.id, []).append(e.value)
@@ -478,6 +532,9 @@ class Polisher:
                         assigned.setdefault(t.id, []).append(None)
                         if e.op in ("+=", "-=") and value_of(e.value, self.ctx) is not None:
                             numbers.add(t.id)
+                        # (x op= y reads x: a mask's operand for &=, |=, ^=, a shift's for <<=, >>=)
+                        visit(t, True if e.op in ("&=", "|=", "^=") else "shift" if e.op in ("<<=", ">>=")
+                              else False)
                 else:
                     visit(t)
                 d = self.types.of(t)
@@ -485,7 +542,7 @@ class Polisher:
                     v = _strip_int_casts(e.value)
                     if isinstance(v, C.Name):
                         byte_stored.add(v.id)
-                visit(e.value)
+                visit(e.value, e.op in ("&=", "|=", "^="))
                 return
             if isinstance(e, (C.Post, C.Unary)) and e.op in ("++", "--"):
                 p = place_of(e.e)
@@ -493,6 +550,7 @@ class Polisher:
                     numbers.add(p)
                 if isinstance(e.e, C.Name):
                     assigned.setdefault(e.e.id, []).append(None)
+                    reads[e.e.id] = reads.get(e.e.id, 0) + 1      # (a counter: no mask)
                 else:
                     visit(e.e)
                 return
@@ -500,6 +558,10 @@ class Polisher:
                 if e.op in ("&", "|", "^"):
                     visit(e.l, True)
                     visit(e.r, True)
+                    return
+                if e.op in ("<<", ">>"):
+                    visit(e.l, "shift")
+                    visit(e.r)
                     return
                 if e.op in COMPARE:
                     for a, b in ((e.l, e.r), (e.r, e.l)):
@@ -513,17 +575,27 @@ class Polisher:
                                 p = place_of(a)
                                 if p:
                                     numbers.add(p)
+                                    bounds.setdefault(p, set()).add(k[0])
+                                op = e.op if a is e.l else FLIP[e.op]
+                                # (x <= 63 for x < 64: a bound and its neighbour on the side it stands for)
+                                direct.update((k[0], k[0] + 1) if op in ("<=", ">") else (k[0], k[0] - 1))
                 if e.op in ("*", "/", "%"):
                     for a, b in ((e.l, e.r), (e.r, e.l)):
-                        if value_of(b, self.ctx) is not None:
+                        k = value_of(b, self.ctx)
+                        if k is not None:
                             p = place_of(a)
                             if p:
                                 numbers.add(p)
+                            if e.op != "*" or self.multiplier(k[0]):
+                                direct.add(k[0])
                 visit(e.l)
                 visit(e.r)
                 return
             if isinstance(e, C.Unary) and e.op == "~":
                 visit(e.e, True)
+                return
+            if isinstance(e, C.Cast) and e.type in INTS:
+                visit(e.e, bits)            # ((u32)x & m: x a mask's operand all the same)
                 return
             for c in _children(e):
                 visit(c)
@@ -533,6 +605,10 @@ class Polisher:
                 for d in s.items:
                     if d.init is not None:
                         assigned.setdefault(d.name, []).append(d.init)
+                        q = place_of(d.init) if not d.dims and not _raw(d.init) else None
+                        if q is not None:   # (u32 r0_1 = r0;: a copy as x = y is)
+                            objects.setdefault(d.name, d.name)
+                            links.append((d.name, q))
                         visit(d.init)
             elif isinstance(s, C.Asm):
                 for o in s.outputs:
@@ -550,6 +626,7 @@ class Polisher:
         for s in self.fn.body.body:
             visit_stmt(s)
         self.masks = {v for v, n in reads.items() if n and bit_reads.get(v, 0) == n}
+        self.bitwise = {v for v, n in reads.items() if n and bit_reads.get(v, 0) + shift_reads.get(v, 0) == n}
         # a variable counted up or down (x = x + k, x++) is a number
         for v, values in assigned.items():
             for x in values:
@@ -565,6 +642,7 @@ class Polisher:
                 numbers.add(p)              # (not ' ' and '0' for a pad character)
         self.pointers = pointers
         self.numbers = numbers - pointers   # (a pointer counted up is no number: r6 = 0x908u; *r6; r6++)
+        self._objects(objects, links, valued, bounds, direct)
         # characters: bytes loaded from memory, variables that hold only those (or small constants), or
         # that hold a callee's result and are stored as a byte
         callish = set()                     # variables that hold only callees' results (copies of them too)
@@ -598,6 +676,92 @@ class Polisher:
                 if v not in pointers and all(k is not None and is_char_code(k[0]) for k in ks) and \
                         len({k[0] for k in ks}) >= 2:
                     self.chars.add(v)
+
+    def _objects(self, objects, links, valued, bounds, direct):
+        """One radix per object: the places of one object (_object_key: a variable; an array's elements,
+        a local's, static data's or a typed pointer's, x[k] and *p; a structure's field), and those a copy
+        joins (x = y, *p = v, v = p[k]: one value in both), are decided together. An object holds numbers
+        where a use makes one of its places a number (self.numbers), where its places together are given
+        or compared with two or more distinct plain numbers (as one place's are), or where it takes a
+        number the function writes in decimal elsewhere: a bound of an ordered comparison or its
+        neighbour on the side it stands for (x <= 63 for x < 64: 64), a divisor, a multiplier, a constant
+        of an object that holds numbers (sizes stored through a pointer after the argument was compared
+        with them). Never one that holds a pointer, or only texts' starts and functions' entries (address:
+        a status message's texts on an image at 0; a line number that falls on a text's start beside
+        others is a number all the same); not by two or more values that are all printable characters (a
+        pad character's ' ' and '0'), nor by a number taken where one of its own values looks like a bit
+        pattern (masklike: an event group's 0x55 in a register a line number reuses). Such an object's
+        constants are all decimal below WIDE, a run of ones from bit 0 (255 beside 63: the bound of x <
+        256) too, unless all its constants of DECIMAL or more look like masks (hexy: x <= 0xffu alone stays
+        as it is); a shifted run (0xff00) stays hex."""
+        parent = {}
+
+        def find(k):
+            while parent[k] != k:
+                parent[k] = parent[parent[k]]
+                k = parent[k]
+            return k
+        for k in objects.values():
+            parent.setdefault(k, k)
+        for a, b in links:
+            ra, rb = find(objects[a]), find(objects[b])
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+        groups = {}
+        for p, k in objects.items():
+            groups.setdefault(find(k), set()).add(p)
+        values, evidence, pointer = {}, {}, {}
+        for root, ps in groups.items():
+            vs = set()
+            for p in ps:
+                vs |= valued.get(("stored", p), set()) | valued.get(("compared", p), set()) | bounds.get(p, set())
+            big = {v & 0xffffffffffffffff for v in vs if abs(v) >= DECIMAL and not _near_top(v)}
+            values[root] = big
+            # (an object given only texts' starts or functions' entries holds addresses: a status message's
+            # texts on an image at 0 are small numbers, 0x1e2u, never 482; a line number that falls on a
+            # text's start among others is a number all the same)
+            pointer[root] = any(p in self.pointers for p in ps) or (bool(big) and all(self.address(v) for v in big))
+            pooled = len(big) >= 2 and not any(hexy(v) or patterned(v) for v in big) and \
+                not all(0x20 <= v <= 0x7e for v in big)
+            evidence[root] = not pointer[root] and (pooled or any(p in self.numbers for p in ps))
+
+        def decimal(root):
+            big = {v for v in values[root] if v < WIDE}
+            return evidence[root] and (not big or any(not hexy(v) for v in big))
+        chosen = {r for r in groups if decimal(r)}
+        known = {v for v in direct if DECIMAL <= v < WIDE}
+        for r in chosen:
+            known |= {v for v in values[r] if v < WIDE}
+        more = True
+        while more:                         # (a number taken in one object makes it one too)
+            more = False
+            for r in groups:
+                if r in chosen or pointer[r] or not values[r] & known or any(masklike(v) for v in values[r]) or \
+                        (len(values[r]) >= 2 and all(0x20 <= v <= 0x7e for v in values[r])):
+                    continue                # (an event group's 0x55 beside a line number: a register reused;
+                                            # a pad character's ' ' and '0')
+                evidence[r] = True
+                if decimal(r):
+                    chosen.add(r)
+                    known |= {v for v in values[r] if v < WIDE}
+                    more = True
+        self.decimal_objects = chosen
+        self.place_root = {p: find(k) for p, k in objects.items()}
+
+    def address(self, v):
+        """Whether v is a text's start or a function's entry in the image (dread.constants Pointed; never
+        below its SMALLEST_POINTER): what an object given it holds is addresses."""
+        p = self.pointed
+        if p is None or v >= 1 << 32:
+            return False
+        return p.function(v) is not None or (p.text(v) is not None and p.begins(v))
+
+    def placed(self, place):
+        """Whether a place holds numbers: its object does (one radix per object, _objects)."""
+        if place is None:
+            return False
+        root = self.place_root.get(place)
+        return root in self.decimal_objects if root is not None else place in self.numbers
 
     def _char_source(self, x, chars):
         """What makes x a character's value: "byte" (a byte loaded from memory, a variable of chars),
@@ -691,11 +855,11 @@ class Polisher:
         """Whether the use makes a constant v a number (decimal unless it looks like a mask)."""
         if use.kind == "arith":
             return use.op in ("/", "%") or (use.op == "*" and self.multiplier(v)) or \
-                (use.op in ("+", "-") and use.place in self.numbers)
+                (use.op in ("+", "-") and self.placed(use.place))
         if use.kind == "cmp":
-            return use.op in ORDER or (use.place is not None and use.place in self.numbers)
+            return use.op in ORDER or self.placed(use.place)
         if use.kind == "conv":
-            return use.place is not None and use.place in self.numbers
+            return self.placed(use.place)
         return False
 
     def multiplier(self, v):
@@ -714,18 +878,28 @@ class Polisher:
                     (use.kind == "conv" and (use.byte or use.place in self.chars)):
                 out.append(char(w))
         masky = use.kind == "arith" and use.op in ("&", "|", "^") or use.kind == "shifted" or \
-            (use.kind == "conv" and use.place in self.masks)
-        n = None if masky else self.negative(v, t, use)
+            (use.kind == "conv" and use.place in self.masks) or use.mask
+        bitwise = masky or (use.kind == "conv" and use.place in self.bitwise)
+        if bitwise and use.kind == "conv":  # (all ones as a mask: 0xffffffffu for ~0x0u, never -1)
+            ct = use.t or t
+            if ct[0] >= self.ctx.int_bits and wrap(v, ct) == (1 << ct[0]) - 1 and _complement(e):
+                out.append(hexa((1 << ct[0]) - 1))
+        n = None if bitwise else self.negative(v, t, use)
         if n is not None and not (use.kind == "cmp" and use.op in ORDER) and \
                 not (use.kind == "arith" and use.op not in ("+", "-")) and not (use.kind == "arm" and not use.neg):
             out.append(decimal(n))
         elif n is not None and use.kind == "cmp":
             out.append(("signed", decimal(n)))
         w = wrap(v, use.t) if use.kind == "conv" and use.t is not None else v
-        if 0 <= w < DECIMAL or use.kind == "count" or (not masky and 0 <= w < WIDE and not hexy(w) and
+        if 0 <= w < DECIMAL or use.kind == "count" or (not masky and 0 <= w < WIDE and
+                                                       (not hexy(w) or (low_run(w) and self.placed(use.place)))
+                                                       and
                                                        self.number(use, w)):
             out += [decimal(w), decimal(w, unsigned=True)]
-        if w >= 0 and not _complement(e) and not isinstance(e, C.Num):
+        # (a complement stored into a narrower place is the value it leaves there: ~0x69u into a byte, 0x96u)
+        narrowed = _complement(e) and use.kind == "conv" and use.t is not None and use.t[0] < self.ctx.int_bits \
+            and not bitwise
+        if w >= 0 and (narrowed or not _complement(e)) and not isinstance(e, C.Num):
             out.append(hexa(w))             # (a cast of a literal, a sum of literals: folded)
         return out
 
@@ -785,8 +959,9 @@ class Polisher:
             return self._assign(e)
         if isinstance(e, C.Call):
             ts = self.types.params(e)
-            return C.Call(self._expr(e.f, SAME), [self._expr(a, Use("conv", t, top=True) if t else SAME)
-                                                  for a, t in zip(e.args, ts)])
+            ms = self.masks_of.get(e.f.id, ()) if isinstance(e.f, C.Name) else ()
+            return C.Call(self._expr(e.f, SAME), [self._expr(a, Use("conv", t, top=True, mask=i in ms) if t else SAME)
+                                                  for i, (a, t) in enumerate(zip(e.args, ts))])
         if isinstance(e, C.Index):
             return C.Index(self._expr(e.base, SAME), self._expr(e.index, SAME))
         if isinstance(e, C.Member):
@@ -830,7 +1005,7 @@ class Polisher:
             return new_inner
         return C.Cast(e.type, new_inner)
 
-    def _narrowed(self, e, t):
+    def _narrowed(self, e, t, place=None):
         """e rewritten where only its value converted to t matters, when it is a sum or the like of
         low bits (LOW_BITS) whose operands may then lose casts that widen beyond t (the lifters' flags
         arithmetic through 64 bits); its constants are then written for the operation as it is
@@ -839,7 +1014,7 @@ class Polisher:
             l, r = self._narrow_operand(e.l, t), self._narrow_operand(e.r, t)
             if l is e.l and r is e.r:
                 return None
-            return self._arith(C.Binary(e.op, l, r), Use("conv", t), narrow=t)
+            return self._arith(C.Binary(e.op, l, r), Use("conv", t, place=place), narrow=t)
         return None
 
     def _narrow_operand(self, x, t):
@@ -897,7 +1072,7 @@ class Polisher:
             l = self._expr(e.l, Use("shifted") if value_of(e.l, self.ctx) is not None else SAME)
             return C.Binary(e.op, l, self._expr(e.r, Use("count")))
         if use.kind == "conv" and use.t is not None and e.op in LOW_BITS:
-            got = self._narrowed(e, use.t)
+            got = self._narrowed(e, use.t, use.place)
             if got is not None and self._width_ok(e, got, use.t):
                 return got
         return self._arith(e, use)
@@ -912,14 +1087,23 @@ class Polisher:
         lt, rt = self.types.int(e.l), self.types.int(e.r)
 
         def const_use(other_t, other):
+            # (a sum's constant is a number where the other operand is, or the place the sum goes into)
+            place = self._place(other) or (use.place if use.kind == "conv" and e.op in ("+", "-") else None)
             if narrow is not None and e.op in ("+", "-"):
-                return Use("conv", narrow, place=self._place(other), op=e.op, other=other)
-            return Use("arith", other_t, e.op, place=self._place(other))
+                return Use("conv", narrow, place=place, op=e.op, other=other)
+            return Use("arith", other_t, e.op, place=place)
+        def operand_use(x):
+            """A sum inside a sum that goes into a place goes there too ((x + 0x3000u) + 0x39u stored into a
+            number: both constants numbers, then one, x + 12345)."""
+            if e.op in ("+", "-") and use.kind == "conv" and use.place is not None and \
+                    isinstance(x, C.Binary) and x.op in ("+", "-"):
+                return Use("conv", None, place=use.place)
+            return SAME
         if done:
             l, r = e.l, e.r
         else:
-            l = self._expr(e.l, const_use(rt, e.r) if lk is not None and rk is None else SAME)
-            r = self._expr(e.r, const_use(lt, e.l) if rk is not None and lk is None else SAME)
+            l = self._expr(e.l, const_use(rt, e.r) if lk is not None and rk is None else operand_use(e.l))
+            r = self._expr(e.r, const_use(lt, e.l) if rk is not None and lk is None else operand_use(e.r))
         new = C.Binary(e.op, l, r)
         # x + 0, x - 0, x | 0, x ^ 0, 0 + x, 0 | x, 0 ^ x: where no type changes (or only the converted value counts)
         for keep, zero, ok_ops in ((l, r, ("+", "-", "|", "^")), (r, l, ("+", "|", "^"))):
@@ -1180,6 +1364,42 @@ def _stmt_exprs(s):
     return []
 
 
+def _arms(x):
+    """The values a select gives (its arms, a select inside an arm's too), or x itself."""
+    y = _strip_int_casts(x)
+    if isinstance(y, C.Cond) and value_of(y.c, cexpr.Ctx()) is None:
+        return _arms(y.t) + _arms(y.f)
+    return [x]
+
+
+def _raw(x):
+    """Whether a place is an access through an address the code computes (*(volatile u32 *)(r0 + 4)):
+    the same text may stand for other memory at another time, so it joins no object by a copy."""
+    x = _strip_int_casts(x)
+    return isinstance(x, C.Unary) and x.op == "*" and not isinstance(x.e, C.Name)
+
+
+def _object_key(x):
+    """The object a place belongs to (one radix per object): a variable or a macro its own; an array's
+    elements one object (a local's, static data's, a typed pointer's: x[k], and *p as p[0]); a
+    structure's fields each their own (x.f, p->f, x[].f); a raw access through an address expression
+    its own place (None: the place's text)."""
+    x = _strip_int_casts(x)
+    if isinstance(x, C.Name):
+        return x.id
+    if isinstance(x, C.Index):
+        base = _object_key(x.base) if isinstance(x.base, (C.Name, C.Member, C.Index)) else C.expr_text(x.base)
+        return None if base is None else base + "[]"
+    if isinstance(x, C.Member):
+        if x.arrow:
+            return C.expr_text(x.base) + "->" + x.name
+        base = _object_key(x.base)
+        return None if base is None else base + "." + x.name
+    if isinstance(x, C.Unary) and x.op == "*" and isinstance(x.e, C.Name):
+        return x.e.id + "[]"
+    return None
+
+
 def _strip_int_casts(x):
     while isinstance(x, C.Cast) and x.type in INTS:
         x = x.e
@@ -1213,6 +1433,13 @@ def _near_top(v):
     """Whether v (as a 32- or 64-bit unsigned value) lies within NEGATIVE of the top: a negative number."""
     return any((1 << n) - NEGATIVE <= v & ((1 << n) - 1) < (1 << n) and v >= (1 << (n - 1)) or -NEGATIVE <= v < 0
                for n in (32, 64))
+
+
+def near_top(e, bits=32):
+    """Whether e is a constant whose value in bits bits lies within NEGATIVE of the top: one this pass
+    writes as a negative number where it is a value (~0x0u, 0xfffffffeu as -1, -2)."""
+    k = value_of(e, cexpr.Ctx())
+    return k is not None and (1 << bits) - NEGATIVE <= k[0] & ((1 << bits) - 1)
 
 
 def _complement(e):
@@ -1310,12 +1537,141 @@ def _same_or_implied(x, target, op, types):
     return tt is not None and ct is not None and ct[0] >= tt[0] and ct[0] <= 32
 
 
-def polish(tree, fn, int_bits=None, io=()):
+# --- parameters used only as masks (the readable_types table's masks) ---
+
+MASK_ROUNDS = 6         # rounds of mask_params over the functions (a mask handed on to a callee's mask)
+
+
+def mask_params(trees, rounds=MASK_ROUNDS):
+    """{function: [indices]} of the parameters each function ([(tree, fn, macros)]: its C) uses only as a
+    mask, every function listed: the parameter is never assigned, and every read of its value (the
+    parameter, or a variable every definition of which is a copy of one that holds it) is an operand of
+    &, |, ^ or ~ (also of &=, |=, ^=: bic is & ~), a copy into such a variable, the value returned as it
+    is (a void function's leftover register: RISC-V's a0), or an argument for a callee's parameter that
+    is a mask itself (over the functions until nothing changes, at most rounds rounds); one read as a
+    mask at least. A shift reads no mask (x << 2 scales a count as often as it moves bits), nor does a
+    shift's count masked by the lifters (1 << (r0 & 0xffu), ARM's register shifts). What a constant argument for such a parameter is
+    written as: a mask (0xffffffffu, ~0x20u), never a negative number (FreeRTOS's
+    xTaskGenericNotifyWait(0, 0xffffffffu, ...): its callee clears &= ~ulBitsToClearOnEntry). Not
+    established: what the callee does with a value it stores (a mask kept for later is no mask here)."""
+    found = {fn.name: set() for _, fn, _ in trees}
+    for _ in range(rounds):
+        changed = False
+        for _, fn, _ in trees:
+            got = _masks_of(fn, found)
+            if got != found[fn.name]:
+                found[fn.name] = got
+                changed = True
+        if not changed:
+            break
+    return {name: sorted(ix) for name, ix in found.items()}
+
+
+def _masks_of(fn, found):
+    """The indices of fn's parameters it uses only as masks (mask_params), its callees' as found says."""
+    defs, reads = {}, {}                    # variable -> [value or None]; variable -> [context of each read]
+
+    def visit(e, ctx="other"):
+        if e is None:
+            return
+        if isinstance(e, C.Name):
+            reads.setdefault(e.id, []).append(ctx)
+            return
+        if isinstance(e, C.Cast) and e.type in INTS:
+            visit(e.e, ctx if ctx in ("bits", "ret", "count") or isinstance(ctx, tuple) else "other")
+            return
+        if isinstance(e, C.Binary) and e.op in ("&", "|", "^"):
+            inner = "count" if ctx == "count" else "bits"     # (1 << (r0 & 0xffu): ARM's count, no mask)
+            visit(e.l, inner)
+            visit(e.r, inner)
+            return
+        if isinstance(e, C.Binary) and e.op in ("<<", ">>"):
+            visit(e.l)                      # (x << 2 scales a count as often as it moves bits)
+            visit(e.r, "count")
+            return
+        if isinstance(e, C.Unary) and e.op == "~":
+            visit(e.e, "bits")
+            return
+        if isinstance(e, C.Assign):
+            if isinstance(e.target, C.Name):
+                v = e.target.id
+                defs.setdefault(v, []).append(e.value if e.op == "=" else None)
+                if e.op != "=":
+                    reads.setdefault(v, []).append("bits" if e.op in ("&=", "|=", "^=") else "other")
+                visit(e.value, ("copy", v) if e.op == "=" else "bits" if e.op in ("&=", "|=", "^=") else
+                      "count" if e.op in ("<<=", ">>=") else "other")
+            else:
+                visit(e.target)
+                visit(e.value, "bits" if e.op in ("&=", "|=", "^=") else "count" if e.op in ("<<=", ">>=") else
+                      "other")
+            return
+        if isinstance(e, (C.Post, C.Unary)) and e.op in ("++", "--") and isinstance(e.e, C.Name):
+            defs.setdefault(e.e.id, []).append(None)
+            reads.setdefault(e.e.id, []).append("other")
+            return
+        if isinstance(e, C.Call) and isinstance(e.f, C.Name):
+            for i, a in enumerate(e.args):
+                visit(a, ("arg", e.f.id, i))
+            return
+        for c in _children(e):
+            visit(c)
+
+    def visit_stmt(s):
+        if isinstance(s, C.Decl):
+            for d in s.items:
+                if d.init is not None:
+                    defs.setdefault(d.name, []).append(d.init)
+                    visit(d.init, ("copy", d.name))
+        elif isinstance(s, C.Asm):
+            for o in s.outputs:
+                if isinstance(o.e, C.Name):
+                    defs.setdefault(o.e.id, []).append(None)
+            for o in s.inputs:
+                visit(o.e)
+        elif isinstance(s, C.Return) and s.e is not None:
+            visit(s.e, "ret")               # (handed back as it is: a void function's leftover register)
+        else:
+            for e in _stmt_exprs(s):
+                visit(e)
+        if isinstance(s, C.For) and isinstance(s.init, C.Decl):
+            visit_stmt(s.init)
+        for inner in _inner(s):
+            visit_stmt(inner)
+    for s in fn.body.body:
+        visit_stmt(s)
+
+    def copy_of(x, held):
+        x = _strip_int_casts(x)
+        return isinstance(x, C.Name) and x.id in held
+    out = set()
+    for i, (ptype, pname) in enumerate(fn.params):
+        if " ".join(ptype.split()) not in INTS or defs.get(pname):
+            continue
+        held = {pname}
+        grown = True
+        while grown:                        # (the variables that only ever copy it)
+            grown = False
+            for v, values in defs.items():
+                if v not in held and values and all(x is not None and copy_of(x, held) for x in values):
+                    held.add(v)
+                    grown = True
+        uses = [ctx for v in held for ctx in reads.get(v, ())]
+        ok = [ctx == "bits" or (isinstance(ctx, tuple) and ctx[0] == "arg" and ctx[2] in found.get(ctx[1], ()))
+              for ctx in uses]
+        neutral = [ctx == "ret" or (isinstance(ctx, tuple) and ctx[0] == "copy" and ctx[1] in held) for ctx in uses]
+        if any(ok) and all(a or b for a, b in zip(ok, neutral)):
+            out.add(i)
+    return out
+
+
+def polish(tree, fn, int_bits=None, io=(), masks=None, pointed=None):
     """Write the function's constants and casts by their use (the module's docstring), in place;
     returns whether anything changed. int_bits: int's width where the function's names no longer tell
     it (dread.tidy context reads the lifter's register names); io: [(start, end)] of device memory,
-    whose registers keep their constants' radix."""
-    p = Polisher(tree, fn, int_bits, io)
+    whose registers keep their constants' radix; masks: {callee: [indices of the parameters it uses only
+    as masks]} (mask_params, the readable_types table's masks); pointed: the image's texts and functions
+    (dread.constants Pointed): an object given one's address holds no numbers."""
+    p = Polisher(tree, fn, int_bits, io, masks, pointed)
     for s in fn.body.body:
         p.stmt(s)
     _drop_self_assignments(fn.body, p)

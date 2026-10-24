@@ -1940,7 +1940,9 @@ class Plan:
     whose objects the cases rejected). takes: {function: {parameter index: "text" or "function"}} of
     the parameters every call gives texts' or functions' addresses (dread.naming taken_kinds), None
     where the table does not say (made before 2026-10-24): what dread.naming apply_globals writes such
-    an argument as besides the parameters it uses as a pointer."""
+    an argument as besides the parameters it uses as a pointer. masks: {function: [indices of the
+    parameters it uses only as masks]} (dread.polish mask_params: a constant argument for one is written
+    as a mask, 0xffffffffu, never -1), None where the table does not say (made before 2026-10-24)."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
@@ -1955,6 +1957,7 @@ class Plan:
         self.returns = None             # function -> [indices of the parameters its result may be] (dread.frames)
         self.whole = set()              # functions whose frame's region is one object (dread.frames, the check)
         self.takes = None               # function -> {parameter index: "text" or "function"} (dread.naming)
+        self.masks = None               # function -> [indices of the parameters it uses only as masks] (dread.polish)
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -1985,6 +1988,8 @@ class Plan:
             out["whole"] = sorted(self.whole)
         if self.takes is not None:
             out["takes"] = {f: {str(i): k for i, k in sorted(ix.items())} for f, ix in sorted(self.takes.items())}
+        if self.masks is not None:
+            out["masks"] = {f: sorted(ix) for f, ix in sorted(self.masks.items()) if ix}
         return out
 
     @classmethod
@@ -2008,6 +2013,7 @@ class Plan:
         p.whole = set(data.get("whole", []))
         p.takes = {f: {int(i): k for i, k in ix.items()} for f, ix in data["takes"].items()} if "takes" in data \
             else None
+        p.masks = {f: list(ix) for f, ix in data["masks"].items()} if "masks" in data else None
         return p
 
     def align(self, name, depth=0):

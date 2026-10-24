@@ -869,10 +869,14 @@ def _named(name, text, stages, context=None):
 
 def polish_tree(tree, fn, context=None, int_bits=None):
     """dread.polish on the finished tree: constants and casts written by their use (the device regions
-    of the context's memory map keep their registers' constants as they are)."""
+    of the context's memory map keep their registers' constants as they are; the callees' parameters
+    the readable_types table's masks lists take masks; an object given a text's or a function's address
+    holds no numbers)."""
     from dread import polish
     memory = context.memory if context is not None else None
-    polish.polish(tree, fn, int_bits=int_bits, io=getattr(memory, "io", ()) or ())
+    masks = getattr(context.plan, "masks", None) if context is not None else None
+    pointed = context.pointed() if context is not None else None
+    polish.polish(tree, fn, int_bits=int_bits, io=getattr(memory, "io", ()) or (), masks=masks, pointed=pointed)
 
 
 def _transform(name, text, stages, context=None):
@@ -1073,10 +1077,33 @@ def make_plan(program, context, lifter, names, flow=None, digests=None):
     context.plan.params = shapes.pointer_params(s, trees)
     context._struct_names = context._static_names = None
     vartypes.plan(context.plan, trees, digests, context)
+    context.plan.masks = mask_plan(program, context, lifter, names, trees)
     context.plan.keeps, context.plan.returns = frames.kept_params(trees, context)
     pointed = context.pointed()
     context.plan.takes = naming.taken_kinds(trees, pointed) if pointed is not None else None
     return context.plan
+
+
+def mask_plan(program, context, lifter, names, trees):
+    """The readable_types table's masks (dread.polish mask_params): {function: [indices of the parameters
+    it uses only as masks]} of the analysed functions (trees), and of the callees outside them that one
+    of them passes a constant dread.polish would print as a negative number (one within dread.polish
+    NEGATIVE of the top), read from their own C where they lift (their machine code, through the lifter:
+    a callee not in the lifted table); a callee that does not lift says nothing (its argument stays a
+    number). What a function printed on request passes to a callee outside both stays a number too."""
+    from dread import cflow, polish, vartypes
+    analysed = {fn.name for _, fn, _ in trees}
+    wanted = set()
+    for _, fn, _ in trees:
+        for st, slot in vartypes.slots_of(fn):
+            e = st.items[int(slot)].init if isinstance(st, cparse.Decl) else getattr(st, slot)
+            for x in cflow.walk_expr(e):
+                if isinstance(x, cparse.Call) and isinstance(x.f, cparse.Name) and x.f.id not in analysed and \
+                        x.f.id in program.by_name and any(polish.near_top(a) for a in x.args):
+                    wanted.add(x.f.id)
+    extra = analysis_trees(program, context, lifter, sorted(wanted), named=context.globals) if wanted else []
+    found = polish.mask_params(list(trees) + extra)
+    return {name: ix for name, ix in found.items() if name in analysed or ix}
 
 
 def check(target, image, names=None, out=print, jobs=None):

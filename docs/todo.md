@@ -2441,7 +2441,7 @@ the pilot's names, which the first review had taken for raw frames. New items:
   the carry, the pilot asking again, the whole region under a name), also with Ubuntu 22.04's compilers.
   Left: dread trace's frame view finds objects by their default names (stackN at sp0 - N), as it finds
   slot variables (sN): one the table names is shown without its label there.
-- [ ] **Masks stay masks across calls.** "Negative constants by use" prints an all-ones or `~N` value as
+- [x] **Masks stay masks across calls.** "Negative constants by use" prints an all-ones or `~N` value as
   a negative number when it is passed to a prototyped parameter or held in a variable that a shift also
   reads, even where the value is a mask. Keep `~N` (or hex) where the callee uses the parameter only as
   an operand of &, |, ^, ~ or bic (from its readable C, or from its machine code when it is not lifted),
@@ -2449,19 +2449,80 @@ the pilot's names, which the first review had taken for raw frames. New items:
   prvNotifiedTask_73ac, `xTaskGenericNotifyWait(0, -1, 0, (u32)&stack40, 0x64u)` for
   `xTaskNotifyWait(notifyUINT32_MAX, ...)`, whose callee clears `&= ~ulBitsToClearOnEntry` (printed on
   request; not in that build's lifted table). gizmo a32 ram_crc, `r3 = -1;` for `crc = 0xFFFFFFFFu`.
+  Done 2026-10-24 (dread.polish mask_params and the variable rule; the readable_types table's `masks`,
+  dread.readable mask_plan; docs/decisions.md, "Masks across calls, one radix per object, signed
+  variables from negative values"; docs/formats.md). A parameter is a mask where every read of its value,
+  also through copies, is an operand of &, |, ^ or ~ (also &=, |=, ^=), the value returned as it is (a
+  void function's leftover register), or an argument for a callee's mask parameter; a store, a
+  comparison, a shift (FreeRTOS's stack depth `<< 2`) and a shift's count the lifters mask (`1 << (r0 &
+  0xffu)`) are none. Read from every lifted function's C and from the C of the callees outside them that
+  a lifted function passes a constant that would read negative (lifted on their own: on GCC -Os
+  xEventGroupSync, xQueuePeek and xQueueSemaphoreTake, whose -1 is a tick count; the plan's masks take
+  1.6 s there). A variable read only by bit operations and shifts gets no negative number either
+  (compound assignments now count as reads: x ^= y a mask's, x++ a number's); all ones as a mask prints
+  0xffffffffu whatever the lifter wrote, another complement keeps ~N (RISC-V's li writes 0xffffffdfu).
+  prvNotifiedTask_73ac (printed on request): `xTaskGenericNotifyWait(0, 0xffffffffu, 0, (u32)&stack40,
+  0x64u)`, `xTaskGenericNotifyWait(0, 0, 0xffffffffu, ...)` for ulBitsToClearOnExit,
+  `ulTaskGenericNotifyValueClear(g_20001760, 0, 0xffffffffu)`, while xTaskGenericNotify's ulValue
+  (stored) and every portMAX_DELAY stay -1; gizmo's ram_crc `r3 = 0xffffffffu;` on every build (a32's
+  ~0x0u and the others' -1 before). Measured with the other two items on fresh copies of the eight builds
+  (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0), main at c5cc30e ->
+  this, every function's readable C as `dread readable --out` prints it: the gate accepts the same
+  functions, set for set (35, 36, 44, 31, 317, 275, 252, 354); the readable C of 8, 9, 10, 6, 52, 46, 41,
+  47 functions changed, every digest as before (the readable_types entries are made for the same C: names
+  apply and carry as they did); every GCC -Os function's readable C in one process 36.1 and 37.2 s of CPU
+  on main, 37.9 and 35.7 s with this (noise; the plan's masks 1.6 s there); the check's times moved
+  within the noise of a shared machine (GCC -Os 370 -> 337 s, GCC -O0 471 -> 420 s). Negative call
+  arguments 0, 0, 0, 0, 96 -> 65, 112 -> 88, 100, 95 -> 65; 0xffffffffu 0 -> 1, 0 -> 1, 0 -> 1, 2 -> 3, 1
+  -> 32, 0 -> 24, 24, 2 -> 32 (the rest of the -1 arguments are tick counts, portMAX_DELAY). Tests
+  (tests/test_polish.py): the variable rule and a callee's mask parameters, mask_params on small
+  functions (copies, &=, a callee's mask handed on, a shift, a count, a return), random functions
+  compiled both ways with a mask parameter, gizmo's ram_crc on every build, a program of our own through
+  the gate (ARM state, Thumb-2, RISC-V; also with Ubuntu 22.04's compilers). Left: RISC-V's
+  xTaskGenericNotifyWait keeps its registers around the ecall of a yield and writes a1 again, and a
+  parameter written in its function is no mask by this rule (its callers keep -1: the reads its entry
+  value reaches would tell, dread.cflow); a callee that neither lifts nor gets a negative-looking
+  constant from a lifted function says nothing (a function printed on request passes -1 to it); what a
+  callee does with a value it stores is not followed.
 - [ ] **Truth values as one comparison.** A dispatch by successive subtraction that sets a result per
   case (`mov r0, #0; subs r1, r1, #1; blo a; beq b; ... a: mov r0, #0 ... b: mov r0, #1`) prints `r0 =
   0; if (x == 0) r0 = 0; else if (x == 1) r0 = 1;` for `return x == 1`. Drop an arm's store of a value
   the variable already holds on every path into it, then turn `v = 0; if (c) v = 1;` into `v = c`.
   Public example: none (GCC uses no branches here). Test: that ARM-state sequence through the conditions
   pass and the gate, as tests/test_flags.py does.
-- [ ] **Signed variables from negative values.** Since negative constants print as such, `u32 ret = -10;
+- [x] **Signed variables from negative values.** Since negative constants print as such, `u32 ret = -10;
   ... return ret;` is common. Type a variable s32 when it is assigned negative constants and read only
   by ==, by return or by signed comparisons (and the result likewise), where that adds no casts. Public
   example: gizmo a32 ring_get, with the readable_types table made as the check makes it. It prints `u32
   ring_get(u32 r0)` with `u32 r0_1; ... r0_1 = -1;` for `int ring_get(...)`, while main's variable for
   its result is s32 (`if (r0 >= 0)`) and uart_getc, which has the same shape, prints `s32
   uart_getc(void)`.
+  Done 2026-10-24 (dread.vartypes negative_variables, returns_negative, read_as_negative, Facts.reads and
+  result_kinds, local_types, Planner.decide_outside; docs/decisions.md, as above; docs/formats.md). A
+  variable given a constant readable C prints negative and read only by == or !=, a truth test or return
+  is s32 where that adds no casts (the plan's trial); one the function returns only where the function's
+  result is s32 (a u32 function's s32 variable would contradict it). A result is s32 where its own
+  returns give negative values and a caller reads it, every caller only so (==, return, a signed
+  comparison, or a variable read only so: the reads the call's definition reaches, dread.cflow); without
+  a caller that reads it a negative return is no evidence (gizmo's udiv_var returns 0xFFFFFFFFu beside an
+  unsigned quotient: u32 as its source). A callee the plan does not analyse (not lifted) whose result an
+  analysed caller compares signed is s32 in the table (`prototypes`, its result alone), and such a
+  function gets the negative variables on its own C. ring_get on every gizmo build: `s32 ring_get(u32
+  r0)` with `s32 r0_1; ... r0_1 = -1;` (RISC-V returns -1 directly), main's `extern s32 ring_get(u32);`;
+  uart_getc's `s32 r0;`, read_line's `s32 r0_1, r0_2;`, cmd_mode s32 on the ARM builds (apply_config
+  reads it by return), parse_kv on Thumb-2 (-1, -2, -3). FreeRTOS: newlib's _close, _lseek, _read and
+  _write (they return -1: `extern s32` in their _r wrappers), xTaskCreate (`s32 r0_2` for
+  errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY). On the eight builds (figures for the gate with "Masks stay
+  masks across calls"): u32 variables given negative constants 10 -> 6, 7 -> 2, 7 -> 2, 6 -> 4, 5 -> 4,
+  12, 5 -> 4, 6 -> 5 (what is left is read otherwise: an index, a sum, a store), s32 variables 4 -> 7, 4
+  -> 8, 5 -> 9, 7 -> 8, 26 -> 27, 27, 15 -> 16, 27 -> 28, s32 results 2 -> 4, 2 -> 5, 2 -> 5, 2 -> 5, 1
+  -> 6, 1 -> 6, 0 -> 1, 1 -> 6; rv32's parse_uint, compared signed by parse_kv and not lifted, is s32 as
+  its source (`parse_uint(...) < 0 ? -3 : 0`, no cast). Tests (tests/test_vartypes.py): the rule's
+  variables and results on small functions (a saturated sum stays u32), a callee outside the plan, random
+  callees and callers typed and compiled in 32 bits each in a file of its own, gizmo's ring_get,
+  uart_getc, udiv_var and cmd_mode on every build; with Ubuntu 22.04's compilers too. Left: a negative
+  value read only by == may be a u32 sentinel (0xFFFFFFFFu compared reads the same); a function only
+  called through pointers keeps u32 (no caller reads it: RISC-V's cmd_mode).
 - [ ] **Pointers held in globals; frame objects to all-u32 externs.** These are "Left" of two done items
   and have no item of their own. A global holding a structure pointer stays a u32 macro, cast through a
   fresh variable at each use, or read through a byte pointer and an index. A frame object passed to an
@@ -2470,12 +2531,49 @@ the pilot's names, which the first review had taken for raw frames. New items:
   the file passes such an object or 0. Public examples: FreeRTOS mps2-gcc-Os
   prvAddCurrentTaskToDelayedList (pxCurrentTCB cast at six uses; `uxListRemove(r0_1 + 4)` for
   `&pxCurrentTCB->xStateListItem`); gizmo a32 print_status (`fmt_dec((u32)stack20, ...)`).
-- [ ] **One radix per object, and stores through pointers.** Follow-up of "Radix by use". The bytes of
+- [x] **One radix per object, and stores through pointers.** Follow-up of "Radix by use". The bytes of
   one small local can come out in two radices (`0x96u, 0x35u, 15`), and constants stored through pointer
   parameters stay hex while the bounds that select them print in decimal. Decide the radix for an
   object, or for a pointer's target, as a whole; count a store through a pointer parameter as a place.
   Public example: none checked. Test: a function that stores sizes through two pointers after comparing
   its argument with the same numbers.
+  Done 2026-10-24 (dread.polish _objects, placed, masklike, low_run, address; docs/decisions.md, as
+  above). One object: a variable; an array's elements (a local's, static data's, a typed pointer's: x[k],
+  *p); a structure's field; joined by copies (x = y, *p = v, v = p[k], a declaration's initialiser), not
+  through an access at an address the code computes. Its places share the evidence (a use; two or more
+  plain numbers given or compared; a number the function writes in decimal elsewhere: a bound or its
+  neighbour on the side the compiler moved it to, x <= 63 for x < 64, a divisor, a multiplier, a constant
+  of an object that holds numbers), and one that holds numbers prints all its constants below WIDE in
+  decimal, a run of ones from bit 0 too (255 beside 63), unless all look like masks (x <= 0xffu alone
+  stays); a sum's constant is a number also where the sum goes into such an object (GCC -O0's 12345 in
+  two adds folds: `0x41c64e6du * g_20000e3c + 12345`). Never an object holding a pointer (RISC-V's walk
+  over the ready lists, `s4 += 0x14u`, hex as the pointer it is copied into) or only texts' starts and
+  functions' entries (dread.constants Pointed: FreeRTOS's prvCheckTask stores its status message's texts,
+  at small addresses on an image at 0, which main printed as numbers, clang -O2 `g_20000000 = 379;`, GCC
+  -Os `r3 = 394;`, now `0x17bu`, `0x18au`; line numbers that fall on such a text beside others stay
+  numbers), nor one taken to numbers by another object's value where one of its own looks like a bit
+  pattern (clang -O2's prvSanityCheckCreatedEventGroup keeps an event group's 0x55 and a line number in
+  one register). A complement stored into a narrower place is the value it leaves there (~0x69u into a
+  byte: 150, or 0x96u). The item's test, tally on ARM state, Thumb-2 and RISC-V through the gate:
+  tally_pick's sizes through two pointers `= 64; = 256; = 1024;` with the bounds `<= 63`, `> 255` (main:
+  `0x40u`, `0x100u`, `0x400u`, `0xffu`), tally_colour's bytes `150, 53, 15/20` (main: `~0x69u, 0x35u`
+  beside `20 : 15`). FreeRTOS: prvRecursiveMutexBlockingTask's `r2 = 255; g_200009dc = r2;` (__LINE__
+  through a register: was 0xffu), QueueOverwrite's ulTx1 and ulTx2 `stack28 = 10; stack24 = 20;`, the
+  printf base `10`/`16`, prvTimerTestTask's counts `while (r4 != 20)`, MessageBufferDemo's tick bound
+  `a5_2 = 249;` beside `249 >= ...`; gizmo m4's handle_key in one radix with its bounds (`r0 == 76`,
+  `r0 - 98`, as a32 printed already; the characters they are stay the Left of "Characters as
+  characters"). On the eight builds (figures for the gate with "Masks stay masks across calls") lines
+  whose constant changed its radix 1, 1, 7, 0, 42, 8, 17, 29 in 1, 1, 2, 0, 10, 5, 13, 3 functions (most
+  of them the texts of FreeRTOS's status message going back to hex: 21 on GCC -Os, 20 on GCC -O0), hex
+  constants of 10 or more 98, 84, 100 -> 94, 87 -> 88, 2,387 -> 2,427, 3,611 -> 3,633, 3,133 -> 3,118,
+  3,003 -> 3,054, decimal ones 44 -> 45, 32 -> 33, 34 -> 41, 31, 572 -> 563, 1,011 -> 1,013, 362 -> 377,
+  580 -> 558. Tests (tests/test_polish.py): one radix per object (a colour triple both ways, sizes and
+  bounds, a sum in a sum, a lone bound, a shifted run, a pad character), texts' addresses (a line number
+  on a text by chance) and bit patterns, random functions with an array and copies compiled both ways,
+  the gate program. Left: a structure's fields are decided each on its own (a frame message's command
+  beside its pointers); a place stored once and in decimal company in another function stays hex
+  (image-wide evidence); call arguments stay hex; a digit's character added to a number (printi's
+  `r8 + 48`) is a number where the function compares too few characters to be text.
 - [ ] **Readable C the gate has not accepted, marked.** `dread readable NAME` prints any function that
   lifts, under the same first line ("readable C from its lifted C"), whether the gate accepted it,
   rejected it, or never saw it. Say so in that line, and in the GUI's reading view. Public example:

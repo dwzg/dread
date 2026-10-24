@@ -192,7 +192,7 @@ def test_radix_by_use():
     io_40004004 = 0x2ffu;
     r2 = r0 * 0xau;
     r3 = r0 * 0x5556u >> 16;
-    if (r1 <= 0xffffu) r2 = 0;
+    if (r3 <= 0xffffu) r2 = 0;
     r6 = 0x908u;
     r3 = r3 + *(volatile u8 *)r6;
     r6 = r6 + 1;
@@ -200,10 +200,230 @@ def test_radix_by_use():
 }
 """)
     for line in ("if (r0 < 759) g_20000930 = 759;", "if (r1 > 107) g_20000930 = 767;", "io_40004004 = 0x2f7u;",
-                 "r2 = r0 * 10;", "r3 = r0 * 0x5556u >> 16;", "if (r1 <= 0xffffu) r2 = 0;", "r6 = 0x908u;", "r6++;"):
+                 "r2 = r0 * 10;", "r3 = r0 * 0x5556u >> 16;", "if (r3 <= 0xffffu) r2 = 0;", "r6 = 0x908u;", "r6++;"):
         assert line in out, (line, out)
     single = polished("u32 f(u32 r0)\n{\n    if (r0 != 0) g_20000930 = 0xb4u;\n    return 0;\n}\n")
     assert "g_20000930 = 0xb4u;" in single, single
+
+
+def test_masks_stay_masks():
+    """All ones in a variable read only by bit operations and shifts (ram_crc's crc: ^=, >>, &, ~) is
+    0xffffffffu, not -1, whatever the lifter wrote (~0x0u); so is a constant for a callee's parameter
+    that it uses only as a mask (masks), a complement there stays ~N; without that a parameter's -1
+    stays a value; a counter that & also reads is no mask (its -1 is a value), and the value of &= is a
+    mask's operand (m's ~0x20u)."""
+    head = HEAD + "extern u32 clear_bits(u32, u32);\n"
+    text = """u32 f(u32 r0, u32 r1)
+{
+    u32 r2, r3, r4, m;
+    r3 = ~0x0u;
+    r3 ^= r0;
+    r3 = (r3 >> 1) ^ (0xedb88320u & ((s32)(r3 << 31) >> 31));
+    r4 = ~0x0u;
+    r4++;
+    r2 = r4 & 1;
+    m = ~0x20u;
+    r1 &= m;
+    clear_bits(~0x0u, ~0x20u);
+    g(~0x0u, r2);
+    return ~r3 + r1;
+}
+"""
+    out = polished(text, head=head)
+    for line in ("r3 = 0xffffffffu;", "r4 = -1;", "m = ~0x20u;", "clear_bits(-1, -33);", "g(-1, r2);"):
+        assert line in out, (line, out)
+    tree = cparse.parse(head + text)
+    fn = tree.function("f")
+    polish.polish(tree, fn, io=IO, masks={"clear_bits": [0, 1]})
+    out = cparse.unparse(fn, notes=False, style="readable")
+    assert "clear_bits(0xffffffffu, ~0x20u);" in out and "g(-1, r2);" in out, out
+
+
+def test_parameters_used_only_as_masks():
+    """mask_params: a parameter read only by &, |, ^, ~ (bic: & ~), also through a copy and &=, is a
+    mask; one compared, stored, counted, shifted (r1 << 2: a count scaled), a shift's count (ARM's 1 <<
+    (r2 & 0xffu)) or never read is none, and one only returned besides (r0) is none either; one handed to
+    a callee's mask parameter is one (the next round); every function is listed."""
+    tree = cparse.parse(HEAD + """extern u32 bits_clear(u32, u32, u32);
+u32 bits_pass(u32 r0, u32 r1, u32 r2, u32 r3)
+{
+    if (r1 == 0) return 0;
+    g_20000930 = r2;
+    return bits_clear(0, r0, r3);
+}
+u32 bits_clear(u32 r0, u32 r1, u32 r2)
+{
+    u32 r4;
+    r4 = r1;
+    g_20000930 &= ~r4;
+    g_20000930 |= r2 & 0xf0u;
+    return r0;
+}
+u32 bits_count(u32 r0, u32 r1, u32 r2)
+{
+    r0++;
+    g_20000930 = 1u << (r2 & 0xffu);
+    return g(r1 << 2, r0 & 1);
+}
+""")
+    trees = [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)]
+    assert polish.mask_params(trees) == {"bits_clear": [1, 2], "bits_pass": [0, 3], "bits_count": []}
+    assert polish.mask_params(trees, rounds=1)["bits_pass"] == []     # (its callee's masks come after it)
+
+
+def test_one_radix_per_object():
+    """The elements of a local array (a colour triple) come out in one radix: decimal where the object
+    holds numbers (one element given two numbers), hex where nothing says so (the mvn of 150 stored into a
+    byte, ~0x69u, is the byte it leaves, 0x96u); sizes stored through two pointers after the argument was
+    compared with them (note_pick: x <= 63 for x < 64) are decimal, the bound 255 beside 63 too, and a sum
+    in a sum stored into a number takes the place too (one constant); a bound that is a run of ones
+    alone (0xffu), a shifted run (0xff00u) and a pad character's ' ' and '0' stay as they were."""
+    out = polished("""u32 f(u32 r0)
+{
+    volatile u8 stack12[8];
+    stack12[0] = ~0x69u;
+    stack12[1] = 0xf0u;
+    stack12[2] = r0 == 0 ? 0x1eu : 0xfu;
+    return g((u32)stack12, 0);
+}
+""")
+    for line in ("stack12[0] = 0x96u;", "stack12[1] = 0xf0u;", "stack12[2] = r0 == 0 ? 0x1eu : 0xfu;"):
+        assert line in out, (line, out)
+    text = """u32 f(u32 r0)
+{
+    volatile u8 stack12[8];
+    stack12[0] = (u8)0x96u;
+    stack12[1] = (u8)0x35u;
+    stack12[2] = (u8)(r0 == 0 ? 0x1eu : 0xfu);
+    if (stack12[2] > 0x14u) r0 = r0 + 1;
+    return g((u32)stack12, r0);
+}
+"""
+    out = polished(text)                    # (before: 0x96u, 0x35u, then 15 for the element compared in order)
+    for line in ("stack12[0] = 150;", "stack12[1] = 53;", "stack12[2] = r0 == 0 ? 30 : 15;", "stack12[2] > 20"):
+        assert line in out, (line, out)
+    out = polished("""u32 f(u32 r0, u32 r1, u32 r2)
+{
+    u32 r0_1, r3;
+    if (r0 <= 0x3fu)
+    {
+        r0_1 = 0;
+        r3 = 0x40u;
+    }
+    else if (r0 > 0xffu)
+    {
+        r0_1 = 0x100u;
+        r3 = 0x400u;
+    }
+    else
+    {
+        r0_1 = 0x40u;
+        r3 = 0x100u;
+    }
+    *(volatile u32 *)r1 = r0_1;
+    *(volatile u32 *)r2 = r3;
+    return r0_1;
+}
+""")
+    for line in ("if (r0 <= 63)", "else if (r0 > 255)", "r0_1 = 256;", "r3 = 1024;", "r0_1 = 64;", "r3 = 256;"):
+        assert line in out, (line, out)
+    out = polished("""u32 f(u32 r0, u32 r1, u32 r2)
+{
+    u32 r0_1, r3;
+    if (r0 > 0x3fu)
+    {
+        r0_1 = r0 < 0x100u ? 0x40u : 0x100u;
+        r3 = r0 < 0x100u ? 0x100u : 0x400u;
+    }
+    else
+    {
+        r0_1 = 0;
+        r3 = 0x40u;
+    }
+    *(volatile u32 *)r1 = r0_1;
+    *(volatile u32 *)r2 = r3;
+    return r0_1;
+}
+""")                                        # (GCC 13's selects of the sizes: the arms are what the places get)
+    for line in ("r0_1 = r0 < 256 ? 64 : 256;", "r3 = r0 < 256 ? 256 : 1024;", "r3 = 64;"):
+        assert line in out, (line, out)
+    out = polished("""u32 f(u32 r0)
+{
+    g_20000930 = 0x41c64e6du * g_20000930 + 0x3000u + 0x39u;
+    if (g_20000930 > 0x3e8u) r0 = 1;
+    return r0;
+}
+""")                                        # (GCC -O0's 12345 in two adds: one number, not 0x3000u + 57)
+    assert "g_20000930 = 0x41c64e6du * g_20000930 + 12345;" in out and "> 1000" in out, out
+    out = polished("""u32 f(u32 r0, u32 r1)
+{
+    u32 r8;
+    if (r0 <= 0xffu) return 1;
+    if (r1 > 0xff00u) return 2;
+    r8 = 0x20u;
+    if (r0 == 1) r8 = 0x30u;
+    return g(r8, r0);
+}
+""")
+    for line in ("if (r0 <= 0xffu) return 1;", "if (r1 > 0xff00u) return 2;", "r8 = 0x20u;", "r8 = 0x30u;"):
+        assert line in out, (line, out)
+
+
+class _Texts:
+    """A stand-in for dread.constants Pointed: texts start at 0x1e2 and 0x215, no function's entry."""
+
+    def function(self, value):
+        return None
+
+    def text(self, value):
+        return ("Error", False) if value in (0x1e2, 0x215) else None
+
+    def begins(self, value):
+        return True
+
+
+def test_addresses_and_bit_patterns_hold_no_numbers():
+    """An object given only texts' starts (FreeRTOS clang -O2's status message: its texts lie at small
+    addresses on an image at 0) holds addresses and stays hex, though it is given two numbers (decimal
+    without the image's texts); one where a value falls on a text beside a number holds numbers (line
+    numbers on such an image); a register that holds an event group's 0x55 and then a line number takes
+    no decimal from the line numbers stored elsewhere (its 0x55 stays a pattern)."""
+    text = """u32 f(u32 r0)
+{
+    u32 r6;
+    r6 = 0x1e2u;
+    if (r0 == 1) r6 = 0x215u;
+    g_20000930 = r6;
+    return 0;
+}
+"""
+    assert "r6 = 482;" in polished(text) and "r6 = 533;" in polished(text)
+    tree = cparse.parse(HEAD + text)
+    fn = tree.function("f")
+    polish.polish(tree, fn, io=IO, pointed=_Texts())
+    out = cparse.unparse(fn, notes=False, style="readable")
+    assert "r6 = 0x1e2u;" in out and "r6 = 0x215u;" in out, out
+    tree = cparse.parse(HEAD + text.replace("0x215u", "0x2f7u"))       # (a line number on a text by chance)
+    fn = tree.function("f")
+    polish.polish(tree, fn, io=IO, pointed=_Texts())
+    out = cparse.unparse(fn, notes=False, style="readable")
+    assert "r6 = 482;" in out and "r6 = 759;" in out, out
+    out = polished("""u32 f(u32 r0)
+{
+    u32 r0_2;
+    if (g(r0, 0) != 0) g_20000930 = 0x35bu;
+    if (g(r0, 1) != 0) g_20000930 = 0x365u;
+    r0_2 = g(r0, 2);
+    if (r0_2 != 0x55u)
+    {
+        r0_2 = 0x379u;
+        g_20000930 = 0x379u;
+    }
+    return r0_2;
+}
+""")
+    for line in ("g_20000930 = 859;", "g_20000930 = 869;", "if (r0_2 != 0x55u)", "r0_2 = 0x379u;", "g_20000930 = 889;"):
+        assert line in out, (line, out)
 
 
 def test_an_int_of_16_bits():
@@ -286,15 +506,15 @@ def random_polish_function(rng, name, steps=12):
     stays inside int): where the original has it, any result is C's, and the comparison would test
     nothing."""
     lines = ["u64 %s(u32 a0, u32 a1, u32 a2, u32 a3)" % name, "{",
-             "    u8 b0; s8 c0; u16 h0; s16 k0; u32 u0, u1, r; s32 i0; u64 w0;",
+             "    u8 b0; s8 c0; u16 h0; s16 k0; u32 u0, u1, r; s32 i0; u64 w0; u8 arr[4];",
              "    b0 = (u8)a0; c0 = (s8)a1; h0 = (u16)a2; k0 = (s16)a3; u0 = a0; u1 = a1; i0 = (s32)a2;",
-             "    w0 = ((u64)a3 << 32) | a0; r = 0;"]
+             "    w0 = ((u64)a3 << 32) | a0; r = 0; arr[0] = (u8)a3; arr[1] = 0; arr[2] = 0; arr[3] = (u8)a1;"]
     names = list(VARS)
     for _ in range(steps):
         x, y = rng.choice(names), rng.choice(names)
         uy = rng.choice(UNSIGNED)
         k = random_constant(rng)
-        kind = rng.randrange(12)
+        kind = rng.randrange(15)
         if kind == 0:
             lines.append("    %s = %s;" % (x, k))
         elif kind == 1:
@@ -325,10 +545,18 @@ def random_polish_function(rng, name, steps=12):
                                                                          rng.choice([0, 3, 0x5f, 0xff])))
         elif kind == 10:
             lines.append("    r = r ^ sink(%s, %s);" % (k, rng.choice(names)))
-        else:
+        elif kind == 11:
             lines.append("    %s = %s << 0x%xu;" % (x, uy, rng.randrange(8)))
+        elif kind == 12:                    # (an array's elements: one object)
+            lines.append("    arr[%d] = %s;" % (rng.randrange(4), k))
+        elif kind == 13:
+            lines.append("    if (arr[%d] %s %s) %s = arr[%d];" % (rng.randrange(4), rng.choice(polish.COMPARE), k, x,
+                                                                  rng.randrange(4)))
+        else:                               # (copies join objects; a store through a pointer)
+            lines.append("    u1 = %s; *(volatile u32 *)&u0 = %s;" % (rng.choice(["u0", "(u32)arr[1]", k]), k))
     lines.append("    return w0 ^ ((u64)u0 << 3) ^ ((u64)u1 << 7) ^ ((u64)(u32)i0 << 11) ^ ((u64)b0 << 17) ^ "
-                 "((u64)(u8)c0 << 23) ^ ((u64)h0 << 29) ^ ((u64)(u16)k0 << 37) ^ ((u64)r << 41) ^ ((u64)trace << 13);")
+                 "((u64)(u8)c0 << 23) ^ ((u64)h0 << 29) ^ ((u64)(u16)k0 << 37) ^ ((u64)r << 41) ^ ((u64)trace << 13) ^ "
+                 "((u64)arr[0] << 5) ^ ((u64)arr[1] << 19) ^ ((u64)arr[2] << 31) ^ ((u64)arr[3] << 47);")
     lines.append("}")
     return "\n".join(lines) + "\n"
 
@@ -338,8 +566,9 @@ def test_random_functions_polished_compute_the_same(tmp_path):
     """Random functions (random_polish_function), polished, compiled with the host's C compiler beside
     the originals and called with boundary and random arguments: the same results. Every rule is among
     the changes (negative numbers, decimal, folded casts and constant expressions, narrowed sums and
-    their negation, increments; a character literal is an int constant of its code, so the comparisons
-    and stores here stand for the characters' too), and most functions change."""
+    their negation, increments, masks for a callee's mask parameter (half the functions), an array's
+    elements in one radix; a character literal is an int constant of its code, so the comparisons and
+    stores here stand for the characters' too), and most functions change."""
     rng = random.Random(23)
     count, originals, results, changed = 250, [], [], 0
     for i in range(count):
@@ -347,7 +576,7 @@ def test_random_functions_polished_compute_the_same(tmp_path):
         originals.append(text)
         tree = cparse.parse("extern u32 sink(u32, u32);\n" + text.replace("orig_", "pol_"))
         fn = tree.function("pol_%d" % i)
-        changed += polish.polish(tree, fn)
+        changed += polish.polish(tree, fn, masks={"sink": [0]} if i % 2 else None)
         results.append(cparse.unparse(fn, notes=False, style="readable"))
     source = tmp_path / "polish.c"
     source.write_text(PROBE + "".join(originals) + "\n".join(results) + "\n" + "".join(
@@ -415,6 +644,14 @@ def test_gizmos_text_functions_read_as_their_source():
         assert "' '" in kv and "'\\t'" in kv and "'='" in kv and "~0x1u" not in kv, (variant, kv)
 
 
+def test_gizmos_crc_starts_from_all_ones(variant):
+    """gizmo's ram_crc (crc = 0xFFFFFFFFu, then ^=, >>, & and ~ only) writes its start as 0xffffffffu on
+    every build, never -1 (ARM state's mvn ~0x0u, Thumb-2's and RISC-V's all ones)."""
+    crc = code(gizmo_texts(variant, ["ram_crc"])["ram_crc"])
+    m = re.search(r"(?m)^    (\w+) = 0xffffffffu;", crc)
+    assert m and not re.search(r"\b%s = -1;" % m.group(1), crc), crc
+
+
 FRAME = ("typedef struct\n{\n    u32 f_0;\n    u32 f_4;\n    u32 f_8;\n    u32 f_c;\n    u8 pad_10[8];\n"
          "} __attribute__((packed, aligned(8))) stack24_t;\n")
 
@@ -458,3 +695,107 @@ def test_freertos_forms():
 """, raw=["struct s_50\n{\n    u32 f_0;\n    u8 pad_4[32];\n    u8 f_24;\n};"], pointers={"r0_1": "s_50"})
     for line in ("g((u32)r0_1 + 4, 0);", "g(r0 - 8, 0);", "sl9 = 0;", "if (r1 == 1) sl9 = 2;", "return sl9;"):
         assert line in out, (line, out)
+
+
+# --- a program of our own through the gate ---
+
+TALLY = """typedef unsigned int u32;
+typedef unsigned char u8;
+typedef int s32;
+%s
+u32 tally_flags;
+u32 tally_sizes[2];
+u8 tally_rgb[3];
+u8 tally_ring[8];
+u32 tally_head, tally_tail;
+NOIPA void tally_clear(u32 keep, u32 clear) { tally_flags = (tally_flags & keep) & ~clear; }
+NOIPA void tally_pick(u32 n, u32 *lo, u32 *hi)
+{
+    if (n < 64) { *lo = 0; *hi = 64; }
+    else if (n < 256) { *lo = 64; *hi = 256; }
+    else { *lo = 256; *hi = 1024; }
+}
+NOIPA void tally_paint(const u8 *c) { tally_rgb[0] = c[0]; tally_rgb[1] = c[1]; tally_rgb[2] = c[2]; }
+NOIPA void tally_colour(u32 dark)
+{
+    volatile u8 c[3];
+    c[0] = 150; c[1] = 53; c[2] = dark ? 15 : 20;
+    tally_paint((const u8 *)c);
+}
+NOIPA int tally_get(void)
+{
+    int c;
+    if (tally_head == tally_tail) return -1;
+    c = tally_ring[tally_tail];
+    tally_tail = (tally_tail + 1) & 7;
+    return c;
+}
+NOIPA u32 tally_crc(const u8 *p, u32 n)
+{
+    u32 crc = 0xFFFFFFFFu;
+    int k;
+    while (n--) {
+        crc ^= *p++;
+        for (k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1));
+    }
+    return ~crc;
+}
+int main(void)
+{
+    int c;
+    tally_clear(0xffffffffu, 0);
+    tally_clear(~0x20u, 0xffffffffu);
+    tally_pick(tally_flags, &tally_sizes[0], &tally_sizes[1]);
+    tally_colour(tally_flags & 1);
+    c = tally_get();
+    if (c >= 0) tally_flags |= 2;
+    tally_sizes[0] = tally_crc(tally_rgb, 3);
+    return 0;
+}
+"""
+
+
+def _kind(kind):
+    from test_statics import needs_kind
+    return needs_kind(kind)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("kind", [pytest.param(k, marks=_kind(k)) for k in ("a32", "m3", "rv32")])
+def test_masks_radix_and_negative_values_through_the_gate(kind, tmp_path):
+    """tally, built with GCC -Os for ARM state, Thumb-2 and RISC-V: masks for a callee's mask parameters
+    (main's tally_clear(0xffffffffu, 0), never -1), the crc's all ones as 0xffffffffu, sizes stored
+    through two pointers in one radix with the bounds that select them (64, 256, 1024; 63, 255), a colour
+    triple in one radix (150, 53, 15, 20), and a ring's -1 or byte in an s32 variable of an s32 function.
+    The gate (dread readable --check) accepts every function so."""
+    from conftest import NOIPA_DEF
+    from test_statics import kind_target
+    from dread import build, lift, readable, regflow
+    from dread.program import Program
+    target = kind_target(tmp_path, kind, TALLY % NOIPA_DEF)
+    image = target.image()
+    lines = []
+    accepted = readable.check(target, image, out=lines.append)
+    lifted = sorted(build.read_names(image.table("lifted")))
+    assert accepted == lifted and "tally_get" in lifted, (accepted, lifted, lines)
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    lifter = lift.make_lifter(program, flow)
+    context = readable.Context(target, image, program, flow)
+    got = {n: code(readable.transform(n, lifter.lift(program.by_name[n]).text, context=context)) for n in lifted}
+    main = got["main"]
+    assert re.search(r"tally_clear\(0xffffffffu, 0\);", main) and not re.search(r"tally_clear\(-", main), main
+    assert re.search(r"tally_clear\((~0x20u|0xffffffdfu), 0xffffffffu\);", main), main
+    pick = got["tally_pick"]                # (GCC 13 writes x < 256 where GCC 12 and older wrote x <= 255, and
+    for want in ("63", "64", "256", "1024"):  # selects of the sizes on Thumb-2 and in ARM state)
+        assert want in pick, (want, pick)
+    assert re.search(r"(<=|<|>=|>) (255|256)\b|\b(255|256) (<=|<|>=|>) ", pick), pick
+    assert not re.search(r"0x(3f|ff|40|100|400)u", pick), pick
+    colour = got["tally_colour"]
+    assert "= 150;" in colour and "= 53;" in colour and not re.search(r"0x96u|0x35u|~0x69u", colour), colour
+    ring = got["tally_get"]
+    unsigned = {n.strip() for line in re.findall(r"(?m)^    u32 ([\w, ]+);$", ring) for n in line.split(",")}
+    assert "s32 tally_get(void)" in ring and not any(re.search(r"\b%s = -1;" % n, ring) for n in unsigned), ring
+    crc = got["tally_crc"]                 # (ARM state's -(crc & 1) through a branch stays -1: a negation)
+    assert re.search(r"(?m)^    \w+ = 0xffffffffu;", crc), crc

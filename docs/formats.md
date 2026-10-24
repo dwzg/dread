@@ -243,7 +243,13 @@ with a type, the others staying as the lifter declared them. `digest` as in `fun
 and the externs' parameters are typed only in the C they were made for. `prototypes`: `{FUNCTION:
 [RESULT, PARAMETER, ...]}`, each a type or null (as the lifter declared it): the function's own
 parameters' types (its variables', and the structure pointers of `functions`) and its result (`s32`
-where its callers compare it signed; a caller's extern takes the result type whatever its digest).
+where its callers compare it signed, or where it returns negative values that every caller reads only
+by `==`, by return or signed, since 2026-10-24; a caller's extern takes the result type whatever its
+digest). Since 2026-10-24 a callee the check does not analyse (not lifted) whose result an analysed
+caller compares signed is listed with its result alone (`{"ring_get": ["s32"]}`): its callers' externs
+and its own C printed on request take it. A variable's `s32` may also come from negative values (one
+given -1 and read only by `==`, a truth test or return); a function the check did not analyse (outside
+`params`) gets those on its own C when it is printed.
 Every expression is rewritten to compute what it did (pointer arithmetic in elements, casts where a
 pointer meets a number); a file whose rewrite wrote pointer arithmetic or an s32 variable starts with
 the line `/* dread: overflow wraps */` (dread.build: compiled with -fno-strict-overflow), one with typed
@@ -273,6 +279,15 @@ or to one `params` lists, as the function's address (`(u32)&prvTimerCallback`, w
 `#define prvTimerCallback FUNCTION_AT(0x6ed5u)` of dread.h above the function: the same number), and a
 text's start as its number with the text in a note beside it (`0xd9cu /* "FR Timer" */`). A file from
 before has no `takes`: only the parameters `params` lists, as pointers, give them.
+
+`masks` (since 2026-10-24; written whenever the check runs, also empty; functions without such a
+parameter left out) lists the parameters a function uses only as masks (dread.polish mask_params):
+`{FUNCTION: [1, 2]}`, every read of the parameter's value an operand of `&`, `|`, `^` or `~` (bic), the
+value returned as it is, or an argument for such a parameter of a callee, from every lifted function's
+readable C and from the C of the callees outside them that one passes a constant readable C would
+print negative (where they lift). A constant argument for a listed parameter is written as a mask
+(`0xffffffffu`, `~0x20u`), never as a negative number. A file from before has no `masks`: such
+arguments print as before (`-1`).
 
 ### `wide_results.txt` (`wide_results`)
 
