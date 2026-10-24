@@ -12,7 +12,7 @@ compares the builds.
     dread cclab doctor --adapter A [--work DIR]  the tools, their versions, one probe built and run
     dread cclab run --adapter A [--work DIR] [--build KEY...] [--probes NAME...] [--probe-dir DIR...]
                     [--jobs N] [--guard]
-    dread cclab report [--work DIR] [--adapter A]
+    dread cclab report [--work DIR] [--adapter A] [--json FILE]
     dread cclab compare [--work DIR] ORIGINAL REBUILD   where two compilers differ, and the options
                                                         of the rebuilding one that close a difference
     dread cclab bundle [--work DIR] --out FILE.zip   what may leave the work directory
@@ -190,10 +190,11 @@ def doctor(adapter, work, out=print, guard=None):
     return 0
 
 
-def make_report(work, adapter_name=None, out=print):
-    """Markdown comparing the builds of each adapter in work (written to WORK/ADAPTER/report.md)."""
+def make_report(work, adapter_name=None, out=print, json_path=None):
+    """Markdown comparing the builds of each adapter in work (written to WORK/ADAPTER/report.md), and
+    with json_path the same as data there (dread.cclab.report data)."""
     import importlib
-    return importlib.import_module("dread.cclab.report").write(work, adapter_name, out)
+    return importlib.import_module("dread.cclab.report").write(work, adapter_name, out, json_path=json_path)
 
 
 def main(argv=None):
@@ -224,6 +225,9 @@ def main(argv=None):
     p = sub.add_parser("report", help="compare the builds measured in the work directory")
     p.add_argument("--work", default="cclab-work")
     p.add_argument("--adapter")
+    p.add_argument("--json", metavar="FILE",
+                   help="also write the report of each adapter, its failed probes and its profile as JSON to FILE "
+                        "(docs/formats.md)")
     p = sub.add_parser("compare", help="where two measured compilers differ, with the options that close it")
     p.add_argument("--work", default="cclab-work")
     p.add_argument("original", help="the adapter of the compiler that made the image")
@@ -251,7 +255,7 @@ def main(argv=None):
                     print("%-22s %-10s %s" % (c["id"], c.get("instructionSet") or "-", c["name"]))
             return 0
         if args.action == "report":
-            return make_report(args.work, args.adapter)
+            return make_report(args.work, args.adapter, json_path=args.json)
         if args.action == "compare":
             from dread.cclab import compare
             return compare.write(args.work, args.original, args.rebuild)

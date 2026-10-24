@@ -9,6 +9,76 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Pages of the tools' results: the bench, the compiler lab, the leak check (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), for the rest of step 4 of
+"The GUI for everything" (docs/todo.md): pages for the tools that work beyond one target, each fed by its
+tool's own output and running the tool as a job, never computing what the tool computes.
+
+- **Question.** What feeds each page, where do its records live, when does a page start a job by itself,
+  and how does a page about a private project's words keep them out of the browser and out of a repository?
+- **Options and choices.**
+  1. What feeds them: (a) the pages read metrics.json, results.json and the leak check's printed lines
+     themselves, (b) a `--json FILE` for each tool, the same facts as its report as data. **(b)**, as the
+     user asked: `dread bench report --json` (also on `measure` and `all`, which end with the report),
+     `dread cclab report --json`, `dread leakcheck --json`. The cclab report is data first now
+     (report.data, report.markdown): report.md and profile.toml came out byte for byte the same on a
+     four-build run of GCC 16 before and after, and the tests' strings of report.md pass unchanged. The
+     bench's markdown report stays as it was (byte for byte the same on the 39 FreeRTOS builds); the JSON is
+     made beside it by report_data with the helpers the markdown uses (stops, compiler_cell, summary_line),
+     and FIGURES says what one number of a measurement is (figures()), so the page needs no knowledge of
+     metrics.json. Undo: drop the options; the pages then have nothing to read.
+  2. The trend: (a) the page reads BUILD/history itself, (b) the report's JSON carries each build's earlier
+     measurements as the same figures. **(b)**: one record, made by the tool that wrote the history; the
+     time of each comes from its file's name as measure wrote it (copies that keep no times keep it). The
+     table's trend column draws one figure (a choice of every numeric one) as a small line per build; a
+     build's page draws it as a chart with a crosshair and its readout, and the same as a table (the chart
+     never gates a value). Plain SVG, one series in the accent colour, no library.
+  3. Where the records live: beside what the tool writes already: BENCH/RECIPE/report.json beside
+     report.md, WORK/report.json in the cclab work directory (every adapter in one file, as report writes
+     every adapter's report.md in one run); the leak check's in the user's state directory (below). The
+     same command typed in a terminal shows on the page.
+  4. When a job starts by itself: (a) only on a button, as the function views do for heavy tools, (b) the
+     report by itself where its record is missing or stale (a file it reads is newer) and no job of the
+     tool runs on it, a measurement or a compiler's run only on a button. **(b)**: a report reads files and
+     takes a second or two; a measurement takes minutes a build (the lift check), so the page shows an
+     estimate from the build's last measurement and takes no "all builds" (dread bench measures every build
+     where none is named: hours on FreeRTOS's 39). A report that failed on the same files is not started
+     again (its log says why; the button runs it). A read-only server starts nothing.
+  5. Opening a build as the target: by the build's name under BENCH/RECIPE (never a path taken from the
+     record), through the server's open_target as the Setup page does, with its refusals (a job running, a
+     read-only server, one beyond this machine); the page names why it cannot (no dread.toml: only the
+     build's figures are there).
+  6. The compiler lab's work directory: a path typed into the page, taken as typed from where dread gui
+     started (the Setup page's rule), remembered per viewer in the browser (a convenience: it is the
+     user's own path, and nothing breaks without it). The run's form: an adapter (built-in, ce:ID,
+     relink:DIR or a file), the builds of its matrix as a grid, one's own probes, --lift, --guard; "Check
+     the adapter" runs dread cclab doctor. Every other option is the Run page's form ("Every option"). A
+     result's builds are written by the matrix where they are exactly the builds of some values of one of
+     its dimensions ("cpu cortex-m4f (4)", "all but cpu cortex-m4f (12)", whichever names fewer), the full
+     list on hover: with GCC's 16 builds a list of twelve names hid the result it belonged to.
+  7. The leak check's secrets: the server never opens the tables, words or allow list (it asks whether a
+     typed path exists); only the check's record (the strings that matched, the paths as given) and its log
+     (the tool's HIT lines) reach the page. Its jobs are the page's own (dread.gui Server.jobs_of_page, a
+     Jobs in $XDG_STATE_HOME/dread/gui/leakcheck/jobs, made and closed with the server), not the target's:
+     their command lines name the private files and their logs hold what matched, and a target can lie in
+     a repository (gizmo's do, in DREAD's own; build/ is ignored there, but "never stored in DREAD's repo"
+     should not rest on an ignore rule). The record is written with mode 600. Tested with canaries in the
+     private files that are in no file of the tree: in no answer, page or log. dread leakcheck's printed
+     lines are unchanged (the user's push script reads its exit status; a line number in the text would be
+     a format change for nothing the JSON lacks). Its exit status 1 (a hit not allowed) shows as "hits not
+     allowed", not as a failed job.
+  8. The bar at a phone's width: three more buttons left the search a few pixels wide. app.css now shows
+     the brand's mark alone below 560 px, keeps the search at 96 px at least and lets the buttons scroll
+     sideways beside it (one row; the bar never wraps). Undo: the rule's block in app.css.
+  9. Class prefixes: the first draft of the compiler lab used `.cl`, which is app.css's class of a line of
+     C (its grid broke the page); the pages' prefixes (bn, lab, lk) were checked against every stylesheet.
+- **Status.** In the code: dread/guipages/bench.py, cclab.py, leakcheck.py, dread/web/bench.js, cclab.js,
+  leakcheck.js and their stylesheets, Server.jobs_of_page, the tools' --json (docs/formats.md). Tried in
+  headless Chrome, light and dark, 1360 and 390 px wide: a copy of the 39 FreeRTOS builds' results (and one
+  whole build, measured from the page), GCC 16's probes run from the compiler lab page, a leak check of a
+  made-up project.
+
 ## A function's views: a trace, the code left unrun, the mutation check, the registers (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), for the first part of step 4

@@ -55,7 +55,12 @@ whose recipe changed since builds it again first, so a figure always belongs to 
 
 A build's figures go to BENCH/NAME/BUILD/metrics.json (the previous one to BUILD/history/, named
 by its time), and `report` gathers every build's into BENCH/NAME/report.md. BENCH is ~/dread-bench (or $DREAD_BENCH). Only recipes are kept in DREAD's
-repository; sources, builds and reports stay in BENCH.
+repository; sources, builds and reports stay in BENCH. `report --json FILE` (also `measure` and `all`,
+which end with the report) writes the same as data (report_data, docs/formats.md): each build's
+figures as the report shows them (FIGURES: one number each, figures()), what stops the rest by
+category, its compiler (kind, release, the flags' optimisation and cpu), whether the recipe changed
+since it was built, its metrics without the lists of every function's name, and the same figures of
+each earlier measurement in BUILD/history for a trend. dread gui's bench page reads that file.
 
 Recipe format:
 
@@ -99,20 +104,22 @@ compiler gives (cc --version), which the report shows: a compiler's version deci
     dread bench fetch RECIPE
     dread bench build RECIPE [BUILD...]
     dread bench measure RECIPE [BUILD...] [--steps asm,ghidra,lift,record,readable,noreturn,callconv,whatcc,groups]
-    dread bench report RECIPE
-    dread bench all RECIPE [BUILD...] [--steps ...]
+                        [--json FILE]
+    dread bench report RECIPE [--json FILE]
+    dread bench all RECIPE [BUILD...] [--steps ...] [--json FILE]
 """
 import argparse
 import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 
-STEPS = ("asm", "ghidra", "lift", "record", "readable", "noreturn", "callconv", "whatcc", "groups")
+STEPS =("asm", "ghidra", "lift", "record", "readable", "noreturn", "callconv", "whatcc", "groups")
 RECORDABLE = ("UNCOVERED", "[case generation]")     # refusals that recorded inputs may lift
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -1106,6 +1113,230 @@ def compiler_cell(m):
     return text + (" (%s)" % m["toolchain"] if m.get("toolchain") else "")
 
 
+def stops(m):
+    """What stops the rest of a build's functions (the report's table "What stops the rest"): ({category:
+    count} by reason_category, {refusal category: count}, the refusal category most functions have as
+    (category, count), or None)."""
+    counts = {}
+    for key, n in (m.get("lift") or {}).get("reasons", {}).items():
+        counts[reason_category(key)] = counts.get(reason_category(key), 0) + n
+    refused = {k: n for k, n in counts.items() if k.startswith("refused: ")}
+    top = max(refused.items(), key=lambda kv: kv[1]) if refused else None
+    return counts, refused, top
+
+
+# ---- the report as data (report --json) ----
+
+JSON_VERSION = 1
+FIGURES = (     # (key, title, unit): a measurement's figures, one number (or yes/no) each (figures())
+    ("functions", "functions", "count"),
+    ("instruction_bytes", "code bytes", "bytes"),
+    ("listing_identical", "the listing rebuilds the image byte for byte", "flag"),
+    ("raw_words", "raw words in the listing", "count"),
+    ("ghidra_found", "functions Ghidra found without the symbols", "count"),
+    ("ghidra_missed", "functions Ghidra missed", "count"),
+    ("ghidra_extra", "starts Ghidra found that are no function", "count"),
+    ("lifted", "functions lifted (dread lift --check)", "count"),
+    ("checked", "functions the lift check decided", "count"),
+    ("lifted_share", "share lifted of those decided", "percent"),
+    ("dropped", "dropped by the lift check", "count"),
+    ("refused", "refused by the lifter", "count"),
+    ("gained", "lifted, not lifted by the measurement before", "count"),
+    ("lost", "lifted by the measurement before, not now", "count"),
+    ("recorded", "recorded cases kept (dread sysrecord)", "count"),
+    ("readable", "readable (dread readable --check)", "count"),
+    ("readable_turned", "turned readable: built from readable C", "count"),
+    ("readable_gotos", "gotos left in readable C", "count"),
+    ("readable_statements", "statements of readable C", "count"),
+    ("readable_ratio", "statements of readable C against the source's, median", "ratio"),
+    ("noreturn", "functions that never return", "count"),
+    ("registers_measured", "functions whose registers were measured (dread callconv)", "count"),
+    ("registers_disagree", "of those, against regflow", "count"),
+    ("whatcc_right", "the libraries' toolchain told right (dread whatcc)", "flag"),
+    ("whatcc_matched", "library functions matched by their bytes", "count"),
+    ("whatcc_sure", "library functions named as certain", "count"),
+    ("whatcc_agree", "of those, the functions' own names", "count"),
+    ("groups_ari", "groups against the source files: adjusted Rand index", "ratio"),
+    ("groups_purity", "groups against the source files: purity", "ratio"),
+    ("groups_completeness", "groups against the source files: completeness", "ratio"),
+    ("seconds", "seconds, all steps", "seconds"),
+) + tuple(("seconds_" + s, "seconds of the %s step" % s, "seconds") for s in STEPS)
+
+
+def figures(m):
+    """{key: value} of a measurement (a metrics.json, of any age) for FIGURES: what the report shows of it,
+    a number or a yes/no each; a key is left out where its step did not run or the file predates it."""
+    out = {}
+
+    def put(key, value):
+        if value is not None:
+            out[key] = value
+    put("functions", m.get("functions"))
+    put("instruction_bytes", m.get("instruction_bytes"))
+    a = m.get("asm") or {}
+    if a:
+        put("listing_identical", bool(a.get("identical")))
+        put("raw_words", a.get("raw_words"))
+    g = m.get("ghidra") or {}
+    if g.get("ran"):
+        for k in ("found", "missed", "extra"):
+            put("ghidra_" + k, g.get(k))
+    lf = m.get("lift") or {}
+    v = lf.get("verdicts") or {}
+    if v:
+        total = sum(v.values())
+        put("lifted", v.get("accepted", 0))
+        put("checked", total)
+        put("lifted_share", round(100.0 * v.get("accepted", 0) / max(1, total), 1))
+        put("dropped", v.get("dropped", 0))
+        put("refused", v.get("refused", 0))
+        against = lf.get("against_last")
+        if against:
+            put("gained", len(against.get("gained", ())))
+            put("lost", len(against.get("lost", ())))
+    r = m.get("record") or {}
+    if "kept" in r:
+        put("recorded", r["kept"])
+    rd = m.get("readable") or {}
+    if rd.get("ran"):
+        put("readable", len(rd.get("accepted") or ()))
+        put("readable_turned", rd.get("turned"))
+        put("readable_gotos", (rd.get("gotos") or {}).get("sum"))
+        put("readable_statements", (rd.get("statements") or {}).get("sum"))
+        ratio = (rd.get("source") or {}).get("ratio")
+        if ratio:
+            put("readable_ratio", ratio[1])
+    put("noreturn", (m.get("noreturn") or {}).get("functions"))
+    c = m.get("callconv") or {}
+    if c.get("ran"):
+        put("registers_measured", c.get("measured"))
+        if c.get("measured") is not None and c.get("agree") is not None:
+            put("registers_disagree", c["measured"] - c["agree"])
+    w = m.get("whatcc") or {}
+    if w.get("ran"):
+        put("whatcc_right", bool(w.get("right")))
+        for k in ("matched", "sure", "agree"):
+            put("whatcc_" + k, w.get(k))
+    gr = m.get("groups") or {}
+    if gr.get("ran"):
+        for k in ("ari", "purity", "completeness"):
+            put("groups_" + k, gr.get(k))
+    total = None
+    for s in STEPS:
+        seconds = (m.get(s) or {}).get("seconds") if isinstance(m.get(s), dict) else None
+        if isinstance(seconds, (int, float)):
+            put("seconds_" + s, seconds)
+            total = (total or 0) + seconds
+    if total is not None:
+        put("seconds", round(total, 1))
+    return out
+
+
+def compiler_kind(cc):
+    """gcc, clang, or the compiler's own name (a build's cc)."""
+    name = os.path.basename(cc or "")
+    return "clang" if "clang" in name else "gcc" if name.endswith("gcc") else name
+
+
+def compiler_release(version):
+    """The release in a compiler's version line (GCC's after its package's parentheses, clang's after
+    "version": 4.9.3, 13.2.1, 16.0.6), or None: the first number with dots after a space, once what
+    stands in parentheses is taken out."""
+    text = re.sub(r"\([^)]*\)", " ", version or "")
+    m = re.search(r"(?:^|\s)(\d+\.\d+(?:\.\d+)?)(?=$|[\s-])", text)
+    return m.group(1) if m else None
+
+
+def flag_value(flags, prefixes):
+    """The value of the first flag with one of the prefixes (-mcpu=cortex-m3: cortex-m3), or None."""
+    for f in flags:
+        for p in prefixes:
+            if f.startswith(p) and len(f) > len(p):
+                return f[len(p):]
+    return None
+
+
+def history_of(where):
+    """[(when, file relative to the build, metrics)] of a build's earlier measurements (BUILD/history,
+    named by the time the measurement was written, in local time as measure() names them), oldest
+    first; files that cannot be read are left out."""
+    import glob
+    out = []
+    for path in sorted(glob.glob(os.path.join(where, "history", "metrics-*.json"))):
+        stamp = os.path.basename(path)[len("metrics-"):-len(".json")]
+        try:
+            when = time.mktime(time.strptime(stamp, "%Y%m%d-%H%M%S"))
+        except ValueError:
+            when = os.path.getmtime(path)
+        try:
+            with open(path) as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(m, dict):
+            out.append((when, os.path.relpath(path, where), m))
+    return sorted(out, key=lambda t: (t[0], t[1]))
+
+
+def report_data(recipe, bench=None):
+    """The report as data (report --json, docs/formats.md): every measured build of the recipe in its
+    order with what the report shows of it, and its earlier measurements' figures."""
+    builds, missing = [], []
+    for b in recipe["builds"]:
+        name = b["name"]
+        where = build_dir(recipe, name, bench)
+        path = os.path.join(where, "metrics.json")
+        try:
+            with open(path) as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            missing.append(name)
+            continue
+        try:
+            with open(os.path.join(where, "build.json")) as f:
+                info = json.load(f)
+        except (OSError, ValueError):
+            info = {}
+        cflags = info.get("cflags") or (m.get("cflags") or "").split()
+        counts, refused, top = stops(m)
+        kept = json.loads(json.dumps(m))
+        for step in ("lift", "readable"):         # (every function's name: the page shows counts)
+            if isinstance(kept.get(step), dict):
+                kept[step].pop("accepted", None)
+        when = os.path.getmtime(path)
+        history = [{"when": t, "file": f, "figures": figures(old)} for t, f, old in history_of(where)]
+        history.append({"when": when, "file": "metrics.json", "figures": figures(m)})
+        builds.append({
+            "build": name, "project": b.get("project"), "directory": where, "target": os.path.exists(
+                os.path.join(where, "dread.toml")), "when": when,
+            "current": info.get("made_from") == made_from(recipe, name) if info.get("made_from") else None,
+            "cc": m.get("cc") or b.get("cc"), "kind": compiler_kind(m.get("cc") or b.get("cc")),
+            "version": m.get("version"), "release": compiler_release(m.get("version")),
+            "toolchain": m.get("toolchain"), "compiler": compiler_cell(m), "cflags": " ".join(cflags),
+            "optimisation": next((f for f in reversed(cflags) if re.fullmatch(r"-O\w*", f)), None),
+            "cpu": flag_value(cflags, ("-mcpu=", "-march=", "-mmcu=")), "summary": summary_line(m),
+            "figures": figures(m), "not_lifted": sum(n for v, n in ((m.get("lift") or {}).get("verdicts") or {}).items()
+                                                     if v != "accepted"),
+            "stops": {c: counts.get(c, 0) for c in CATEGORIES}, "refused": sum(refused.values()),
+            "refused_most": {"category": top[0][len("refused: "):], "count": top[1]} if top else None,
+            "metrics": kept, "history": history})
+    return {"version": JSON_VERSION, "recipe": recipe["name"], "file": recipe["_file"],
+            "bench": os.path.join(bench or bench_dir(), recipe["name"]),
+            "figures": [{"key": k, "title": t, "unit": u} for k, t, u in FIGURES], "categories": list(CATEGORIES),
+            "builds": builds, "missing": missing}
+
+
+def write_json(data, path):
+    """A JSON report written whole and renamed into place (a reader never sees half of it)."""
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.replace(path + ".tmp", path)
+    return path
+
+
 def report(recipe, bench=None, out=print):
     """BENCH/NAME/report.md from every build's metrics.json."""
     rows = []
@@ -1146,11 +1377,7 @@ def report(recipe, bench=None, out=print):
         lf = m.get("lift", {})
         if not lf.get("verdicts"):
             continue
-        counts = {}
-        for key, n in lf.get("reasons", {}).items():
-            counts[reason_category(key)] = counts.get(reason_category(key), 0) + n
-        refused = {k: n for k, n in counts.items() if k.startswith("refused: ")}
-        top = max(refused.items(), key=lambda kv: kv[1]) if refused else None
+        counts, refused, top = stops(m)
         lines.append("| %s | %s | %d | %s | %d | %s |" % (
             m["build"], compiler_cell(m), sum(n for v, n in lf["verdicts"].items() if v != "accepted"),
             " | ".join(str(counts.get(c, 0)) for c in CATEGORIES), sum(refused.values()),
@@ -1206,6 +1433,9 @@ def main(argv=None):
                         help="toolchain: remove the images of older versions of the toolchains' files")
     parser.add_argument("--steps", default=",".join(STEPS), help="measuring steps (default: %s)" % ",".join(STEPS))
     parser.add_argument("--jobs", type=int, help="compilers at once")
+    parser.add_argument("--json", metavar="FILE",
+                        help="report (and measure, all): also write the report as JSON to FILE, with each build's "
+                             "earlier measurements (docs/formats.md)")
     args = parser.parse_args(argv)
     try:
         if args.action == "toolchain":
@@ -1229,6 +1459,8 @@ def main(argv=None):
                 measure(recipe, name, steps=steps)
         if args.action in ("report", "all", "measure"):
             report(recipe)
+            if args.json:
+                print("report as JSON: %s" % write_json(report_data(recipe), args.json))
     except BenchError as e:
         print("dread bench: %s" % e, file=sys.stderr)
         return 1

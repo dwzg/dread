@@ -33,9 +33,12 @@ and dread/web/app.js; they answer through the same server.
    needed), .jobs (the server's dread.jobs Jobs: the target's, or without a target the user's, run in
    server.home) and .read_only. A page runs DREAD's commands as jobs with
    dread.guipages.run start_command(request, COMMAND, values=... or args=[...], grace=, after=, cwd=):
-   the record's "id" is the job, #/jobs/N its page, /api/job-log its log; after= chains jobs. It returns data or (status, data); Failure(status, message) answers {"error":
-   message}, a KeyError 404, a ValueError or TypeError 400, anything else 500 (the traceback on the
-   server's stderr).
+   the record's "id" is the job, #/jobs/N its page, /api/job-log its log; after= chains jobs. A page whose
+   jobs must not land in the target's directory (the leak check's name a private project's files) keeps
+   jobs of its own: request.server.jobs_of_page(NAME, DIRECTORY), made on first use as the server's are
+   (none where it runs none) and closed with it; the page then shows their state and logs itself. It
+   returns data or (status, data); Failure(status, message) answers {"error": message}, a KeyError 404, a
+   ValueError or TypeError 400, anything else 500 (the traceback on the server's stderr).
 
 2. dread/web/NAME.js, an ES module the page imports when it starts, after app.js:
 

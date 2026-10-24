@@ -4582,8 +4582,76 @@ reimplement them.
     for byte the traced image (a rebuilt image older than the tables has none: the view shows the note);
     tried with a few hundred functions, not a large target's thousands of failing cases (the view lists
     eight before "all").
-- [ ] 4. Result views for the tools the GUI does not show yet: bench results, cclab profiles, leakcheck's
-  hits.
+- [x] 4. Result views for the tools the GUI does not show yet: bench results, cclab profiles, leakcheck's
+  hits. Done 2026-10-24 (docs/decisions.md, "Pages of the tools' results"): three pages, each reading its
+  tool's own `--json` record and running the tool as a job (the report by itself where its record is
+  missing or older than what it reads and no job of the tool runs on it; anything longer on a button):
+  - The tools' JSON (docs/formats.md): `dread bench report --json FILE` (also measure and all), dread.bench
+    report_data: each build's figures as the report shows them (FIGURES, one number each: figures()), what
+    stops the rest, its compiler (kind, release, the flags' optimisation and cpu), whether the recipe changed
+    since it was built, its metrics without the lists of every function's name, and the same figures of
+    every earlier measurement (BUILD/history) for a trend; report.md byte for byte as before on the 39
+    FreeRTOS builds. `dread cclab report --json FILE`: the report is data first now (report.data,
+    report.markdown), with the probes whose measurement failed apart and the profile; report.md and
+    profile.toml byte for byte as before. `dread leakcheck --json FILE`: each hit with its file, its lines
+    and whether it is allowed, the history's with their commits, the authors, what was looked for; of the
+    private files only their paths and the strings that matched; mode 600; the printed lines unchanged.
+  - The bench (#/bench, key m; dread/guipages/bench.py, bench.js, bench.css): a recipe's builds as a table
+    that sorts by any column and filters by compiler, release, -O, core, project and text, each row with a
+    small line of the chosen figure over the build's measurements; a build's page (#/bench/RECIPE/BUILD) with
+    tiles, the trend as a chart (crosshair and readout) and as a table, every figure against the measurement
+    before, what stops the rest, why the rest is not lifted, what it gained and lost, registers against
+    regflow, the readable C's figures; "Measure again" (the steps chosen, by default those it had; the
+    command line and an estimate from the build's last metrics.json; at least one build), "Every option"
+    (the Run page's form of dread bench); "Open as the target" (Server.open_target by the build's name under
+    BENCH, as the Setup page opens a target).
+  - The compiler lab (#/cclab, key i; cclab.py, cclab.js, cclab.css): a work directory typed as a path, the
+    compilers measured there; a compiler's profile (#/cclab/ADAPTER): what failed first (builds, probes with
+    each error and its builds), then where arguments arrive and results come back, the types, what each
+    operation calls or does inline, what a call keeps with the stack alignment, where the functions lie, the
+    runtime helpers with the registers they change and those the compiler's code reads after them (the
+    profile), what DREAD lifts; rows whose builds differ marked, a filter and "only where the builds differ".
+    A run from a form (an adapter: built-in, ce:ID, relink:DIR or a file; its matrix as a grid; one's own
+    probes; --lift, --guard), "Check the adapter" (dread cclab doctor), the report.
+  - The leak check (#/leakcheck, key w; leakcheck.py, leakcheck.js, leakcheck.css): the form (a tree,
+    default the DREAD the server runs; tables, words, allow list by their paths; --history; --min), the
+    command line, the check as a job of the page's own (Server.jobs_of_page: its records and logs in
+    $XDG_STATE_HOME/dread/gui/leakcheck, never in the target's directory), its log while it runs; the hits
+    with file, lines and string, allowed ones on request, the history's with their commits, the authors; the
+    checks made, the form starting from the newest. The server never opens the private files.
+  - The bar at a phone's width (app.css): the brand's mark alone, the search at least 96 px, the pages'
+    buttons scrolling sideways beside it (three more of them had left the search a few pixels wide).
+  - Checked: tests/test_gui_bench.py, test_gui_cclab.py, test_gui_leakcheck.py (the APIs: jobs started and
+    read back, records made stale, refusals, the token, read-only servers; with GCC a build measured from the
+    page and opened as the target, a compiler's probes run with a probe of one's own that never returns; the
+    leak check's canaries, strings of the private files in no tree file, in no answer, page or log, and its
+    jobs nowhere in the target's directory), test_gui_results_browser.py (the three pages in headless Chrome:
+    sorting, filters, the trend's chart and readout, the profile's filters, a check from the form; no script
+    error, no sideways scroll at 390 px), the tools' JSON in test_bench.py, test_cclab.py, test_leakcheck.py.
+    Tried in headless Chrome, light and dark, 1360 and 390 px wide: a copy of the 39 FreeRTOS builds' results
+    (metrics, history, build.json; times kept) and of mps2-gcc-Os whole, which was measured from its page
+    (asm, readable, noreturn, callconv: 463 s on a busy machine, the readable step 458 s; 317 of its 329
+    lifted functions readable, 24 gotos, statements against the source's median 1.10; callconv measured 275
+    functions where the measurement of 2026-10-21 measured 283, not traced) and opened as the target; GCC
+    16's 16 builds run from the compiler lab page with --lift and a probe of one's own that never returns
+    (497 s on a busy machine, the lift checks 30-50 s a build, the report started by the page after it; the
+    probe's error in every build, each with its address; the lift check of cortex-m0-O2 and -O3 gave no
+    verdicts: below); a leak check of a made-up project with a history.
+  - Not established: staleness by the files' times misses a change of DREAD's own code; a measurement's
+    estimate is its last one's seconds (the machine's load then); a recipe outside DREAD's bench/ has its
+    results shown and no job (the Run page's form takes a recipe's path); a build directory of BENCH whose
+    report names a build the recipe no longer has is not listed; `dread cclab compare` (two compilers side by
+    side) has no JSON and no view yet; the pages tried in Chrome only, not on macOS.
+  Left of "The GUI for everything": the comparison of two compilers (cclab compare) as a view; a view of
+  dread whatcc, samecode and callpair on a target of one's own (their results show in the job's log only);
+  adding a hit to the allow list from the leak check page (a change of the user's private file: asked, not
+  assumed).
+- [ ] dread cclab run --lift with gcc-arm (GCC 16.2): the lift check of cortex-m0-O2 and cortex-m0-O3 fails as
+  a whole ("the build failed: the link failed": the lifted C of op_switch_jump, built for the Cortex-M0, calls
+  `__gnu_thumb1_case_uqi`, which the link does not have), so those builds get no verdicts at all; at -Os the
+  same function is dropped alone ("its C calls __gnu_thumb1_case_uqi, which the original does not call").
+  A link error of one function's C should drop that function, not the check (found 2026-10-24 by the
+  compiler lab page's trial; not traced further).
 
 ## Browser view (`dread gui`; asked for by the user on 2026-10-18)
 

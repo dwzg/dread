@@ -5,6 +5,10 @@ build agrees); for each runtime helper the probes called directly, its names (al
 address), the operations that called it, and the registers it changed besides its results, over
 every call in every build. A build that failed is listed with its error. It says what was measured;
 it explains nothing (that is a human's or an LLM's reading of it).
+
+The report is data first (data(): what report.md shows, the probes whose measurement failed, and the
+profile of profile.py), and report.md is made from it (markdown()); `dread cclab report --json FILE`
+writes the data of every adapter it reports on (docs/formats.md), which dread gui's cclab page reads.
 """
 import collections
 import glob
@@ -105,116 +109,187 @@ def lift_verdicts(result):
     return {fn: v[0] if v[0] == "accepted" else "%s: %s" % (v[0], reason_kind(v[1])) for fn, v in got.items()}
 
 
-def lift_lines(good):
-    """The report's section on run --lift: how many probe functions each build's lift check accepted,
-    and the others with their verdicts. [] when no build was lifted."""
+def lift_data(good):
+    """A report's run --lift as data: {"builds": {build: {"accepted", "checked"}}, "errors": {build: why
+    its check did not run}, "rows": [{"probe", "results": [{"text", "builds"}]}] (the probe functions not
+    lifted somewhere, each verdict with the builds that gave it)}; None when no build was lifted."""
     lifted = {k: lift_verdicts(v) for k, v in good.items() if lift_verdicts(v)}
     errors = {k: v["lift"]["error"] for k, v in good.items() if "error" in (v.get("lift") or {})}
     if not lifted and not errors:
-        return []
-    lines = ["", "## What DREAD lifts", "",
-             "dread lift --check on each build's probe functions (run --lift): the compiler's code translated "
-             "instruction by instruction, rebuilt and compared with the original in the emulator.", ""]
-    lines += ["- %s: %d of %d" % (k, sum(1 for t in v.values() if t == "accepted"), len(v)) for k, v in lifted.items()]
-    lines += ["- %s: %s" % (k, e) for k, e in errors.items()]
+        return None
     rows = collections.OrderedDict()
     for key, verdicts in lifted.items():
         for fn, text in verdicts.items():
             if text != "accepted":
                 rows.setdefault(fn, collections.OrderedDict()).setdefault(text, []).append(key)
-    if rows:
-        lines += ["", "| probe | not lifted (builds) |", "|---|---|"]
-        for fn, seen in rows.items():
-            lines.append("| `%s` | %s |" % (fn, "; ".join("%s (%s)" % (text, builds_text(keys, lifted))
-                                                           for text, keys in seen.items())))
-    return lines
+    return {"builds": {k: {"accepted": sum(1 for t in v.values() if t == "accepted"), "checked": len(v)}
+                       for k, v in lifted.items()},
+            "errors": errors,
+            "rows": [{"probe": fn, "results": [{"text": t, "builds": keys} for t, keys in seen.items()]}
+                     for fn, seen in rows.items()]}
 
 
-def write(work, adapter_name=None, out=print):
+def result_text(kind, field, entry, arch):
+    """A probe's result in a section's cell: op_text, keeps_text, or the entry's field (its error)."""
+    if kind == "op":
+        return op_text(entry, arch)
+    if kind == "keeps":
+        return keeps_text(entry)
+    return entry.get(field, entry.get("error", "?"))
+
+
+def data(work, name):
+    """One adapter's report as data (report --json, docs/formats.md), what report.md shows: the compiler,
+    the builds measured and failed, each section's probes with their distinct results and the builds that
+    gave them, the stack alignment, where the functions lie, the runtime helpers, what DREAD lifts, the
+    probes whose measurement failed (an entry with an error, by build) and the profile (profile.py). None
+    where nothing was measured."""
+    from dread.cclab.profile import ORDER
+    builds = load(work, name)
+    if not builds:
+        return None
+    good = {k: v for k, v in builds.items() if "results" in v}
+    arch = next((v.get("arch") for v in good.values() if v.get("arch")), "arm")
+    version = None
+    vpath = os.path.join(work, name, "version.txt")
+    if os.path.exists(vpath):
+        with open(vpath) as f:
+            lines = f.read().strip().splitlines()
+        version = lines[0] if lines else ""
+    functions, probe_files = [], {}
+    for result in good.values():
+        for fn in result["results"]:
+            if fn not in functions:
+                functions.append(fn)
+        probe_files.update(result.get("probes") or {})
+    sections, failed_probes = [], collections.OrderedDict()
+    for kind, title, field in SECTIONS:
+        rows = []
+        for fn in functions:
+            seen = collections.OrderedDict()
+            note = ""
+            for key, result in good.items():
+                entry = result["results"].get(fn)
+                if entry is None or entry.get("measure") != kind:
+                    continue
+                note = entry.get("note", "")
+                seen.setdefault(result_text(kind, field, entry, arch), []).append(key)
+                if "error" in entry:
+                    got = failed_probes.setdefault(fn, {"probe": fn, "kind": kind, "what": note,
+                                                        "results": collections.OrderedDict()})
+                    got["results"].setdefault(entry["error"], []).append(key)
+            if seen:
+                rows.append({"probe": fn, "what": note,
+                             "results": [{"text": t, "builds": keys} for t, keys in seen.items()]})
+        aligned = [e["aligned"] for r in good.values() for e in r["results"].values()
+                   if e.get("measure") == kind == "keeps" and e.get("aligned")]
+        sections.append({"kind": kind, "title": title, "rows": rows, "aligned": min(aligned) if aligned else None})
+    layout = collections.OrderedDict()
+    for key, result in good.items():
+        for row, text in layout_cells(result.get("layout")).items():
+            layout.setdefault(row, collections.OrderedDict()).setdefault(text, []).append(key)
+    notes = dict(LAYOUT)
+    helpers = collections.OrderedDict()
+    for key, result in good.items():
+        for fn, entry in result["results"].items():
+            for h in entry.get("helpers", []):
+                if h.get("depth", 1) != 1:
+                    continue
+                info = helpers.setdefault(h["function"], {"ops": set(), "changed": set(), "builds": set()})
+                info["ops"].add(fn)
+                info["changed"] |= set(h.get("changed", []))
+                info["builds"].add(key)
+    from dread.cclab import profile
+    return {"adapter": name, "arch": arch, "compiler": version,
+            "builds": [{"build": k, "flags": v.get("flags"), "picked": v.get("picked"), "measured": "results" in v,
+                        "error": v.get("error")} for k, v in builds.items()],
+            "measured": list(good), "failed": {k: v["error"] for k, v in builds.items() if "results" not in v},
+            "probes": probe_files, "sections": sections,
+            "layout": [{"row": row, "what": notes.get(row, row), "results": [{"text": t, "builds": keys}
+                                                                             for t, keys in seen.items()]}
+                       for row, seen in layout.items()],
+            "helpers": [{"helper": h, "called_by": sorted(info["ops"]),
+                         "changed": [r for r in ORDER if r in info["changed"]] + sorted(info["changed"] - set(ORDER)),
+                         "builds": sorted(info["builds"])} for h, info in helpers.items()],
+            "lift": lift_data(good),
+            "failed_probes": [dict(p, results=[{"error": e, "builds": keys} for e, keys in p["results"].items()])
+                              for p in failed_probes.values()],
+            "profile": profile.build_profile(work, name) if good else None}
+
+
+def markdown(d):
+    """report.md of an adapter's data()."""
+    good = d["measured"]
+    lines = ["# dread cclab: %s" % d["adapter"], ""]
+    if d["compiler"] is not None:
+        lines += ["Compiler: `%s`" % d["compiler"], ""]
+    lines += ["%d builds measured: %s." % (len(good), ", ".join(good))]
+    if d["failed"]:
+        lines += ["", "Failed: " + "; ".join("%s (%s)" % (k, e) for k, e in d["failed"].items())]
+    for s in d["sections"]:
+        if s["rows"]:
+            lines += ["", "## " + s["title"], "", "| probe | what | result (builds) |", "|---|---|---|"]
+            lines += ["| `%s` | %s | %s |" % (row["probe"], row["what"], "; ".join(
+                "%s (%s)" % (r["text"], builds_text(r["builds"], good)) for r in row["results"])) for row in s["rows"]]
+        if s["aligned"]:
+            lines += ["", "Every frame at a call is a multiple of %d bytes, over all builds: the stack alignment "
+                          "the compiler keeps at calls (given an aligned entry)." % s["aligned"]]
+    if d["layout"]:
+        lines += ["", "## Where the functions lie", "", "| what | result (builds) |", "|---|---|"]
+        for row in d["layout"]:
+            lines.append("| %s | %s |" % (row["what"], "; ".join(
+                "%s (%s)" % (r["text"], builds_text(r["builds"], good)) for r in row["results"])))
+    if d["helpers"]:
+        lines += ["", "## Runtime helpers the probes call", "",
+                  "Registers changed: over every call in every build (results included).", "",
+                  "| helper | called by | registers changed | builds |", "|---|---|---|---|"]
+        for h in d["helpers"]:
+            lines.append("| `%s` | %s | %s | %s |" % (h["helper"], ", ".join(h["called_by"]),
+                                                     " ".join(h["changed"]) or "-", builds_text(h["builds"], good)))
+    lift = d["lift"]
+    if lift is not None:
+        lines += ["", "## What DREAD lifts", "",
+                  "dread lift --check on each build's probe functions (run --lift): the compiler's code translated "
+                  "instruction by instruction, rebuilt and compared with the original in the emulator.", ""]
+        lines += ["- %s: %d of %d" % (k, v["accepted"], v["checked"]) for k, v in lift["builds"].items()]
+        lines += ["- %s: %s" % (k, e) for k, e in lift["errors"].items()]
+        if lift["rows"]:
+            lines += ["", "| probe | not lifted (builds) |", "|---|---|"]
+            for row in lift["rows"]:
+                lines.append("| `%s` | %s |" % (row["probe"], "; ".join(
+                    "%s (%s)" % (r["text"], builds_text(r["builds"], lift["builds"])) for r in row["results"])))
+    return "\n".join(lines) + "\n"
+
+
+JSON_VERSION = 1
+
+
+def write(work, adapter_name=None, out=print, json_path=None):
+    """WORK/ADAPTER/report.md and profile.toml for each adapter in work (or the one named); with json_path,
+    also every adapter's data() as JSON there ({"version", "work", "adapters": {name: data}}, written
+    whole and renamed into place)."""
     adapters = [adapter_name] if adapter_name else sorted(
         d for d in os.listdir(work) if os.path.isdir(os.path.join(work, d)))
+    found = {}
     for name in adapters:
-        builds = load(work, name)
-        if not builds:
+        d = data(work, name)
+        if d is None:
             out("dread cclab report: nothing measured for %s in %s" % (name, work))
             continue
-        good = {k: v for k, v in builds.items() if "results" in v}
-        arch = next((v.get("arch") for v in good.values() if v.get("arch")), "arm")
-        lines = ["# dread cclab: %s" % name, ""]
-        version = os.path.join(work, name, "version.txt")
-        if os.path.exists(version):
-            with open(version) as f:
-                lines += ["Compiler: `%s`" % f.read().strip().splitlines()[0], ""]
-        lines += ["%d builds measured: %s." % (len(good), ", ".join(good))]
-        bad = {k: v for k, v in builds.items() if "results" not in v}
-        if bad:
-            lines += ["", "Failed: " + "; ".join("%s (%s)" % (k, v["error"]) for k, v in bad.items())]
-        functions = []
-        for result in good.values():
-            for fn in result["results"]:
-                if fn not in functions:
-                    functions.append(fn)
-        for kind, title, field in SECTIONS:
-            rows = []
-            for fn in functions:
-                seen = collections.OrderedDict()
-                note = ""
-                for key, result in good.items():
-                    entry = result["results"].get(fn)
-                    if entry is None or entry.get("measure") != kind:
-                        continue
-                    note = entry.get("note", "")
-                    if kind == "op":
-                        text = op_text(entry, arch)
-                    elif kind == "keeps":
-                        text = keeps_text(entry)
-                    else:
-                        text = entry.get(field, entry.get("error", "?"))
-                    seen.setdefault(text, []).append(key)
-                if seen:
-                    cells = "; ".join("%s (%s)" % (text, builds_text(keys, good)) for text, keys in seen.items())
-                    rows.append("| `%s` | %s | %s |" % (fn, note, cells))
-            if rows:
-                lines += ["", "## " + title, "", "| probe | what | result (builds) |", "|---|---|---|"] + rows
-            aligned = [e["aligned"] for r in good.values() for e in r["results"].values()
-                       if e.get("measure") == kind == "keeps" and e.get("aligned")]
-            if aligned:
-                lines += ["", "Every frame at a call is a multiple of %d bytes, over all builds: the stack alignment "
-                              "the compiler keeps at calls (given an aligned entry)." % min(aligned)]
-        rows = collections.OrderedDict()
-        for key, result in good.items():
-            for row, text in layout_cells(result.get("layout")).items():
-                rows.setdefault(row, collections.OrderedDict()).setdefault(text, []).append(key)
-        if rows:
-            notes = dict(LAYOUT)
-            lines += ["", "## Where the functions lie", "", "| what | result (builds) |", "|---|---|"]
-            for row, seen in rows.items():
-                lines.append("| %s | %s |" % (notes.get(row, row), "; ".join(
-                    "%s (%s)" % (text, builds_text(keys, good)) for text, keys in seen.items())))
-        helpers = collections.OrderedDict()
-        for key, result in good.items():
-            for fn, entry in result["results"].items():
-                for h in entry.get("helpers", []):
-                    if h.get("depth", 1) != 1:
-                        continue
-                    info = helpers.setdefault(h["function"], {"ops": set(), "changed": set(), "builds": set()})
-                    info["ops"].add(fn)
-                    info["changed"] |= set(h.get("changed", []))
-                    info["builds"].add(key)
-        if helpers:
-            lines += ["", "## Runtime helpers the probes call", "",
-                      "Registers changed: over every call in every build (results included).", "",
-                      "| helper | called by | registers changed | builds |", "|---|---|---|---|"]
-            from dread.cclab.profile import ORDER
-            for h, info in helpers.items():
-                changed = [r for r in ORDER if r in info["changed"]] + sorted(info["changed"] - set(ORDER))
-                lines.append("| `%s` | %s | %s | %s |" % (h, ", ".join(sorted(info["ops"])), " ".join(changed) or "-",
-                                                         builds_text(sorted(info["builds"]), good)))
-        lines += lift_lines(good)
+        found[name] = d
         path = os.path.join(work, name, "report.md")
         with open(path, "w") as f:
-            f.write("\n".join(lines) + "\n")
+            f.write(markdown(d))
         from dread.cclab import profile
-        made = profile.write(work, name)
+        made = profile.write(work, name, d["profile"]) if d["profile"] is not None else None
         out("dread cclab report: %s%s" % (path, ", " + made if made else ""))
+    if json_path:
+        folder = os.path.dirname(os.path.abspath(json_path))
+        os.makedirs(folder, exist_ok=True)
+        with open(json_path + ".tmp", "w") as f:
+            json.dump({"version": JSON_VERSION, "work": os.path.abspath(work), "adapters": found}, f, indent=1,
+                      sort_keys=True)
+            f.write("\n")
+        os.replace(json_path + ".tmp", json_path)
+        out("dread cclab report: %s" % json_path)
     return 0

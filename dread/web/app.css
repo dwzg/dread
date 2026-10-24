@@ -553,6 +553,15 @@ a.button:hover { border-color: var(--accent); text-decoration: none; }
   .rel-legend { display: none; }
   .rel-bar { padding: 7px 10px; }
 }
+/* a phone: the search keeps room to type; the brand shows its mark alone and the bar's buttons (one per
+   page) scroll sideways beside the search when they do not fit */
+@media (max-width: 560px) {
+  .brand { font-size: 0; gap: 0; letter-spacing: 0; }
+  .search { min-width: 96px; }
+  .tools { min-width: 0; overflow-x: auto; scrollbar-width: none; padding: 8px 8px 8px 0; margin-right: -8px; }
+  .tools::-webkit-scrollbar { display: none; }
+  .tools > * { flex: none; }
+}
 @media (max-width: 700px) {
   .tl-cols { display: none; }
   .tlrow { height: 44px; padding: 0 10px; gap: 0 10px; grid-template-columns: 6ch minmax(0, 1fr); grid-template-rows: 1fr 1fr; }

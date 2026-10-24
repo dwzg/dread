@@ -89,7 +89,15 @@ the tools know and decided, and runs nothing heavy itself:
   and the C, its instructions marked in the listing and its lines in the C: where a failing case parts
   (dread trace), why its cases leave code unrun (dread uncovered), the changes to its C no case notices
   (dread mutate), its registers (dread.regflow's facts, dread callconv's measurement); each from its
-  tool's --json record in BUILD/gui/views, run as a job from the page where it is missing or stale.
+  tool's --json record in BUILD/gui/views, run as a job from the page where it is missing or stale;
+- the results of the tools that work beyond one target, each a page of its own that reads its tool's --json
+  record and runs the tool as a job: the bench (#/bench, key m; dread/guipages/bench.py: a recipe's builds
+  with their figures and trends from dread bench report --json, a build's page, a measurement as a job, the
+  build opened as the target), the compiler lab (#/cclab, key i; dread/guipages/cclab.py: a compiler's
+  profile from dread cclab report --json, the probes and builds that failed, its probes run as a job) and
+  the leak check (#/leakcheck, key w; dread/guipages/leakcheck.py: dread leakcheck as a job of the page's
+  own, its jobs and records in the user's state directory, its hits with their files and lines, nothing of
+  the private files but what matched).
 A server started where there is no target (no --target, no $DREAD_TARGET, no dread.toml above the
 working directory) comes up with the Setup page alone: the browsing views wait for a target, its jobs
 (dread new, a provider's test) run in the directory it started in with their records in the user's
@@ -107,8 +115,8 @@ background; the page fills them in when they are ready.
 Pages of their own: the Run page is the first page that is a module of dread/guipages (its API routes
 registered from it, imported at start) with a script of its own in dread/web (run.js, imported by
 app.js and registered with its router); the Setup page (setup.py, setup.js) the second, the pilot page
-(pilot.py, pilot.js) the third; a function's views (views.py, views.js) are part of the function's page,
-through its hooks in app.js (functionHook). Later
+(pilot.py, pilot.js) the third, the bench, the compiler lab and the leak check after them; a function's
+views (views.py, views.js) are part of the function's page, through its hooks in app.js (functionHook). Later
 pages are added the same way without touching the lines of another; dread/guipages/__init__.py says how.
 The pages of browsing above stay here and in app.js.
 
@@ -130,6 +138,8 @@ nothing; what the names give is kept until a names table changes):
 - the pilot page's: /api/pilot, /api/pilot/runs, /api/pilot/job, /api/pilot/follow, /api/pilot/usage,
   /api/pilot/compare, POST /api/pilot/estimate, /api/pilot/start, /api/pilot/stop,
   /api/pilot/cancel-batches and /api/pilot/compare/start (dread/guipages/pilot.py);
+- the bench's /api/bench..., the compiler lab's /api/cclab... and the leak check's /api/leakcheck...
+  (dread/guipages/bench.py, cclab.py, leakcheck.py say what each answers);
 - /api/functions: each function's name, entry, size, origin and test record, its "certainty"
   (dread.relations CERTAINTY), "confidence" (its vote's agreement, where there was a vote), "proposed"
   (the name it goes by where the tables have none) and "review" ({"mark", "outcome", "old": the name
@@ -1357,13 +1367,28 @@ class Server(ThreadingHTTPServer):
     home = None                 # the directory the server started in: the jobs' without a target
     upload_limit = UPLOAD_LIMIT
     jobs_limit = 1
+    page_jobs = None            # {page: Jobs} of the pages that run jobs of their own (jobs_of_page)
 
     def server_close(self):
         super().server_close()
         if self.jobs is not None:
             self.jobs.close()
+        for jobs in list((self.page_jobs or {}).values()):
+            jobs.close()
         for state in list(self.RequestHandlerClass.states.values()):
             state.close()
+
+    def jobs_of_page(self, name, directory):
+        """A page's jobs of its own (dread.jobs Jobs in directory, made by make_jobs on first use, so none
+        run where this server runs none; stopped and closed with the server, kept across a change of target):
+        the leak check's, whose command lines name a private project's files and whose logs hold what matched,
+        so that they stay out of the target's directory (dread/guipages/leakcheck.py)."""
+        with self.RequestHandlerClass.lock:
+            if self.page_jobs is None:
+                self.page_jobs = {}
+            if name not in self.page_jobs:
+                self.page_jobs[name] = self.make_jobs(directory)
+            return self.page_jobs[name]
 
     def open_target(self, path):
         """Show another target (a dread.toml or its directory), or the first one: refused (TargetError)

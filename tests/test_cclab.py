@@ -731,3 +731,47 @@ def test_a_bundles_objects_relinked_here_measure_the_same(tmp_path):
         (tmp_path / "work" / "gcc-arm" / "version.txt").read_text()
     with pytest.raises(ad.AdapterError, match="no builds with objects"):
         ad.load("relink:" + str(tmp_path))
+
+
+SPIN_PROBE = ("int spin_forever(int a, int b) { volatile int n = a; for (;;) { n += b; } return n; }\n",
+              '[[probes]]\nfunction = "spin_forever"\nmeasure = "arg"\nnote = "a probe that never returns"\n')
+
+
+@needs_gcc
+def test_the_report_as_data(tmp_path):
+    """dread cclab report --json: the data report.md is made from (dread.cclab.report data), every adapter
+    of the work directory: each section's probes with their distinct results and the builds that gave them,
+    the probes whose measurement failed (one of one's own that never returns: its error, in both builds),
+    the helpers and the profile; report.md as the markdown of the same data."""
+    from dread.cclab import main, run, report
+    own = tmp_path / "own"
+    own.mkdir()
+    (own / "spin.c").write_text(SPIN_PROBE[0])
+    (own / "spin.toml").write_text(SPIN_PROBE[1])
+    work = tmp_path / "work"
+    run(ad.load("gcc-arm"), str(work), only=["cortex-m0-Os", "cortex-m3-Os"], names=["abi", "ops", "spin"], jobs=2,
+        out=lambda *x: None, probe_dirs=[str(own)])
+    out = tmp_path / "report.json"
+    assert main(["report", "--work", str(work), "--json", str(out)]) == 0
+    data = json.loads(out.read_text())
+    assert data["version"] == 1 and data["work"] == str(work) and list(data["adapters"]) == ["gcc-arm"]
+    a = data["adapters"]["gcc-arm"]
+    assert a["measured"] == ["cortex-m0-Os", "cortex-m3-Os"] and a["failed"] == {} and a["compiler"]
+    sections = {s["kind"]: s for s in a["sections"]}
+    rows = {r["probe"]: r for r in sections["arg"]["rows"]}
+    assert rows["pick_i5_5"] == {"probe": "pick_i5_5", "what": "the 5th of five ints",
+                                 "results": [{"text": "stack+0", "builds": ["cortex-m0-Os", "cortex-m3-Os"]}]}
+    udiv = {r["probe"]: r for r in sections["op"]["rows"]}["op_udiv"]["results"]
+    assert len(udiv) == 2 and "__aeabi_uidiv" in udiv[0]["text"] and udiv[1]["text"] == "inline (udiv)"
+    failed, = a["failed_probes"]
+    assert failed["probe"] == "spin_forever" and failed["kind"] == "arg" and failed["what"] == "a probe that never returns"
+    assert sorted(b for r in failed["results"] for b in r["builds"]) == ["cortex-m0-Os", "cortex-m3-Os"]
+    assert all(r["error"] for r in failed["results"])           # (each build's error: its addresses differ)
+    assert a["probes"]["spin_forever"] == "spin" and any("__aeabi_uidiv" in h["helper"] for h in a["helpers"])
+    assert a["profile"]["compiler"]["builds"] == ["cortex-m0-Os", "cortex-m3-Os"] and a["profile"]["helpers"]
+    text = (work / "gcc-arm" / "report.md").read_text()
+    assert text == report.markdown(report.data(str(work), "gcc-arm"))
+    assert "| `pick_i5_5` | the 5th of five ints | stack+0 (all 2) |" in text
+    row = next(line for line in text.splitlines() if line.startswith("| `spin_forever` |"))
+    assert all("%s (%s)" % (r["error"], ", ".join(r["builds"]) if len(r["builds"]) < 2 else "all 2") in row
+               for r in failed["results"]), row

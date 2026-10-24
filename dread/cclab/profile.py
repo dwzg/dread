@@ -93,9 +93,10 @@ def _toml_value(v):
     return json.dumps(v)
 
 
-def write(work, adapter):
-    """Write WORK/ADAPTER/profile.toml; returns its path, or None when nothing was measured."""
-    profile = build_profile(work, adapter)
+def write(work, adapter, profile=None):
+    """Write WORK/ADAPTER/profile.toml (from profile, a build_profile() made already, or made here);
+    returns its path, or None when nothing was measured."""
+    profile = profile or build_profile(work, adapter)
     if not profile["compiler"]["builds"]:
         return None
     lines = ["# dread cclab: the profile of %s (written by dread cclab report; see dread/cclab/profile.py)" % adapter,

@@ -666,3 +666,105 @@ def test_the_readable_step_measures_readable_c_against_the_source(tmp_path, monk
         {k: v for k, v in got["source"].items() if k not in strip}
     lines = bench.readable_report([{"build": "m3-Os", "readable": got}])
     assert any(line.startswith("| m3-Os | %d | " % len(lifted)) for line in lines), lines
+
+
+def measurement(lifted, checked, readable=None, seconds=100.0, stamp=None):
+    """A metrics.json as dread bench measure writes it (the steps the report reads), made up for a test."""
+    m = {"build": "m3-Os", "functions": checked, "instruction_bytes": 4000, "image_bytes": 4400, "cc": "arm-none-eabi-gcc",
+         "cflags": "-mcpu=cortex-m3 -mthumb -Os", "toolchain": None, "version": "arm-none-eabi-gcc (Example 1:2.0) 13.2.1 20231009",
+         "asm": {"identical": True, "raw_words": 0, "seconds": 0.5},
+         "ghidra": {"ran": True, "found": checked - 2, "missed": 2, "extra": 0, "seconds": 3.0},
+         "lift": {"ran": True, "verdicts": {"accepted": lifted, "dropped": checked - lifted - 1, "refused": 1},
+                  "reasons": {"dropped: UNCOVERED f: N of N instructions of the original never ran: N": checked - lifted - 1,
+                              "refused: N reads a stack pointer (msp): the C's stack is not the original's": 1},
+                  "accepted": ["fn_%d" % i for i in range(lifted)], "seconds": seconds},
+         "noreturn": {"functions": 2, "seconds": 0.2},
+         "callconv": {"ran": True, "measured": lifted, "agree": lifted - 1, "functions": {}, "seconds": 1.0,
+                      "disagree": {"fn_0": {"reads, regflow does not": ["r2"]}}}}
+    if readable is not None:
+        from dread import cmetrics
+        m["readable"] = {"ran": True, "lifted": lifted, "turned": readable + 1, "accepted": ["fn_%d" % i for i in range(readable)],
+                         "stay_lifted": {"its readable C does not compile": lifted - readable}, "measured": readable,
+                         "gate": "ran", "seconds_gate": 7.0, "seconds_figures": 1.0, "kept_lifted": 0,
+                         "source": {"ran": False, "why": "no clang on this machine", "ratio": [0.9, 1.1, 1.4]},
+                         "seconds": 9.0}
+        for key in cmetrics.READABLE + ("lifted_statements", "lifted_gotos"):
+            m["readable"][key] = {"sum": 10, "median": 1, "max": 4, "functions": readable}
+        m["readable"]["gotos"] = {"sum": 3, "median": 0, "max": 2, "functions": 2}
+    return m
+
+
+def write_measurements(where, recipe_, history, now):
+    """BUILD/metrics.json (now) and history/ (the earlier ones, named by their times), with build.json."""
+    os.makedirs(os.path.join(where, "history"), exist_ok=True)
+    for stamp, m in history:
+        with open(os.path.join(where, "history", "metrics-%s.json" % stamp), "w") as f:
+            json.dump(m, f)
+    with open(os.path.join(where, "metrics.json"), "w") as f:
+        json.dump(now, f)
+    with open(os.path.join(where, "build.json"), "w") as f:
+        json.dump({"recipe": "gizmo", "build": "m3-Os", "project": "m3", "cc": "arm-none-eabi-gcc", "toolchain": None,
+                   "version": now["version"], "cflags": now["cflags"].split(), "sources": 5, "seconds": 1.0,
+                   "made_from": bench.made_from(recipe_, "m3-Os")}, f)
+
+
+def test_the_report_as_data(tmp_path, monkeypatch):
+    """dread bench report --json: each build's figures as the report shows them (dread.bench FIGURES), what
+    stops the rest by category, its compiler (kind, release, the flags' optimisation and cpu), whether the
+    recipe changed since it was built, its metrics without every function's name, and the same figures of
+    every earlier measurement (history/) oldest first; report.md as before; the same bytes twice. The
+    measurements are made up here (no compiler)."""
+    monkeypatch.setenv("DREAD_BENCH", str(tmp_path / "bench"))
+    r = recipe(tmp_path)
+    where = os.path.join(str(tmp_path / "bench"), "gizmo", "m3-Os")
+    write_measurements(where, r, [("20261020-101500", measurement(30, 40)), ("20261019-090000", measurement(25, 40))],
+                       measurement(33, 40, readable=31, seconds=80.0))
+    out = str(tmp_path / "report.json")
+    assert bench.main(["report", r["_file"], "--json", out]) == 0
+    first = open(out, "rb").read()
+    assert bench.main(["report", r["_file"], "--json", out]) == 0
+    assert open(out, "rb").read() == first                      # (deterministic)
+    data = json.loads(first)
+    assert data["version"] == 1 and data["recipe"] == "gizmo" and data["missing"] == []
+    assert [f["key"] for f in data["figures"]][:3] == ["functions", "instruction_bytes", "listing_identical"]
+    b, = data["builds"]
+    assert b["build"] == "m3-Os" and b["project"] == "m3" and b["current"] is True and b["target"] is False
+    assert (b["kind"], b["release"], b["optimisation"], b["cpu"]) == ("gcc", "13.2.1", "-Os", "cortex-m3")
+    f = b["figures"]
+    assert (f["lifted"], f["checked"], f["lifted_share"], f["dropped"], f["refused"]) == (33, 40, 82.5, 6, 1)
+    assert (f["readable"], f["readable_gotos"], f["readable_ratio"]) == (31, 3, 1.1)
+    assert (f["registers_measured"], f["registers_disagree"], f["noreturn"]) == (33, 1, 2)
+    assert f["seconds_lift"] == 80.0 and f["seconds"] == round(0.5 + 3.0 + 80.0 + 9.0 + 0.2 + 1.0, 1)
+    assert b["stops"]["cases leave instructions unrun"] == 6 and b["refused"] == 1
+    assert b["refused_most"] == {"category": "N reads a stack pointer", "count": 1} and b["not_lifted"] == 7
+    assert "accepted" not in b["metrics"]["lift"] and "accepted" not in b["metrics"]["readable"]
+    assert b["metrics"]["lift"]["verdicts"]["accepted"] == 33
+    assert [h["file"] for h in b["history"]] == ["history/metrics-20261019-090000.json",
+                                                 "history/metrics-20261020-101500.json", "metrics.json"]
+    assert [h["figures"]["lifted"] for h in b["history"]] == [25, 30, 33]
+    assert b["history"][0]["when"] < b["history"][1]["when"] and "readable" not in b["history"][0]["figures"]
+    assert "lifted 33 of 40" in b["summary"]
+    report = open(os.path.join(str(tmp_path / "bench"), "gizmo", "report.md")).read()
+    assert "| m3-Os | arm-none-eabi-gcc (Example 1:2.0) 13.2.1 20231009 | 40 | 4000 | identical | 38 / 2 / 0 | 33 of 40 (82 %) |" \
+        in report
+    with open(os.path.join(where, "build.json")) as fh:          # (a recipe changed since: not current)
+        info = json.load(fh)
+    info["made_from"] = "0" * 40
+    with open(os.path.join(where, "build.json"), "w") as fh:
+        json.dump(info, fh)
+    assert json.loads(json.dumps(bench.report_data(r)))["builds"][0]["current"] is False
+
+
+def test_figures_of_older_measurements_and_releases():
+    """figures() leaves out what an older metrics.json lacks; compiler_release reads the release out of the
+    version lines of GCC (its package's parentheses taken out) and clang."""
+    old = {"functions": 10, "asm": {"identical": False, "raw_words": 3, "seconds": 1}, "lift": {"verdicts": {"accepted": 4}}}
+    assert bench.figures(old) == {"functions": 10, "listing_identical": False, "raw_words": 3, "lifted": 4, "checked": 4,
+                                  "lifted_share": 100.0, "dropped": 0, "refused": 0, "seconds_asm": 1, "seconds": 1}
+    for line, release in (("arm-none-eabi-gcc (15:4.9.3+svn231177-1) 4.9.3 20150529 (prerelease)", "4.9.3"),
+                          ("msp430-elf-gcc (Mitto Systems Limited - msp430-gcc 8.2.0.52) 8.2.0", "8.2.0"),
+                          ("Ubuntu clang version 12.0.0-3ubuntu1~20.04.5", "12.0.0"), ("clang version 23.1.3", "23.1.3"),
+                          ("arm-none-eabi-gcc (15:13.2.rel1-2) 13.2.1 20231009", "13.2.1"), ("", None)):
+        assert bench.compiler_release(line) == release, line
+    assert (bench.compiler_kind("clang"), bench.compiler_kind("/opt/x/riscv64-elf-gcc"), bench.compiler_kind("armcl")) == \
+        ("clang", "gcc", "armcl")

@@ -72,3 +72,44 @@ def test_history_honours_path_allows(tmp_path, capsys):
     assert leakcheck.main(["--tree", str(repo), "--tables", str(table), "--allow", str(allow), "--history"]) == 1
     out = capsys.readouterr().out
     assert "HIT b.txt: 0x123456" in out and "b.txt: 0x123456" in out.split("HIT history")[-1]
+
+
+def test_the_hits_as_json_with_their_lines(tmp_path):
+    """--json FILE: each hit in the tree with its file, the lines it is on and whether it is allowed; the
+    history's with their commits; the commit authors; how many names, addresses and words were looked for;
+    the private files' paths as given and nothing else of them (no name, address or word that did not match,
+    no comment of theirs); written with mode 600."""
+    import json
+    import os
+    import stat
+    private = setup_private(tmp_path)
+    (private / "words.txt").write_text("# canary-words-0193: a comment\nacme\n")
+    allow = private / "allow.txt"
+    allow.write_text("# canary-allow-0193\nb.md:0x2fe000\n")
+    tree = tmp_path / "public"
+    tree.mkdir()
+    subprocess.run(["git", "init", "-q", str(tree)], check=True)
+    (tree / "a.py").write_text("x = 1\n# calls secret_widget_init\ny = 2\nsecret_widget_init()\n")
+    (tree / "b.md").write_text("ACME made it; g_hidden_state lives at 0x2FE000.\n")
+    git = ["git", "-C", str(tree), "-c", "user.name=t", "-c", "user.email=t@example.org"]
+    subprocess.run(git + ["add", "-A"], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "about blinker_task"], check=True)
+    out = tmp_path / "out" / "check.json"
+    tables = [str(private / "functions.tsv"), str(private / "symbols.txt")]
+    rc = leakcheck.main(["--tree", str(tree), "--tables"] + tables + ["--words", str(private / "words.txt"),
+                         "--allow", str(allow), "--history", "--json", str(out)])
+    assert rc == 1 and stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    data = json.loads(out.read_text())
+    assert data["version"] == 1 and data["tree"] == str(tree) and data["tables"] == tables and data["history"] is True
+    hits = {(h["file"], h["hit"]): h for h in data["hits"]}
+    assert hits[("a.py", "secret_widget_init")]["lines"] == [2, 4] and not hits[("a.py", "secret_widget_init")]["allowed"]
+    assert hits[("b.md", "acme")]["lines"] == [1] and hits[("b.md", "g_hidden_state")]["lines"] == [1]
+    assert hits[("b.md", "0x2fe000")]["allowed"] is True and data["allowed"] == 1
+    assert data["not_allowed"] == 3 + len(data["history_hits"]) and data["exit"] == 1
+    assert {"commit", "file", "hit"} == set(data["history_hits"][0]) and any(
+        h["hit"] == "blinker_task" and h["file"] is None for h in data["history_hits"])       # (the message)
+    assert data["authors"] == ["t <t@example.org>"]
+    assert data["looked_for"] == {"names": 3, "addresses": 5, "words": 1}
+    text = out.read_text()
+    for never in ("canary-words-0193", "canary-allow-0193", "0x12400", "0x12480", "FUN_00012480"):
+        assert never not in text, never

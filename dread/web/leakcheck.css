@@ -1,0 +1,78 @@
+/* dread gui's leak check page (leakcheck.js): the form, a check's hits, the checks made. app.css's colour
+   variables only, so both themes hold; self-contained (no class of another page's stylesheet; app.css's
+   .bad, .mono). */
+.lk { padding: 22px 26px 48px; max-width: 1240px; }
+.lk-head { display: flex; align-items: baseline; gap: 4px 14px; flex-wrap: wrap; }
+.lk-head h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.lk .mono { font-family: var(--mono); font-size: 12px; }
+.lk-muted { color: var(--muted); }
+.lk-note { color: var(--muted); font-size: 12.5px; margin: 0 0 8px; overflow-wrap: anywhere; }
+.lk-none { color: var(--muted); padding: 10px 2px; font-size: 13px; }
+.lk-none.bad { color: var(--missed); }
+.lk-blocked { margin-top: 12px; padding: 8px 12px; border-left: 3px solid var(--o-refused); background: var(--panel-2); border-radius: 0 7px 7px 0; font-size: 12.5px; }
+.lk-card { margin-top: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.lk-card h2, .lk-h { margin: 0 0 8px; font-size: 11px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+.lk-card h3 { margin: 12px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.lk-card-head { display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.lk-card-head h2 { margin: 0; }
+.lk-card-head .lk-muted { font-size: 12px; }
+button.lk-link { border: 0; background: none; padding: 4px 2px; color: var(--accent-strong); font-size: 12px; cursor: pointer; }
+.lk button:disabled { opacity: .45; cursor: default; }
+
+/* the form */
+.lk-row { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 3px 16px; padding: 8px 0; border-top: 1px solid var(--line); align-items: start; }
+.lk-k { font-size: 12.5px; color: var(--muted); padding-top: 5px; }
+.lk-v { display: flex; flex-direction: column; gap: 4px; min-width: 0; align-items: flex-start; }
+.lk-v input[type="text"], .lk-v textarea {
+  width: min(100%, 640px); padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2);
+  font: 12.5px var(--mono); max-width: 100%;
+}
+.lk-v input[type="text"] { height: 28px; }
+.lk-v textarea { resize: vertical; min-height: 54px; }
+.lk-v input:focus, .lk-v textarea:focus, .lk-filters input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.lk-help { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.lk-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; flex-wrap: wrap; }
+.lk-check input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
+input.lk-num { width: 64px; height: 26px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2); }
+.lk-cmd { margin: 12px 0 0; padding: 8px 12px; font: 12px/1.55 var(--mono); background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 35px; }
+.lk-cmd::before { content: "$ "; color: var(--faint); }
+.lk-error { color: var(--missed); font-size: 12.5px; margin-top: 6px; overflow-wrap: anywhere; }
+.lk-error:empty { display: none; }
+.lk-actions { display: flex; gap: 8px 12px; align-items: center; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+.lk-log { margin: 10px 0 0; max-height: 240px; overflow: auto; padding: 8px 12px; font: 11.5px/1.5 var(--mono); background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* a check */
+.lk-result-head { margin-top: 22px; display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; }
+.lk-result-head .lk-h { margin: 0; }
+.lk-result-head .lk-muted { font-size: 12.5px; overflow-wrap: anywhere; min-width: 0; }
+.lk-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-top: 10px; }
+.lk-tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; min-width: 0; }
+.lk-tile-k { color: var(--muted); font-size: 11.5px; }
+.lk-tile-v { font-size: 24px; font-weight: 600; margin-top: 2px; }
+.lk-tile-v.lk-small { font-size: 14px; font-weight: 550; padding: 6px 0 4px; }
+.lk-tile-d { color: var(--faint); font-size: 11.5px; margin-top: 2px; }
+.lk-tile.lk-bad { border-color: var(--missed); }
+.lk-tile.lk-bad .lk-tile-v { color: var(--missed); }
+.lk-tile.lk-good .lk-tile-v { color: var(--accent-strong); }
+.lk-filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 8px; }
+.lk-filters input[type="search"] { height: 28px; width: min(300px, 100%); padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2); }
+.lk-scroll { overflow-x: auto; max-width: 100%; }
+table.lk-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.lk-table th { text-align: left; font-weight: 500; color: var(--faint); font-size: 11px; padding: 4px 8px; white-space: nowrap; }
+.lk-table th.r, .lk-table td.r { text-align: right; font-variant-numeric: tabular-nums; }
+.lk-table td { padding: 5px 8px; border-top: 1px solid var(--line); vertical-align: top; }
+.lk-table td.lk-file { overflow-wrap: anywhere; }
+.lk-table td.lk-lines { white-space: nowrap; color: var(--muted); }
+.lk-table td.lk-match { font-weight: 600; overflow-wrap: anywhere; }
+.lk-table tr.lk-hit td:first-child { box-shadow: inset 3px 0 0 var(--missed); }
+.lk-table tr.lk-allowed { color: var(--muted); }
+.lk-checks tr.on td { background: var(--accent-bg); }
+.lk-busy { color: var(--accent-strong); font-size: 12px; }
+.lk-authors { display: flex; flex-wrap: wrap; gap: 6px; }
+.lk-chip { font-size: 12px; padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: 10px; overflow-wrap: anywhere; }
+
+@media (max-width: 820px) {
+  .lk { padding: 16px 16px 40px; }
+  .lk-row { grid-template-columns: minmax(0, 1fr); }
+  .lk-k { padding-top: 0; }
+}

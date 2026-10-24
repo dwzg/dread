@@ -56,7 +56,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick); each run kept as a record: both device logs with the function behind each entry, and who entered whom (calls through pointers, tasks started by their scheduler, exceptions) | done |
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
 | Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order, the functions in groups found from their code alone, the subsystems a reader would see (`dread groups`: shared memory, texts and devices, neighbours in memory); renaming everywhere at once (`dread rename`) | done |
-| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes; the system run's device logs of both images side by side; every command from a form made from its own options, run as a job with its log followed; a Setup page: what this machine has, a new target from an ELF or a raw image (a path or an upload), its first analyses as a chain of jobs, the language-model providers with their keys in key files; the pilot started from a short form with an estimate, followed live within its budget, stopped, its runs, costs per month and comparisons; a function's views beside its listing and C: where a failing case parts (`dread trace`), why its cases leave code unrun (`dread uncovered`), the changes to its C no case notices (`dread mutate`), its registers (`dread regflow`, `dread callconv`) | done |
+| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes; the system run's device logs of both images side by side; every command from a form made from its own options, run as a job with its log followed; a Setup page: what this machine has, a new target from an ELF or a raw image (a path or an upload), its first analyses as a chain of jobs, the language-model providers with their keys in key files; the pilot started from a short form with an estimate, followed live within its budget, stopped, its runs, costs per month and comparisons; a function's views beside its listing and C: where a failing case parts (`dread trace`), why its cases leave code unrun (`dread uncovered`), the changes to its C no case notices (`dread mutate`), its registers (`dread regflow`, `dread callconv`); the bench's builds with their figures and trends, a compiler's profile from the compiler lab, the leak check's hits, each tool run as a job from its page | done |
 | Setting up (`dread doctor`, `dread new`, `dread llm set`/`key`): the prerequisites with what to install for this system's package manager; a target directory and its `dread.toml` from an ELF (architecture, image, startup copies, memory map, compiler and its flags from the debug information, the tables from the symbols) or from a raw image (an architecture of a list, a load address), each guess marked; providers added and changed in `llm.toml` with its comments kept, keys in files of mode 600 | first version |
 | Relations (`dread relations`, and in the browser): a function's callers, callees, memory, texts and structures as a graph, each piece marked by how sure its name is (its vote's agreement, and the name review's suspects); the whole program as a graph of its groups (`dread groups --json`), a group opening into its functions, a search lighting the functions and groups it finds; both laid out by a force simulation as they are drawn | first version |
 | Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
@@ -178,8 +178,8 @@ lifted function's readable C to read, each statement's first instruction in a ma
 in the listing), verdicts and cases, search by name, proposed name, address and text. Its only changes are
 names (through `dread rename`), notes (annotations.txt) and the commands its Run page starts; everything
 else is the tools' work. Keys: `/` search, `j` `k` lines, `Enter` follow, `n` rename, `;` note, `r`
-relations, `p` the whole program, `s` the system run, `x` run a command, `u` setup, `l` the pilot, `?` all of
-them.
+relations, `p` the whole program, `s` the system run, `x` run a command, `u` setup, `l` the pilot, `m` the
+bench, `i` the compiler lab, `w` the leak check, `?` all of them.
 
 The Run page (`x`, or the button in the bar) has a form for every command of DREAD, made from the
 command's own options as `--help` lists them (a subcommand's form inside its command's; dread pilot's
@@ -227,6 +227,30 @@ tool reads:
 - **Registers**: what dread.regflow knows (what it reads at its entry and what its callers read after it,
   with the bits where fewer than all count, what it leaves alone, leftovers and computed results), per
   call site of its callers and of its own calls, and what `dread callconv` measured against it.
+
+Three pages show the results of the tools that work beyond one target, each from its tool's own `--json`
+record and running the tool as a job (the report by itself where it is missing or older than what it reads,
+quick; anything longer on a button):
+- **The bench** (`m`): a recipe's builds (`dread bench`) as a table that sorts and filters by compiler,
+  release, optimisation, core and project, each build's figures as `dread bench report` shows them (functions,
+  lifted, readable, Ghidra's starts, never-returning functions, registers against regflow, the libraries'
+  toolchain, seconds) with the trend of one figure over its measurements; a build's page with every figure
+  against the measurement before, the trend as a chart and a table, what stops the rest and why, what it
+  gained and lost, its readable C's figures; a measurement started as a job with the steps chosen and an
+  estimate from the last one's seconds; the build opened as the page's target. The record is
+  `BENCH/RECIPE/report.json` (`dread bench report RECIPE --json FILE`).
+- **The compiler lab** (`i`): the compilers measured in a work directory (`dread cclab`) and a compiler's
+  profile: where arguments arrive and results come back, the types, what each operation calls or does
+  inline, what a call keeps and the stack alignment, where the functions lie, the runtime helpers with the
+  registers they change and those the compiler's code reads after them, what DREAD lifts; the probes and
+  builds that failed; the results that differ between builds marked. A compiler's probes run from a form
+  (an adapter, the builds of its matrix, one's own probes, `--lift`), its adapter checked (`dread cclab
+  doctor`). The record is `WORK/report.json` (`dread cclab report --json FILE`).
+- **The leak check** (`w`): `dread leakcheck` against a tree with the private tables, words and allow list
+  given by their paths, its hits with their file, lines and the string each matched, the history's with
+  their commits. The page shows nothing of the private files but what matched: the server never opens them,
+  and the check's jobs and records stay in your state directory (`~/.local/state/dread/gui/leakcheck`),
+  never in a target's or a repository.
 
 A function's relations are the pieces of the puzzle around it, as a graph:
 - its callers above and callees below, to a depth of 1 to 3;

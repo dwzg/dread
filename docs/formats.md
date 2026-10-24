@@ -887,6 +887,54 @@ holds), `uncovered/NAME.json` (dread uncovered's), `mutate/NAME.json` (dread mut
 (dread callconv's). Each is replaced whole when the job runs again; the page takes a record for stale
 where a file its tool read is newer (by the files' times), and says which. Nothing else reads them.
 
+### A bench's report as data (`dread bench report --json FILE`; dread gui's `BENCH/RECIPE/report.json`)
+
+Written by dread.bench report_data (since 2026-10-24), also by `measure` and `all` with `--json` (they end
+with the report), whole and renamed into place, keys sorted: `{"version": 1, "recipe", "file" (the recipe),
+"bench" (BENCH/RECIPE), "figures": [{"key", "title", "unit"}] (dread.bench FIGURES: `count`, `bytes`,
+`percent`, `ratio`, `seconds` or `flag`), "categories" (what stops the rest, the report's categories),
+"builds": [...] (the recipe's measured builds in its order), "missing" (its builds without a metrics.json)}`.
+A build: `build`, `project`, `directory`, `target` (whether a dread.toml is there), `when` (its
+metrics.json's time), `current` (whether build.json's made_from is the recipe's as it is now: false means a
+measurement builds it again first; null without one), `cc`, `kind` (`gcc`, `clang`, or the compiler's
+name), `version` (its version line), `release` (the number in it: `13.2.1`), `toolchain`, `compiler` (the
+report's column), `cflags`, `optimisation` (the last -O flag), `cpu` (-mcpu, -march or -mmcu), `summary`
+(the line measure prints), `figures` ({key: value} of FIGURES, a key left out where its step did not run),
+`not_lifted`, `stops` ({category: functions}), `refused`, `refused_most` ({"category", "count"} or null),
+`metrics` (the build's metrics.json without lift's and readable's `accepted`, every function's name: dread
+bench's docstring says what its steps record) and `history`: `[{"when", "file", "figures"}]`, its earlier
+measurements (BUILD/history, the time from each file's name, which measure writes in local time) oldest
+first, the current metrics.json last. Deterministic for the same files and their times.
+
+### A compiler's report as data (`dread cclab report --json FILE`; dread gui's `WORK/report.json`)
+
+Written by dread.cclab.report (since 2026-10-24), whole and renamed into place, keys sorted: `{"version": 1,
+"work", "adapters": {ADAPTER: ...}}` for each adapter reported on (one with --adapter), report.md made from
+the same data: `adapter`, `arch`, `compiler` (version.txt's first line, null without one), `builds`
+([{"build", "flags", "picked", "measured", "error"}]), `measured` (build keys), `failed` ({build: why}),
+`probes` ({function: its probe file}), `sections` ([{"kind": `arg`, `result`, `value`, `op` or `keeps`,
+"title", "rows": [{"probe", "what", "results": [{"text", "builds"}]}], "aligned": the stack alignment at
+calls over all builds, or null}]: each probe's distinct results with the builds that gave them, as
+report.md's cells), `layout` ([{"row", "what", "results"}]), `helpers` ([{"helper", "called_by", "changed",
+"builds"}]), `lift` (null without run --lift: {"builds": {build: {"accepted", "checked"}}, "errors",
+"rows": [{"probe", "results"}]}), `failed_probes` ([{"probe", "kind", "what", "results": [{"error",
+"builds"}]}]: the probes whose measurement failed, each error with its builds), `profile` (profile.toml's
+content, dread.cclab.profile build_profile: {"compiler", "helpers"}; null where nothing was measured).
+
+### A leak check's hits (`dread leakcheck --json FILE`; dread gui's `$XDG_STATE_HOME/dread/gui/leakcheck/`)
+
+Written by dread leakcheck (since 2026-10-24) with mode 600, whole and renamed into place, keys sorted:
+`{"version": 1, "tree", "tables", "words", "allow" (the private files' paths as given, null where not
+given), "history", "min", "looked_for": {"names", "addresses", "words"}, "hits": [{"file" (relative to the
+tree), "hit" (the string it matched: a word's match in lower case, a name as written, an address's hex text
+in lower case), "lines" (where it is, from 1), "allowed"}], "history_hits": [{"commit" (ten hex digits),
+"file" (null for a commit's message or author), "hit"}] (those not allowed, once a commit), "authors"
+(with --history, else null), "not_allowed", "allowed", "exit"}`. Of the private files it holds their paths
+and the strings the hits matched, nothing else. dread gui's leak check page keeps one record a check in
+`checks/KEY.json` (KEY: the first sixteen hex digits of the SHA-1 of the check's tree, paths and options; a
+check run again replaces it) and its jobs' records and logs in `jobs/` (dread gui's jobs' format), there and
+not in the target's directory, since they name the private files.
+
 ### `BUILD/relations/IMAGE/NAME.json`
 
 What `dread relations` read of one function, kept so that a second look costs a lift instead of

@@ -258,6 +258,15 @@ Each build is a DREAD target of its own, so the other tools run on it unchanged 
 --target BUILD` lifts the probes and the runtime library alike): a way to try DREAD's pipeline on a
 compiler's code generation with nothing but the probes.
 
+## In the browser
+
+`report --json FILE` writes what report.md and profile.toml say as data, for every adapter of the work
+directory, with the probes whose measurement failed listed apart (docs/formats.md). `dread gui`'s compiler
+lab page (key `i`) reads `WORK/report.json`: the compilers measured in a work directory, a compiler's profile
+with the results that differ between builds marked, what failed; it runs `dread cclab run` (an adapter, the
+builds of its matrix, one's own probes, `--lift`), `dread cclab doctor` and the report as jobs. It shows
+what the report holds and nothing of a build's image or tables.
+
 ## Adapters
 
 An adapter is a TOML file: the tools (a name on PATH, a path, a glob, or a list of those), the

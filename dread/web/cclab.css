@@ -1,0 +1,106 @@
+/* dread gui's compiler lab page (cclab.js): a work directory's compilers, a run's form, a compiler's
+   profile. app.css's colour variables only, so both themes hold; self-contained (no class of another page's
+   stylesheet; app.css's .warn, .bad, .mono). */
+.lab { padding: 22px 26px 48px; max-width: 1320px; }
+.lab-head { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; min-width: 0; }
+.lab-head h1 { margin: 0; font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.lab-back { font-size: 12.5px; }
+.lab .mono { font-family: var(--mono); font-size: 12px; }
+.lab-muted { color: var(--muted); }
+.lab-grow { flex: 1; }
+.lab-sub { margin-top: 6px; color: var(--muted); display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; overflow-wrap: anywhere; min-width: 0; }
+.lab-sub .mono { min-width: 0; overflow-wrap: anywhere; }
+.lab-sub button { font-size: 12px; padding: 2px 10px; }
+.lab-state.busy { color: var(--accent-strong); }
+.lab-work { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; flex: 0 1 420px; }
+.lab-work input { flex: 1; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2); font: 12.5px var(--mono); }
+.lab-work input:focus, .lab-v input:focus, .lab-v select:focus, .lab-filters input[type="search"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.lab-live { margin-top: 10px; display: grid; gap: 4px; padding: 8px 12px; border-radius: 8px; background: var(--accent-bg); border: 1px solid var(--accent-soft); font-size: 12.5px; overflow-wrap: anywhere; }
+.lab-none { color: var(--muted); padding: 10px 2px; font-size: 13px; }
+.lab-none.bad { color: var(--missed); }
+.lab-ok { margin-top: 14px; color: var(--muted); font-size: 12.5px; }
+.lab-note { color: var(--muted); font-size: 12.5px; margin: 0 0 10px; }
+.lab-note.lab-after { margin: 10px 0 0; }
+button.lab-link { border: 0; background: none; padding: 0 2px; color: var(--accent-strong); font-size: 12px; cursor: pointer; }
+button.lab-link:hover { text-decoration: underline; }
+a.lab-link { font-size: 12.5px; }
+.lab button:disabled { opacity: .45; cursor: default; }
+
+.lab-card { margin-top: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.lab-card h2 { margin: 0 0 8px; font-size: 11px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+.lab-card h3 { margin: 12px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.lab-card-head { display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.lab-card-head h2 { margin: 0; }
+.lab-card-head .lab-muted { font-size: 12px; }
+
+/* the compilers of the work directory */
+.lab-adapters { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+a.lab-adapter { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 9px; color: var(--text); min-width: 0; }
+a.lab-adapter:hover { border-color: var(--accent); text-decoration: none; background: var(--panel-2); }
+.lab-a-name { font: 600 13px var(--mono); }
+.lab-a-version { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.lab-a-counts { font-size: 12px; }
+
+/* the run's form */
+.lab-row { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 3px 16px; padding: 8px 0; border-top: 1px solid var(--line); align-items: start; }
+.lab-k { font-size: 12.5px; color: var(--muted); padding-top: 4px; }
+.lab-v { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; min-width: 0; }
+.lab-v-col { flex-direction: column; align-items: flex-start; }
+.lab-v select, .lab-v input[type="text"] { height: 28px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2); max-width: 100%; min-width: 0; }
+.lab-v input[type="text"] { font: 12.5px var(--mono); width: min(100%, 420px); }
+.lab-v textarea { font: 12.5px var(--mono); width: min(100%, 560px); max-width: 100%; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2); resize: vertical; min-height: 28px; }
+.lab-v textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.lab-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; flex-wrap: wrap; }
+.lab-check input, .lab-matrix input, .lab-builds input { accent-color: var(--accent); margin: 0; }
+table.lab-matrix { border-collapse: collapse; font-size: 12px; }
+.lab-matrix th { font-weight: 500; color: var(--muted); padding: 3px 10px; text-align: center; font-family: var(--mono); font-size: 11.5px; }
+.lab-matrix tbody th { text-align: left; }
+.lab-matrix td { text-align: center; padding: 3px 10px; }
+.lab-matrix label { display: inline-grid; place-items: center; width: 22px; height: 22px; cursor: pointer; }
+.lab-builds { display: flex; flex-wrap: wrap; gap: 4px 14px; font: 12px var(--mono); }
+.lab-builds label { display: inline-flex; align-items: center; gap: 5px; }
+.lab-quick { font-size: 12px; }
+.lab-cmd { margin: 12px 0 0; padding: 8px 12px; font: 12px/1.55 var(--mono); background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 35px; }
+.lab-cmd::before { content: "$ "; color: var(--faint); }
+.lab-error { color: var(--missed); font-size: 12.5px; margin-top: 6px; }
+.lab-error:empty { display: none; }
+.lab-actions { display: flex; gap: 8px 12px; align-items: center; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+
+/* a compiler's profile */
+.lab-builds-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.lab-chip { font: 11.5px var(--mono); padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: 10px; color: var(--text); background: var(--panel); }
+.lab-chip.bad { color: var(--missed); border-color: var(--missed); }
+.lab-lift-builds { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.lab-lift-builds .lab-chip b { font-weight: 600; }
+.lab-filters { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.lab-filters input[type="search"] { height: 28px; width: min(300px, 100%); padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2); }
+.lab-jump { font-size: 12px; }
+.lab-scroll { overflow-x: auto; max-width: 100%; }
+table.lab-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.lab-table th { text-align: left; font-weight: 500; color: var(--faint); font-size: 11px; padding: 4px 8px; white-space: nowrap; }
+.lab-table td { padding: 5px 8px; border-top: 1px solid var(--line); vertical-align: top; }
+.lab-table td.lab-probe { white-space: nowrap; }
+.lab-table tr.differ td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.lab-table tr.differ { background: var(--panel-2); }
+.lab-res + .lab-res { margin-top: 3px; }
+.lab-res-t { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.lab-builds-of { color: var(--muted); font-size: 11.5px; }
+.lab-failed { border-color: var(--missed); }
+.lab-failed h2 { color: var(--missed); }
+.lab-list { margin: 0; padding-left: 18px; font-size: 12.5px; display: grid; gap: 3px; overflow-wrap: anywhere; }
+
+@media (max-width: 820px) {
+  .lab { padding: 16px 16px 40px; }
+  .lab-work { margin-left: 0; flex-basis: 100%; }
+  .lab-row { grid-template-columns: minmax(0, 1fr); }
+  .lab-k { padding-top: 0; }
+}
+/* a phone: each probe a block (its name, what it asks, its results) instead of three narrow columns */
+@media (max-width: 600px) {
+  .lab-table thead { display: none; }
+  .lab-table tr { display: block; border-top: 1px solid var(--line); padding: 6px 0; }
+  .lab-table td { display: block; border-top: 0; padding: 1px 6px; }
+  .lab-table td.lab-probe { font-weight: 600; }
+  .lab-table tr.differ td:first-child { box-shadow: none; }
+  .lab-table tr.differ { box-shadow: inset 3px 0 0 var(--accent); }
+}
