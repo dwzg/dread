@@ -55,17 +55,42 @@ the tools know and decided, and runs nothing heavy itself:
   repulsion approximated by Barnes-Hut beyond a few hundred nodes (dread/web/sim.js);
 - search by name, by the name dread pilot proposed, by address and by the text a function refers to;
 - two kinds of change, made as the command line makes them: rename (dread rename, checked and
-  undone when the tree contradicts it) and annotate (annotations.txt).
+  undone when the tree contradicts it) and annotate (annotations.txt);
+- the Run page (#/run, key x, a button in the bar; dread/guipages/run.py): every command of DREAD as a
+  form made from its own parser (dread.cli parser, dread.cliforms: positionals, options with their
+  choices, defaults and help, flags as checkboxes, repeated options, subcommands as nested forms, the
+  options a help text ties to a choice of another field shown for that choice), the command line the
+  form makes, as the server makes it, run as a job in the target's directory with --target of the
+  target shown; a command that needs what the server cannot give (dread gui itself) says so instead;
+- the jobs (#/jobs, #/jobs/N): each one's command line, state, times and exit status, its log
+  followed while it runs (polled from an offset), stop, run again, change and run (its form filled
+  from its command line). dread.jobs runs them: `sys.executable -m dread.cli COMMAND ARGS...`, each in
+  a process group of its own, polite, at most --jobs at a time (default 1) and the rest queued, stopped
+  by SIGTERM to the group and SIGKILL after a grace period, the output in BUILD/gui/jobs/N.log and a
+  record N.json beside it (docs/formats.md) that survives the server: a job that was running when the
+  server stopped is marked so. The server's environment reaches the jobs and nothing of it is kept or
+  shown. Stopping the server stops its jobs.
 It reloads by itself when the tables or the tools' records change (the names' tables alone, names.tsv
-and review.tsv among them, and the system run's records, without loading the image again). The
-analyses that take a while on a large image (callers, regflow, never-returning functions, the text
-index, the relations' readable C, the groups) run in the background; the page fills them in when they
-are ready.
+and review.tsv among them, and the system run's records, without loading the image again), also where
+a job from the Run page changed them. The analyses that take a while on a large image (callers,
+regflow, never-returning functions, the text index, the relations' readable C, the groups) run in the
+background; the page fills them in when they are ready.
+
+Pages of their own: the Run page is the first page that is a module of dread/guipages (its API routes
+registered from it, imported at start) with a script of its own in dread/web (run.js, imported by
+app.js and registered with its router). Later pages are added the same way without touching the
+lines of another; dread/guipages/__init__.py says how. The pages of browsing above stay here and in
+app.js.
 
 The answers, JSON, all computed here from the tables and the tools' records (the page computes
 nothing; what the names give is kept until a names table changes):
+- /api/gui: {"pages": [{"name", "script", "style"}] (dread/guipages' pages, whose scripts the page
+  imports), "read_only", "version", "status" (as /api/status's "pages")};
 - /api/status: {"generation" (a load of the image), "pending" (analyses), "names" (a change of the
-  names' tables), "runs" (a change of the system run's records)};
+  names' tables), "runs" (a change of the system run's records), "pages" ({page: what it adds}: the
+  Run page's dread.jobs status)};
+- the Run page's: /api/commands, /api/command, /api/command-line, /api/jobs, /api/job, /api/job-log,
+  POST /api/jobs/start and /api/jobs/stop (dread/guipages/run.py says what each answers);
 - /api/functions: each function's name, entry, size, origin and test record, its "certainty"
   (dread.relations CERTAINTY), "confidence" (its vote's agreement, where there was a vote), "proposed"
   (the name it goes by where the tables have none) and "review" ({"mark", "outcome", "old": the name
@@ -103,9 +128,16 @@ nothing; what the names give is kept until a names table changes):
 
 Safety: the server listens on 127.0.0.1 unless told otherwise, answers only requests addressed to
 that host name (no DNS rebinding), and a change needs the token of the page it served (no other web
-page can make one). Over SSH: ssh -L 8350:127.0.0.1:8350 HOST, then open http://127.0.0.1:8350/.
+page can make one): a rename, a note, starting or stopping a job. Jobs run DREAD's commands with
+whatever arguments the form gives, as the user who runs the server, so they run only where the server
+listens on this machine alone (127.0.0.1, the default): whoever can load the page has its token, and
+on another address that is anyone who can reach it. --read-only turns off every change and job (the
+jobs' records and logs are still shown). One server per target runs jobs (dread.jobs: a lock in
+BUILD/gui/jobs); another one on the same target shows them and starts none. Over SSH: ssh -L
+8350:127.0.0.1:8350 HOST, then open http://127.0.0.1:8350/.
 
     dread gui [--target DIR] [--image NAME] [--host 127.0.0.1] [--port 8350] [--allow-host NAME] [--open]
+              [--read-only] [--jobs N]
 """
 import argparse
 import glob
@@ -120,6 +152,8 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from dread import guipages
+from dread import jobs as jobs_
 from dread import target as tgt
 
 WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -1132,8 +1166,22 @@ class Handler(BaseHTTPRequestHandler):
             if name == "index.html":
                 body = body.replace(b"{{TOKEN}}", self.token.encode())
             return self.reply(200, body, kind)
+        asset = guipages.assets().get(url.path)
+        if asset is not None:                       # (a page's script or stylesheet)
+            with open(asset[0], "rb") as f:
+                return self.reply(200, f.read(), asset[1])
         if not url.path.startswith("/api/"):
             return self.reply(404, {"error": "not found"})
+        if url.path == "/api/gui":
+            from dread import __version__
+            return self.reply(200, {"pages": [p.brief() for p in guipages.PAGES.values()],
+                                    "read_only": bool(self.server.read_only), "version": __version__,
+                                    "status": guipages.statuses(self.server)})
+        found = guipages.ROUTES.get(("GET", url.path))
+        if found is not None:
+            if found.change and self.refused():
+                return
+            return self.answer(found, query)
         try:
             state = self.state(query).refresh()
         except tgt.TargetError as e:
@@ -1160,16 +1208,49 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200, state.timeline(query.get("name"), query.get("from"),
                                                           query.get("count", TIMELINE_ROWS)))
                 if url.path == "/api/status":
-                    return self.reply(200, state.status())
+                    return self.reply(200, dict(state.status(), pages=guipages.statuses(self.server)))
         except KeyError as e:
             return self.reply(404, {"error": "no function %s" % e})
         return self.reply(404, {"error": "not found"})
 
+    def answer(self, found, query, data=None):
+        """A page's route (dread.guipages): its answer, or the error it ended with."""
+        try:
+            got = found.fn(guipages.Request(self, query, data))
+        except guipages.Failure as e:
+            return self.reply(e.status, {"error": str(e)})
+        except tgt.TargetError as e:
+            return self.reply(404, {"error": str(e)})
+        except KeyError as e:
+            return self.reply(404, {"error": "not found: %s" % e})
+        except (ValueError, TypeError) as e:
+            return self.reply(400, {"error": str(e)})
+        except Exception as e:                      # (the page says so; the traceback for whoever runs the server)
+            import traceback
+            traceback.print_exc()
+            return self.reply(500, {"error": "%s: %s" % (type(e).__name__, e)})
+        status, body = got if isinstance(got, tuple) else (200, got)
+        return self.reply(status, body)
+
+    def refused(self, change=True):
+        """Why a request may not be answered (a reply sent), or False: a change on a read-only server,
+        a request without the page's token."""
+        if change and self.server.read_only:
+            self.reply(403, {"error": "this page is read-only (dread gui --read-only): it changes nothing and runs no "
+                                      "jobs"})
+            return True
+        if not secrets.compare_digest(self.headers.get("X-Dread-Token", ""), self.token):
+            self.reply(403, {"error": "a change needs the page's token"})
+            return True
+        return False
+
     def do_POST(self):
         if not self.allowed():
             return
-        if not secrets.compare_digest(self.headers.get("X-Dread-Token", ""), self.token):
-            return self.reply(403, {"error": "a change needs the page's token"})
+        url = urllib.parse.urlsplit(self.path)
+        found = guipages.ROUTES.get(("POST", url.path))
+        if self.refused(found is None or found.change):
+            return
         if not self.headers.get("Content-Type", "").startswith("application/json"):
             return self.reply(415, {"error": "expected JSON"})
         try:
@@ -1177,7 +1258,10 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length) or b"{}")
         except ValueError:
             return self.reply(400, {"error": "not JSON"})
-        url = urllib.parse.urlsplit(self.path)
+        if not isinstance(data, dict):
+            return self.reply(400, {"error": "expected a JSON object"})
+        if found is not None:
+            return self.answer(found, dict(urllib.parse.parse_qsl(url.query)), data)
         try:
             state = self.state(dict(urllib.parse.parse_qsl(url.query)))
             if url.path == "/api/rename":
@@ -1191,19 +1275,31 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
-    """The page's server; closing it also stops the threads of the images' states (State.close)."""
+    """The page's server; closing it also stops its jobs (dread.jobs Jobs.close: the running ones get
+    SIGTERM, the queued ones are cancelled) and the threads of the images' states (State.close)."""
+    read_only = False
+    jobs = None
 
     def server_close(self):
         super().server_close()
+        if self.jobs is not None:
+            self.jobs.close()
         for state in list(self.RequestHandlerClass.states.values()):
             state.close()
 
 
-def serve(target, image, host="127.0.0.1", port=8350, allow_hosts=()):
+def jobs_dir(target):
+    """Where the page's jobs keep their logs and records: BUILD/gui/jobs."""
+    return os.path.join(target.build, "gui", "jobs")
+
+
+def serve(target, image, host="127.0.0.1", port=8350, allow_hosts=(), read_only=False, jobs=1):
     """The server, not yet serving (serve_forever() or a thread does that); its address is
     server.server_address. Requests are answered for the host names 127.0.0.1, localhost, [::1],
-    the address listened on and allow_hosts (any port: a tunnel may use another one)."""
+    the address listened on and allow_hosts (any port: a tunnel may use another one). read_only: no
+    change and no job (the jobs' records are still shown); jobs: how many run at a time."""
     import socket
+    guipages.load()
     state = State(target, image)
     token = secrets.token_urlsafe(24)
     names = {host, "127.0.0.1", "localhost", "[::1]"} | set(allow_hosts)
@@ -1212,9 +1308,22 @@ def serve(target, image, host="127.0.0.1", port=8350, allow_hosts=()):
     handler = type("BoundHandler", (Handler,), {"target": target, "default": image.name, "states": {image.name: state},
                                                 "token": token, "lock": threading.Lock(),
                                                 "hosts": frozenset(n.lower() for n in names)})
-    server = Server((host, port), handler)
+    try:
+        server = Server((host, port), handler)
+    except OSError:
+        state.close()
+        raise
     server.daemon_threads = True
-    server.token, server.state = token, state
+    server.token, server.state, server.read_only = token, state, bool(read_only)
+    local = host in ("localhost", "::1") or host.startswith("127.")
+    try:
+        server.jobs = jobs_.Jobs(jobs_dir(target), limit=jobs, read_only=read_only or not local)
+    except OSError as e:                    # (the page still shows the image; it runs no jobs)
+        server.jobs = jobs_.Jobs(jobs_dir(target), read_only=True)
+        server.jobs.owner = "no jobs: %s" % e
+    if not local and not read_only:         # (whoever can load the page has its token)
+        server.jobs.owner = ("jobs run only where the server listens on this machine alone (127.0.0.1): anyone who "
+                             "can reach %s could run commands; for another machine use ssh -L" % host)
     return server
 
 
@@ -1226,10 +1335,16 @@ def main(argv=None):
     parser.add_argument("--allow-host", action="append", default=[], metavar="NAME",
                         help="also answer requests addressed to this host name")
     parser.add_argument("--open", action="store_true", help="open the page in the web browser")
+    parser.add_argument("--read-only", action="store_true",
+                        help="change nothing and run no jobs: no rename, no note, no command (the jobs' records are "
+                             "still shown)")
+    parser.add_argument("--jobs", type=int, default=1, metavar="N",
+                        help="commands the Run page runs at a time (default 1; the others wait in a queue)")
     args = parser.parse_args(argv)
     try:
         target, image = tgt.from_args(args)
-        server = serve(target, image, args.host, args.port, args.allow_host)
+        server = serve(target, image, args.host, args.port, args.allow_host, read_only=args.read_only,
+                       jobs=max(1, args.jobs))
     except (tgt.TargetError, OSError) as e:
         print("dread gui: %s" % e, file=sys.stderr)
         return 1
@@ -1237,15 +1352,29 @@ def main(argv=None):
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print("dread gui: listening on %s: anyone who can reach it can read the image; changes still need "
               "the page's token" % args.host, file=sys.stderr)
-    print("dread gui: %s, image %s, on %s (Ctrl-C ends it)" % (target.name, image.name, url), flush=True)
+    if server.jobs.owner and not args.read_only:
+        print("dread gui: %s: this page starts no jobs" % server.jobs.owner, file=sys.stderr)
+    print("dread gui: %s, image %s, on %s (Ctrl-C ends it%s)" % (
+        target.name, image.name, url, " and stops its jobs" if not server.jobs.owner else ""), flush=True)
     if args.open:
         import webbrowser
         webbrowser.open(url)
+    import signal
+
+    def stop(signum, frame):            # (a terminal closed, or kill: the jobs stop with the server)
+        raise KeyboardInterrupt
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_DFL)
+        running = server.jobs.status()["running"] if not server.jobs.owner else 0
+        if running:
+            print("dread gui: stopping %d job%s" % (running, "" if running == 1 else "s"), file=sys.stderr, flush=True)
         server.server_close()
     return 0
 

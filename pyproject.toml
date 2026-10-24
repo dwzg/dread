@@ -13,6 +13,7 @@ dependencies = ["unicorn==2.1.4", "capstone>=5,<6"]
 test = ["pytest"]
 prove = ["z3-solver>=4.12"]     # dread readable proves its rewrites of conditions and values with it
 dwarf = ["pyelftools>=0.29"]    # dread readable --score reads the source's names from debug information
+browser = ["playwright>=1.40"]  # tests/test_gui_browser.py looks at dread gui's pages in headless Chrome
 
 [project.scripts]
 dread = "dread.cli:main"
@@ -32,4 +33,5 @@ markers = [
     "slow: takes more than a few seconds",
     "ghidra: needs a Ghidra installation (GHIDRA_INSTALL_DIR)",
     "compiles: skipped when the build's compiler is missing (GCC for the ARM builds, clang for rv32)",
+    "browser: needs Playwright (the browser extra) and Chrome, Chromium or Playwright's own; skipped without",
 ]

@@ -4244,6 +4244,83 @@ The long runs set the pace of everything after them. Measure first, then cut.
     in each image's emulator: every call now finds them at zero. All tests run on rv32 (the marker
     is gone); 269 pass.
 
+## The GUI for everything (the user, 2026-10-24)
+
+The user, 2026-10-24: "Can the GUI be extended to support all of DREADs features and also provides an
+easy way to set everything up and run and monitor the pilot?" Four steps: the first alone, then the
+other three in parallel, each one or more pages of its own (a module of dread/guipages with its routes,
+a script in dread/web registered with the page's router: dread/guipages/__init__.py says how), so that
+they add pages without touching the same lines. As before, the tools compute and the page shows and
+starts them: a page runs DREAD's commands as jobs (dread.guipages.run start_command), it does not
+reimplement them.
+
+- [x] 1. Jobs and every command: a job runner in dread gui and a Run page with a form for every
+  command generated from its parser (2026-10-24; docs/decisions.md, "The GUI runs every command"):
+  - Every command's parser, read without running it: dread.cli parser calls the command's main with
+    argparse's parse methods stopped at their first call (this thread only) and takes the parser main
+    built. dread.cliforms makes a form of it (positionals, options with their choices, defaults and
+    help, flags as checkboxes, --x/--no-x pairs, repeated options, an option's optional value,
+    subcommands as nested forms) and a command line of a form's values, and reads a command line back
+    into the form through the parser; the options a help text ties to a choice of another field
+    ("--task name: ...", bench's "toolchain: ...") are shown for that choice only (a switch shows them
+    all). tests/test_cliforms.py: every command yields a parser in an empty directory without writing
+    or printing anything; for every command and subcommand, generated values for every field (each
+    choice, lists with spaces, values starting with -) make a command line its parser takes, the values
+    read back make one it reads the same, a second round changes nothing; the README's command lines
+    too.
+  - dread.jobs runs them: `sys.executable -m dread.cli COMMAND ARGS...` in the target's directory with
+    `--target .` (and --image for an image other than the first) where the form leaves them empty, a
+    session (process group) of its own, polite as the tools are, at most `dread gui --jobs N` at a time
+    (default 1) and the rest queued, stdout and stderr into BUILD/gui/jobs/N.log, a record N.json
+    beside it (docs/formats.md: command line, directory, by, queued, started, ended, state, exit status;
+    never the environment). A job may wait for another (`after`: a chain stops at the first job that
+    fails, for step 2's first analyses). Stop: SIGTERM to the group, SIGKILL after 30 s (a job may ask
+    for more); stopping the server stops its jobs; a server that ended without closing leaves records
+    the next one marks lost, or follows again while their process lives (Linux: pid, start time, boot
+    id). One server per target runs jobs (a lock), and only one that listens on this machine alone (the
+    page carries its token: on another address anyone who reaches it could run commands); a second
+    one, and `dread gui --read-only` (no change, no job), show them. The values of secret-looking
+    variables (KEY, TOKEN, SECRET, PASSWORD) are replaced by their names in the logs served and in a
+    record's command line.
+  - The page: the Run page (#/run, key x, a button in the bar with the jobs running and waiting): the
+    commands, a command's form, the command line the server makes of it (as you type, with the
+    command's own refusal and the field it names), Copy, Run; the jobs (#/jobs) and a job (#/jobs/N):
+    its command line, state, times, exit status, its log followed while it runs (polled from a byte
+    offset), Stop, Run again, Change and run (its form filled from its command line). A command that
+    needs what the server cannot give (dread gui itself) says so instead of running. The tables a job
+    changes reload the other views as a run in a terminal does: after a lift check from the page the
+    overview and the list show its verdicts (tests/test_gui_run.py).
+  - The server: page modules (dread/guipages: discovered at start, routes by decorator, /api/gui),
+    their share of /api/status, their scripts and stylesheets served from dread/web; app.js exports its
+    helpers, imports the pages' scripts and routes to them (register: address, show, leave, status,
+    keys and their help, a button in the bar). The pages of browsing stay where they were.
+  - Checked: tests/test_cliforms.py, test_jobs.py, test_gui_run.py (also on Python 3.11 and 3.13 in
+    containers), test_gui_browser.py (headless Chrome through Playwright, the `browser` extra: a job
+    run from the form, a task's options, a subcommand, a refusal, a stop, a read-only page; skipped
+    without Playwright, as on CI); by eye in headless Chrome, light and dark, 1360 and 390 px wide: no
+    script error, no horizontal scroll.
+  - Not established: a job that outlived a crashed server is recognised on Linux only (elsewhere it is
+    marked lost without looking); politeness is applied right after the process starts, so its first
+    milliseconds run at the server's priority; the options tied to a choice come from a convention of
+    the help texts (an option whose help does not follow it is always shown); the page keeps a log's
+    last 20,000 lines (the file keeps all), tried with short logs only; not tried on macOS; a long form
+    (dread pilot's three dozen options) is checked by its round trips, not yet for how well it reads.
+- [ ] 2. Setup: a new target from an ELF (dread import-elf) or a raw image (architecture, load address,
+  entry); the prerequisites checked (Python packages, cross compilers, podman, Ghidra optional) with
+  what to install; the first analyses as one chain of jobs (functions, regflow, the lift check, the
+  readable check) with their progress; the language-model providers as a form (llm.toml: models,
+  prices, cache_min, batch size; keys from a key file per provider, written with mode 600 and never
+  shown back).
+- [ ] 3. The pilot: start a run (task, provider, budget, batches), follow it live (stage, questions asked
+  and answered, batches waiting and their age, spend so far against the budget, the names as they
+  come), stop it (its batches cancelled: a job's stop is SIGTERM to its process group, which makes the
+  pilot cancel its batches; start_command's grace gives it longer than 30 s where that takes longer),
+  its history and the cost per month (the usage log), two runs compared (--score, the judge). The
+  pilot's side (structured progress events) is another agent's, in parallel.
+- [ ] 4. Result views for the tools the GUI does not show yet: bench results, cclab profiles, a trace's
+  first difference, uncovered regions, mutation survivors, callconv and regflow per function,
+  leakcheck's hits.
+
 ## Browser view (`dread gui`; asked for by the user on 2026-10-18)
 
 A view over what the tools know and decided, never a second implementation: whatever computes is a

@@ -1,6 +1,8 @@
 // dread gui: one page, no framework, no build step. The server (dread/gui.py) answers /api/*;
 // everything here is the view. Changes go through the server, which makes them as the command line does.
-// The force simulation both graphs are laid out with is sim.js.
+// The force simulation both graphs are laid out with is sim.js. Pages of their own (the Run page and
+// those after it) are modules of dread/guipages on the server and scripts beside this one, which import
+// what they need from here and register() themselves (dread/guipages/__init__.py says how).
 
 import { Sim } from "./sim.js";
 
@@ -242,13 +244,109 @@ async function loadFunctions() {
 // the page always shows what the address bar says, whatever order the server's answers come in.
 let renders = 0;
 
+// ---- pages of their own (a module of dread/guipages on the server, a script beside this one) ----
+
+// What /api/gui says: the pages' scripts, whether the server is read-only (no change, no job).
+const GUI = { pages: [], readOnly: false, version: "" };
+const PAGES = [];               // registered: {name, match, show, leave, status, keys, help, nav}
+const pageKeys = {};
+let shownPage = null;           // the registered page on screen, or null
+
+// A page script registers its view: the addresses it shows (match: a RegExp on the part after #), how
+// (show(match, keep): keep is a reload of the same address, which must keep what the reader has typed),
+// what it stops when another view is shown (leave), its share of /api/status (status), its keys and
+// their help, and a button in the bar (nav: {title, href, icon}).
+function register(page) {
+  PAGES.push(page);
+  for (const [key, action] of Object.entries(page.keys || {})) if (!(key in pageKeys)) pageKeys[key] = action;
+  const table = $("#help .keys");
+  for (const [keys, text] of page.help || []) {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td>${keys.split(" ").map((k) => `<kbd>${esc(k)}</kbd>`).join(" ")}</td><td>${esc(text)}</td>`;
+    table.tBodies[0].insertBefore(row, table.tBodies[0].lastElementChild);     // (before Alt ← back)
+  }
+  if (page.nav) {
+    const a = document.createElement("a");
+    a.className = "icon-btn nav-btn";
+    a.href = page.nav.href;
+    a.title = page.nav.title;
+    a.setAttribute("aria-label", page.nav.title);
+    a.dataset.page = page.name;
+    a.innerHTML = (page.nav.icon || esc(page.name[0])) + `<span class="nav-badge" hidden></span>`;
+    $(".tools").insertBefore(a, $("#theme"));
+  }
+}
+
+// The main area for a registered page's view, the other views' motion stopped, no function current.
+function enter(view, title) {
+  stopRelations();
+  if (P.frame) cancelAnimationFrame(P.frame);
+  P.frame = 0;
+  S.view = view;
+  S.current = null;
+  renderList();
+  document.title = title + " · DREAD";
+  return $("#main");
+}
+
+// A page's own render numbers, for dropping answers a newer render overtook (as the views here do).
+const nextRender = () => ++renders;
+const isCurrent = (mine) => mine === renders;
+
+function pageStatus(pages) {
+  if (!pages) return;
+  for (const p of PAGES) {
+    if (p.status && pages[p.name] !== undefined) {
+      try { p.status(pages[p.name]); } catch (e) { console.error(p.name, e); }
+    }
+  }
+}
+
+// The pages' scripts and stylesheets, imported before the first view (an older server has none).
+async function loadPages() {
+  let gui;
+  try {
+    gui = await api("/api/gui");
+  } catch {
+    return;
+  }
+  Object.assign(GUI, { pages: gui.pages || [], readOnly: !!gui.read_only, version: gui.version || "" });
+  document.documentElement.classList.toggle("read-only", GUI.readOnly);
+  for (const p of GUI.pages) {
+    if (!p.style) continue;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "/" + p.style;
+    document.head.appendChild(link);
+  }
+  for (const p of GUI.pages) {            // (one after another: the bar's buttons and the keys' help in their order)
+    if (!p.script) continue;
+    try {
+      await import("/" + p.script);
+    } catch (e) {
+      console.error(p.script, e);
+      toast(`The page ${p.name} did not load: ${e.message}`, true);
+    }
+  }
+  pageStatus(gui.status);
+}
+
+export { $, esc, api, hex, size, ago, when, toast, showError, watch, prefs, S, GUI, register, enter, nextRender, isCurrent };
+
 async function route(keep = false) {
   const hash = decodeURIComponent(location.hash.slice(1));
   const m = hash.match(/^\/([fr])\/([^@]+)(?:@(0x[0-9a-f]+))?$/i);
   const p = hash.match(/^\/p(?:\/(.+))?$/);
   const t = hash.match(/^\/s(?:\/(.+))?$/);
   if (!keep) $("#side").classList.remove("open");
-  if (m) await showFunction(m[2], m[3] ? parseInt(m[3], 16) : null, keep, m[1] === "r" ? "relations" : "code");
+  const page = PAGES.find((x) => x.match.test(hash)) || null;
+  if (shownPage && shownPage !== page && shownPage.leave) {
+    try { shownPage.leave(); } catch (e) { console.error(shownPage.name, e); }
+  }
+  shownPage = page;
+  for (const b of document.querySelectorAll(".nav-btn")) b.classList.toggle("on", !!page && b.dataset.page === page.name);
+  if (page) await page.show(hash.match(page.match), keep);
+  else if (m) await showFunction(m[2], m[3] ? parseInt(m[3], 16) : null, keep, m[1] === "r" ? "relations" : "code");
   else if (p) await showProgram(p[1] || null, keep);
   else if (t) await showTimeline(t[1] || null, keep);
   else await showOverview(keep);
@@ -3045,6 +3143,7 @@ function dialog({ title, hint, value = "", multiline = false, okLabel = "Save", 
 
 async function renameCurrent() {
   if (!S.current) return;
+  if (GUI.readOnly) return toast("This page is read-only (dread gui --read-only): it renames nothing.", true);
   const old = S.current.header.name;
   await dialog({
     title: `Rename ${old}`,
@@ -3065,6 +3164,7 @@ async function renameCurrent() {
 async function noteSelected() {
   const d = S.current;
   if (!d) return;
+  if (GUI.readOnly) return toast("This page is read-only (dread gui --read-only): it keeps no notes.", true);
   const row = S.sel >= 0 ? d.rows[S.sel] : null;
   const address = row ? row.address : d.header.entry;
   const existing = address === d.header.entry ? d.header.notes
@@ -3110,6 +3210,7 @@ async function poll() {
       S.runs = status.runs;              // (a new record of the system run: the graphs and the timeline anew)
       await refreshView();
     }
+    pageStatus(status.pages);           // (the registered pages' shares: the jobs, ...)
     watch(status);
     if (S.pending.length) delay = 1200;
   } catch {
@@ -3261,7 +3362,11 @@ function wire() {
       Escape: () => { selectRow(-1); },
     };
     const action = keys[e.key];
-    if (!action) return;
+    if (!action) {
+      const own = pageKeys[e.key];          // (a registered page's key)
+      if (own) { e.preventDefault(); own(e); }
+      return;
+    }
     if (S.view !== "function" && ["j", "k", "ArrowDown", "ArrowUp", "Enter", "n", ";", "Escape", "r"].includes(e.key)) return;
     if (e.key === "f" && S.view !== "program" && !(S.view === "function" && S.mode === "relations")) return;
     if (e.key === "d" && S.view !== "timeline") return;
@@ -3308,6 +3413,7 @@ async function start() {
   } catch (e) {
     return showError(e.message);
   }
+  await loadPages();
   await route();
   setTimeout(poll, 1500);
 }

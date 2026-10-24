@@ -145,7 +145,10 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   capstone 5. The virtual environment is `.venv` in the checkout. `bin/dread COMMAND` runs a tool
   from the checkout; every command is also `python -m dread.MODULE`.
 - Each tool is a module with `main(argv)`, registered in `dread/cli.py`. It takes `--target` and,
-  where a target has several images, `--image`.
+  where a target has several images, `--image`. Its main builds its argparse parser first and parses
+  before any work: dread gui reads every command's parser that way, without running it (dread.cli
+  parser), to make the command's form; tests/test_cliforms.py fails on a main that writes or prints
+  before it parses.
 - Bulk runs are polite and parallel (`dread.util.polite`): lowest priority, a pool sized by
   `workers()`, slowest tasks first (`dread.util.poolorder`).
 - Docstrings say what a tool does, what it assumes and what it does not establish.

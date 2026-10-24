@@ -56,7 +56,7 @@ for an RV32IMC core; and with TI's MSP430 GCC for the 16-bit MSP430.
 | System run from reset, original against rebuilt, on a shared clock; models for serial port, timer, pins, interrupt controllers (A profile, Cortex-M NVIC with SysTick); each run kept as a record: both device logs with the function behind each entry, and who entered whom (calls through pointers, tasks started by their scheduler, exceptions) | done |
 | Lifter for ARM and Thumb-2: instruction by instruction to C, built only when the generated cases agree and run every instruction of the original; its instruction semantics fuzzed against the emulator (`dread liftfuzz`) | done |
 | Reading aids: flat listing, call sites with constant arguments, the same code in two images, names by call order, the functions in groups found from their code alone, the subsystems a reader would see (`dread groups`: shared memory, texts and devices, neighbours in memory); renaming everywhere at once (`dread rename`) | done |
-| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes; the system run's device logs of both images side by side | done |
+| Browser view (`dread gui`): overview and map of the image, listings with coverage, the C, verdicts, search, rename and notes; the system run's device logs of both images side by side; every command from a form made from its own options, run as a job with its log followed | done |
 | Relations (`dread relations`, and in the browser): a function's callers, callees, memory, texts and structures as a graph, each piece marked by how sure its name is (its vote's agreement, and the name review's suspects); the whole program as a graph of its groups (`dread groups --json`), a group opening into its functions, a search lighting the functions and groups it finds; both laid out by a force simulation as they are drawn | first version |
 | Claude Code plugin (skills, writer and reviewer agents, a target template) | done |
 | Method documentation and a porting guide | done |
@@ -120,10 +120,19 @@ bin/dread gui --target examples/gizmo/m3 --open               # all of it in the
 decided: where each function stands (written by hand, by the pilot, lifted, refused, original), a
 map of the image, the listing with the instructions the cases ran or missed, the C beside it (a
 lifted function's readable C to read, each statement's first instruction in a margin that selects it
-in the listing), verdicts and cases, search by name, proposed name, address and text. It changes nothing but names
-(through `dread rename`) and notes (annotations.txt); everything else is the tools' work. Keys: `/`
-search, `j` `k` lines, `Enter` follow, `n` rename, `;` note, `r` relations, `p` the whole program,
-`s` the system run, `?` all of them.
+in the listing), verdicts and cases, search by name, proposed name, address and text. Its only changes are
+names (through `dread rename`), notes (annotations.txt) and the commands its Run page starts; everything
+else is the tools' work. Keys: `/` search, `j` `k` lines, `Enter` follow, `n` rename, `;` note, `r`
+relations, `p` the whole program, `s` the system run, `x` run a command, `?` all of them.
+
+The Run page (`x`, or the button in the bar) has a form for every command of DREAD, made from the
+command's own options as `--help` lists them (a subcommand's form inside its command's; dread pilot's
+options for the task chosen). What you set becomes the command line below the form, the words you would
+type in the target's directory, and Run runs it there as a job: polite, `--jobs N` at a time (default 1)
+and the others waiting, its output kept in BUILD/gui/jobs and followed live, with Stop (SIGTERM to its
+processes, SIGKILL after a grace period), Run again, and Change and run. Where a job changes the tables,
+the other views reload. The jobs live with the server: stopping it stops them, and the history stays.
+`dread gui --read-only` changes nothing and runs nothing.
 
 A function's relations are the pieces of the puzzle around it, as a graph:
 - its callers above and callees below, to a depth of 1 to 3;
@@ -166,6 +175,8 @@ program is drawn on a canvas, its repulsion approximated by Barnes-Hut.
 ![How sure the names of a FreeRTOS build are after a naming run and a review: each function's disc filled as far as its vote agreed, the review's marks, a changed name with its old name and why](docs/images/gui-names.webp)
 ![The whole program of a FreeRTOS build: its functions in the groups dread groups found, one function lit with its callers and callees](docs/images/gui-program.webp)
 ![The system run of a FreeRTOS build: the device logs of the original and of the image with 329 functions from lifted C side by side, each entry with the function that made it](docs/images/gui-timeline.webp)
+![The Run page: dread lift's form, made from its options, and the command line it makes](docs/images/gui-run.webp)
+![A job: the lift check run from the page, its command line, exit status and log](docs/images/gui-job.webp)
 
 ### With Claude Code
 

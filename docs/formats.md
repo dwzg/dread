@@ -776,6 +776,35 @@ these makes the groups anew; a file with another key or version is not used (ver
 evidence had a choice, was always the readable C's: such a file is found anew). One record an image:
 the last one found. `dread groups --fresh` finds them anew whatever is kept.
 
+### `BUILD/gui/jobs/N.json`, `N.log`, `lock` (dread gui's jobs)
+
+Written by dread gui's job runner (dread/jobs.py, since 2026-10-24) for each command its Run page runs
+(and later pages: a setup's analyses, a pilot run), numbered from 1 for the target; the history the
+page lists, kept across servers. `N.log` holds the job's output, stdout and stderr together, as it
+printed it. `N.json`, written whole and renamed into place at each change:
+
+- `version` (1), `id` (N), `command` (DREAD's command, or null for another command line), `argv` (what
+  ran: `[python, "-m", "dread.cli", COMMAND, ARGS...]`), `line` (as a person types it: `dread COMMAND
+  ARGS...`), `cwd` (the target's directory), `by` (`dread gui`), `log` (`N.log`), `grace` (seconds
+  from SIGTERM to SIGKILL), `polite` (whether it was to run polite) and `nice` (the niceness it got,
+  null where none was applied), `after` (the job it waited for, null for none: it starts once that one
+  is done and is cancelled where that one ended otherwise);
+- `state`: `queued`, `running`, `stopping` (SIGTERM sent), `done` (exit status 0), `failed`, `stopped`
+  (ended after a stop), `cancelled` (stopped before it started), `lost` (how it ended is not known: the
+  server that ran it ended without closing, or it ended while no server watched it); `why` says more
+  where there is more (`stopped from the page`, `the server stopped`, ...);
+- `queued`, `started`, `ended`: seconds since the epoch (the wall clock: not deterministic output),
+  null until they happen; `exit`: the exit status, negative for the signal that ended it, null where
+  not known;
+- `pid` and `proc` (the process's start time in clock ticks and the boot id, from Linux's /proc: a
+  later server recognises a job that outlived the server that started it by them, and follows it,
+  `adopted`: true); `stopping` (when a stop was asked for); `redacted`: true where the command line held
+  the value of a secret of the environment, written here as `[$NAME]` (the words that ran were the
+  real ones).
+
+Never the environment. `lock` holds the process id of the server that runs the jobs (an advisory
+lock on it: one server a target runs them; another one reads the records and starts none).
+
 ## The whole-program graph (`dread groups --json`, `dread gui`'s `/api/program`)
 
 `{"groups": [...], "between": [...], "functions": [...], "calls": [...], "refers": [...], "shared": [...],

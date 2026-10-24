@@ -90,6 +90,15 @@ kbd {
 .icon-btn { width: 28px; height: 28px; padding: 0; display: inline-grid; place-items: center; color: var(--muted); }
 .icon-btn svg { width: 15px; height: 15px; display: block; }
 .icon-btn:hover { color: var(--text); }
+/* a registered page's button in the bar (app.js register: nav), with a count where it has one */
+a.icon-btn { border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel); position: relative; }
+a.icon-btn:hover { border-color: var(--accent); text-decoration: none; }
+a.icon-btn.on { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-bg); }
+.nav-badge {
+  position: absolute; top: -6px; right: -7px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px;
+  font: 600 10px/15px var(--sans); text-align: center; background: var(--accent); color: var(--on-accent);
+}
+.read-only #rename-btn, .read-only #note-btn { display: none; }
 
 /* the bar */
 .bar {

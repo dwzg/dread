@@ -1,10 +1,14 @@
 """dread COMMAND [OPTIONS]: the commands of the toolkit.
 
 Every command is a module with main(argv); `dread COMMAND --help` shows its options, and
-`python -m dread.MODULE` runs the same.
+`python -m dread.MODULE` runs the same. A main builds its argparse parser first and parses before it
+does any work: parser(COMMAND) reads a command's parser that way without running it (dread gui makes
+a form of it).
 """
+import argparse
 import importlib
 import sys
+import threading
 
 COMMANDS = {
     "info": ("dread.target", "show the target as DREAD reads it"),
@@ -43,6 +47,56 @@ COMMANDS = {
     "cclab": ("dread.cclab", "put a compiler in and learn how it compiles: probes run in the emulator"),
     "leakcheck": ("dread.leakcheck", "look for a private project's names and addresses before publishing"),
 }
+
+
+class NoParser(Exception):
+    """A command whose main did not parse its arguments with argparse before anything else."""
+
+
+class _Parsed(BaseException):        # (not an Exception: a main's `except Exception` must not catch it)
+    def __init__(self, parser):
+        super().__init__()
+        self.parser = parser
+
+
+_reading = threading.local()
+_patch = threading.Lock()
+
+
+def _stop_at_parse(original):
+    def parse(self, *args, **kwargs):
+        if getattr(_reading, "on", False):
+            raise _Parsed(self)
+        return original(self, *args, **kwargs)
+    parse.__wrapped__ = original
+    return parse
+
+
+def parser(command):
+    """The argparse parser of a command as its main builds it, without running the command: main is
+    called with ArgumentParser's parse methods stopped at their first call in this thread (other
+    threads parse as usual), so that it hands over its parser before it does any work. That holds as
+    long as every main builds its parser first and parses before anything else, which they all do
+    (tests/test_cliforms.py calls this for every command in an empty directory and checks that
+    nothing was written or printed). Raises NoParser for a main that returned or failed without
+    parsing, KeyError for an unknown command. Each call builds a new parser."""
+    module = importlib.import_module(COMMANDS[command][0])
+    with _patch:
+        saved = argparse.ArgumentParser.parse_args, argparse.ArgumentParser.parse_known_args
+        argparse.ArgumentParser.parse_args = _stop_at_parse(saved[0])
+        argparse.ArgumentParser.parse_known_args = _stop_at_parse(saved[1])
+        _reading.on = True
+        try:
+            module.main([])
+        except _Parsed as got:
+            return got.parser
+        except (Exception, SystemExit) as e:    # (nothing of a command may end the caller)
+            raise NoParser("dread %s: main ended before it parsed its arguments (%s: %s)"
+                           % (command, type(e).__name__, e)) from e
+        finally:
+            _reading.on = False
+            argparse.ArgumentParser.parse_args, argparse.ArgumentParser.parse_known_args = saved
+    raise NoParser("dread %s: main returned without parsing its arguments with argparse" % command)
 
 
 def usage():

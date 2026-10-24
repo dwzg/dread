@@ -9,6 +9,77 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## The GUI runs every command: jobs, forms from the commands' parsers, pages as modules (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), for step 1 of "The GUI for
+everything" (docs/todo.md; the user, 2026-10-24: "Can the GUI be extended to support all of DREADs
+features and also provides an easy way to set everything up and run and monitor the pilot?").
+
+- **Question.** How does dread gui run DREAD's commands: where does a command's form come from, how is
+  a job run, followed and stopped, what happens to jobs when the server stops, and how is the page
+  split so that three agents can add pages at once?
+- **Options and choices.**
+  1. A command's parser without running the command: (a) a `parser()` function in every command's
+     module, main building its parser with it; (b) main called with ArgumentParser's parse methods
+     stopped at their first call, the parser it built handed over (dread.cli parser); (c) a table of
+     each command's options in the GUI. **(b)**: main stays the one place a command's options are
+     written, so the form cannot drift from --help, and no command module changes ((a) touches 35
+     modules, two of them being changed by other agents now). The price: a main must build its parser
+     first and parse before any work. Every one does; tests/test_cliforms.py reads each command's
+     parser in an empty directory with an empty home and fails on anything written or printed, and
+     CLAUDE.md's conventions say so. The stop is for the calling thread only (other threads parse as
+     usual) and argparse's methods are put back afterwards. Undo: a `parser()` per module and dread.cli
+     parser calling it.
+  2. The form and the command line: generic over argparse's actions (dread.cliforms); the page sends
+     the form's values and the server makes the command line, for the preview as for the job, with
+     the same code; options of one value first, then the positionals, then options of several values
+     (which would take the positionals for theirs); a list as shell words. Subcommands (dread llm,
+     dread cclab) are nested forms. A mode that argparse does not know as one (dread bench's action,
+     dread pilot's --task): (a) real subparsers in those commands, (b) a table per command in the GUI,
+     (c) the convention the help texts already follow ("--task name: ...", "toolchain: ..."), the
+     options it ties to a choice shown for that choice only, a switch showing them all. **(c)**: (a)
+     changes their command lines, (b) is a second description to drift. An option whose help does not
+     follow the convention is always shown. Undo: describe() without condition().
+  3. A job: `sys.executable -m dread.cli COMMAND ARGS...` (dread.jobs command) in the target's directory
+     with `--target .` where the form leaves it empty (what a person types there), PYTHONPATH with this
+     DREAD in front (a worktree's server runs the worktree's code, as bin/dread does), a session of its
+     own (its process group), stdout and stderr into one log. Polite: applied by the server to the new
+     process right after it starts, and DREAD_POLITE=1 so that the tools' own polite() does not repeat
+     it; not in the child before exec (Popen's preexec_fn is unsafe in a threaded server, which this
+     one is). Its first milliseconds run at the server's priority.
+  4. Following a log: (a) server-sent events, (b) the page polling from a byte offset. **(b)**: the
+     threading server holds a thread per open connection, and a stream left open would hold one that
+     the server's close and the tests (no thread left behind) would have to cut; a poll a second costs
+     a short request where nothing happened. While a job runs a piece holds whole lines only, so that a
+     secret is never split between two pieces past the redaction.
+  5. Stopping: SIGTERM to the group, SIGKILL after GRACE (30 s, as long as dread pilot needs to cancel
+     its batches; start_command takes a longer grace). When the server stops: (a) its jobs run on, (b)
+     they are stopped the same way. **(b)**: the jobs share the target's files with the next server's,
+     and a job nobody follows writes tables nobody watches; a run that should outlive the page belongs
+     in a terminal. A server that ends without closing (killed, crashed) leaves its jobs running in
+     their sessions: the next server follows such a job again (Linux: the same pid with the same start
+     time since the same boot) and can stop it, else it is marked lost. SIGTERM and SIGHUP of `dread
+     gui` close it as Ctrl-C does. Undo: Server.server_close without jobs.close().
+  6. One server per target runs jobs: an advisory lock on BUILD/gui/jobs/lock; a second server, and
+     `dread gui --read-only` (no change at all), read the records and start nothing.
+  7. Secrets: the environment reaches the jobs (keys come from it) and is never kept or shown; the
+     values of secret-looking variables (KEY, TOKEN, SECRET, PASSWORD, ...) are replaced by their names
+     in the log text served and in a record's command line (the words run are the real ones).
+  8. Pages as modules: dread/guipages, its modules imported at start (pkgutil, in the order of their
+     names), routes registered by a decorator, each page's script and stylesheet served from dread/web;
+     app.js exports its helpers, imports the pages' scripts (import(): the page's Content-Security-Policy
+     allows its own origin) and routes to what they register (address, show, leave, status, keys, help,
+     a button in the bar). The pages of browsing stay where they are; app.js gained the router hooks.
+  9. A browser test: Playwright as an optional extra (`browser`) for tests/test_gui_browser.py, which
+     drives the Run page in headless Chrome where both are installed. CI installs neither, so it is
+     skipped there; the API is tested without a browser (tests/test_gui_run.py).
+  10. A server listening beyond this machine (`--host 0.0.0.0`): (a) jobs as on 127.0.0.1, (b) no jobs.
+     **(b)**: the page carries its token, so whoever can load the page can start a command, any of
+     DREAD's with any arguments, as the user who runs the server; the token keeps other web pages out,
+     not other machines. Renames and notes there are as before. For another machine, ssh -L. Undo: the
+     `local` test in dread.gui serve.
+- **Status.** In the code (branch gui-jobs).
+
 ## The naming runs' cost (1): rounds of 100 questions or more as Message Batches, by default (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), on the request to make the

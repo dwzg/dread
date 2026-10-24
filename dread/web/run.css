@@ -1,0 +1,142 @@
+/* dread gui's Run page and jobs (run.js): the commands, one command's form and the command line it makes,
+   the jobs and a job's log. The colours are app.css's variables, so both themes hold. */
+.run { padding: 22px 26px 48px; max-width: 1240px; }
+.run-head { display: flex; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; }
+.run-head h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.run .mono, .job .mono, .jobs-view .mono { font-family: var(--mono); font-size: 12px; }
+.run-grid { margin-top: 16px; display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 16px; align-items: start; }
+
+/* the commands */
+.cmds { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 8px; max-height: calc(100vh - 46px - 24px); }
+.cmds input, .cmds select {
+  height: 28px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2);
+}
+.cmds input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.cmds > input, .cmds > select { flex: none; }
+#cmd-select { display: none; }
+.cmd-list { overflow: auto; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 4px; }
+.cmd { display: grid; gap: 1px; padding: 5px 9px; border-radius: 6px; color: var(--text); }
+.cmd:hover { background: var(--panel-2); text-decoration: none; }
+.cmd.on { background: var(--sel); }
+.cmd .nm { font: 600 12.5px var(--mono); }
+.cmd .about { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd.off .nm { color: var(--faint); }
+.cmd-list .none, .run-jobs .none, .jobs-view .none { color: var(--faint); font-size: 12.5px; padding: 6px 4px; }
+
+/* one command */
+.cmd-pane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; min-width: 0; }
+.cmd-head { display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; }
+.cmd-title { margin: 0; font: 600 17px var(--mono); }
+.cmd-desc { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; }
+.cmd-pick h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+.cmd-pick p, .cmd-pick li { color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.cmd-pick ul { margin: 6px 0; padding-left: 18px; }
+.fields { margin-top: 12px; display: grid; }
+.field {
+  display: grid; grid-template-columns: minmax(140px, 210px) minmax(0, 1fr); gap: 3px 16px; padding: 8px 0;
+  border-top: 1px solid var(--line); align-items: center;
+}
+.fields > .field:first-child, .subform > .field:first-child { border-top: 0; }
+.field .fl { font: 12.5px var(--mono); overflow-wrap: anywhere; }
+.field .fl code { font: inherit; color: var(--accent-strong); }
+.field .fl .arg-name { font-style: italic; }
+.field .fw { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; min-width: 0; }
+.field .fw input[type="text"], .field .fw input[type="number"], .field .fw select {
+  width: min(100%, 440px); height: 28px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 6px;
+  background: var(--panel-2); font: 12.5px var(--mono);
+}
+.field .fw input:focus, .field .fw select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.field .fw input.num { width: 90px; }
+.field .fw input[type="checkbox"] { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+.field .fh { grid-column: 2; color: var(--muted); font-size: 12px; }
+.field .fmeta { font-size: 11px; color: var(--faint); display: inline-flex; gap: 8px; flex-wrap: wrap; }
+.field .req { color: var(--o-refused); }
+.field.bad .fw input, .field.bad .fw select { border-color: var(--missed); box-shadow: 0 0 0 3px var(--differ-bg); }
+.fgroup {
+  margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--line-strong); font-size: 11px; font-weight: 650;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
+}
+.fnote { font-size: 12px; color: var(--muted); padding: 6px 0; border-top: 1px solid var(--line); }
+.fnote code, .fgroup code { font: 12px var(--mono); }
+.maybe { display: inline-flex; gap: 8px; align-items: center; width: min(100%, 440px); }
+.maybe input[type="text"] { flex: 1; min-width: 0; }
+.subcmds { flex-wrap: wrap; }
+.subform { margin: 0 0 6px 6px; padding-left: 14px; border-left: 2px solid var(--accent-soft); }
+.show-all { display: inline-flex; gap: 6px; align-items: center; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.show-all input { accent-color: var(--accent); }
+.cmdline-box { margin-top: 14px; display: flex; gap: 8px; align-items: flex-start; }
+.cmdline {
+  flex: 1; margin: 0; padding: 8px 12px; font: 12.5px/1.55 var(--mono); background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 37px; min-width: 0;
+}
+.cmdline::before { content: "$ "; color: var(--faint); }
+.cmd-error { color: var(--missed); font-size: 12.5px; margin-top: 6px; white-space: pre-wrap; }
+.cmd-error:empty { display: none; }
+.run-actions { display: flex; gap: 8px 12px; align-items: center; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+.run-actions .run-where { overflow-wrap: anywhere; }
+button.primary:disabled { opacity: .45; cursor: default; }
+
+/* the jobs */
+.run-jobs { margin-top: 16px; }
+.run-jobs .section-head .legend-line { margin-right: 6px; }
+.jobs { display: grid; }
+.jobrow {
+  display: grid; grid-template-columns: 4ch 8.5em minmax(0, 1fr) 7.5em 7.5em 10em; gap: 10px; align-items: center;
+  padding: 6px 6px; border-top: 1px solid var(--line); color: var(--text); font-size: 12.5px;
+}
+.jobrow:first-child { border-top: 0; }
+.jobrow:hover { background: var(--panel-2); text-decoration: none; }
+.jobrow .jid { color: var(--faint); text-align: right; font-variant-numeric: tabular-nums; }
+.jobrow .jline { font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jobrow .jwhen, .jobrow .jtime, .jobrow .jexit {
+  color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.jobs-view .section { padding: 6px 12px; }
+.state {
+  display: inline-flex; align-items: center; gap: 6px; justify-self: start; font-size: 11.5px; padding: 1px 8px 1px 7px;
+  border-radius: 10px; border: 1px solid var(--line-strong); color: var(--muted); white-space: nowrap;
+}
+.state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.state.s-queued::before { background: transparent; box-shadow: inset 0 0 0 1.5px currentColor; }
+.state.s-running { color: var(--accent-strong); border-color: var(--accent); }
+.state.s-running::before { animation: pulse 1.2s ease-in-out infinite; }
+.state.s-stopping, .state.s-stopped { color: var(--o-refused); }
+.state.s-done { color: var(--accent-strong); }
+.state.s-failed, .state.s-lost { color: var(--missed); border-color: var(--missed); }
+.state.s-cancelled { color: var(--faint); }
+@media (prefers-reduced-motion: reduce) { .state.s-running::before { animation: none; } }
+
+/* one job */
+.job { display: flex; flex-direction: column; min-width: 0; }
+.job-head .fn-title button, .job-head .fn-title a.button { flex: none; }
+.job-head .cmdline { margin-top: 10px; }
+.job-facts { margin-top: 8px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.job-facts b { font-weight: 600; }
+.job-why { margin-top: 6px; font-size: 12.5px; color: var(--muted); }
+.log-empty { padding: 10px 18px; color: var(--faint); font-size: 12.5px; font-style: italic; }
+.job-log-box { overflow: auto; background: var(--panel); min-height: 220px; }
+.job-log {
+  margin: 0; padding: 10px 18px 28px; font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text);
+}
+.log-note {
+  position: sticky; top: 0; padding: 6px 18px; font-size: 12px; color: var(--muted); background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+}
+
+@media (max-width: 820px) {
+  .run { padding: 16px 16px 40px; }
+  .run-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .cmds { position: static; max-height: none; }
+  .cmd-list, #cmd-filter { display: none; }
+  #cmd-select { display: block; width: 100%; height: 32px; }
+  .cmd-pane { padding: 14px; }
+  .field { grid-template-columns: minmax(0, 1fr); }
+  .field .fh { grid-column: 1; }
+}
+@media (max-width: 700px) {
+  .jobrow { grid-template-columns: 3ch auto auto minmax(0, 1fr); row-gap: 2px; }
+  .jobrow .jline { grid-column: 2 / -1; grid-row: 2; }
+  .jobrow .jexit { display: none; }
+  .job-log { padding: 8px 12px 24px; }
+}
