@@ -235,10 +235,15 @@ def test_readable_frame_objects_reach_the_call_they_are_handed_to(gizmo, monkeyp
     if not hit:
         pytest.skip("%s's readable C indexes no byte buffer of its frame here" % NAME)
     # a failing case, else (where the bytes it changes decide nothing a case compares) the first case
-    # whose run hands the buffer to a callee
+    # whose run hands the buffer to a callee. A case that returns before the call can part at the end
+    # alone: NAME's result is read by nobody, so its readable C is void here, and what a void function
+    # leaves in the result register is the compiler's (on CI, GCC 13 and 10 for RV32 left a loaded byte
+    # there where the original leaves its argument; the host's compiler did not part there); the runner
+    # compares it, so the gate gives such a function its result back, but this test's C has not been
+    # through the gate: such a case is passed over.
     for label in labels[:1] + ["generated %d" % i for i in range(8)]:
         result, heading, text = traced(target, image, NAME, label, mode="readable")
-        if result.first is not None:
+        if result.first is not None and result.first.kind == "arguments":
             break
     assert "%s is built from readable C" % NAME in heading
     d = result.first
