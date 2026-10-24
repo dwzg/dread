@@ -9,6 +9,113 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## A refusal stands only where it explains every difference (2026-10-24)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20). It makes the comparison
+stronger (rule 6): no case is refused or compared except now that was compared before, and some that
+were refused fail.
+
+- **Question.** dread test (and through it the lift check and the readable gate) refuses a case instead
+  of failing it when its input is one the C cannot be held to: the original touches its own saved
+  registers (a length past a local), takes a stack address for a value, calls through a code pointer
+  the input gave into the middle of a function, or, in a written case, loads instructions as data or
+  stores into the image; and it compares a case except the outputs the original's stale stack data
+  decides. Until now a reason that held refused the case whatever else differed (the stale data
+  apart, whose log was one output: any entry moved left the whole log out). On the private real-life
+  test the readable gate accepted C that had lost an argument of a call: every case that showed it was
+  refused under the saved-register rule, and the cases that agreed ran every instruction. Which
+  differences may each reason explain?
+- **Options.** (a) As before. (b) Each reason explains a defined part of a case's outputs; a case is
+  refused only where the reasons that hold explain every difference, and fails otherwise, its line
+  naming the reasons and what they leave (`FAIL NAME [label]: refused for X, but it differs Y: Z`).
+  (c) No refusals: such cases fail, and their functions stay lifted or original.
+- **Choice: (b)**, with these rules (dread.runner judge, Moved, After; dread.fragile Timeline,
+  stack_moved):
+  - *An event explains what comes after it, and nothing before it*: the first touch of a saved
+    register's slot (saves_touched), the call into the middle of a function (wild_call), a written
+    case's first load of an instruction as data or store into the image (code_touch). Before the event
+    the C's frame layout, or the code at the call's target, has not mattered yet, so C that is right
+    does what the original does there; after it the C may do anything: its overflow lands among its
+    own locals and saves, which lie otherwise, or it runs other code. "Before" is found by a clock both
+    runs keep alike: the moves between the function's own code and the rest (calls out of it, returns
+    into it, counted from its first block; in the rebuilt image its C's place from placement.json) and
+    the entries of the log (stub calls, device accesses), which right C makes in the same order;
+    between two ticks the images may order their instructions and stores otherwise, so a store is
+    placed by the last tick before it. The original's run is watched to the event (its log's length
+    then, its ticks before it, the bytes outside the stack as they were at the last of those ticks);
+    the rebuilt image's run again, to the same tick. Explained: every register at the return (it is
+    made at the end); the log from the first entry the original made after the event; a byte outside
+    the stack that either image wrote after the last tick before the event. Not explained: the log's
+    entries before the event (a stub call's arguments); a byte whose final value both images had at
+    that tick (a store elsewhere); a rebuilt run that faults (an original that faults after a written
+    case's load), unless the rebuilt run got to that tick with the original's log and bytes. A rebuilt
+    run that never gets to that tick (it made fewer calls out of the function or log entries before the
+    event: it went another way earlier, a return taken too soon) gets nothing explained by the event,
+    not even a register, and the FAIL line says how far it got.
+  - *Where the stack lies explains the outputs that change in the original when its stack starts
+    lower*: with it STACK_SHIFT (64) bytes lower, the run that decides whether the reason holds, and,
+    while a difference is left that those do not explain, 8, 256 and 680 bytes lower one after another
+    (fragile.MORE_SHIFTS), joined; the log from its first entry that changes. A run 64 bytes lower that
+    faults or hangs stands for itself up to where it stopped (the log from where it parts, the bytes it
+    left otherwise or not at all, every register); a further shift's run that faults adds nothing (a
+    deep case run off the stack's end says nothing about the code). Why more than one shift: a stack
+    address may pick one of a few outputs, and one shift can leave alone the one the C's frame picked
+    (FreeRTOS's queue set test seeds a random generator with the address of a local, which picks the
+    counter each send adds to: on RISC-V GCC -Os 39 of prvQueueSetSendingTask's 41 loop cases failed
+    with the one shift, the third counter left alone; with the four, none).
+  - *Stale stack data* (compared except, not refused): the outputs the fills move, as before, but the
+    log from the first entry a fill moves; the entries before it are compared.
+  - Reasons join, checked in the old order while a difference is left (code, wild call, stack, stale
+    data, saved registers): a case is refused when the reasons that hold together explain every
+    difference (a memcpy that reads a saved register past a local, in a function whose queue items
+    carry a stack address: FreeRTOS's vTimerPeriodicISRTests), compared except the stale outputs when
+    those alone do, and fails otherwise. The REFUSED line now says what its reasons explained (`(it
+    differs only after the touch: r4 after the return)`).
+- **Why.** A refusal says that the case's input is one the C cannot be held to; that holds for what
+  its reason reaches, not for the whole case. For an event, time is the boundary that is sound without
+  the C's frame: what the touched registers decide cannot be told from the original's run alone, since
+  the C's overflow lands elsewhere and corrupts other things; but nothing the C does before its own
+  overflow depends on its layout. For the stack's position the original's own runs tell what it
+  decides, without a moment: a stack address may be taken long before it matters. Option (c) would
+  lose functions whose refused cases are all honest (FreeRTOS's queue set and timer tests: a stack
+  address seeds or is sent), and (a) let wrong C through.
+- **Measured** on the eight builds (gizmo a32, m3, m4, rv32; FreeRTOS mps2-gcc-Os, mps2-clang-O2, the
+  RISC-V GCC -Os build, mps2-gcc-O0), the lift check and then the readable gate, before (5eaeefc) and
+  after, from the same cached cases: the functions accepted are the same on every build in both steps
+  (gizmo 36, 36, 44, 32 lifted and 35, 36, 44, 31 readable; FreeRTOS 341, 300, 272, 382 lifted and
+  328, 288, 265, 378 readable), the lifted and readable tables byte for byte the same, and so are the
+  refused cases (87, 32, 60, 175 in the lift check's last rounds, 45, 25, 16, 14 in the gate's) and
+  those compared except stale data (8, 8, 10, 35; 20, 14, 5, 18). Some refusals name other reasons now:
+  the stack and a saved register where the stack alone had refused them (vTimerPeriodicISRTests, whose
+  memcpy reads one: 25 cases on mps2-clang-O2 and on mps2-gcc-O0 in the lift check, 25 on mps2-clang-O2
+  in the gate; prvSanityCheckCreatedQueue, which writes one: 1 on RISC-V in each step), and the saved
+  register alone for 6 of prvSanityCheckCreatedQueue's cases in mps2-gcc-O0's gate, where the stack
+  moves none of their differences. No case fails for a difference its reasons leave: the stricter rules
+  found no fault in these builds' C. Two functions newly failed on the way and were traced: fflush on mps2-clang-O2 (accepted
+  before) and prvSingleTaskTests on the same build (dropped either way), through a fault of the first
+  version (the event's tick was counted to the run's end); and prvQueueSetSendingTask's loop cases on
+  RISC-V, through the one shift (above). The lift check of mps2-gcc-O0 took 134 s against 137 s before,
+  side by side on one machine: the extra runs are made only for cases a reason holds for.
+- **Not established.** (1) The stretch between the last tick and the event is not compared: a store
+  the function's own code makes there counts as after the event, and a function whose own code touches
+  its saves before any call or log entry has nothing compared before the touch but the log (a finer
+  clock, docs/todo.md). (2) Time is wider than what the event decides: a difference made after the
+  touch but not by it is explained too. (3) C that makes other calls than the original (a helper of
+  its own, a call the original inlined) would put the clock out of step: such a case fails (the safe
+  side); none on the eight builds. (4) Four shifts can miss what depends on the stack's position in a
+  way none of them changes (such a case fails: the safe side). (5) dread integration's own stack check
+  leaves out an input whose builds differ when the shift moves anything at all, the same hole: not
+  changed here (docs/todo.md). (6) The private test's function was not run against these rules here
+  (rule 1): that its cases now fail rests on the public reproduction, a stub call's argument made before
+  the touch.
+- **Undo.** Revert the commit: runner.judge back to the first reason that holds refusing the case,
+  stale_outputs' log one output.
+- **Status.** Done (2026-10-24): tests/test_runner.py has each reason's reproduction with wrong C
+  (another value passed to a stubbed callee before the touch, before the call, before the load, where
+  the stack moves nothing; a store before the touch; a return before the touch; a stale case's first
+  log entry) that the old rules accepted and these fail, beside right C they still refuse, and C that
+  does otherwise only after the touch, which they refuse too.
+
 ## Stack arguments through a bound call; a callee whose stack pointer is not static (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).

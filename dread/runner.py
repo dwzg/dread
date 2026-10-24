@@ -31,23 +31,40 @@ Output, one block per function, in this form (other tools read it):
                                     local: what earlier frames left there, which C, laying out its
                                     frames and saving other values in them, leaves otherwise;
                                     stale_outputs): compared except those outputs, which the line
-                                    names, and counted for coverage (decided 2026-10-20 by
-                                    recommendation, docs/decisions.md; refused before)
-    FAIL NAME [label]               followed by the differences, indented by five spaces
+                                    names (the log from the first entry the fills move), and
+                                    counted for coverage (decided 2026-10-20 by recommendation,
+                                    docs/decisions.md; refused before)
+    FAIL NAME [label]               followed by the differences, indented by five spaces; with
+                                    ": refused for X, but it differs Y: Z" where a refusal below
+                                    applies but does not explain every difference (Z: those it
+                                    does not)
     UNCOVERED NAME: a of b instructions of the original never ran: ADDRESS ...
-    REFUSED NAME [label]: ...       a written case that reads code as data or writes into the image,
-                                    or a case whose two images differ where the original's own
-                                    outcome changes when its stack starts STACK_SHIFT bytes lower
-                                    (it took a stack address for a value: C's frames lie otherwise),
-                                    or where the original's input makes code other than a push or
-                                    a pop read or write the function's own saved registers (a length
+    REFUSED NAME [label]: ... (it differs only ...: Z)
+                                    a case whose images differ only where one of these reasons, or
+                                    several together, explain (judge; decided 2026-10-24,
+                                    docs/decisions.md: until then a reason that applied refused
+                                    the case whatever else differed), Z naming the differences:
+                                    a written case that reads code as data or writes into the image
+                                    (what comes after the first such load or store; refused also
+                                    when the images agree: remove it),
+                                    where the original's own outcome changes when its stack starts
+                                    STACK_SHIFT bytes lower (it took a stack address for a value:
+                                    C's frames lie otherwise; the outputs that change so),
+                                    where the original's input makes code other than a push or a
+                                    pop read or write the function's own saved registers (a length
                                     past a local: C keeps them elsewhere; saves_touched; decided
-                                    2026-10-20, docs/decisions.md),
-                                    or where the original calls through a register into the middle of a
+                                    2026-10-20; what comes after the first touch),
+                                    where the original calls through a register into the middle of a
                                     function (a code pointer the input gave that is no entry: the
                                     rebuilt image has other code there, or calls it with other
-                                    values in the other registers; wild_call); such a case is not
-                                    compared and runs nothing for coverage
+                                    values in the other registers; wild_call; what comes after
+                                    that call); such a case is not compared and runs nothing for
+                                    coverage. "What comes after" an event (fragile.Timeline,
+                                    After): every register at the return, the log from the entry
+                                    made after the event, and a byte written outside the stack that
+                                    either image wrote after the last call out of the function or
+                                    return into it, or log entry, before the event; a rebuilt run
+                                    that never gets that far gets nothing explained by the event
     UNTESTED NAME
 
 Exit status 1 when anything failed, is uncovered or untested. Functions run in parallel worker
@@ -104,35 +121,186 @@ def _original():
     return Machine(RUN["layout"], RUN["original"], isa_of=RUN["isa_of"])
 
 
-def stack_moves_it(name, addr, args, limit, setup, kept, why, first):
-    """dread.fragile.stack_moves for the run's original."""
+def inside(name, words=(), rebuilt=False):
+    """A test of a block's address: whether it is the function's own code. In the original: its extent
+    and its instructions with the shared code its C holds (words); in the rebuilt image: where its C was
+    placed, with the body behind a naked entry (dread.overlay's placement.json), or the original's when
+    it was not built from C."""
+    spans = RUN.get("placed", {}).get(name) if rebuilt else None
+    if spans:
+        return lambda a: any(lo <= a < hi for lo, hi in spans)
+    fn = RUN["program"].by_name.get(name)
+    lo, hi = (fn.entry, fn.entry + fn.size) if fn is not None else (0, 0)
+    words = frozenset(words)
+    return lambda a: lo <= a < hi or a in words
+
+
+class Moved:
+    """The outputs a change of the original's own run moves (its stack lower: fragile.stack_moved; stale
+    stack data filled: stale_outputs): difference items (fragile.items), the log from the entry where
+    the runs part (log_from). A difference between the images among them is one the original itself
+    does not define."""
+
+    def __init__(self, keys, log_from):
+        self.keys, self.log_from = set(keys), log_from
+
+    def explains(self, item):
+        if isinstance(item, tuple) and item[0] == "log":
+            return self.log_from is not None and item[1] >= self.log_from
+        return item in self.keys
+
+
+class After:
+    """What an event of the original's run explains (a saved register touched, a call into the middle of
+    a function, an instruction loaded as data: fragile.Timeline marks it): what comes after it, and
+    nothing before it. After it the C, whose frames lie otherwise or which has other code there, may do
+    anything: every register at the return, the log from the entry made after the event on, a byte
+    either run wrote late (since the last tick before the event). Before it the C does what the
+    original does: the log's entries before the event, and a byte whose final value both runs had at
+    that tick, are compared. A rebuilt run that never gets to that tick (fewer calls out of the
+    function or log entries: it went another way before the event) gets nothing explained (note says
+    so); a run that faults (an original that faults after it) counts as after it only when the
+    rebuilt run got there with the original's log and bytes."""
+
+    def __init__(self, original, rebuilt, original_calls, rebuilt_calls):
+        self.k, self.ticks = original.calls, original.event
+        self.late = original.late | rebuilt.late
+        self.reached, self.got = rebuilt.reached, rebuilt.ticks
+        self.fault_after = rebuilt.reached and rebuilt.snapshot == original.snapshot and \
+            list(rebuilt_calls[:self.k]) == list(original_calls[:self.k])
+        self.note = None if self.reached else (
+            "the rebuilt image's run never gets that far: %d moves out of the function and back and log "
+            "entries, where the original makes %d before it" % (self.got, self.ticks))
+
+    def explains(self, item):
+        if not self.reached:
+            return False
+        if item == "return":
+            return True
+        if not isinstance(item, tuple):
+            return False
+        if item[0] in ("saved", "kept"):
+            return True
+        if item[0] == "log":
+            return item[1] >= self.k
+        if item[0] == "memory":
+            return item[1] in self.late
+        if item[0] in ("rebuilt", "original"):
+            return self.fault_after
+        return False
+
+
+def stack_moved_it(name, addr, args, limit, setup, kept, why, first, left=()):
+    """fragile.stack_moved for the run's original, as a Moved; None when the stack's position moves
+    nothing (with the stack STACK_SHIFT bytes lower, the check that decides whether the reason holds).
+    While a difference of left is one the outputs moved so far do not explain, the stack moves by
+    fragile.MORE_SHIFTS too, one after another, and what they move is joined (a run that faults
+    there adds nothing)."""
     from dread import fragile
-    return fragile.stack_moves(_original, RUN["layout"], setup, addr, args, limit, first, name, kept, why)
+    got = fragile.stack_moved(_original, RUN["layout"], setup, addr, args, limit, first, name, kept, why)
+    if not got:
+        return None
+    moved = Moved(*got)
+    for shift in fragile.MORE_SHIFTS:
+        if all(moved.explains(i) for i in left):
+            break
+        more = fragile.stack_moved(_original, RUN["layout"], setup, addr, args, limit, first, name, kept, why,
+                                   shift=shift, partial=False)
+        if more:
+            moved.keys |= more[0]
+            if more[1] is not None:
+                moved.log_from = more[1] if moved.log_from is None else min(moved.log_from, more[1])
+    return moved
 
 
-def saves_touched(name, addr, args, limit, setup, kept, why):
-    """dread.fragile.saves_touched for the run's original."""
+def saves_touched(name, addr, args, limit, setup, kept, why, timeline=None):
+    """dread.fragile.saves_touched for the run's original (timeline: marked at the first touch)."""
     from dread import fragile
-    return fragile.saves_touched(_original, RUN["program"], RUN["layout"], setup, addr, args, limit, name, kept, why)
+    return fragile.saves_touched(_original, RUN["program"], RUN["layout"], setup, addr, args, limit, name, kept, why,
+                                 timeline=timeline)
 
 
-def wild_call(name, addr, args, limit, setup, kept, why):
+def wild_call(name, addr, args, limit, setup, kept, why, timeline=None):
     """(site, target) of the first call through a register, anywhere in the original's run, that
     lands in the image but at no function's entry, or None (dread.emu.Machine.watch_calls). A generated
     input set a timer's callback to 127, a Thumb pointer into the middle of __aeabi_dmul at 0x7e
     (FreeRTOS's Cortex-M4F builds): the original ran that code with its registers and came back, the
-    lifted prvReloadTimer called it with others and came to address 0."""
+    lifted prvReloadTimer called it with others and came to address 0. timeline: marked at that call
+    (a fragile.Timeline, attached before the watch, so that the move out of the function that the call
+    may be counts before it)."""
+    from unicorn import UC_HOOK_BLOCK
     lay, program = RUN["layout"], RUN["program"]
     m = Machine(lay, RUN["original"], isa_of=RUN["isa_of"])
     m.plan, m.replay, m.function = [], False, name
     m.kept, m.kept_why = kept, why
     try:
         setup(m)
+        if timeline is not None:
+            timeline.attach(m)
         m.watch_calls(program, program.icall_sites())
+        if timeline is not None:
+            def mark(uc, address, size, user):
+                if m.wild_calls:
+                    timeline.mark(m)
+            m.hook_add(UC_HOOK_BLOCK, mark)
         m.call(addr, *args, max_instructions=limit)
     except Exception:
         pass
     return (getattr(m, "wild_calls", None) or [None])[0]
+
+
+def code_touch(name, addr, args, limit, setup, kept, why, timeline):
+    """A written case's original run again, timeline marked at its first load of an instruction as data
+    or store into the image (the conditions of Machine.trace_reads and wrote_into, watched here in
+    Python so that the moment is known)."""
+    from unicorn import UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE
+    lay, prog, image = RUN["layout"], RUN["program"], RUN["image"]
+    code, owners = RUN["code"], RUN["owners"]
+    lo, hi = image.base, image.end
+    if owners is not None:
+        hi = max(hi, lo + 2 * len(owners))
+    m = Machine(lay, RUN["original"], isa_of=RUN["isa_of"])
+    m.plan, m.replay, m.function = [], False, name
+    m.kept, m.kept_why = kept, why
+
+    def owner(a):
+        h = (a - lo) >> 1
+        return owners[h] if owners is not None and 0 <= h < len(owners) else 0
+
+    def on_read(uc, access, address, size, value, user):
+        if any(a in code for a in range(address & ~1, address + size, 2)) or \
+                owner(address) and owner(uc.reg_read(lay.pc) & ~1) != owner(address):
+            timeline.mark(m)
+
+    def on_write(uc, access, address, size, value, user):
+        if not lay.in_stack(address):
+            timeline.mark(m)
+    try:
+        setup(m)
+        timeline.attach(m)
+        m.hook_add(UC_HOOK_MEM_READ, on_read, begin=lo, end=hi - 1)
+        m.hook_add(UC_HOOK_MEM_WRITE, on_write, begin=image.base, end=prog.writable_end() - 1)
+        m.call(addr, *args, max_instructions=limit)
+    except Exception:
+        pass
+
+
+def event_after(name, addr, args, budget, setup, kept, why, plan, timeline, words=()):
+    """An After for the event timeline marked in the original's run: the rebuilt image's run of the case
+    again (its stubs' plan replayed, its budget), with a timeline to the same tick."""
+    from dread import fragile
+    lay = RUN["layout"]
+    m = Machine(lay, RUN["recon"], RUN["aliases"], isa_of=RUN["isa_of"])
+    m.plan, m.replay, m.function = list(plan), True, name
+    m.kept, m.kept_why = kept, why
+    rebuilt = fragile.Timeline(lay, inside(name, words, rebuilt=True), at=timeline.event)
+    try:
+        setup(m)
+        rebuilt.attach(m)
+        m.call(addr, *args, max_instructions=budget)
+    except Exception:
+        pass
+    return After(timeline, rebuilt, list(timeline.m.calls), list(m.calls))
 
 
 def stale_outputs(name, addr, args, limit, setup, kept, why, first, rebuilt):
@@ -142,14 +310,17 @@ def stale_outputs(name, addr, args, limit, setup, kept, why, first, rebuilt):
     reads the fill instead of what earlier frames left; an output that changes there too is one the
     original itself does not define, and C cannot be held to it (it lays out its frames otherwise
     and saves other values in them; FreeRTOS's timer commands carry a union member nobody set into
-    the timer queue). Returns those outputs (dread.emu's difference keys), empty when the fills move
-    none or the original fails with a fill."""
-    images = first.differences(rebuilt)
+    the timer queue). Returns a Moved of the outputs the fills move (the log from the first entry
+    either fill moves: the entries before it are compared; until 2026-10-24 the whole log was one
+    output, left out when any entry moved), or None when they move none in which the images differ,
+    or the original fails with a fill."""
+    from dread import fragile
+    images = fragile.items(first, rebuilt)
     if not images:
-        return set()
+        return None
     lay = RUN["layout"]
     entries = frozenset(e & ~1 for e in Machine.entries.get((lay.target.file, lay.image.name), ()))
-    moved = set()
+    keys, log_from = set(), None
     for fill in STALE_FILLS:
         m = Machine(lay, RUN["original"], isa_of=RUN["isa_of"])
         m.plan, m.replay, m.function = [], False, name
@@ -159,13 +330,18 @@ def stale_outputs(name, addr, args, limit, setup, kept, why, first, rebuilt):
             setup(m)
             again = m.call(addr, *args, max_instructions=limit)
         except Exception:
-            return set()
-        moved |= first.differences(again)
-    return images & moved
+            return None
+        for k in fragile.items(first, again):
+            if isinstance(k, tuple) and k[0] == "log":
+                log_from = k[1] if log_from is None else min(log_from, k[1])
+            else:
+                keys.add(k)
+    stale = Moved(keys, log_from)
+    return stale if any(stale.explains(i) for i in images) else None
 
 
-def outputs_text(keys):
-    """A short text of difference keys: memory as address runs, the rest by name."""
+def items_text(keys):
+    """A short text of difference items (fragile.items): memory as address runs, the rest in words."""
     memory = sorted(k[1] for k in keys if isinstance(k, tuple) and k[0] == "memory")
     runs = []
     for a in memory:
@@ -175,9 +351,123 @@ def outputs_text(keys):
             runs.append([a, a])
     shown = ["memory " + ", ".join("0x%x" % lo if lo == hi else "0x%x-0x%x" % (lo, hi) for lo, hi in runs[:4])
              + (", ..." if len(runs) > 4 else "")] if runs else []
-    shown += sorted(k if isinstance(k, str) else "%s %s" % k for k in keys if not (isinstance(k, tuple)
-                                                                                  and k[0] == "memory"))
-    return "; ".join(shown)
+    words = []
+    for k in keys:
+        if k == "return":
+            words.append("the return value")
+        elif isinstance(k, str):
+            words.append(k)
+        elif k[0] in ("saved", "kept"):
+            words.append("%s after the return" % k[1])
+        elif k[0] == "log":
+            words.append("the log from entry %d" % (k[1] + 1))
+        elif k[0] in ("rebuilt", "original"):
+            words.append("the %s's run (%s)" % ("rebuilt image" if k[0] == "rebuilt" else "original", k[1]))
+        elif k[0] != "memory":
+            words.append(" ".join("%s" % x for x in k))
+    return "; ".join(shown + sorted(words))
+
+
+outputs_text = items_text   # (its name until 2026-10-24)
+
+
+class Reason:
+    """A refusal's reason that applies to a case (kind: code, wild, stack, stale, saves): what it explains
+    (explains(item), a difference item of fragile.items; got: the case's differences it does explain),
+    its words in a REFUSED line (refused) and in a FAIL line (reason; outside: where it explains
+    nothing; note: why it explains nothing at all), and the scope of what it explains."""
+
+    def __init__(self, kind, explains, refused, reason, scope, outside, got=(), note=None):
+        self.kind, self.explains, self.refused, self.reason = kind, explains, refused, reason
+        self.scope, self.outside, self.got, self.note = scope, outside, set(got), note
+
+
+def fragile_items(out):
+    """The difference items of a case's two outcomes (fragile.items); an outcome that is an error is
+    one item, ("original" or "rebuilt", its text)."""
+    from dread import fragile
+    if not isinstance(out[0], Exception) and out[1] is not None and not isinstance(out[1], Exception):
+        return fragile.items(out[0], out[1])
+    return {(which, "%s" % o) for which, o in zip(("original", "rebuilt"), out) if isinstance(o, Exception)}
+
+
+def judge(name, addr, args, limit, setup, kept, why, words, out, diff, depends, code_touched, recorded, budget):
+    """The refusals' reasons that apply to a case whose images differ, and the differences none of them
+    explains: (reasons, left, stale: the stale outputs' Moved or None). Checked in this order, each only
+    while a difference is left: the instructions a written case loads as data or the image it stores
+    into (code_touch), a call into the middle of a function (wild_call), where the stack lies
+    (stack_moved_it), the original's stale stack data (stale_outputs), the saved registers the input
+    makes the original touch (saves_touched). An event's reason (a load or store, a call, a touch)
+    explains what comes after the event (After), a moved output's (the stack, stale data) the outputs
+    that change in the original (Moved). run_function refuses a case only when the reasons together
+    explain every difference, compares it except the stale outputs when those alone do, and fails it
+    with the reasons named when a difference is left (decided 2026-10-24, docs/decisions.md: until then
+    a reason that applied refused the case whatever else differed)."""
+    from dread import fragile
+    layout = RUN["layout"]
+    orig_ran = not isinstance(out[0], Exception)
+    reb_ran = len(out) == 2 and out[1] is not None and not isinstance(out[1], Exception)
+    reasons, stale = [], None
+    if not diff or depends or len(out) != 2 or out[1] is None or not (orig_ran or code_touched):
+        return reasons, set(), stale
+    items = fragile_items(out)
+    left = set(items)
+
+    def timed(kind, timeline, refused_text, reason, scope, outside):
+        nonlocal left
+        after = event_after(name, addr, args, budget, setup, kept, why, recorded, timeline, words) \
+            if timeline.calls is not None else None     # (a moment not found again explains nothing)
+        explains = after.explains if after else (lambda item: False)
+        got = {i for i in items if explains(i)}
+        left -= got
+        reasons.append(Reason(kind, explains, refused_text, reason, scope, outside, got,
+                              after.note if after else "its moment was not found again"))
+
+    if code_touched:
+        tl = fragile.Timeline(layout, inside(name, words))
+        code_touch(name, addr, args, limit, setup, kept, why, tl)
+        timed("code", tl, "the input loads instructions as data or stores into the image; remove it",
+              "the instructions the input loads as data or the image it stores into",
+              "after the first such load or store", "before the first such load or store")
+    if left and orig_ran:
+        wild = wild_call(name, addr, args, limit, setup, kept, why)
+        if wild:
+            tl = fragile.Timeline(layout, inside(name, words))
+            wild_call(name, addr, args, limit, setup, kept, why, timeline=tl)
+            owner = RUN["program"].function_at(wild[1])
+            where = "inside %s but not its entry" % owner.name if owner else "into the image's data"
+            timed("wild", tl, "the original calls 0x%x from 0x%x, %s (a code pointer the input gave): the rebuilt "
+                  "image has other code there, or calls it with other values in the other registers; not compared"
+                  % (wild[1], wild[0], where),
+                  "the call of 0x%x from 0x%x, %s (a code pointer the input gave)" % (wild[1], wild[0], where),
+                  "after that call", "before that call")
+    if left and orig_ran and reb_ran:
+        moved = stack_moved_it(name, addr, args, limit, setup, kept, why, out[0], left)
+        if moved:
+            got = {i for i in items if moved.explains(i)}
+            left -= got
+            reasons.append(Reason(
+                "stack", moved.explains, "the original's outcome depends on where the stack lies (it differs with "
+                "the stack %d bytes lower): a stack address taken for a value; not compared" % STACK_SHIFT,
+                "where the stack lies (with it lower the original changes %s)"
+                % (items_text(got) or "in other outputs"),
+                "where the lower stack moves the original too", "where the lower stack moves nothing", got))
+    if left and orig_ran and reb_ran:
+        stale = stale_outputs(name, addr, args, limit, setup, kept, why, out[0], out[1])
+        if stale:
+            stale.shown = {i for i in items if stale.explains(i)}
+            left -= stale.shown
+            reasons.append(Reason("stale", stale.explains, None, None, "where the original's stale stack data "
+                                  "decides", None, stale.shown))
+    if left and orig_ran and reb_ran:
+        tl = fragile.Timeline(layout, inside(name, words))
+        smash = saves_touched(name, addr, args, limit, setup, kept, why, timeline=tl)
+        if smash:
+            timed("saves", tl, "the input makes the original touch its own saved registers (%s; a length past a "
+                  "local): C keeps them elsewhere; not compared" % smash,
+                  "the saved registers the input makes the original touch (%s)" % smash,
+                  "after the touch", "before the touch")
+    return reasons, left, stale
 
 
 def run_function(name):
@@ -202,7 +492,7 @@ def run_function(name):
     kept, why, argued = kept_for(name)
     bad, covered, failing, refused = 0, set(), [], 0
     for label, addr, setup, args, limit, generated in cases:
-        out, plan, case_covered = [], [], set()
+        out, plan, recorded, case_covered, budget, code_touched = [], [], [], set(), limit, False
         for which, payload in (("original", RUN["original"]), ("rebuilt", RUN["recon"])):
             m = Machine(layout, payload, RUN["aliases"] if which == "rebuilt" else None, isa_of=RUN["isa_of"])
             m.plan, m.replay = plan, which == "rebuilt"
@@ -231,16 +521,10 @@ def run_function(name):
                 out.append(m.call(addr, *args, max_instructions=budget))
             except Exception as e:          # EmuError, or anything a case's own code raises
                 out.append(e if isinstance(e, EmuError) else EmuError("%s: %s" % (type(e).__name__, e)))
-            if which == "original" and written and (m.code_reads or m.wrote_into(image.base, prog.writable_end())):
-                out = None
-                break
             if which == "original":
+                recorded = list(plan)       # (what the rebuilt run replays: for a run of it again)
+                code_touched = written and bool(m.code_reads or m.wrote_into(image.base, prog.writable_end()))
                 case_covered = m.covered_insns(words)
-        if out is None:
-            refused += 1
-            lines.append("REFUSED %s [%s]: the input loads instructions as data or stores into the image; "
-                         "remove it" % (name, label))
-            continue
         depends = None
         regs = RUN["suite"].caller_regs.get(name)
         if regs and out and not isinstance(out[0], Exception):
@@ -265,48 +549,46 @@ def run_function(name):
             diff = out[0].diff(out[1])
         if depends:
             diff = list(diff) + [depends]
-        wild = wild_call(name, addr, args, limit, setup, kept, why) \
-            if diff and not depends and not isinstance(out[0], Exception) else None
-        if wild:
+        if code_touched and not diff:
             refused += 1
-            owner = RUN["program"].function_at(wild[1])
-            lines.append("REFUSED %s [%s]: the original calls 0x%x from 0x%x, %s (a code pointer the input "
-                         "gave): the rebuilt image has other code there, or calls it with other values in the "
-                         "other registers; not compared" % (name, label, wild[1], wild[0], "inside %s but not its "
-                                                             "entry" % owner.name if owner else "into the image's data"))
+            lines.append("REFUSED %s [%s]: the input loads instructions as data or stores into the image; "
+                         "remove it" % (name, label))
             continue
-        if diff and not depends and not isinstance(out[0], Exception) and not isinstance(out[1], Exception) \
-                and stack_moves_it(name, addr, args, limit, setup, kept, why, out[0]):
-            refused += 1
-            lines.append("REFUSED %s [%s]: the original's outcome depends on where the stack lies (it differs "
-                         "with the stack %d bytes lower): a stack address taken for a value; not compared"
-                         % (name, label, STACK_SHIFT))
-            continue
-        both_ran = diff and not depends and not isinstance(out[0], Exception) and not isinstance(out[1], Exception)
-        stale = stale_outputs(name, addr, args, limit, setup, kept, why, out[0], out[1]) if both_ran else set()
-        if stale and not out[0].differences(out[1]) - stale:
+        reasons, left, stale = judge(name, addr, args, limit, setup, kept, why, words, out, diff, depends,
+                                     code_touched, recorded, budget)
+        refusing = [r for r in reasons if r.kind != "stale"]
+        if reasons and not left:
+            # (named: the reasons that explain a difference, and a written case's load of code always)
+            named = [r for r in reasons if r.got or r.kind == "code"]
+            if any(r.kind != "stale" for r in named):
+                refused += 1
+                lines.append("REFUSED %s [%s]: %s (it differs only %s: %s)" % (
+                    name, label, "; ".join(r.refused for r in named if r.kind != "stale"),
+                    " or ".join(r.scope for r in named), items_text(fragile_items(out))))
+                continue
             # Every difference is an output the original's stale stack data decides: compared except
             # those (decided 2026-10-20, docs/decisions.md; such a case was refused before)
             lines.append("     %s [%s]: compared except what the original's stale stack data (an uninitialised "
-                         "local) decides: %s" % (name, label, outputs_text(stale)))
+                         "local) decides: %s" % (name, label, items_text(stale.shown)))
             covered |= case_covered
             continue
-        # A difference left that a saved register the input made code touch explains (checked after the
-        # stale data: a case whose every difference that explains keeps its coverage)
-        smash = saves_touched(name, addr, args, limit, setup, kept, why) if both_ran else None
-        if smash:
-            refused += 1
-            lines.append("REFUSED %s [%s]: the input makes the original touch its own saved registers (%s; a "
-                         "length past a local): C keeps them elsewhere; not compared" % (name, label, smash))
-            continue
         if stale:
-            diff = list(diff) + ["(of these, the original's stale stack data decides %s)" % outputs_text(stale)]
+            diff = list(diff) + ["(of these, the original's stale stack data decides %s)"
+                                 % items_text(stale.shown)]
         covered |= case_covered
         if diff:
             bad += 1
             if generated is not None:
                 failing.append(generated)
-            lines.append("FAIL %s [%s]" % (name, label))
+            note = ""
+            if refusing:
+                # A refusal stands only where it explains every difference (2026-10-24, docs/decisions.md):
+                # here one is left that it does not
+                note = ": refused for %s, but it differs %s: %s%s" % (
+                    " and for ".join(r.reason for r in refusing),
+                    refusing[0].outside if len(refusing) == 1 else "where none of them explains",
+                    items_text(left), "".join(" (%s)" % r.note for r in refusing if r.note and not r.got))
+            lines.append("FAIL %s [%s]%s" % (name, label, note))
             lines += ["     " + d for d in diff]
     if failing and RUN["keep_failing"]:
         from dread import autocase
@@ -330,6 +612,27 @@ def run_function(name):
     return name, len(cases), bad, lines, missed
 
 
+def c_places(path):
+    """{function: [(start, end)]}: where the rebuilt image holds each function's C (dread.overlay's
+    placement.json), with the body behind its naked entry (NAME_dread_body, a helper of its own);
+    empty without the file."""
+    import json
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        data = json.load(f).get("functions", {})
+    out = {}
+    for name, v in data.items():
+        if v.get("placement") == "helper" or "address" not in v:
+            continue
+        spans = [(v["address"] & ~1, (v["address"] & ~1) + v.get("c_bytes", 0))]
+        body = data.get(name + "_dread_body")
+        if body and "address" in body:
+            spans.append((body["address"] & ~1, (body["address"] & ~1) + body.get("c_bytes", 0)))
+        out[name] = spans
+    return out
+
+
 def prepare(target, image, recon_path, keep_failing=False):
     """Fill RUN for a run over one image; returns the suite."""
     prog = Program(target, image)
@@ -338,6 +641,7 @@ def prepare(target, image, recon_path, keep_failing=False):
     with open(recon_path, "rb") as f:
         recon = f.read()
     aliases, built = load_placement(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"))
+    placed = c_places(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"))
     from dread.build import read_names
     here = os.path.dirname(os.path.abspath(recon_path))
     lifted_info = {}
@@ -366,7 +670,7 @@ def prepare(target, image, recon_path, keep_failing=False):
     RUN.update(target=target, image=image, program=prog, layout=layout, suite=suite, original=image.payload(),
                recon=recon, aliases=aliases, built=built, keep_failing=keep_failing,
                isa_of=prog.isa_at, code=prog.instruction_halves(), owners=prog.extent_owners(), regflow=flow,
-               kept_argued=kept_argued)
+               kept_argued=kept_argued, placed=placed)
     if suite.auto:                          # the generated cases' keys (dread.autocase's environment): their
         from dread import autocase          # digests found once here, before the workers fork, not in each
         try:

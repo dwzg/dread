@@ -407,3 +407,298 @@ def test_a_frame_that_returned_leaves_no_saved_registers_behind(tmp_path):
     failed, uncovered, text = run_all(target, payload)
     assert "FAIL outer [a = 5]" in text, text
     assert "REFUSED outer" not in text, text
+
+
+def small_target(tmp_path, source, rewritten, cases, entry, data=()):
+    """A target of our own: source (C, NOIPA_DEF in front) built by arm-none-eabi-gcc -O2 for a
+    Cortex-M3, the rebuilt image from rewritten (C; each name in data is defined as the unsigned at
+    the original's address of that global), cases a case file's text. Returns (target, image,
+    payload, program)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    if not shutil.which("arm-none-eabi-gcc"):
+        pytest.skip("needs arm-none-eabi-gcc")
+    (tmp_path / "t.c").write_text(NOIPA_DEF + source)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-Wno-uninitialized", "-Wno-maybe-uninitialized", "-T", str(tmp_path / "t.ld"), "-e", entry,
+                    "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    program = Program(target, image)
+    symbols = {name: address for kind, address, name in program.symbols() if kind == "d"}
+    src = tmp_path / "src"
+    src.mkdir()
+    defines = "".join("#define %s (*(volatile unsigned *)0x%x)\n" % (n, symbols[n]) for n in data)
+    (src / "rewritten.c").write_text(defines + rewritten)
+    os.makedirs(image.cases)
+    with open(os.path.join(image.cases, "few.py"), "w") as f:
+        f.write(cases)
+    payload = build.build(target, image, src=str(src), out=str(tmp_path / "recon"), quiet=True)
+    return target, image, payload, program
+
+
+TOUCH_BEFORE_C = """
+volatile unsigned sink, mark;
+NOIPA void copy(char *dst, const char *src, unsigned n) { while (n--) *dst++ = *src++; }
+NOIPA void report(unsigned n) { sink = n; }
+unsigned user(const char *src, unsigned n, unsigned k)
+{ char buf[4]; report(n); copy(buf, src, n); sink = k; return k * 5 + buf[0]; }
+unsigned marker(const char *src, unsigned n, unsigned k)
+{ char buf[4]; mark = n; copy(buf, src, n); sink = k; return k * 5 + buf[0]; }
+unsigned later(const char *src, unsigned n, unsigned k)
+{ char buf[4]; report(n); copy(buf, src, n); report(k); sink = k; return k * 5 + buf[0]; }
+unsigned shortcut(const char *src, unsigned n, unsigned k)
+{ char buf[4]; copy(buf, src, n); sink = k; return k * 5 + buf[0]; }
+"""
+
+TOUCH_BEFORE_CASES = """
+def text(m):
+    m.write(0x20100000, b"ABCDEFGHIJKLMNOP")
+    logging_stubs(m, ("report", 0, 1))
+for f, n in (("user", 12), ("marker", 12), ("later", 12), ("shortcut", 8)):     # (as far as the saved r4, not lr)
+    case(f, "n = 2", text, 0x20100000, 2, 9)
+    case(f, "n = %d" % n, text, 0x20100000, n, 9)
+"""
+
+
+@pytest.mark.parametrize("wrong", [False, True])
+def test_a_saved_register_touched_explains_only_what_comes_after_it(tmp_path, wrong):
+    """user hands n to a stubbed report, then copy writes past its 4-byte buffer and the padding behind
+    it over the saved r4 for n = 12 (as in the test above); marker stores n into a global first. C with
+    a 16-byte buffer gets its r4 back whole: for n = 12 the images differ in r4 after the return only,
+    which the touch explains, and the case is refused. C that passes n & 3 and stores n & 3 (wrong)
+    differs for n = 12 in the stub's argument and in the global as well, both made before the touch:
+    the touch explains neither, and the case fails with a line that says so (until 2026-10-24 it was
+    refused, and the function, its n = 2 case agreeing and running every instruction, accepted).
+    later reports k after the copy too, and its C leaves that out for n > 8: a difference after the
+    touch (the log from its second entry, one move out and back fewer), which the touch explains.
+    shortcut (its frame smaller: n = 8 reaches its saved r4) has wrong C that returns for n > 4 before it
+    calls copy (the same value, but sink not stored): it never gets to the touch, so the touch explains
+    none of its differences, not even those that come after the touch in the original (sink, r4)."""
+    value = "n & 3" if wrong else "n"
+    rewritten = ("void copy(char *dst, const char *src, unsigned n);\nvoid report(unsigned n);\n"
+                 "unsigned user(const char *src, unsigned n, unsigned k)\n"
+                 "{ char buf[16]; report(%s); copy(buf, src, n); sink = k; return k * 5 + buf[0]; }\n"
+                 "unsigned marker(const char *src, unsigned n, unsigned k)\n"
+                 "{ char buf[16]; mark = %s; copy(buf, src, n); sink = k; return k * 5 + buf[0]; }\n"
+                 "unsigned later(const char *src, unsigned n, unsigned k)\n"
+                 "{ char buf[16]; report(n); copy(buf, src, n); if (n <= 8) report(k); sink = k;\n"
+                 "  return k * 5 + buf[0]; }\n"
+                 "unsigned shortcut(const char *src, unsigned n, unsigned k)\n"
+                 "{ char buf[16]; %scopy(buf, src, n); sink = k; return k * 5 + buf[0]; }\n"
+                 % (value, value, "if (n > 4) return k * 5 + 'A'; " if wrong else ""))
+    target, image, payload, program = small_target(tmp_path, TOUCH_BEFORE_C, rewritten, TOUCH_BEFORE_CASES, "user",
+                                                   data=("sink", "mark"))
+    head = program.instructions(program.by_name["user"])[:4]
+    assert any(i.mnemonic == "push" and "r4" in i.op_str for i in head), [(i.mnemonic, i.op_str) for i in head]
+    failed, uncovered, text = run_all(target, payload)
+
+    def line(start):                        # (which saved registers the copy reaches depends on the compiler)
+        return next((x for x in text.splitlines() if x.startswith(start)), "")
+    refused = line("REFUSED later [n = 12]: the input makes the original touch its own saved registers")
+    assert "it differs only after the touch: r4 after the return; " in refused and refused.endswith(
+        "the log from entry 2)"), text
+    assert "ok   later" in text, text
+    if not wrong:
+        for f in ("user [n = 12]", "marker [n = 12]", "shortcut [n = 8]"):
+            refused = line("REFUSED %s: the input makes the original touch its own saved registers" % f)
+            assert "it differs only after the touch: r4 after the return" in refused, text
+            assert "ok   %s" % f.split()[0] in text, text
+        return
+    assert "FAIL user [n = 12]: refused for the saved registers the input makes the original touch (write of the " \
+           "saved r4" in text and "but it differs before the touch: the log from entry 1" in text, text
+    mark = next(address for kind, address, name in program.symbols() if kind == "d" and name == "mark")
+    assert "FAIL marker [n = 12]: refused for the saved registers" in text and \
+           "but it differs before the touch: memory 0x%x" % mark in text, text
+    sink = next(address for kind, address, name in program.symbols() if kind == "d" and name == "sink")
+    failing = line("FAIL shortcut [n = 8]: refused for the saved registers")
+    assert "but it differs before the touch: memory 0x%x-0x%x; r4 after the return" % (sink, sink + 3) in failing \
+        and failing.endswith("(the rebuilt image's run never gets that far: 0 moves out of the function and back "
+                             "and log entries, where the original makes 1 before it)"), text
+    for f in ("user", "marker", "shortcut"):
+        assert "REFUSED %s" % f not in text and "ok   %s" % f not in text, text
+
+
+STACK_BEFORE_C = """
+volatile unsigned sink;
+NOIPA void touch(volatile unsigned *p) { *p += 1; }
+NOIPA void report(unsigned x) { sink = x; }
+unsigned scaled(unsigned x, unsigned y)
+{ volatile unsigned local = 0; touch(&local); report(x); return y ? ((unsigned)&local * 3u) >> y : x; }
+"""
+
+
+@pytest.mark.parametrize("wrong", [False, True])
+def test_where_the_stack_lies_explains_only_what_it_moves(tmp_path, wrong):
+    """scaled returns a number made from the address of a local for y = 2 (for y = 31 that number is 0
+    wherever the stack lies, and y = 0 returns x): C that holds its local elsewhere in the frame returns
+    another, and the original's own return value changes with its stack lower, so the case is refused.
+    C that passes x & 3 to the stubbed report besides (wrong) differs for x = 8 in the log too, which
+    the lower stack does not move: the case fails, the refusal named (until 2026-10-24 it was refused,
+    and the function, its other cases agreeing and running every instruction, accepted)."""
+    rewritten = ("void touch(volatile unsigned *p);\nvoid report(unsigned x);\n"
+                 "unsigned scaled(unsigned x, unsigned y)\n"
+                 "{ volatile unsigned pad[4], local = 0; pad[0] = 0; touch(&local); report(%s);\n"
+                 "  return y ? ((unsigned)&local * 3u) >> y : x; }\n" % ("x & 3" if wrong else "x"))
+    cases = ('def stubbed(m):\n    logging_stubs(m, ("report", 0, 1))\n'
+             'case("scaled", "x = 2, y = 0", stubbed, 2, 0)\n'
+             'case("scaled", "x = 2, y = 31", stubbed, 2, 31)\n'
+             'case("scaled", "x = 8, y = 2", stubbed, 8, 2)\n')
+    target, image, payload, program = small_target(tmp_path, STACK_BEFORE_C, rewritten, cases, "scaled",
+                                                   data=("sink",))
+    failed, uncovered, text = run_all(target, payload)
+    if not wrong:
+        assert "REFUSED scaled [x = 8, y = 2]: the original's outcome depends on where the stack lies" in text, text
+        assert "it differs only where the lower stack moves the original too: the return value" in text, text
+        assert "ok   scaled" in text and not uncovered, text
+        return
+    assert "FAIL scaled [x = 8, y = 2]: refused for where the stack lies (with it lower the original changes the " \
+           "return value), but it differs where the lower stack moves nothing: the log from entry 1" in text, text
+    assert "REFUSED scaled" not in text and "ok   scaled" not in text, text
+
+
+WILD_BEFORE_C = """
+volatile unsigned sink;
+NOIPA int twice(int x) { return x + x + 3; }
+NOIPA void report(unsigned x) { sink = x; }
+int apply(int (*f)(int), int x) { report(x); if (!f) return -1; return f(x) * 5; }
+"""
+
+
+def test_a_call_into_the_middle_of_a_function_explains_only_what_comes_after_it(tmp_path):
+    """apply hands x to a stubbed report, then calls the code pointer it was given. C that passes x & 3
+    agrees where f is twice or null (x = 2 and 3); with f the middle of twice and x = 8 the original
+    calls into the middle of a function (refused before: the rebuilt image may have other code there),
+    but the images differ before that call already, in report's argument: the case fails, the refusal
+    named (until 2026-10-24 it was refused, and the function accepted)."""
+    rewritten = ("void report(unsigned x);\n"
+                 "int apply(int (*f)(int), int x) { report(x & 3); if (!f) return -1; return f(x) * 5; }\n")
+    cases = ('def stubbed(m):\n    logging_stubs(m, ("report", 0, 1))\n'
+             'twice = program.by_name["twice"]\n'
+             'case("apply", "twice, x = 2", stubbed, twice.entry | 1, 2)\n'
+             'case("apply", "null, x = 3", stubbed, 0, 3)\n'
+             'case("apply", "into twice, x = 8", stubbed, twice.insns[1] | 1, 8)\n')
+    target, image, payload, program = small_target(tmp_path, WILD_BEFORE_C, rewritten, cases, "apply", data=("sink",))
+    failed, uncovered, text = run_all(target, payload)
+    assert "FAIL apply [into twice, x = 8]: refused for the call of 0x%x from " % program.by_name["twice"].insns[1] \
+           in text and "inside twice but not its entry (a code pointer the input gave), but it differs before that " \
+           "call: the log from entry 1" in text, text
+    assert "REFUSED apply" not in text and "ok   apply" not in text, text
+
+
+STALE_BEFORE_C = """
+struct msg { unsigned id, a, b; };
+volatile unsigned done;
+NOIPA void report(unsigned a, unsigned b) { done = a + b; }
+NOIPA void put(const struct msg *m) { report(m->id, m->b); }
+NOIPA void send(unsigned id, unsigned a) { struct msg m; m.id = id; m.a = a; put(&m); }
+NOIPA void leave(unsigned x) { volatile unsigned junk[16]; int i; for (i = 0; i < 16; i++) junk[i] = x * 3 + i; }
+void start(unsigned x) { leave(x); report(x, 1); send(x, x); done = 1; }
+"""
+
+
+@pytest.mark.parametrize("wrong", [False, True])
+def test_stale_stack_data_leaves_out_only_the_log_entries_it_moves(tmp_path, wrong):
+    """start reports x, then send has put report a member nobody set (stale stack data: what leave left).
+    C that leaves other data there (leave(x + 1)) differs in the second report only, which the fills
+    move: compared except the log from that entry. C that reports x & 3 first (wrong) differs for x = 8
+    in the first entry too, which the fills do not move: the case fails (until 2026-10-24 the whole
+    log was one output, left out when any entry moved, and the case was compared except it)."""
+    rewritten = ("void leave(unsigned x); void send(unsigned id, unsigned a); void report(unsigned a, unsigned b);\n"
+                 "void start(unsigned x) { leave(x + 1); report(%s, 1); send(x, x); done = 1; }\n"
+                 % ("x & 3" if wrong else "x"))
+    cases = ('def stubbed(m):\n    logging_stubs(m, ("report", 0, 2))\n'
+             'case("start", "x = 2", stubbed, 2)\n'
+             'case("start", "x = 8", stubbed, 8)\n')
+    target, image, payload, program = small_target(tmp_path, STALE_BEFORE_C, rewritten, cases, "start",
+                                                   data=("done",))
+    failed, uncovered, text = run_all(target, payload)
+    assert "start [x = 2]: compared except what the original's stale stack data (an uninitialised local) " \
+           "decides: the log from entry 2" in text, text
+    if not wrong:
+        assert "start [x = 8]: compared except what the original's stale stack data" in text, text
+        assert "ok   start" in text, text
+        return
+    assert "FAIL start [x = 8]" in text and "(of these, the original's stale stack data decides the log from " \
+           "entry 1)" not in text, text
+    assert "ok   start" not in text, text
+
+
+CODE_BEFORE_C = """
+volatile unsigned sink;
+NOIPA void report(unsigned x) { sink = x; }
+unsigned peek(const unsigned *p, unsigned x) { report(x); return *p + x; }
+"""
+
+
+@pytest.mark.parametrize("wrong", [False, True])
+def test_an_instruction_loaded_as_data_explains_only_what_comes_after_it(tmp_path, wrong):
+    """A written case aims peek's pointer at peek's own first instruction, which the rebuilt image holds
+    otherwise (its C starts with a nop): refused as before (remove it), the images differing in what
+    the load returns only. C that reports x & 3 (wrong) differs before the load, in the log: the case
+    fails, the refusal named (until 2026-10-24 such a case was refused whatever differed; its rebuilt
+    image was not even run)."""
+    rewritten = ("void report(unsigned x);\n"
+                 "unsigned peek(const unsigned *p, unsigned x) { __asm__ volatile (\"nop\"); report(%s); return *p + x; }\n"
+                 % ("x & 3" if wrong else "x"))
+    cases = ('def stubbed(m):\n    logging_stubs(m, ("report", 0, 1))\n'
+             'case("peek", "x = 2", lambda m: (stubbed(m), m.write(SCRATCH, bytes(4))), SCRATCH, 2)\n'
+             'case("peek", "written: own code, x = 8", stubbed, entry("peek"), 8)\n')
+    target, image, payload, program = small_target(tmp_path, CODE_BEFORE_C, rewritten, cases, "peek", data=("sink",))
+    failed, uncovered, text = run_all(target, payload)
+    if not wrong:
+        assert "REFUSED peek [written: own code, x = 8]: the input loads instructions as data or stores into the " \
+               "image; remove it (it differs only after the first such load or store: the return value)" in text, text
+        assert "ok   peek" in text, text
+        return
+    assert "FAIL peek [written: own code, x = 8]: refused for the instructions the input loads as data or the image " \
+           "it stores into, but it differs before the first such load or store: the log from entry 1" in text, text
+    assert "REFUSED peek" not in text, text
+
+
+SHIFTED_C = """
+volatile unsigned scaled3, bits;
+NOIPA void touch(volatile unsigned *p) { *p += 1; }
+void place(void)
+{ volatile unsigned local = 0; touch(&local); scaled3 = (unsigned)&local * 3u; bits = ((unsigned)&local >> 3) & 7; }
+"""
+
+
+@pytest.mark.parametrize("more", [True, False])
+def test_more_shifts_of_the_stack_find_what_one_leaves_alone(tmp_path, monkeypatch, more):
+    """place stores two numbers made from the address of a local: the stack 64 bytes lower changes the
+    first (so the reason holds) but not the second, whose bits a shift by a multiple of 64 keeps. C that
+    holds the local elsewhere changes both. The further shifts (fragile.MORE_SHIFTS: 8 bytes changes
+    those bits) find that the second moves too, and the case is refused; with the first shift alone
+    the second is a difference it does not explain, and the case fails."""
+    from dread import fragile
+    if not more:
+        monkeypatch.setattr(fragile, "MORE_SHIFTS", ())
+    rewritten = ("void touch(volatile unsigned *p);\n"
+                 "void place(void) { volatile unsigned pad[4], local = 0; pad[0] = 0; touch(&local);\n"
+                 "  scaled3 = (unsigned)&local * 3u; bits = ((unsigned)&local >> 3) & 7; }\n")
+    target, image, payload, program = small_target(tmp_path, SHIFTED_C, rewritten, 'case("place", "once", lambda m: '
+                                                   'None)\n', "place", data=("scaled3", "bits"))
+    failed, uncovered, text = run_all(target, payload)
+    bits = next(address for kind, address, name in program.symbols() if kind == "d" and name == "bits")
+    if more:
+        assert "REFUSED place [once]: the original's outcome depends on where the stack lies" in text, text
+        assert "0x%x" % bits in text.split("moves the original too: ")[1], text   # (bits differs: the C's local
+                                                                                # lies elsewhere modulo 64)
+    else:
+        assert "FAIL place [once]: refused for where the stack lies" in text and \
+            "but it differs where the lower stack moves nothing: memory 0x%x" % bits in text, text

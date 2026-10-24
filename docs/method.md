@@ -52,14 +52,25 @@ coverage. So is a case whose images differ where, run again on the original, any
 pop, or a save or restore of that register touches a saved register's slot of a frame still on the
 stack: the input made code reach the saved registers through a pointer, mostly a length past a local
 (a queue whose item size it made larger than the item), and the outcome is the original's frame
-layout (decided 2026-10-20, `docs/decisions.md`; checked after the stale data below). When the original read stale stack data, an uninitialised local whose bytes are what
+layout (decided 2026-10-20, `docs/decisions.md`; checked after the stale data below). Each such
+reason explains only part of a case's outputs, and a case is refused only when the reasons that hold
+explain every difference; one left fails the case, the reasons named beside it (decided 2026-10-24,
+`docs/decisions.md`: on a private test, readable C that had lost an argument of a call was accepted,
+every case that showed it refused). The stack's position explains the outputs that change in the
+original with its stack lower. An event (a saved register touched, a call through a code pointer into
+the middle of a function, a written case's load of an instruction as data) explains what comes after
+it: the registers at the return, the log from the entry made after it, and the bytes either image
+wrote after the last call out of the function or return into it, or log entry, before it. Before the
+event, C that is right does what the original does, so a stub call's arguments or a store made
+there are compared as in any case. When the original read stale stack data, an uninitialised local whose bytes are what
 earlier frames left, the original runs again with the stack below the stack pointer filled at every
 function entry (twice, with two bytes): an output that changes there too is one the original itself
 does not define, and C cannot be held to it (it lays out its frames otherwise and saves other values
 in them). When every difference between the images is such an output, the case is compared except
 those outputs, which the report names, and counts for coverage (decided 2026-10-20,
-`docs/decisions.md`; refused before). FreeRTOS's timer commands carry a union member nobody set into
-the timer queue so. A difference the fills do not move keeps the case failed.
+`docs/decisions.md`; refused before); of the log, the entries from the first one the fills move.
+FreeRTOS's timer commands carry a union member nobody set into the timer queue so. A difference the
+fills do not move keeps the case failed.
 
 ## 4. Where inputs come from
 

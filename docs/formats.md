@@ -546,7 +546,11 @@ of a smallest set of three or more is enough, only that one goes: `dropped for i
 alone is enough; the smallest set that differs: A, B, C); with them alone: ...`, since 2026-10-23,
 and its reason in verdicts.tsv reads `the whole image differs with its lifted C; without it alone it
 agrees (...)`). `dread uncovered` reads it (the `missed` column, and the reason's first words for how
-the function was dropped).
+the function was dropped). Since 2026-10-24 a dropped function's FAIL reason may go on after its case's
+label with the refusal that held but did not explain every difference (`FAIL NAME [label]: refused for
+X, but it differs Y: Z`, dread.runner), and the runner's REFUSED lines in the round files beside it end
+with what their reasons explained (`(it differs only after the touch: ...)`); older files have
+neither, and readers take the lines by their first words as before.
 
 ### `BUILD/sysrun/IMAGE/NAME.json` (the system run's record)
 
@@ -755,7 +759,8 @@ given), `function`, `verdict` (`readable`: built from readable C; `lifted`: it s
 lifted`: a name not in the lifted table), `reason` (why it stays lifted, in the gate's words: the
 system run accepted it, it no longer lifts, its lifted C is not the dialect dread.cparse reads, the
 overlay's refusal or lack of room, its readable C does not compile or calls what the original does
-not, the FAIL or UNCOVERED line of its cases, the whole image differs with it). `dread bench`'s
+not, the FAIL or UNCOVERED line of its cases, the whole image differs with it; a FAIL line may name a
+refusal that did not explain every difference since 2026-10-24, as in the lift check's). `dread bench`'s
 readable step counts the reasons by category (dread.bench readable_reason).
 
 ### Figures of readable C (`dread readable --figures FILE`) and `BUILD/work/readable.tsv`

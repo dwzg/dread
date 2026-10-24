@@ -303,6 +303,8 @@ def judge(task):
     with open(payload, "rb") as f:
         runner.RUN["recon"] = f.read()
     runner.RUN["aliases"], _ = overlay.load_placement(os.path.join(workdir, "placement.json"))
+    runner.RUN["placed"] = runner.c_places(os.path.join(workdir, "placement.json"))   # (where its C lies: a
+                                            # refusal's event is found again in the rebuilt run by it)
     for name in names:
         _, _, bad, lines, missed = runner.run_function(name)
         if bad:

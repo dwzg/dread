@@ -1697,7 +1697,7 @@ model).
   the entry's straight run (a shrink-wrapped save later is local bytes). Not established: that a callee
   stays inside the object it is given, that an index stays inside its array (the cases and the whole
   image decide, as for every transformation; where the cases see otherwise, whole).
-- [ ] **A refused case must not hide a difference.** On the private real-life test the gate accepted
+- [x] **A refused case must not hide a difference.** On the private real-life test the gate accepted
   readable C that had lost an argument of a formatting call: 21 of the function's 30 cases differed,
   every one refused as "the input makes the original touch its own saved registers", and the 9 that
   agreed still ran every instruction. A refusal says the case's input is one the C cannot reproduce;
@@ -1708,6 +1708,31 @@ model).
   outcomes, wild calls): each with the differences it may explain, said in its line. Public
   reproduction: a function whose input makes it write past a local into its saves and that also
   passes a value to a stubbed callee, with C that passes another.
+  Done 2026-10-24 (docs/decisions.md): a case is refused only where the reasons that hold explain every
+  difference, and fails otherwise with `refused for X, but it differs Y: Z`. An event (a saved register
+  touched, a call into the middle of a function, a written case's load of code) explains what comes
+  after it, found by a clock both images keep alike (moves in and out of the function, log entries:
+  dread.fragile Timeline); the stack's position the outputs that change with the stack lower (64 bytes,
+  then 8, 256 and 680 while a difference is left); stale data's log only from the first entry the
+  fills move. Each with wrong C in tests/test_runner.py that the old rules accepted. On the eight
+  builds (gizmo a32, m3, m4, rv32; four FreeRTOS builds) the lift check and the readable gate accept the
+  same functions as before and refuse the same cases; the measurement found a fault of the first
+  version (fflush on mps2-clang-O2 failed) and one shift too few (prvQueueSetSendingTask's loop cases
+  on RISC-V), both mended.
+- [ ] **dread integration's stack check, as the runner's.** An input whose builds differ is left out of
+  dread integration when the original's outcome moves at all with the stack 64 bytes lower, whatever
+  else differs: the hole the runner had until 2026-10-24. Left out only where every difference is an
+  output the shifted runs move (fragile.stack_moved, the further shifts while one is left), else
+  reported as a DIFF with the reason named. Public test: an input whose return value follows a stack
+  address while a store elsewhere differs.
+- [ ] **A finer clock for an event's refusal.** What comes after a saved register touched or a wild
+  call is placed by the last move in or out of the function or log entry before it (runner.After): a
+  store the function's own code makes between that tick and the event counts as after it, and a
+  function whose own code touches its saves before any call compares nothing but its log before the
+  touch. Stores outside the stack as ticks too, where both images make them in the same order (lifted C
+  keeps the original's order of volatile stores; readable C may merge or move stores between calls:
+  measure how often they part on the bench before relying on it). Public test: a store, then the
+  function's own loop writing past a local, with C that stores another value.
 - [ ] **One case in both images, to the first divergence.** Tracing a FAIL took one-off scripts: run a
   case in the original and the rebuilt image side by side and stop at the first point where they part
   (a callee entered with other arguments, a store of another value or to another place, a return
