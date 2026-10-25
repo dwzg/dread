@@ -428,7 +428,7 @@ class Rewriter:
                     idx = n.r if n.op == "+" else _neg(n.r)
                     got = C.Index(n.l, idx)
                 else:
-                    got = C.Unary("*", n)
+                    got = _deref(n)
                 if not store and p[0][1] != INTS[m.group(1)]:
                     return C.Cast(m.group(1), got)
                 return got
@@ -439,7 +439,7 @@ class Rewriter:
         if isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast):
             return self.access(e, store=True)
         if isinstance(e, C.Unary) and e.op == "*":
-            return C.Unary("*", self.pointer_or_value(e.e))
+            return _deref(self.pointer_or_value(e.e))
         if isinstance(e, C.Member):
             return C.Member(self.pointer_or_value(e.base) if e.arrow else self.lvalue(e.base), e.name, e.arrow)
         if isinstance(e, C.Index):
@@ -493,7 +493,7 @@ class Rewriter:
             if e.op == "*" and isinstance(e.e, C.Cast):
                 return self.access(e)
             if e.op == "*":
-                return C.Unary("*", self.pointer_or_value(e.e))
+                return _deref(self.pointer_or_value(e.e))
             if e.op == "&":
                 return C.Unary("&", self.lvalue(e.e))
             if e.op == "!":
@@ -752,6 +752,15 @@ def casts(e):
     """The casts an expression holds."""
     from dread.cflow import walk_expr
     return sum(1 for x in walk_expr(e) if isinstance(x, C.Cast))
+
+
+def _deref(n):
+    """*n, or the object itself where n is its address (&r0->f_4, not *&r0->f_4: an access at a field's
+    place through a pointer that steps to it, r0 + 4 + 0 where the lifter wrote [r1] after r1 = r0 + 4;
+    *&x is x, of x's type)."""
+    if isinstance(n, C.Unary) and n.op == "&":
+        return n.e
+    return C.Unary("*", n)
 
 
 def _neg(e):

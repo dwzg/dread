@@ -2964,6 +2964,49 @@ the pilot's names, which the first review had taken for raw frames. New items:
   parameter is not typed. Left: frame objects to all-u32 externs (gizmo a32 print_status's
   `fmt_dec((u32)stack20, ...)`; uart_puts there also takes texts, so "every call passes such an object"
   holds for fmt_dec only), and typed parameters of the list functions, which would take the casts above.
+- [x] **An access through a field's address, as the field.** A lifter's `[r1]` after `r1 = p + k` is
+  `*(volatile T *)(p + k + 0)` once the stages substitute r1; where k is the place of a field of the
+  structure p points to, dread.shapes writes the address as the field's (`&p->f_4`, the members for derived
+  pointers) and dread.vartypes wrote the access as the dereference of that address: `*&p->f_4 = v;`. Seen
+  on the private real-life test (a run of halfword stores through stepped pointers); no public build printed
+  it (their compilers put the offset into the store). Done 2026-10-25 (dread.vartypes _deref: the
+  dereference of an address is the object, `*&x` is x, in stores and loads alike; tests/test_vartypes.py
+  test_an_access_through_a_field_s_address_is_the_field). On the eight builds the readable C is the same,
+  line for line (none printed it); on the private real-life test the stores print as members.
+- [ ] **Masks moved into place by a shift.** dread.polish mask_params takes any shift of a parameter as no
+  mask use (`x << 2` scales a count as often as it moves bits), so a callee that moves its mask before one
+  of its uses (`(keep >> 8) & REG` in one arm, `keep & REG` in another) has no mask parameter, and its
+  callers' constants print as negative numbers (`-16` for `~0xfu`, `-1` for all ones). A shift whose value
+  is only an operand of &, |, ^ or ~ (or of &=, |=, ^=) keeps the mask use. Seen on the private real-life
+  test (a port's read-modify-write and its callers); public example: none checked. Test: such a callee and
+  callers passing ~0xfu and 0xffffffffu, through the gate on the three architectures.
+- [ ] **What a variable loaded from a pointer global reads past its structure.** The structure of a
+  pointer global is the one its typed loaders and storers vote for; a variable loaded from it that reads
+  past that structure's members (a task block's flag byte past the list item the block starts with, where
+  only list functions typed the word) prints `*(volatile u8 *)((u32)p + k)`, longer than the untyped `p[k]`
+  it replaced. Take the accesses through variables loaded from the global into its structure, as for a
+  parameter, or write such an access `((volatile u8 *)p)[k]`. Seen on the private real-life test; public
+  example: none checked (FreeRTOS's readers type pxCurrentTCB as the task block itself). Part of the
+  pointer globals' Left.
+- [ ] **A frame object walked by an index is an array.** dread.frames makes a structure of a frame region
+  with accesses of two widths at one place even where a loop walks the whole region with a variable index
+  of one element size (a buffer zeroed word by word, one of its words read as a halfword later): a packed
+  structure with a union, and the loop's stores stay `*(volatile u32 *)((u32)&buf + (i << 2)) = 0;`. Such
+  a region is an array of the walk's element (`u32 buf[8]`), its constant places elements, a narrower read
+  at one through the element. An access through a variable that holds the object's address (`v =
+  (u32)&buf; *(volatile u32 *)v |= 0x80u;`) is the object's. Seen on the private real-life test; public
+  example: none checked. Test: a function that zeroes a local array of words in a loop, sets a bit in its
+  first word, passes words of it to a callee and reads one as a halfword.
+- [ ] **An element read through an array's address plus an index.** `v = (u32)tab + i; v = *(volatile s8
+  *)v;` (the address and the index added in a register, the load through it) is `tab[i]`, also where one
+  variable holds the address and then the value (One variable per value). Seen on the private real-life
+  test once its local arrays became frame objects; public example: none checked.
+- [ ] (low) **A member's address held for one access.** `q = &p->size; ... *q = v;` (the address computed
+  early), with nothing between that writes p or q, is `p->size = v;`.
+- [ ] (low) **A narrower access at a word member of static data.** One name per static object takes a
+  halfword that had a name of its own into the structure whose word member is at its place: `*(volatile
+  s16 *)&g.member`, the halfword's name gone. Compare the alternatives (a union member, the narrower member
+  where every access there has that width, the separate name kept) before changing anything.
 - [x] **One radix per object, and stores through pointers.** Follow-up of "Radix by use". The bytes of
   one small local can come out in two radices (`0x96u, 0x35u, 15`), and constants stored through pointer
   parameters stay hex while the bounds that select them print in decimal. Decide the radix for an

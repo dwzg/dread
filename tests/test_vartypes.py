@@ -1147,3 +1147,26 @@ int main(void)
     assert r.returncode == 0, [(originals[i], files[2 * i], files[2 * i + 1]) for i in sorted(set(bad))[:2]]
     text = "\n".join(files)
     assert re.search(r"(?m)^\s+s32 [vwx]\b", text) and re.search(r"(?m)^s32 typed_neg_", text), text[:3000]
+
+
+# ---- an access at a field's place through a pointer stepped to it (2026-10-25)
+
+STEPPED = ("u32 fill(u32 r0, u32 r2, u32 r3)\n{\n    u32 r1;\n"
+           "    *(volatile u16 *)(r0 + 0) = (u16)r2;\n"
+           "    r1 = r0 + 2;\n    *(volatile u16 *)((r1 + 0)) = (u16)r3;\n"
+           "    *(volatile u16 *)(r0 + 4 + 0) = (u16)r2;\n"
+           "    *(volatile u16 *)(r0 + 30) = (u16)r3;\n    return *(volatile u16 *)(r0 + 4 + 0);\n}\n")
+
+
+def test_an_access_through_a_field_s_address_is_the_field():
+    """r1 = r0 + 4 and then [r1] (the lifter's r1 + 0, r0 + 4 + 0 once the stages substitute r1) at the
+    place of a field of the structure r0 points to: dread.shapes writes the address as the field's
+    (&r0->f_4) and the access is the field, r0->f_4, as a store and as a load, never *&r0->f_4; a
+    pointer variable that holds the field's address stays one (r1 = &r0->f_2; *r1 = r3)."""
+    from test_shapes import HEAD as SHAPES_HEAD, plan_of
+    out, _ = typed(SHAPES_HEAD + STEPPED, "fill", plan_of(STEPPED))
+    body = out[out.index("u32 fill"):]
+    for text in ("r0->f_0 = r2;", "r1 = &r0->f_2;", "*r1 = r3;", "r0->f_4 = r2;", "r0->f_1e = r3;",
+                 "return r0->f_4;"):
+        assert text in body, (text, body)
+    assert "*&" not in body, body
