@@ -3168,12 +3168,25 @@ the pilot's names, which the first review had taken for raw frames. New items:
   they give x / d for every x of the width (not by the pattern alone; signed ones add a correction of the
   sign) and write x / d, x % d where the code subtracts the product; the gate decides as for any rewrite.
   Public examples: gizmo a32 fmt_dec, FreeRTOS clang -O2 (ten such products).
-- [ ] **A jump to the start of the other arm, as a condition.** `if (A) { S; if (B) goto L; R } else { L:
-  T }`, where L begins the other arm and S are plain statements, is `if (A && (S, !B)) { R } else { T }`
-  (`if (!A || (S, B)) { T }` without R); a jump from an arm of an else-if chain to an earlier arm's start
-  joins that arm's test with ||, where the tests between have no effects. Frequent on the private
-  real-life test (its compiler threads such conditions), seldom on the public builds. Test: such shapes
-  among the structure stage's random functions, compiled before and after.
+- [x] **A jump to the start of the other arm, as a condition.** Done 2026-10-25 (dread.structure
+  arm_jumps, after the arms pass): a check in one arm of an if that jumps to the start of the other arm
+  joins the if's condition, the expression statements before it in a comma expression: `if (A) { S; if
+  (B) goto L; R } else { L: T }` is `if (A && (S, !B)) { R } else { T }` (`if (!A || (S, B)) { T }`
+  without R), and the other way round `if (A || (S, B)) { T } else { R }`; a jump just before an if, only
+  expression statements between, to the start of one of its arms likewise (`if (B) goto L; S; if (A) {
+  L: T }` is `if (B || (S, A)) { T }`, `if (!B && (S, A))` where L begins the else arm). The operands of
+  one && or || print flat; the label goes where nothing else names it. Not joined: a statement other
+  than an expression before the check, more than two of them (ARM_JUMP_EFFECTS) or a call made for its
+  effects alone among them (both read worse in a condition than the goto: docs/decisions.md), a label
+  further into the arm. Test: random threaded checks (both layouts, a jump from before, and checks that
+  must stay jumps) and the shapes one by one, compiled before and after; ten wrong variants of the rule
+  each fail a test. The jump from an arm of an else-if chain to an earlier arm's start stays (the next
+  item).
+- [ ] **A jump from an else-if arm to an earlier arm's start.** `if (A) { L: T } else if (C) { X } else {
+  S; if (B) goto L; R }`: joined as `if (A || (!C && (S, B))) { T } else if (C) ...` it evaluates C twice,
+  so only where C has no effects and reads only variables that S and B do not write (a volatile read
+  twice is another access). Seen on the private real-life test; the random threaded checks' chain layout
+  (tests/test_structure.py) is its test bed.
 - [ ] (low) **Members comments over several lines**, wrapped past a few members.
 - [x] (low) **Declarations nothing uses**, dropped. Done 2026-10-25 (dread.polish drop_unused_declarations,
   the last step of polish): a variable that a pass after the clean-up's own tidy_declarations folded away

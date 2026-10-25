@@ -1,12 +1,15 @@
 """dread.structure: gotos as if/else and loops. The shapes one by one (a while, a do-while, an
 if/else, two conditions to one target as || and &&, a switch, joins in a loop that never ends, a short
 way repeated, shared blocks after an if without a join, an else-if chain, early exits, a staircase of
-checks, an else if printed with comments), and property tests: random functions of labels,
-arithmetic and gotos (irreducible flow among them; with switches; flow that mostly never returns;
-runs of checks as compilers lay them out), structured, compiled with the host's C compiler next to
-the originals and called with random arguments: every one gives the original's result."""
+checks, an else if printed with comments, a jump to the start of an arm as part of the condition), and
+property tests: random functions of labels, arithmetic and gotos (irreducible flow among them; with
+switches; flow that mostly never returns; runs of checks as compilers lay them out; checks threaded
+into a shared arm), structured, compiled with the host's C compiler next to the originals and called
+with random arguments: every one gives the original's result."""
 import ctypes
+import itertools
 import random
+import re
 import shutil
 import subprocess
 
@@ -455,3 +458,217 @@ def test_random_runs_of_checks_structured_compute_the_same(tmp_path, monkeypatch
             assert a(*args) == b(*args), (i, args, originals[i], results[i])
     assert shapes["flat"] > count * 0.9 and shapes["else if"] > count // 3, shapes
     assert shapes["goto"] < count // 10, shapes
+
+
+PAIRS = itertools.count()
+
+
+def same_results(tmp_path, body, after, prelude=""):
+    """The function of body (as fn_of writes it) and the C after a rewrite give the same results for
+    random arguments, compiled with the host's C compiler (nothing compared without one; prelude: C
+    before both, the functions they call). A library of its own each time: dlopen hands back a library
+    already loaded from the same path."""
+    if not shutil.which("cc"):
+        return
+    n = next(PAIRS)
+    before = ("u32 orig_%d(u32 a0, u32 a1, u32 a2, u32 a3)\n{\n    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3;\n%s\n}\n"
+              % (n, body))
+    source = tmp_path / ("pair_%d.c" % n)
+    source.write_text("typedef unsigned int u32;\n" + prelude + before + after.replace("u32 f(", "u32 rest_%d(" % n, 1))
+    lib = tmp_path / ("pair_%d.so" % n)
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(source)], check=True)
+    so = ctypes.CDLL(str(lib))
+    a, b = getattr(so, "orig_%d" % n), getattr(so, "rest_%d" % n)
+    for f in (a, b):
+        f.restype, f.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * 4
+    rng = random.Random(n)
+    for _ in range(400):
+        args = [rng.choice([0, 1, 2, 3, 4, 5, 6, 7, rng.getrandbits(32)]) for _ in range(4)]
+        assert a(*args) == b(*args), (args, before, after)
+
+
+def joined(body):
+    """The C of body after arm_jumps alone (and the labels nothing names dropped), or None when it
+    changed nothing."""
+    fn = fn_of(body)
+    if not structure.arm_jumps(fn.body.body):
+        return None
+    fn.body.body[:] = structure.prune_labels(fn.body.body, structure.gotos_in(fn.body.body))
+    return cparse.unparse(fn, notes=False, style="readable")
+
+
+def test_a_jump_to_the_start_of_the_other_arm_is_part_of_the_condition(tmp_path):
+    """A check in one arm of an if that jumps to the start of the other arm (a compiler sharing the
+    else's code, too long to repeat) joins the if's condition, the statements before it in a comma
+    expression: && with what follows the check, || when nothing does, and the other way round. Each
+    compiled before and after: the same results."""
+    tail = ("L_t: ;\n    r2 = 9;\n    r3 = r3 * 3;\n    r1 = r1 ^ r3;\n    r2 = r2 + r1;\n    r3 = r3 - r2;\n"
+            "    r0 = r0 + r3;\n")
+    body = ("    if (r0 == 0) goto L_t;\n    r1 = r1 + 1;\n    if (r1 == 5) goto L_t;\n    r2 = 7;\n    goto L_j;\n" +
+            tail + "L_j: ;\n    return r2 + r1 + r0;")
+    both = structured(body)
+    assert "if (r0 != 0 && (r1 = r1 + 1, r1 != 5))" in both and "goto" not in both and "L_t" not in both, both
+    same_results(tmp_path, body, both)
+    body = ("    if (r0 == 0) goto L_t;\n    r1 = r1 + 1;\n    if (r1 == 5) goto L_t;\n    goto L_j;\n" + tail +
+            "L_j: ;\n    return r2 + r1 + r0;")
+    alone = structured(body)
+    assert "if (r0 == 0 || (r1 = r1 + 1, r1 == 5))" in alone and "else" not in alone and "goto" not in alone, alone
+    same_results(tmp_path, body, alone)
+    # the label first in the then arm, the jump in the else arm (as the emitter turns some ifs round)
+    body = ("    if (r0 == 0)\n    {\nL_t: ;\n        r2 = 9;\n    }\n    else\n    {\n        r1 = r1 + 1;\n"
+            "        r3 = r3 ^ r1;\n        if (r1 == 5) goto L_t;\n        r2 = 7;\n    }\n    return r2 + r1 + r3;")
+    flipped = joined(body)
+    assert "if (r0 == 0 || (r1 = r1 + 1, r3 = r3 ^ r1, r1 == 5))" in flipped and "goto" not in flipped, flipped
+    assert "r2 = 7;" in flipped.split("else")[1], flipped
+    same_results(tmp_path, body, flipped)
+
+
+def test_a_jump_to_an_arm_start_stays_where_it_cannot_join_the_condition(tmp_path):
+    """Not joined: a statement other than an expression before the check (it cannot go into a comma
+    expression), a check whose if has an else, a label further into the arm. And a label another jump
+    still names stays when the check joins the condition."""
+    assert joined("    if (r0 == 0)\n    {\n        if (r2 != 0) r3 = 1;\n        if (r1 == 5) goto L_t;\n        r2 = 7;\n"
+                  "    }\n    else\n    {\nL_t: ;\n        r2 = 9;\n    }\n    return r2 + r1;") is None
+    assert joined("    if (r0 == 0)\n    {\n        if (r1 == 5) goto L_t; else r3 = 2;\n        r2 = 7;\n"
+                  "    }\n    else\n    {\nL_t: ;\n        r2 = 9;\n    }\n    return r2 + r1;") is None
+    assert joined("    if (r0 == 0)\n    {\n        if (r1 == 5) goto L_t;\n        r2 = 7;\n"
+                  "    }\n    else\n    {\n        r2 = 8;\nL_t: ;\n        r2 = r2 + 9;\n    }\n    return r2 + r1;") is None
+    body = ("    if (r3 == 4) goto L_t;\n    if (r2 != 0) r3 = 1;\n    if (r0 == 0)\n    {\n        r1 = r1 + 1;\n"
+            "        if (r1 == 5) goto L_t;\n        r2 = 7;\n    }\n    else\n    {\nL_t: ;\n        r2 = 9;\n    }\n"
+            "    return r2 + r1 + r3;")
+    kept = joined(body)
+    assert "if (r0 == 0 && (r1 = r1 + 1, r1 != 5))" in kept and "L_t: ;" in kept and kept.count("goto") == 1, kept
+    same_results(tmp_path, body, kept)
+
+
+def test_a_jump_after_long_or_calling_statements_stays_a_goto(tmp_path):
+    """More than ARM_JUMP_EFFECTS statements before the check, or a call made for its effects alone among
+    them, stay as they are: a long comma expression or a call statement in a condition reads worse than
+    the goto (a source's call and the test after it, which a compiler threaded). A call whose result is
+    assigned joins."""
+    def body(before):
+        return ("    if (r0 == 0)\n    {\n" + before + "        if (r1 == 5) goto L_t;\n        r2 = 7;\n    }\n"
+                "    else\n    {\nL_t: ;\n        r2 = 9;\n    }\n    return r2 + r1 + r3;")
+    assert structure.ARM_JUMP_EFFECTS == 2
+    assert joined(body("        r1 = r1 + 1;\n        r2 = r2 + 1;\n        r3 = r3 + 1;\n")) is None
+    assert joined(body("        sink(r1, 2);\n")) is None
+    assert joined(body("        (void)sink(r1, 2);\n")) is None
+    two = body("        r1 = r1 + 1;\n        r3 = r3 ^ r1;\n")
+    assert "if (r0 == 0 && (r1 = r1 + 1, r3 = r3 ^ r1, r1 != 5))" in joined(two)
+    assigned = body("        r1 = sink(r1, 2);\n")
+    out = joined(assigned)
+    assert "if (r0 == 0 && (r1 = sink(r1, 2), r1 != 5))" in out, out
+    same_results(tmp_path, assigned, out, prelude="static u32 sink(u32 a, u32 b)\n{\n    return a * 3u + b;\n}\n")
+
+
+def test_a_jump_from_before_an_if_to_an_arm_start_is_part_of_its_condition(tmp_path):
+    """A jump just before an if, only expression statements between, to the start of one of its arms:
+    || where the label begins the then arm, && with the jump's test turned round where it begins the
+    else arm; two such jumps one after the other both join (the one further up last)."""
+    body = ("    if (r3 == 4) goto L_t;\n    r1 = r1 + 1;\n    if (r0 == 0)\n    {\nL_t: ;\n        r2 = 9;\n    }\n"
+            "    else\n    {\n        r2 = 7;\n    }\n    return r2 + r1;")
+    then = joined(body)
+    assert "if (r3 == 4 || (r1 = r1 + 1, r0 == 0))" in then and "goto" not in then and "L_t" not in then, then
+    same_results(tmp_path, body, then)
+    body = ("    if (r3 == 4) goto L_t;\n    r1 = r1 + 1;\n    if (r2 < r1) goto L_t;\n    r3 = r3 ^ r2;\n"
+            "    if (r0 == 0)\n    {\n        r2 = 7;\n    }\n    else\n    {\nL_t: ;\n        r2 = 9;\n    }\n"
+            "    return r2 + r1 + r3;")
+    other = joined(body)
+    assert "if (r3 != 4 && (r1 = r1 + 1, r2 >= r1) && (r3 = r3 ^ r2, r0 == 0))" in other, other
+    assert "goto" not in other and "L_t" not in other, other
+    same_results(tmp_path, body, other)
+
+
+def random_threaded_function(rng, name, endless=False):
+    """Checks threaded as a compiler threads them: if (A) goes to a long block (too long to repeat), and
+    where A did not hold, statements and one or two more checks go to the same block's start before the
+    statements of their own (sometimes none). Laid out either way round: the long block after the checks
+    (the emitter makes it the else arm), or first with the checks jumping back into it. Sometimes a jump
+    from before the if names the block too. And checks that must stay jumps, their labels named L_stay:
+    one after an if statement (which no condition can hold), one into the middle of the long block, and
+    an else-if chain whose last arm jumps to the first arm's block (its test would be evaluated twice).
+    endless: in a loop that never ends, left by bail() when the fuel runs out."""
+    regs, flip = ["r0", "r1", "r2", "r3"], {"<": ">=", ">=": "<", "==": "!=", "!=": "=="}
+
+    def arith():
+        a, b = rng.choice(regs), rng.choice(regs)
+        return "    %s = %s %s %s;" % (a, b, rng.choice(["+", "-", "^", "&", "|"]),
+                                         rng.choice([b, "%du" % rng.randint(1, 9)]))
+
+    def cond():
+        return "%s %s %s" % (rng.choice(regs), rng.choice(list(flip)), rng.choice(regs + ["%du" % rng.randint(0, 9)]))
+    lines = ["u32 %s(u32 a0, u32 a1, u32 a2, u32 a3)" % name, "{",
+             "    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, fuel = 40;", "L_top: ;"]
+    if endless:
+        lines += ["    fuel = fuel - 1;", "    if (fuel == 0) bail(r0);"]
+    for i in range(rng.randint(1, 4)):
+        stay = rng.choice([None] * 6 + ["if", "middle", "chain"])
+        block = ("L_stay%d" if stay in ("if", "chain") else "L_long%d") % i
+        lines += [arith() for _ in range(rng.randint(0, 2))]
+        if rng.random() < 0.2 and stay != "chain":
+            lines.append("    if (%s) goto %s;" % (cond(), block))
+            lines += [arith() for _ in range(rng.randint(0, 1))]
+        checks = []
+        n = rng.randint(1, 2)
+        for k in range(n):
+            checks += [arith() for _ in range(rng.randint(1, 2))]
+            last = k == n - 1
+            if stay == "if" and last:
+                r = rng.choice(regs)
+                checks.append("    if (%s) %s = %s + 2u;" % (cond(), r, r))
+            checks.append("    if (%s) goto %s;" % (cond(), "L_staymid%d" % i if stay == "middle" and last else block))
+        own = [arith() for _ in range(rng.choice([0, 1, 2]))]
+        body = [arith() for _ in range(rng.randint(5, 7))]
+        long = ["%s: ;" % block] + body[:2] + (["L_staymid%d: ;" % i] if stay == "middle" else []) + body[2:]
+        if stay == "chain":
+            lines += ["    if (%s) goto %s;" % (cond(), block), "    if (%s) goto L_c%d;" % (cond(), i)]
+            lines += [arith() for _ in range(rng.randint(1, 2))] + ["    goto L_x%d;" % i, "L_c%d: ;" % i]
+            lines += checks + own + ["    goto L_x%d;" % i] + long
+        elif rng.random() < 0.5:
+            lines.append("    if (%s) goto %s;" % (cond(), block))
+            lines += checks + own + ["    goto L_x%d;" % i] + long
+        else:
+            lines.append("    if (%s) goto L_c%d;" % (cond(), i))
+            lines += long + ["    goto L_x%d;" % i, "L_c%d: ;" % i] + checks + own
+        lines.append("L_x%d: ;" % i)
+    lines.append("    goto L_top;" if endless else "    return r1 ^ r2 ^ r3;")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+@pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
+def test_random_threaded_checks_structured_compute_the_same(tmp_path, monkeypatch):
+    """Random threaded checks (random_threaded_function; half in a loop that never ends), structured,
+    compiled next to the originals, called (through setjmp) with random arguments: every one gives the
+    original's result or bails out with the same value. The checks join their ifs' conditions: the only
+    gotos left are those that must stay (labels L_stay), and most functions change."""
+    fired = []
+    rewrite = structure.arm_jumps
+    monkeypatch.setattr(structure, "arm_jumps", lambda out: fired.append(rewrite(out)) or fired[-1])
+    rng = random.Random(47)
+    originals, results, left = [], [], []
+    count = 300
+    for i in range(count):
+        text = random_threaded_function(rng, "orig_%d" % i, endless=i % 2 == 1)
+        originals.append(text)
+        tree = cparse.parse("typedef unsigned int u32;\n" + text.replace("orig_", "rest_"))
+        fn = tree.function("rest_%d" % i)
+        structure.structure(fn)
+        out = cparse.unparse(fn, notes=False, style="readable")
+        left += re.findall(r"goto (\w+);", out)
+        results.append(out)
+    source = tmp_path / "threaded.c"
+    source.write_text(BAIL + "".join(originals) + "\n".join(results) + "\n" + "".join(
+        bail_caller("orig_%d" % i) + bail_caller("rest_%d" % i) for i in range(count)))
+    lib = tmp_path / "threaded.so"
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(source)], check=True)
+    so = ctypes.CDLL(str(lib))
+    for i in range(count):
+        a, b = getattr(so, "call_orig_%d" % i), getattr(so, "call_rest_%d" % i)
+        for f in (a, b):
+            f.restype, f.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * 4
+        for _ in range(25):
+            args = [rng.choice([0, 1, 2, 7, rng.getrandbits(32)]) for _ in range(4)]
+            assert a(*args) == b(*args), (i, args, originals[i], results[i])
+    assert sum(fired) > count * 0.9, sum(fired)
+    assert left and all(g.startswith("L_stay") for g in left), sorted(set(left))

@@ -5068,3 +5068,28 @@ recommendations here."), on a recommendation.
 - **Status.** Done. Measured on the private firmware (docs/todo.md, the pilot on the draft). The
   readable C of every function is made first in a pool of workers (dread.readable views: in a
   sixth of the time on one core), each worker costing up to the parent's size in memory, so pools are now capped by the memory available.
+
+## A jump to an arm's start as part of the condition (2026-10-25)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), from docs/todo.md's "A
+jump to the start of the other arm, as a condition": a compiler that threads a condition (the code of an
+arm shared with a later check) leaves a jump the emitter cannot place without a goto, since it places
+each block once.
+
+- **Question.** How is such a jump written without a goto, and without changing what runs where and how
+  often?
+- **Options.** (a) Leave the goto. (b) Repeat the shared arm where the jump was, as the emitter repeats
+  short ways. (c) A flag set before the jump and tested after. (d) The check in the if's condition, the
+  statements before it in a comma expression.
+- **Choice.** (d) where the statements before the check are at most two expression statements and
+  none of them a call made for its effects alone, (a) otherwise. (b) doubles code that is long by
+  definition (a short one is repeated already); (c) adds a variable and a test the original does not
+  have. (d) keeps every evaluation where it was: the statements run after the test that decided before
+  them and before the check, in order, as often as before, and what follows the check stays in its arm.
+  A comma expression in a condition is rarer in hand-written C than a goto, but with one or two
+  statements it reads as one decision (`if (a && (n = f(x), n != 5))`), and the readable check compares
+  its behaviour like that of any other rewrite. The limit came from the public builds: on FreeRTOS's
+  timer task four statements, one of them a call through a pointer with eight arguments, went into one
+  condition, the source's callback and the test after it, which the compiler had threaded; that read
+  worse than the goto. The else-if chain's case would evaluate a test twice; it waits (docs/todo.md).
+

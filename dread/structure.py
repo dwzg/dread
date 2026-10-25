@@ -748,8 +748,10 @@ def innermost_loop(frames):
 
 
 def negate(cond):
-    """!cond, written simply: a comparison turned round, !!x as x."""
+    """!cond, written simply: a comparison turned round, !!x as x, (s, c) as (s, !c)."""
     flip = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
+    if isinstance(cond, C.Comma) and cond.items:
+        return C.Comma(cond.items[:-1] + [negate(cond.items[-1])])
     if isinstance(cond, C.Binary) and cond.op in flip:
         return C.Binary(flip[cond.op], cond.l, cond.r)
     if isinstance(cond, C.Unary) and cond.op == "!":
@@ -1834,9 +1836,10 @@ def structure(fn, run=None):
     """The function's body with its gotos as if/else, loops and switches where they can be; unchanged
     when the body holds what the cut does not handle (a switch other than a jump table). Made once
     plain and, where that nests more than GUARDS levels, once more with the early exits that repeat
-    short ways, taken when they take GUARDS levels or more off. Last, a variable set to 0 or 1 and then
-    by ifs to 0 or 1 is set once to the truth value they make (dread.tidy truths, proved: the ifs of
-    branches, which the clean-up before saw as gotos)."""
+    short ways, taken when they take GUARDS levels or more off. A jump to the start of an arm of an if
+    that is left is then part of the if's condition where it can be (arm_jumps). Last, a variable set to
+    0 or 1 and then by ifs to 0 or 1 is set once to the truth value they make (dread.tidy truths, proved:
+    the ifs of branches, which the clean-up before saw as gotos)."""
     body = fn.body.body
     k = 0
     while k < len(body) and isinstance(body[k], (C.Decl, C.Note)):
@@ -1858,12 +1861,158 @@ def structure(fn, run=None):
         return fn
     out = refine_loops(out)
     out = arms_pass(out)[0]
+    if arm_jumps(out):                      # (a jump to the start of the other arm as part of the condition;
+        out = prune_labels(out, gotos_in(out))  # the label it named goes when nothing else names it)
     fn.body.body[:] = head + out
     entered(fn, fn.body.body)
     fn.body.body[:] = counted(fn.body.body, address_taken(fn.body.body))
     from dread import tidy                  # (v = 0; if (c) v = 1; of branches as v = c: dread.tidy truths)
     tidy.truths(fn)
     return fn
+
+
+# arm_jumps: how many expression statements may go into a condition before the check that joins it (a
+# longer comma expression reads worse than the goto it takes away)
+ARM_JUMP_EFFECTS = 2
+
+
+def arm_jumps(stmts):
+    """A jump to the start of an arm of an if as part of the if's condition, in place; returns whether
+    any changed. A compiler threads conditions so (the code of one arm shared with a later check), and
+    the emitter, which places each block once, leaves the goto. From inside the other arm:
+
+        if (A) { S...; if (B) goto L; R... } else { L: T... }   is   if (A && (S..., !B)) { R... } else { T... }
+        (without R:                                              if (!A || (S..., B)) { T... })
+        if (A) { L: T... } else { S...; if (B) goto L; R... }   is   if (A || (S..., B)) { T... } else { R... }
+
+    and from just before the if:
+
+        if (B) goto L; S...; if (A) { L: T... } else { R... }   is   if (B || (S..., A)) { T... } else { R... }
+        if (B) goto L; S...; if (A) { R... } else { L: T... }   is   if (!B && (S..., A)) { R... } else { T... }
+
+    S are expression statements only (they run where they ran, after what decided before them and before
+    the test after them, in a comma expression), at most ARM_JUMP_EFFECTS of them and none a call made for
+    its effects alone (a call statement in a condition reads worse than the goto: a source's call and the
+    test after it, which a compiler threaded), the jump is the whole of an if without else, and L the
+    first statement of its arm (a label other jumps still name stays where it is; the caller drops one
+    nothing names). Each way through does what it did: S and the tests are evaluated exactly where and
+    as often as before, T runs where it ran and so does R."""
+    changed = []
+
+    def real(xs):
+        return [x for x in xs if not isinstance(x, (C.Note, C.Empty))]
+
+    def jump_of(x):
+        """L when x is if (B) goto L; without else, else None."""
+        if isinstance(x, C.If) and x.orelse is None:
+            only = real(_list(x.then))
+            if len(only) == 1 and isinstance(only[0], C.Goto):
+                return only[0].label
+        return None
+
+    def effects_of(xs):
+        """The expressions of the expression statements xs (notes and empty statements apart) where they
+        may go into a condition (few, no call made for its effects alone), else None."""
+        es = [y.e for y in xs if isinstance(y, C.ExprStmt)]
+        bare = [e.e if isinstance(e, C.Cast) and e.type == "void" else e for e in es]
+        if len(es) > ARM_JUMP_EFFECTS or any(isinstance(e, C.Call) for e in bare):
+            return None
+        return es
+
+    def plain_prefix(xs, label):
+        """(S, B, R) where xs is [S..., if (B) goto label;, R...] as the docstring says, else None."""
+        for k, x in enumerate(xs):
+            if isinstance(x, (C.Note, C.Empty)):
+                continue
+            if jump_of(x) == label:
+                effects = effects_of(xs[:k])
+                return None if effects is None else (effects, x.cond, xs[k + 1:])
+            if not isinstance(x, C.ExprStmt):
+                return None
+        return None
+
+    def first_label(xs):
+        first = next(iter(real(xs)), None)
+        return first.name if isinstance(first, C.Label) else None
+
+    def joined(effects, cond):
+        return C.Comma(effects + [cond]) if effects else cond
+
+    def both(op, l, r):
+        """l op r for && or ||, a right operand of the same operator taken apart: a && (b && c) as
+        a && b && c, a && (s, b && c) as a && (s, b) && c (the same order of evaluation, flat)."""
+        if isinstance(r, C.Comma) and isinstance(r.items[-1], C.Binary) and r.items[-1].op == op:
+            last = r.items[-1]
+            return both(op, both(op, l, C.Comma(r.items[:-1] + [last.l])), last.r)
+        if isinstance(r, C.Binary) and r.op == op:
+            return both(op, both(op, l, r.l), r.r)
+        return C.Binary(op, l, r)
+
+    def arms(x):
+        """The jumps from inside one arm of the if x to the other arm's start."""
+        while x.orelse is not None:
+            then, other = _list(x.then), _list(x.orelse)
+            label = first_label(other)
+            got = plain_prefix(then, label) if label else None
+            if got is not None:
+                effects, cond, rest = got
+                if real(rest):
+                    x.cond = both("&&", x.cond, joined(effects, negate(cond)))
+                    x.then = C.Block(rest)
+                else:
+                    x.cond = both("||", negate(x.cond), joined(effects, cond))
+                    x.then, x.orelse = C.Block(other), None
+                changed.append(x)
+                continue
+            label = first_label(then)
+            got = plain_prefix(other, label) if label else None
+            if got is None:
+                return
+            effects, cond, rest = got
+            x.cond = both("||", x.cond, joined(effects, cond))
+            x.orelse = C.Block(rest) if real(rest) else None
+            changed.append(x)
+
+    def before(xs):
+        """The jumps from just before an if to one of its arms' start (from the start again after each:
+        a jump further up may name the same arm)."""
+        i = 0
+        while i < len(xs):
+            label = jump_of(xs[i])
+            j = i + 1
+            while label is not None and j < len(xs) and isinstance(xs[j], (C.ExprStmt, C.Note, C.Empty)):
+                j += 1
+            y = xs[j] if label is not None and j < len(xs) else None
+            effects = effects_of(xs[i + 1:j]) if isinstance(y, C.If) and jump_of(y) is None else None
+            if effects is not None:
+                if first_label(_list(y.then)) == label:
+                    y.cond = both("||", xs[i].cond, joined(effects, y.cond))
+                elif y.orelse is not None and first_label(_list(y.orelse)) == label:
+                    y.cond = both("&&", negate(xs[i].cond), joined(effects, y.cond))
+                else:
+                    y = None
+                if y is not None:
+                    del xs[i:j]
+                    changed.append(y)
+                    arms(y)
+                    i = 0
+                    continue
+            i += 1
+
+    def visit(xs):
+        for x in xs:
+            if isinstance(x, C.If):
+                arms(x)
+                visit(_list(x.then))
+                if x.orelse is not None:
+                    visit(_list(x.orelse))
+            elif isinstance(x, (C.For, C.While, C.DoWhile, C.Switch)):
+                visit(_list(x.body))
+            elif isinstance(x, C.Block):
+                visit(x.body)
+        before(xs)
+    visit(stmts)
+    return bool(changed)
 
 
 def _emit(blocks, labels, guards):
