@@ -870,3 +870,98 @@ u32 f(u32 r0, u32 r1)
     assert decls == ["r2", "r4", "r5"], decls          # (r3 and r6 named nowhere: gone; r5's call stays)
     assert [n for _, n in fn.params] == ["r0", "r1"]
     assert not drop_unused_declarations(fn)
+
+
+WIDE = ("typedef unsigned int u32;\ntypedef int s32;\ntypedef unsigned long long u64;\n"
+        "static u64 divmod(u32 a, u32 b)\n{\n    return ((u64)(a % b) << 32) | (a / b);\n}\n")
+WIDE_FN = """u32 f(u32 r0, u32 r1, u32 r2)
+{
+    u64 t_1, t_2, t_3, t_4, t_5, t_6;
+    u32 r3;
+    t_1 = (u64)r1 + 1;
+    t_2 = (u64)r0 + ~0x2u + 1;
+    t_3 = divmod(r0, r2 | 1u);
+    t_4 = (u64)r0 * r1;
+    t_5 = ((u64)r0 * r1) >> 3;
+    t_6 = (u64)r2 << 4;
+    r3 = (u32)t_1 + (u32)t_2;
+    if ((u32)t_2 > 8) r3 = r3 + (u32)t_3;
+    return r3 + (u32)(t_4 >> 32) + (u32)t_4 + (u32)t_5 + (u32)t_6;
+}
+"""
+
+
+def test_a_two_word_value_read_only_as_its_low_word_is_32_bits(tmp_path):
+    """narrow_wide: a u64 variable read only as (u32)v (a carry kept by the lifter, a routine's two
+    result words) is u32, its values computed in 32 bits where their low word depends on their operands'
+    low words alone (t_1 = r1 + 1; the borrow form polish then folds, r0 - 2; a call, cut to its low word
+    by the 32-bit place); one whose high word is read (t_4), or whose value shifts a product right (t_5:
+    its low word needs the high one), stays. Compiled before and after with the host's C compiler: the
+    same results."""
+    import ctypes
+    import random
+    import shutil
+    import subprocess
+    tree = cparse.parse(WIDE + WIDE_FN)
+    fn = tree.function("f")
+    assert polish.narrow_wide(tree, fn)
+    polish.polish(tree, fn)
+    out = cparse.unparse(fn, notes=False, style="readable")
+    for line in ("u64 t_4, t_5;", "t_1 = r1 + 1;", "t_2 = r0 - 2;", "t_3 = divmod(r0, r2 | 1);",
+                 "t_6 = r2 << 4;", "if (t_2 > 8) r3 += t_3;"):
+        assert line in out, (line, out)
+    assert "(u32)t_4" in out and "(u32)(t_4 >> 32)" in out and "(u32)t_5" in out, out
+    if not shutil.which("cc"):
+        return
+    source = tmp_path / "wide.c"
+    source.write_text(WIDE + WIDE_FN.replace("u32 f(", "u32 orig(") + out.replace("u32 f(", "u32 rest("))
+    lib = tmp_path / "wide.so"
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(source)], check=True)
+    so = ctypes.CDLL(str(lib))
+    a, b = so.orig, so.rest
+    for g in (a, b):
+        g.restype, g.argtypes = ctypes.c_uint32, [ctypes.c_uint32] * 3
+    rng = random.Random(9)
+    for _ in range(20000):
+        args = [rng.choice([0, 1, 2, 3, 0xFFFFFFFF, rng.getrandbits(32)]) for _ in range(3)]
+        assert a(*args) == b(*args), args
+
+
+def test_a_wide_value_stays_where_it_is_read_otherwise():
+    """Not narrowed: a parameter, a variable whose address is taken, one compared whole, one given a value
+    inside another expression, one given its own value shifted right."""
+    text = WIDE + """u32 f(u64 p, u32 r0)
+{
+    u64 t_1, t_2, t_3, t_4;
+    u32 r1;
+    t_1 = (u64)r0 + 1;
+    divmod((u32)&t_1, 0);
+    t_2 = (u64)r0 + 2;
+    t_3 = (u64)r0 + 3;
+    r1 = (u32)(t_4 = (u64)r0 + 4);
+    return (u32)p + (u32)t_1 + (t_2 == 7) + (u32)t_3 + (u32)(t_3 >> 1) + r1 + (u32)t_4;
+}
+"""
+    tree = cparse.parse(text)
+    fn = tree.function("f")
+    assert not polish.narrow_wide(tree, fn)
+
+
+def test_a_routines_quotient_read_alone_becomes_a_division():
+    """A division routine's two words kept in a u64 variable whose low word, the quotient, alone is read:
+    narrowed first (readable.polish_tree), the 32-bit place given the call is written as / by
+    dread.divisions."""
+    from dread import divisions
+    text = WIDE + """u32 f(u32 r0, u32 r1)
+{
+    u64 t_1;
+    t_1 = divmod(r0, r1);
+    return (u32)t_1 + 1;
+}
+"""
+    tree = cparse.parse(text)
+    fn = tree.function("f")
+    assert polish.narrow_wide(tree, fn)
+    assert divisions.rewrite(tree, fn, {"divmod": ["u", "qr", "nd"]})
+    out = cparse.unparse(fn, notes=False, style="readable")
+    assert "t_1 = r0 / r1;" in out and "u32 t_1;" in out, out

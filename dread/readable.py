@@ -1333,9 +1333,13 @@ def polish_tree(tree, fn, context=None, int_bits=None):
     """dread.polish on the finished tree: constants and casts written by their use (the device regions
     of the context's memory map keep their registers' constants as they are; the callees' parameters
     the readable_types table's masks lists take masks; an object given a text's or a function's address
-    holds no numbers)."""
+    holds no numbers). Before it, a two-word value read only as its low word is made 32 bits
+    (dread.polish narrow_wide), then dread.divisions writes the routines' calls and the divisions by a
+    constant as / and %."""
     from dread import polish
     plan_ = getattr(context, "plan", None) if context is not None else None
+    from dread import polish
+    polish.narrow_wide(tree, fn, int_bits)  # (a two-word value read only as its low word: 32 bits, first)
     divs = getattr(plan_, "divisions", None)
     divcalls = getattr(plan_, "divcalls", None) or ()
     if fn.name not in divcalls and fn.name not in (divs or {}):     # (divisions as / and %: before the

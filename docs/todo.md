@@ -3189,6 +3189,18 @@ the pilot's names, which the first review had taken for raw frames. New items:
   prvStaticallyAllocatedCreator % 150 three times (a 15-bit value); the products left (11 -> 4 on clang
   -O2) are no divisions (the high word of a product of two variables, an overflow check), or RISC-V's
   whose shift is a statement of its own.
+- [x] **A two-word value read only as its low word.** Done 2026-10-25 (dread.polish narrow_wide,
+  readable.polish_tree before the divisions): a u64 variable every read of which is (u32)v is u32, its
+  values computed in 32 bits where their low word depends on their operands' low words alone (+, -,
+  *, &, |, ^, ~, negation, a left shift under 32, a call that the 32-bit place cuts to its low word):
+  a carry the lifter kept (t = (u64)r1 + 1; the borrow form (u64)r0 + ~0x2u + 1, which polish then
+  writes r0 - 2) and a division routine's two words whose quotient alone is read (then written as /
+  by dread.divisions). Not a parameter, nor a variable whose address is taken or that is read any
+  other way. Seen on the private real-life test and on FreeRTOS clang -O2 (xTaskIncrementTick's
+  tick count plus one). Test: tests/test_polish.py (compiled before and after; what stays; the
+  chain into /). On the eight builds the gate accepts the same functions; only clang -O2 changes
+  (xTaskIncrementTick reads t_2 = r1 + 1 ... if (t_2 < ...), as the source's xConstTickCount; its u64
+  declarations 5 -> 3, the others' high words read: overflow checks of a product).
 - [x] **A jump to the start of the other arm, as a condition.** Done 2026-10-25 (dread.structure
   arm_jumps, after the arms pass): a check in one arm of an if that jumps to the start of the other arm
   joins the if's condition, the expression statements before it in a comma expression: `if (A) { S; if

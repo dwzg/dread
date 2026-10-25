@@ -1691,6 +1691,147 @@ def polish(tree, fn, int_bits=None, io=(), masks=None, pointed=None):
     return p.changed
 
 
+LOW_OPS = ("+", "-", "*", "&", "|", "^")     # whose low word depends on the operands' low words alone
+
+
+def narrow_wide(tree, fn, int_bits=None):
+    """A u64 variable of which only the low word is ever read ((u32)v at every read) declared u32, its
+    values computed in 32 bits: the lifters keep a carry or a routine's second result register in a
+    two-word value (t = (u64)r1 + 1, a subtraction with its borrow, a division routine's quotient and
+    remainder), and where nothing reads the high word it is noise. Only where every value it is given
+    (by a statement of its own) has a low word that depends on its operands' low words alone (+, -, *,
+    &, |, ^, ~, negation, a left shift by a constant under 32, a call, which the 32-bit place then cuts
+    to its low word, as (u32) did): those values' (u64) casts of 32-bit operands go. Not a parameter, nor
+    a variable whose address is taken, that an asm names or that is read any other way. Before
+    dread.divisions (readable.polish_tree): a division routine's two words, the quotient alone read,
+    then hand a 32-bit place the call, which that writes as /. Returns whether anything changed."""
+    types = Types(tree, fn, int_bits)
+    wide = {}
+    for st in fn.body.body:
+        if isinstance(st, C.Decl) and " ".join(st.specs.split()) == "u64":
+            for d in st.items:
+                if not d.ptr and not d.dims and d.init is None and not getattr(d, "asm", ""):
+                    wide[d.name] = st
+    if not wide:
+        return False
+    bad = set()
+
+    def bits32(e):
+        t = types.of(e)
+        return t is not None and t[0] == "int" and t[1][0] <= 32
+
+    def kind(e):
+        """"32" (a value of 32 bits or fewer), "low" (a wider one whose low word depends on its operands'
+        low words alone) or None."""
+        if isinstance(e, C.Num):
+            return "32" if isinstance(e.value, int) and 0 <= e.value < (1 << 32) else None
+        if isinstance(e, C.Name):
+            return None if e.id in wide else ("32" if bits32(e) else None)
+        if isinstance(e, C.Cast):
+            t = " ".join(e.type.split())
+            if t == "u64":
+                return "low" if kind(e.e) in ("32", "low") else None
+            return "32" if t in ("u8", "s8", "u16", "s16", "u32", "s32") else None
+        if isinstance(e, C.Call):
+            return "low"
+        if isinstance(e, C.Unary) and e.op in ("~", "-"):
+            return kind(e.e)
+        if isinstance(e, C.Binary) and e.op in LOW_OPS:
+            a, b = kind(e.l), kind(e.r)
+            if a is None or b is None:
+                return None
+            return "low" if "low" in (a, b) else "32"
+        if isinstance(e, C.Binary) and e.op == "<<" and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
+            a = kind(e.l)
+            return a if a == "32" or (a == "low" and e.r.value < 32) else None
+        return "32" if bits32(e) and not any(isinstance(x, C.Name) and x.id in wide for x in _walk(e)) else None
+
+    def visit(e, parent, top):
+        if isinstance(e, C.Name) and e.id in wide:
+            low_read = isinstance(parent, C.Cast) and " ".join(parent.type.split()) == "u32"
+            if not low_read:
+                bad.add(e.id)
+            return
+        if isinstance(e, C.Assign) and isinstance(e.target, C.Name) and e.target.id in wide:
+            v = e.target.id
+            if not top or e.op != "=" or kind(e.value) not in ("32", "low"):
+                bad.add(v)
+            visit(e.value, e, False)
+            return
+        for slot in type(e).__slots__:
+            x = getattr(e, slot, None)
+            if isinstance(x, C.Expr):
+                visit(x, e, False)
+            elif isinstance(x, list):
+                for y in x:
+                    if isinstance(y, C.Expr):
+                        visit(y, e, False)
+    for st in _all_statements(fn.body.body):
+        if isinstance(st, C.Asm):
+            for o in st.outputs + st.inputs:
+                bad.update(x.id for x in _walk(o.e) if isinstance(x, C.Name))
+            continue
+        if isinstance(st, C.Decl):
+            for d in st.items:
+                if d.init is not None:
+                    visit(d.init, None, False)
+            continue
+        tops = [st.e] if isinstance(st, C.ExprStmt) else []
+        if isinstance(st, C.For):
+            tops = [x for x in (st.init, st.step) if isinstance(x, C.Expr)]
+        for e in _stmt_exprs(st):
+            visit(e, None, any(e is t for t in tops))
+    good = set(wide) - bad - {n for _, n in fn.params}
+    if not good:
+        return False
+
+    def strip(e):
+        """A value's (u64) casts of 32-bit operands taken off, through the operations kind allows."""
+        if isinstance(e, C.Cast) and " ".join(e.type.split()) == "u64" and kind(e.e) == "32":
+            return e.e
+        if isinstance(e, C.Binary) and (e.op in LOW_OPS or e.op == "<<"):
+            e.l, e.r = strip(e.l), strip(e.r)
+        elif isinstance(e, C.Unary) and e.op in ("~", "-"):
+            e.e = strip(e.e)
+        return e
+
+    def rewrite(e):
+        if isinstance(e, C.Cast) and " ".join(e.type.split()) == "u32" and isinstance(e.e, C.Name) and e.e.id in good:
+            return C.Name(e.e.id)
+        if isinstance(e, C.Assign) and isinstance(e.target, C.Name) and e.target.id in good:
+            e.value = strip(e.value)
+            e.value = _naming_rewrite(e.value, rewrite)
+            return e
+        return None
+    for st in fn.body.body:
+        _naming_rewrite_stmt(st, rewrite)
+    body = fn.body.body
+    for v in sorted(good):
+        decl = wide[v]
+        k = body.index(decl)
+        item = next(d for d in decl.items if d.name == v)
+        decl.items.remove(item)
+        target = next((st for st in body if isinstance(st, C.Decl) and " ".join(st.specs.split()) == "u32"
+                       and all(not d.ptr and not d.dims for d in st.items)), None)
+        if target is not None:
+            target.items.append(item)
+        else:
+            body.insert(k + 1, C.Decl("u32", [item]))
+        if not decl.items:
+            body.remove(decl)
+    return True
+
+
+def _naming_rewrite(e, f):
+    from dread.naming import _rewrite
+    return _rewrite(e, f)
+
+
+def _naming_rewrite_stmt(s, f):
+    from dread.naming import _rewrite_stmt
+    _rewrite_stmt(s, f)
+
+
 def drop_unused_declarations(fn):
     """The declarations of variables the function no longer names anywhere else go (at its top, where
     readable C declares them), those with no initial value or one without effects: what a pass after
