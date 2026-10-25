@@ -276,9 +276,11 @@ remainder there) or "qr" (the quotient, the remainder in the second), order "nd"
 "dn" (the divisor first). Readable C writes their calls as `/` and `%` (`r4 % 10`, `(s32)c / 250`); the
 readable check links the helpers GCC's own `/` and `%` call where the image lacks them, made of these
 routines (`build/readable-check/IMAGE/support/dread_divisions.c`). A file from before has no
-`divisions`: the calls stay calls. `divcalls` (left out when empty) lists the functions whose calls of
-those routines stay calls: the check tried them so after their / and % failed their cases (a case that
-stubs the routine sees each call).
+`divisions`: the calls stay calls. `divcalls` (left out when empty) lists the functions whose divisions
+stay as their machine code has them, calls of those routines and multiplications by a constant's
+reciprocal (dread.divisions constants): the check tried them so after their / and % failed their cases
+(a case that stubs the routine sees each call; a compiler may make a C division by a constant a helper's
+call the original does not make).
 
 `params` (left out when empty; since 2026-10-23) lists, for every analysed function, the indices of
 its parameters that it uses as a pointer (dread.shapes pointer_params): `{FUNCTION: [0, 2]}`. A

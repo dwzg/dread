@@ -1336,9 +1336,12 @@ def polish_tree(tree, fn, context=None, int_bits=None):
     from dread import polish
     plan_ = getattr(context, "plan", None) if context is not None else None
     divs = getattr(plan_, "divisions", None)
-    if divs and fn.name not in (getattr(plan_, "divcalls", None) or ()):    # (the routines that divide as
-        from dread import divisions                                         # / and %: before the constants)
-        divisions.rewrite(tree, fn, divs, int_bits)
+    divcalls = getattr(plan_, "divcalls", None) or ()
+    if fn.name not in divcalls and fn.name not in (divs or {}):     # (divisions as / and %: before the
+        from dread import divisions                                 # constants; a routine that divides
+        if divs:                                                    # keeps its own, which GCC could make
+            divisions.rewrite(tree, fn, divs, int_bits)             # a helper of it)
+        divisions.constants(tree, fn, int_bits)
     memory = context.memory if context is not None else None
     masks = getattr(context.plan, "masks", None) if context is not None else None
     pointed = context.pointed() if context is not None else None
@@ -1928,10 +1931,12 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
         # - A void function that differs otherwise and has no objects, or whose region is one already,
         #   is tried with its result.
         # - First of all, a function whose readable C writes calls of a routine that divides as / and %
-        #   (dread.divisions) is tried once more with them as calls (the readable_types table's
+        #   (dread.divisions), or a division by a constant its machine code multiplies by (constants), is
+        #   tried once more with them as the machine code has them (the readable_types table's
         #   divcalls): a case that stubs the routine (a generated case whose run hung in it at a divisor
         #   of 0, a written one that logs it) sees each call, which the compiler's / may not make (a
-        #   divisor it knows, a constant it multiplies by). And last, where a function would be dropped
+        #   divisor it knows, a constant it multiplies by), and the compiler may make a / by a constant
+        #   a helper's call the original does not make. And last, where a function would be dropped
         #   otherwise, with the divisions of the functions its code reaches as calls (its cases run them;
         #   a case's refusal of a callee's difference also takes its coverage); dropped after that, it
         #   gives them back to / and % where no other function still checked was tried with them. (Tried
@@ -1950,13 +1955,22 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
                                                                                           trees)}
         divs = context.plan.divisions or {}
 
+        def constant_divider(m):
+            """Whether m's readable C writes a division by a constant its machine code multiplies by
+            (dread.divisions constants): the build's compiler may make it a helper's call the original
+            does not make (GCC -Os on ARMv4T calls __aeabi_uidiv for x % 150)."""
+            from dread import divisions
+            made = kept_cleaned(trees, context, m, texts[m]) if m in texts else None
+            return made is not None and divisions.has_constants(made[0], made[1])
+
         def dividers(pool):
-            """The functions of pool whose readable C writes calls of a routine that divides as / and %."""
+            """The functions of pool whose readable C writes calls of a routine that divides, or divisions
+            by constants, as / and %."""
             return {m for m in pool if m not in divs and m not in context.plan.divcalls
                     and program.by_name.get(m) is not None
-                    and lift.direct_callees(program, program.by_name[m]) & set(divs)}
+                    and (lift.direct_callees(program, program.by_name[m]) & set(divs) or constant_divider(m))}
         divided = {}                        # name -> its own divisions, tried as calls first
-        for n in sorted(rest) if divs else ():
+        for n in sorted(rest):
             mine = dividers({n})
             if mine:
                 divided[n] = mine

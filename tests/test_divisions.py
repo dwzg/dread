@@ -127,8 +127,9 @@ def test_the_helpers_gcc_calls_are_made_of_the_image_s_routines():
 @pytest.mark.slow
 @pytest.mark.compiles
 def test_gizmo_a32_s_divisions_through_the_gate(tmp_path):
-    """dread readable --check on a copy of gizmo a32: fmt_dec's remainder by 10 is written as %, and the
-    readable table takes it and print_status, which calls it; __aeabi_uidivmod itself stays readable (its
+    """dread readable --check on a copy of gizmo a32: fmt_dec's remainder by 10 is written as %, its
+    quotient, which the compiler multiplied out, as / (divisions.constants), and the readable table takes
+    it and print_status, which calls it; __aeabi_uidivmod itself stays readable (its
     own call of __udivsi3 stays); the link has the __aeabi_uidiv a C / would call (made of
     __aeabi_uidivmod). udiv_var, whose C is the program's own (not in the lifted table), prints its
     quotient as / when asked for."""
@@ -155,6 +156,7 @@ def test_gizmo_a32_s_divisions_through_the_gate(tmp_path):
     out = subprocess.run([sys.executable, "-m", "dread.cli", "readable", "--target", root, "fmt_dec"], cwd=root,
                          env=env, capture_output=True, text=True).stdout
     assert "% 10" in out and "__aeabi_uidivmod" not in out.split("\n", 1)[1], out
+    assert "/= 10;" in out and "0xcccccccd" not in out, out
     out = subprocess.run([sys.executable, "-m", "dread.cli", "readable", "--target", root, "udiv_var"], cwd=root,
                          env=env, capture_output=True, text=True).stdout
     assert "r0 / r1" in out and "__udivsi3" not in out.split("\n", 1)[1], out
@@ -200,4 +202,117 @@ def test_a_function_whose_divisions_fail_keeps_the_calls(tmp_path, monkeypatch):
     assert "fmt_dec" in open(image.table("readable")).read().split(), said[-2000:]
     plan = json.load(open(image.table("readable_types")))
     assert plan.get("divcalls") == ["fmt_dec"], plan.get("divcalls")
+
+
+
+def test_a_multiplier_is_a_division_only_where_the_numbers_prove_it():
+    """magic_divisor: GCC's multipliers for / 3, / 10, / 100, / 1000 with their shifts give the divisors
+    (each checked on random values and on the last three runs of d values below 2**32); clang -O2's for
+    / 150 holds for the 15-bit values it was made for and not for every 32-bit one (1309892841 differs).
+    And whatever it returns holds: every 12-bit value of random multipliers near a reciprocal, tried."""
+    import random
+    for m, k, d in ((0xaaaaaaab, 33, 3), (0xcccccccd, 35, 10), (0x51eb851f, 37, 100), (0x10624dd3, 38, 1000)):
+        assert divisions.magic_divisor(m, k) == d, (m, k)
+        rng = random.Random(d)
+        for x in [rng.getrandbits(32) for _ in range(20000)] + [0, d - 1, d] + list(range(2 ** 32 - 3 * d, 2 ** 32)):
+            assert (x * m) >> k == x // d, (m, k, x)
+    assert divisions.magic_divisor(0x1b4e81c, 32, bits=15) == 150
+    assert divisions.magic_divisor(0x1b4e81c, 32) is None
+    x = 1309892841
+    assert (x * 0x1b4e81c) >> 32 != x // 150
+    assert divisions.magic_divisor(0xcccccccd, 32) is None          # (x * 0.8: no whole divisor)
+    rng = random.Random(7)
+    taken = 0
+    for _ in range(1500):
+        d, k = rng.randint(2, 4095), rng.randint(32, 44)
+        m = -(-(1 << k) // d) + rng.randint(-2, 2)
+        got = divisions.magic_divisor(m, k, bits=12)
+        if got is not None:
+            taken += 1
+            assert all((x * m) >> k == x // got for x in range(1 << 12)), (m, k, got)
+    assert taken > 300, taken
+
+
+CONSTS = HEAD + """u32 f(u32 r0, u32 r4, s32 r6)
+{
+    u32 r1, r5;
+    r4 = (u32)((u64)r4 * 0xcccccccdu >> 32) >> 3;
+    r1 = (r0 >> 16) & 0x7fffu;
+    r5 = r1 - (u32)((u64)r1 * 0x1b4e81cu >> 32) * 150;
+    return r4 + r5 + (u32)((u64)r0 * 0x1b4e81cu >> 32) + ((u32)((u64)r6 * 0xcccccccdu >> 32) >> 3);
+}
+"""
+
+
+@pytest.mark.skipif(not shutil.which("cc"), reason="needs the host's C compiler (cc)")
+def test_divisions_by_constants_are_written_as_such(tmp_path):
+    """constants: the high word of x times GCC's multiplier for / 10, shifted, is x / 10; x minus clang's
+    quotient by 150 times 150 is x % 150 where x is a 15-bit value (its one definition masks it); the same
+    multiplier on a 32-bit parameter, and a product of a signed value, stay. Compiled before and after
+    with the host's C compiler: the same results."""
+    import ctypes
+    import random
+    import subprocess
+    tree = cparse.parse(CONSTS)
+    fn = tree.function("f")
+    assert divisions.constants(tree, fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "r4 = r4 / 10;" in out and "r5 = r1 % 150;" in out, out
+    assert "(u32)((u64)r0 * 0x1b4e81cu >> 32)" in out and "(u64)r6 * 0xcccccccdu" in out, out
+    tree2 = cparse.parse(CONSTS)
+    assert divisions.has_constants(tree2, tree2.function("f"))
+    assert "/ 10" not in cparse.unparse(tree2.function("f"), notes=False)       # (asked, not changed)
+    source = tmp_path / "consts.c"
+    source.write_text(HEAD + CONSTS[len(HEAD):].replace("u32 f(", "u32 orig(") + out.replace("u32 f(", "u32 rest("))
+    lib = tmp_path / "consts.so"
+    subprocess.run(["cc", "-shared", "-fPIC", "-O0", "-w", "-o", str(lib), str(source)], check=True)
+    so = ctypes.CDLL(str(lib))
+    a, b = so.orig, so.rest
+    for f in (a, b):
+        f.restype, f.argtypes = ctypes.c_uint32, [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_int32]
+    rng = random.Random(3)
+    for _ in range(20000):
+        args = [rng.getrandbits(32), rng.choice([rng.getrandbits(32), 9, 10, 0xFFFFFFFF]), rng.getrandbits(31)]
+        assert a(*args) == b(*args), args
+
+
+@pytest.mark.slow
+@pytest.mark.compiles
+def test_a_function_whose_constant_division_fails_keeps_the_multiplication(tmp_path, monkeypatch):
+    """Where a function's division by a constant fails its cases (on GCC -Os for ARMv4T a C % 150 becomes
+    a call of __aeabi_uidivmod the original never makes), the check tries it once more with its
+    divisions as written in the machine code (the readable_types table's divcalls): here fmt_dec's / 10 is
+    made / 9 on purpose; it comes back readable with the multiplication, and the table lists it."""
+    from dread import cparse as C, readable
+    from dread.target import Target
+    from conftest import GIZMO
+    shutil.copytree(GIZMO, tmp_path / "gizmo", ignore=shutil.ignore_patterns("build"))
+    root = tmp_path / "gizmo" / "a32"
+    for cache in ("autocases", "regflow"):
+        here = os.path.join(gizmo_dir("a32"), "build", cache)
+        if os.path.isdir(here):
+            shutil.copytree(here, root / "build" / cache)
+    real = divisions.constants
+
+    def wrong(tree, fn, int_bits=None):
+        changed = real(tree, fn, int_bits)
+        if changed and fn.name == "fmt_dec":
+            from dread import polish
+            for st in polish._all_statements(fn.body.body):
+                for e in polish._stmt_exprs(st):
+                    for x in polish._walk(e):
+                        if isinstance(x, C.Binary) and x.op == "/" and isinstance(x.r, C.Num) and x.r.value == 10:
+                            x.r = C.Num("9")
+        return changed
+    monkeypatch.setattr(divisions, "constants", wrong)
+    target = Target.load(str(root))
+    image = target.image()
+    lines = []
+    readable.check(target, image, out=lines.append, jobs=4)
+    said = "\n".join(lines)
+    assert "calls    fmt_dec" in said, said[-3000:]
+    assert "fmt_dec" in open(image.table("readable")).read().split(), said[-2000:]
+    import json
+    table = json.load(open(image.table("readable_types")))
+    assert "fmt_dec" in table.get("divcalls", []), sorted(table)
 

@@ -42,8 +42,18 @@ case that logs it) sees calls the compiler's / does not make where it knows the 
 a constant. Its last try before it is dropped keeps the calls of the dividing functions its code reaches
 too (their / runs in its cases), given back to / and % where it is dropped all the same.
 
+A division by a constant, which a compiler makes a multiplication by the divisor's reciprocal and a
+shift (constants, after rewrite): `(u32)((u64)r4 * 0xcccccccdu >> 32) >> 3` is r4 / 10 where
+magic_divisor proves it for every value r4 can have (the error of such a quotient grows with the
+dividend, so two values decide: the last of the last whole run of d values and the largest value; a
+dividend whose form or one definition holds fewer bits, a mask or a cast, is proved for those: clang -O2
+takes a smaller multiplier for a 15-bit value), and x minus that quotient times d is x % d. Such a
+function goes into divcalls too where it fails (GCC -Os for ARMv4T makes a C % 150 a call of
+__aeabi_uidivmod, which the original does not make).
+
 Not done: a two-word value kept whole; 64-bit division (__aeabi_uldivmod); a routine that divides by
-a constant of its own (a compiler's x / 10 as a call).
+a constant of its own (a compiler's x / 10 as a call); a constant divisor's signed form and the one with
+an add-back step (a 33-bit multiplier).
 """
 import re
 
@@ -262,6 +272,157 @@ def rewrite(tree, fn, divisions, int_bits=None):
     tree.items[:] = [item for item in tree.items if not (
         isinstance(item, C.Raw) and any(re.match(r"^extern .*\b%s\(" % re.escape(g), item.text.strip()) for g in gone))]
     return True
+
+
+# ---- division by a constant, as the compiler multiplied it
+
+def magic_divisor(m, k, bits=32):
+    """d where floor(x * m / 2**k) is floor(x / d) for every unsigned x of bits bits, else None: m the
+    multiplier, k how far the product is shifted right. d is the nearest 2**k / m; with e = m * d - 2**k
+    not negative (else x = d gives 0 already), the error x * e / (d * 2**k) grows with x, so for each
+    remainder r of d the hardest x is the largest below 2**bits that has it, and two of them decide for
+    all: the last x of the last whole run of d values (remainder d - 1, the least room) and 2**bits - 1
+    (the largest error, in the part run after it, whose remainders have more room)."""
+    if not (0 < m < (1 << 33)) or not (32 <= k < 66) or not 0 < bits <= 32:
+        return None
+    d = ((1 << k) + m // 2) // m
+    top = (1 << bits) - 1
+    if d < 2 or d > top or m * d < (1 << k):
+        return None
+    for x in (((top + 1) // d) * d - 1, top):
+        if (x * m) >> k != x // d:
+            return None
+    return d
+
+
+def _bits(e, defs, depth=0):
+    """How many low bits an unsigned 32-bit expression's values can have set, from its form: a constant's
+    own, a cast to u8 or u16, a mask, a right shift, a variable by its one definition (defs); 32 otherwise
+    (dread readable's C names a value once where it can: webs)."""
+    from dread import cparse as C
+    if depth > 8:
+        return 32
+    if isinstance(e, C.Num) and isinstance(e.value, int):
+        return max(1, (e.value & MASK).bit_length())
+    if isinstance(e, C.Cast):
+        t = " ".join(e.type.split())
+        inner = _bits(e.e, defs, depth + 1)
+        return min(inner, {"u8": 8, "u16": 16}.get(t, 32)) if t in ("u8", "u16", "u32") else 32
+    if isinstance(e, C.Binary) and e.op == "&":
+        return min(_bits(e.l, defs, depth + 1), _bits(e.r, defs, depth + 1))
+    if isinstance(e, C.Binary) and e.op == ">>" and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
+        return max(1, _bits(e.l, defs, depth + 1) - e.r.value)
+    if isinstance(e, C.Name) and e.id in defs:
+        return _bits(defs[e.id], defs, depth + 1)
+    return 32
+
+
+def _definitions(fn):
+    """{variable: its value} for the function's locals given a value by one plain assignment and changed
+    nowhere else (not a parameter, its address never taken)."""
+    from dread import cparse as C
+    from dread import polish
+    count, value, bad = {}, {}, {n for _, n in fn.params}
+    for st in polish._all_statements(fn.body.body):
+        for e in polish._stmt_exprs(st):
+            for x in polish._walk(e):
+                if isinstance(x, C.Assign) and isinstance(x.target, C.Name):
+                    count[x.target.id] = count.get(x.target.id, 0) + 1
+                    if x.op == "=":
+                        value[x.target.id] = x.value
+                    else:
+                        bad.add(x.target.id)
+                elif isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--") and isinstance(x.e, C.Name):
+                    bad.add(x.e.id)
+                elif isinstance(x, C.Unary) and x.op == "&" and isinstance(x.e, C.Name):
+                    bad.add(x.e.id)
+        if isinstance(st, C.Decl):
+            for d in st.items:
+                if d.init is not None:
+                    count[d.name] = count.get(d.name, 0) + 1
+                    value[d.name] = d.init
+    return {v: value[v] for v, n in count.items() if n == 1 and v in value and v not in bad}
+
+
+def _high_product(e, types):
+    """(x, m, k) where e is the high word of an unsigned 32-bit x times a constant m shifted right by k in
+    all ((u32)((u64)x * m >> k), k >= 32, and that shifted right again: k the sum), else None."""
+    from dread import cparse as C
+    extra = 0
+    if isinstance(e, C.Binary) and e.op == ">>" and isinstance(e.r, C.Num) and isinstance(e.r.value, int):
+        extra, e = e.r.value, e.l
+    if not (isinstance(e, C.Cast) and " ".join(e.type.split()) == "u32"):
+        return None
+    e = e.e
+    if not (isinstance(e, C.Binary) and e.op == ">>" and isinstance(e.r, C.Num) and isinstance(e.r.value, int)
+            and e.r.value >= 32):
+        return None
+    k = e.r.value + extra
+    prod = e.l
+    if not (isinstance(prod, C.Binary) and prod.op == "*"):
+        return None
+    for wide, m in ((prod.l, prod.r), (prod.r, prod.l)):
+        if isinstance(m, C.Cast) and " ".join(m.type.split()) == "u64":
+            m = m.e
+        if isinstance(wide, C.Cast) and " ".join(wide.type.split()) == "u64" and isinstance(m, C.Num) \
+                and isinstance(m.value, int):
+            x = wide.e
+            if types.of(x) == ("int", (32, False)):
+                return x, m.value, k
+    return None
+
+
+def constants(tree, fn, int_bits=None):
+    """Division by a constant, which a compiler makes a multiplication by a reciprocal and a shift, as /
+    and % in fn's readable C, in place: (u32)((u64)x * m >> 32) >> s is x / d where magic_divisor proves it
+    for every value x can have (by the numbers, not by the pattern: an unsigned 32-bit x, fewer bits where
+    its form says so, _bits; clang -O2 takes a smaller multiplier for a value it knows is short); x minus
+    that quotient times d is then x % d. Returns whether anything changed. Not done: the signed form (a
+    correction of the sign) and the one with an add-back step (a 33-bit multiplier)."""
+    from dread import cparse as C
+    from dread import polish
+    from dread.naming import _rewrite_stmt
+    from dread.structure import _has_effects
+    types = polish.Types(tree, fn, int_bits)
+    defs = _definitions(fn)
+    changed = []
+
+    def number(d, x):
+        return C.Num("%d" % d) if types.of(x) == ("int", (32, False)) else C.Num("%du" % d)
+
+    def f(e):
+        got = _high_product(e, types)
+        if got is not None:
+            x, m, k = got
+            d = magic_divisor(m, k, _bits(x, defs))
+            if d is not None:
+                changed.append(d)
+                return C.Binary("/", x, number(d, x))
+        if isinstance(e, C.Binary) and e.op == "-":
+            y, prod = e.l, e.r
+            if isinstance(prod, C.Binary) and prod.op == "*":
+                for q, n in ((prod.l, prod.r), (prod.r, prod.l)):
+                    got = _high_product(q, types)
+                    if got is None or not isinstance(n, C.Num) or not isinstance(n.value, int):
+                        continue
+                    x, m, k = got
+                    d = magic_divisor(m, k, _bits(x, defs))
+                    if d is not None and d == n.value and not _has_effects(x) and \
+                            C.expr_text(x) == C.expr_text(y):
+                        changed.append(d)
+                        return C.Binary("%", x, number(d, x))
+        return None
+    for st in fn.body.body:
+        _rewrite_stmt(st, f)
+    return bool(changed)
+
+
+def has_constants(tree, fn, int_bits=None):
+    """Whether constants would write a division by a constant in fn (the readable check tries such a
+    function once more with them as multiplications, as it does a routine's calls)."""
+    import copy
+    tree = copy.deepcopy(tree)
+    return constants(tree, tree.function(fn.name), int_bits)
 
 
 # ---- what the readable check links

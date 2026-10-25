@@ -5093,3 +5093,21 @@ each block once.
   condition, the source's callback and the test after it, which the compiler had threaded; that read
   worse than the goto. The else-if chain's case would evaluate a test twice; it waits (docs/todo.md).
 
+## A division by a constant proved by the numbers (2026-10-25)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), from docs/todo.md's
+"Division by a constant, from its multiplication".
+
+- **Question.** When is the high word of x times a constant, shifted, x / d in readable C?
+- **Options.** (a) By the pattern and a table of the compilers' multipliers. (b) By the numbers: the
+  nearest d to 2^k / m, and a check that it holds for every value x can have, with x taken as 32 bits.
+  (c) As (b), with fewer bits where the dividend's form says so: a mask, a cast to a narrower type, a
+  right shift, or a variable's one definition that is such an expression. (d) A solver (z3) per product.
+- **Choice.** (c). A table misses compilers and flags, and a pattern can match a product that is no
+  division. Two values decide the check exactly (the error of such a quotient grows with the dividend),
+  so no solver is needed. Taking 32 bits alone left clang -O2's products out: it chose a smaller
+  multiplier for a value it knew had 15 bits, which is not x / 150 for every 32-bit x (1309892841
+  differs), so written as / for 32 bits it would have been wrong. A variable's one definition stands
+  for every value it holds (dread's readable C names a value once where it can); a parameter's or a
+  variable whose address is taken does not.
+

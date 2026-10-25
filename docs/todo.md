@@ -3161,13 +3161,28 @@ the pilot's names, which the first review had taken for raw frames. New items:
   f(a, b), both halves read later) stays a call; 64-bit division; a compiler's division by a constant
   as a multiplication (`(u32)((u64)r4 * 0xcccccccdu >> 32) >> 3` for r4 / 10). Tests:
   tests/test_divisions.py.
-- [ ] **Division by a constant, from its multiplication.** A compiler divides by a constant with a
+- [x] **Division by a constant, from its multiplication.** A compiler divides by a constant with a
   multiplication by its reciprocal and a shift: `(u32)((u64)r4 * 0xcccccccdu >> 32) >> 3` is r4 / 10
   (gizmo a32's fmt_dec), clang -O2's `(u32)((u64)r1_1 * 0x1b4e81cu >> 32) * 150` the quotient by 150
   taken times 150 (a remainder in the making). Recognise the multiplier and the shift by checking that
   they give x / d for every x of the width (not by the pattern alone; signed ones add a correction of the
   sign) and write x / d, x % d where the code subtracts the product; the gate decides as for any rewrite.
   Public examples: gizmo a32 fmt_dec, FreeRTOS clang -O2 (ten such products).
+  Done 2026-10-25 (dread.divisions constants, magic_divisor; polish_tree after the routines' rewrite):
+  proved by the numbers for every value the dividend can have, a 32-bit one or fewer bits where its form
+  or its one definition says so (clang's / 150 multiplier is exact for the 15-bit value it was made for,
+  not for every 32-bit one: written as % 150 there only); two values decide (the error of a quotient
+  made so grows with the dividend: the last of the last whole run of d values and the largest value).
+  A function whose constant division fails its cases is tried again with its divisions as the machine
+  code has them (divcalls, as for the routines' calls: GCC -Os for ARMv4T calls __aeabi_uidivmod for a C
+  % 150). Not done: the signed form, and the one with an add-back step (a 33-bit multiplier: GCC's / 7).
+  Test: tests/test_divisions.py (the proof on known multipliers, and sound on every 12-bit value of
+  random ones; the rewrite compiled before and after; gizmo a32 through the gate; a wrong rewrite taken
+  back). On the eight builds the gate accepts the same functions: gizmo a32's fmt_dec writes `r4 /= 10`,
+  FreeRTOS clang -O2's printf (tiny_print) / 10, / 100, / 1000 and /= 10000, its
+  prvStaticallyAllocatedCreator % 150 three times (a 15-bit value); the products left (11 -> 4 on clang
+  -O2) are no divisions (the high word of a product of two variables, an overflow check), or RISC-V's
+  whose shift is a statement of its own.
 - [x] **A jump to the start of the other arm, as a condition.** Done 2026-10-25 (dread.structure
   arm_jumps, after the arms pass): a check in one arm of an if that jumps to the start of the other arm
   joins the if's condition, the expression statements before it in a comma expression: `if (A) { S; if
