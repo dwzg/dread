@@ -782,19 +782,36 @@ def _inner(s):
     return []
 # --- what a function's C says of its variables ---
 
-def eligible(fn):
+def eligible(fn, why=None):
     """The variables a typing may change: the function's own u32 parameters and plain u32 locals of its
     body's top level (not initialised, no pointer or array declarator), less those an asm names, whose
     address is taken, those given the address of a variable of the function (the lifter's stack
     arguments: a_1 = (u32)&s1, read at a_1 + 4 too), the frame's (sp0) and those given a frame address
-    (dread.frames' domain)."""
+    (dread.frames' domain). why, a dict: filled with the reason each variable left out is left out
+    (dread readable --types)."""
     from dread.cflow import walk_expr
     from dread.naming import _exprs, _inner as n_inner
-    out = {n for t, n in fn.params if " ".join(t.split()) == "u32"}
+    why = {} if why is None else why
+    out = set()
+    for t, n in fn.params:
+        if " ".join(t.split()) == "u32":
+            out.add(n)
+        else:
+            why[n] = "a parameter declared %s" % " ".join(t.split())
     for st in fn.body.body:
-        if isinstance(st, C.Decl) and " ".join(st.specs.split()) == "u32":
-            out.update(d.name for d in st.items if not d.ptr and not d.dims and d.init is None
-                       and not getattr(d, "asm", ""))
+        if isinstance(st, C.Decl):
+            u32 = " ".join(st.specs.split()) == "u32"
+            for d in st.items:
+                if not u32:
+                    why[d.name] = "declared %s" % " ".join(st.specs.split())
+                elif d.ptr or d.dims:
+                    why[d.name] = "a pointer or array declarator"
+                elif d.init is not None:
+                    why[d.name] = "initialised in its declaration"
+                elif getattr(d, "asm", ""):
+                    why[d.name] = "bound to a register (asm)"
+                else:
+                    out.add(d.name)
     from dread.naming import variables
     own = set(variables(fn)) | set(FRAME)
     bad = set()
@@ -809,19 +826,25 @@ def eligible(fn):
     def visit(st):
         if isinstance(st, C.Asm):
             for o in st.outputs + st.inputs:
-                bad.update(x.id for x in walk_expr(o.e) if isinstance(x, C.Name))
+                for x in walk_expr(o.e):
+                    if isinstance(x, C.Name):
+                        bad.add(x.id)
+                        why.setdefault(x.id, "an asm operand")
         if isinstance(st, C.Decl):
             bad.update(d.name for d in st.items if d.init is not None or d.ptr or d.dims)
         for e in _exprs(st):
             for x in walk_expr(e):
                 if isinstance(x, C.Unary) and x.op == "&" and isinstance(x.e, C.Name):
                     bad.add(x.e.id)
+                    why.setdefault(x.e.id, "its address is taken")
                 if isinstance(x, C.Assign) and isinstance(x.target, C.Name):
                     given.setdefault(x.target.id, set()).update(
                         t.id for _, t in terms(x.value) if isinstance(t, C.Name))
                     if any(isinstance(y, C.Unary) and y.op == "&" and local(y.e) for y in walk_expr(x.value)):
                         bad.add(x.target.id)        # (a_1 = (u32)&s1: the lifter reads the stack arguments
                                                     # beyond s1 through it; typed, clang -O2 read past s1)
+                        why.setdefault(x.target.id, "given the address of a variable of the function "
+                                                    "(the lifter's stack arguments)")
         for inner in n_inner(st):
             visit(inner)
     for st in fn.body.body:
@@ -834,6 +857,11 @@ def eligible(fn):
             if v not in framed and names & framed:
                 framed.add(v)
                 changed = True
+    for v in out & framed:
+        if v in FRAME:
+            why[v] = "the frame's own"
+        else:
+            why.setdefault(v, "given a frame address (dread.frames)")
     return out - bad - framed
 
 
@@ -1435,10 +1463,11 @@ class Planner:
         r = Rewriter(fn, typing, self.types[name], protos, self.results.get(name), self.sizes)
         return r.count(atoms)
 
-    def decide(self, name, protos):
+    def decide(self, name, protos, log=None):
         """(typing, calls) of one function: its candidates tried in order, each kept where the
         expressions it touches (those naming its variables, the calls of its callees) hold no more casts
-        with it than without."""
+        with it than without. log, a list: each trial appended as (kind, members, callee parameters,
+        type, casts without, casts with, kept)."""
         fx = self.facts[name]
         typing, calls = {}, {}
         for cand in candidates(fx, protos, signed_result=self.results.get(name) == "s32"):
@@ -1451,7 +1480,11 @@ class Planner:
                 trial.update({v: t for v in cand.members})
                 for f, i in cand.params:
                     trial_calls.setdefault(f, {})[i] = protos[f][1][i]
-                if self.cost(name, trial, self.file_protos(protos, trial_calls), atoms) <= before:
+                after = self.cost(name, trial, self.file_protos(protos, trial_calls), atoms)
+                if log is not None:
+                    log.append((cand.kind, sorted(cand.members), sorted(cand.params), t, before, after,
+                                after <= before))
+                if after <= before:
                     typing, calls = trial, trial_calls
                     break
         return typing, calls
@@ -1546,6 +1579,72 @@ class Planner:
                     self.decide_outside(c, sorted(outside[c])):
                 self.results[c] = "s32"
         return self
+
+
+def explain(p, trees, digests=None, context=None):
+    """Why each function of trees ([(tree, fn, macros)] of readable.analysis_trees) has the variable types
+    it has, as lines (dread readable --types): the table's types and whether they were made for this C,
+    the variables the plan may type and why each other one may not (eligible), the pointer groups with
+    their accesses, and every candidate the plan tries in order, with the casts of the expressions it
+    touches without and with it and whether it is kept; then the types those trials give. The trials
+    run as the plan's last round does: on the C as it is built (finished, with context), the callees'
+    prototypes and the functions' results as the table has them (p.prototypes)."""
+    from dread import tidy
+    names = context.struct_names() if context is not None else {}
+
+    def shown(t):                           # (the table keeps its own structure names: as printed)
+        return re.sub(r"\bstruct (\w+)", lambda m: "struct " + names.get(m.group(1), (m.group(1), {}))[0],
+                      t) if t else t
+    protos = {f: (shown(e[0]), [shown(t) for t in e[1:]]) for f, e in (getattr(p, "prototypes", None) or {}).items()}
+    if context is not None:
+        trees = [finished(tree, fn, p, context, (digests or {}).get(fn.name)) + (macros,)
+                 for tree, fn, macros in trees]
+    planner = Planner(trees, p, names=names)
+    out = []
+    for tree, fn, _ in trees:
+        name = fn.name
+        entry = (getattr(p, "variables", None) or {}).get(name) or {}
+        table = ", ".join("%s %s" % (v, shown(t)) for v, t in sorted((entry.get("types") or {}).items())) or "none"
+        made = entry.get("digest")
+        mine = (digests or {}).get(name)
+        note = "" if not entry or made is None or mine is None else (
+            " (made for this C)" if made == mine else " (made for other C: not applied)")
+        out.append("%s: the table's types %s%s" % (name, table, note))
+        if name not in planner.facts:
+            out.append("  not analysed: %s" % ("its registers are fixed (an asm statement binds them)"
+                                                if tidy.fixed_registers(tree) else "not 32-bit registers"))
+            continue
+        why = {}
+        plain = eligible(fn, why)
+        fx = planner.facts[name]
+        excluded = sorted(plain - fx.plain)
+        out.append("  may type: %s" % (", ".join(sorted(fx.plain)) or "nothing"))
+        for v in excluded:
+            out.append("  not %s: a structure pointer of dread.shapes" % v)
+        for v, reason in sorted(why.items()):
+            out.append("  not %s: %s" % (v, reason))
+        group, roots = fx.groups()
+        by_root = {}
+        for ctype, a, store in fx.accesses:
+            b = fx.base(a, group, roots)
+            if b is not None:
+                by_root.setdefault(group[b], []).append("%s %s" % ("store" if store else "load", ctype))
+        members = {}
+        for v, r in group.items():
+            members.setdefault(r, []).append(v)
+        for r in sorted(by_root):
+            acc = by_root[r]
+            out.append("  group %s: %s" % (", ".join(sorted(members.get(r, [r]))), ", ".join(
+                "%s x%d" % (k, acc.count(k)) for k in sorted(set(acc)))))
+        planner.results[name] = protos.get(name, (None, []))[0]
+        log = []
+        typing, calls = planner.decide(name, protos, log)
+        for kind, ms, params, t, before, after, kept in log:
+            what = ", ".join(ms) or ", ".join("%s parameter %d" % (f, i) for f, i in params)
+            out.append("  %s %s: %s, casts %d -> %d, %s" % (kind, what, t, before, after,
+                                                         "kept" if kept else "not kept"))
+        out.append("  typed: %s" % (", ".join("%s %s" % (v, t) for v, t in sorted(typing.items())) or "nothing"))
+    return out
 
 
 def finished(tree, fn, p, context, digest=None):

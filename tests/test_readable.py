@@ -291,6 +291,17 @@ def test_the_command_prints_readable_c_and_the_shapes(capsys):
             "one each); 0 kinds paired with several source structures") in out, out
 
 
+@needs_gcc
+def test_the_command_explains_the_variables_types(capsys):
+    """dread readable --types NAME: per function the table's types, the trials and what they give (gizmo
+    m3 carries no table: the trials alone); a name without readable C says so."""
+    assert readable.main(["--target", gizmo_dir("m3"), "--types", "strncpy", "no_such_function"]) in (0, None)
+    out = capsys.readouterr().out
+    assert out.startswith("strncpy: the table's types none\n"), out
+    assert "  pointer r0" in out and ", kept\n" in out and "  typed: r0 volatile u8 *" in out, out
+    assert "no_such_function: no readable C (it does not lift)" in out, out
+
+
 def test_the_trees_made_in_a_pool_are_those_made_in_one_process(monkeypatch):
     """readable_trees, analysis_trees, views and question_trees give the same in worker processes as in
     this one."""

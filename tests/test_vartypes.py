@@ -1204,3 +1204,84 @@ def test_objects_go_to_callees_as_the_pointers_their_own_c_takes():
                  "extern u32 send(volatile struct s_7 *);", "send(&msg);"):
         assert line in out, (line, out)
     assert not vartypes.object_arguments(tree, fn, p)     # (nothing left to take)
+
+
+def test_eligible_says_why_a_variable_is_left_out():
+    """eligible(fn, why) fills why with the reason each variable it leaves out is left out (dread readable
+    --types prints them); the set is the same as without."""
+    tree = cparse.parse(HEAD + """u32 f(u32 r0, s32 r1)
+{
+    u32 a_1, r3, r4, r5, sp0;
+    u32 r6 = 4;
+    u32 *r7;
+    u32 frame[4];
+    sp0 = (u32)&frame[4];
+    a_1 = sp0 - 8;
+    *(volatile u32 *)a_1 = r0;
+    r3 = r0;
+    __asm__ volatile ("" : "+r" (r3));
+    r5 = (u32)&r4;
+    r7 = 0;
+    return *(volatile u32 *)(a_1 + 4) + *(volatile u32 *)r3 + r1 + r6 + r5;
+}
+""")
+    fn = tree.function("f")
+    why = {}
+    assert vartypes.eligible(fn, why) == {"r0"} == vartypes.eligible(fn)
+    assert why == {"a_1": "given a frame address (dread.frames)", "frame": "a pointer or array declarator",
+                   "r1": "a parameter declared s32", "r3": "an asm operand", "r4": "its address is taken",
+                   "r5": "given the address of a variable of the function (the lifter's stack arguments)",
+                   "r6": "initialised in its declaration", "r7": "a pointer or array declarator",
+                   "sp0": "the frame's own"}, why
+
+
+EXPLAINED = HEAD + """u32 f(u32 r0, u32 r1, u32 r2)
+{
+    u32 r3, r4, r12;
+    r4 = 7;
+    sink((u32)&r4, 0);
+    r3 = 0;
+L_1: ;
+    if ((s32)r3 >= (s32)r2) goto L_2;
+    r12 = *(volatile u16 *)r0;
+    *(volatile u16 *)r1 = (r12 >> 8) | ((r12 & 0xffu) << 8);
+    r0 = r0 + 2;
+    r1 = r1 + 2;
+    r3 = r3 + 2;
+    goto L_1;
+L_2: ;
+    return r0;
+}
+
+u32 g(u32 r0)
+{
+    u32 r1;
+    r1 = *(volatile u8 *)r0;
+    sink(r0, 1);
+    sink(r0, 2);
+    return r1;
+}
+"""
+
+
+def test_explain_shows_each_trial_with_its_casts():
+    """vartypes.explain (dread readable --types): the table's types, the variables the plan may type and
+    why another may not, each pointer group's accesses, every candidate the plan tries with the casts of
+    what it touches without and with it, kept or not (a pointer handed to a callee that takes integers
+    twice: not), and the types the trials give, the table's (the plan's last round)."""
+    tree = cparse.parse(EXPLAINED)
+    p = shapes.Plan()
+    trees = [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)]
+    vartypes.plan(p, trees)
+    lines = vartypes.explain(p, trees)
+    f = lines[:lines.index("g: the table's types none")]
+    assert f[0] == "f: the table's types r0 const volatile u16 *, r1 volatile u16 *, r2 s32, r3 s32", f
+    assert "  not r4: its address is taken" in f, f
+    assert "  group r0: load u16 x1" in f and "  group r1: store u16 x1" in f, f
+    assert "  pointer r0: const volatile u16 *, casts 1 -> 1, kept" in f, f
+    assert "  pointer r1: volatile u16 *, casts 1 -> 0, kept" in f, f
+    assert f[-1] == "  typed: r0 const volatile u16 *, r1 volatile u16 *, r2 s32, r3 s32", f
+    g = lines[lines.index("g: the table's types none"):]
+    assert "  pointer r0: const volatile u8 *, casts 1 -> 2, not kept" in g, g
+    assert "  pointer r0: volatile u8 *, casts 1 -> 2, not kept" in g, g
+    assert g[-1] == "  typed: nothing", g

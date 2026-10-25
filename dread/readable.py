@@ -2117,6 +2117,10 @@ def main(argv=None):
                         "structures' fields too")
     parser.add_argument("--shapes", action="store_true", help="the structures behind pointers (dread.shapes) of "
                         "the readable functions (or those named), largest first")
+    parser.add_argument("--types", action="store_true", help="why the named functions' variables have the types "
+                        "they have (dread.vartypes explain): the table's types, the variables the plan may type and "
+                        "why the others not, the pointer groups' accesses, every candidate with its casts without "
+                        "and with it, kept or not")
     parser.add_argument("--statics", action="store_true", help="the structures and arrays of static data "
                         "(dread.statics) every function's machine code and the lifted functions' readable C show; "
                         "with --score ELF, against the ELF's variables")
@@ -2201,6 +2205,22 @@ def main(argv=None):
         with open(args.figures, "w") as f:
             json.dump(got, f, indent=1, sort_keys=True)
         print("dread readable --figures: %d of %d functions measured, into %s" % (len(got), len(names), args.figures))
+        return 0
+    if args.types:
+        from dread import build, lift, regflow, vartypes
+        from dread.program import Program
+        program = Program(target, image)
+        flow = regflow.load(target, image, program)
+        names = args.names or build.read_names(image.table("readable"))
+        context = Context(target, image, program, flow)
+        digests = {}
+        trees = analysis_trees(program, context, lift.make_lifter(program, flow), names, named=context.globals,
+                               digests=digests)
+        missing = sorted(set(names) - {fn.name for _, fn, _ in trees})
+        for line in vartypes.explain(context.plan, trees, digests, context):
+            print(line)
+        for name in missing:
+            print("%s: no readable C (it does not lift)" % name)
         return 0
     if args.shapes:
         from dread import build, lift, regflow, shapes

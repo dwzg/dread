@@ -2954,6 +2954,14 @@ the pilot's names, which the first review had taken for raw frames. New items:
   uart_getc, udiv_var and cmd_mode on every build; with Ubuntu 22.04's compilers too. Left: a negative
   value read only by == may be a u32 sentinel (0xFFFFFFFFu compared reads the same); a function only
   called through pointers keeps u32 (no caller reads it: RISC-V's cmd_mode).
+- [x] **Why a variable has its type.** Done 2026-10-25 (dread readable --types NAME..., vartypes.explain):
+  per function the table's types and whether they were made for this C, the variables the plan may type
+  and why each other one may not (eligible's reasons: declared otherwise, initialised, an asm operand,
+  its address taken, the lifter's stack arguments, the frame's), the pointer groups with their accesses,
+  and every candidate in the plan's order with the casts of what it touches without and with it, kept
+  or not; the trials run as the plan's last round does (the C as built, the table's prototypes). For
+  finding why a variable on a real firmware stays an integer without reading the plan's code; the
+  private real-life test has many such variables used directly as addresses.
 - [ ] **Pointers held in globals; frame objects to all-u32 externs.** These are "Left" of two done items
   and have no item of their own. A global holding a structure pointer stays a u32 macro, cast through a
   fresh variable at each use, or read through a byte pointer and an index. A frame object passed to an
