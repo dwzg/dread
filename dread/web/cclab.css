@@ -104,3 +104,12 @@ table.lab-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .lab-table tr.differ td:first-child { box-shadow: none; }
   .lab-table tr.differ { box-shadow: inset 3px 0 0 var(--accent); }
 }
+/* two compilers side by side (#/cclab/compare/A/B) and the card that leads there */
+a.button.lab-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.lab-made { display: flex; gap: 6px; flex-wrap: wrap; margin-right: auto; }
+.lab-made .lab-chip { text-decoration: none; }
+.lab-cmp td:nth-child(n+3) { min-width: 140px; }
+@media (max-width: 600px) {
+  .lab-cmp td[data-k]::before { content: attr(data-k) ": "; color: var(--muted); font: 11.5px var(--mono); }
+  .lab-cmp td[data-k] .lab-res { display: inline; }
+}

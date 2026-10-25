@@ -3,7 +3,9 @@ from where dread gui started, the built-in adapters with their matrices, a run's
 page's choices (builds, one's own probes, --lift, --guard) and its refusals, the doctor's; with GCC, a
 compiler's probes run as a job from the page (one build, a probe of one's own that never returns), the report
 made as a job (dread cclab report --json) and read back with the probe that failed, a record made stale by a
-newer run; a read-only server that starts nothing and a change without the token."""
+newer run; two compilers compared from the page (dread cclab compare --json as a job, its record read back,
+listed on the work page, made stale by a newer result, names that are no compiler refused); a read-only
+server that starts nothing and a change without the token."""
 import json
 import os
 import threading
@@ -82,6 +84,7 @@ def test_a_read_only_server_starts_nothing(home):
         assert "read-only" in d["changes"] and not d["auto"]
         assert answer(srv, "/api/cclab/run", {"adapter": "gcc-arm"})[0] == 403
         assert answer(srv, "/api/cclab/report", {})[0] == 403
+        assert answer(srv, "/api/cclab/compare", {"original": "a", "rebuild": "b"})[0] == 403
     finally:
         srv.shutdown()
         srv.server_close()
@@ -123,3 +126,55 @@ def test_a_compiler_s_probes_run_and_its_report_read_back(server):
     assert d["stale"] == [os.path.join("gcc-arm", "cortex-m3-Os", "results.json")] and d["auto"]
     a = answer(srv, q("/api/cclab/adapter", work="lab", adapter="gcc-arm"))[1]
     assert a["stale_count"] == 1 and a["record"] is not None
+
+
+@pytest.mark.slow
+@pytest.mark.compiles
+@needs_gcc
+def test_two_compilers_compared_from_the_page(server):
+    """GCC with int-sized enums and signed plain char as the original's compiler and GCC as it comes as the
+    rebuilding one, measured in one work directory: the comparison's view has no record, may start it, and
+    starts dread cclab compare --json as a job; its record read back says where they differ in what linking
+    depends on (each result with its builds), the options that close a difference and how many probes
+    agree; the work page lists it; a newer result makes it stale; names that are no compiler measured there
+    (a path, an unknown one, one missing) are refused, by both routes."""
+    from dread.cclab import adapters as ad
+    from test_cclab import measured
+    srv, home = server
+    work = home / "lab"
+    text = open(ad.builtin()["gcc-arm"]).read().replace('name = "gcc-arm"', 'name = "variant"')
+    text = text.replace('support_flags = ["-fno-builtin"]',
+                        'support_flags = ["-fno-builtin"]\ncflags = ["-fno-short-enums", "-fsigned-char"]')
+    (home / "variant.toml").write_text(text)
+    measured(work, str(home / "variant.toml"), ["cortex-m3-O2"])
+    measured(work, "gcc-arm", ["cortex-m3-O2"])
+    d = answer(srv, q("/api/cclab", work="lab"))[1]
+    assert {a["name"] for a in d["adapters"]} == {"variant", "gcc-arm"} and d["compares"] == [], d
+    pair = {"original": "variant", "rebuild": "gcc-arm"}
+    c = answer(srv, q("/api/cclab/compare", work="lab", **pair))[1]
+    assert c["record"] is None and c["auto"] and c["path"] == str(work / "compare-variant-gcc-arm.json"), c
+    status, job = answer(srv, "/api/cclab/compare", dict(pair, work="lab"))
+    assert status == 200 and job["args"] == ["compare", "--work", str(work), "variant", "gcc-arm", "--json",
+                                             c["path"]], job
+    assert wait_job(srv, job["id"], timeout=600)["state"] == "done"
+    c = answer(srv, q("/api/cclab/compare", work="lab", **pair))[1]
+    rec = c["record"]
+    assert not c["auto"] and c["stale"] == [] and (rec["original"], rec["rebuild"]) == ("variant", "gcc-arm"), c
+    abi = {r["probe"]: r for r in rec["abi"]}
+    assert abi["size_enum_small"]["original"] == [{"text": "4", "builds": ["cortex-m3-O2"], "shown": "all 1"}]
+    assert abi["size_enum_small"]["rebuild"][0]["text"] == "1" and "char_is_signed" in abi
+    assert {"option": "-fno-short-enums", "probes": ["size_enum_small"]} in rec["hints"]
+    assert rec["same"] > 40 and rec["markdown"] == str(work / "compare-variant-gcc-arm.md")
+    assert os.path.exists(rec["markdown"])
+    d = answer(srv, q("/api/cclab", work="lab"))[1]
+    assert [(x["original"], x["rebuild"]) for x in d["compares"]] == [("variant", "gcc-arm")]
+    later = time.time() + 5                                 # (a newer result: the comparison is stale)
+    results = work / "gcc-arm" / "cortex-m3-O2" / "results.json"
+    os.utime(results, (later, later))
+    c = answer(srv, q("/api/cclab/compare", work="lab", **pair))[1]
+    assert c["stale"] == [os.path.join("gcc-arm", "cortex-m3-O2", "results.json")] and c["auto"], c
+    for bad in ({"original": "variant", "rebuild": "../lab"}, {"original": "nothing", "rebuild": "gcc-arm"},
+                {"original": "variant"}):
+        assert answer(srv, "/api/cclab/compare", dict(bad, work="lab"))[0] == 400, bad
+        assert answer(srv, q("/api/cclab/compare", work="lab", **bad))[0] == 400, bad
+

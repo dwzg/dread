@@ -10,7 +10,8 @@ do not, and the options of the rebuilding compiler that close a difference where
 It writes WORK/compare-ORIGINAL-REBUILD.md: the probes whose results differ, each compiler's
 results with the builds that gave them (a result that varies with a compiler's options shows its
 builds), the options (GCC's names; clang takes most of them) and, apart, the operations whose
-helpers or inline code differ, which matter to a reader, not to linking.
+helpers or inline code differ, which matter to a reader, not to linking. With --json FILE it also
+writes the same as data (data(); docs/formats.md), which dread gui's compiler lab page shows.
 
 What it does not establish: that two matrices' builds are comparable (GCC's -O2 against IAR's -Oh);
 that an option it names has the effect wanted with the compiler at hand (add it to the adapter's
@@ -62,20 +63,18 @@ def results(work, adapter):
     return builds, arch, rows, min(aligned) if aligned else None
 
 
-def lift_section(builds_a, builds_b, original, rebuild):
-    """Lines on run --lift's verdicts: each compiler's count, and the probes one compiler's code lifts
-    in every build and the other's not in some (DREAD's tools on the two compilers' code). [] unless
-    both were lifted."""
+def lift_data(builds_a, builds_b):
+    """run --lift's verdicts of both compilers, or None unless both were lifted: {"original", "rebuild":
+    [accepted, probe functions, builds], "rows": [{"probe", "original", "rebuild": [{"text", "builds"}]}]},
+    a row for each probe one compiler's code lifts in every build and the other's not in some."""
     a = {k: report.lift_verdicts(v) for k, v in builds_a.items() if report.lift_verdicts(v)}
     b = {k: report.lift_verdicts(v) for k, v in builds_b.items() if report.lift_verdicts(v)}
     if not a or not b:
-        return []
+        return None
 
     def count(side):
-        return sum(1 for v in side.values() for t in v.values() if t == "accepted"), sum(len(v) for v in side.values())
-    lines = ["", "## What DREAD lifts (run --lift)", "",
-             "%s: %d of %d probe functions over %d builds; %s: %d of %d over %d." % (
-                 original, *count(a), len(a), rebuild, *count(b), len(b))]
+        return [sum(1 for v in side.values() for t in v.values() if t == "accepted"), sum(len(v) for v in side.values()),
+                len(side)]
     rows = []
     for fn in sorted({fn for v in list(a.values()) + list(b.values()) for fn in v}):
         texts = []
@@ -87,12 +86,33 @@ def lift_section(builds_a, builds_b, original, rebuild):
             texts.append(seen)
         if all(set(t) <= {"accepted"} for t in texts):
             continue
-        rows.append("| `%s` | %s | %s |" % (fn, *("; ".join("%s (%s)" % (t, report.builds_text(k, side))
-                                                            for t, k in seen.items()) or "-"
-                                                  for seen, side in zip(texts, (a, b)))))
+        rows.append({"probe": fn, "original": cell(texts[0], a), "rebuild": cell(texts[1], b)})
+    return {"original": count(a), "rebuild": count(b), "rows": rows}
+
+
+def lift_section(lift, original, rebuild):
+    """The Markdown lines of lift_data's record ([] for None)."""
+    if lift is None:
+        return []
+    lines = ["", "## What DREAD lifts (run --lift)", "",
+             "%s: %d of %d probe functions over %d builds; %s: %d of %d over %d." % (
+                 original, *lift["original"], rebuild, *lift["rebuild"])]
+    rows = ["| `%s` | %s | %s |" % (r["probe"], shown(r["original"]) or "-", shown(r["rebuild"]) or "-")
+            for r in lift["rows"]]
     if rows:
         lines += ["", "| probe | %s | %s |" % (original, rebuild), "|---|---|---|"] + rows
     return lines
+
+
+def cell(texts, builds):
+    """[{"text", "builds", "shown"}] of a result's texts ({text: [build keys]}), shown: the builds as the
+    Markdown writes them (all N, or their keys)."""
+    return [{"text": t, "builds": list(keys), "shown": report.builds_text(keys, builds)} for t, keys in texts.items()]
+
+
+def shown(c):
+    """A cell (cell()) as the Markdown writes it."""
+    return "; ".join("%s (%s)" % (x["text"], x["shown"]) for x in c)
 
 
 def hint(fn, original, rebuild):
@@ -124,56 +144,94 @@ def hint(fn, original, rebuild):
     return None
 
 
-def write(work, original, rebuild, out=print):
-    """Write WORK/compare-ORIGINAL-REBUILD.md; returns 0, or 1 when either was not measured."""
+def data(work, original, rebuild):
+    """The comparison as data, or None when either compiler was not measured in work: {"version": 1,
+    "original", "rebuild", "builds": {"original", "rebuild": [build keys]}, "arch": {"original", "rebuild"},
+    "abi" and "code": [{"probe", "note", "original", "rebuild"}] (a side's cell(), or null where that
+    compiler has no such probe measured), "alignment": {"original", "rebuild"} (the stack alignment kept at
+    calls, null where nothing was measured), "hints": [{"option", "probes"}], "lift" (lift_data), "same" (the
+    probes that agree on what linking depends on)}. abi: what linking depends on (the calling convention,
+    the types, what a call keeps); code: helpers, inline code, saves and frames, which matter to a reader."""
     a_builds, a_arch, a, a_align = results(work, original)
     b_builds, b_arch, b, b_align = results(work, rebuild)
-    for name, builds in ((original, a_builds), (rebuild, b_builds)):
-        if not builds:
-            out("dread cclab compare: nothing measured for %s in %s" % (name, work))
-            return 1
-    lines = ["# dread cclab: %s against %s" % (original, rebuild), "",
-             "%s (the original's compiler): %d builds; %s (the rebuilding one): %d builds. A probe is "
-             "listed where the two differ, each result with the builds that gave it." % (
-                 original, len(a_builds), rebuild, len(b_builds))]
-    if a_arch != b_arch:
-        lines += ["", "Different architectures (%s, %s): their code cannot be linked together." % (a_arch, b_arch)]
+    if not a_builds or not b_builds:
+        return None
     found = {"abi": [], "code": []}
     hints, same = collections.OrderedDict(), 0
     for key in list(a) + [k for k in b if k not in a]:
         fn, side = key
         ra, rb = a.get(key), b.get(key)
-        if ra is None or rb is None:
-            found[side].append("| `%s` | %s | %s | %s |" % (fn, (ra or rb)["note"], "-" if ra is None else "measured",
-                                                           "-" if rb is None else "measured"))
-            continue
-        if set(ra["texts"]) == set(rb["texts"]):
+        if ra is not None and rb is not None and set(ra["texts"]) == set(rb["texts"]):
             same += side == "abi"
             continue
-        shown = ["; ".join("%s (%s)" % (t, report.builds_text(keys, builds)) for t, keys in r["texts"].items())
-                 for r, builds in ((ra, a_builds), (rb, b_builds))]
-        found[side].append("| `%s` | %s | %s | %s |" % (fn, ra["note"], *shown))
-        if side == "abi" and len(ra["texts"]) == 1 and len(rb["texts"]) == 1:
+        found[side].append({"probe": fn, "note": (ra or rb)["note"],
+                            "original": None if ra is None else cell(ra["texts"], a_builds),
+                            "rebuild": None if rb is None else cell(rb["texts"], b_builds)})
+        if ra is not None and rb is not None and side == "abi" and len(ra["texts"]) == 1 and len(rb["texts"]) == 1:
             h = hint(fn, next(iter(ra["texts"])), next(iter(rb["texts"])))
             if h:
                 hints.setdefault(h, []).append(fn)
-    if a_align != b_align:
-        found["abi"].append("| stack alignment at calls | the largest power of two dividing every frame at a "
-                            "call | %s | %s |" % (a_align, b_align))
+    return {"version": 1, "original": original, "rebuild": rebuild,
+            "builds": {"original": list(a_builds), "rebuild": list(b_builds)},
+            "arch": {"original": a_arch, "rebuild": b_arch}, "abi": found["abi"], "code": found["code"],
+            "alignment": {"original": a_align, "rebuild": b_align},
+            "hints": [{"option": h, "probes": fns} for h, fns in hints.items()],
+            "lift": lift_data(a_builds, b_builds), "same": same}
+
+
+def markdown(d):
+    """The Markdown lines of data()'s record (what WORK/compare-ORIGINAL-REBUILD.md holds)."""
+    original, rebuild = d["original"], d["rebuild"]
+    lines = ["# dread cclab: %s against %s" % (original, rebuild), "",
+             "%s (the original's compiler): %d builds; %s (the rebuilding one): %d builds. A probe is "
+             "listed where the two differ, each result with the builds that gave it." % (
+                 original, len(d["builds"]["original"]), rebuild, len(d["builds"]["rebuild"]))]
+    if d["arch"]["original"] != d["arch"]["rebuild"]:
+        lines += ["", "Different architectures (%s, %s): their code cannot be linked together." % (
+            d["arch"]["original"], d["arch"]["rebuild"])]
+
+    def row(r):
+        if r["original"] is None or r["rebuild"] is None:
+            return "| `%s` | %s | %s | %s |" % (r["probe"], r["note"], "-" if r["original"] is None else "measured",
+                                               "-" if r["rebuild"] is None else "measured")
+        return "| `%s` | %s | %s | %s |" % (r["probe"], r["note"], shown(r["original"]), shown(r["rebuild"]))
+    abi = [row(r) for r in d["abi"]]
+    if d["alignment"]["original"] != d["alignment"]["rebuild"]:
+        abi.append("| stack alignment at calls | the largest power of two dividing every frame at a call | %s | %s |"
+                   % (d["alignment"]["original"], d["alignment"]["rebuild"]))
+    code = [row(r) for r in d["code"]]
     head = ["| probe | what | %s | %s |" % (original, rebuild), "|---|---|---|---|"]
-    lines += lift_section(a_builds, b_builds, original, rebuild)
+    lines += lift_section(d["lift"], original, rebuild)
     lines += ["", "## Calling convention, types, what a call keeps", ""]
-    lines += head + found["abi"] if found["abi"] else ["They agree on every probe."]
-    if hints:
+    lines += head + abi if abi else ["They agree on every probe."]
+    if d["hints"]:
         lines += ["", "## Options of %s that close a difference" % rebuild, ""]
-        lines += ["- %s: %s" % (h, ", ".join("`%s`" % f for f in fns)) for h, fns in hints.items()]
-    if found["code"]:
+        lines += ["- %s: %s" % (h["option"], ", ".join("`%s`" % f for f in h["probes"])) for h in d["hints"]]
+    if code:
         lines += ["", "## The code: helpers, inline code, saves and frames, where they differ", "",
-                  "These matter to a reader of the two compilers' code, not to linking it."] + [""] + head + found["code"]
-    lines += ["", "%d probes agree on what linking depends on." % same]
+                  "These matter to a reader of the two compilers' code, not to linking it."] + [""] + head + code
+    lines += ["", "%d probes agree on what linking depends on." % d["same"]]
+    return lines, len(abi), len(code)
+
+
+def write(work, original, rebuild, out=print, json_path=None):
+    """Write WORK/compare-ORIGINAL-REBUILD.md (and with json_path data()'s record, its "markdown" the .md's
+    path); returns 0, or 1 when either was not measured."""
+    d = data(work, original, rebuild)
+    if d is None:
+        for name in (original, rebuild):
+            if not results(work, name)[0]:
+                out("dread cclab compare: nothing measured for %s in %s" % (name, work))
+                break
+        return 1
+    lines, abi, code = markdown(d)
     path = os.path.join(work, "compare-%s-%s.md" % (original, rebuild))
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")
-    out("dread cclab compare: %s (%d differences that matter for linking, %d in the code)" % (
-        path, len(found["abi"]), len(found["code"])))
+    if json_path:
+        import json
+        with open(json_path, "w") as f:
+            json.dump(dict(d, markdown=path), f, indent=1)
+            f.write("\n")
+    out("dread cclab compare: %s (%d differences that matter for linking, %d in the code)" % (path, abi, code))
     return 0

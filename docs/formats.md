@@ -971,6 +971,22 @@ report.md's cells), `layout` ([{"row", "what", "results"}]), `helpers` ([{"helpe
 "builds"}]}]: the probes whose measurement failed, each error with its builds), `profile` (profile.toml's
 content, dread.cclab.profile build_profile: {"compiler", "helpers"}; null where nothing was measured).
 
+### Two compilers compared (`dread cclab compare --json FILE`; dread gui's `WORK/compare-ORIGINAL-REBUILD.json`)
+
+Since 2026-10-25 (dread.cclab.compare data): what WORK/compare-ORIGINAL-REBUILD.md says, as data. `{"version":
+1, "original", "rebuild" (the adapters' names: the compiler that made the image, the one that rebuilds its
+functions), "builds": {"original", "rebuild": [build keys]}, "arch": {"original", "rebuild"}, "abi" and
+"code": [{"probe", "note", "original", "rebuild"}], "alignment": {"original", "rebuild"}, "hints": [{"option",
+"probes"}], "lift", "same", "markdown"}`. A row is a probe whose results differ (abi: what linking depends on,
+the calling convention, the types, what a call keeps; code: helpers, inline code, saves and frames); a side
+is `[{"text", "builds", "shown"}]` (each result with the builds that gave it, shown as the Markdown writes
+them: "all N" or the keys), or null where that compiler has no such probe measured. alignment: the stack
+alignment kept at calls over all builds (null where nothing was measured; a row of the Markdown's table
+where the two differ). hints: the rebuilding compiler's options that close a difference, with the probes.
+lift: null unless both were measured with --lift, else `{"original", "rebuild": [accepted, probe functions,
+builds], "rows": [{"probe", "original", "rebuild"}]}` (the probes one compiler's code lifts in every build and
+the other's not in some). same: the probes that agree on what linking depends on. markdown: the .md's path.
+
 ### A leak check's hits (`dread leakcheck --json FILE`; dread gui's `$XDG_STATE_HOME/dread/gui/leakcheck/`)
 
 Written by dread leakcheck (since 2026-10-24) with mode 600, whole and renamed into place, keys sorted:

@@ -4948,8 +4948,16 @@ reimplement them.
     results shown and no job (the Run page's form takes a recipe's path); a build directory of BENCH whose
     report names a build the recipe no longer has is not listed; `dread cclab compare` (two compilers side by
     side) has no JSON and no view yet; the pages tried in Chrome only, not on macOS.
-  Left of "The GUI for everything": the comparison of two compilers (cclab compare) as a view; adding a hit
-  to the allow list from the leak check page (a change of the user's private file: asked, not assumed).
+  Left of "The GUI for everything": adding a hit to the allow list from the leak check page (a change of the
+  user's private file: asked, not assumed).
+  Done 2026-10-25: two compilers side by side (#/cclab/compare/ORIGINAL/REBUILD, from the compiler lab's
+  "Compare two compilers"; dread.guipages.cclab compare_view, compare_run): dread cclab compare --json
+  (dread.cclab.compare data, markdown: the Markdown as before, byte for byte) made as a job where its record is
+  missing or older than a result of either compiler, as the page makes the report; the differences in what
+  linking depends on, the options that close them, where the code differs, what DREAD lifts of each; the
+  work page lists the comparisons made. tests/test_gui_cclab.py (GCC with int-sized enums and signed chars
+  against GCC as it comes: the job, the record, the list, staleness, names that are no compiler refused);
+  looked at in Chrome, light, dark and at a phone's width.
   Done 2026-10-25: names from elsewhere (#/names, key e; dread/guipages/names.py, dread/web/names.js): dread
   whatcc, samecode and callpair run as jobs from the page (samecode and callpair with `--json` since then),
   their proposals listed (only those that give a function without a name one), the chosen ones applied by

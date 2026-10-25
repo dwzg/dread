@@ -4,7 +4,8 @@
 // what each operation calls or does inline, what a call keeps, where the functions lie, its runtime helpers,
 // what DREAD lifts), the probes and builds that failed, and dread cclab's run, doctor and report as jobs.
 // The page computes nothing: results, builds and the command lines come from the server.
-// Addresses: #/cclab (the work directory, its compilers, a run), #/cclab/ADAPTER (a compiler's profile).
+// Addresses: #/cclab (the work directory, its compilers, a run), #/cclab/ADAPTER (a compiler's profile),
+// #/cclab/compare/ORIGINAL/REBUILD (two compilers side by side: dread cclab compare --json, made as a job).
 
 import { $, esc, api, ago, when, toast, S, prefs, register, enter, nextRender, isCurrent } from "./app.js";
 
@@ -16,6 +17,7 @@ const KINDS = { arg: "the calling convention: where each argument arrives", resu
   keeps: "what a function keeps across a call, what its frame saves, its frame at calls" };
 
 const C = { work: null, data: null, adapter: null, record: null, filter: "", differ: false, timer: 0, started: new Set(),
+  compare: null, compareData: null, cmp: { original: "", rebuild: "" },
   pick: { adapter: "gcc-arm", other: "", builds: null, own: "", lift: true, guard: false }, lineSeq: 0, lineTimer: 0, line: null, live: null };
 
 // ---- small helpers ----
@@ -86,6 +88,24 @@ function adaptersHTML(d) {
       <span class="lab-a-counts">${plural(a.measured, "build")} measured${a.failed ? ` · <span class="bad">${count(a.failed)} failed</span>` : ""}${a.reported ? "" : ` · <span class="warn">not in the report yet</span>`}</span></a>`).join("")}</div>`;
 }
 
+function compareHref(a, b) { return `#/cclab/compare/${encodeURIComponent(a)}/${encodeURIComponent(b)}`; }
+
+// Two compilers measured here, side by side: the one that made the image and the one that rebuilds its
+// functions (dread cclab compare), and the comparisons made before.
+function compareCardHTML(d) {
+  const names = (d.adapters || []).filter((a) => a.measured).map((a) => a.name);
+  if (names.length < 2) return "";
+  if (!names.includes(C.cmp.original)) C.cmp.original = names[0];
+  if (!names.includes(C.cmp.rebuild) || C.cmp.rebuild === C.cmp.original) C.cmp.rebuild = names.find((n) => n !== C.cmp.original);
+  const opts = (chosen) => names.map((n) => `<option value="${esc(n)}"${n === chosen ? " selected" : ""}>${esc(n)}</option>`).join("");
+  const made = (d.compares || []).map((c) => `<a class="lab-chip" href="${compareHref(c.original, c.rebuild)}">${esc(c.original)} against ${esc(c.rebuild)} <span class="lab-muted">${esc(ago(c.when))}</span></a>`).join("");
+  return `<section class="lab-card" id="lab-compare"><h2>Compare two compilers</h2>
+    <p class="lab-note">Where the compiler that made an image and the one that rebuilds its functions differ: in what linking depends on (the calling convention, the types, what a call keeps), with the options that close a difference, and in their code.</p>
+    <div class="lab-row"><label class="lab-k" for="lab-cmp-a">Made the image</label><div class="lab-v"><select id="lab-cmp-a">${opts(C.cmp.original)}</select></div></div>
+    <div class="lab-row"><label class="lab-k" for="lab-cmp-b">Rebuilds</label><div class="lab-v"><select id="lab-cmp-b">${opts(C.cmp.rebuild)}</select></div></div>
+    <div class="lab-actions">${made ? `<span class="lab-made">${made}</span>` : ""}<a class="button lab-primary" id="lab-cmp-go" href="${compareHref(C.cmp.original, C.cmp.rebuild)}">Compare</a></div></section>`;
+}
+
 function ownDirs() { return C.pick.own.split("\n").map((s) => s.trim()).filter(Boolean); }
 
 function chosenAdapter() {
@@ -135,6 +155,7 @@ function renderWork() {
       <button type="button" id="lab-report"${disabledWhy(d.changes || (!d.adapters.length ? "nothing measured here yet" : ""))}>${d.when ? "Make the report again" : "Make the report"}</button></div>`;
   html += liveHTML(d);
   html += `<section class="lab-card"><h2>Compilers measured here</h2>${adaptersHTML(d)}</section>`;
+  html += compareCardHTML(d);
   html += runHTML(d) + `</div>`;
   main.innerHTML = html;
   askLine(true);
@@ -273,6 +294,121 @@ function sectionsHTML(rec, all) {
   return html || `<div class="lab-none">Nothing matches.</div>`;
 }
 
+// ---- two compilers side by side ----
+
+function cmpCell(cell) {
+  if (cell == null) return `<span class="lab-muted">not measured</span>`;
+  return cell.map((r) => `<div class="lab-res"><span class="lab-res-t">${esc(r.text)}</span> <span class="lab-builds-of" title="${esc(r.builds.join(", "))}">${esc(r.shown)}</span></div>`).join("");
+}
+
+// (data-k: the compiler's name, which a phone's stacked rows show in front of its results)
+function cmpRows(rec, rows) {
+  return rows.map((r) => `<tr><td class="mono lab-probe">${esc(r.probe)}</td><td>${esc(r.note || "")}</td><td data-k="${esc(rec.original)}">${cmpCell(r.original)}</td><td data-k="${esc(rec.rebuild)}">${cmpCell(r.rebuild)}</td></tr>`).join("");
+}
+
+function cmpTable(rec, rows, extra = "") {
+  return `<div class="lab-scroll"><table class="lab-table lab-cmp"><thead><tr><th>probe</th><th>what it asks</th><th>${esc(rec.original)}</th><th>${esc(rec.rebuild)}</th></tr></thead>
+    <tbody>${cmpRows(rec, rows)}${extra}</tbody></table></div>`;
+}
+
+function compareState(c) {
+  const live = c.job && LIVE.has(c.job.state);
+  if (live) return `<span class="lab-state busy">${jobLine(c.job, "compares them:")}</span>`;
+  if (!c.when) return `<span class="lab-state">not compared yet${c.job ? " · " + jobLine(c.job, "") : ""}</span>`;
+  const parts = [`compared ${esc(ago(c.when))}`];
+  if (c.stale_count) parts.push(`<span class="warn" title="${esc((c.stale || []).join("\n"))}">${plural(c.stale_count, "newer result")}</span>`);
+  if (c.job && c.job.state === "failed") parts.push(`<span class="bad">${jobLine(c.job, "")}</span>`);
+  return `<span class="lab-state">${parts.join(" · ")}</span>`;
+}
+
+function renderCompare() {
+  const c = C.compareData, rec = c.record, main = $("#main");
+  const busy = c.job && LIVE.has(c.job.state);
+  let html = `<div class="lab lab-compare"><div class="lab-head"><a class="lab-back" href="#/cclab">← compiler lab</a><h1>${esc(c.original)} against ${esc(c.rebuild)}</h1></div>
+    <div class="lab-sub">${compareState(c)} <button type="button" id="lab-compare-again"${disabledWhy(c.changes || (busy ? "a comparison is being made" : ""))}>${c.when ? "Compare again" : "Compare"}</button></div>`;
+  if (!rec) {
+    html += `<div class="lab-none">${c.changes ? esc(c.changes) : "The comparison is being made: it reads the two compilers' results."}</div></div>`;
+    main.innerHTML = html;
+    return;
+  }
+  html += `<p class="lab-note"><b>${esc(rec.original)}</b> made the image (${plural(rec.builds.original.length, "build")}, ${esc(rec.arch.original)}); <b>${esc(rec.rebuild)}</b> rebuilds its functions (${plural(rec.builds.rebuild.length, "build")}, ${esc(rec.arch.rebuild)}). A probe is listed where the two differ, each result with the builds that gave it.</p>`;
+  if (rec.arch.original !== rec.arch.rebuild) html += `<div class="lab-none bad">Different architectures: their code cannot be linked together.</div>`;
+  const al = rec.alignment || {};
+  const alignRow = al.original !== al.rebuild ? `<tr><td class="lab-probe">stack alignment at calls</td><td>the largest power of two dividing every frame at a call</td><td data-k="${esc(rec.original)}">${esc(String(al.original ?? "–"))}</td><td data-k="${esc(rec.rebuild)}">${esc(String(al.rebuild ?? "–"))}</td></tr>` : "";
+  const abi = rec.abi.length || alignRow;
+  html += `<section class="lab-card" id="lab-c-abi"><div class="lab-card-head"><h2>What linking depends on</h2><span class="lab-muted">the calling convention, the types, what a call keeps</span><span class="lab-grow"></span><span class="lab-muted">${plural(rec.abi.length + (alignRow ? 1 : 0), "difference")} · ${plural(rec.same, "probe")} agree</span></div>
+    ${abi ? cmpTable(rec, rec.abi, alignRow) : `<div class="lab-ok">They agree on every probe.</div>`}</section>`;
+  if (rec.hints.length) {
+    html += `<section class="lab-card" id="lab-c-hints"><h2>Options of ${esc(rec.rebuild)} that close a difference</h2>
+      <ul class="lab-list">${rec.hints.map((h) => `<li><span class="mono">${esc(h.option)}</span>: ${h.probes.map((f) => `<span class="mono">${esc(f)}</span>`).join(", ")}</li>`).join("")}</ul></section>`;
+  }
+  if (rec.code.length) {
+    html += `<section class="lab-card" id="lab-c-code"><div class="lab-card-head"><h2>Where their code differs</h2><span class="lab-muted">helpers, inline code, saves and frames: they matter to a reader, not to linking</span></div>
+      ${cmpTable(rec, rec.code)}</section>`;
+  }
+  if (rec.lift) {
+    const [aa, an, ab] = rec.lift.original, [ba, bn, bb] = rec.lift.rebuild;
+    html += `<section class="lab-card" id="lab-c-lift"><div class="lab-card-head"><h2>What DREAD lifts</h2><span class="lab-muted">run --lift's verdicts</span></div>
+      <p class="lab-note">${esc(rec.original)}: ${count(aa)} of ${count(an)} probe functions over ${plural(ab, "build")}; ${esc(rec.rebuild)}: ${count(ba)} of ${count(bn)} over ${plural(bb, "build")}.</p>
+      ${rec.lift.rows.length ? `<div class="lab-scroll"><table class="lab-table lab-cmp"><thead><tr><th>probe</th><th>${esc(rec.original)}</th><th>${esc(rec.rebuild)}</th></tr></thead><tbody>
+        ${rec.lift.rows.map((r) => `<tr><td class="mono lab-probe">${esc(r.probe)}</td><td data-k="${esc(rec.original)}">${r.original.length ? cmpCell(r.original) : "–"}</td><td data-k="${esc(rec.rebuild)}">${r.rebuild.length ? cmpCell(r.rebuild) : "–"}</td></tr>`).join("")}</tbody></table></div>` : ""}</section>`;
+  }
+  html += `<p class="lab-note lab-after">The same as Markdown: <span class="mono">${esc(rec.markdown || "")}</span></p></div>`;
+  main.innerHTML = html;
+}
+
+async function maybeCompare(c) {
+  const key = "compare:" + c.path + "@" + (c.inputs || 0);
+  if (!c.auto || C.started.has(key)) return false;
+  C.started.add(key);
+  try {
+    await api("/api/cclab/compare", {}, Object.assign(workParam(), { original: c.original, rebuild: c.rebuild }));
+    return true;
+  } catch (e) {
+    toast("The comparison did not start: " + e.message, true);
+    return false;
+  }
+}
+
+async function showCompare(match, keep = false) {
+  const mine = nextRender();
+  clearTimeout(C.timer);
+  if (C.work === null) C.work = prefs.get("cclab-work", "cclab-work");
+  const [original, rebuild] = [match[1], match[2]];
+  C.adapter = null;
+  C.compare = [original, rebuild];
+  let c;
+  try {
+    c = await api("/api/cclab/compare", Object.assign(workParam(), { original, rebuild }));
+  } catch (e) {
+    if (!isCurrent(mine)) return;
+    enter("cclab", "Compiler lab");
+    $("#main").innerHTML = `<div class="lab"><div class="lab-head"><a class="lab-back" href="#/cclab">← compiler lab</a><h1>${esc(original)} against ${esc(rebuild)}</h1></div><div class="lab-none bad">${esc(e.message)}</div></div>`;
+    return;
+  }
+  if (!isCurrent(mine)) return;
+  C.compareData = c;
+  C.cmp = { original, rebuild };
+  const scroll = $("#main").scrollTop;
+  enter("cclab", `${original} against ${rebuild} · Compiler lab`);
+  renderCompare();
+  $("#main").scrollTop = keep ? scroll : 0;
+  if (await maybeCompare(c)) return refresh(true);
+  schedule(c);
+}
+
+async function compareAgain() {
+  const c = C.compareData;
+  if (!c) return;
+  try {
+    const r = await api("/api/cclab/compare", {}, Object.assign(workParam(), { original: c.original, rebuild: c.rebuild }));
+    toast(`Job ${r.id}: the comparison.`);
+  } catch (e) {
+    toast(e.message, true);
+  }
+  refresh(true);
+}
+
 // ---- loading, polling ----
 
 function schedule(d) {
@@ -282,6 +418,7 @@ function schedule(d) {
 }
 
 async function refresh(keep) {
+  if (C.compare) return showCompare([null, ...C.compare], keep);
   if (C.adapter) return showAdapter([null, C.adapter], keep);
   return showWork([null], keep);
 }
@@ -303,6 +440,7 @@ async function showWork(match, keep = false) {
   const mine = nextRender();
   clearTimeout(C.timer);
   C.adapter = null;
+  C.compare = null;
   if (C.work === null) C.work = prefs.get("cclab-work", "cclab-work");
   let d;
   try {
@@ -345,6 +483,7 @@ async function showAdapter(match, keep = false) {
   const name = match[1];                // (the router has decoded the address)
   if (C.adapter !== name) { C.filter = ""; }
   C.adapter = name;
+  C.compare = null;
   let a, d;
   try {
     [a, d] = await Promise.all([api("/api/cclab/adapter", Object.assign(workParam(), { adapter: name })), api("/api/cclab", workParam())]);
@@ -429,6 +568,12 @@ function wire() {
       scheduleLine();
       return;
     }
+    if (el.id === "lab-cmp-a" || el.id === "lab-cmp-b") {
+      C.cmp[el.id === "lab-cmp-a" ? "original" : "rebuild"] = el.value;
+      const go = $("#lab-cmp-go");
+      if (go) go.setAttribute("href", compareHref(C.cmp.original, C.cmp.rebuild));
+      return;
+    }
     if (el.id === "lab-lift") { C.pick.lift = el.checked; scheduleLine(); return; }
     if (el.id === "lab-guard") { C.pick.guard = el.checked; scheduleLine(); return; }
     if (el.id === "lab-differ") { C.differ = el.checked; const box = $("#lab-sections"); if (box) box.innerHTML = sectionsHTML(C.adapterData.record, C.adapterData.record.measured || []); }
@@ -442,6 +587,7 @@ function wire() {
     if (t.closest("#lab-go")) return start("run");
     if (t.closest("#lab-doctor")) return start("doctor");
     if (t.closest("#lab-report")) return startReport();
+    if (t.closest("#lab-compare-again")) return compareAgain();
     if (t.closest("#lab-all") || t.closest("#lab-none")) {
       const on = !!t.closest("#lab-all");
       for (const box of document.querySelectorAll("#lab-matrix input[data-build]")) box.checked = on;
@@ -470,3 +616,5 @@ register({
 });
 // (the same name: the bar's button stays lit on a compiler's profile)
 register({ name: "cclab", match: /^\/cclab\/([^/]+)$/, show: showAdapter, leave: () => { clearTimeout(C.timer); } });
+register({ name: "cclab", match: /^\/cclab\/compare\/([^/]+)\/([^/]+)$/, show: showCompare,
+  leave: () => { clearTimeout(C.timer); C.compare = null; } });

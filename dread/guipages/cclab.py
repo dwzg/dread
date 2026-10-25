@@ -18,7 +18,13 @@ probes in the emulator, from the report's own data. The page shows and starts; d
   `dread cclab doctor --adapter A --work WORK` (its tools, version and one probe built and run: for setting a
   compiler up) and `dread cclab report --work WORK --json WORK/report.json`. The page starts the report by
   itself where it is missing or stale (a run that measured something makes it stale; the report reads files
-  and is quick), not while a job of dread cclab runs on the work directory.
+  and is quick), not while a job of dread cclab runs on the work directory;
+- two compilers measured in the work directory side by side (#/cclab/compare/ORIGINAL/REBUILD): `dread cclab
+  compare --work WORK ORIGINAL REBUILD --json WORK/compare-ORIGINAL-REBUILD.json` (docs/formats.md), started
+  by the page as the report is, where its record is missing or older than a result of either compiler: where
+  the two differ in what linking depends on (the calling convention, the types, what a call keeps, the stack
+  alignment), the options of the rebuilding compiler that close a difference, where their code differs
+  (helpers, inline code, saves, frames), what DREAD lifts of each one's probes.
 
 The record is WORK/report.json, written by `dread cclab report --json` (docs/formats.md): every adapter of
 the work directory, the same command typed in a terminal shows here. It is stale where a build's
@@ -37,7 +43,14 @@ Routes (dread.guipages):
   it), "error"}; probe_dirs: directories of one's own probes (--probe-dir), as typed;
 - POST /api/cclab/run {"work", "adapter", "builds", "probe_dirs", "lift", "guard", "action": "run" or "doctor"}:
   the job;
-- POST /api/cclab/report {"work"}: the report as a job.
+- POST /api/cclab/report {"work"}: the report as a job;
+- GET /api/cclab/compare?work=&original=&rebuild=: {"work", "original", "rebuild", "record" (the comparison's
+  data, null where it is not made yet), "path", "when", "stale", "stale_count", "job", "live", "auto", "inputs",
+  "changes"}, as GET /api/cclab for the report; both names must be compilers measured in the work directory;
+- POST /api/cclab/compare {"work", "original", "rebuild"}: the comparison as a job.
+
+GET /api/cclab also lists the comparisons made in the work directory ("compares": [{"original", "rebuild",
+"when"}], from the records' own names).
 
 What it does not establish: staleness by the files' times misses a change of DREAD's own code; what a
 compiler's profile says holds for the code the probes contain (dread cclab's docstring); a guarded work
@@ -148,8 +161,17 @@ def inputs(work):
     return sorted(f for f in files if os.path.exists(f))
 
 
-def read_record(path):
-    """The report's data, parsed once per version of the file, or None."""
+def report_valid(data):
+    return isinstance(data.get("adapters"), dict)
+
+
+def compare_valid(data):
+    return data.get("version") == 1 and isinstance(data.get("abi"), list) and isinstance(data.get("code"), list)
+
+
+def read_record(path, valid=report_valid):
+    """A record's data (the report's; with valid=compare_valid a comparison's), parsed once per version of the
+    file, or None."""
     try:
         st = os.stat(path)
     except OSError:
@@ -164,7 +186,7 @@ def read_record(path):
             data = json.load(f)
     except (OSError, ValueError):
         data = None
-    if not isinstance(data, dict) or not isinstance(data.get("adapters"), dict):
+    if not isinstance(data, dict) or not valid(data):
         data = None
     with _lock:
         if len(_cache) > 16:
@@ -254,7 +276,8 @@ def overview(request):
             "when": when or None, "stale": [os.path.relpath(f, work) for f in newer[:STALE_SHOWN]],
             "stale_count": len(newer), "job": job, "live": live_jobs(request.server, work),
             "auto": auto_start(request, data, when, newer, job, dirs, work),
-            "inputs": max((mtime(f) for f in inputs(work)), default=0), "changes": changes(request)}
+            "inputs": max((mtime(f) for f in inputs(work)), default=0), "changes": changes(request),
+            "compares": compares(work, dirs)}
 
 
 @route("GET", "/api/cclab/adapter")
@@ -368,3 +391,78 @@ def report(request):
     if running and running["state"] in jobs_.LIVE:
         raise Failure(409, "job %d writes this report already (%s)" % (running["id"], running["state"]))
     return start(request, ["report", "--work", work, "--json", path])
+
+
+# ---- two compilers side by side ----
+
+def compare_path(work, original, rebuild):
+    """The comparison's record, beside dread cclab compare's Markdown: WORK/compare-ORIGINAL-REBUILD.json."""
+    return os.path.join(work, "compare-%s-%s.json" % (original, rebuild))
+
+
+def compare_inputs(work, names):
+    """The files a comparison of these adapters reads: each build's results.json and build.json (not the
+    doctor's builds: dread.cclab.report load)."""
+    dirs = adapter_dirs(work)
+    files = []
+    for name in names:
+        d = dirs.get(name)
+        if d is None:
+            continue
+        for kind in ("results.json", "build.json"):
+            files += [f for f in glob.glob(os.path.join(d, "*", kind))
+                      if not os.path.basename(os.path.dirname(f)).startswith("doctor-")]
+    return sorted(set(files))
+
+
+def compares(work, dirs):
+    """[{"original", "rebuild", "when"}] of the comparisons made in the work directory between compilers
+    measured there, by the names their records hold (an adapter's name may hold a dash)."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(work, "compare-*.json"))):
+        data = read_record(path, valid=compare_valid)
+        if data is None or data.get("original") not in dirs or data.get("rebuild") not in dirs or \
+                path != compare_path(work, data["original"], data["rebuild"]):
+            continue
+        out.append({"original": data["original"], "rebuild": data["rebuild"], "when": mtime(path)})
+    return out
+
+
+def compare_names(request, body=None):
+    """(work, original, rebuild) of a request: two compilers measured in its work directory, by name (the
+    record's file name is made of them), else Failure 400."""
+    work = work_dir(request)
+    given = body if body is not None else request.query
+    names = [str(given.get(k) or "").strip() for k in ("original", "rebuild")]
+    dirs = adapter_dirs(work)
+    for name in names:
+        if name not in dirs:
+            raise Failure(400, "%s is no compiler measured in %s" % (repr(name) if name else "(none given)", work))
+    return work, names[0], names[1]
+
+
+@route("GET", "/api/cclab/compare")
+def compare_view(request):
+    work, original, rebuild = compare_names(request)
+    path = compare_path(work, original, rebuild)
+    data = read_record(path, valid=compare_valid)
+    when = mtime(path) if data is not None else 0
+    files = compare_inputs(work, (original, rebuild))
+    newer = [f for f in files if mtime(f) > when] if data is not None else files
+    job = job_for(request, path)
+    return {"work": work, "original": original, "rebuild": rebuild, "record": data, "path": path,
+            "when": when or None, "stale": [os.path.relpath(f, work) for f in newer[:STALE_SHOWN]],
+            "stale_count": len(newer), "job": job, "live": live_jobs(request.server, work),
+            "auto": auto_start(request, data, when, newer, job, files, work),
+            "inputs": max((mtime(f) for f in files), default=0), "changes": changes(request)}
+
+
+@route("POST", "/api/cclab/compare")
+def compare_run(request):
+    work, original, rebuild = compare_names(request, body=request.data or {})
+    path = compare_path(work, original, rebuild)
+    running = job_for(request, path)
+    if running and running["state"] in jobs_.LIVE:
+        raise Failure(409, "job %d compares these already (%s)" % (running["id"], running["state"]))
+    return start(request, ["compare", "--work", work, original, rebuild, "--json", path])
+

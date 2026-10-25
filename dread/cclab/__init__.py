@@ -232,6 +232,7 @@ def main(argv=None):
     p.add_argument("--work", default="cclab-work")
     p.add_argument("original", help="the adapter of the compiler that made the image")
     p.add_argument("rebuild", help="the adapter of the compiler that rebuilds its functions")
+    p.add_argument("--json", metavar="FILE", help="also write the comparison as JSON to FILE (docs/formats.md)")
     p = sub.add_parser("bundle", help="zip what may leave the work directory (no images, binaries, tables)")
     p.add_argument("--work", default="cclab-work")
     p.add_argument("--out", required=True)
@@ -258,7 +259,7 @@ def main(argv=None):
             return make_report(args.work, args.adapter, json_path=args.json)
         if args.action == "compare":
             from dread.cclab import compare
-            return compare.write(args.work, args.original, args.rebuild)
+            return compare.write(args.work, args.original, args.rebuild, json_path=args.json)
         if args.action == "bundle":
             from dread.cclab import workdir
             packed = workdir.bundle(args.work, args.out)

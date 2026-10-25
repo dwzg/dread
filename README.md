@@ -245,7 +245,11 @@ quick; anything longer on a button):
   registers they change and those the compiler's code reads after them, what DREAD lifts; the probes and
   builds that failed; the results that differ between builds marked. A compiler's probes run from a form
   (an adapter, the builds of its matrix, one's own probes, `--lift`), its adapter checked (`dread cclab
-  doctor`). The record is `WORK/report.json` (`dread cclab report --json FILE`).
+  doctor`). The record is `WORK/report.json` (`dread cclab report --json FILE`). Two compilers measured
+  there side by side (`#/cclab/compare/ORIGINAL/REBUILD`, from the page's "Compare two compilers"): where
+  they differ in what linking depends on, the options of the rebuilding compiler that close a difference,
+  where their code differs, what DREAD lifts of each; the record is `WORK/compare-ORIGINAL-REBUILD.json`
+  (`dread cclab compare --json FILE`), made as a job where it is missing or older than a result.
 - **The leak check** (`w`): `dread leakcheck` against a tree with the private tables, words and allow list
   given by their paths, its hits with their file, lines and the string each matched, the history's with
   their commits. The page shows nothing of the private files but what matched: the server never opens them,
