@@ -113,3 +113,25 @@ def test_the_hits_as_json_with_their_lines(tmp_path):
     text = out.read_text()
     for never in ("canary-words-0193", "canary-allow-0193", "0x12400", "0x12480", "FUN_00012480"):
         assert never not in text, never
+
+
+def test_a_word_matched_across_lines_is_one_hit_its_allow_entry_one_line(tmp_path, capsys):
+    """A word's expression that matches across a line break (a phrase a wrapped paragraph splits) is
+    reported with its whitespace collapsed, and an allow entry of one line, its spaces collapsed too,
+    passes it (before, the hit kept its newline and indentation, which no allow entry could match)."""
+    private = setup_private(tmp_path)
+    (private / "words.txt").write_text("widget[^.]{0,40}?ten units\n")
+    tree = tmp_path / "public"
+    tree.mkdir()
+    (tree / "notes.md").write_text("The widget was measured at\n  ten units.\n")
+    rc = leakcheck.main(["--tree", str(tree), "--tables", str(private / "symbols.txt"), "--words",
+                         str(private / "words.txt")])
+    out = capsys.readouterr().out
+    assert rc == 1 and "HIT notes.md: widget was measured at ten units" in out, out
+    allow = tmp_path / "allow.txt"
+    allow.write_text("notes.md:widget was measured   at ten units\n")
+    rc = leakcheck.main(["--tree", str(tree), "--tables", str(private / "symbols.txt"), "--words",
+                         str(private / "words.txt"), "--allow", str(allow)])
+    out = capsys.readouterr().out
+    assert rc == 0 and "allowed notes.md: widget was measured at ten units" in out, out
+

@@ -8,9 +8,12 @@ never from the repository being checked:
   --tables FILE...  the private project's function tables or symbol files (functions.tsv,
                     symbols.txt, DREAD's formats): every name of at least --min characters that is
                     not generic, and every address of at least five hex digits
-  --words FILE      one word or regular expression per line, matched case-insensitively
+  --words FILE      one word or regular expression per line, matched case-insensitively (in the tree
+                    over a whole file: an expression may span lines; in the history line by line); a
+                    match is reported with its whitespace collapsed to single spaces
   --allow FILE      hits that are coincidences, one per line: a hit ("0x10000", "timer_start") or
-                    "path:hit" (also in the history, for lines of that file's diffs)
+                    "path:hit" (also in the history, for lines of that file's diffs), its whitespace
+                    collapsed as a hit's is (a match across a line break is allowed by one line)
 
 Scans every text file of the tree (not .git, .venv, build directories) and, with --history, the
 message and diff of every commit on every branch, and the commit authors. Prints each hit with where
@@ -68,11 +71,17 @@ def deny_lists(tables, min_length=6):
     return names, addresses
 
 
+def collapsed(text):
+    """text's runs of whitespace as single spaces, lower case: how a word's match is reported and an
+    allow entry compared (a match across a line break, with the next line's indentation, is one line)."""
+    return " ".join(text.lower().split())
+
+
 def scan(text, names, addresses, words):
     hits = set()
     for word in words:
         for m in word.finditer(text):
-            hits.add(m.group(0).lower())
+            hits.add(collapsed(m.group(0)))
     hits |= set(IDENT.findall(text)) & names
     for m in HEX.finditer(text):
         if int(m.group(1), 16) in addresses:
@@ -87,7 +96,7 @@ def found(text, names, addresses, words):
     hits = {}
     for word in words:
         for m in word.finditer(text):
-            hits.setdefault(m.group(0).lower(), []).append(m.start())
+            hits.setdefault(collapsed(m.group(0)), []).append(m.start())
     for m in IDENT.finditer(text):
         if m.group(0) in names:
             hits.setdefault(m.group(0), []).append(m.start())
@@ -148,7 +157,7 @@ def main(argv=None):
     allowed = set()
     if args.allow:
         with open(args.allow) as f:
-            allowed = {line.strip().lower() for line in f if line.strip() and not line.startswith("#")}
+            allowed = {collapsed(line) for line in f if line.strip() and not line.startswith("#")}
     tree = os.path.abspath(args.tree)
     bad = 0
     record = {"version": JSON_VERSION, "tree": tree, "tables": list(args.tables), "words": args.words,
