@@ -1170,3 +1170,37 @@ def test_an_access_through_a_field_s_address_is_the_field():
                  "return r0->f_4;"):
         assert text in body, (text, body)
     assert "*&" not in body, body
+
+
+# ---- the frame's objects handed to callees that take their pointers (2026-10-25)
+
+OBJECTS = ("extern u32 fill(u32, u32);\nextern u32 put(u32);\nextern u32 halves(u32);\n"
+           "u32 h(u32 r0)\n{\n    u8 buf[8];\n    u16 half;\n    u32 msg;\n"
+           "    fill((u32)buf, 0);\n    fill(0, (u32)&half);\n    put((u32)buf);\n    put(r0);\n"
+           "    halves((u32)&half);\n    send((u32)&msg);\n    return buf[0];\n}\n")
+
+
+def test_objects_go_to_callees_as_the_pointers_their_own_c_takes():
+    """dread.vartypes object_arguments, after dread.frames made the objects: a callee's parameter its
+    extern declares u32 takes the callee's own pointer type (the readable_types table's prototypes)
+    where every call passes an object's address of the type it points to, or 0 (fill: an array and a
+    halfword's address, 0 beside them); one a call passes an integer stays u32 with its casts (put);
+    a pointee of the other sign is another type (halves' s16 for a u16); a structure's address goes as
+    the structure's pointer (send)."""
+    from test_shapes import HEAD as SHAPES_HEAD
+    p = shapes.Plan()
+    p.prototypes = {"fill": [None, "volatile u8 *", "volatile u16 *"], "put": [None, "const volatile u8 *"],
+                    "halves": [None, "volatile s16 *"], "send": [None, "volatile struct s_7 *"]}
+    tree = cparse.parse(SHAPES_HEAD + "extern u32 send(u32);\n" + OBJECTS)
+    fn = tree.function("h")
+    tree.items.insert(tree.items.index(fn), cparse.Raw("struct s_7\n{\n    u32 f_0;\n};"))     # (as shapes.define)
+    decl = next(st for st in fn.body.body if isinstance(st, cparse.Decl) and st.items[0].name == "msg")
+    decl.specs = "struct s_7"                 # (as dread.frames declares a typed object; the parser reads none)
+    assert vartypes.object_arguments(tree, fn, p)
+    out = cparse.unparse(tree, notes=False)
+    for line in ("extern u32 fill(volatile u8 *, volatile u16 *);", "fill(buf, 0);", "fill(0, &half);",
+                 "extern u32 put(u32);", "put((u32)buf);", "put(r0);",
+                 "extern u32 halves(u32);", "halves((u32)&half);",
+                 "extern u32 send(volatile struct s_7 *);", "send(&msg);"):
+        assert line in out, (line, out)
+    assert not vartypes.object_arguments(tree, fn, p)     # (nothing left to take)

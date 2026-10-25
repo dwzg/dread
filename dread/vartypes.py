@@ -1614,6 +1614,86 @@ def _decl_text(t, name):
     return "%s%s" % (t, name) if t.endswith("*") else "%s %s" % (t, name)
 
 
+def object_arguments(tree, fn, p, names=None, int_bits=None):
+    """After dread.frames made the function's objects: a callee's parameter that its extern in the file
+    still declares u32 takes the callee's own pointer type (the readable_types table's prototypes) where
+    every call of the function passes for it what C takes for that type without a cast: an object's
+    address that dread.frames wrote as an integer ((u32)&obj, (u32)arr for an array, (u32)&obj.f), of
+    the type the parameter points to, or 0; those casts go (FreeRTOS's xTaskDelayUntil(&stack36, 0x1388u)
+    for xTaskDelayUntil((u32)&stack36, 0x1388u)). The rule of a file's externs (plan) for what only exists
+    after the plan: the frame's objects, which the plan's trials never saw. Every cast it takes away is
+    one less, none comes in. A parameter some call passes anything else (an integer, a sum) stays u32.
+    Returns whether anything changed."""
+    from dread import polish, tidy
+    prototypes = getattr(p, "prototypes", None) or {}
+    if not prototypes or tidy.fixed_registers(tree):
+        return False
+    types = polish.Types(tree, fn, int_bits)
+    externs = {}
+    for k, item in enumerate(tree.items):
+        m = EXTERN.match(item.text.strip()) if isinstance(item, C.Raw) else None
+        if m and "..." not in m.group(3) and m.group(2) != fn.name and prototypes.get(m.group(2)):
+            externs[m.group(2)] = k
+    if not externs:
+        return False
+    calls = {}
+    for st in polish._all_statements(fn.body.body):
+        for e in polish._stmt_exprs(st):
+            for x in polish._walk(e):
+                if isinstance(x, C.Call) and isinstance(x.f, C.Name) and x.f.id in externs:
+                    calls.setdefault(x.f.id, []).append(x)
+    changed = False
+    for f, found in sorted(calls.items()):
+        k = externs[f]
+        m = EXTERN.match(tree.items[k].text.strip())
+        old = [x.strip() for x in m.group(3).split(",")] if m.group(3).strip() not in ("", "void") else []
+        proto = prototypes[f]
+        new, strip = list(old), []
+        for i, t in enumerate(old):
+            want = proto[i + 1] if i + 1 < len(proto) else None
+            if " ".join(t.split()) != "u32" or not want or not want.rstrip().endswith("*"):
+                continue
+            want = _named_structs(want, names)
+            target = types.parse(want)
+            if not target or target[0] != "ptr" or target[1] is None:
+                continue
+            fits = []
+            for call in found:
+                a = call.args[i] if i < len(call.args) else None
+                if isinstance(a, C.Num) and a.value == 0:
+                    continue
+                if isinstance(a, C.Cast) and " ".join(a.type.split()) == "u32" and _object_address(a.e) and \
+                        _points_to(types.of(a.e), target[1]):
+                    fits.append((call, i))
+                    continue
+                fits = None
+                break
+            if fits:
+                new[i] = want
+                strip += fits
+        if strip:
+            for call, i in strip:
+                call.args[i] = call.args[i].e
+            tree.items[k].text = "extern %s %s(%s);" % (m.group(1).strip(), f, ", ".join(new))
+            changed = True
+    return changed
+
+
+def _object_address(e):
+    """Whether e is an object's address as dread.frames writes one: &x, &x.f, &x[k], or an array's name."""
+    if isinstance(e, C.Unary) and e.op == "&":
+        x = e.e
+        while isinstance(x, (C.Member, C.Index)) and not getattr(x, "arrow", False):
+            x = x.base
+        return isinstance(x, C.Name)
+    return isinstance(e, C.Name)
+
+
+def _points_to(d, pointee):
+    """Whether a value of descriptor d (a pointer, or an array that decays to one) points to pointee."""
+    return bool(d) and d[0] in ("ptr", "array") and d[1] is not None and d[1] == pointee
+
+
 def apply(tree, fn, p, made_for=None, names=None, int_bits=None):
     """The plan's types written into one function's readable C (after dread.shapes apply_types, before
     the variables' names): its variables (only for the C the plan was made for: made_for, its digest

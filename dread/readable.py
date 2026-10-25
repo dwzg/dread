@@ -751,6 +751,8 @@ def question_tree(name, text, context):
         from dread import frames            # (the frame's objects, as the builds make them before the names:
         objects = frames.frame_objects(tree, fn, context)   # the question names them too, and their names carry)
         ids = frames.object_identities(fn, ids, objects)
+        if objects:                         # (the objects' addresses as the callees' own parameters take them)
+            vartypes.object_arguments(tree, fn, context.plan, names=context.struct_names(), int_bits=int_bits)
         polish_tree(tree, fn, context, int_bits)
     return tree, fn, digest, print_file(tree, fn), cparse.unparse(fn, notes=False, style="readable"), ids
 
@@ -1231,6 +1233,9 @@ def _framed(name, text, stages, context=None, names=True, cleaned=None):
     before = naming.variables(fn)
     from dread import frames
     objects = frames.frame_objects(tree, fn, context, avoid=mine)
+    if objects and context is not None:     # (the objects' addresses as the callees' own parameters take them)
+        from dread import vartypes
+        vartypes.object_arguments(tree, fn, context.plan, names=context.struct_names(), int_bits=int_bits)
     return tree, fn, stages, objects, (made_for, int_bits, entry, before)
 
 

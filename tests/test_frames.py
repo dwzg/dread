@@ -245,14 +245,17 @@ TYPED = MESSAGE.replace("    *(volatile u32 *)(sp0 - 32) = r0;  /* c: str r0, [s
 def test_a_structure_a_callee_s_parameter_points_to_types_the_object():
     """The callee's parameter is a structure of the readable_types table (its prototypes, dread.vartypes)
     whose fields at 0 and 4 the function stores: the object is of that structure, its definition in the
-    file, and smaller than the bytes up to the saves (what lies past it is nobody's)."""
+    file, and smaller than the bytes up to the saves (what lies past it is nobody's); its address goes to
+    the callee as the parameter's pointer, the extern's parameter typed so (dread.vartypes
+    object_arguments, since 2026-10-25: before, (u32)&stack40 for a u32)."""
     facts = Facts(saves=SAVES, keeps={"send": []}, returns={"send": []},
                   prototypes={"send": [None, None, "volatile struct s_7 *", None, None]},
                   structs={"s_7": [(0, "u32"), (4, "u32")]})
     out = readable_c(TYPED, context=facts)
     assert "struct s_7\n{\n    u32 f_0;\n    u32 f_4;\n};" in out, out
     assert "    struct s_7 stack40;" in out and "stack40.f_0 = r1; stack40.f_4 = r2;" in out, out
-    assert "(u32)&stack40, " in out, out
+    assert "send(g_20000100, &stack40, r3, 0)" in out and "(u32)&stack40" not in out, out
+    assert re.search(r"^extern u32 send\(u32, volatile struct s_7 \*, u32, u32\);$", out, re.M), out
     _, fn = readable.readable_tree("h", TYPED, context=facts)
     p = frames.plan(fn, facts).pieces
     assert [(x.start, x.size, x.kind, x.tag) for x in p] == [(-40, 8, "typed", "s_7")]
@@ -502,7 +505,10 @@ def test_print_status_s_buffer_is_its_own_array_and_its_parameters_are_gone(targ
     buffer and the saves of r4 and lr; now u32 print_status(void) with a 12-byte array, not volatile:
     fmt_dec and uart_puts keep nothing (the readable_types table as the check makes it). apply_config's
     value, key[12] and line[40] are three objects, the line written through its index (an element on the
-    ARM builds; on rv32 through a variable that holds the element's address, as the code computes it)."""
+    ARM builds; on rv32 through a variable that holds the element's address, as the code computes it).
+    Since 2026-10-25 the buffer goes to fmt_dec as its own parameter's pointer (fmt_dec(stack20, ...),
+    its extern's parameter volatile u8 *), to uart_puts, whose own C takes an integer (texts too), still
+    as (u32)stack20."""
     image = target.image()
     program = Program(target, image)
     flow = regflow.load(target, image, program)
@@ -514,7 +520,8 @@ def test_print_status_s_buffer_is_its_own_array_and_its_parameters_are_gone(targ
         return readable.transform(name, lifter.lift(program.by_name[name]).text, context=context)
     status = text("print_status")
     assert "void print_status(void)" in status, status      # (nobody reads its result: dread.tidy void_results)
-    assert "    u8 stack20[12];" in status and "fmt_dec((u32)stack20, " in status, status
+    assert "    u8 stack20[12];" in status and "fmt_dec(stack20, " in status, status
+    assert "extern u32 fmt_dec(volatile u8 *, u32);" in status, status
     assert "uart_puts((u32)stack20);" in status and "stack20_t" not in status, status
     config = text("apply_config")
     decls = {m.group(2): (m.group(1), m.group(4)) for m in re.finditer(
@@ -677,7 +684,7 @@ def test_a_name_of_sp0_leaves_print_status_s_buffer_an_object(target):
                                       "by": "test"}}
     for out in (readable.printed("print_status", text, context), readable.transform("print_status", text,
                                                                                     context=context)):
-        assert buf.group(0) in out and "fmt_dec((u32)%s, " % buf.group(1) in out, out
+        assert buf.group(0) in out and "fmt_dec(%s, " % buf.group(1) in out, out
         assert "buf_end" not in out and "frame[" not in out and "/* print_status: prints (names: test) */" in out, out
 
 

@@ -2964,6 +2964,19 @@ the pilot's names, which the first review had taken for raw frames. New items:
   parameter is not typed. Left: frame objects to all-u32 externs (gizmo a32 print_status's
   `fmt_dec((u32)stack20, ...)`; uart_puts there also takes texts, so "every call passes such an object"
   holds for fmt_dec only), and typed parameters of the list functions, which would take the casts above.
+  Frame objects: done 2026-10-25 (dread.vartypes object_arguments, called behind dread.frames in
+  readable._framed and question_tree): the plan typed a file's externs before the frame's objects existed,
+  so their addresses went as `(u32)&stack36`; now a parameter the extern still declares u32 takes the
+  callee's own pointer type where every call passes an object's address of the type it points to (an
+  array for its elements, a structure's for the structure) or 0, and those casts go: gizmo's
+  `fmt_dec(stack20, ...)` (uart_puts, whose own C takes an integer, keeps `(u32)stack20`), FreeRTOS's
+  `xTaskDelayUntil(&stack36, 0x1388u)`, `strcmp(stack40, stack56)`, `memset(stack40, 0, 0xfu)`. On the eight
+  builds the gate accepts the same functions; `(u32)&` 1, 2, 2, 1 (gizmo, as before), 400 -> 315 (GCC -Os),
+  498 -> 416 (clang -O2), 385 -> 363 (RISC-V GCC -Os), 465 -> 445 (GCC -O0); lines with a `(u32)` 37 ->
+  33, 31 -> 27, 34 -> 30, 33 -> 29, 1,115 -> 1,007, 1,013 -> 897, 746 -> 725, 948 -> 927. Tests:
+  tests/test_vartypes.py test_objects_go_to_callees_as_the_pointers_their_own_c_takes (an array, a
+  halfword, a structure; 0 beside them; a parameter a call passes an integer, a pointee of the other
+  sign), tests/test_frames.py (print_status's fmt_dec, the callee's structure).
 - [x] **An access through a field's address, as the field.** A lifter's `[r1]` after `r1 = p + k` is
   `*(volatile T *)(p + k + 0)` once the stages substitute r1; where k is the place of a field of the
   structure p points to, dread.shapes writes the address as the field's (`&p->f_4`, the members for derived
@@ -3072,6 +3085,25 @@ the pilot's names, which the first review had taken for raw frames. New items:
   which can be the entry's copy of a parameter. gizmo a32 read_line shows `2097c  r0[r4] = 0;` for the
   store at 0x209c8; 0x2097c is `mov r5, r0`. Prefer the statement's own instruction when the folded ones
   are earlier register copies.
+- [ ] **Readable C of a wrapped function's body.** A function that reaches its caller's stack (a
+  variadic one, or one whose callees read its stack arguments) is lifted as a naked trampoline and a body
+  that takes the real stack's address, and dread readable leaves both as the lifter wrote them: registers,
+  the flags as compare instructions set them, gotos. Run the clean-up and the structure on the body (its
+  frame accesses staying raw, as they must), and print the trampoline in one line. Public examples:
+  FreeRTOS printf and sprintf on every build. Frequent on the private real-life test, where the naming
+  pilot then describes the trampoline instead of the function.
+- [ ] **Division helpers as operators.** A runtime helper that returns a quotient and a remainder prints
+  as a two-word call with its halves cut out: `(u32)(__aeabi_uidivmod(r4, 0xau) >> 32) + 0x30u`. Print
+  `r4 % 10 + '0'` where the helper is known to divide (by name for the EABI's; by its behaviour in the
+  emulator for a library's own routine, checked on test values, the order of its arguments included),
+  and give the readable check's link the helper the compiler's own code calls for `/` and `%`. Public
+  example: gizmo a32 fmt_dec. Frequent on the private real-life test (its library's own routines).
+- [ ] **A jump to the start of the other arm, as a condition.** `if (A) { S; if (B) goto L; R } else { L:
+  T }`, where L begins the other arm and S are plain statements, is `if (A && (S, !B)) { R } else { T }`
+  (`if (!A || (S, B)) { T }` without R); a jump from an arm of an else-if chain to an earlier arm's start
+  joins that arm's test with ||, where the tests between have no effects. Frequent on the private
+  real-life test (its compiler threads such conditions), seldom on the public builds. Test: such shapes
+  among the structure stage's random functions, compiled before and after.
 - [ ] (low) **Members comments over several lines**, wrapped past a few members.
 - [x] (low) **Declarations nothing uses**, dropped. Done 2026-10-25 (dread.polish drop_unused_declarations,
   the last step of polish): a variable that a pass after the clean-up's own tidy_declarations folded away
