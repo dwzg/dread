@@ -1861,8 +1861,10 @@ def structure(fn, run=None):
         return fn
     out = refine_loops(out)
     out = arms_pass(out)[0]
-    if arm_jumps(out):                      # (a jump to the start of the other arm as part of the condition;
-        out = prune_labels(out, gotos_in(out))  # the label it named goes when nothing else names it)
+    own = {n for _, n in fn.params} | {d.name for st in head if isinstance(st, C.Decl) and "volatile" not in st.specs
+                                      for d in st.items if not d.dims}
+    if arm_jumps(out, own - address_taken(out)):    # (a jump to the start of the other arm as part of the
+        out = prune_labels(out, gotos_in(out))      # condition; the label it named goes when nothing else does)
     fn.body.body[:] = head + out
     entered(fn, fn.body.body)
     fn.body.body[:] = counted(fn.body.body, address_taken(fn.body.body))
@@ -1874,9 +1876,12 @@ def structure(fn, run=None):
 # arm_jumps: how many expression statements may go into a condition before the check that joins it (a
 # longer comma expression reads worse than the goto it takes away)
 ARM_JUMP_EFFECTS = 2
+# ... and how many tests of an else-if chain (on the way to an arm's jump to the chain's first arm): a
+# switch compiled as a chain of tests gave its default arm six of them in one condition
+ARM_JUMP_TESTS = 2
 
 
-def arm_jumps(stmts):
+def arm_jumps(stmts, own=None):
     """A jump to the start of an arm of an if as part of the if's condition, in place; returns whether
     any changed. A compiler threads conditions so (the code of one arm shared with a later check), and
     the emitter, which places each block once, leaves the goto. From inside the other arm:
@@ -1890,13 +1895,24 @@ def arm_jumps(stmts):
         if (B) goto L; S...; if (A) { L: T... } else { R... }   is   if (B || (S..., A)) { T... } else { R... }
         if (B) goto L; S...; if (A) { R... } else { L: T... }   is   if (!B && (S..., A)) { R... } else { T... }
 
+    and from an arm of an else-if chain to the start of the chain's first arm, given own (the function's
+    variables that are no memory: parameters and locals not volatile, whose address nothing takes):
+
+        if (A) { L: T... } else if (C1) { X1... } ... else if (Cj) { S...; if (B) goto L; R... } ...
+        is   if (A || (!C1 && ... && Cj && (S..., B))) { T... } else if (C1) { X1... } ... else if (Cj) { R... } ...
+
+    (the chain's last else alike, without Cj), where every test from C1 to Cj reads only own and has no
+    effects, and S and B write none of the variables those tests read: the tests are evaluated a second
+    time on the way into the chain, and give what they gave the first time. At most ARM_JUMP_TESTS such
+    tests (a longer run of them in one condition reads worse than the goto).
+
     S are expression statements only (they run where they ran, after what decided before them and before
     the test after them, in a comma expression), at most ARM_JUMP_EFFECTS of them and none a call made for
     its effects alone (a call statement in a condition reads worse than the goto: a source's call and the
     test after it, which a compiler threaded), the jump is the whole of an if without else, and L the
     first statement of its arm (a label other jumps still name stays where it is; the caller drops one
     nothing names). Each way through does what it did: S and the tests are evaluated exactly where and
-    as often as before, T runs where it ran and so does R."""
+    as often as before (the chain's tests apart, as said), T runs where it ran and so does R."""
     changed = []
 
     def real(xs):
@@ -1948,8 +1964,84 @@ def arm_jumps(stmts):
             return both(op, both(op, l, r.l), r.r)
         return C.Binary(op, l, r)
 
+    def pure(e):
+        """Whether e reads only own and has no effects (no call, store, memory read)."""
+        from dread.cflow import walk_expr
+        for y in walk_expr(e):
+            if isinstance(y, (C.Call, C.Assign, C.Post, C.Index, C.Member, C.Comma)):
+                return False
+            if isinstance(y, C.Unary) and y.op in ("*", "++", "--"):
+                return False
+            if isinstance(y, C.Cast) and "volatile" in y.type:
+                return False
+            if isinstance(y, C.Name) and y.id not in own:
+                return False
+        return True
+
+    def names_read(es):
+        from dread.cflow import walk_expr
+        return {y.id for e in es for y in walk_expr(e) if isinstance(y, C.Name)}
+
+    def names_written(es):
+        from dread.cflow import walk_expr
+        out = set()
+        for e in es:
+            for y in walk_expr(e):
+                if isinstance(y, C.Assign) and isinstance(y.target, C.Name):
+                    out.add(y.target.id)
+                elif isinstance(y, (C.Post, C.Unary)) and y.op in ("++", "--") and isinstance(y.e, C.Name):
+                    out.add(y.e.id)
+        return out
+
+    def single_if(node):
+        """node itself, or the one if a block holds alone."""
+        if isinstance(node, C.Block):
+            inner = real(node.body)
+            if len(inner) == 1 and isinstance(inner[0], C.If):
+                return inner[0]
+        return node
+
+    def chain(x):
+        """The jump from an arm of the else-if chain under x to the start of x's then arm (the docstring's
+        else-if form), joined into x's condition; whether it was."""
+        label = first_label(_list(x.then))
+        if not label or own is None:
+            return False
+        tests, parent, node = [], x, single_if(x.orelse)
+        while True:
+            if isinstance(node, C.If):
+                got = plain_prefix(_list(node.then), label)
+                cs = tests + [node.cond]
+            else:
+                got = plain_prefix(_list(node), label)
+                cs = list(tests)
+            if got is not None:
+                effects, cond, rest = got
+                if len(cs) > ARM_JUMP_TESTS or not all(pure(c) for c in cs) or \
+                        names_written(effects + [cond]) & names_read(cs):
+                    return False
+                part = None
+                for t in tests:
+                    part = negate(t) if part is None else both("&&", part, negate(t))
+                if isinstance(node, C.If):
+                    part = node.cond if part is None else both("&&", part, node.cond)
+                last = joined(effects, cond)
+                part = last if part is None else both("&&", part, last)
+                x.cond = both("||", x.cond, part)
+                if isinstance(node, C.If):
+                    node.then = C.Block(rest)
+                else:
+                    parent.orelse = C.Block(rest) if real(rest) else None
+                changed.append(x)
+                return True
+            if not isinstance(node, C.If) or node.orelse is None:
+                return False
+            tests.append(node.cond)
+            parent, node = node, single_if(node.orelse)
+
     def arms(x):
-        """The jumps from inside one arm of the if x to the other arm's start."""
+        """The jumps from inside one arm of the if x to the other arm's start (or from an arm of an else-if
+        chain under it to its then arm's start)."""
         while x.orelse is not None:
             then, other = _list(x.then), _list(x.orelse)
             label = first_label(other)
@@ -1967,6 +2059,8 @@ def arm_jumps(stmts):
             label = first_label(then)
             got = plain_prefix(other, label) if label else None
             if got is None:
+                if chain(x):
+                    continue
                 return
             effects, cond, rest = got
             x.cond = both("||", x.cond, joined(effects, cond))

@@ -5091,7 +5091,11 @@ each block once.
   its behaviour like that of any other rewrite. The limit came from the public builds: on FreeRTOS's
   timer task four statements, one of them a call through a pointer with eight arguments, went into one
   condition, the source's callback and the test after it, which the compiler had threaded; that read
-  worse than the goto. The else-if chain's case would evaluate a test twice; it waits (docs/todo.md).
+  worse than the goto. The else-if chain's case evaluates the tests on the way into the chain a second
+  time; done the same day where those tests read only the function's own variables (no memory, no call,
+  no effect) and the statements before the jump write none of them, so the second evaluation gives
+  what the first gave, and where they are at most two (a switch compiled as a chain of tests gave its
+  default arm six in one condition on a public build).
 
 ## A division by a constant proved by the numbers (2026-10-25)
 

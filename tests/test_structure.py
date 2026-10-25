@@ -584,10 +584,11 @@ def random_threaded_function(rng, name, endless=False):
     where A did not hold, statements and one or two more checks go to the same block's start before the
     statements of their own (sometimes none). Laid out either way round: the long block after the checks
     (the emitter makes it the else arm), or first with the checks jumping back into it. Sometimes a jump
-    from before the if names the block too. And checks that must stay jumps, their labels named L_stay:
+    from before the if names the block too. And checks that may stay jumps, their labels named L_stay:
     one after an if statement (which no condition can hold), one into the middle of the long block, and
-    an else-if chain whose last arm jumps to the first arm's block (its test would be evaluated twice).
-    endless: in a loop that never ends, left by bail() when the fuel runs out."""
+    an else-if chain whose last arm jumps to the first arm's block (joined only where the statements
+    before the jump write nothing the chain's tests read). endless: in a loop that never ends, left by
+    bail() when the fuel runs out."""
     regs, flip = ["r0", "r1", "r2", "r3"], {"<": ">=", ">=": "<", "==": "!=", "!=": "=="}
 
     def arith():
@@ -644,7 +645,7 @@ def test_random_threaded_checks_structured_compute_the_same(tmp_path, monkeypatc
     gotos left are those that must stay (labels L_stay), and most functions change."""
     fired = []
     rewrite = structure.arm_jumps
-    monkeypatch.setattr(structure, "arm_jumps", lambda out: fired.append(rewrite(out)) or fired[-1])
+    monkeypatch.setattr(structure, "arm_jumps", lambda *a: fired.append(rewrite(*a)) or fired[-1])
     rng = random.Random(47)
     originals, results, left = [], [], []
     count = 300
@@ -672,3 +673,68 @@ def test_random_threaded_checks_structured_compute_the_same(tmp_path, monkeypatc
             assert a(*args) == b(*args), (i, args, originals[i], results[i])
     assert sum(fired) > count * 0.9, sum(fired)
     assert left and all(g.startswith("L_stay") for g in left), sorted(set(left))
+
+
+def chained(body):
+    """The C of body after arm_jumps with the function's own variables (as structure gives them), or None
+    when it changed nothing."""
+    fn = fn_of(body)
+    own = {n for _, n in fn.params} | {d.name for st in fn.body.body if isinstance(st, cparse.Decl)
+                                      and "volatile" not in st.specs for d in st.items if not d.dims}
+    if not structure.arm_jumps(fn.body.body, own):
+        return None
+    fn.body.body[:] = structure.prune_labels(fn.body.body, structure.gotos_in(fn.body.body))
+    return cparse.unparse(fn, notes=False, style="readable")
+
+
+CHAIN_T = ("L_t: ;\n        r2 = 9;\n        r3 = r3 * 3;\n        r1 = r1 ^ r3;\n        r2 = r2 + r1;\n"
+           "        r0 = r0 + r3;\n")
+
+
+def test_a_jump_from_an_else_if_arm_to_the_first_arms_start_joins_its_condition(tmp_path):
+    """An else-if arm that jumps to the start of the chain's first arm: the tests on the way to it join the
+    first condition (turned round, the arm's own as it is) where they read only the function's own
+    variables, have no effects, and the statements before the jump write none of what they read; from
+    the chain's last else alike. Compiled before and after: the same results."""
+    body = ("    if (r0 == 1)\n    {\n" + CHAIN_T + "    }\n    else if (r1 == 2)\n    {\n        r2 = 5;\n    }\n"
+            "    else if (r3 == 4)\n    {\n        r2 = r2 + 1;\n        if (r2 == 9) goto L_t;\n        r0 = 7;\n    }\n"
+            "    return r0 + r1 + r2 + r3;")
+    out = chained(body)
+    assert "if (r0 == 1 || (r1 != 2 && r3 == 4 && (r2 = r2 + 1, r2 == 9)))" in out and "goto" not in out, out
+    assert "else if (r3 == 4) r0 = 7;" in out, out
+    same_results(tmp_path, body, out)
+    body = ("    if (r0 == 1)\n    {\n" + CHAIN_T + "    }\n    else if (r1 == 2)\n    {\n        r2 = 5;\n    }\n"
+            "    else\n    {\n        r3 = r3 + 1;\n        if (r3 == 9) goto L_t;\n        r0 = 7;\n    }\n"
+            "    return r0 + r1 + r2 + r3;")
+    out = chained(body)
+    assert "if (r0 == 1 || (r1 != 2 && (r3 = r3 + 1, r3 == 9)))" in out and "goto" not in out, out
+    same_results(tmp_path, body, out)
+
+
+def test_a_jump_from_an_else_if_arm_stays_where_a_test_would_read_otherwise(tmp_path):
+    """Not joined: the statements before the jump write a variable an earlier test of the chain reads
+    (the test would give another answer the second time), a test calls a function or reads memory, or
+    more than ARM_JUMP_TESTS tests lie on the way (two do not, three do)."""
+    body = ("    if (r0 == 1)\n    {\n" + CHAIN_T + "    }\n    else if (r1 == 2)\n    {\n        r2 = 5;\n    }\n"
+            "    else if (r3 == 4)\n    {\n        r1 = r1 + 1;\n        if (r2 == 9) goto L_t;\n        r0 = 7;\n    }\n"
+            "    return r0 + r1 + r2 + r3;")
+    assert chained(body) is None
+    body = ("    if (r0 == 1)\n    {\n" + CHAIN_T + "    }\n    else if (sink(r1, 0) == 2)\n    {\n        r2 = 5;\n    }\n"
+            "    else\n    {\n        r3 = r3 + 1;\n        if (r3 == 9) goto L_t;\n        r0 = 7;\n    }\n"
+            "    return r0 + r1 + r2 + r3;")
+    assert chained(body) is None
+    body = ("    if (r0 == 1)\n    {\n" + CHAIN_T + "    }\n    else if (*(volatile u32 *)r1 == 2)\n    {\n        r2 = 5;\n"
+            "    }\n    else\n    {\n        r3 = r3 + 1;\n        if (r3 == 9) goto L_t;\n        r0 = 7;\n    }\n"
+            "    return r0 + r1 + r2 + r3;")
+    assert chained(body) is None
+    # more than ARM_JUMP_TESTS tests on the way (a switch compiled as a chain: its default arm)
+    assert structure.ARM_JUMP_TESTS == 2
+    body = ("    if (r0 == 1)\n    {\n" + CHAIN_T + "    }\n    else if (r1 == 2)\n    {\n        r2 = 5;\n    }\n"
+            "    else if (r1 == 3)\n    {\n        r2 = 6;\n    }\n    else\n    {\n        r3 = r3 + 1;\n"
+            "        if (r3 == 9) goto L_t;\n        r0 = 7;\n    }\n    return r0 + r1 + r2 + r3;")
+    assert chained(body) is not None
+    body = ("    if (r0 == 1)\n    {\n" + CHAIN_T + "    }\n    else if (r1 == 2)\n    {\n        r2 = 5;\n    }\n"
+            "    else if (r1 == 3)\n    {\n        r2 = 6;\n    }\n    else if (r1 == 4)\n    {\n        r2 = 8;\n    }\n"
+            "    else\n    {\n        r3 = r3 + 1;\n        if (r3 == 9) goto L_t;\n        r0 = 7;\n    }\n"
+            "    return r0 + r1 + r2 + r3;")
+    assert chained(body) is None

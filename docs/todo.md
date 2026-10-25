@@ -3223,11 +3223,21 @@ the pilot's names, which the first review had taken for raw frames. New items:
   count in words within a sentence of a mention of the private target; a public build's figure beside
   such a mention goes into the allow file. Old commits keep such passages: they are allowed by their
   text, and a rewrite of the public history is the user's decision.
-- [ ] **A jump from an else-if arm to an earlier arm's start.** `if (A) { L: T } else if (C) { X } else {
+- [x] **A jump from an else-if arm to an earlier arm's start.** `if (A) { L: T } else if (C) { X } else {
   S; if (B) goto L; R }`: joined as `if (A || (!C && (S, B))) { T } else if (C) ...` it evaluates C twice,
   so only where C has no effects and reads only variables that S and B do not write (a volatile read
   twice is another access). Seen on the private real-life test; the random threaded checks' chain layout
-  (tests/test_structure.py) is its test bed.
+  (tests/test_structure.py) is its test bed. Done 2026-10-25 (dread.structure arm_jumps' chain, given the
+  function's own variables: parameters and locals not volatile, whose address nothing takes): from any
+  arm of the chain (`... else if (Cj) { S; if (B) goto L; R }` joins `!C1 && ... && Cj && (S, B)`) and
+  from its last else; every test on the way reads only those variables, has no effects (no call, store,
+  memory read), and S and B write none of what the tests read; at most two such tests (ARM_JUMP_TESTS:
+  FreeRTOS GCC -O0's xTaskGenericNotify, a switch compiled as a chain, would have given its default arm
+  six in one condition). Test: the shapes compiled before and
+  after, the cases that stay (a test that calls or reads memory, statements that write a tested
+  variable), and the threaded checks' chain layout through the property test; five wrong variants of
+  the rule each fail a test. On the eight builds the gate accepts the same functions, and with the limit
+  no public build's C changes: the shape is the private real-life test's.
 - [ ] (low) **Members comments over several lines**, wrapped past a few members.
 - [x] (low) **Declarations nothing uses**, dropped. Done 2026-10-25 (dread.polish drop_unused_declarations,
   the last step of polish): a variable that a pass after the clean-up's own tidy_declarations folded away
