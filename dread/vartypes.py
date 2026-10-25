@@ -1749,6 +1749,8 @@ def apply(tree, fn, p, made_for=None, names=None, int_bits=None):
         isinstance(st, C.Decl) and any(d.ptr for d in st.items) for st in fn.body.body)
     if not typing and not protos and not result and not shaped:
         return False
+    if tidy.fixed_head(fn):                 # (a wrapped function's body: its parameters as they are declared)
+        typing = {v: t for v, t in typing.items() if v not in {n for _, n in fn.params}}
     tidy.split_typed(fn, set(typing))       # (a chain that assigns a typed variable: one statement each)
     types = polish.Types(tree, fn, int_bits)
     r = Rewriter(fn, typing, types, protos, result, sizes)

@@ -2513,6 +2513,9 @@ def apply_types(tree, fn, p, made_for=None, names=None):
         typed = {v: k for v, k in p.typed.get(fn.name, {}).items() if k in p.structs}
         allowed = pointer_candidates(fn) - _uses(fn)
         typed = {v: k for v, k in typed.items() if v in allowed}
+    from dread import tidy as tidy_
+    if tidy_.fixed_head(fn):                # (a wrapped function's body: its parameters as they are declared)
+        typed = {v: k for v, k in typed.items() if v not in {n for _, n in fn.params}}
     typed.update(words)
     if not typed:
         return []

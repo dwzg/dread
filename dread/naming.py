@@ -160,8 +160,12 @@ def problems(tree, fn, names):
 
 def rename(fn, names):
     """The function's variables renamed in place (parameters, declarations, every use), its head
-    written anew with the parameters' names when it is plain (type name(parameters))."""
+    written anew with the parameters' names when it is plain (type name(parameters)); a head that is
+    not (a wrapped function's body: dread.tidy fixed_head) keeps its parameters' names everywhere."""
     from dread.cflow import walk_expr
+    from dread import tidy
+    if tidy.fixed_head(fn):
+        names = {k: v for k, v in names.items() if k not in {n for _, n in fn.params}}
 
     def visit(s):
         if isinstance(s, C.Decl):

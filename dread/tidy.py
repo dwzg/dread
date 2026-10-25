@@ -205,6 +205,18 @@ def foldable_into(s, v):
     return isinstance(s, C.If) and _reads_in_cond_only(s, v)
 
 
+HEAD = re.compile(r"^(\w+) (\w+)\((.*)\)$")     # a head the stages rewrite: TYPE NAME(PARAMETERS)
+
+
+def fixed_head(fn):
+    """Whether the stages cannot rewrite the function's head (it is no TYPE NAME(PARAMETERS): a wrapped
+    function's body, whose head starts with its attribute and whose declaration the file holds as the
+    lifter wrote it, readable.picked). Its parameters then keep their types and names in the statements
+    too (dread.shapes apply_types, dread.vartypes apply, dread.naming rename), so that statements and
+    head agree: typed in the statements alone, `*more = r3` dereferenced a parameter declared u32."""
+    return HEAD.match(fn.head.strip()) is None
+
+
 def fixed_registers(tree):
     """Whether the lifted file reads registers as the caller left them (dread.build's FIXED line: the
     C binds them with asm, and GCC's -ffixed-REG keeps them so): such C stays as the lifter wrote it.

@@ -1066,3 +1066,31 @@ def test_a_wrapped_function_s_body_is_made_readable():
     assert tree.function("h") is fn and tree.function("h" + readable.ENTRY).head.startswith("__attribute__((naked))")
     plain = cparse.parse(BODY_WRAPPED.replace("bl h_dread_body", "bl other_body"))      # (an entry that calls
     assert readable.picked(plain, "h").head.startswith("__attribute__((naked))")    # something else: itself)
+
+
+def test_a_wrapped_body_keeps_its_parameters_as_declared():
+    """A wrapped function's body (its head starts with its attribute: dread.tidy fixed_head) keeps its
+    parameters as its head and the file's declaration have them: dread.vartypes does not type one in the
+    statements alone (the "more results" body's `*(volatile u32 *)more = r3;` stays; typed, it read `*more
+    = r3` with more declared u32, which does not compile: found by the private real-life test's gate),
+    dread.shapes does not make one a structure pointer (`more->f_0`), dread.naming renames none; its
+    locals are typed and named as before."""
+    from dread import naming, shapes, tidy, vartypes
+    text = ('#include "dread.h"\nu32 h_dread_body(u32 a0, u32 a1, u32 a2, u32 a3, u32 more);\n'
+            '__attribute__((noinline, used)) u32 h_dread_body(u32 a0, u32 a1, u32 a2, u32 a3, u32 more)\n{\n'
+            '    u32 r3, p;\n    p = a1;\n    r3 = *(volatile u8 *)(p + 1);\n'
+            '    *(volatile u32 *)more = r3;\n    return a0;\n}\n')
+    tree = cparse.parse(text)
+    fn = tree.function("h_dread_body")
+    assert tidy.fixed_head(fn) and not tidy.fixed_head(cparse.parse("u32 f(u32 a0)\n{\n    return a0;\n}\n").function("f"))
+    p = shapes.Plan()
+    p.variables = {"h_dread_body": {"digest": None, "types": {"more": "volatile u32 *", "p": "const volatile u8 *"}}}
+    p.typed = {"h_dread_body": {"more": "s_1"}}
+    p.structs = {"s_1": [(0, "u32"), (4, "u32")]}
+    shapes.apply_types(tree, fn, p)
+    vartypes.apply(tree, fn, p)
+    naming.rename(fn, {"more": "extra", "p": "src", "r3": "byte"})
+    out = cparse.unparse(tree, notes=False)
+    assert "*(volatile u32 *)more = byte;" in out and "more->" not in out and "*more" not in out, out
+    assert "u32 a3, u32 more)\n{" in out and "u32 h_dread_body(u32 a0, u32 a1, u32 a2, u32 a3, u32 more);" in out, out
+    assert "src[1]" in out or "*(src + 1)" in out or "src = (const volatile u8 *)a1" in out, out

@@ -3105,6 +3105,12 @@ the pilot's names, which the first review had taken for raw frames. New items:
   -O0's gained the byte the body reads; gizmo, which wraps nothing, unchanged. Not done: the trampoline
   stays as the lifter wrote it (one asm statement). Test: tests/test_readable.py
   test_a_wrapped_function_s_body_is_made_readable.
+  Fixed the same day (dread.tidy fixed_head): dread.vartypes, dread.shapes and dread.naming rewrote a
+  body's statements but not its head, so a parameter typed or renamed in the statements alone no longer
+  compiled (`*more = r3;` for more declared u32, in the bodies that hand back results through an area);
+  the private real-life test's gate refused such bodies, the public builds have none (their printf and
+  sprintf hand back nothing beyond r0). Such a body's parameters now stay as declared, its locals are
+  typed and named as before (tests/test_readable.py test_a_wrapped_body_keeps_its_parameters_as_declared).
 - [ ] **Division helpers as operators.** A runtime helper that returns a quotient and a remainder prints
   as a two-word call with its halves cut out: `(u32)(__aeabi_uidivmod(r4, 0xau) >> 32) + 0x30u`. Print
   `r4 % 10 + '0'` where the helper is known to divide (by name for the EABI's; by its behaviour in the
