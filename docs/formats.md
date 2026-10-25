@@ -257,6 +257,16 @@ in every function: a macro of the signed type where it is listed, else of the un
 globals part is that type's, else one of the other signedness's. A file from before has no `signed`:
 a macro per address and type, as before (`g_200018dc_u16 = g_200018dc_s16 + 1`).
 
+`global_pointers` (since 2026-10-25; written whenever the check runs, also empty) lists the words at
+fixed addresses that hold a pointer to one of the structures (dread.shapes pointer_globals: every variable
+typed as a pointer that a function loads from the word or stores into it points to that structure, such
+loads and stores at least as many as its other uses, and the word only loaded and stored whole):
+`{"0xADDRESS": "s_8"}`. Readable C declares such a word's macro as that pointer, itself as volatile as
+before (`#define g_20029aac (*(volatile struct s_8 *volatile *)0x20029aacu)`), and writes its uses as a
+typed variable's: a typed variable takes it as it is (`r3 = g_20029aac;`), members are read through it,
+a member's address is `&g_20029aac->f_4`, and every other use is `(u32)g_20029aac`. A file from before
+has no `global_pointers`: the word stays a u32, cast at each use.
+
 `params` (left out when empty; since 2026-10-23) lists, for every analysed function, the indices of
 its parameters that it uses as a pointer (dread.shapes pointer_params): `{FUNCTION: [0, 2]}`. A
 constant that is the address of static data is written `(u32)&g_x` as an argument only where the

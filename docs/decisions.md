@@ -9,6 +9,35 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Words that hold a structure's pointer (2026-10-25)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Pointers
+held in globals; frame objects to all-u32 externs" (docs/todo.md), its first half.
+
+- **Question.** A word at a fixed address that holds a pointer to one of the structures (FreeRTOS's
+  pxCurrentTCB) stayed a u32, cast to the structure at every use (`r3 = (volatile struct s_8
+  *)g_20029aac;`, six times in prvAddCurrentTaskToDelayedList). When is such a word declared as the
+  pointer, and how are its uses written then?
+- **Options.** (a) Leave it. (b) Declare it as the pointer when every typed variable that loads or
+  stores it takes it as a pointer to one structure, such uses at least as many as the others, and it is
+  only loaded and stored whole; write it as a typed variable is written (apply_types: no cast into a
+  typed variable, members through it, `&g->f` for a member's address, `(u32)` elsewhere). (c) As (b),
+  with a stricter share (typed uses twice the others).
+- **Choice.** (b): dread.shapes pointer_globals, the readable_types table's global_pointers (by address,
+  whatever the word's name), apply_types adding the words to its typed names and declaring their macros
+  as the pointer, as volatile as before (`(*(volatile struct s_8 *volatile *)0x20029aacu)`).
+- **Why.** The word's type is then the source's, and its uses read as the source's: members and member
+  addresses (`&g_20029aac->f_4` for `&pxCurrentTCB->xStateListItem`) where there were sums and casts.
+  The casts move rather than vanish where the word is read into a variable that a call takes as a u32:
+  measured on the eight builds, casts of such words to a structure pointer 53 -> 13, 50 -> 15, 52 -> 47,
+  31 -> 31 and `(u32)` casts of them 0 -> 31, 40, 1, 0 (GCC -Os, clang -O2, GCC -O0, RISC-V GCC -Os),
+  nearly all pxCurrentTCB passed to list functions whose parameters are not typed: typing those is the
+  next step, and it would take these casts too; (c) would have kept pxCurrentTCB a u32, the item's own
+  example. The gate accepts the same functions on all eight builds.
+- **Undo.** Leave `global_pointers` out of the plan (pointer_globals returning {}); a table without it
+  reads as before.
+- **Status.** In the code (tests/test_global_pointers.py).
+
 ## Truth values of ifs that store 0 and 1: one comparison, proved; a store of the value held dropped (2026-10-25)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Truth values

@@ -149,7 +149,8 @@ def nodes(x):
 
 
 FIXED = re.compile(r"#define\s+(\w+)\s+\(\*\(volatile\b")          # dread.naming's fixed-address names
-FIXED_STRUCT = re.compile(r"#define\s+(\w+)\s+\(\*\(volatile struct\b")    # (of those, structures of static data)
+FIXED_STRUCT = re.compile(r"#define\s+(\w+)\s+\(\*\(volatile struct\s+\w+\s*\*\)")    # (of those, structures of
+#                                                     static data; not a word holding a structure's pointer)
 FIXED_ARRAY = re.compile(r"#define\s+(\w+)\s+\(\(volatile\b")          # (arrays of static data: a pointer)
 STRUCT_TYPEDEF = re.compile(r"typedef\s+struct\b.*\}\s*(?:__attribute__\s*\(\(.*?\)\)\s*)?(\w+)\s*;\s*$", re.S)
 

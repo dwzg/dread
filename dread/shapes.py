@@ -1972,7 +1972,11 @@ class Plan:
     its callers' calls of it are assignments again). signed: {(address, size)} of the scalars at fixed
     addresses (outside the structures and arrays of static data) that an access of that size reads
     signed (dread.statics plan), None where the table does not say (made before 2026-10-24): dread.naming
-    apply_globals names such a scalar once at that width, signed where it is listed, else unsigned."""
+    apply_globals names such a scalar once at that width, signed where it is listed, else unsigned.
+    global_pointers: {address: structure} of the words at fixed addresses that hold a pointer to one of
+    the structures (pointer_globals: FreeRTOS's pxCurrentTCB), None where the table does not say (made
+    before 2026-10-25): apply_types declares such a word's macro as that pointer and writes its uses as a
+    typed variable's (no cast where a typed variable takes it, its members through it, (u32) elsewhere)."""
 
     def __init__(self):
         self.structs, self.typed, self.digests = {}, {}, {}
@@ -1990,6 +1994,7 @@ class Plan:
         self.masks = None               # function -> [indices of the parameters it uses only as masks] (dread.polish)
         self.results = set()            # functions printed with their result, read or not (the check)
         self.signed = None              # {(address, size)}: scalars at fixed addresses read signed (dread.statics)
+        self.global_pointers = None     # address -> structure: words at fixed addresses holding its pointer
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -2029,6 +2034,8 @@ class Plan:
             for a, z in sorted(self.signed):
                 sizes.setdefault("0x%x" % a, []).append(z)
             out["signed"] = sizes
+        if self.global_pointers is not None:
+            out["global_pointers"] = {"0x%x" % a: k for a, k in sorted(self.global_pointers.items())}
         return out
 
     @classmethod
@@ -2056,6 +2063,8 @@ class Plan:
         p.results = set(data.get("results", []))
         p.signed = {(int(a, 16), z) for a, sizes in data["signed"].items() for z in sizes} if "signed" in data \
             else None
+        p.global_pointers = {int(a, 16): k for a, k in data["global_pointers"].items() if k in p.structs} \
+            if "global_pointers" in data else None
         return p
 
     def align(self, name, depth=0):
@@ -2274,6 +2283,80 @@ def plan(s, trees, digests=None, least=2):
         if ptrs:
             out.pointers[name] = ptrs
     out.digests = {f: (digests or {}).get(f) for f in out.typed}
+    out.global_pointers = pointer_globals(out, trees)
+    return out
+
+
+GLOBAL_MACRO = re.compile(r"^#define (\w+) \(\*\(volatile (\w+) \*\)0x([0-9a-fA-F]+)u\)$")
+
+
+def macro_globals(tree):
+    """{name: (address, type)} of the scalars at fixed addresses whose macros dread.naming apply_globals
+    put into tree's file (#define g_20029aac (*(volatile u32 *)0x20029aacu))."""
+    out = {}
+    for item in tree.items:
+        if isinstance(item, C.Raw):
+            for line in item.text.splitlines():
+                m = GLOBAL_MACRO.match(line.strip())
+                if m:
+                    out[m.group(1)] = (int(m.group(3), 16), m.group(2))
+    return out
+
+
+def pointer_globals(p, trees):
+    """{address: structure} of the words at fixed addresses that hold a pointer to one of plan p's
+    structures (FreeRTOS's pxCurrentTCB, the running task's block): every variable typed as a pointer
+    (p.typed) that a function loads from the word or stores into it points to the same structure; such
+    loads and stores are at least as many as the word's other uses (loads into variables that stay
+    integers, stores of integers, its value in an expression: each a cast once it is a pointer); and the
+    word is only loaded and stored whole (no p++, +=, nor its address taken: on a pointer they would step
+    by the structure, or the address would have another type). Read from the analysis trees, whose files
+    define the words' macros already (macro_globals: by address, whatever their names). apply_types then
+    writes the word as a typed variable (2026-10-25: until then every use was cast to the structure,
+    (volatile struct s_8 *)g_20029aac, six times in one FreeRTOS function)."""
+    from collections import Counter
+    from dread.cflow import walk_expr
+    from dread.naming import _exprs
+    votes, other, bad = {}, {}, set()
+    for tree, fn, _ in trees:
+        macros = {n: a for n, (a, t) in macro_globals(tree).items() if t == "u32"}
+        if not macros:
+            continue
+        typed = {v: k for v, k in p.typed.get(fn.name, {}).items() if k in p.structs}
+        for st in _statements(fn):
+            for e in _exprs(st):
+                counted = set()             # (the macro names a load or store above counted)
+                for x in walk_expr(e):
+                    if isinstance(x, C.Assign) and isinstance(x.target, C.Name) and x.target.id in macros:
+                        a = macros[x.target.id]
+                        counted.add(id(x.target))
+                        if x.op != "=":
+                            bad.add(a)
+                        elif isinstance(x.value, C.Name) and x.value.id in typed:
+                            votes.setdefault(a, Counter())[typed[x.value.id]] += 1
+                        else:
+                            other[a] = other.get(a, 0) + 1
+                    if isinstance(x, C.Assign) and x.op == "=" and isinstance(x.target, C.Name) \
+                            and isinstance(x.value, C.Name) and x.value.id in macros:
+                        a = macros[x.value.id]
+                        counted.add(id(x.value))
+                        if x.target.id in typed:
+                            votes.setdefault(a, Counter())[typed[x.target.id]] += 1
+                        else:
+                            other[a] = other.get(a, 0) + 1
+                    if isinstance(x, (C.Post, C.Unary)) and x.op in ("++", "--", "&") and isinstance(x.e, C.Name) \
+                            and x.e.id in macros:
+                        bad.add(macros[x.e.id])
+                for x in walk_expr(e):
+                    if isinstance(x, C.Name) and x.id in macros and id(x) not in counted:
+                        other[macros[x.id]] = other.get(macros[x.id], 0) + 1
+    out = {}
+    for a, c in votes.items():
+        if a in bad or len(c) != 1:
+            continue
+        (k, n), = c.items()
+        if n >= other.get(a, 0):
+            out[a] = k
     return out
 
 
@@ -2421,11 +2504,16 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     def fname(k, rel):
         return field_name(names.get(k, (k, {}))[1], rel)
     from dread.naming import _rewrite, _rewrite_stmt
+    # (the words at fixed addresses that hold a structure's pointer: by address, whatever the digest)
+    words = {n: p.global_pointers[a] for n, (a, t) in macro_globals(tree).items()
+             if t == "u32" and a in (p.global_pointers or {}) and p.global_pointers[a] in p.structs}
     if made_for is not None and p.digests.get(fn.name) not in (None, made_for):
-        return []
-    typed = {v: k for v, k in p.typed.get(fn.name, {}).items() if k in p.structs}
-    allowed = pointer_candidates(fn) - _uses(fn)
-    typed = {v: k for v, k in typed.items() if v in allowed}
+        typed = {}                          # (variables typed for other C: the words alone)
+    else:
+        typed = {v: k for v, k in p.typed.get(fn.name, {}).items() if k in p.structs}
+        allowed = pointer_candidates(fn) - _uses(fn)
+        typed = {v: k for v, k in typed.items() if v in allowed}
+    typed.update(words)
     if not typed:
         return []
     order = []                              # (the structures defined: those typed and those they hold,
@@ -2613,6 +2701,14 @@ def apply_types(tree, fn, p, made_for=None, names=None):
     for k in sorted(moved, reverse=True):
         fn.body.body.insert(0, C.Decl("volatile struct %s" % cname(k), [C.Declarator(n, ptr="*")
                                                                           for n in sorted(moved[k])]))
+    for item in tree.items:                 # (a word that holds a structure's pointer: its macro the pointer,
+        if isinstance(item, C.Raw) and words:   # itself as volatile as before)
+            lines = item.text.splitlines()
+            for i, line in enumerate(lines):
+                m = GLOBAL_MACRO.match(line.strip())
+                if m and m.group(1) in words:
+                    lines[i] = "#define %s (*(%svolatile *)0x%su)" % (m.group(1), ptype[words[m.group(1)]], m.group(3))
+            item.text = "\n".join(lines)
     define(tree, fn, p, set(typed.values()), names)
     from dread.build import NULL_CHECKS     # (a pointer it dereferences may be 0 and still be compared with 0:
     tree.items.insert(0, C.Raw(NULL_CHECKS))    # dread.build compiles it so)

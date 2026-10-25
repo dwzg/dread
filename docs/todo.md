@@ -2952,6 +2952,18 @@ the pilot's names, which the first review had taken for raw frames. New items:
   the file passes such an object or 0. Public examples: FreeRTOS mps2-gcc-Os
   prvAddCurrentTaskToDelayedList (pxCurrentTCB cast at six uses; `uxListRemove(r0_1 + 4)` for
   `&pxCurrentTCB->xStateListItem`); gizmo a32 print_status (`fmt_dec((u32)stack20, ...)`).
+  Globals: done 2026-10-25 (dread.shapes pointer_globals, the readable_types table's global_pointers,
+  apply_types; docs/decisions.md, "Words that hold a structure's pointer"): a word at a fixed address that
+  every typed variable loading or storing it takes as a pointer to one structure is declared as that
+  pointer (`#define g_20029aac (*(volatile struct s_8 *volatile *)0x20029aacu)`), a typed variable takes it
+  as it is, members and member addresses go through it (`&g_20029aac->f_4`), other uses are `(u32)`. On
+  the eight builds the gate accepts the same functions; casts of such words to a structure pointer 53 ->
+  13 (GCC -Os), 50 -> 15 (clang -O2), 52 -> 47 (GCC -O0), 31 -> 31 (RISC-V GCC -Os, whose globals are
+  reached through a base register), while (u32) casts of them 0 -> 31, 40, 1, 0: nearly all of those are
+  pxCurrentTCB read into a variable that a call takes as a u32 (`uxListRemove(r0_1 + 4)`), whose
+  parameter is not typed. Left: frame objects to all-u32 externs (gizmo a32 print_status's
+  `fmt_dec((u32)stack20, ...)`; uart_puts there also takes texts, so "every call passes such an object"
+  holds for fmt_dec only), and typed parameters of the list functions, which would take the casts above.
 - [x] **One radix per object, and stores through pointers.** Follow-up of "Radix by use". The bytes of
   one small local can come out in two radices (`0x96u, 0x35u, 15`), and constants stored through pointer
   parameters stay hex while the bounds that select them print in decimal. Decide the radix for an
