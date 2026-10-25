@@ -3085,13 +3085,26 @@ the pilot's names, which the first review had taken for raw frames. New items:
   which can be the entry's copy of a parameter. gizmo a32 read_line shows `2097c  r0[r4] = 0;` for the
   store at 0x209c8; 0x2097c is `mov r5, r0`. Prefer the statement's own instruction when the folded ones
   are earlier register copies.
-- [ ] **Readable C of a wrapped function's body.** A function that reaches its caller's stack (a
+- [x] **Readable C of a wrapped function's body.** A function that reaches its caller's stack (a
   variadic one, or one whose callees read its stack arguments) is lifted as a naked trampoline and a body
   that takes the real stack's address, and dread readable leaves both as the lifter wrote them: registers,
   the flags as compare instructions set them, gotos. Run the clean-up and the structure on the body (its
   frame accesses staying raw, as they must), and print the trampoline in one line. Public examples:
   FreeRTOS printf and sprintf on every build. Frequent on the private real-life test, where the naming
   pilot then describes the trampoline instead of the function.
+  Done 2026-10-25 (dread.readable picked): the stages ran on the function the file is named after, which
+  for a wrapped one is its entry, an asm block; now the body is the function readable C is made of, and
+  carries the function's name while the stages run (what the tables, the plan and the names know it by),
+  the entry NAME_dread_entry; the heads keep their own text (the body's starts with its attribute, which
+  no stage's head pattern matches, so its parameters and its declaration stay as the lifter wrote them).
+  FreeRTOS GCC -Os's printf: `return tiny_print(0, r0, sp0 - 12, 0);` behind the stores of its variadic
+  registers, where the lifted form set flags and passed registers. On the eight builds the gate accepts
+  the same functions; printf and sprintf changed on the FreeRTOS builds, and with them their callers
+  prvCheckTask and vAssertCalled, whose formats now show (`printf(0x108u /* "ASSERT! Line %d, file
+  %s\r\n" */, ...)`: printf's body tells that its first parameter is a text), and one structure of GCC
+  -O0's gained the byte the body reads; gizmo, which wraps nothing, unchanged. Not done: the trampoline
+  stays as the lifter wrote it (one asm statement). Test: tests/test_readable.py
+  test_a_wrapped_function_s_body_is_made_readable.
 - [ ] **Division helpers as operators.** A runtime helper that returns a quotient and a remainder prints
   as a two-word call with its halves cut out: `(u32)(__aeabi_uidivmod(r4, 0xau) >> 32) + 0x30u`. Print
   `r4 % 10 + '0'` where the helper is known to divide (by name for the EABI's; by its behaviour in the

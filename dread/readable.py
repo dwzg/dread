@@ -448,6 +448,31 @@ def plan_key(context):
 EXTERN = re.compile(r"^extern (\w+) (\w+)\(([^)]*)\);$")
 
 
+BODY = "_dread_body"         # dread.lift: a wrapped function's C body, behind its naked entry
+ENTRY = "_dread_entry"       # the entry's name while the body carries the function's (picked)
+
+
+def picked(tree, name):
+    """The function of a parsed lifted file that readable C is made of: the function itself, or for a
+    wrapped one (dread.lift: a naked entry whose asm calls NAME_dread_body, the C body, with the real
+    stack's address or an area for results beyond C's) its body, which then carries the function's name
+    (what the tables, the plan and the names know it by, and what the stages look up) while the entry is
+    NAME_dread_entry. The heads keep their own text, the body's never rewritten (it starts with its
+    attribute, which the stages' head patterns do not match), so the file prints, compiles and links as
+    the lifter wrote it, with the body's code made readable (until 2026-10-25 a wrapped function was
+    printed as lifted: the stages ran on its entry, an asm block). None where the file lacks the function."""
+    fn = tree.function(name)
+    if fn is None:
+        return None
+    body = tree.function(name + BODY)
+    asm = [st for st in fn.body.body if not isinstance(st, (cparse.Note, cparse.Empty))]
+    if body is not None and "naked" in fn.head and len(asm) == 1 and isinstance(asm[0], cparse.Asm) and \
+            name + BODY in "".join(asm[0].template.parts):
+        fn.name, body.name = name + ENTRY, name
+        return body
+    return fn
+
+
 def readable_tree(name, text, stages=None, context=None, with_results=True):
     """(tree, function) of a lifted file after the stages, before names (dread.naming): what a
     names proposal is made for. None when the text is not the lifters' dialect. with_results: and,
@@ -458,7 +483,7 @@ def readable_tree(name, text, stages=None, context=None, with_results=True):
         tree = cparse.parse(text)
     except cparse.ParseError:
         return None
-    fn = tree.function(name)
+    fn = picked(tree, name)
     if fn is None:
         return None
     if tidy.fixed_registers(tree):
@@ -764,7 +789,7 @@ def _figures_one(name):
     if made is None:
         return None
     tree, fn, stages = made
-    lifted = cparse.parse(text).function(name)      # (it parsed in _named)
+    lifted = picked(cparse.parse(text), name)       # (it parsed in _named)
     return {"readable": cmetrics.readable_figures(tree, fn),
             "lifted": cmetrics.count(cmetrics.skeleton(lifted.body.body)),
             "kept_lifted": stages is not None and not stages}       # (_named: [] for fixed registers)

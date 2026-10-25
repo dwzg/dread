@@ -506,10 +506,12 @@ __attribute__((naked)) void f(void)
 
 def test_the_view_of_a_function_with_a_body_shows_the_body():
     """A variadic function lifted as a naked entry and its body: the view a question shows has both
-    (the entry alone named FreeRTOS's printf a trampoline)."""
+    (the entry alone named FreeRTOS's printf a trampoline). Since 2026-10-25 the body is the function
+    readable C is made of (readable.picked): readable, last, as a function is shown behind the file's
+    others; the entry in front of it as the lifter wrote it (before, the body came first, as lifted)."""
     text = readable.view("f", WRAPPED)
-    assert text is not None and "f_dread_body(u32 a0" in text and "g(r0, r1, r2, r3)" in text, text
-    assert text.index("f_dread_body(u32") < text.index("void f(void)")
+    assert text is not None and "f_dread_body(u32 a0" in text and "return g(r0, r1, r2, r3);" in text, text
+    assert text.index("void f(void)") < text.index("f_dread_body(u32") and "(void)r12" not in text, text
 
 
 def test_a_call_saved_line_lets_the_stages_run_and_a_fixed_line_does_not():
@@ -1021,3 +1023,46 @@ def test_the_image_s_structures_once_in_a_header_the_printed_form_includes(tmp_p
     assert readable.main(["--target", target.root, "--plain", "ring_put"]) == 0
     plain = capsys.readouterr().out
     assert "/* struct s_1: u32 f_20 at 0x20, u32 f_24 at 0x24 */" in plain and ": ldr" not in plain, plain
+
+
+# ---- a wrapped function's body made readable (2026-10-25)
+
+BODY_PREAMBLE = ("    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0, r11 = 0, "
+            "r12 = 0, lr = (u32)__builtin_return_address(0);\n    u32 n = 0, z = 0, c = 0, v = 0;\n"
+            "    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)lr; (void)sp0;\n")
+BODY_ENTRY = ('__attribute__((naked)) void h(void)\n{\n    __asm__ volatile ("mov r12, sp\\n\\tsub sp, sp, #8\\n\\t'
+         'push {r12, lr}\\n\\tbl h_dread_body\\n\\tpop {r12, lr}\\n\\tadd sp, sp, #8\\n\\tbx lr");\n}\n')
+BODY_WRAPPED = ("/* h at 0x100, lifted by dread lift: one statement per instruction. */\n#include \"dread.h\"\n"
+           "extern u32 g(u32, u32);\nu32 h_dread_body(u32 a0, u32 a1, u32 a2, u32 a3, u32 sp0);\n" + BODY_ENTRY +
+           "__attribute__((noinline, used)) u32 h_dread_body(u32 a0, u32 a1, u32 a2, u32 a3, u32 sp0)\n{\n" + BODY_PREAMBLE +
+           "    r12 = (u32)*(volatile u32 *)(sp0 + 0);  /* 100: ldr r12, [sp] */\n"
+           "    { u32 x = r0, y = 0x0u; u64 t = (u64)x + (u32)~y + 1; u32 r = (u32)t; n = r >> 31; z = r == 0; "
+           "c = (u32)(t >> 32); v = ((x ^ r) & (~y ^ r)) >> 31; }  /* 104: cmp r0, #0 */\n"
+           "    if (z) goto L_110;  /* 108: beq #0x110 */\n"
+           "    r0 = g(r12, r1); r1 = r2 = r3 = r12 = 0;  /* 10c: bl g */\n"
+           "    return r0;  /* 10e: bx lr */\n"
+           "L_110: ;\n"
+           "    r0 = ~0x0u;  /* 110: mvn r0, #0 */\n"
+           "    return r0;  /* 114: bx lr */\n}\n")
+
+
+def test_a_wrapped_function_s_body_is_made_readable():
+    """A wrapped function (dread.lift: a naked entry that reserves the frame and calls NAME_dread_body
+    with the real stack's address, as for FreeRTOS's printf): the stages run on its body, which carries
+    the function's name meanwhile (readable.picked), not on the entry; the entry, the body's declaration
+    and its head stay as the lifter wrote them (the file links as it did), the body's flags and goto are
+    gone, its stack argument read where it lies. Until 2026-10-25 both were printed as lifted."""
+    out = readable.transform("h", BODY_WRAPPED, context=readable.Context())
+    assert BODY_ENTRY in out, out
+    assert "u32 h_dread_body(u32 a0, u32 a1, u32 a2, u32 a3, u32 sp0);" in out, out
+    assert "__attribute__((noinline, used)) u32 h_dread_body(u32 a0, u32 a1, u32 a2, u32 a3, u32 sp0)" in out, out
+    body = out[out.index("__attribute__((noinline, used))"):]
+    assert "goto" not in body and "n = r >> 31" not in body and "u64" not in body, body
+    assert re.search(r"if \(\w+ == 0\)", body) or re.search(r"if \(\w+ != 0\)", body), body
+    assert "*(volatile u32 *)sp0" in body and "g(" in body, body
+    tree = cparse.parse(BODY_WRAPPED)
+    fn = readable.picked(tree, "h")
+    assert fn.head.startswith("__attribute__((noinline, used)) u32 h_dread_body(") and fn.name == "h"
+    assert tree.function("h") is fn and tree.function("h" + readable.ENTRY).head.startswith("__attribute__((naked))")
+    plain = cparse.parse(BODY_WRAPPED.replace("bl h_dread_body", "bl other_body"))      # (an entry that calls
+    assert readable.picked(plain, "h").head.startswith("__attribute__((naked))")    # something else: itself)
