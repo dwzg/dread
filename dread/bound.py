@@ -16,10 +16,12 @@ statement and takes them back (ARM: lift.Lifter._bound_call):
 which readable C printed over nine lines a call. compact writes it as one statement of dread.h's BOUND
 (BOUND_R12 where r12 is among the registers, which the asm then binds instead of clobbering):
 
-    BOUND(timer_wait, IO(r0, delay), IO(r1, r1), IN(r2, 5), INOUT(r5, arg, r3));
+    BOUND(timer_wait, R0(delay), R1(r1), R2_IN(5), R5_IN_OUT(arg, r3));
 
-IO(r, v): v handed in r and r taken back into v; IN(r, e): e handed in r, what the call leaves there
-unread; INOUT(r, e, v): e handed in r, r taken back into v. dread.h's macros make the same block (the
+Rn(v): v handed in rn and rn taken back into v; Rn_IN(e): e handed in rn, what the call leaves there
+unread; Rn_IN_OUT(e, v): e handed in rn, rn taken back into v. The register is in the macro's name: as an
+argument (IO(r0, v), until the same day) it was a name like any other, and the naming pilot's renaming of
+a variable r0 renamed the register too, which no longer compiled. dread.h's macros make the same block (the
 same instructions: tests/test_bound.py compiles both). Only the block as the lifter writes it is so
 written: the asm a bl and nothing else (no flags read behind it, no stack arguments), its outputs the
 registers' variables in their order, its clobbers lr, cc, memory and r12 unless r12 is bound (no FPU
@@ -116,12 +118,13 @@ def _statements(blk):
     args = []
     for x, r, init in regs:
         v = back.get(x)
+        reg = r.upper()                     # (in the macro's name: renaming a variable r0 renames no register)
         if v is None:
-            args.append(C.Call(C.Name("IN"), [C.Name(r), init]))
+            args.append(C.Call(C.Name(reg + "_IN"), [init]))
         elif isinstance(init, C.Name) and init.id == v:
-            args.append(C.Call(C.Name("IO"), [C.Name(r), C.Name(v)]))
+            args.append(C.Call(C.Name(reg), [C.Name(v)]))
         else:
-            args.append(C.Call(C.Name("INOUT"), [C.Name(r), init, C.Name(v)]))
+            args.append(C.Call(C.Name(reg + "_IN_OUT"), [init, C.Name(v)]))
     call = C.Call(C.Name("BOUND_R12" if bound12 else "BOUND"), [C.Name(m.group(1))] + args)
     stmt = C.ExprStmt(call)
     stmt.addr = getattr(blk, "addr", None) or getattr(asm, "addr", None) or getattr(body[0], "addr", None)

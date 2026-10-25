@@ -24,11 +24,11 @@ def compacted(body):
 
 
 def test_the_block_as_the_lifter_writes_it_is_one_statement():
-    """IO where a register goes back into the variable it came from, IN where nothing takes it back,
-    INOUT where it goes back into another; what followed the write-backs (r12 = 0) follows."""
+    """Rn where a register goes back into the variable it came from, Rn_IN where nothing takes it back,
+    Rn_IN_OUT where it goes back into another; what followed the write-backs (r12 = 0) follows."""
     changed, out = compacted(CALL)
     assert changed
-    assert "BOUND(timer_wait, IO(r0, delay), IO(r1, r1), IN(r2, 5), INOUT(r5, arg, r3));" in out, out
+    assert "BOUND(timer_wait, R0(delay), R1(r1), R2_IN(5), R5_IN_OUT(arg, r3));" in out, out
     assert "r12 = 0;" in out and "__asm__" not in out and "register" not in out, out
 
 
@@ -38,7 +38,7 @@ def test_r12_bound_and_inside_an_arm():
     text = ('    if (delay != 0) { register u32 x0 __asm__("r0") = delay, x12 __asm__("r12") = arg; '
             '__asm__ volatile ("bl timer_wait" : "+r"(x0), "+r"(x12) :: "lr", "cc", "memory"); delay = x0; r12 = x12; }\n')
     changed, out = compacted(text)
-    assert changed and "BOUND_R12(timer_wait, IO(r0, delay), INOUT(r12, arg, r12));" in out, out
+    assert changed and "BOUND_R12(timer_wait, R0(delay), R12_IN_OUT(arg, r12));" in out, out
 
 
 @pytest.mark.parametrize("change", [
@@ -83,3 +83,19 @@ def test_the_macro_makes_the_same_instructions_as_the_block(tmp_path):
         dump = subprocess.run(target.compiler.command("objdump") + ["-d", str(obj)], capture_output=True, text=True)
         code[name] = [line.split("\t", 2)[-1] for line in dump.stdout.splitlines() if line[:1] == " " and "\t" in line]
     assert code["block"] == code["macro"] and code["block"], code
+
+
+
+def test_renaming_a_variable_named_like_a_register_renames_no_register():
+    """The naming pilot renames the variables of the C it showed, BOUND statements written already: the
+    variables r0 and r1 renamed, the registers stay those of the macros' names (until the same day the
+    register was an argument, IO(r0, r0), and became IO(delay, delay): __asm__("delay"), no C)."""
+    from dread import naming
+    tree = cparse.parse(HEAD + "u32 f(u32 r0, u32 r1)\n{\n    u32 r12;\n" + CALL.replace("delay", "r0").replace("arg", "r1") +
+                        "    return r0 + r1;\n}\n")
+    fn = tree.function("f")
+    assert bound.compact(fn)
+    naming.rename(fn, {"r0": "delay", "r1": "count", "r3": "left"})
+    out = cparse.unparse(fn, notes=False, style="readable")
+    assert "BOUND(timer_wait, R0(delay), R1(count), R2_IN(5), R5_IN_OUT(count, left));" in out, out
+

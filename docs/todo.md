@@ -2021,9 +2021,9 @@ model).
   mark a register read as unreachable (a report on a path that cannot run), so that the call is a
   plain call there. Public example: none found (GCC code does not read registers its caller left);
   test: gizmo assembly.
-  The statement done 2026-10-25 (dread/bound.py, dread.h's BOUND, BOUND_R12, IO, IN, INOUT): the
-  lifter's block (register variables, the asm's bl, the write-backs) as `BOUND(f, IO(r0, a), IO(r1, b),
-  IN(r2, 5), INOUT(r5, c, d));` behind dread.polish, only where the block is the lifter's as it writes it
+  The statement done 2026-10-25 (dread/bound.py, dread.h's BOUND, BOUND_R12, Rn, Rn_IN, Rn_IN_OUT): the
+  lifter's block (register variables, the asm's bl, the write-backs) as `BOUND(f, R0(a), R1(b), R2_IN(5),
+  R5_IN_OUT(c, d));` behind dread.polish, only where the block is the lifter's as it writes it
   (no flags read behind the call, no stack arguments, no FPU registers, plain write-backs: else the block
   stays); what followed the write-backs (r12 = 0) follows. The macros make the same instructions as the
   block (tests/test_bound.py compiles both with gizmo a32's compiler). ARM only: RISC-V's bound calls

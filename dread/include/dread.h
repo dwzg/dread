@@ -73,14 +73,51 @@ typedef signed long long s64;
  * caller reads what the callee leaves beyond a C result) in one statement, as readable C writes it
  * (dread.bound): the registers named are handed in, the call is made, and they are taken back. ARM with
  * GCC (the C is built with -ffixed for the registers it reads as left), up to sixteen registers:
- *     BOUND(f, IO(r0, a), IO(r1, b), IN(r2, 5), INOUT(r3, c + 1, d));
- * IO(r, v): v handed in r, and r back into v; IN(r, e): e handed in r, what the call leaves there unread;
- * INOUT(r, e, v): e handed in r, r back into v. BOUND clobbers r12, BOUND_R12 binds it instead (r12 among
- * the registers named). */
+ *     BOUND(f, R0(a), R1(b), R2_IN(5), R5_IN_OUT(c + 1, d));
+ * Rn(v): v handed in rn, and rn taken back into v; Rn_IN(e): e handed in rn, what the call leaves there
+ * unread; Rn_IN_OUT(e, v): e handed in rn, rn taken back into v. The register is in the macro's name, not
+ * among its arguments, so that renaming a variable r0 renames no register. BOUND clobbers r12, BOUND_R12
+ * binds it instead (R12 among the registers named). */
 #if defined(__arm__) || defined(__thumb__)
-#define IO(r, v) (IO, r, v, v)
-#define IN(r, e) (IN, r, e, _)
-#define INOUT(r, e, v) (INOUT, r, e, v)
+#define R0(v) (IO, r0, v, v)
+#define R0_IN(e) (IN, r0, e, _)
+#define R0_IN_OUT(e, v) (INOUT, r0, e, v)
+#define R1(v) (IO, r1, v, v)
+#define R1_IN(e) (IN, r1, e, _)
+#define R1_IN_OUT(e, v) (INOUT, r1, e, v)
+#define R2(v) (IO, r2, v, v)
+#define R2_IN(e) (IN, r2, e, _)
+#define R2_IN_OUT(e, v) (INOUT, r2, e, v)
+#define R3(v) (IO, r3, v, v)
+#define R3_IN(e) (IN, r3, e, _)
+#define R3_IN_OUT(e, v) (INOUT, r3, e, v)
+#define R4(v) (IO, r4, v, v)
+#define R4_IN(e) (IN, r4, e, _)
+#define R4_IN_OUT(e, v) (INOUT, r4, e, v)
+#define R5(v) (IO, r5, v, v)
+#define R5_IN(e) (IN, r5, e, _)
+#define R5_IN_OUT(e, v) (INOUT, r5, e, v)
+#define R6(v) (IO, r6, v, v)
+#define R6_IN(e) (IN, r6, e, _)
+#define R6_IN_OUT(e, v) (INOUT, r6, e, v)
+#define R7(v) (IO, r7, v, v)
+#define R7_IN(e) (IN, r7, e, _)
+#define R7_IN_OUT(e, v) (INOUT, r7, e, v)
+#define R8(v) (IO, r8, v, v)
+#define R8_IN(e) (IN, r8, e, _)
+#define R8_IN_OUT(e, v) (INOUT, r8, e, v)
+#define R9(v) (IO, r9, v, v)
+#define R9_IN(e) (IN, r9, e, _)
+#define R9_IN_OUT(e, v) (INOUT, r9, e, v)
+#define R10(v) (IO, r10, v, v)
+#define R10_IN(e) (IN, r10, e, _)
+#define R10_IN_OUT(e, v) (INOUT, r10, e, v)
+#define R11(v) (IO, r11, v, v)
+#define R11_IN(e) (IN, r11, e, _)
+#define R11_IN_OUT(e, v) (INOUT, r11, e, v)
+#define R12(v) (IO, r12, v, v)
+#define R12_IN(e) (IN, r12, e, _)
+#define R12_IN_OUT(e, v) (INOUT, r12, e, v)
 #define DREAD_BIND_(k, r, e, v) register u32 dread_##r##_ __asm__(#r) = (u32)(e);
 #define DREAD_OPND_(k, r, e, v) "+r"(dread_##r##_)
 #define DREAD_BACK_(k, r, e, v) DREAD_BACK_##k(r, v)
