@@ -100,7 +100,7 @@ its sources.
   (tests/test_structure.py: 400 random functions with switches, compiled before and after, the same
   results on random arguments, every switch structured). On the 39 builds' 11,359 lifted functions
   gotos 12,950 -> 12,228 (FreeRTOS has few switches); on a private firmware's readable C, which has
-  many switches, the gotos fell by more than half. The gate accepts the same functions as before on
+  many switches, far more of its gotos went. The gate accepts the same functions as before on
   nine builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; the
   private firmware).
   The gotos left, by cause (2026-10-22; each goto by the block it leaves and the one it goes to, on
@@ -541,11 +541,11 @@ its sources.
   address, not per structure of static data; a target whose data symbols are complete (an ELF's) could
   let them make structures too (gizmo's g_config), which needs the target to say so.
   On the private real-life test (2026-10-23) the gate accepted the same functions with the structures
-  of static data as without; about a sixth of its readable C's accesses at fixed addresses became
+  of static data as without; many of its readable C's accesses at fixed addresses became
   members of them (on FreeRTOS a twentieth), and where its reconstruction has named the fields, the
   structures found are the blocks it reads as one base with offsets too. With the arrays (the same
-  day) half as many again became members, a fifth of those indexed, a tenth of the raw accesses went,
-  and some hundreds of addresses read as &; the gate still accepted the same functions.
+  day) more became members, some of them indexed, raw accesses went, and addresses read as &; the gate
+  still accepted the same functions.
   The four left above, done later on 2026-10-23 (docs/decisions.md, "Arrays of static data, addresses
   as &, and what callees reach"). Arrays (statics.find_arrays): a load or store of the lifted functions'
   readable C at a constant plus an index times a scale (indexed_accesses; dread.tidy folded the
@@ -625,7 +625,7 @@ its sources.
   Where it stands (2026-10-23, the structures behind pointers, of static data and its arrays done):
   volatile now sits in declarations and macros (a struct pointer's type, g_x's definition), where it
   does not get in a reader's way; what still shows it is the raw accesses, *(volatile u32 *)(r3 + 8),
-  some hundreds on a FreeRTOS build and thousands on the private firmware, which plain accesses
+  some hundreds on a FreeRTOS build and many more on the private firmware, which plain accesses
   would shorten by a word each. Against that, plain accesses let the compiler merge and hoist loads (a
   wait for a flag an interrupt sets would spin forever) and the gate's per-access identity no longer
   holds. Not now: the raw accesses are better served by more of them becoming members (structures,
@@ -634,8 +634,8 @@ its sources.
   after the call (an old ARM compiler's __value_in_regs: a structure of up to four words returned in
   r0-r3) is refused while any original caller reads them, since C under the AAPCS returns at most
   r0:r1; so is one that reads registers its caller left (the stale readers). On the private real-life
-  test that is about a hundred functions, many of them the RTOS's service calls, which its
-  reconstruction rewrote by hand together with their callers. A way: lift such a function with all
+  test that is many functions, which its reconstruction rewrote by hand together with their callers. A
+  way: lift such a function with all
   of its callers as one group, the extra results handed between the group's C functions through a
   structure (their ABI among themselves is free), refused while a caller stays machine code; or a
   thin asm wrapper that loads r2 and r3 from that structure for callers that stay machine code.
@@ -691,8 +691,8 @@ its sources.
 - [x] **Stack arguments through a bound call.** A call of a function that reads a register its caller
   leaves (r4-r11), or whose result the caller reads behind the call, and that also takes stack
   arguments was refused ("calls X, which reads r5 its caller leaves"; "reads r2 behind the call of
-  X"): Lifter._bound_call passed none. Found on the private real-life target (dozens of functions
-  there; not measured here). Done 2026-10-24 (docs/decisions.md): the asm statement reserves the
+  X"): Lifter._bound_call passed none. Found on the private real-life target (not measured
+  here). Done 2026-10-24 (docs/decisions.md): the asm statement reserves the
   stack-argument words below the stack pointer (8-byte alignment kept, 16 on RISC-V), stores them as
   the caller's C has them (_stack_arg_values, shared with _call) before the bl or call, and restores
   the stack pointer after; frame_effects counts the words, so the caller's frame keeps its outgoing
@@ -708,7 +708,7 @@ its sources.
 - [x] **A callee whose stack pointer is not static.** A call of a function whose stack pointer is not
   static (sp set from an auipc or from a register the analysis does not know, a variable-length
   array's sub sp, sp, rN) was refused for every caller ("calls X, whose stack arguments are not
-  known"). Found on the private real-life target (dozens there; not measured here). Done 2026-10-24
+  known"). Found on the private real-life target (not measured here). Done 2026-10-24
   (docs/decisions.md): scan_stack_args counts the words such a callee reads above its entry, walking
   past the point where its stack pointer is lost and following the registers that still hold a frame
   address (a frame pointer set from sp at the entry); a caller that stores those words into its
@@ -759,7 +759,7 @@ its sources.
   register ICSR got portNVIC_INT_CTRL_REG, FreeRTOS's own name for it. 32 answers, 30,324 tokens
   in and 30,632 out, about $0.02. Collecting the globals' uses runs the stages over every readable
   function (49 s for GCC -Os's 316 on one core; in a pool of workers since 2026-10-22, a large
-  private firmware's in a sixth of the time, dread.readable in_pool). The variables' questions went
+  private firmware's in a fraction of the time, dread.readable in_pool). The variables' questions went
   one after another, each made in its turn (the stages, and its callers found by a walk over the
   whole image's code, once per function), slow on a large private firmware; since 2026-10-22
   `--task readable` asks them --jobs at a time (default 4, as --task name; name_variables): all of
@@ -1221,7 +1221,7 @@ its sources.
   random audit of names without a reason would at least count the misses) not tried; the review's
   spread between two runs of itself not measured (one decision went both ways in two trials).
   On the private real-life test (2026-10-23, after a naming run with the device line): it challenged
-  two fifths of the functions (FreeRTOS: a fifth) and changed about a tenth of them; the changed names
+  more of the functions than on FreeRTOS and changed some of them; the changed names
   were judged closer to the true ones somewhat more often than the old ones, by functions and by
   groups, but not beyond chance; it changed only one group's name, the device line having fixed the
   misread groups already. On the way it crashed the process in Unicorn (eight threads in one engine of
@@ -1852,7 +1852,7 @@ model).
 
 - [x] **Regressions of 2026-10-23 on a private firmware: two-word results, callers of a function that
   fails, save areas behind a frame copy.** After the day's readable C changes the readable gate kept
-  many times as many functions of the private real-life test lifted, most of them readable the day
+  many more functions of the private real-life test lifted, many of them readable the day
   before; traced to three causes (docs/decisions.md). (1) A callee declared u64 (two words back: a
   division's quotient and remainder) whose first word a function compares or shifts: since f6757bd
   loads_once lets a call be a value's only effect, the values pass writes r0 = f(...) for
@@ -2789,7 +2789,7 @@ the pilot's names, which the first review had taken for raw frames. New items:
 - [x] **Frame objects under the table's names.** dread.frames finds the frame array and its end by their
   names (`frame`, `sp0`) and runs after the readable_names table is applied. Wherever a naming run named
   either, no objects are made: not in the printed C, not in the compiled C the gate builds, not in the
-  next naming question (which then names the raw array again). On a private firmware this caused most of
+  next naming question (which then names the raw array again). On a private firmware this caused many of
   a review's raw frames, including those the 2026-10-23 review reported, and turned a frame that was one
   object under the earlier names into raw offsets. Make the objects before applying the names (drop the
   table's names for `frame`/`sp0`, or map them onto the object when the region is one), or find the
@@ -3197,6 +3197,14 @@ the pilot's names, which the first review had taken for raw frames. New items:
   must stay jumps) and the shapes one by one, compiled before and after; ten wrong variants of the rule
   each fail a test. The jump from an arm of an else-if chain to an earlier arm's start stays (the next
   item).
+- [x] **Quantities beside a private target, found by the leak check.** Rule 1 keeps a private target's
+  counts, scores, times and costs out of DREAD's texts; dread leakcheck looked for its names, addresses
+  and listed words, not for quantities, and on 2026-10-25 twenty passages written over three days still
+  gave some (reworded). Done the same day without a change to the tool: its words file takes regular
+  expressions, and the private project's now holds two that find a number with a unit, a fraction or a
+  count in words within a sentence of a mention of the private target; a public build's figure beside
+  such a mention goes into the allow file. Old commits keep such passages: they are allowed by their
+  text, and a rewrite of the public history is the user's decision.
 - [ ] **A jump from an else-if arm to an earlier arm's start.** `if (A) { L: T } else if (C) { X } else {
   S; if (B) goto L; R }`: joined as `if (A || (!C && (S, B))) { T } else if (C) ...` it evaluates C twice,
   so only where C has no effects and reads only variables that S and B do not write (a volatile read
@@ -5185,9 +5193,8 @@ tool, the page shows its records; the only changes are the command line's own.
   function, refused outside the target's directory, compiled and loaded after the change and undone
   when anything still uses the old name) and notes (annotations.txt). The tools now keep what the
   page reads: `dread lift --check` writes verdicts.tsv, `dread test` the missed instructions.
-  Measured on a large private image: loading 0.14 s, the background analyses 19 s, a median function
-  0.024 s (2.6 s before the GUI reused one lifter fed with the never-returning functions it already
-  has), the largest 1.5 s.
+  Measured on a large private image: a function's page comes up at once (it took much longer before the
+  GUI reused one lifter fed with the never-returning functions it already has).
 - [ ] (Later: after MSP430) v2: a failing case's differences (the test run keeps them per function),
   pilot review (conversations, argued survivors and name proposals, accepted or rejected from the
   page through `dread rename` and argued.tsv).
@@ -6075,8 +6082,8 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 - [x] **Case keys scoped to a function's call tree** (2026-10-23; docs/decisions.md). The generated
   cases' key held one environment for the whole image (dread.autocase Generator.environment): a change
   of what dread.regflow found anywhere, or of the stubs' answers beyond a C result, made every case of
-  the image anew (on the private real-life test most of a day on 8 cores, for a change that concerned
-  the callers of a few dozen functions). Now it has two parts (docs/formats.md, "the key"): whole,
+  the image anew (on the private real-life test for hours, for a change that concerned
+  the callers of a few functions). Now it has two parts (docs/formats.md, "the key"): whole,
   what no call tree scopes (the image's bytes, the startup copies, the memory map, and, in no key
   before, the code's layout, the devices, stack, sentinel and scratch, the calling convention, the
   fixed registers, the core, the domains' address rows); and the facts of every function the

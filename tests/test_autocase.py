@@ -275,7 +275,7 @@ def test_case_keys_follow_the_call_tree(target, monkeypatch):
     others: the key holds the facts of its call tree only (Generator.scopes), so that a change of one
     function's facts makes the cases of the functions whose trees hold it anew and keeps the others'
     (until 2026-10-23 one digest of the whole image's findings: a change concerning the callers of a few
-    dozen functions made every case of a private firmware anew). gpio_set lies in the trees of led_on (a
+    functions made every case of a private firmware anew). gpio_set lies in the trees of led_on (a
     tail call on the M3 and RISC-V builds), handle_key and main, not in parse_kv's or checksum's; so do
     its stub's answers beyond a C result (more), its two-word answers (wide_results) and its rows of the
     domains table. The same image gives the same keys."""

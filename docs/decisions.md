@@ -439,8 +439,8 @@ round for results given back" (docs/todo.md).
   round that gave functions their results back (the table keeps each function's types for the digest of
   its C, and the first was made for the void forms), and with it every analysis tree and every
   function's readable C, which readable_texts kept by the whole context: FreeRTOS's clang -O2 gate went
-  from 58 s to 144 s, GCC -O0's from 49 to 166 s, and on a large private firmware a quarter of an hour
-  became most of an hour. How does such a round make only what changed, and still give, function for
+  from 58 s to 144 s, GCC -O0's from 49 to 166 s, and on a large private firmware it took several times
+  as long. How does such a round make only what changed, and still give, function for
   function, the C a check that keeps nothing gives?
 - **Options.**
   1. The table after such a round: (a) made from trees made anew, as before; (b) made from the analysis
@@ -2057,8 +2057,8 @@ were refused fail.
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
 
-- **Question.** Two refusals of the lifter, found on a private real-life target (dozens of functions
-  each there; its figures stay with it): (1) a call of a function that reads a register its caller
+- **Question.** Two refusals of the lifter, found on a private real-life target (its figures stay
+  with it): (1) a call of a function that reads a register its caller
   leaves (r4-r11), or whose result the caller reads behind the call, and that also takes stack
   arguments, was refused, since Lifter._bound_call passed no stack arguments; (2) a call of a function
   whose stack pointer is not static (sp set from an auipc or from a register the analysis does not
@@ -2134,8 +2134,8 @@ were refused fail.
 ## Readable C's two-word results, callers of a function that fails, save areas behind a frame copy (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), from regressions on the
-private real-life test: after the readable C changes of 2026-10-23 the readable gate kept many times
-as many of its functions lifted as the day before, most of them readable then.
+private real-life test: after the readable C changes of 2026-10-23 the readable gate kept many more
+of its functions lifted than the day before, many of them readable then.
 
 - **Question.** What made those functions fail, and how is each cause mended without taking from what
   the gate compares? Three causes were found, each traced to the first instruction where the images
@@ -2638,8 +2638,8 @@ signed use).
   bytes, the startup copies, the memory map, what dread.regflow found in the whole image (its case
   facts since this morning) and the table of stubs that answer registers beyond a C result (more). A
   change of regflow's findings or of that table anywhere made every case of the image anew: on the
-  private real-life test most of a day on 8 cores, for a change that concerned the callers of a few
-  dozen functions. What may a function's key leave out, and how are calls through pointers taken?
+  private real-life test for hours, for a change that concerned the callers of a few functions. What may
+  a function's key leave out, and how are calls through pointers taken?
 - **Options and choices.**
   1. What is scoped: (a) nothing; (b) what belongs to one function: its entries in regflow's case
      facts, its stub's answers beyond a C result, and (new in any key) its wide_results row and its
@@ -5047,8 +5047,8 @@ recommendations here."), on a recommendation.
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
 
 - **Question.** `dread pilot --task name` asked for one FUN_ function's name at a time, smallest
-  first, from its listing, and kept the proposals unscored. On a stripped firmware of thousands of
-  functions (DREAD's real-life test, private), what should a question show, in which order, and how
+  first, from its listing, and kept the proposals unscored. On a large stripped firmware
+  (DREAD's real-life test, private), what should a question show, in which order, and how
   is a name scored when the words of two good names differ (buf_len against buffer_length share
   no word)?
 - **Options.** Input: (a) the listing, as before; (b) the readable C where the function lifts, the
