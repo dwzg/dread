@@ -736,7 +736,7 @@ class Names:
                     self.reviewed.setdefault(int(r["address"], 16), []).append(r)
                 except ValueError:
                     continue
-        self.globals = naming.load(img, "globals")
+        self.globals = naming.load_globals(img, self.program)
         self.plan = shapes.load_plan(img)
         taken = {e.get("name") for e in self.globals.values() if isinstance(e, dict)}
         self.structs = naming.struct_names(self.plan, naming.load(img, "structs"), taken)

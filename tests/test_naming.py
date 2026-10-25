@@ -665,3 +665,36 @@ def test_the_shared_names_prompts_show_no_name_that_could_be_asked():
         assert not re.search(r"\b(g|io|rom)_[0-9a-f]{3,}|\bs_\d+\b|\bf_[0-9a-f]+\b", example), example
         assert "<your name>" in example and "placeholders" in prompt
     assert not re.search(r"\b(g|io|rom)_[0-9a-f]{3,}", pilot.GLOBALS_SYSTEM)
+
+
+def test_old_tables_names_lose_the_type_suffix_where_it_tells_nothing_apart():
+    """plain_globals (the context applies it to the table it loads): a name an older pilot kept with the
+    default name's type (g_play_state_u8) is used without it, unless that is another name of the table
+    (mode beside mode_u8), names two views of one address apart (state_u8, state_u16), is a default name,
+    a function's (avoid) or a keyword with its suffix."""
+    table = {"0x1 u8": {"name": "g_play_state_u8", "by": "m"}, "0x2 u16": {"name": "g_image_width_u16"},
+             "0x3 u8": {"name": "state_u8"}, "0x3 u16": {"name": "state_u16"}, "0x4 u8": {"name": "mode_u8"},
+             "0x5 u32": {"name": "mode"}, "0x6 u8": {"name": "g_6_u8"}, "0x7 s8": {"name": "main_s8"},
+             "0x8 u8": {"name": "if_u8"}, "0x9 u32": {"name": "tick_count"}}
+    got = {k: e["name"] for k, e in naming.plain_globals(table, avoid={"main"}).items()}
+    assert got == {"0x1 u8": "g_play_state", "0x2 u16": "g_image_width", "0x3 u8": "state_u8",
+                   "0x3 u16": "state_u16", "0x4 u8": "mode_u8", "0x5 u32": "mode", "0x6 u8": "g_6_u8",
+                   "0x7 s8": "main_s8", "0x8 u8": "if_u8", "0x9 u32": "tick_count"}, got
+    assert naming.plain_globals(table, avoid={"main"})["0x1 u8"]["by"] == "m"
+    assert table["0x1 u8"]["name"] == "g_play_state_u8"             # (the table itself is not changed)
+
+
+@pytest.mark.skipif(not shutil.which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_readable_c_writes_an_old_tables_global_without_its_type(tmp_path):
+    """A readable_names table written before the pilot took the type suffix off its answers: its
+    UART_DATA_u32 is printed UART_DATA, its uart_putc_u32 stays (uart_putc is a function)."""
+    from dread import readable
+    target, image, program, _, lifter = gizmo_copy(tmp_path / "gizmo")
+    naming.store(image, "0x40011000 u32", {"name": "UART_DATA_u32", "by": "an older pilot"}, part="globals")
+    out = readable.transform("uart_putc", lifter.lift(program.by_name["uart_putc"]).text,
+                             context=readable.Context(target, image, program))
+    assert "#define UART_DATA (*(volatile u32 *)0x40011000u)" in out and "UART_DATA_u32" not in out, out
+    naming.store(image, "0x40011000 u32", {"name": "uart_putc_u32", "by": "an older pilot"}, part="globals")
+    out = readable.transform("uart_putc", lifter.lift(program.by_name["uart_putc"]).text,
+                             context=readable.Context(target, image, program))
+    assert "#define uart_putc_u32 (*(volatile u32 *)0x40011000u)" in out, out

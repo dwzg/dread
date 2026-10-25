@@ -1361,7 +1361,7 @@ def name_shared(target, image, program, provider, context, lifter, names, everyt
                          jobs=jobs, batched=batch)
     out("dread pilot: %d globals named, of %d the functions use (their uses %.0f s, the questions %.0f s, %d at a "
         "time)" % (named, len(wanted), asking - started, time.time() - asking, at_once))
-    context.globals, context._static_names = naming.load(image, "globals"), None
+    context.globals, context._static_names = naming.load_globals(image, program), None
     structs = 0
     if context.plan.structs:                # (then the structures, which the variables' C shows)
         started = time.time()
@@ -2018,7 +2018,7 @@ class Namer:
         from dread import autocase, behaviour, naming
         if self._generator is None:
             self._generator = autocase.Generator(self.target, self.image, program=self.program)
-        return behaviour.section(self._generator, fn, self.flow, naming.load(self.image, "globals"),
+        return behaviour.section(self._generator, fn, self.flow, naming.load_globals(self.image, self.program),
                                  has_callers=fn.name in self.callers)
 
     def code(self, fn):

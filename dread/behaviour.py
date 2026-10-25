@@ -704,7 +704,7 @@ def sections(target, image, program, flow, names, jobs=None, called=None, make=T
         pass
     names = list(names)
     _G.clear()
-    _G.update(program=program, gen=gen, flow=flow, named=naming.load(image, "globals"), called=set(called),
+    _G.update(program=program, gen=gen, flow=flow, named=naming.load_globals(image, program), called=set(called),
               make=make)
     try:
         n = min(len(names), jobs or workers(memory_each=resident()))

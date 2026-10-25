@@ -2954,6 +2954,12 @@ the pilot's names, which the first review had taken for raw frames. New items:
   uart_getc, udiv_var and cmd_mode on every build; with Ubuntu 22.04's compilers too. Left: a negative
   value read only by == may be a u32 sentinel (0xFFFFFFFFu compared reads the same); a function only
   called through pointers keeps u32 (no caller reads it: RISC-V's cmd_mode).
+- [x] **Old tables' globals without the type suffix.** Done 2026-10-25 (dread.naming plain_globals,
+  load_globals): the pilot takes the default name's type off its answers since 2026-10-24, but a table
+  named before keeps names like g_play_state_u8, which the private real-life test's readable C showed
+  widely. Where names are shown, such a name is used without the suffix when the
+  name without it is unique in the table, no default name and no function's; two views of one address
+  named apart only by it keep it. The file is not rewritten (the pilot works on it as it is).
 - [x] **Why a variable has its type.** Done 2026-10-25 (dread readable --types NAME..., vartypes.explain):
   per function the table's types and whether they were made for this C, the variables the plan may type
   and why each other one may not (eligible's reasons: declared otherwise, initialised, an asm operand,

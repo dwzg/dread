@@ -166,7 +166,10 @@ other than a u32 one (`g_20029aac_u8`). The pilot asks for these before the func
 alone for every function's readable C (`dread pilot --task globals`, with the structures below); they
 need no digest, since an address does not change with the transformations. Since 2026-10-24 a proposed
 name keeps no such type at its end (`uxTimerFlags_u8` is stored as `uxTimerFlags`), unless the name
-without it is taken or another proposal of the same question (two views of one address). A structure of
+without it is taken or another proposal of the same question (two views of one address). A table from
+before keeps such names in the file; since 2026-10-25 they are shown without the type where the name
+without it is unique in the table, no default name and no function's (dread.naming load_globals: the
+readable C, the pilot's questions, the behaviour notes, the GUI's relations, --score). A structure of
 static data (the readable_types table's `statics`, since 2026-10-23) is named under `"0xADDRESS
 struct"` (its address), optionally with `"fields": {"OFFSET": name}`; a field without a name there
 takes the name of its own address and type (`"0x20000034 u32"`: the pilot asks for each field so,

@@ -526,6 +526,35 @@ def untyped(name):
     return m.group(1)
 
 
+def plain_globals(entries, avoid=()):
+    """The globals part of a readable_names table (entries: {key: entry}) with each name untyped where the
+    name without its suffix is still unique among the table's names, is no default name and nothing in
+    avoid (the image's function names): a table named before the pilot took the suffix off its answers
+    (2026-10-24) keeps names like g_play_state_u8 that echo the default name's type, which the macro and
+    the code show already. Two views of one address named apart only by the suffix keep it."""
+    names = {k: e.get("name") for k, e in entries.items() if isinstance(e, dict)}
+    plain = {k: untyped(n) for k, n in names.items() if isinstance(n, str)}
+    count = {}
+    for k, n in names.items():
+        final = plain.get(k, n)
+        count[final] = count.get(final, 0) + 1
+    out = {}
+    for k, e in entries.items():
+        n = names.get(k)
+        p = plain.get(k, n)
+        if isinstance(e, dict) and p != n and count.get(p) == 1 and p not in names.values() and p not in avoid \
+                and not re.match(r"^(g|io|rom)_[0-9a-f]+(_[us]\d+)?$", p):
+            e = dict(e, name=p)
+        out[k] = e
+    return out
+
+
+def load_globals(image, program=None):
+    """The table's globals part as names are shown (plain_globals: an older pilot's type suffixes off),
+    the program's function names avoided; the table itself as it is for writing to it (load)."""
+    return plain_globals(load(image, "globals"), avoid={f.name for f in program.functions} if program else ())
+
+
 def globals_in(fn):
     """{(address, type)} of the function's accesses to memory at fixed addresses."""
     from dread.cflow import walk_expr
@@ -1809,7 +1838,7 @@ def score_globals(image, elf_path):
     """The table's globals against the ELF's data symbols: ([rows], totals); a row says whether the
     name is the symbol's at that address (exact, ignoring case), shares a word with it, or names a
     place inside a symbol (a member of a structure, an element of an array: inside)."""
-    table = load(image, "globals")
+    table = load_globals(image)
     symbols = data_symbols(elf_path)
     rows = []
     totals = {"globals": 0, "exact": 0, "words": 0, "inside": 0, "unknown": 0}

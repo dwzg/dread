@@ -136,6 +136,7 @@ class Context:
         from dread.program import Program
         program = program or Program(target, image)
         self._program = program
+        self.globals = naming.load_globals(image, program)
         flow = flow or regflow.load(target, image, program)
         self.image_spans = statics.image_spans(program)
         self.arg_regs = list(target.abi.arg_regs)
