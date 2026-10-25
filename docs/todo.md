@@ -2973,13 +2973,20 @@ the pilot's names, which the first review had taken for raw frames. New items:
   dereference of an address is the object, `*&x` is x, in stores and loads alike; tests/test_vartypes.py
   test_an_access_through_a_field_s_address_is_the_field). On the eight builds the readable C is the same,
   line for line (none printed it); on the private real-life test the stores print as members.
-- [ ] **Masks moved into place by a shift.** dread.polish mask_params takes any shift of a parameter as no
+- [x] **Masks moved into place by a shift.** dread.polish mask_params takes any shift of a parameter as no
   mask use (`x << 2` scales a count as often as it moves bits), so a callee that moves its mask before one
   of its uses (`(keep >> 8) & REG` in one arm, `keep & REG` in another) has no mask parameter, and its
   callers' constants print as negative numbers (`-16` for `~0xfu`, `-1` for all ones). A shift whose value
   is only an operand of &, |, ^ or ~ (or of &=, |=, ^=) keeps the mask use. Seen on the private real-life
   test (a port's read-modify-write and its callers); public example: none checked. Test: such a callee and
   callers passing ~0xfu and 0xffffffffu, through the gate on the three architectures.
+  Done 2026-10-25 (dread.polish _masks_of: a shift in a mask's place reads its operand "moved"): a
+  parameter shifted where the shift's value is an operand of &, |, ^ or ~ is allowed beside its mask uses,
+  but is none itself, so a count scaled and masked ((n << 2) & 0x3cu) stays a number; the port function's
+  keep and set values are masks, its callers write `~0xfu` and `0xffffffffu`
+  (tests/test_polish.py test_a_mask_moved_by_a_shift_stays_a_mask, which fails on the previous rule). The
+  gate test was not needed: the change writes the same values. On the eight builds the gate accepts the
+  same functions and no line changes (none moves a mask before using it).
 - [ ] **What a variable loaded from a pointer global reads past its structure.** The structure of a
   pointer global is the one its typed loaders and storers vote for; a variable loaded from it that reads
   past that structure's members (a task block's flag byte past the list item the block starts with, where

@@ -1556,7 +1556,10 @@ def mask_params(trees, rounds=MASK_ROUNDS):
     is (a void function's leftover register: RISC-V's a0), or an argument for a callee's parameter that
     is a mask itself (over the functions until nothing changes, at most rounds rounds); one read as a
     mask at least. A shift reads no mask (x << 2 scales a count as often as it moves bits), nor does a
-    shift's count masked by the lifters (1 << (r0 & 0xffu), ARM's register shifts). What a constant argument for such a parameter is
+    shift's count masked by the lifters (1 << (r0 & 0xffu), ARM's register shifts); a shift whose value
+    is itself in a mask's place ((keep >> 8) & REG: the mask moved to another field) is allowed beside
+    the parameter's mask uses, but is none itself (a count scaled and masked, (n << 2) & 0x3cu, stays a
+    number since 2026-10-25; before, any shift made the parameter no mask). What a constant argument for such a parameter is
     written as: a mask (0xffffffffu, ~0x20u), never a negative number (FreeRTOS's
     xTaskGenericNotifyWait(0, 0xffffffffu, ...): its callee clears &= ~ulBitsToClearOnEntry). Not
     established: what the callee does with a value it stores (a mask kept for later is no mask here)."""
@@ -1592,9 +1595,9 @@ def _masks_of(fn, found):
             visit(e.r, inner)
             return
         if isinstance(e, C.Binary) and e.op in ("<<", ">>"):
-            visit(e.l)                      # (x << 2 scales a count as often as it moves bits)
-            visit(e.r, "count")
-            return
+            visit(e.l, "moved" if ctx in ("bits", "moved") else "other")
+            visit(e.r, "count")             # (x << 2 scales a count as often as it moves bits: in a mask's
+            return                          # place, moved, it is allowed beside a mask use, never one itself)
         if isinstance(e, C.Unary) and e.op == "~":
             visit(e.e, "bits")
             return
@@ -1664,7 +1667,8 @@ def _masks_of(fn, found):
         uses = [ctx for v in held for ctx in reads.get(v, ())]
         ok = [ctx == "bits" or (isinstance(ctx, tuple) and ctx[0] == "arg" and ctx[2] in found.get(ctx[1], ()))
               for ctx in uses]
-        neutral = [ctx == "ret" or (isinstance(ctx, tuple) and ctx[0] == "copy" and ctx[1] in held) for ctx in uses]
+        neutral = [ctx in ("ret", "moved") or (isinstance(ctx, tuple) and ctx[0] == "copy" and ctx[1] in held)
+                   for ctx in uses]
         if any(ok) and all(a or b for a, b in zip(ok, neutral)):
             out.add(i)
     return out

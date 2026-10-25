@@ -276,6 +276,46 @@ u32 bits_count(u32 r0, u32 r1, u32 r2)
     assert polish.mask_params(trees, rounds=1)["bits_pass"] == []     # (its callee's masks come after it)
 
 
+def test_a_mask_moved_by_a_shift_stays_a_mask():
+    """mask_params since 2026-10-25: a parameter used as a mask in one arm and moved to another field
+    before its mask use in the other ((r1 >> 8) & REG, a port's read-modify-write) is a mask, and so is the
+    value it sets there (r2 | ..., r2 >> 8 | ...); a caller's constants for them print as masks (~0xfu,
+    0xffffffffu), never as negative numbers; a parameter only shifted into a mask's place ((r0 << 2) &
+    0x3cu: a count scaled) is none, nor is one compared besides."""
+    tree = cparse.parse(HEAD + """u32 port_set(u32 r0, u32 r1, u32 r2)
+{
+    if (r0 == 0)
+    {
+        g_20000930 = r2 | (r1 & g_20000930);
+        return 0;
+    }
+    g_20000934 = (r2 >> 8) | ((r1 >> 8) & g_20000934);
+    return (r0 << 2) & 0x3cu;
+}
+u32 scaled(u32 r0)
+{
+    return (r0 << 2) & 0x3cu;
+}
+""")
+    trees = [(tree, fn, {}) for fn in tree.items if isinstance(fn, cparse.Function)]
+    masks = polish.mask_params(trees)
+    assert masks == {"port_set": [1, 2], "scaled": []}, masks
+    head = HEAD + "extern u32 port_set(u32, u32, u32);\nextern u32 scaled(u32);\n"
+    text = """u32 f(u32 r0)
+{
+    port_set(2u, ~0xfu, 0u);
+    port_set(0u, ~0x0u, 1u);
+    return scaled(~0x0u);
+}
+"""
+    caller = cparse.parse(head + text)
+    fn = caller.function("f")
+    polish.polish(caller, fn, io=IO, masks=masks)
+    out = cparse.unparse(fn, notes=False, style="readable")
+    for line in ("port_set(2, ~0xfu, 0);", "port_set(0, 0xffffffffu, 1);", "return scaled(-1);"):
+        assert line in out, (line, out)
+
+
 def test_one_radix_per_object():
     """The elements of a local array (a colour triple) come out in one radix: decimal where the object
     holds numbers (one element given two numbers), hex where nothing says so (the mvn of 150 stored into a
