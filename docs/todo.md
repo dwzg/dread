@@ -3032,7 +3032,7 @@ the pilot's names, which the first review had taken for raw frames. New items:
   parameter, or write such an access `((volatile u8 *)p)[k]`. Seen on the private real-life test; public
   example: none checked (FreeRTOS's readers type pxCurrentTCB as the task block itself). Part of the
   pointer globals' Left.
-- [ ] **A frame object walked by an index is an array.** dread.frames makes a structure of a frame region
+- [x] **A frame object walked by an index is an array.** dread.frames makes a structure of a frame region
   with accesses of two widths at one place even where a loop walks the whole region with a variable index
   of one element size (a buffer zeroed word by word, one of its words read as a halfword later): a packed
   structure with a union, and the loop's stores stay `*(volatile u32 *)((u32)&buf + (i << 2)) = 0;`. Such
@@ -3041,6 +3041,13 @@ the pilot's names, which the first review had taken for raw frames. New items:
   (u32)&buf; *(volatile u32 *)v |= 0x80u;`) is the object's. Seen on the private real-life test; public
   example: none checked. Test: a function that zeroes a local array of words in a loop, sets a bit in its
   first word, passes words of it to a callee and reads one as a halfword.
+  Done 2026-10-25 (dread.frames _decide and member): a region accessed through an index of one width,
+  every access at a constant offset inside one element and aligned to its own size, is an array of the
+  index's element even where some of those accesses are narrower; such an access is an element of a
+  view of its width (((volatile u16 *)stack32)[3] for bytes 6 and 7), the loop's stores elements
+  (stack32[r3] = 0). One that is not aligned, or spans two elements, keeps the structure. Not done: an
+  access through a variable that holds the object's address. Test: tests/test_frames.py (the item's
+  function; the two that stay structures).
 - [ ] **An element read through an array's address plus an index.** `v = (u32)tab + i; v = *(volatile s8
   *)v;` (the address and the index added in a register, the load through it) is `tab[i]`, also where one
   variable holds the address and then the value (One variable per value). Seen on the private real-life

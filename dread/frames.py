@@ -41,7 +41,11 @@ Each object is written by what the function and its callees do with it:
                                     TickType_t *)
     u8 stack20[12];                 bytes: accessed at no constant offset (a buffer a callee fills), only
                                     by bytes, or indexed by bytes (stack48[r3] = r2); an array of the
-                                    width a callee's parameter or the index says (one width throughout)
+                                    width a callee's parameter or the index says (one width throughout,
+                                    or the index's where every access at a constant offset lies inside
+                                    one element and is aligned to its own size: a buffer zeroed word by
+                                    word and read as a halfword at one place, whose halfword is an element
+                                    of a view of its width, ((volatile u16 *)stack32)[3])
     struct s_29 stack32;            a structure of dread.shapes that a callee's parameter points to
                                     (vTaskInternalSetTimeOutState's TimeOut_t), where it fits and the
                                     function's own accesses inside it are its plain fields
@@ -1027,6 +1031,14 @@ def _decide(p, context):
         if p.indexed and p.size % w == 0:
             p.kind, p.elem = "array", t
             return
+    iw = {SIZES[t] for t in p.index_types}
+    if len(widths) > 1 and p.indexed and len(iw) == 1:      # (walked by an index of one width, read narrower
+        w = next(iter(iw))                                  # at a place: an array, the narrower access an
+        if p.size % w == 0 and all(SIZES[t] <= w and rel % SIZES[t] == 0 and rel % w + SIZES[t] <= w
+                                   for rel, ts in p.fields.items() for t in ts):     # element of a narrower view)
+            t = next(iter(p.index_types)) if len(p.index_types) == 1 else _unsigned(sorted(p.index_types)[0])
+            p.kind, p.elem = "array", hint if hint is not None and SIZES[hint] == w else t
+            return
     p.kind, p.struct = "struct", Fields(p.fields, p.size)
 
 
@@ -1094,6 +1106,9 @@ def frame_objects(tree, fn, context=None, avoid=()):
         if p.kind == "scalar":
             e, own = C.Name(p.name), p.elem
         elif p.kind == "array":
+            if SIZES[t] < SIZES[p.elem]:    # (narrower than an element, inside one: an element of a view of
+                view = C.Cast("%s%s *" % ("volatile " if p.volatile else "", t), C.Name(p.name))   # its width)
+                return C.Index(view, C.Num("%d" % (rel // SIZES[t])))
             e, own = C.Index(C.Name(p.name), C.Num("%d" % (rel // SIZES[p.elem]))), p.elem
         elif p.kind == "typed":
             e, own = C.Member(C.Name(p.name), fname(p, rel), False), dict(context.plan.structs[p.tag])[rel]

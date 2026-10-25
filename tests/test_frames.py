@@ -788,3 +788,49 @@ def test_the_objects_compile(variant, tmp_path):
         (src / ("h%d.c" % k)).write_text(out)
     assert build.compile_all(target, image, str(src), str(tmp_path / "obj"), quiet=True,
                              flags=target.compiler.lifted_cflags)
+
+
+WALK = """/* h at 0x0, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+extern u32 g(u32, u32, u32, u32);
+u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r4 = 0, r12 = 0;
+    u32 n = 0, z = 0, c = 0, v = 0;
+    u32 frame[8] __attribute__((aligned(8)));
+    u32 sp0 = (u32)&frame[8];
+    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)sp0;
+    r3 = 0x0u;  /* 0: movs r3, #0 */
+L_2: ;
+    *(volatile u32 *)(sp0 - 32 + (r3 << 2)) = 0x0u;  /* 2: str r4, [sp, r3, lsl #2] */
+    r3 = r3 + 0x1u;  /* 4: adds r3, #1 */
+    if (r3 != 0x8u) goto L_2;  /* 6: bne #0x2 */
+    r2 = *(volatile u32 *)(sp0 - 32);  /* 8: ldr r2, [sp] */
+    *(volatile u32 *)(sp0 - 32) = r2 | 0x80u;  /* a: str r2, [sp] */
+    r0 = g(sp0 - 32, *(volatile u32 *)(sp0 - 28), 0x0u, 0x0u);  /* c: bl g */
+    r1 = (u32)*(volatile u16 *)(sp0 - 26);  /* 10: ldrh r1, [sp, #6] */
+    return r0 + r1;  /* 12: pop */
+}
+"""
+
+
+def test_a_frame_region_walked_by_an_index_is_an_array_its_narrower_read_a_view():
+    """A region a loop walks word by word (zeroed), whose first word gets a bit set, whose address and a
+    word go to a callee and of which one halfword is read: an array of the walk's element, the loop's
+    stores its elements (stack32[r3]), the halfword an element of a halfword view of it (bytes 6 and 7:
+    ((volatile u16 *)stack32)[3]), not a packed structure with a union and the stores as address sums."""
+    out = readable_c(WALK)
+    for line in ("volatile u32 stack32[8];", "stack32[r3] = 0;", "stack32[0] |= 0x80u;",
+                 "r0 = g((u32)stack32, stack32[1], 0, 0);", "return r0 + ((volatile u16 *)stack32)[3];"):
+        assert line in out, (line, out)
+    assert "typedef" not in out and "union" not in out and "sp0" not in out, out
+    _, fn = readable.readable_tree("h", WALK, context=readable.Context())
+    assert [(p.start, p.size, p.kind, p.elem) for p in frames.plan(fn).pieces] == [(-32, 32, "array", "u32")]
+
+
+def test_a_walked_region_read_across_its_elements_stays_a_structure():
+    """Not an array: a narrower read that is not aligned to its own size (a halfword at byte 3), or one
+    that spans two elements (a word at byte 6 of words): the structure of its own, as before."""
+    for read in ("r1 = (u32)*(volatile u16 *)(sp0 - 29);", "r1 = *(volatile u32 *)(sp0 - 26);"):
+        out = readable_c(WALK.replace("r1 = (u32)*(volatile u16 *)(sp0 - 26);", read))
+        assert "stack32_t" in out and "volatile u32 stack32[8];" not in out, (read, out)
