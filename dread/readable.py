@@ -779,6 +779,8 @@ def question_tree(name, text, context):
         if objects:                         # (the objects' addresses as the callees' own parameters take them)
             vartypes.object_arguments(tree, fn, context.plan, names=context.struct_names(), int_bits=int_bits)
         polish_tree(tree, fn, context, int_bits)
+        from dread import bound
+        bound.compact(fn)
     return tree, fn, digest, print_file(tree, fn), cparse.unparse(fn, notes=False, style="readable"), ids
 
 
@@ -1321,6 +1323,8 @@ def _named(name, text, stages, context=None, cleaned=None):
             naming.apply(tree, fn, dict(entry, names=frames.table_names(entry.get("names") or {}, before, fn)),
                          made_for)
         polish_tree(tree, fn, context, int_bits)    # (constants and casts by their use: last)
+        from dread import bound
+        bound.compact(fn)                   # (a bound call in one statement: how it reads, nothing more)
     return tree, fn, stages
 
 

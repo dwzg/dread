@@ -1232,7 +1232,11 @@ structures to one header and includes it:
   second result register holds a leftover (dread.regflow) one-word, `return RETURN2(lo, hi);` with a
   comment above it naming the reader (`/* r1 at its returns (RETURN2): no result of its own, read after
   the call by NAME 0xADDR (dread regflow) */`), and a call of one that reads both words `CALL2(f,
-  ...)`; RETURN2 and CALL2 are dread.h's.
+  ...)`; RETURN2 and CALL2 are dread.h's. Since 2026-10-25 a bound call (dread.lift: a call whose callee
+  reads registers its caller leaves, or behind which the caller reads what the callee leaves beyond a C
+  result) is one statement of dread.h's `BOUND(f, IO(r0, a), IN(r2, 5), INOUT(r5, b, c), ...)`
+  (`BOUND_R12` where r12 is bound) in place of the lifter's block of register variables, asm and
+  write-backs (dread.bound; the same instructions).
 - With `--plain`, the reading form: each line behind a margin with an address in hex (blank where the
   line has none), the instructions' comments and their notes left out, and dread.build's lines for the
   compiler (`/* dread: ... */`). A statement's address is its first instruction (dread.cparse

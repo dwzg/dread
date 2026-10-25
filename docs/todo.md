@@ -2014,13 +2014,23 @@ model).
   applied, and its planner, which rebuilds the prototypes of every function for each decision, quadratic
   in the functions: not measured on a large target); the first table's lifting in one process (7.9 s for
   GCC -Os's 341 functions).
-- [ ] **Bound calls in one line.** A call whose callee reads registers its caller left, or behind
+- [x] **Bound calls in one line.** A call whose callee reads registers its caller left, or behind
   which the caller reads scratch registers, prints as an inline-asm block that binds every register,
   plus asm reads of those registers at the function's entry: many lines for one call. Print it as one
   statement through a dread.h macro that names the registers it hands over, and let a target table
   mark a register read as unreachable (a report on a path that cannot run), so that the call is a
   plain call there. Public example: none found (GCC code does not read registers its caller left);
   test: gizmo assembly.
+  The statement done 2026-10-25 (dread/bound.py, dread.h's BOUND, BOUND_R12, IO, IN, INOUT): the
+  lifter's block (register variables, the asm's bl, the write-backs) as `BOUND(f, IO(r0, a), IO(r1, b),
+  IN(r2, 5), INOUT(r5, c, d));` behind dread.polish, only where the block is the lifter's as it writes it
+  (no flags read behind the call, no stack arguments, no FPU registers, plain write-backs: else the block
+  stays); what followed the write-backs (r12 = 0) follows. The macros make the same instructions as the
+  block (tests/test_bound.py compiles both with gizmo a32's compiler). ARM only: RISC-V's bound calls
+  clobber what their callee writes, a list no one macro holds. The public builds have none; on the
+  private real-life test they are frequent, nine lines each before. Left: a target table that marks a
+  register read as unreachable, so that such a call is a plain call; the entry's reads of registers as
+  left (`__asm__ volatile ("mov %0, r7" : "=r"(saved))`), one line each already.
 - [x] **No address for a plain value.** The pass that prints `(u32)&object` for constants that are
   the address of static data also replaces a constant compared with a masked word, a bit-field value,
   by the address of an object that happens to lie at that number. Substitute an address only where
