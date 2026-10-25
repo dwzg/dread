@@ -346,6 +346,18 @@ def build(target, image, src=None, out=None, extent=True, quiet=False, lifted=No
             loops = [n for n in loops if n not in by_system]
         objects += compile_all(target, image, os.path.join(workdir, "lifted"), os.path.join(workdir, "obj-lifted"),
                                quiet=quiet, flags=target.compiler.generated_cflags())
+        support = getattr(transform, "support", None)   # (readable C's own helpers: dread.divisions)
+        text = support() if support is not None else ""
+        folder = os.path.join(workdir, "support")
+        if os.path.isdir(folder):
+            shutil.rmtree(folder)
+        if text:
+            os.makedirs(folder)
+            from dread import divisions
+            with open(os.path.join(folder, divisions.SUPPORT), "w") as f:
+                f.write(text)
+            objects += compile_all(target, image, folder, os.path.join(workdir, "obj-support"), quiet=quiet,
+                                   flags=target.compiler.generated_cflags())
         with open(record, "w") as f:
             f.write("".join(n + "\n" for n in made))
         with open(os.path.join(workdir, "lifted.json"), "w") as f:

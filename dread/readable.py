@@ -339,7 +339,7 @@ def transform(name, text, stages=None, context=None):
 # every round's table and C anew from nothing beside, and stops at the first difference).
 
 IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
-SCOPED = ("typed", "digests", "params", "variables", "prototypes", "keeps", "returns", "takes", "masks", "whole",
+SCOPED = ("typed", "digests", "params", "variables", "prototypes", "keeps", "returns", "takes", "masks", "whole", "divcalls",
           "results")        # the readable_types table's parts kept per function (shapes.Plan's attributes)
 _SCOPE = True               # False: every function made from the whole context (remade: what --verify compares)
 
@@ -1330,6 +1330,11 @@ def polish_tree(tree, fn, context=None, int_bits=None):
     the readable_types table's masks lists take masks; an object given a text's or a function's address
     holds no numbers)."""
     from dread import polish
+    plan_ = getattr(context, "plan", None) if context is not None else None
+    divs = getattr(plan_, "divisions", None)
+    if divs and fn.name not in (getattr(plan_, "divcalls", None) or ()):    # (the routines that divide as
+        from dread import divisions                                         # / and %: before the constants)
+        divisions.rewrite(tree, fn, divs, int_bits)
     memory = context.memory if context is not None else None
     masks = getattr(context.plan, "masks", None) if context is not None else None
     pointed = context.pointed() if context is not None else None
@@ -1503,6 +1508,17 @@ def chooser(names, context=None, jobs=None, verify=False, stats=None, kept=None)
         for n, out in readable_texts(chosen, context, jobs, verify=verify, stats=stats, kept=kept).items():
             made[n] = (chosen[n], out)
     change.prepare = prepare
+
+    def support():
+        """The C build.build compiles beside the readable C: the division helpers the C's own / and %
+        call where the image lacks them (dread.divisions support_source), or ""."""
+        from dread import divisions
+        program = getattr(context, "_program", None)
+        divs = getattr(getattr(context, "plan", None), "divisions", None)
+        if program is None or not divs:
+            return ""
+        return divisions.support_source(getattr(program.arch, "name", None), divs, set(program.by_name))
+    change.support = support
     return change
 
 
@@ -1624,10 +1640,24 @@ def make_plan(program, context, lifter, names, flow=None, digests=None, kept=Non
     context._struct_names = context._static_names = None
     vartypes.plan(context.plan, trees, digests, context)
     context.plan.masks = mask_plan(program, context, lifter, names, trees, kept=kept)
+    context.plan.divisions = division_plan(program, context, kept=kept)
     context.plan.keeps, context.plan.returns = frames.kept_params(trees, context)
     pointed = context.pointed()
     context.plan.takes = naming.taken_kinds(trees, pointed) if pointed is not None else None
     return context.plan
+
+
+def division_plan(program, context, kept=None):
+    """The readable_types table's divisions (dread.divisions find): {function: [sign, results, order]} of
+    the image's routines that divide, by name and by what they do in the emulator (of the machine code
+    alone: kept, as for analysis_trees, holds it for the check's rounds)."""
+    from dread import divisions
+    if kept is not None and ("divisions",) in kept:
+        return kept[("divisions",)]
+    found = divisions.find(program, context, getattr(program, "target", None), getattr(program, "image", None))
+    if kept is not None:
+        kept[("divisions",)] = found
+    return found
 
 
 def mask_plan(program, context, lifter, names, trees, kept=None):
@@ -1689,6 +1719,7 @@ def verify_plan(program, context, lifter, names, flow, digests):
     finally:
         _SCOPE = old
     full.plan.whole, full.plan.results = set(context.plan.whole), set(context.plan.results)
+    full.plan.divcalls = set(context.plan.divcalls)
     a, b = context.plan.to_json(), full.plan.to_json()
     parts = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
     names_ = sorted(n for n in again if digests.get(n) != again[n])
@@ -1813,8 +1844,20 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
         kept from the link. Until 2026-10-25 this was asked after the link, which failed first, and with
         it the whole check, where the image lacks what the C calls (the lift check's way since the same
         day)."""
+        found = lift.foreign_calls(program, work, accepted, lifter)
+        divs = getattr(context.plan, "divisions", None) or {}
+        if divs and found:                  # (the division helpers the C's own / and % call, where the
+            from dread import divisions     # original calls a routine that divides: the image's or made)
+            helpers = divisions.helper_names(getattr(program.arch, "name", None))
+            for name in list(found):
+                fn = program.by_name.get(name)
+                if fn is not None and lift.direct_callees(program, fn) & set(divs):
+                    found[name] = found[name] - helpers
+                    if not found[name]:
+                        del found[name]
         return {name: "its readable C calls %s, which the original does not call" % ", ".join(sorted(symbols))
-                for name, symbols in lift.foreign_calls(program, work, accepted, lifter).items()}
+                for name, symbols in found.items()}
+    divfor = {}                             # name -> the functions whose divisions it was tried with as calls
     while accepted:
         rounds += 1
         try:
@@ -1880,6 +1923,16 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
         #   objects.
         # - A void function that differs otherwise and has no objects, or whose region is one already,
         #   is tried with its result.
+        # - First of all, a function whose readable C writes calls of a routine that divides as / and %
+        #   (dread.divisions) is tried once more with them as calls (the readable_types table's
+        #   divcalls): a case that stubs the routine (a generated case whose run hung in it at a divisor
+        #   of 0, a written one that logs it) sees each call, which the compiler's / may not make (a
+        #   divisor it knows, a constant it multiplies by). And last, where a function would be dropped
+        #   otherwise, with the divisions of the functions its code reaches as calls (its cases run them;
+        #   a case's refusal of a callee's difference also takes its coverage); dropped after that, it
+        #   gives them back to / and % where no other function still checked was tried with them. (Tried
+        #   before the frame and the result, the callees' calls stayed where another change had helped:
+        #   gizmo a32's handle_key took fmt_dec's % so.)
         # (Until 2026-10-24 the frame came first, also for a function that reached a failing callee; with
         # void functions failing in the first round, gizmo-m3's handle_key went whole for its callees'.)
         culprits = {n for n in gone if not (reaches(n) & (gone - {n}))}
@@ -1891,14 +1944,31 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
                           trees)
         objects = {n for n in rest if n not in context.plan.whole and n in texts and framed(n, texts[n], context,
                                                                                           trees)}
-        with_result = {n for n in rest if n in context.void and (n in returned or n not in objects)}
-        whole = objects - with_result
+        divs = context.plan.divisions or {}
+
+        def dividers(pool):
+            """The functions of pool whose readable C writes calls of a routine that divides as / and %."""
+            return {m for m in pool if m not in divs and m not in context.plan.divcalls
+                    and program.by_name.get(m) is not None
+                    and lift.direct_callees(program, program.by_name[m]) & set(divs)}
+        divided = {}                        # name -> its own divisions, tried as calls first
+        for n in sorted(rest) if divs else ():
+            mine = dividers({n})
+            if mine:
+                divided[n] = mine
+        late = {}                           # name -> the divisions its code reaches, tried as calls last
+        with_result = {n for n in rest if n in context.void and (n in returned or n not in objects)} - set(divided)
+        whole = objects - with_result - set(divided)
         told = set()                        # (one line a function tried again, its first failure)
         for text in lines:
             for line in text.splitlines():
                 for name in gone:
                     if line.startswith(("FAIL %s " % name, "UNCOVERED %s:" % name)) and name in accepted:
-                        if name in whole:
+                        if name in divided:
+                            if name not in told:
+                                told.add(name)
+                                out("calls    %-24s %s" % (name, ("its divisions as calls again: " + line)[:200]))
+                        elif name in whole:
                             out("whole    %-24s %s" % (name, ("its frame as one object again: " + line)[:200]))
                         elif name in with_result:
                             if name not in told:
@@ -1911,23 +1981,39 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
                                     ", ".join(again[name][:3]) + (", ..." if len(again[name]) > 3 else ""),
                                     line))[:200]))
                         elif verdicts.get(name, ("",))[0] != "lifted":
-                            drop([name], line)
+                            reached = set() if name in late or not divs else dividers(reaches(name) - {name})
+                            if reached:         # (its last try: the divisions of what its code reaches)
+                                late[name] = reached
+                                told.add(name)
+                                whose = sorted(reached)
+                                out("calls    %-24s %s" % (name, ("with the divisions of %s as calls: " % (
+                                    ", ".join(whose[:3]) + (", ..." if len(whose) > 3 else "")) + line)[:200]))
+                            elif name not in late:
+                                drop([name], line)
+                                # (what it was tried with as calls in vain goes back to / and %, where no
+                                # function still checked needed it so: one that failed before for another reason)
+                                back = divfor.pop(name, set()) - set().union(*divfor.values())
+                                if back & context.plan.divcalls:
+                                    context.plan.divcalls -= back
         if whole:
             context.plan.whole |= whole         # (in context_key: the next round's readable C is made anew)
+        for n, whose in list(divided.items()) + list(late.items()):
+            context.plan.divcalls |= whose      # (scoped: only their readable C is made anew)
+            divfor.setdefault(n, set()).update(whose)
         if with_result:
             context.keep_results(with_result)
             # The readable_types table keeps each function's types for the digest of its C, made for the
             # void forms: made anew for what these functions and their callers print now (the check's whole
             # and results kept), else they lost their parameters' types. From the trees kept but theirs
             # (kept_trees), and the next round's builds make anew only the readable C whose entries changed
-            keep = (set(context.plan.whole), set(context.plan.results))
+            keep = (set(context.plan.whole), set(context.plan.results), set(context.plan.divcalls))
             make_plan(program, context, lifter, lifted, flow, digests=digests, kept=trees)
             plans += 1
-            context.plan.whole, context.plan.results = keep
+            context.plan.whole, context.plan.results, context.plan.divcalls = keep
             if verify:
                 verify_plan(program, context, lifter, lifted, flow, digests)
             shapes.store_plan(image, context.plan)
-        accepted = [n for n in accepted if n not in gone - whole - set(again) - with_result]
+        accepted = [n for n in accepted if n not in gone - whole - set(again) - with_result - set(divided) - set(late)]
         if not gone:
             break
     runs = target.scenarios and hasattr(program.arch, "reset")
@@ -1973,8 +2059,9 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
         found = whole(accepted) if accepted else None
     for name in accepted:
         verdicts[name] = ("readable", "")
-    if context.plan.whole or context.plan.results:
+    if context.plan.whole or context.plan.results or context.plan.divcalls:
         context.plan.whole &= set(accepted)     # (results stay whole: their callers' readable C reads them)
+        context.plan.divcalls &= set(accepted)
         from dread import shapes
         shapes.store_plan(image, context.plan)  # (the functions whose frame is one object: the builds read it)
     os.makedirs(work, exist_ok=True)

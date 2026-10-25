@@ -9,6 +9,35 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Division routines as / and % (2026-10-25)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), from docs/todo.md's
+"Division helpers as operators": a compiler without a divide instruction calls a routine for x / y and
+x % y, and readable C printed the call with its two words cut apart.
+
+- **Question.** How does readable C know a routine divides, write its calls, and still pass the readable
+  check, whose link and whose test of foreign calls the C's own / and % meet?
+- **Options.** Knowing the routine: (a) by name only (the RTABI's, libgcc's); (b) by name, and by what it
+  does in the emulator for one without such a name. Writing a call: (c) a macro of dread.h; (d) the
+  operators. The C's own / and %: (e) only where GCC needs no helper (a constant divisor it multiplies);
+  (f) the helpers it calls made of the image's routines where the image lacks them, and taken as what
+  the original calls where the original calls a routine that divides.
+- **Choice.** (b), (d), (f). A library of a compiler's own, or a stripped image, has no such names, and a
+  routine's behaviour on a few pairs (both orders, both signs, quotient and remainder) leaves no doubt,
+  and the probe is cheap (most candidates are out after their first pair). Not a function that uses a
+  divide instruction (the program's own code, which such a routine stands in for) nor a wrapper that
+  hands back nothing its callee does not (gizmo's udiv_var): their calls stay calls, as does a routine's
+  own call of another (written as an operator, GCC would call a helper made of the routine itself).
+  (e) would have kept most variable divisors as calls. Where a function's / and % fail its cases (a case
+  that stubs the routine sees each call, which the compiler's / does not make where it knows the
+  divisor), the check tries it once more with its calls kept (divcalls), the first of its second tries,
+  and, as its last before it is dropped, with the calls of the dividing functions its code reaches kept
+  too, given back where it is dropped all the same (tried earlier, a caller that another change helped
+  kept its callee's calls for nothing).
+- **Undo.** Leave the readable_types table's `divisions` empty (dread.readable division_plan) or delete
+  dread/divisions.py and its four uses (make_plan, polish_tree, chooser's support, check's foreign).
+- **Status.** In the code (tests/test_divisions.py).
+
 ## Names from elsewhere, a page of the GUI (2026-10-25)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with what was left of "The GUI

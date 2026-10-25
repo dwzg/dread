@@ -1995,6 +1995,8 @@ class Plan:
         self.results = set()            # functions printed with their result, read or not (the check)
         self.signed = None              # {(address, size)}: scalars at fixed addresses read signed (dread.statics)
         self.global_pointers = None     # address -> structure: words at fixed addresses holding its pointer
+        self.divisions = None           # function -> [sign, results, order]: routines that divide (dread.divisions)
+        self.divcalls = set()           # functions whose calls of those stay calls (the check: their / and % failed)
 
     def to_json(self):
         out = {"version": 1, "structs": {n: [list(r) for r in rows] for n, rows in sorted(self.structs.items())},
@@ -2027,6 +2029,10 @@ class Plan:
             out["takes"] = {f: {str(i): k for i, k in sorted(ix.items())} for f, ix in sorted(self.takes.items())}
         if self.masks is not None:
             out["masks"] = {f: sorted(ix) for f, ix in sorted(self.masks.items()) if ix}
+        if self.divisions is not None:
+            out["divisions"] = {f: list(k) for f, k in sorted(self.divisions.items())}
+        if self.divcalls:
+            out["divcalls"] = sorted(self.divcalls)
         if self.results:
             out["results"] = sorted(self.results)
         if self.signed is not None:
@@ -2060,6 +2066,8 @@ class Plan:
         p.takes = {f: {int(i): k for i, k in ix.items()} for f, ix in data["takes"].items()} if "takes" in data \
             else None
         p.masks = {f: list(ix) for f, ix in data["masks"].items()} if "masks" in data else None
+        p.divisions = {f: list(k) for f, k in data["divisions"].items()} if "divisions" in data else None
+        p.divcalls = set(data.get("divcalls", []))
         p.results = set(data.get("results", []))
         p.signed = {(int(a, 16), z) for a, sizes in data["signed"].items() for z in sizes} if "signed" in data \
             else None

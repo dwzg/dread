@@ -3111,12 +3111,45 @@ the pilot's names, which the first review had taken for raw frames. New items:
   the private real-life test's gate refused such bodies, the public builds have none (their printf and
   sprintf hand back nothing beyond r0). Such a body's parameters now stay as declared, its locals are
   typed and named as before (tests/test_readable.py test_a_wrapped_body_keeps_its_parameters_as_declared).
-- [ ] **Division helpers as operators.** A runtime helper that returns a quotient and a remainder prints
+- [x] **Division helpers as operators.** A runtime helper that returns a quotient and a remainder prints
   as a two-word call with its halves cut out: `(u32)(__aeabi_uidivmod(r4, 0xau) >> 32) + 0x30u`. Print
   `r4 % 10 + '0'` where the helper is known to divide (by name for the EABI's; by its behaviour in the
   emulator for a library's own routine, checked on test values, the order of its arguments included),
   and give the readable check's link the helper the compiler's own code calls for `/` and `%`. Public
   example: gizmo a32 fmt_dec. Frequent on the private real-life test (its library's own routines).
+  Done 2026-10-25 (dread/divisions.py; the readable_types table's `divisions`, docs/formats.md;
+  docs/decisions.md, "Division routines as / and %"): the routines that divide by name (the RTABI's,
+  libgcc's) and by what they do in the emulator (a function that reads two argument registers, run on
+  pairs in both orders and signs; not one that uses a divide instruction, nor a wrapper that hands back
+  nothing its callee does not, gizmo's udiv_var); their calls as `/` and `%` in the routine's order and
+  sign (dread.readable polish_tree, before the constants), not inside a routine that divides (written
+  as an operator its own call would become a helper made of itself: gizmo a32's __aeabi_uidivmod fell
+  out of the readable table so on the first try); the helpers GCC's own `/` and `%` call made of the
+  image's routines where it lacks them (build/readable-check/IMAGE/support/dread_divisions.c, linked
+  beside the readable C), and taken as what the original calls by the check's test of foreign calls.
+  A function whose / and % fail its cases is tried once more with its divisions as calls (the
+  readable_types table's divcalls, tried first among the check's second tries): a case that stubs the
+  routine sees each call, which the compiler's / does not make where it knows the divisor or multiplies
+  by a constant; and last, where it would be dropped otherwise, with the divisions of the functions its
+  code reaches as calls (a case's refusal of a callee's difference takes its coverage too), given back to
+  / and % if it is dropped all the same. On the private real-life test the gate accepts as many functions
+  as before, with / and % where their cases allow it; without the second tries it lost functions to
+  cases that log the routine.
+  gizmo a32: fmt_dec's `r4 % 10 + 0x30u` (its quotient by 10 stays the compiler's multiplication),
+  udiv_var's `return r0 / r1;` when printed (its C is the program's own); its __aeabi_uidiv made of
+  __aeabi_uidivmod. On the eight builds the gate accepts the same functions; only gizmo a32 changed (6
+  lines), the others have divide instructions. On the private real-life test both of its library's
+  routines are found by what they do, the divisor first. Not done: a two-word value kept whole (u64 t =
+  f(a, b), both halves read later) stays a call; 64-bit division; a compiler's division by a constant
+  as a multiplication (`(u32)((u64)r4 * 0xcccccccdu >> 32) >> 3` for r4 / 10). Tests:
+  tests/test_divisions.py.
+- [ ] **Division by a constant, from its multiplication.** A compiler divides by a constant with a
+  multiplication by its reciprocal and a shift: `(u32)((u64)r4 * 0xcccccccdu >> 32) >> 3` is r4 / 10
+  (gizmo a32's fmt_dec), clang -O2's `(u32)((u64)r1_1 * 0x1b4e81cu >> 32) * 150` the quotient by 150
+  taken times 150 (a remainder in the making). Recognise the multiplier and the shift by checking that
+  they give x / d for every x of the width (not by the pattern alone; signed ones add a correction of the
+  sign) and write x / d, x % d where the code subtracts the product; the gate decides as for any rewrite.
+  Public examples: gizmo a32 fmt_dec, FreeRTOS clang -O2 (ten such products).
 - [ ] **A jump to the start of the other arm, as a condition.** `if (A) { S; if (B) goto L; R } else { L:
   T }`, where L begins the other arm and S are plain statements, is `if (A && (S, !B)) { R } else { T }`
   (`if (!A || (S, B)) { T }` without R); a jump from an arm of an else-if chain to an earlier arm's start

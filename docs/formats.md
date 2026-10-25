@@ -267,6 +267,19 @@ typed variable's: a typed variable takes it as it is (`r3 = g_20029aac;`), membe
 a member's address is `&g_20029aac->f_4`, and every other use is `(u32)g_20029aac`. A file from before
 has no `global_pointers`: the word stays a u32, cast at each use.
 
+`divisions` (since 2026-10-25; written whenever the check runs, also empty) lists the image's routines
+that divide (dread.divisions find: the RTABI's and libgcc's by name, any other function of at most 4 KB
+that reads two argument registers by what it does in the emulator on test pairs, not one that uses a
+divide instruction nor a wrapper that hands back nothing its callee does not): `{FUNCTION: [sign,
+results, order]}`, sign "u" or "s", results "q" (the quotient in the first result register), "r" (the
+remainder there) or "qr" (the quotient, the remainder in the second), order "nd" (the dividend first) or
+"dn" (the divisor first). Readable C writes their calls as `/` and `%` (`r4 % 10`, `(s32)c / 250`); the
+readable check links the helpers GCC's own `/` and `%` call where the image lacks them, made of these
+routines (`build/readable-check/IMAGE/support/dread_divisions.c`). A file from before has no
+`divisions`: the calls stay calls. `divcalls` (left out when empty) lists the functions whose calls of
+those routines stay calls: the check tried them so after their / and % failed their cases (a case that
+stubs the routine sees each call).
+
 `params` (left out when empty; since 2026-10-23) lists, for every analysed function, the indices of
 its parameters that it uses as a pointer (dread.shapes pointer_params): `{FUNCTION: [0, 2]}`. A
 constant that is the address of static data is written `(u32)&g_x` as an argument only where the
