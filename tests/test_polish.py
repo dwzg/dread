@@ -804,3 +804,29 @@ def test_masks_radix_and_negative_values_through_the_gate(kind, tmp_path):
     assert "s32 tally_get(void)" in ring and not any(re.search(r"\b%s = -1;" % n, ring) for n in unsigned), ring
     crc = got["tally_crc"]                 # (ARM state's -(crc & 1) through a branch stays -1: a negation)
     assert re.search(r"(?m)^    \w+ = 0xffffffffu;", crc), crc
+
+
+def test_declarations_nobody_names_any_more_go_at_the_end():
+    """drop_unused_declarations: a variable a pass after the clean-up folded away is no longer declared;
+    one an asm operand names, one with an initial value that has effects and a parameter stay."""
+    from dread import cparse
+    from dread.polish import drop_unused_declarations
+    text = """#include "dread.h"
+extern u32 g(u32);
+u32 f(u32 r0, u32 r1)
+{
+    u32 r2, r3, r4;
+    u32 r5 = g(1);
+    u32 r6 = 7;
+    r2 = r0 + 1;  /* 4: adds r2, r0, #1 */
+    __asm__ volatile ("" : : "r"(r4));
+    return r2;  /* 8: bx lr */
+}
+"""
+    tree = cparse.parse(text)
+    fn = tree.function("f")
+    assert drop_unused_declarations(fn)
+    decls = [d.name for s in fn.body.body if isinstance(s, cparse.Decl) for d in s.items]
+    assert decls == ["r2", "r4", "r5"], decls          # (r3 and r6 named nowhere: gone; r5's call stays)
+    assert [n for _, n in fn.params] == ["r0", "r1"]
+    assert not drop_unused_declarations(fn)

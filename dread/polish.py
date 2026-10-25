@@ -1682,7 +1682,51 @@ def polish(tree, fn, int_bits=None, io=(), masks=None, pointed=None):
         p.stmt(s)
     _drop_self_assignments(fn.body, p)
     fold_steps(fn, p)
+    if drop_unused_declarations(fn):
+        p.changed = True
     return p.changed
+
+
+def drop_unused_declarations(fn):
+    """The declarations of variables the function no longer names anywhere else go (at its top, where
+    readable C declares them), those with no initial value or one without effects: what a pass after
+    the clean-up's own (dread.tidy tidy_declarations) folded away, the structure stage's loops, merged
+    arms and truth values, fold_steps here, left declared and unused (2026-10-25: about one declaration
+    in a hundred on the FreeRTOS builds). A name counts where an expression of a statement holds it, an
+    initial value, an asm operand, or the text of a raw statement (not the instructions' comments,
+    which name registers). Parameters stay. Returns whether anything changed."""
+    from dread.tidy import has_effects
+    named, raw = set(), []
+    for s in _all_statements(fn.body.body):
+        if isinstance(s, C.Decl):
+            for d in s.items:
+                if d.init is not None:
+                    named |= {y.id for y in _walk(d.init) if isinstance(y, C.Name)}
+        elif isinstance(s, C.Asm):
+            for o in list(s.outputs) + list(s.inputs):
+                named |= {y.id for y in _walk(o.e) if isinstance(y, C.Name)}
+        elif isinstance(s, C.Raw):
+            raw.append(s.text)
+        else:
+            for e in _stmt_exprs(s):
+                named |= {y.id for y in _walk(e) if isinstance(y, C.Name)}
+
+    def unused(d):
+        return d.name not in named and (d.init is None or not has_effects(d.init)) and \
+            not any(re.search(r"\b%s\b" % re.escape(d.name), text) for text in raw)
+    changed = False
+    body = []
+    for s in fn.body.body:
+        if isinstance(s, C.Decl):
+            keep = [d for d in s.items if not unused(d)]
+            if len(keep) != len(s.items):
+                changed = True
+                if not keep:
+                    continue
+                s.items[:] = keep
+        body.append(s)
+    fn.body.body[:] = body
+    return changed
 
 
 STEP_BETWEEN = 2        # the most statements between an access and its pointer's step that fold_steps moves the step

@@ -3023,7 +3023,12 @@ the pilot's names, which the first review had taken for raw frames. New items:
   store at 0x209c8; 0x2097c is `mov r5, r0`. Prefer the statement's own instruction when the folded ones
   are earlier register copies.
 - [ ] (low) **Members comments over several lines**, wrapped past a few members.
-- [ ] (low) **Declarations nothing uses**, dropped.
+- [x] (low) **Declarations nothing uses**, dropped. Done 2026-10-25 (dread.polish drop_unused_declarations,
+  the last step of polish): a variable that a pass after the clean-up's own tidy_declarations folded away
+  (the structure stage's loops, merged arms and truth values, polish's steps) is no longer declared, where
+  its initial value, if any, has no effects; a name an asm operand or a raw statement holds counts. On the
+  FreeRTOS GCC -Os and clang -O2 builds 18 and 28 such declarations before, none after, the gate
+  accepting the same functions (317, 275); it runs after the digest, so names are untouched.
 
 ## Compiler diversity (the user, 2026-10-20: first, on ARM/Cortex-M and RISC-V)
 
