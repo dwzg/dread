@@ -108,6 +108,10 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   CI has none of these caches: a test must make or search for what it needs and pass on a checkout
   without them (on 2026-10-22 a test read gizmo's cached cases without searching and failed only on
   CI). To see what CI sees, delete the caches in a worktree of its own before running the test.
+  Readable C is kept per process as well (dread.readable `_STORE` and `_MEMO`): a test that changes
+  what a stage makes (a fault put into `readable._transform`) clears both first, with
+  `monkeypatch.setattr(readable, "_STORE", {})`, or it gets the C an earlier test made of the same
+  program and passes alone but fails in the suite (2026-10-25, tests/test_readable_link.py).
   Threads and forks do not mix: DREAD's pools fork, and a thread left running (the GUI's analyses and
   facts worker) may hold a lock the child then waits for forever. On 2026-10-22 the suite hung on CI
   in the tests after the GUI's, intermittently, never here; conftest now fails a test that leaves a
