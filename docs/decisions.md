@@ -9,6 +9,25 @@ goes to the user.
 
 Newest first. "Status" says whether the choice is in the code yet.
 
+## Names from elsewhere, a page of the GUI (2026-10-25)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), with what was left of "The GUI
+for everything" (docs/todo.md): dread whatcc, samecode and callpair had no view; their results showed in a
+job's log only.
+
+- **Question.** How does the GUI show three tools that propose names from elsewhere, and how are their
+  proposals applied?
+- **Options.** (a) A view each. (b) One page for all three, since they answer one question (names for this
+  image's functions), each source a command run as a job and its proposals a table with a box each, the
+  chosen ones applied by dread rename as a job. (c) As (b), applied by writing symbols.txt from the page.
+- **Choice.** (b): a page of its own (#/names, key e: n was rename's already), a proposal offered only where
+  it gives a function without a name one (FUN_... here, a name there: the tools' new_name, what --symbols
+  prints), applied by dread rename, which renames everywhere a name is written and refuses where the tree
+  then contradicts itself (C that no longer compiles, case files that name what is gone). samecode and
+  callpair write `--json` for it (docs/formats.md); whatcc's table is read as it writes it.
+- **Undo.** Delete dread/guipages/names.py and dread/web/names.js (and the two `--json` options).
+- **Status.** In the code (tests/test_gui_names.py).
+
 ## Words that hold a structure's pointer (2026-10-25)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), with the item "Pointers

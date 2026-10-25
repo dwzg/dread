@@ -4905,10 +4905,14 @@ reimplement them.
     results shown and no job (the Run page's form takes a recipe's path); a build directory of BENCH whose
     report names a build the recipe no longer has is not listed; `dread cclab compare` (two compilers side by
     side) has no JSON and no view yet; the pages tried in Chrome only, not on macOS.
-  Left of "The GUI for everything": the comparison of two compilers (cclab compare) as a view; a view of
-  dread whatcc, samecode and callpair on a target of one's own (their results show in the job's log only);
-  adding a hit to the allow list from the leak check page (a change of the user's private file: asked, not
-  assumed).
+  Left of "The GUI for everything": the comparison of two compilers (cclab compare) as a view; adding a hit
+  to the allow list from the leak check page (a change of the user's private file: asked, not assumed).
+  Done 2026-10-25: names from elsewhere (#/names, key e; dread/guipages/names.py, dread/web/names.js): dread
+  whatcc, samecode and callpair run as jobs from the page (samecode and callpair with `--json` since then),
+  their proposals listed (only those that give a function without a name one), the chosen ones applied by
+  dread rename as a job; tests/test_gui_names.py (on gizmo-m3 stripped of its names: samecode against the
+  named build proposes 46, three applied; callpair from the ARM-state build with one seed; whatcc's table;
+  the token, a read-only server, words that are no names; the page in Chrome).
 - [x] dread cclab run --lift with gcc-arm (GCC 16.2): the lift check of cortex-m0-O2 and cortex-m0-O3 failed as
   a whole ("the build failed: the link failed": the lifted C of op_switch_jump, built for the Cortex-M0, calls
   `__gnu_thumb1_case_uqi`, which the link does not have), so those builds got no verdicts at all; at -Os the

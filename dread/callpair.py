@@ -84,6 +84,7 @@ def main(argv=None):
     parser.add_argument("--other-image", help="its image (default: its first)")
     parser.add_argument("--seed", action="append", default=[], help="HERE=THERE: names or addresses known to pair")
     parser.add_argument("--symbols", action="store_true", help="only names this side lacks, as symbols.txt lines")
+    parser.add_argument("--json", help="write the pairs here as well (docs/formats.md)")
     args = parser.parse_args(argv)
     try:
         target, image = tgt.from_args(args)
@@ -126,6 +127,17 @@ def main(argv=None):
                 a, fa.name, fb.name, votes.get(a, 0), len(fa.insns), len(fb.insns)))
     if not args.symbols:
         print("dread callpair: %d seeds, %d pairs found by call order" % (len(seeds), len(new)))
+    if args.json:
+        from dread.samecode import write_json
+        write_json(args.json, {"here": {"target": target.root, "image": image.name},
+                               "other": {"target": other.root, "image": other_image.name},
+                               "seeds": len(seeds),
+                               "pairs": [{"entry": a, "here": here.by_entry[a].name, "there": there.by_entry[b].name,
+                                          "votes": votes.get(a, 0), "instructions_here": len(here.by_entry[a].insns),
+                                          "instructions_there": len(there.by_entry[b].insns),
+                                          "new_name": bool(UNNAMED.match(here.by_entry[a].name) and
+                                                           not UNNAMED.match(there.by_entry[b].name))}
+                                         for a, b in new]})
     return 0
 
 

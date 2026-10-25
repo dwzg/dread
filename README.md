@@ -179,7 +179,7 @@ in the listing), verdicts and cases, search by name, proposed name, address and 
 names (through `dread rename`), notes (annotations.txt) and the commands its Run page starts; everything
 else is the tools' work. Keys: `/` search, `j` `k` lines, `Enter` follow, `n` rename, `;` note, `r`
 relations, `p` the whole program, `s` the system run, `x` run a command, `u` setup, `l` the pilot, `m` the
-bench, `i` the compiler lab, `w` the leak check, `?` all of them.
+bench, `i` the compiler lab, `w` the leak check, `e` names from elsewhere, `?` all of them.
 
 The Run page (`x`, or the button in the bar) has a form for every command of DREAD, made from the
 command's own options as `--help` lists them (a subcommand's form inside its command's; dread pilot's
@@ -251,6 +251,11 @@ quick; anything longer on a button):
   their commits. The page shows nothing of the private files but what matched: the server never opens them,
   and the check's jobs and records stay in your state directory (`~/.local/state/dread/gui/leakcheck`),
   never in a target's or a repository.
+- **Names from elsewhere** (`e`): names for this image's functions from three sources, each a command run as a
+  job: the toolchains' libraries (`dread whatcc`: functions whose code is a library function), the same
+  code in another image (`dread samecode`), the order of calls (`dread callpair`, with seeds). A proposal is
+  offered only where it gives a function without a name one; the chosen ones are applied by `dread rename`,
+  a job too, everywhere a name is written.
 
 A function's relations are the pieces of the puzzle around it, as a graph:
 - its callers above and callees below, to a depth of 1 to 3;

@@ -888,6 +888,16 @@ same data (TraceResult.data), so the two say the same.
   down), `rows` (`[{"depth", "label", "object", "size", "original", "original_unset", "rebuilt",
   "rebuilt_unset", "rebuilt_missing"}]`, at most 40), `more`; or `{"error"}` where it could not be made.
 
+### Functions of another image (`dread samecode --json FILE`, `dread callpair --json FILE`)
+
+Since 2026-10-25 (dread gui's names page reads them). samecode: `{"here": {"target", "image"}, "other":
+{"target", "image"}, "functions_here", "functions_there", "min", "pairs": [{"entry", "here", "there",
+"instructions", "new_name"}]}`, a pair of functions that are the same instructions (entry: this image's
+function's, here and there: the two names). callpair: `{"here", "other", "seeds", "pairs": [{"entry", "here",
+"there", "votes", "instructions_here", "instructions_there", "new_name"}]}`, the pairs the order of calls found
+beyond its seeds (the names both images share, the same code, `--seed`). new_name: whether the pair gives this
+image's function a name it lacks (FUN_... here, a name there): what `--symbols` prints, as symbols.txt lines.
+
 ### What dread mutate found (`dread mutate --json FILE`)
 
 `{"version": 1, "names", "functions": {NAME: ENTRY}, "error"}`, since 2026-10-24 (dread/mutate.py

@@ -1,0 +1,22 @@
+/* dread gui's names page (names.js): app.css's colour variables, so that both themes hold */
+.nm-page { max-width: 1100px; padding: 16px 24px 48px; }
+.nm-page h1 { font-size: 1.3rem; margin: 0 0 4px; }
+.nm-sub { color: var(--muted); margin: 0 0 12px; }
+.nm-muted { color: var(--muted); }
+.nm-live { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+.nm-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin: 0 0 16px; }
+.nm-card h2 { font-size: 1rem; margin: 0 0 2px; }
+.nm-form { display: flex; flex-wrap: wrap; gap: 10px 16px; margin: 6px 0 8px; }
+.nm-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); flex: 1 1 320px; }
+.nm-field input, .nm-field textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 4px; padding: 5px 8px; }
+.nm-short { max-width: 160px; }
+.nm-num { max-width: 90px; }
+.nm-actions { display: flex; gap: 8px; margin: 4px 0 8px; }
+.nm-table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+.nm-table th, .nm-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--line); }
+.nm-table th { color: var(--muted); font-weight: 500; }
+@media (max-width: 640px) {
+  .nm-page { padding: 12px 16px 32px; }
+  .nm-table { display: block; overflow-x: auto; }
+}

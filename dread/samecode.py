@@ -76,6 +76,7 @@ def main(argv=None):
     parser.add_argument("--other-image", help="its image (default: its first)")
     parser.add_argument("--symbols", action="store_true", help="only names this side lacks, as symbols.txt lines")
     parser.add_argument("--min", type=int, default=3, help="instructions a function needs at least (default 3)")
+    parser.add_argument("--json", help="write the pairs here as well (docs/formats.md)")
     args = parser.parse_args(argv)
     try:
         target, image = tgt.from_args(args)
@@ -95,7 +96,25 @@ def main(argv=None):
     if not args.symbols:
         print("dread samecode: %d pairs of %d functions here and %d there" % (
             len(found), len(here.functions), len(there.functions)))
+    if args.json:
+        write_json(args.json, {"here": {"target": target.root, "image": image.name},
+                               "other": {"target": other.root, "image": other_image.name},
+                               "functions_here": len(here.functions), "functions_there": len(there.functions),
+                               "min": args.min,
+                               "pairs": [{"entry": a.entry, "here": a.name, "there": b.name,
+                                          "instructions": len(a.insns),
+                                          "new_name": bool(UNNAMED.match(a.name) and not UNNAMED.match(b.name))}
+                                         for a, b in found]})
     return 0
+
+
+def write_json(path, data):
+    """data as JSON at path (its directory made), for dread gui's names page."""
+    import json
+    import os
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=1)
 
 
 if __name__ == "__main__":
