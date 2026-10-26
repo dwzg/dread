@@ -995,16 +995,18 @@ def case_notes(name, fn, loop):
     if not cases and not notes["failed"]:
         notes["failed"] = "no cases cached"
     ctx = RUN["ctx"]
-    stubbed, stops, polled = collections.Counter(), collections.Counter(), set()
+    stubbed, stops, later, polled = collections.Counter(), collections.Counter(), collections.Counter(), set()
     for c in dicts:
         for callee in {ctx.callee_name(call[0]) for call in c.get("calls", ())}:
             stubbed[callee] += 1
         for callee in {ctx.callee_name(s) for s in c.get("stops", ())}:
             stops[callee] += 1
+        for callee in {ctx.callee_name(s) for s, _ in c.get("stop_from", ())}:
+            later[callee] += 1
         polled.update(p[0] for p in c.get("poll", ()))
         notes["hang"] += bool(c.get("hang"))
     notes.update(stubbed=dict(sorted(stubbed.items())), stops=dict(sorted(stops.items())),
-                 polled=["0x%x" % a for a in sorted(polled)])
+                 stop_from=dict(sorted(later.items())), polled=["0x%x" % a for a in sorted(polled)])
     return cases, notes
 
 
@@ -1191,8 +1193,10 @@ def search_notes(region, notes, runs):
         return said
     callee = w.get("callee")
     if callee and callee in notes.get("stops", {}):
-        said.append("the cases end at each call of %s (runs hung in it: stops, in %d of %d cases)" % (
-            callee, notes["stops"][callee], notes["cases"]))
+        later = notes.get("stop_from", {}).get(callee)
+        said.append("the cases end at %s call of %s (runs hung in it: stops, in %d of %d cases%s)" % (
+            "a" if later else "each", callee, notes["stops"][callee], notes["cases"],
+            "; %d of them from a later call on, the earlier ones answered" % later if later else ""))
     elif callee and callee in notes.get("stubbed", {}):
         said.append("%s is stubbed in %d of %d cases (its answer an input)" % (callee, notes["stubbed"][callee],
                                                                               notes["cases"]))

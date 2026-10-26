@@ -5193,3 +5193,31 @@ parameters from pushes, system calls and calls that keep every argument", part (
   taken away. (c) is the generator's work on hard functions and stays open beside it (the cases decide
   more finely than a scenario does). Where nothing can decide (a target without scenarios, an image
   that differs with lifted C alone) they stay lifted, with that reason.
+
+## The code behind a stop (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** A callee in which runs hang (configASSERT's handler, which waits for a debugger to set a
+  variable) becomes a stop: the case ends at its call. Code behind such a call runs only when the
+  callee returns, and on FreeRTOS's clang -O2 build sixteen functions kept one to four instructions
+  behind a configASSERT call unrun (clang copies the next check behind the call), xQueueGenericSend,
+  xQueueReceive and their kin among them: dropped from the lifted table for that alone, so their readable
+  C was never made, typed or checked. The frontier answers already retried a run that ended at such a
+  stop with the callee stubbed at every call; the run then went on with what the assertion had refused
+  (a null queue), called the handler again, went on again and faulted, and was dropped. How can a case
+  run the code behind the call?
+- **Options.** (a) Count the code behind an assertion's call as unreachable (the callee never returns
+  in practice). (b) Stub the callee at every call (as before). (c) Answer the call the run ended at and
+  end the run at the callee's next call (a case's new `stop_from`: the calls before that number are as
+  without the stop), and where that run fails, at the first call the run makes after the answered one.
+  Each also for the cases whose runs ended at such a call (not only for the answers' own, as before).
+- **Choice.** (c) behind (b): (b) first, as before, and (c) where its run fails. (a) weakens the gate:
+  the instructions are the function's own, the lifted C must reproduce them, and vAssertCalled does
+  return when a debugger sets its variable. (b) alone runs on into the state the check refused, which
+  faults or writes into the image; but where it does not, it reaches code that only a run past every
+  call reaches (GCC -O0's prvBlockOnNotificationsComingFromInterrupts returns after nine rounds with two
+  checks each, and lost its return with (c) alone). (c) compares the code behind the call up to the next
+  call, a place both images reach alike, and goes on from there one call at a time (each answered in
+  turn, as far as the answers' depth goes). The answers' version changes, not the generator's: cached
+  searches are kept and only the answers are made anew.

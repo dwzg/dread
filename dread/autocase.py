@@ -82,8 +82,14 @@ The values: the compare's other operand and its neighbours, the operand itself a
 a test its bits), solved through a constant offset when two runs show one, the word's edges, single
 bits. A run that gains code and then hangs in a callee is tried with that callee stubbed, then ending
 at its call; one that faults or stores into the image is chased (words that point just in front of
-the failing access to buffers of their own, one at a time where given); one that ends at a stop whose
-callee may return is tried once more with it stubbed, for the code behind the call. Each answer is a
+the failing access to buffers of their own, one at a time where given). The code behind a call at
+which runs ended (a stop whose callee may return: configASSERT's handler waits for a debugger), from a
+case whose run ended there and from an answer that ends so: the callee answered at every call; where
+that run fails, as one that goes on into the null pointer the check guarded does, the call answered and
+the callee's next call ending the run instead (a case's stop_from); where that fails too, the first call
+the run makes after the answered one ending it (behind; until 2026-10-26 only the first, for the answers'
+own runs, and FreeRTOS's clang -O2 queue functions kept the instruction behind their first configASSERT
+unrun). Each answer is a
 case like any other (marked "answer"), compared under its stubs in both images; nothing is answered
 that the run would not take as an input (a local, the image). Bounded by ANSWER_RUNS runs a function.
 
@@ -217,8 +223,9 @@ ANSWER_FLIPS = 2            # ... the repairs of at most this many that went the
 ANSWER_VISITS = 2           # visits of a branch whose decision is answered (the first ones)
 ANSWER_BASES = 2            # cases a branch is answered from at most
 ANSWER_EVENTS = 512         # calls and visits a run records at most
-ANSWERS = 1                 # the frontier answers' version (Generator.answers): cached cases get them anew when
-                            # it changes, or when the cases they are made from change (_answered)
+ANSWERS = 2                 # the frontier answers' version (Generator.answers): cached cases get them anew when
+                            # it changes, or when the cases they are made from change (_answered); 2: the code
+                            # behind a stop (behind, stop_from)
 READING_MARKS = ("carried", "firm", "kept", "why", "by", "answer")     # marks a case made from another drops
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
 # Float arguments (hard float), as bits: zeros, ones, halves, decimal steps, the integer conversions'
@@ -676,13 +683,28 @@ class Generator:
                 return answer, (answer * 0x9E3779B1 + 0x7F4A7C15) & 0xFFFFFFFF
             return answer
 
+        answering = {}                      # callee -> its stub (what answers a stop's calls before stop_from's)
         for target, nargs, *rest in case.get("calls", ()):
             nstack = rest[0] if rest else 0
             only = frozenset(rest[1]) if len(rest) > 1 and rest[1] is not None else None
-            m.stub(target, lambda m, *a, target=target, nargs=nargs, nstack=nstack, only=only:
-                   stub(m, *a, target=target, nargs=nargs, nstack=nstack, only=only))
+            answering[target] = lambda m, *a, target=target, nargs=nargs, nstack=nstack, only=only: \
+                stub(m, *a, target=target, nargs=nargs, nstack=nstack, only=only)
+            m.stub(target, answering[target])
+        stop_from = {target: n for target, n in case.get("stop_from", ())}
+        stop_calls = {}                     # a stop_from callee's calls so far
 
         def stop(m, *args, target=0):       # a callee that never returns: the run ends at its call
+            first = stop_from.get(target)
+            if first is not None:           # (stop_from: the calls before that one are as without the stop)
+                sp, pc = m.reg("sp"), m.reg("pc") & ~1
+                if passing.pop(target, None) == sp and m.unalias.get(pc) == target:
+                    return RUN_CALLEE       # (the same call, through the branch at a moved callee's old entry)
+                n = stop_calls[target] = stop_calls.get(target, 0) + 1
+                if n < first:
+                    got = answering[target](m, *args) if target in answering else RUN_CALLEE
+                    if got is RUN_CALLEE and target in m.aliases and pc == target:
+                        passing[target] = sp
+                    return got
             # What it reads of the call's registers, as a stub logs it (stop_mask; until 2026-10-26 the
             # call alone, and the arguments of the call that ends the run were compared by nothing)
             mask = self.stop_mask(target) | (self.format_mask(m, args, taking[target]) if target in taking else 0)
@@ -2525,8 +2547,11 @@ class Generator:
         code and ends as a case must is kept; one that hangs in a callee is tried with it stubbed, then
         ending at its call; one that faults or stores into the image is chased (chase); those repairs only
         for the first ANSWER_FLIPS values that went the other way and failed (the next mostly fails alike;
-        a single bit can still give a pointer that names another object). One that ends at a stop whose
-        callee may return is run once more with that callee stubbed. Over again from the cases it made while one gains, at most
+        a single bit can still give a pointer that names another object). The code behind a call at
+        which the runs of the first ANSWER_BASES cases that got there ended (a stop whose callee may
+        return), and behind the stop an answer ends at: the callee answered at every call, else that call
+        answered and the callee's next call ending the run, else the first call the run makes after it
+        (behind). Over again from the cases it made while one gains, at most
         ANSWER_RUNS runs in all. loop: the function never returns (its cases are loop cases). What is not
         done: a callee that returns its argument untouched (dread.regflow: the branch's source is then the
         argument, not the stub's answer), a real callee's store into a local, a switch's index, a value two
@@ -2744,15 +2769,69 @@ class Generator:
             corpus.append(case)
             reach[len(corpus) - 1] = set(got)
             stop = stopped(m)
-            if stop is not None and not self.loop and self.program.function_at(stop) is not None and \
-                    self.program.function_at(stop).name not in self.endless():
-                callee = self.program.function_at(stop)
-                trial = dict(case, stops=[s for s in case["stops"] if s != stop],
-                             calls=[list(c) for c in case.get("calls", ()) if c[0] != stop] +
-                             [[stop, self.reads_mask(callee.name), 0]])
-                m2, _, error2 = run(trial)
-                gained(trial, m2, error2, depth + 1)
+            if stop is not None and may_return(stop):
+                behind(case, stop, depth + 1)
             return True
+
+        def may_return(stop):
+            """Whether a stop's callee may return (not one of dread.noreturn's), so code behind its call can run."""
+            callee = self.program.function_at(stop)
+            return not self.loop and callee is not None and callee.entry != entry and callee.name not in self.endless()
+
+        def answered_stop(base, stop):
+            """base with the call of stop that ended its run answered by a stub (a plain one: every call it
+            gets) and the callee's next call ending the run instead (stop_from)."""
+            case = json.loads(json.dumps(base))
+            n = dict((a, k) for a, k in case.get("stop_from", ())).get(stop, 1)
+            case["stop_from"] = [[a, k] for a, k in case.get("stop_from", ()) if a != stop] + [[stop, n + 1]]
+            if not any(c[0] == stop and (len(c) < 4 or c[3] is None) for c in case.get("calls", ())):
+                case["calls"] = [c for c in case.get("calls", ()) if c[0] != stop] + \
+                    [[stop, self.reads_mask(names.get(stop, "")), 0]]
+            return case
+
+        def behind(base, stop, depth):
+            """The code behind the call at which base's run ended (stop: a callee that may return, such as
+            an assertion handler that waits for a debugger), in three tries, the first that gains kept: the
+            callee answered at every call (code only a run that gets past each of its calls reaches: GCC
+            -O0's prvBlockOnNotificationsComingFromInterrupts returns after nine rounds with two checks
+            each); the call answered and the callee's next call ending the run instead (answered_stop);
+            where that fails too (the run goes on into what the check in front of the call guards, a null
+            pointer), the first call it makes after the answered one ending it, so that the code up to there
+            is compared. Whether one gained. (Until 2026-10-26 only the first, and runs that went on
+            faulted: FreeRTOS's clang -O2 queue functions kept the instruction behind their first
+            configASSERT unrun.)"""
+            every = json.loads(json.dumps(base))
+            every["stops"] = [s for s in every.get("stops", ()) if s != stop]
+            every["stop_from"] = [[a, k] for a, k in every.get("stop_from", ()) if a != stop]
+            if not every["stop_from"]:
+                del every["stop_from"]
+            every["calls"] = [list(c) for c in every.get("calls", ()) if c[0] != stop] + \
+                [[stop, self.reads_mask(names.get(stop, "")), 0]]
+            m1, _, error1 = run(every)
+            if gained(every, m1, error1, depth):
+                return True
+            if runs[0] <= 0:
+                return False
+            trial = answered_stop(base, stop)
+            have = {c[0] for c in trial["calls"]}
+            watched = dict(trial, calls=trial["calls"] + [[c, self.reads_mask(names.get(c, "")), 0, []]
+                                                          for c in sorted(direct - have)])   # (counted only)
+            m2, events, error2 = run(watched)
+            if gained(trial, m2, error2, depth):
+                return True
+            if runs[0] <= 0:
+                return False
+            n = dict((a, k) for a, k in trial["stop_from"]).get(stop) - 1
+            at = next((k for k, e in enumerate(events) if e[0] == "call" and e[1] == stop and e[2] == n), None)
+            nxt = next((e for e in events[at + 1:] if e[0] == "call"), None) if at is not None else None
+            if nxt is None or nxt[1] in (entry, self.fake_pointer):
+                return False
+            _, x, k = nxt[:3]
+            ended = json.loads(json.dumps(trial))
+            ended["stops"] = sorted(set(ended.get("stops", ())) | {x})
+            ended["stop_from"] = [[a, c] for a, c in ended["stop_from"] if a != x] + ([[x, k]] if k > 1 else [])
+            m3, _, error3 = run(ended)
+            return gained(ended, m3, error3, depth)
 
         def renumber(case, after):
             """A stub call inserted as number after + 1: the effects and fills of later calls move on."""
@@ -2901,9 +2980,34 @@ class Generator:
                     flips += bool(m2.covered_insns(words) - covered)    # (it went the other way, and failed)
             return False
 
+        direct = {fn.entry for fn in self.callees(words, depth=1)} - {entry, self.fake_pointer}
+        sites = {}                          # a call in words -> (its callee, the instruction behind it)
+        for a in words:
+            insn = self.program.insn(a)
+            if insn is None:
+                continue
+            kind, target, _ = self.program.arch.flow(insn)
+            callee = self.program.by_entry.get(target & ~1) if kind == "call" and isinstance(target, int) else None
+            if callee is not None and a + self.program.insn_size(a) in words_set:
+                sites[a] = (callee.entry, a + self.program.insn_size(a))
         tried, progress = set(), True
         while progress and runs[0] > 0 and not words_set <= covered and not self.late():
             progress = False
+            # The code behind a call at which every run that got there ended (a stop whose callee may
+            # return: configASSERT's handler waits for a debugger), from the first ANSWER_BASES cases
+            # whose runs ended there (behind)
+            for a, (stop, back) in sorted(sites.items()):
+                if back in covered or runs[0] <= 0 or self.late() or not may_return(stop):
+                    continue
+                for i in [i for i in sorted(reach) if a in reach[i] and stop in corpus[i].get("stops", ())][:ANSWER_BASES]:
+                    if ("behind", a, i) in tried or runs[0] <= 0:
+                        continue
+                    tried.add(("behind", a, i))
+                    if DEBUG:
+                        print("behind 0x%x: base %d" % (a, i))
+                    if behind(corpus[i], stop, 1):
+                        progress = True
+                        break
             for w in sorted(edge()):
                 if runs[0] <= 0 or self.late() or words_set <= covered:
                     break

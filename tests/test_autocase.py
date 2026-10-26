@@ -1448,3 +1448,106 @@ def test_a_stub_that_answers_one_call_counts_a_moved_callee_once(tmp_path):
         gen.apply(m, case)
         results.append((m.call(twice.entry, 10, max_instructions=10_000).ret, list(m.calls)))
     assert results[0] == results[1] and results[0][0] == 11 + 2 * 0x100, results
+
+
+# The code behind a stop (Generator.answers' behind, a case's stop_from): checked_send asserts its
+# queue (wait_for_debugger waits for a debugger, as configASSERT's handler does) and counts the failed
+# check behind the call, then asserts its item and writes through the queue. Every run with a null
+# queue ends at the handler's first call (a stop), or, with the handler stubbed at every call, goes on
+# and faults on queue[1]; the count behind the first call runs in neither.
+BEHIND_C = NOIPA_DEF + """
+volatile unsigned asserted, noted;
+NOIPA void wait_for_debugger(unsigned line) { volatile unsigned go = 0; while (!go) ; }
+NOIPA void note(unsigned v) { noted = v; }
+unsigned checked_send(unsigned *queue, unsigned item)
+{
+    if (queue == 0) { wait_for_debugger(1); asserted++; }
+    if (item == 0) wait_for_debugger(2);
+    note(item);
+    return queue[1] + item;
+}
+"""
+
+
+def behind_target(tmp_path):
+    """The checked_send program's target and its Generator."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(BEHIND_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "checked_send", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    return Generator(t, t.image())
+
+
+def behind_first_call(gen):
+    """The instructions of checked_send behind its first call of wait_for_debugger, up to the next
+    conditional branch (the count of failed checks)."""
+    p = gen.program
+    fn, wait = p.by_name["checked_send"], p.by_name["wait_for_debugger"]
+    words = sorted(fn.insns)
+    call = next(a for a in words if p.arch.flow(p.insn(a))[0] == "call" and p.arch.flow(p.insn(a))[1] is not None
+                and p.arch.flow(p.insn(a))[1] & ~1 == wait.entry)
+    back = call + p.insn_size(call)
+    return {a for a in words if back <= a < back + 8}
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_stop_from_a_later_call(tmp_path):
+    """stop_from [[callee, n]]: the callee's calls before the n-th are answered by its stub in calls (or
+    run, without one), the n-th ends the run as a stop. With a null queue and a null item, the first
+    call of wait_for_debugger returns (its stub logs r0, the mask's), the count behind it runs, and the
+    second call ends the run, logged as a stop logs it: with the registers the handler reads (none: it
+    never reads its line)."""
+    gen = behind_target(tmp_path)
+    p = gen.program
+    fn, wait = p.by_name["checked_send"], p.by_name["wait_for_debugger"]
+    case = {"args": [0, 0, 0, 0], "mem": [], "returns": [], "calls": [[wait.entry, 1, 0]], "frame": 0,
+            "hang": True, "limit": 200_000, "stops": [wait.entry], "stop_from": [[wait.entry, 2]]}
+    m = gen.machine()
+    m.plan = []
+    gen.apply(m, case)
+    m.cover(min(fn.insns), max(fn.insns) + 4)
+    m.call(fn.entry, *case["args"], max_instructions=case["limit"])
+    logged = [c[0] for c in m.calls if c and isinstance(c[0], str)]
+    assert logged == ["call 0x%x" % wait.entry, "call 0x%x, never returns" % wait.entry], m.calls
+    assert [c[1:] for c in m.calls if c and isinstance(c[0], str)] == [(1,), ()], m.calls
+    assert behind_first_call(gen) <= gen.coverage(fn.entry, fn.insns, case)
+    plain = dict(case, stop_from=[])        # (every call a stop: the count stays unrun)
+    assert not behind_first_call(gen) & gen.coverage(fn.entry, fn.insns, plain)
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_run_the_code_behind_a_stop(tmp_path):
+    """From a case whose run ended at wait_for_debugger's first call (a null queue, item 5), the answers
+    answer that call and end the run at the callee's next one (stop_from); that run goes on into
+    queue[1] and faults, so the first call it makes after the answered one ends it instead (note's), and
+    the count behind the first call runs. A stub at every call (the answers until 2026-10-26) faults."""
+    gen = behind_target(tmp_path)
+    p = gen.program
+    fn, wait, note = p.by_name["checked_send"], p.by_name["wait_for_debugger"], p.by_name["note"]
+    stopped = {"args": [0, 5, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0, "hang": True,
+               "limit": 200_000, "stops": [wait.entry]}
+    plain = {"args": [0x20100000, 5, 0, 0], "mem": [[0x20100000 + 4 * i, 4, i] for i in range(4)], "returns": [],
+             "calls": [], "frame": 0}
+    bases = [stopped, plain]
+    before = set().union(*(gen.coverage(fn.entry, fn.insns, c) for c in bases))
+    assert not behind_first_call(gen) & before
+    stubbed = dict(stopped, stops=[], calls=[[wait.entry, 1, 0]])
+    assert gen.attempt(fn.entry, fn.insns, stubbed, 200_000)[1] is not None     # (it faults)
+    new = gen.answers("checked_send", fn.entry, fn.insns, bases)
+    after = set().union(before, *(gen.coverage(fn.entry, fn.insns, c) for c in new))
+    assert behind_first_call(gen) <= after, new
+    made = next(c for c in new if behind_first_call(gen) <= gen.coverage(fn.entry, fn.insns, c))
+    assert [wait.entry, 2] in made["stop_from"] and note.entry in made["stops"] and made.get("answer"), made
+    assert gen.survives(fn.entry, made)
