@@ -481,7 +481,7 @@ def test_a_slot_reached_through_a_variable_that_holds_a_frame_address_stays():
     assert tidy._frame_low(expr("r3 - 4"), held) == -12 and tidy._frame_low(expr("(u32)r3 + 0xfffffffcu"), held) == -12
     assert tidy._frame_low(expr("(u64)r3 + y + 0"), held, const) == -3     # (adds r6, r3, #5, its carry kept)
     assert tidy._frame_low(expr("(u64)r3 + (u32)~m + 1"), held, const) == -18     # (subs r6, r3, #10)
-    assert tidy._frame_low(expr("r3 + r0"), held) is tidy.UNKNOWN_OFFSET
+    assert tidy._frame_low(expr("r3 + r0"), held) == -8 and tidy._frame_low(expr("r3 - r0"), held) is tidy.UNKNOWN_OFFSET
     assert tidy._frame_low(expr("*(volatile u32 *)(r3 - 4)"), held) is None
     assert tidy._frame_low(expr("r3 == 0"), held) is None and tidy._frame_low(expr("g(r3)"), held) is None
     loop = cparse.parse(HELD_FRAME.replace("    r2 = r1;  /* a: mov r2, r1 */\n",

@@ -1376,7 +1376,7 @@ def _types_used(fn):
     return set(re.findall(r"\b[su](?:8|16|32|64)\b", C.unparse(fn, notes=False)))
 
 
-UNKNOWN_OFFSET = "unknown"  # _frame_low: a frame address not bounded below (an index added, a mask)
+UNKNOWN_OFFSET = "unknown"  # _frame_low: a frame address not bounded below (an index subtracted, a mask)
 WALKED_OFFSET = "walked"    # _frame_low: a frame address a loop steps downwards (_held_frame_addresses)
 _INT_CASTS = ("u32", "u16", "u64", "s64", "s32")    # casts through which a frame address keeps its value
 
@@ -1415,8 +1415,10 @@ def _const_value(e, const):
 def _frame_low(e, held, const=lambda name: None):
     """The lowest offset from sp0 that e may have as a frame address, where e is sp0, or a variable that
     may hold one, plus or minus constants (held(name): its lowest offset, UNKNOWN_OFFSET, WALKED_OFFSET
-    or None; const(name): the constant a variable holds, or None); UNKNOWN_OFFSET where e is computed
-    from one otherwise (an index added, a mask), WALKED_OFFSET from a walked one; None where e is no
+    or None; const(name): the constant a variable holds, or None); an index added counts from the
+    address it is added to, as frame_index takes one (an array's element: GCC -O0 adds a loaded index to
+    a local array's address); UNKNOWN_OFFSET where e is computed from one otherwise (an index
+    subtracted, a mask), WALKED_OFFSET from a walked one; None where e is no
     frame address: a load through one is a value read from the frame, not an address, and a call's
     result is none either (as frame_locals always took it: a callee that hands back the frame address
     it was given, memcpy's destination, is not followed)."""
@@ -1432,14 +1434,16 @@ def _frame_low(e, held, const=lambda name: None):
         left, right = _frame_low(e.l, held, const), _frame_low(e.r, held, const)
         if left is not None and right is None:
             k = _const_value(e.r, const)
-            if left in (UNKNOWN_OFFSET, WALKED_OFFSET) or k is None:
-                return left if k is not None else UNKNOWN_OFFSET
+            if k is None:                   # (an index added counts from the address, as frame_index takes
+                return left if e.op == "+" else UNKNOWN_OFFSET  # one: an array's element; subtracted, no bound)
+            if left in (UNKNOWN_OFFSET, WALKED_OFFSET):
+                return left
             k = _signed32(k)
             return left + k if e.op == "+" else left - k
         if right is not None and left is None and e.op == "+":
             k = _const_value(e.l, const)
-            if right in (UNKNOWN_OFFSET, WALKED_OFFSET) or k is None:
-                return right if k is not None else UNKNOWN_OFFSET
+            if k is None or right in (UNKNOWN_OFFSET, WALKED_OFFSET):
+                return right
             return right + _signed32(k)
         return UNKNOWN_OFFSET if left is not None or right is not None else None
     if isinstance(e, C.Cond):
