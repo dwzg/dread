@@ -6334,6 +6334,29 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   target's own convention where it states one; RIP-relative addressing. For x86-64, 64-bit registers
   and pointers through every tool first, as for AArch64 (shared work). Gizmo builds for both with GCC
   and clang, then an open-source program as a larger test target.
+  Order (the user, 2026-10-26: "What about x86/AMD64 support?"; decided by recommendation): i386 first,
+  since DREAD is 32-bit throughout (registers, pointers, the lifted C's u32) and the MSP430 work brought
+  return addresses a call pushes and instructions of several lengths; AMD64 after the 64-bit work that
+  AArch64 and RV64 share. Steps, each a branch with its tests:
+  - [x] gizmo-i386: gizmo built with the host's GCC (-m32) and clang (i686-unknown-elf, ld.lld), flat
+    32-bit protected mode, integer only (no x87, MMX, SSE), the RV32 build's memory-mapped peripherals,
+    no interrupts yet; imported (dread import-elf) and listed identically. Done 2026-10-26 with the
+    layer's first part (dread.arch.x86: decoding, flow, register effects, the stack, the listing in
+    AT&T syntax, the assembler's and linker's flags by toolchain; the program database reads up to
+    max_insn bytes to tell a length): both builds rebuild byte for byte at the first pass (GCC 955
+    instructions with one raw, clang 1,048 with two), 46 functions each (tests/test_x86.py). Their code, measured
+    2026-10-26: about 45 mnemonics (moves with zero and sign extension, push and pop, call, ret, jmp and
+    the conditional jumps, add, sub, and, or, xor, not, neg, inc, dec, cmp, test, lea, leave, imul, mul,
+    div, the shifts, rol, setcc, cmovcc, xchg, one movsb, hlt; clang pads with int3), and the read-only
+    data inside .text: decoding goes by flow from known entries.
+  - [ ] The arch layer (dread.arch.x86): capstone and Unicorn in 32-bit mode, the registers (eax ... edi,
+    esp, ebp), flow and targets, register effects, the stack (push, pop, enter, leave), cdecl (arguments
+    on the stack, eax and edx:eax results, ebx, esi, edi, ebp kept), a call's pushed return address in
+    the emulator (as MSP430's push_return), dread.regflow.
+  - [ ] The lifter (dread.lift_x86): the integer instructions with the six flags, computed where read;
+    the fuzzer's x86 ISA (dread liftfuzz) against Unicorn.
+  - [ ] The lift check on gizmo-i386 (both compilers), the overlay (a 5-byte jmp at a moved function's
+    entry), then readable C, then a larger open-source target.
 - [ ] AVR on the emulator interface the MSP430 work brings (clang builds it, Unicorn does not run
   it): an interpreter behind it, Harvard memory (program and data spaces) in the program database.
 - [ ] Z80 (low priority; the user, 2026-10-19: "Z80 and later 8051, but both low in prio"): an engine

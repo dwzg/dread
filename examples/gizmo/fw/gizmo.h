@@ -9,9 +9,10 @@
  * 0xffe0, RAM at 0x0200, peripherals at 0x0100 with 16-bit registers, the A32 build's interrupt
  * controller on every vector but reset), and for a little-endian MIPS32 core in kernel mode
  * (GIZMO_MIPS: the boot flash at 0xbfc00000 in kseg1, RAM at 0x80000000 in kseg0, peripherals at
- * 0xbf800000, the A32 build's interrupt controller at hardware interrupt 0). The peripherals have
- * the same registers on all of them. (The M4 and the C++ builds are the M3's and the RV32's with
- * more.)
+ * 0xbf800000, the A32 build's interrupt controller at hardware interrupt 0), and for a 32-bit x86
+ * core in flat protected mode (GIZMO_I386: flash at 0x08000000, RAM at 0x20000000, the RV32 build's
+ * peripherals, memory-mapped; no interrupts wired yet). The peripherals have the same registers on
+ * all of them. (The M4 and the C++ builds are the M3's and the RV32's with more.)
  */
 #ifndef GIZMO_H
 #define GIZMO_H
@@ -38,7 +39,7 @@ typedef u32 hwreg;
 #define GPIO_BASE  0x40010800u
 #define NVIC_ISER0 (*(volatile u32 *)0xE000E100u)
 #else
-#ifdef GIZMO_RV32
+#if defined(GIZMO_RV32) || defined(GIZMO_I386)
 #define UART_BASE  0x10000000u
 #define TIMER_BASE 0x10001000u
 #define INTC_BASE  0x10002000u

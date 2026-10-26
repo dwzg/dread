@@ -247,8 +247,9 @@ class Program:
             if isa == "a32":
                 n = 4
             else:
-                try:
-                    n = self.arch.insn_length(self.read(a, 2), isa)
+                try:            # (x86 needs up to max_insn bytes to tell a length; the others two)
+                    n = self.arch.insn_length(self.read(a, min(getattr(self.arch, "max_insn", 2), max(end - a, 2))),
+                                              isa)
                 except TargetError:
                     raise TargetError("code range %s-%s lies outside the image" % (h(start), h(end)))
             self.code[a] = (n, isa)

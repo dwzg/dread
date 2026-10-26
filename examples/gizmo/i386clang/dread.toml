@@ -1,0 +1,41 @@
+# Gizmo 1000, i386 build with clang: DREAD's test firmware (examples/gizmo/fw), built with clang (i686-unknown-elf, ld.lld) for
+# a 32-bit x86 core in flat protected mode (integer only, not position-independent). Not a real device.
+# The tables in config/ come from the ELF (`make -C ../fw targets`). No interrupts are wired yet, so no
+# device models or scenarios.
+
+[target]
+name = "gizmo-i386clang"
+title = "Gizmo 1000 (i386, clang)"
+
+[arch]
+name = "x86"
+isa = "i386"
+
+[image.main]
+original = "original/gizmo.bin"
+base = 0x08000000
+limit = 0x08020000              # 128 KiB of flash from the base
+entry = "_start"
+startup = [
+    {kind = "code", run = 0x20000000, size = 0x40, stored = 0x8000b24},
+    {kind = "data", run = 0x20000040, size = 0x1c, stored = 0x8000b64},
+    {kind = "zero", run = 0x2000005c, size = 0x2c},
+]
+
+[memory]
+regions = [
+    {name = "flash", base = 0x08000000, size = 0x100000, kind = "rom"},
+    {name = "ram", base = 0x20000000, size = 0x10000},
+    {name = "scratch", base = 0x20100000, size = 0x20000},
+]
+io = [[0x10000000, 0x10010000]]
+stack = {top = 0x20010000, size = 0x2000}
+sentinel = 0x1fff0000
+scratch = {base = 0x20100000, size = 0x20000}
+
+[compiler]
+kind = "clang"
+triple = "i686-unknown-elf"
+cflags = ["-march=i686", "-mno-x87", "-mno-mmx", "-mno-sse", "-fno-pic", "-Os",
+          "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common",
+          "-fno-asynchronous-unwind-tables", "-fno-stack-protector"]

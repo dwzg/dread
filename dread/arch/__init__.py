@@ -2,7 +2,8 @@
 
 `get(spec)` returns the layer for a target's [arch] section: ARM (ARM state and Thumb, A and M
 profiles, `dread.arch.arm`), RISC-V (RV32IMC, `dread.arch.riscv`), MSP430 (`dread.arch.msp430`,
-under way) and MIPS (MIPS32r2 little endian, `dread.arch.mips`, under way). Another architecture is a module whose class offers the same methods;
+under way), MIPS (MIPS32r2 little endian, `dread.arch.mips`, under way) and x86 (32-bit i386,
+`dread.arch.x86`, under way). Another architecture is a module whose class offers the same methods;
 `dread.arch.arm.Arm` documents them.
 """
 
@@ -78,4 +79,7 @@ def get(spec):
     if name == "mips":
         from dread.arch.mips import Mips
         return Mips(**options)
-    raise ValueError("unknown architecture %r (known: arm, riscv, msp430, mips)" % (name,))
+    if name == "x86":
+        from dread.arch.x86 import X86
+        return X86(**options)
+    raise ValueError("unknown architecture %r (known: arm, riscv, msp430, mips, x86)" % (name,))
