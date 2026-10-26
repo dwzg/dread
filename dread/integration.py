@@ -55,8 +55,8 @@ G = {}
 
 def run(payload, aliases, case, addr, name, watch=False, limit=None, shift=0):
     """Result of one input with real callees, or None if it does not return. With watch, also
-    whether it read stale stack or differing image bytes as data (result.unusable). shift: start
-    the stack that many bytes lower (see check)."""
+    whether it read stale stack or differing image bytes as data, or stored into the image or the room
+    behind it (result.unusable). shift: start the stack that many bytes lower (see check)."""
     gen, lay = G["gen"], G["gen"].layout
     m = Machine(lay, payload, aliases, isa_of=gen.program.isa_at)
     m.stack_shift = shift
@@ -103,7 +103,12 @@ def run(payload, aliases, case, addr, name, watch=False, limit=None, shift=0):
         result = m.call(addr, *case["args"], max_instructions=limit or LIMIT)
     except EmuError:
         return None
-    result.unusable = bool(stale) or bool(foreign)
+    # (an input that makes the original store into the image or the room behind it, where the rebuilt
+    # image has other code: dread test refuses it, and so does the generator; until 2026-10-26 it
+    # counted here, and clang -O2's prvCopyDataToQueue, its queue's write pointer generated into the
+    # image, memcpy'd over code and "differed")
+    stored = watch and m.wrote_into(G["image"].base, gen.program.writable_end())
+    result.unusable = bool(stale) or bool(foreign) or stored
     return result
 
 

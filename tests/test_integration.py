@@ -30,6 +30,27 @@ def test_callee_bug_shows_in_a_caller(target, variant, tmp_path, capsys):
     assert rc == 1 and "DIFF " + caller in out and "peripheral accesses differ" in out, out
 
 
+@pytest.mark.slow
+def test_an_input_that_stores_into_the_image_counts_for_nothing(tmp_path, capsys):
+    """An input that makes the original store into the image (a buffer pointer generated into it) is
+    no input, as dread test refuses it: what the original does after it may run code it overwrote,
+    which the rebuilt image holds otherwise (clang -O2's prvCopyDataToQueue memcpy'd over code and
+    "differed" until 2026-10-26). gizmo-m3's fmt_dec with its buffer in the flash: no input runs."""
+    import json
+    import os
+    from test_readable import gizmo_copy
+    target = gizmo_copy(tmp_path)
+    image = target.image()
+    build.build(target, image, quiet=True)
+    os.makedirs(image.kept_cases, exist_ok=True)
+    with open(os.path.join(image.kept_cases, "fmt_dec.json"), "w") as f:
+        json.dump({"cases": [{"args": [image.base + 0x100, 1234, 0, 0], "mem": [], "returns": [], "calls": [],
+                              "kept": "real callees"}]}, f)
+    rc = integration.main(["--target", target.root, "--cases", "0", "fmt_dec"])
+    out = capsys.readouterr().out
+    assert rc == 0 and "(0 inputs)" in out, out
+
+
 def test_a_difference_beside_one_the_stack_explains_is_reported(tmp_path, capsys):
     """seed_from_stack's C stores into other besides (a difference the stack does not move): the
     original's own outcome still moves with its stack lower (the seed), but every difference is not
