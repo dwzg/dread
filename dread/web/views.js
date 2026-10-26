@@ -373,7 +373,14 @@ function registersHTML(d) {
       <dt>leaves as it found them</dt><dd>${regs(f.preserved)}</dd>
       <dt>its own on every path</dt><dd>${f.overwritten == null ? `<span class="muted">not known</span>` : regs(f.overwritten)}</dd>
       <dt>second word a leftover</dt><dd>${yes(f.leftover, "yes: it holds only a constant or what a callee left there (no result of the source's)")}</dd>
-      <dt>result computed for the return</dt><dd>${yes(f.computed, "yes: its code writes the result for the return alone")}</dd></dl>`;
+      <dt>result computed for the return</dt><dd>${yes(f.computed, "yes: its code writes the result for the return alone")}</dd>
+      <dt>variadic</dt><dd>${yes(f.variadic, "yes: it reads unnamed arguments (a save area of its argument registers, or a printf format it takes)")}</dd></dl>`;
+    if (f.formats && f.formats.length) {
+      html += `<div class="vw-sub">its calls of variadic functions: the argument registers each passes (dread.varargs, from a constant format)</div>`;
+      html += `<div class="vw-scroll"><table class="vw-table"><thead><tr><th>at</th><th>callee</th><th>arguments</th><th>format at</th></tr></thead><tbody>` +
+        f.formats.map((c) => `<tr><td>${addrLink(V.name, c.address)}</td><td>${fnRef(c.callee)}</td><td>${c.arguments == null ? `<span class="muted">not known: all of them</span>` : c.arguments}</td><td>${c.format == null ? "" : `<span class="mono">${hex8(c.format)}</span>`}</td></tr>`).join("") +
+        `</tbody></table></div>`;
+    }
     html += `<div class="vw-sub">its callers: each call site and what it reads after the call</div>`;
     html += f.callers.length ? `<div class="vw-scroll"><table class="vw-table"><thead><tr><th>caller</th><th>at</th><th>reads after it</th></tr></thead><tbody>` +
       f.callers.map((c) => `<tr><td>${c.address ? fnRef(c.caller, c.address) : `<span class="muted">${esc(c.caller)}</span>`}</td><td>${c.address ? `<a class="mono" href="${fnLink(c.caller, c.address)}">${hex8(c.address)}</a>` : ""}</td><td>${siteRegs(c.registers)}</td></tr>`).join("") +

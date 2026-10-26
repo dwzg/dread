@@ -1565,6 +1565,29 @@ model).
   push their arguments, which variadic_reach did not find, so their calls were trimmed (sprintf(buf,
   fmt) without its value); now such a call keeps them all (readable.entry_save_areas), and five
   functions that call one (three on GCC -O0) pass their entry registers on.
+  (2) done 2026-10-26 (docs/decisions.md, "The arguments of a printf call from its format"):
+  dread.varargs counts the words a constant printf format takes; dread.regflow 28 counts them as the
+  call's uses, so a wrapper that hands its line on reads it; readable trims each such call to them, the
+  callee declared variadic, and keeps every argument only where a variadic function's call has a format
+  it does not know; a stub of a printf-family function logs the registers its format takes (only logs:
+  the fills behind pointers go by the case's own mask). Main -> this on the eight builds: the gate
+  accepts the same functions (gizmo a32 35, m3 36, m4 44, rv32 31; FreeRTOS GCC -Os 328, clang -O2 288,
+  RISC-V GCC -Os 252, GCC -O0 378); gizmo's C is unchanged; the readable C's parameters GCC -Os 487 ->
+  473, clang -O2 579 -> 380, RISC-V GCC -Os 1009 -> 442, GCC -O0 491 -> 484; vAssertCalled's calls pass
+  the file and the line (GCC -Os: the line had been lost, its arguments 677 -> 1376; clang -O2 3616 ->
+  1800; RISC-V GCC -Os 5448 -> 1354). The first measurement lost three GCC -O0 functions: counted among a
+  stub's arguments, the format's register moved the seeds of the fills behind pointers, and cached cases
+  ran otherwise than they were made (prvCoreATask's overwrote its loop counter and faulted in the
+  original). Left: a format kept in a saved register across a loop (the next item), formats with 64-bit
+  or floating-point words, a format argument on the stack.
+- [ ] **A format kept in a saved register across a loop.** dread.varargs finds a call's format where
+  the code puts its address into the register on the straight run in front of the call
+  (dread.constants at). RISC-V GCC -Os computes a format once into a callee-saved register in front of
+  a loop and copies it into a1 at each call of sprintf in the loop, so the run back from the call stops
+  at the loop's head: on virt-gcc-Os 6 of the 13 calls of printf and sprintf are not known (the
+  tasks' sprintf(buf, "...", n) in their loops), and those calls keep all eight arguments. A register
+  written once in the function, with a constant, on the way into the loop (its one write on every path
+  from the entry to the call) holds that constant at the call; regflow's graphs give the paths.
 - [x] **Flags as comparisons, the rest.** After the IT-block work, flags still print as u64 sums with
   carry and zero variables where one compare or subtraction is read by two conditions (borrow, then
   zero), where an add's carry is tested, where a compiler dispatches by successive subtractions
@@ -4049,6 +4072,13 @@ undone). Other decisions are taken by the recommended option and written down in
 
 ## Phase 4: cases, mutation, coverage (rest)
 
+- [ ] **A call of a callee that never returns compares no arguments.** dread.autocase's stop stub (a
+  case's `stops`: a callee that never returns, or one a run hung in) logs only that the call came: the
+  arguments of the call that ends the run are compared by nothing (found 2026-10-26 with the printf
+  formats: on FreeRTOS GCC -Os, prvAutoReloadTimerCallback's cases stop at vAssertCalled in 11 of the
+  69 that reach it, and its file and line went unseen there). Log what the callee reads (reads_mask,
+  and the registers a format takes: format_mask), as the call stubs do: it adds to what is compared,
+  and the cases stay as they are (the stub reads the mask at the run).
 - [x] **Why the cases leave code unrun, by code** (`dread uncovered`, 2026-10-23; asked for before the
   generator gets new work: on a private firmware, DREAD's real-life test, the lift check drops functions
   as UNCOVERED, some without a single instruction run). For each

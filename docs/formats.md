@@ -411,7 +411,7 @@ the seconds the search was allowed; only for showing what a function does, never
 | `args` | the argument registers |
 | `mem` | `[[address, size, value], ...]` written before the call (peripheral registers too) |
 | `returns` | the answers of the stubbed callees, in call order (later calls answer 0) |
-| `calls` | `[[callee, register mask, stack words], ...]`: the generic stubs; written cases without it get auto()'s; recorded cases (`dread record`) carry the ones they were recorded with, and those are kept. A fourth element, a list of call numbers (from 1, counting the callee's calls in the run), makes the stub answer those calls only: at the others the callee runs as if no stub were there, and they take no answer from `returns` and count as no stub call (the frontier answers, since 2026-10-23; a DREAD from before reads three elements and stubs every call) |
+| `calls` | `[[callee, register mask, stack words], ...]`: the generic stubs (a stub of a function that takes a printf format logs the registers its format takes besides the mask's, read at the call: dread.autocase format_mask, since 2026-10-26; only logged, the fills behind pointers go by the mask); written cases without it get auto()'s; recorded cases (`dread record`) carry the ones they were recorded with, and those are kept. A fourth element, a list of call numbers (from 1, counting the callee's calls in the run), makes the stub answer those calls only: at the others the callee runs as if no stub were there, and they take no answer from `returns` and count as no stub call (the frontier answers, since 2026-10-23; a DREAD from before reads three elements and stubs every call) |
 | `frame` | the bytes of the function's frame a stub may fill behind a pointer to a local (as `calls`: from auto() unless the case carries it) |
 | `effects` | `[[call number, address, size, value], ...]` written by that stub call before it returns |
 | `fills` | `[[call number, which pointer, offset, size, value], ...]` set inside what a stub stored behind a pointer |
@@ -942,9 +942,15 @@ register's count, as a number; null before regflow 27), `callers` (each call sit
 registers are read: `[{"caller", "address", "registers": [{"register", "always"}]}]`, `always` false
 where it is read on some paths only; a caller that stands for others, `callers through a pointer`, `the
 ABI` or `the compiler's profile`, has address 0 and comes last) and `calls` (its own calls after which
-it reads a callee's registers: `[{"address", "callee", "registers"}]`). Since regflow 27 the cache
-(`BUILD/regflow/IMAGE.json`, `{"key", "flow"}`) holds `bits` beside kept and reads; a cache of another key
-is made anew.
+it reads a callee's registers: `[{"address", "callee", "registers"}]`), `variadic` (whether it is one:
+a save area of its argument registers, or a printf format it takes; null before regflow 28) and `formats`
+(its calls and tail calls of variadic functions: `[{"address", "callee", "arguments", "format"}]`, how many
+argument registers the call passes and its format's address where the format is a constant whose words
+all go in registers, dread.varargs; both null elsewhere; null before regflow 28). Since regflow 27 the cache
+(`BUILD/regflow/IMAGE.json`, `{"key", "flow"}`) holds `bits` beside kept and reads, since regflow 28
+`variadic` (the variadic functions' names) and `formats` (`{caller: [[address, callee, arguments or null,
+format or null], ...]}`), neither of which is in the generated cases' key; a cache of another key is made
+anew.
 
 ### `BUILD/gui/views/IMAGE/` (dread gui's views of one function)
 

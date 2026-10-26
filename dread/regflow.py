@@ -83,7 +83,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 27                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 28                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -154,6 +154,9 @@ VERSION = 27                # 3: entry spills (variadic functions) are no use; 4
                             # 27: the bits a read uses kept beside the registers (bits: kept's and reads'
                             # fields where fewer than all of a register's bits are used); the analysis is
                             # the one of 26
+                            # 28: a call of a function that takes a printf format whose format is a constant
+                            # uses the registers the format takes (dread.varargs call_arities: FreeRTOS's
+                            # vAssertCalled hands its line on to printf and reads it); variadic and formats
 
 
 class RegFlow:
@@ -172,7 +175,7 @@ class RegFlow:
     register absent where every bit counts; None before version 27."""
 
     def __init__(self, names, kept, reads, sites, preserved=None, overwritten=None, leftover=None, computed=None,
-                 bits=None):
+                 bits=None, variadic=None, formats=None):
         self.names = names                  # register names in bit order
         self.kept, self.reads, self.sites = kept, reads, sites
         self.preserved = preserved or {}
@@ -180,6 +183,8 @@ class RegFlow:
         self.leftover = leftover
         self.computed = computed
         self.bits = bits
+        self.variadic = variadic
+        self.formats = formats
         self._by_caller = None              # caller -> {(address, callee): {register: always}} (calls_of)
 
     def _regs(self, value):
@@ -237,19 +242,25 @@ class RegFlow:
             out["computed"] = self.computed
         if self.bits is not None:
             out["bits"] = self.bits
+        if self.variadic is not None:
+            out["variadic"] = self.variadic
+        if self.formats is not None:
+            out["formats"] = self.formats
         return out
 
     @classmethod
     def from_json(cls, data):
         return cls(data["names"], data["kept"], data["reads"], data["sites"], data.get("preserved"),
-                   data.get("overwritten"), data.get("leftover"), data.get("computed"), data.get("bits"))
+                   data.get("overwritten"), data.get("leftover"), data.get("computed"), data.get("bits"),
+                   data.get("variadic"), data.get("formats"))
 
     def case_facts(self):
         """What a function's generated cases depend on of the result (dread.autocase's environment):
-        to_json without overwritten, leftover, computed and bits, which no case reads, so that version 25
-        kept every image's cases (version 26 changed kept, reads and sites; 27 added bits alone)."""
+        to_json without overwritten, leftover, computed, bits, variadic and formats, which no case reads,
+        so that version 25 kept every image's cases (version 26 changed kept, reads and sites; 27 added
+        bits alone; 28 changed reads, kept and sites where a format is known, and added the last two)."""
         out = self.to_json()
-        for field in ("overwritten", "leftover", "computed", "bits"):
+        for field in ("overwritten", "leftover", "computed", "bits", "variadic", "formats"):
             out.pop(field, None)
         return out
 
@@ -282,7 +293,10 @@ class RegFlow:
         bits used where fewer than all, as bits; null before version 27), "callers" (each call site after
         which its registers are read: [{"caller", "address", "registers": [{"register", "always"}]}]; a
         caller that stands for others, such as POINTER_CALLERS or "the ABI", with address 0), "calls"
-        (calls_of)}."""
+        (calls_of), "variadic" (whether it is: its save area, or a printf format it takes; null before
+        version 28) and "formats" (its calls of variadic functions: [{"address", "callee", "arguments",
+        "format"}], how many argument registers each passes and the format's address, both null where the
+        format is not known; null before version 28)}."""
         callers = {}
         for reg, entries in self.sites.get(name, {}).items():
             for e in entries:
@@ -299,7 +313,10 @@ class RegFlow:
                 "bits": bits,
                 "callers": [{"caller": c, "address": a, "registers": self._listed(regs)}
                             for (c, a), regs in sorted(callers.items(), key=lambda kv: (kv[0][1] == 0, kv[0]))],
-                "calls": self.calls_of(name)}
+                "calls": self.calls_of(name),
+                "variadic": name in self.variadic if self.variadic is not None else None,
+                "formats": [{"address": a, "callee": c, "arguments": n, "format": f}
+                            for a, c, n, f in self.formats.get(name, ())] if self.formats is not None else None}
 
 
 def argued_path(image):
@@ -838,6 +855,7 @@ class Analysis:
             self._dead_saved_writes(fn)
         self.may = self._may_write()
         self._must = None
+        self._variadic_sites(program)
         self.handed = self._handed()
         # a runtime helper's result by the ABI is read, whatever the original's callers do with it:
         # compiled C calls the helper by that contract (the layer's abi_results)
@@ -1359,6 +1377,37 @@ class Analysis:
                 continue
             code[i] = code[i]._replace(uses=0)
 
+    def _variadic_sites(self, program):
+        """The calls of variadic functions and what their formats say (dread.varargs). formats: {address:
+        the argument registers the call or tail call there passes, as a mask} where its format is known
+        (effects counts them as the call's uses, _handed leaves the call alone). variadic_all: the
+        functions variadic by their save area (variadic; a push of argument registers at the entry,
+        pushed_save_area) or that take a format (dread.varargs family). format_sites: {caller: [[address,
+        callee, how many argument registers it passes, the format's address], ...]} of every call and tail
+        call of one of them, the last two None where the format is not known (dread.readable: a function
+        whose calls of them are all known reads what regflow says; a call whose format argument is one of
+        the formats passes what it takes)."""
+        from dread import varargs
+        args = [r for r in program.target.abi.arg_regs if r in self.bit]
+        taking = {n: i for n, i in varargs.family(program.target).items() if n in self.rows}
+        pushed = {fn.name for fn in program.functions
+                  if pushed_save_area(program, [program.insn(a) for a in fn.insns[:SAVE_AREA_LEAD + 1]])}
+        self.variadic_all = set(self.variadic) | pushed | set(taking)
+        found = []                          # (dread.varargs sites, from the graphs: a branch, not a fall)
+        for fn in program.functions:
+            code = self.rows[fn.name]
+            _, _, calls, tails, _ = self.graphs[fn.name]
+            here = [(code[i].address, c, "call") for i, c in calls if c in self.variadic_all]
+            here += [(code[i].address, c, "tail") for i, c in tails
+                     if c in self.variadic_all and code[i].kind == "jump"]
+            found += [(fn, a, c, kind) for a, c, kind in sorted(here)]
+        arities = varargs.call_arities(program, taking, args, found) if taking and args else {}
+        self.formats = {a: self.mask(args[:n]) for a, (n, _) in arities.items()}
+        self.format_sites = {}
+        for fn, address, callee, _ in found:
+            n, fmt = arities.get(address, (None, None))
+            self.format_sites.setdefault(fn.name, []).append([address, callee, n, fmt])
+
     def _handed(self):
         """{name: {row: registers}}: what counts as read at the rows where a value goes to code whose reads
         the analysis does not see: a call through a pointer (or an svc, an ecall), a call or tail call of
@@ -1375,11 +1424,13 @@ class Analysis:
         entries = {fn.name: fn.entry for fn in self.program.functions}
         out = {}
         for name, (succ, _, calls, tails, _) in self.graphs.items():
-            sinks = [i for i, c in calls if c is None or c in self.variadic] + \
-                [i for i, c in tails if c in self.variadic] + sorted(self.leaves.get(name, ()))
+            code = self.rows[name]
+            unknown = self.variadic                 # (a call whose format is known passes what it says)
+            sinks = [i for i, c in calls if c is None or (c in unknown and code[i].address not in self.formats)]
+            sinks += [i for i, c in tails if c in unknown and code[i].address not in self.formats]
+            sinks += sorted(self.leaves.get(name, ()))
             if not sinks or not args:
                 continue
-            code = self.rows[name]
             start = next((i for i, row in enumerate(code) if row.address == entries.get(name)), 0)
             preds = [[] for _ in code]
             for i, nexts in enumerate(succ):
@@ -1661,11 +1712,13 @@ class Analysis:
         passed = 0 if own else self.kept[name] | self.seed
         for i in returns:
             exits[i] |= passed
+        formats = self.formats
         for i, callee in tails:
-            exits[i] |= self.reads[callee] | (passed & ~self.may[callee])
+            exits[i] |= self.reads[callee] | formats.get(code[i].address, 0) | (passed & ~self.may[callee])
         for i, callee in calls:
             if callee is not None:      # (the call writes its link register before the callee reads it)
-                uses[i] |= self.reads[callee] & ~code[i].covered & ~(code[i].writes & self.link_mask)
+                uses[i] |= (self.reads[callee] | formats.get(code[i].address, 0)) & ~code[i].covered & \
+                    ~(code[i].writes & self.link_mask)
                 kills[i] = 0 if code[i].conditional else self.may[callee]
             else:
                 kills[i] = 0 if code[i].conditional else self.everything
@@ -1832,6 +1885,8 @@ class Analysis:
         flow.leftover = sorted(self.leftovers())
         flow.computed = sorted(self.computed())
         flow.bits = {"kept": self.partial_bits(kept), "reads": self.partial_bits(self.reads)}
+        flow.variadic = sorted(self.variadic_all)
+        flow.formats = self.format_sites
         return flow
 
     def partial_bits(self, masks):
@@ -1967,11 +2022,11 @@ class Analysis:
                     row = code[j]
                     if row.uses & b and j not in exits:
                         return False
-                    if j in tail_at and self.reads[tail_at[j]] & b:
+                    if j in tail_at and (self.reads[tail_at[j]] | self.formats.get(row.address, 0)) & b:
                         return False
                     if j in call_at:
                         callee = call_at[j]
-                        if callee is None or self.reads[callee] & b:
+                        if callee is None or (self.reads[callee] | self.formats.get(row.address, 0)) & b:
                             return False
                         if self.may[callee] & b and not row.conditional:
                             continue
@@ -2133,7 +2188,8 @@ class Analysis:
                 continue
             if j in returns and self.kept[name] & b:
                 out.append(("return", code[j].address))
-            if j in tail_at and (self.reads[tail_at[j]] | (self.kept[name] & ~self.may[tail_at[j]])) & b:
+            if j in tail_at and (self.reads[tail_at[j]] | self.formats.get(code[j].address, 0) |
+                                 (self.kept[name] & ~self.may[tail_at[j]])) & b:
                 out.append(("tail", code[j].address, tail_at[j]))
             stack.extend(succ[j])
         return sorted(out)
@@ -2173,7 +2229,7 @@ def _read_sources():
     import pkgutil
     with open(__file__, "rb") as f:
         _SOURCES[__name__] = f.read()
-    for name in ("dread.switches", "dread.program", "dread.arch"):
+    for name in ("dread.switches", "dread.program", "dread.arch", "dread.varargs", "dread.constants"):
         _source(name)
     for m in pkgutil.iter_modules(importlib.util.find_spec("dread.arch").submodule_search_locations):
         _source("dread.arch." + m.name)
@@ -2182,9 +2238,11 @@ def _read_sources():
 def cache_key(target, image):
     h = hashlib.sha1()
     h.update(b"dread regflow %d\0" % VERSION)
-    for module in (__name__, "dread.switches", type(image.arch).__module__, "dread.arch", "dread.program"):
-        # the analysis, the arch layer (and the helpers of its bit rules) and the decoder (it marks calls
-        # through a register), as this process read them when it imported this module (_read_sources)
+    for module in (__name__, "dread.switches", type(image.arch).__module__, "dread.arch", "dread.program",
+                   "dread.varargs", "dread.constants"):
+        # the analysis, the arch layer (and the helpers of its bit rules), the decoder (it marks calls
+        # through a register) and what finds the formats of calls (dread.varargs, by dread.constants), as
+        # this process read them when it imported this module (_read_sources)
         h.update(_source(module))
     h.update(image.payload())
     for table in ("functions", "code_ranges"):
@@ -2195,6 +2253,9 @@ def cache_key(target, image):
         h.update(b"\0")
     copies = [(c.kind, c.run, c.size, c.stored) for c in image.startup()]
     h.update(repr((target.abi.callee_saved, image.arch.describe(), image.base, copies)).encode())
+    formats = sorted((getattr(target.abi, "formats", None) or {}).items())
+    if formats:                                             # (the target's [abi] formats, where it has any)
+        h.update(b"formats " + repr(formats).encode())
     profile = getattr(getattr(target, "compiler", None), "profile", None)
     if profile and os.path.exists(profile):                 # the compiler's profile (dread cclab)
         with open(profile, "rb") as f:

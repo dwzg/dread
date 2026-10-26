@@ -53,7 +53,8 @@ SCHEMA = {
     "arch": {"name": str, "isa": str, "profile": str, "cpu": str, "endian": str, "ghidra": str, "thumb2": bool,
              "extensions": str},
     "memory": {"regions": list, "io": list, "stack": dict, "sentinel": int, "scratch": dict},
-    "abi": {"args": int, "callee_saved": list, "result": list, "float": str, "stack_args": dict},
+    "abi": {"args": int, "callee_saved": list, "result": list, "float": str, "stack_args": dict,
+            "formats": dict},
     "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "lifted_cflags": list, "generated_std": str,
                  "cxxflags": list,
                  "ldflags": list,
@@ -171,6 +172,10 @@ class Abi:
                   s0 or s0:s1), as the VFP variant of the procedure call standard says; "soft": in
                   the core registers like integers. Default: hard where the compiler's flags say
                   -mfloat-abi=hard, else soft (set_float)
+    stack_args    {name: words} of stack arguments the lifter cannot count
+    formats       {name: index} of the functions that take a printf format besides the printf family
+                  by name (dread.varargs FAMILY), with the index of the format argument: a call whose
+                  format is a constant passes the registers the format takes
     """
 
     def __init__(self, data, arch):
@@ -187,6 +192,10 @@ class Abi:
         for name, words in self.stack_args.items():
             if not isinstance(words, int) or words < 0:
                 raise ValueError("[abi] stack_args: %s takes a number of words, not %r" % (name, words))
+        self.formats = dict(data.get("formats", {}))
+        for name, index in self.formats.items():
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                raise ValueError("[abi] formats: %s takes the index of its format argument, not %r" % (name, index))
         self.fp_arg_regs = []
 
     def set_float(self, cflags, arch):

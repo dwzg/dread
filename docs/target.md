@@ -170,6 +170,7 @@ address faults before the run can stop.
 | `callee_saved` | the registers a function preserves (default ARM r4-r11; RISC-V s0-s11) |
 | `result` | the registers a result comes back in (default ARM r0, r1; RISC-V a0, a1) |
 | `stack_args` | `{name = words}`: the stack words a function takes where the lifter cannot count them, its stack pointer not being static; its callers are refused without it. A context switch needs none: the words it reads above its return address before it loads its stack pointer from memory not on the stack are counted (FreeRTOS's MSP430 port's `vPortYield`: none), and generated cases of the functions whose calls reach it stub it |
+| `formats` | `{name = index}`: functions that take a printf format besides the printf family by name (printf, sprintf, snprintf, fprintf and newlib's i- and _r variants: `dread.varargs` FAMILY), with the index of the format argument. A call whose format is a constant text in the image passes the format, the arguments in front of it and one register for each conversion: the register flow counts those as read, readable C passes them alone, and a stub logs them (formats with 64-bit, floating-point or positional arguments stay as they were) |
 | `float` | `"hard"`: floats travel in the FPU's argument registers (ARM: s0-s15, as the procedure call standard's VFP variant says), which the register flow, the generated cases and the lifted C then follow; `"soft"`: in the core registers. Default: hard where `[compiler] cflags` has `-mfloat-abi=hard` |
 
 ### `[compiler]`

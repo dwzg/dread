@@ -5115,3 +5115,35 @@ each block once.
   for every value it holds (dread's readable C names a value once where it can); a parameter's or a
   variable whose address is taken does not.
 
+
+## The arguments of a printf call from its format (2026-10-26)
+
+**Decided by the user** on my recommendation (asked "What is your recommendation on the phantom parameters
+issue? Ignoring what the rules say.", then "Yes, take it as the next item"), from docs/todo.md's "No
+parameters from pushes, system calls and calls that keep every argument", part (2).
+
+- **Question.** A variadic function reads as many of its unnamed arguments as its format says, which the
+  register flow cannot see (it counts the save area's stores as no use). Readable C therefore kept every
+  argument of every call of a variadic function and of a function that calls one, and each caller of
+  FreeRTOS's vAssertCalled handed its own entry registers on as phantom parameters (a2-a7 on RISC-V).
+  Where newlib's printf pushes its arguments, the wrapper was not recognised at all, regflow said it read
+  the file alone, and its callers' readable C lost the line it prints (GCC -Os; no stub compared the
+  line). How many arguments does such a call pass?
+- **Options.** (a) Leave it. (b) Drop the registers a caller only hands on to a call that keeps every
+  argument. (c) A table per target of how many arguments each such function takes. (d) Count the
+  conversions of a constant format: the register flow counts the format, the arguments in front of it and
+  one register for each word the format takes as the call's uses, so a wrapper that hands its line on
+  reads it; readable C trims each such call to them, the callee declared variadic; a stub of a
+  printf-family function logs the registers its format takes. Everything else (a format that is not a
+  constant, a 64-bit, floating-point or positional argument, a call through a pointer, an ecall) stays as
+  it was.
+- **Choice.** (d), with the printf family by name and a target's own functions in `[abi] formats`. (b)
+  breaks a wrapper that hands on its caller's format and arguments (`say(fmt, ...)` calling printf with
+  them): what it hands on is what printf reads. (c) is the same fact typed by hand, and a function like
+  printf takes a different number at every call. (d) is what the callee itself reads: the format decides
+  every va_arg. It adds to what the gate compares rather than taking away: the stubs of the wrappers log
+  the line regflow now finds them reading (before: the file alone), and a stub of printf logs the
+  format's registers (before: the format alone), so a trimmed call is checked, not trusted. A format is
+  read from the image only where the code puts its address into the register on the straight run in
+  front of the call; a stub reads it from the emulator's memory, never from code, free space or the room
+  behind the image, where the two images differ.

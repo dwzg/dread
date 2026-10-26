@@ -105,6 +105,9 @@ class Context:
     def __init__(self, target=None, image=None, program=None, flow=None):
         self.arg_regs, self.reads, self.preserved, self.variadic = [], {}, {}, set()
         self.save_areas = set()         # functions whose entry pushes argument registers only (entry_save_areas)
+        self.formats = {}               # function -> the index of its printf format argument (dread.varargs)
+        self.format_words = {}          # a format's address -> the words of arguments it takes (dread.regflow's
+                                        # formats: those its calls pass)
         self.results = []               # the registers a result comes back in (the target's [abi])
         self.overwritten = {}           # function -> what it writes on every path, its caller's never read
         self.unread = set()             # functions whose result no caller reads (dread.shapes analyse)
@@ -163,7 +166,14 @@ class Context:
             if second in flow.kept_regs(name) and second not in flow.preserved_regs(name):
                 self.leftover.add(name)
                 self.leftover_why[name] = flow.why(name, second)
-        self.variadic = variadic_reach(program)
+        from dread import varargs
+        taking = varargs.family(target)
+        self.formats = {fn.name: taking[fn.name] for fn in program.functions if fn.name in taking}
+        for calls in (getattr(flow, "formats", None) or {}).values():
+            for _, callee, n, fmt in calls:
+                if n is not None and fmt is not None and callee in self.formats:
+                    self.format_words[fmt] = n - self.formats[callee] - 1
+        self.variadic = variadic_reach(program, flow)
         self.save_areas = entry_save_areas(program)
 
     def keep_results(self, names):
@@ -221,11 +231,29 @@ class Context:
         return insn is not None and prog.arch.stack_kind(insn) == "push"
 
     def unknown(self, name):
-        """Whether what a function reads cannot be told from regflow: it is variadic or calls one on
-        (regflow counts a variadic function's unnamed argument registers in its save area as no use,
-        right for the lifter, which passes them all; FreeRTOS's vAssertCalled hands its line number on
-        to printf, and trimmed to its first argument it printed garbage on clang -O2)."""
+        """Whether what a function reads cannot be told from regflow: it is variadic, or calls one where
+        the call's format is not known (variadic_reach; regflow counts a variadic function's unnamed
+        argument registers in its save area as no use, right for the lifter, which passes them all;
+        FreeRTOS's vAssertCalled hands its line number on to printf, and trimmed to its first argument it
+        printed garbage on clang -O2; where printf's format is a constant regflow counts what it takes,
+        and vAssertCalled reads its line)."""
         return self.variadic is None or name in self.variadic
+
+    def format_arity(self, name, args):
+        """How many arguments a call of name with these arguments (C expressions) passes where name takes a
+        printf format (formats) and the format argument is the address of a format regflow found at a call
+        (format_words): the format, the arguments in front of it and one for each word it takes; None
+        elsewhere (dread.tidy trim_calls)."""
+        index = self.formats.get(name)
+        if index is None or index >= len(args):
+            return None
+        e = args[index]
+        while isinstance(e, cparse.Cast):
+            e = e.e
+        if not isinstance(e, cparse.Num) or not isinstance(e.value, int) or e.value not in self.format_words:
+            return None
+        n = index + 1 + self.format_words[e.value]
+        return n if n <= len(self.arg_regs) else None
 
     def arity(self, name):
         """How many argument registers a function reads at its entry, counted from the first up to the
@@ -271,11 +299,22 @@ def entry_save_areas(program):
             if pushed_save_area(program, [program.insn(a) for a in fn.insns[:SAVE_AREA_LEAD + 1]])}
 
 
-def variadic_reach(program):
-    """The functions that are variadic (dread.regflow's save area) or call one directly (a wrapper
-    that hands its arguments on: vAssertCalled to printf); None when it cannot be worked out. Not
-    further up: nearly every FreeRTOS function calls vAssertCalled, with constants of its own. A
-    function that hands an argument on two levels down is not seen; the gate is there for it."""
+def variadic_reach(program, flow=None):
+    """The functions whose reads dread.regflow cannot tell: the variadic ones (its save area, a push of
+    argument registers at the entry, or a printf format they take: RegFlow.variadic) and those that call
+    or tail-call one where the call's format is not known (RegFlow.formats, dread.varargs: a wrapper
+    that hands its arguments on to a call whose format comes from elsewhere); None when it cannot be
+    worked out. A function whose calls of variadic ones all have a constant format reads what regflow
+    says, which counts what the formats take: FreeRTOS's vAssertCalled hands its line on to printf and
+    reads it, and its callers pass it; until 2026-10-26 every caller of a variadic function was here,
+    and its callers passed their own entry registers on as phantom parameters (a2-a7 on RISC-V). Not
+    further up: nearly every FreeRTOS function calls vAssertCalled, with constants of its own. A function
+    that hands an argument on two levels down to a call whose format is not known is not seen; the gate
+    is there for it. Without the flow's two fields (a flow made by hand) as before 2026-10-26: the
+    variadic functions by their save area's stores, and their direct callers."""
+    variadic, formats = getattr(flow, "variadic", None), getattr(flow, "formats", None)
+    if variadic is not None and formats is not None:
+        return set(variadic) | {name for name, calls in formats.items() if any(c[2] is None for c in calls)}
     try:
         from dread.lift import direct_callees
         from dread.regflow import variadic_save_area
@@ -303,6 +342,8 @@ class Run:
     def __init__(self, context):
         self.context = context or Context()
         self.trimmed = {}
+        self.formats = {}           # callee -> the parameters in front of "..." (dread.tidy trim_calls: calls
+                                    # trimmed to what their formats take)
         self.returns = {}           # callee -> its declared result type (the file's extern declarations)
 
 
@@ -499,7 +540,11 @@ def readable_tree(name, text, stages=None, context=None, with_results=True):
         stage(fn, run)
     for item in tree.items:
         m = EXTERN.match(item.text) if isinstance(item, cparse.Raw) else None
-        if m and m.group(2) in run.trimmed:
+        if m and m.group(2) in run.formats:
+            params = [p.strip() for p in m.group(3).split(",")]
+            item.text = "extern %s %s(%s, ...);" % (m.group(1), m.group(2),
+                                                     ", ".join(params[:run.formats[m.group(2)]]))
+        elif m and m.group(2) in run.trimmed:
             params = [p.strip() for p in m.group(3).split(",")]
             item.text = "extern %s %s(%s);" % (m.group(1), m.group(2),
                                                 ", ".join(params[:run.trimmed[m.group(2)]]) or "void")

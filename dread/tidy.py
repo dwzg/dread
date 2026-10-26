@@ -4017,7 +4017,10 @@ def trim_calls(fn, run):
     argument reads), so it goes. Safe as far as regflow's facts are (its docstring: a push is no use
     there, as for every argument trimmed by reads); the gate checks the result all the same. Called again after the clean-up has run (_tidy): an argument it kept
     because the call's value was read may go once nothing reads that value any more (the lifters'
-    vPortExitCritical(r0, ...) behind vPortEnterCritical read its r0 until it was trimmed itself)."""
+    vPortExitCritical(r0, ...) behind vPortEnterCritical read its r0 until it was trimmed itself).
+
+    A callee whose reads regflow cannot tell (Context.arity None: a variadic function) keeps every
+    argument, but for the calls of one that takes a printf format (trim_formats)."""
     ctx = run.context if run is not None else None
     if ctx is None or not ctx.arg_regs:
         return False
@@ -4032,6 +4035,7 @@ def trim_calls(fn, run):
     for name, calls in by_callee.items():
         n = ctx.arity(name)
         if n is None:
+            changed |= trim_formats(name, calls, run)
             continue
         if name in used:
             # The call's value is read: what the callee leaves in its result registers is what the
@@ -4050,6 +4054,35 @@ def trim_calls(fn, run):
             del c.args[n:]
         run.trimmed[name] = n
         changed = True
+    return changed
+
+
+def trim_formats(name, calls, run):
+    """Each call of a function that takes a printf format passes the format, the arguments in front of it
+    and one for each word the format takes (Context.format_arity: a constant format regflow found at a
+    call, dread.varargs), where its other arguments have no effects; the callee's extern declaration
+    becomes variadic (readable's transform: run.formats). Calls of the lifters' form only (as many
+    arguments as the target has argument registers); one whose format is not known keeps them all.
+    printf reads no more than its format takes, and a stub of it logs those (dread.autocase format_mask):
+    the gate compares them. Until 2026-10-26 every call of a variadic function kept every argument
+    (FreeRTOS's vAssertCalled called printf with its own entry registers a3-a7 behind the line and the
+    file, and took them as parameters)."""
+    ctx = run.context
+    fixed = getattr(ctx, "formats", {}).get(name)
+    if fixed is None:
+        return False
+    k = len(ctx.arg_regs)
+    changed = False
+    for c in calls:
+        if len(c.args) != k:
+            continue
+        n = ctx.format_arity(name, c.args)
+        if n is None or n >= k or any(has_effects(a) for a in c.args[n:]):
+            continue
+        del c.args[n:]
+        changed = True
+    if changed:
+        run.formats[name] = fixed + 1
     return changed
 
 
