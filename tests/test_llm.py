@@ -361,6 +361,32 @@ def test_a_forked_worker_still_ends_on_sigterm():
             assert pool.map(abs, [-1, -2, -3]) == [1, 2, 3]
 
 
+def _wait_in_c():
+    """Lock a pthread mutex twice: a wait in C that no signal interrupts (glibc's default mutex)."""
+    import ctypes
+    libc = ctypes.CDLL(None)
+    mutex = ctypes.create_string_buffer(64)        # (zeroed: PTHREAD_MUTEX_INITIALIZER on glibc)
+    libc.pthread_mutex_lock(mutex)
+    libc.pthread_mutex_lock(mutex)
+
+
+@pytest.mark.timeout(120)
+def test_a_pool_ends_a_worker_that_waits_in_c():
+    """A pool's worker blocked in a wait in C (a mutex locked twice) under ending_on_signals' handler,
+    which is Python code and never runs there: the pool's terminate ends it all the same, since the
+    pools' initializer gives SIGTERM its default (dread.util.polite die_with_parent). On 2026-10-26 such
+    a worker held a test suite and a push's tests, its parent in terminate."""
+    import multiprocessing
+    import time
+    from dread.util.polite import die_with_parent
+    with llm.ending_on_signals():
+        started = time.monotonic()
+        with multiprocessing.get_context("fork").Pool(1, initializer=die_with_parent) as pool:
+            pool.apply_async(_wait_in_c)
+            time.sleep(0.5)
+        assert time.monotonic() - started < 30
+
+
 def test_the_llm_command_lists_and_cancels_batches(tmp_path, monkeypatch, capsys):
     """dread llm batches: a provider's last Message Batches with how they stand; --cancel cancels those
     named (a run killed outright cannot cancel its own)."""

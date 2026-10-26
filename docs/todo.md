@@ -6323,7 +6323,7 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## Scale and robustness
 
-- [ ] **A suite that hung on a forked child** (2026-10-26, once, under a load of about 20: a bench
+- [x] **A suite that hung on a forked child** (2026-10-26, under a load of about 20: a bench
   measurement, a private gate and another suite beside it). The full suite stopped at 53 % in
   tests/test_pilot.py, most likely test_the_input_question_shows_the_callees_and_a_stopped_input_where_it_stopped
   (the test after the newest temporary directory): pytest waited for a child process (do_wait) that
@@ -6337,7 +6337,17 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   warning of a fork beside other threads for an error; so the child was likely a worker a pool forked
   from its own handler thread to replace one that ended (the defunct workers beside it), while another of
   its threads held a lock. A test that hangs fails after half an hour now (pytest-timeout in the test
-  extra, [tool.pytest.ini_options] timeout = 1800; docs/decisions.md). Left: why a worker ended there.
+  extra, [tool.pytest.ini_options] timeout = 1800; docs/decisions.md). It happened again the same
+  evening in a push's tests, and the timeout gave the traceback: test_a_dry_run_of_the_input_task_asks_nothing
+  -> dread pilot's main -> missed_instructions -> dread.runner run, its `with Pool(...)` ending in
+  terminate, which sends SIGTERM to the workers and waits for each. dread pilot's main runs inside
+  llm.ending_on_signals, whose SIGTERM handler the workers inherit; it is Python code, and a worker
+  blocked in a wait in C never runs it (the fix of 2026-10-24, the handler resetting itself in a worker,
+  does not reach such a worker). Done: the pools' initializer (dread.util.polite die_with_parent) gives
+  SIGTERM and SIGHUP their default, so terminate ends a worker wherever it waits; test
+  tests/test_llm.py test_a_pool_ends_a_worker_that_waits_in_c (a worker locking a mutex twice under
+  ending_on_signals: the old initializer held the pool until the test's timeout, the new one ends it in
+  a second). Not found: why a worker of that pool waited on a lock at all (idle, before any task).
 - [x] **Copies of one target share their generated cases** (2026-10-25, from the private real-life
   test: a naming experiment's copy of a target made every case anew after the target's own lift check
   had just made them, hours of work). `[paths] cases` puts the case cache where a target says (default

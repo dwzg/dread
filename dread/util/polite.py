@@ -91,10 +91,21 @@ def resident():
 def die_with_parent():
     """Ask the kernel to kill this process when its parent dies (Linux; elsewhere nothing). For
     pool workers and for the runs a mutation check starts: a worker whose parent was killed is
-    otherwise reparented and runs on."""
+    otherwise reparented and runs on. And SIGTERM and SIGHUP end it as they end a process that set
+    nothing: a pool ends its workers with SIGTERM (terminate, at the end of every `with Pool(...)`), and
+    a handler the parent set (dread pilot's llm.ending_on_signals) is Python code, which a worker blocked
+    in a wait in C never runs: the pool then waited for it for good (2026-10-26, twice in a day under
+    load: a worker waiting on a lock, its parent in terminate, the test suite with them)."""
+    import signal
+    for name in ("SIGTERM", "SIGHUP"):
+        number = getattr(signal, name, None)
+        if number is not None:
+            try:
+                signal.signal(number, signal.SIG_DFL)
+            except (ValueError, OSError):
+                pass
     try:
         import ctypes
-        import signal
         parent = os.getppid()
         ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)      # PR_SET_PDEATHSIG
         if os.getppid() != parent:
