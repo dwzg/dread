@@ -1747,6 +1747,115 @@ def test_answers_end_the_code_behind_a_stop_at_a_fault(tmp_path):
     assert made is not None and made.get("fault") and made.get("answer"), new
 
 
+# A function whose assertion path has its own copy of the function's end, as GCC -O2 makes on RISC-V:
+# first_word returns a table's second word; with a null table it waits for a debugger and then reads the
+# word all the same, and only that path adds one and returns there. Address 4 is mapped by nothing.
+FAULT_TAIL_S = """
+    .syntax unified
+    .cpu cortex-m3
+    .thumb
+    .text
+    .global first_word, wait_for_debugger
+    .type wait_for_debugger, %function
+    .thumb_func
+wait_for_debugger:              @ waits until a debugger sets the word on its stack
+        sub     sp, sp, #8
+        movs    r3, #0
+        str     r3, [sp, #4]
+2:      ldr     r3, [sp, #4]
+        cmp     r3, #0
+        beq     2b
+        add     sp, sp, #8
+        bx      lr
+    .size wait_for_debugger, . - wait_for_debugger
+    .type first_word, %function
+    .thumb_func
+first_word:
+        push    {r4, lr}
+        cbz     r0, 1f
+        ldr     r0, [r0, #4]
+        pop     {r4, pc}
+1:      mov     r4, r0
+        movs    r0, #3
+        bl      wait_for_debugger
+        ldr     r0, [r4, #4]
+        adds    r0, r0, #1
+        pop     {r4, pc}
+    .size first_word, . - first_word
+"""
+
+
+def tail_target(tmp_path):
+    """first_word's target and its Generator: (generator, first_word, wait_for_debugger, the faulting
+    load behind the call, the instructions behind it)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.s").write_text(FAULT_TAIL_S)
+    obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-as", "-o", obj, str(tmp_path / "t.s")], check=True)
+    subprocess.run(["arm-none-eabi-ld", "-Ttext=0x08000000", "-e", "first_word", "-o", elf, obj], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
+    t = Target.load(str(tmp_path))
+    gen = Generator(t, t.image())
+    p = gen.program
+    fn, wait = p.by_name["first_word"], p.by_name["wait_for_debugger"]
+    words = sorted(fn.insns)
+    call = next(a for a in words if p.arch.flow(p.insn(a))[0] == "call")
+    load = call + p.insn_size(call)
+    return gen, fn, wait, load, {a for a in words if a > load}
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-as"), reason="needs arm-none-eabi-as")
+def test_a_case_maps_a_page_of_its_own(tmp_path):
+    """map: a page nothing of the target maps, mapped for one run (zero-filled, the case's memory written
+    after it): first_word's null path reads the word set there and runs to its own return; the next
+    Machine on the same emulator finds the page gone. Layout.free_page names only pages nothing maps."""
+    from unicorn import UcError
+    from dread.emu import EmuError
+    gen, fn, wait, load, tail = tail_target(tmp_path)
+    lay = gen.layout
+    assert lay.free_page(4) == 0 and lay.free_page(0x08000004) is None and lay.free_page(lay.sentinel) is None
+    assert lay.free_page(0x40000010) is None and lay.free_page(lay.stack_top - 4) is None
+    case = {"args": [0, 0, 0, 0], "mem": [[4, 4, 41]], "returns": [], "calls": [[wait.entry, 1, 0]], "frame": 0,
+            "map": [[0, 0x1000]]}
+    m = gen.machine()
+    m.plan = []
+    gen.apply(m, case)
+    m.cover(min(fn.insns), max(fn.insns) + 4)
+    got = m.call(fn.entry, *case["args"], max_instructions=10_000)
+    assert got.ret == 42 and tail | {load} <= m.covered_insns(fn.insns)
+    again = gen.machine()
+    assert again.core is m.core and again.core.extra == []
+    with pytest.raises(UcError):
+        again.uc.mem_read(4, 4)
+    with pytest.raises(EmuError):
+        again.map_page(0x08000000)
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-as"), reason="needs arm-none-eabi-as")
+def test_answers_map_the_page_a_run_faulted_at(tmp_path):
+    """From a case whose run ended at wait_for_debugger's call (a null table), the answers answer the
+    call, fault on the read of address 4 (a fault case), and then map that page for the run alone with
+    MAPPED_WORD at the address: the copy of the function's end that only the null path runs is run."""
+    from dread import autocase
+    gen, fn, wait, load, tail = tail_target(tmp_path)
+    stopped = {"args": [0, 0, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0, "hang": True,
+               "limit": 200_000, "stops": [wait.entry]}
+    plain = {"args": [0x20100000, 0, 0, 0], "mem": [[0x20100000 + 4 * i, 4, i] for i in range(4)], "returns": [],
+             "calls": [], "frame": 0}
+    before = set().union(*(gen.coverage(fn.entry, fn.insns, c) for c in (stopped, plain)))
+    assert not tail & before and load not in before
+    new = gen.answers("first_word", fn.entry, fn.insns, [stopped, plain])
+    mapped = next((c for c in new if c.get("map")), None)
+    assert mapped is not None and mapped["map"] == [[0, 0x1000]] and [4, 4, autocase.MAPPED_WORD] in mapped["mem"], new
+    assert tail <= gen.coverage(fn.entry, fn.insns, mapped) and gen.survives(fn.entry, mapped)
+    assert any(c.get("fault") and not c.get("map") for c in new), new
+
+
 # A system register a case sets (Generator.answers' sysreg, a case's sysregs): in_handler reads the
 # exception number (mrs ipsr), as FreeRTOS's vPortValidateInterruptPriority does, and only in a handler
 # (16 and up) counts and computes. Every generated case runs in thread mode (0).

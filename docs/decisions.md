@@ -5323,3 +5323,26 @@ added where they help, the user, 2026-10-21).
   same day under that load. CI installs the test extra, so it has it too; a venv without the package
   warns of an unknown option and runs as before.
 
+
+## A page a case maps for its run (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** On a target that maps nothing at address 0 (QEMU's RISC-V virt board) the code behind a
+  null pointer's load runs in no case. GCC -O2 gives configASSERT's path its own copy of the function's
+  end (the handler returns, the null queue's field is loaded, the function returns), and the answers'
+  fault case ends the run at that load. FreeRTOS's RISC-V GCC -O2 build had seventeen kernel functions
+  (queue, stream buffer and timer accessors) dropped for those few instructions; on the ARM builds,
+  whose flash lies at 0, the same paths run. Should a case be able to map memory the target does not
+  have?
+- **Options.** (a) No: such tails stay unrun, and their functions lift only where address 0 is mapped.
+  (b) Declare the instructions behind a load that must fault unreachable: it needs a proof that the
+  address is fixed and unmapped on every path there, it is narrow, and it leaves the code untested.
+  (c) A case field that maps the faulting page for one run, zero-filled with a word set at the faulting
+  address, in both images alike.
+- **Choice.** (c). The cases check the translation, not what the hardware would do: the generic stubs
+  already answer what no callee would, and both images run under the same answers; a page mapped for a
+  run is an input of the same kind. The fault case stays beside it and compares the faulting address,
+  and the word set at the address is not 0, so a C that reads another address of the page differs.
+  Only pages in which the target maps nothing (Layout.free_page), only for the run (the next reset
+  unmaps them).

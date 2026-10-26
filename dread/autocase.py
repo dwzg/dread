@@ -96,9 +96,14 @@ first); where that run fails, as one that goes on into the null pointer the chec
 call answered and the callee's next call ending the run instead (a case's stop_from); where that fails
 too, the first call the run makes after the answered one ending it; where the run faults on a data
 access before any call, the fault ending it as its result (a case's fault: RISC-V GCC -O2 jumps back
-from its out-of-line configASSERT call into a read of the null queue) (behind; until 2026-10-26 only the
-first, for the answers' own runs that ended at the callee itself, and FreeRTOS's clang -O2 queue
-functions kept the instruction behind their first configASSERT unrun). Each answer is a
+from its out-of-line configASSERT call into a read of the null queue), and then the same run with the
+faulting page mapped for it alone and a word set at the address (MAPPED_WORD), so that what the code
+does behind the access runs too, compared in both images (a case's map: GCC -O2 gives the assertion's
+path its own copy of the function's end, which no other path runs, and on a target that maps nothing
+at address 0, QEMU's RISC-V virt board, that copy stayed unrun; a fault on another page ends such a
+run) (behind; until 2026-10-26 only the first, for the answers' own runs that ended at the callee
+itself, and FreeRTOS's clang -O2 queue functions kept the instruction behind their first configASSERT
+unrun). Each answer is a
 case like any other (marked "answer"), compared under its stubs in both images; nothing is answered
 that the run would not take as an input (a local, the image). Bounded by ANSWER_RUNS runs a function.
 
@@ -130,10 +135,11 @@ import time
 
 import capstone as cs
 from capstone import arm as csarm
-from unicorn import UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_WRITE
+from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_READ_UNMAPPED, UC_MEM_WRITE,
+                     UC_MEM_WRITE_UNMAPPED)
 
 from dread.cases import confine_args
-from dread.emu import RUN_CALLEE, EmuError, Layout, Machine
+from dread.emu import PAGE, RUN_CALLEE, EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
 VERSION = 34       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
@@ -233,11 +239,14 @@ ANSWER_VISITS = 2           # visits of a branch whose decision is answered (the
 ANSWER_BASES = 2            # cases a branch is answered from at most (that give something to answer: Generator.answers)
 ANSWER_SCAN = 8             # ... among the first this many cases that get there
 ANSWER_EVENTS = 512         # calls and visits a run records at most
-ANSWERS = 6                 # the frontier answers' version (Generator.answers): cached cases get them anew when
+ANSWERS = 7                 # the frontier answers' version (Generator.answers): cached cases get them anew when
                             # it changes, or when the cases they are made from change (_answered); 2: the code
                             # behind a stop (behind, stop_from); 3: a word read again (reread, later); 4: behind a
                             # call whose run ended at a stop deeper in; 5: a case that ends at a fault there;
-                            # 6: a system register an mrs reads (sysregs)
+                            # 6: a system register an mrs reads (sysregs); 7: the faulting page mapped (map)
+MAPPED_WORD = 3             # what a case's mapped page holds at the address its run faulted at (behind): not 0,
+                            # so that a C reading another address of the page (0 there) differs; small, so
+                            # that a count or an index read there ends soon
 READING_MARKS = ("carried", "firm", "kept", "why", "by", "answer")     # marks a case made from another drops
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
 # Float arguments (hard float), as bits: zeros, ones, halves, decimal steps, the integer conversions'
@@ -578,6 +587,8 @@ class Generator:
     def apply(self, m, case):
         """Put a case into a machine: memory, peripheral answers, generic stubs."""
         lay = self.layout
+        for base, size in case.get("map", ()):     # pages of its own, before its memory (a page its run
+            m.map_page(base, size)                  # faulted at: Generator.answers' behind)
         fixed = {} if case.get("io") == "fixed" else None
         if case.get("hang"):
             m.may_hang = True
@@ -2847,7 +2858,9 @@ class Generator:
             ending the run instead (answered_stop); where that fails too (the run goes on into what the
             check in front of the call guards, a null pointer), the first call it makes after the answered
             one ending it, so that the code up to there is compared; and where the run faults on a data
-            access before any call, the fault ending it as its result (fault: true). Whether one gained.
+            access before any call, the fault ending it as its result (fault: true), and then the faulting
+            page mapped for that run alone (map, MAPPED_WORD at the address), which runs the code behind
+            the access (a second fault, on another page, ending it). Whether one gained.
             (Until 2026-10-26
             only the first, for the answers' own runs that ended at the callee itself, and runs that went on
             faulted: FreeRTOS's clang -O2 queue functions kept the instruction behind their first
@@ -2895,7 +2908,21 @@ class Generator:
                 # configASSERT call): the fault ends the case as its result (a case's fault)
                 faulting = dict(trial, fault=True)
                 m4, _, error4 = run(faulting)
-                return gained(faulting, m4, error4, depth)
+                got = gained(faulting, m4, error4, depth)
+                # and the code behind the access: the page mapped for this run alone, a word at the
+                # address (a case's map; where its run faults again, on another page, that fault ends it)
+                access, address = m2.unmapped
+                page = self.layout.free_page(address) if access in (UC_MEM_READ_UNMAPPED,
+                                                                    UC_MEM_WRITE_UNMAPPED) else None
+                if page is None or runs[0] <= 0:
+                    return got
+                mapped = dict(trial, map=[[page, PAGE]],
+                              mem=[list(x) for x in trial["mem"]] + [[address & ~3, 4, MAPPED_WORD]])
+                m5, _, error5 = run(mapped)
+                if error5 is not None and getattr(m5, "unmapped", None) is not None and runs[0] > 0:
+                    mapped = dict(mapped, fault=True)
+                    m5, _, error5 = run(mapped)
+                return gained(mapped, m5, error5, depth) or got
             return False
 
         def renumber(case, after):

@@ -115,6 +115,15 @@ class Layout:
     def in_stack(self, address):
         return self.stack_top - self.stack_size <= address < self.stack_top
 
+    def free_page(self, address):
+        """The page of address where the target maps nothing in it (no region, nor the image, IO, the
+        stack, the sentinel, scratch memory, a startup copy): a case may map it for its run alone
+        (Machine.map_page). None where something is mapped there."""
+        page = address & ~(PAGE - 1)
+        if any(lo < page + PAGE and page < hi for lo, hi in self.maps):
+            return None
+        return page
+
     def initial(self, payload):
         """[(address, bytes)]: what memory holds before any code runs."""
         out = [(self.base, payload)]
@@ -292,6 +301,7 @@ class Core:
         for start, data in self.initial:
             uc.mem_write(start, data)
         self.pages, self.dirty, self.hooks, self.machine = {}, set(), [], None
+        self.extra = []                     # (base, size) of pages a case mapped for its run (Machine.map_page)
         self.budget_hook = None     # fasthooks.dread_budget, kept across resets (Machine.call)
         # The hot hooks run in C when dread.fasthooks builds (stores here; coverage and load tracing
         # per Machine); otherwise in Python. Both record the same.
@@ -381,6 +391,10 @@ class Core:
             for h in self.fast_hooks:
                 self.fast.delete(h)
             self.fast_hooks = []
+        for lo, size in self.extra:         # a case's pages of its own: gone for the next Machine
+            self.dirty.difference_update(range(lo >> 12, (lo + size) >> 12))
+            self.uc.mem_unmap(lo, size)
+        self.extra = []
         for number in self.dirty:
             try:
                 self.uc.mem_write(number << 12, self.page(number))
@@ -598,6 +612,24 @@ class Machine:
         from what this one left."""
         self.core.dirty.update(range(addr >> 12, ((addr + len(data) - 1) >> 12) + 1))
         uc.mem_write(addr, data)
+
+    def map_page(self, base, size=PAGE):
+        """Map size bytes at base, zero-filled, for this Machine's run alone (the next reset unmaps
+        them): a case's "map" (dread.autocase: the page of a data access its run faulted at, so that the
+        code behind the access runs, in the original and in the rebuilt image alike). Refused (EmuError)
+        where the target maps anything there."""
+        base &= ~(PAGE - 1)
+        size = (size + PAGE - 1) & ~(PAGE - 1)
+        if (base, size) in self.core.extra:
+            return
+        if size <= 0 or any(lo < base + size and base < hi for lo, hi in self.layout.maps) or \
+                any(lo < base + size and base < lo + n for lo, n in self.core.extra):
+            raise EmuError("a case's page at 0x%x: the target or another page maps memory there" % base)
+        if not hasattr(self.uc, "mem_map"):
+            raise EmuError("a case's page at 0x%x: this engine maps no memory for a case" % base)
+        self.uc.mem_map(base, size)
+        self.uc.mem_write(base, bytes(size))
+        self.core.extra.append((base, size))
 
     def later_read(self, addr, size, n, value):
         """Just before the n-th read that starts at addr (1 is the first), memory there becomes
