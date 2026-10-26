@@ -86,13 +86,14 @@ a test its bits), solved through a constant offset when two runs show one, the w
 bits. A run that gains code and then hangs in a callee is tried with that callee stubbed, then ending
 at its call; one that faults or stores into the image is chased (words that point just in front of
 the failing access to buffers of their own, one at a time where given). The code behind a call at
-which runs ended (a stop whose callee may return: configASSERT's handler waits for a debugger), from a
-case whose run ended there and from an answer that ends so: the callee answered at every call; where
-that run fails, as one that goes on into the null pointer the check guarded does, the call answered and
-the callee's next call ending the run instead (a case's stop_from); where that fails too, the first call
-the run makes after the answered one ending it (behind; until 2026-10-26 only the first, for the answers'
-own runs, and FreeRTOS's clang -O2 queue functions kept the instruction behind their first configASSERT
-unrun). Each answer is a
+which runs ended, at a stop there or deeper in (a callee that may return: configASSERT's handler waits
+for a debugger, the RISC-V demo's prints first and waits in the UART's output), from a case whose run
+ended so and from an answer that ends so: the callee answered at every call (where that call is its
+first); where that run fails, as one that goes on into the null pointer the check guarded does, the
+call answered and the callee's next call ending the run instead (a case's stop_from); where that fails
+too, the first call the run makes after the answered one ending it (behind; until 2026-10-26 only the
+first, for the answers' own runs that ended at the callee itself, and FreeRTOS's clang -O2 queue
+functions kept the instruction behind their first configASSERT unrun). Each answer is a
 case like any other (marked "answer"), compared under its stubs in both images; nothing is answered
 that the run would not take as an input (a local, the image). Bounded by ANSWER_RUNS runs a function.
 
@@ -227,9 +228,10 @@ ANSWER_VISITS = 2           # visits of a branch whose decision is answered (the
 ANSWER_BASES = 2            # cases a branch is answered from at most (that give something to answer: Generator.answers)
 ANSWER_SCAN = 8             # ... among the first this many cases that get there
 ANSWER_EVENTS = 512         # calls and visits a run records at most
-ANSWERS = 3                 # the frontier answers' version (Generator.answers): cached cases get them anew when
+ANSWERS = 4                 # the frontier answers' version (Generator.answers): cached cases get them anew when
                             # it changes, or when the cases they are made from change (_answered); 2: the code
-                            # behind a stop (behind, stop_from); 3: a word read again (reread, later)
+                            # behind a stop (behind, stop_from); 3: a word read again (reread, later); 4: behind a
+                            # call whose run ended at a stop deeper in
 READING_MARKS = ("carried", "firm", "kept", "why", "by", "answer")     # marks a case made from another drops
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
 # Float arguments (hard float), as bits: zeros, ones, halves, decimal steps, the integer conversions'
@@ -2557,10 +2559,11 @@ class Generator:
         ending at its call; one that faults or stores into the image is chased (chase); those repairs only
         for the first ANSWER_FLIPS values that went the other way and failed (the next mostly fails alike;
         a single bit can still give a pointer that names another object). The code behind a call at
-        which the runs of the first ANSWER_BASES cases that got there ended (a stop whose callee may
-        return), and behind the stop an answer ends at: the callee answered at every call, else that call
-        answered and the callee's next call ending the run, else the first call the run makes after it
-        (behind). Over again from the cases it made while one gains, at most
+        which the runs of the first ANSWER_BASES cases that called it ended (at a stop there or deeper in,
+        or hung; the callee one that may return), and behind the call an answer's run last left the
+        function by where it ends at a stop: the callee answered at every call, else that call answered
+        and the callee's next call ending the run, else the first call the run makes after it (behind).
+        Over again from the cases it made while one gains, at most
         ANSWER_RUNS runs in all. loop: the function never returns (its cases are loop cases). What is not
         done: a callee that returns its argument untouched (dread.regflow: the branch's source is then the
         argument, not the stub's answer), a real callee's store into a local, a switch's index, a value two
@@ -2782,8 +2785,9 @@ class Generator:
             corpus.append(case)
             reach[len(corpus) - 1] = set(got)
             stop = stopped(m)
-            if stop is not None and may_return(stop):
-                behind(case, stop, depth + 1)
+            left = self.left_through(m, words) if stop is not None else None      # (the call in words it ended
+            if left is not None and may_return(left.entry):                       # behind: the stop may lie deeper)
+                behind(case, left.entry, depth + 1)
             return True
 
         def may_return(stop):
@@ -2791,41 +2795,66 @@ class Generator:
             callee = self.program.function_at(stop)
             return not self.loop and callee is not None and callee.entry != entry and callee.name not in self.endless()
 
-        def answered_stop(base, stop):
-            """base with the call of stop that ended its run answered by a stub (a plain one: every call it
-            gets) and the callee's next call ending the run instead (stop_from)."""
+        def answered_stop(base, stop, k):
+            """base with the k-th call of stop (the one its run did not come back from) answered by a stub
+            and the callee's next call ending the run (stop_from; stop joins the stops). Its earlier calls
+            stay as they were: answered where its stub answered every call, run where the callee ran (the
+            stub then answers the k-th alone)."""
             case = json.loads(json.dumps(base))
-            n = dict((a, k) for a, k in case.get("stop_from", ())).get(stop, 1)
-            case["stop_from"] = [[a, k] for a, k in case.get("stop_from", ()) if a != stop] + [[stop, n + 1]]
-            if not any(c[0] == stop and (len(c) < 4 or c[3] is None) for c in case.get("calls", ())):
-                case["calls"] = [c for c in case.get("calls", ()) if c[0] != stop] + \
-                    [[stop, self.reads_mask(names.get(stop, "")), 0]]
+            case["stops"] = sorted(set(case.get("stops", ())) | {stop})
+            case["stop_from"] = [[a, c] for a, c in case.get("stop_from", ()) if a != stop] + [[stop, k + 1]]
+            calls = [list(c) for c in case.get("calls", ())]
+            mine = next((c for c in calls if c[0] == stop), None)
+            if mine is None:
+                calls.append([stop, self.reads_mask(names.get(stop, "")), 0] + ([[k]] if k > 1 else []))
+            elif len(mine) > 3 and mine[3] is not None:
+                mine[3] = sorted(set(mine[3]) | {k})
+            case["calls"] = calls
             return case
 
+        def ending_call(base, callee):
+            """Which call of callee base's run did not come back from (its last; 1 for a stop of every call,
+            stop_from's number for a later one), or None where the run did not call it: counted in a run
+            with a stub that answers none of its calls where base has no stub of it."""
+            if callee in base.get("stops", ()):
+                return dict((a, k) for a, k in base.get("stop_from", ())).get(callee, 1)
+            counted = json.loads(json.dumps(base))
+            if not any(c[0] == callee for c in counted.get("calls", ())):
+                counted["calls"] = counted.get("calls", []) + [[callee, self.reads_mask(names.get(callee, "")), 0, []]]
+            _, events, _ = run(counted)
+            seen = [e[2] for e in events if e[0] == "call" and e[1] == callee]
+            return max(seen) if seen else None
+
         def behind(base, stop, depth):
-            """The code behind the call at which base's run ended (stop: a callee that may return, such as
-            an assertion handler that waits for a debugger), in three tries, the first that gains kept: the
-            callee answered at every call (code only a run that gets past each of its calls reaches: GCC
-            -O0's prvBlockOnNotificationsComingFromInterrupts returns after nine rounds with two checks
-            each); the call answered and the callee's next call ending the run instead (answered_stop);
-            where that fails too (the run goes on into what the check in front of the call guards, a null
-            pointer), the first call it makes after the answered one ending it, so that the code up to there
-            is compared. Whether one gained. (Until 2026-10-26 only the first, and runs that went on
+            """The code behind the call of stop (a callee that may return) at which base's run ended, there
+            or at a stop deeper in (an assertion handler that waits for a debugger, or one that prints first
+            and waits in the UART's output: FreeRTOS's RISC-V demo), in three tries, the first that gains
+            kept: the callee answered at every call, where that call is its first (code only a run that
+            gets past each of its calls reaches: GCC -O0's prvBlockOnNotificationsComingFromInterrupts
+            returns after nine rounds with two checks each); that call answered and the callee's next call
+            ending the run instead (answered_stop); where that fails too (the run goes on into what the
+            check in front of the call guards, a null pointer), the first call it makes after the answered
+            one ending it, so that the code up to there is compared. Whether one gained. (Until 2026-10-26
+            only the first, for the answers' own runs that ended at the callee itself, and runs that went on
             faulted: FreeRTOS's clang -O2 queue functions kept the instruction behind their first
             configASSERT unrun.)"""
-            every = json.loads(json.dumps(base))
-            every["stops"] = [s for s in every.get("stops", ()) if s != stop]
-            every["stop_from"] = [[a, k] for a, k in every.get("stop_from", ()) if a != stop]
-            if not every["stop_from"]:
-                del every["stop_from"]
-            every["calls"] = [list(c) for c in every.get("calls", ()) if c[0] != stop] + \
-                [[stop, self.reads_mask(names.get(stop, "")), 0]]
-            m1, _, error1 = run(every)
-            if gained(every, m1, error1, depth):
-                return True
-            if runs[0] <= 0:
+            k = ending_call(base, stop)
+            if not k or runs[0] <= 0:
                 return False
-            trial = answered_stop(base, stop)
+            if k == 1:
+                every = json.loads(json.dumps(base))
+                every["stops"] = [s for s in every.get("stops", ()) if s != stop]
+                every["stop_from"] = [[a, c] for a, c in every.get("stop_from", ()) if a != stop]
+                if not every["stop_from"]:
+                    del every["stop_from"]
+                every["calls"] = [list(c) for c in every.get("calls", ()) if c[0] != stop] + \
+                    [[stop, self.reads_mask(names.get(stop, "")), 0]]
+                m1, _, error1 = run(every)
+                if gained(every, m1, error1, depth):
+                    return True
+                if runs[0] <= 0:
+                    return False
+            trial = answered_stop(base, stop, k)
             have = {c[0] for c in trial["calls"]}
             watched = dict(trial, calls=trial["calls"] + [[c, self.reads_mask(names.get(c, "")), 0, []]
                                                           for c in sorted(direct - have)])   # (counted only)
@@ -2834,15 +2863,14 @@ class Generator:
                 return True
             if runs[0] <= 0:
                 return False
-            n = dict((a, k) for a, k in trial["stop_from"]).get(stop) - 1
-            at = next((k for k, e in enumerate(events) if e[0] == "call" and e[1] == stop and e[2] == n), None)
+            at = next((i for i, e in enumerate(events) if e[0] == "call" and e[1] == stop and e[2] == k), None)
             nxt = next((e for e in events[at + 1:] if e[0] == "call"), None) if at is not None else None
             if nxt is None or nxt[1] in (entry, self.fake_pointer):
                 return False
-            _, x, k = nxt[:3]
+            _, x, kx = nxt[:3]
             ended = json.loads(json.dumps(trial))
             ended["stops"] = sorted(set(ended.get("stops", ())) | {x})
-            ended["stop_from"] = [[a, c] for a, c in ended["stop_from"] if a != x] + ([[x, k]] if k > 1 else [])
+            ended["stop_from"] = [[a, c] for a, c in ended["stop_from"] if a != x] + ([[x, kx]] if kx > 1 else [])
             m3, _, error3 = run(ended)
             return gained(ended, m3, error3, depth)
 
@@ -3025,13 +3053,14 @@ class Generator:
         tried, progress = set(), True
         while progress and runs[0] > 0 and not words_set <= covered and not self.late():
             progress = False
-            # The code behind a call at which every run that got there ended (a stop whose callee may
-            # return: configASSERT's handler waits for a debugger), from the first ANSWER_BASES cases
-            # whose runs ended there (behind)
+            # The code behind a call at which every run that got there ended (at a stop there or deeper
+            # in, or hung: configASSERT's handler waits for a debugger, the RISC-V demo's in the UART's
+            # output first), from the first ANSWER_BASES such cases whose runs called it (behind)
             for a, (stop, back) in sorted(sites.items()):
                 if back in covered or runs[0] <= 0 or self.late() or not may_return(stop):
                     continue
-                for i in [i for i in sorted(reach) if a in reach[i] and stop in corpus[i].get("stops", ())][:ANSWER_BASES]:
+                for i in [i for i in sorted(reach) if a in reach[i] and
+                          (corpus[i].get("stops") or corpus[i].get("hang"))][:ANSWER_BASES]:
                     if ("behind", a, i) in tried or runs[0] <= 0:
                         continue
                     tried.add(("behind", a, i))

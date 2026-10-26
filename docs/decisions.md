@@ -5220,7 +5220,9 @@ parameters from pushes, system calls and calls that keep every argument", part (
   checks each, and lost its return with (c) alone). (c) compares the code behind the call up to the next
   call, a place both images reach alike, and goes on from there one call at a time (each answered in
   turn, as far as the answers' depth goes). The answers' version changes, not the generator's: cached
-  searches are kept and only the answers are made anew.
+  searches are kept and only the answers are made anew. The same day also where the run ended at a stop
+  deeper in (FreeRTOS's RISC-V demo prints in its handler and waits in the UART's output): the call in
+  the function is the one answered, its earlier calls left as they ran.
 
 ## A word read twice that changes in between (2026-10-26)
 

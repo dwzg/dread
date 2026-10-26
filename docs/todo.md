@@ -4242,6 +4242,31 @@ undone). Other decisions are taken by the recommended option and written down in
   memory accesses volatile now; the Memory item (plain accesses for RAM) will meet it. Test:
   tests/test_autocase.py test_answers_change_a_word_between_two_reads (a retry behind a second read of
   a buffer's tail, with a call so that GCC branches instead of an IT block).
+- [x] **Behind a call whose run ended deeper in** (2026-10-26, behind "A value read twice"). The code
+  behind a stop looked at cases whose stop was the call's own callee. FreeRTOS's RISC-V demo prints in
+  its assertion handler before it waits, and the emulated UART reports itself busy, so its output
+  routine (vOutNS16550, `j .` while busy) spins: the cases end there, two calls below the
+  configASSERT call whose code behind stays unrun (RISC-V GCC -O2: 52 functions so after behind-stops
+  and reread). Now (ANSWERS 4) the call in the function is the one answered, whatever stop below it
+  ended the run: a base is any case with stops (or a hang case) whose run called it, the call's number
+  counted in a run where the callee has no stub (its earlier calls keep running, the stub answers that
+  call alone), and an answer that ends at a stop is retried behind the call the run last left the
+  function by (left_through). Reread -> this (copies of that branch's lift results; RISC-V GCC -O2 from
+  main's lift check of the bench build, 203 there, 214 with reread): RISC-V GCC -O2 214 -> 226
+  (vTaskPlaceOnEventList, xTaskIncrementTick, vTaskStartScheduler, xTimerCreate, xTimerCreateTimerTask,
+  xTaskAbortDelay, xTaskGenericNotifyFromISR, xEventGroupSetBits, vEventGroupDelete,
+  prvCheckTasksWaitingTermination, vQueueOverwritePeriodicISRDemo, a test helper), RISC-V GCC -Os 277 ->
+  278 (xTimerCreateTimerTask), GCC -O0 393 -> 394 (prvPerformTaskSyncTests), GCC -Os and clang -O2
+  unchanged, none lost; the readable gate accepts every new one (RISC-V GCC -O2 224 of 226: the two
+  that stayed lifted before still do).
+- [ ] **A case that ends at a fault** (found 2026-10-26 behind the item above). On RISC-V GCC -O2, 40
+  functions keep the instruction behind a configASSERT call unrun (GCC puts the call out of line and
+  jumps back): with the null queue the assertion refused, the run faults at once (0x38 or 0x40 on the
+  virt board, where nothing is mapped below RAM), before any call that could end it, so no try of the
+  code behind a stop gives a case. A case whose end is a data fault, compared like a stop (the logs and
+  writes up to it, the faulting access's address and kind), would run that code. Its risk: a fault that
+  depends on the stack layout (fragile) or on the C's own address arithmetic; it changes what the
+  comparison accepts, so docs/decisions.md first.
 - [x] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
   (found 2026-10-23 with the frontier answers, FreeRTOS RISC-V GCC -Os). With xTaskResumeAll accepted
   (its answers covered it) on top of what was accepted before, the whole image differs: the stream-buffer

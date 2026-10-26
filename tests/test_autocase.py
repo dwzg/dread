@@ -1600,3 +1600,67 @@ def test_answers_change_a_word_between_two_reads(tmp_path):
     assert after == words, sorted(hex(a) for a in words - after)
     made = next(c for c in new if gen.coverage(fn.entry, fn.insns, c) - before)
     assert made.get("later") and made["later"][0][2] == 2 and made.get("answer"), made
+
+
+# The code behind a call whose run ended deeper in (behind, from the call in the function): report
+# prints before it waits, as FreeRTOS's RISC-V demo's assertion handler does, and uart_out spins for
+# good while the UART says it is busy (`j .`), so a run with a null queue and a busy UART ends at a stop
+# in uart_out, below the call of report whose code behind (the count) stays unrun.
+DEEP_C = NOIPA_DEF + """
+volatile unsigned asserted, noted;
+#define UART_LSR (*(volatile unsigned char *)0x40001005u)
+#define UART_THR (*(volatile unsigned char *)0x40001000u)
+NOIPA void uart_out(unsigned c) { if (!(UART_LSR & 0x20)) for (;;) ; UART_THR = c; }
+NOIPA void report(unsigned line) { volatile unsigned go = 0; uart_out(line); while (!go) ; }
+NOIPA void note(unsigned v) { noted = v; }
+unsigned checked_get(unsigned *queue, unsigned k)
+{
+    if (queue == 0) { report(7); asserted++; }
+    if (k == 0) report(8);
+    note(k);
+    return queue[1] + k;
+}
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_run_the_code_behind_a_call_whose_run_ended_deeper(tmp_path):
+    """From a case whose run ended at a stop in uart_out (a null queue, k 5, the UART busy), the answers
+    answer the call of report in checked_get: report stubbed at every call goes on into queue[1] and
+    faults, so does report answered once (no second call of it before), and the first call after the
+    answered one ends the run (note's): the count behind the call runs. Until 2026-10-26 the code behind
+    a stop was sought only where the stop was the call's own callee."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(DEEP_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "checked_get", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    gen = Generator(t, t.image())
+    p = gen.program
+    fn, report, uart, note = (p.by_name[n] for n in ("checked_get", "report", "uart_out", "note"))
+    words = sorted(fn.insns)
+    call = next(a for a in words if p.arch.flow(p.insn(a))[0] == "call" and p.arch.flow(p.insn(a))[1] is not None
+                and p.arch.flow(p.insn(a))[1] & ~1 == report.entry)
+    count = {a for a in words if call + p.insn_size(call) <= a < call + p.insn_size(call) + 8}
+    stopped = {"args": [0, 5, 0, 0], "mem": [[0x40001005, 1, 0]], "returns": [], "calls": [], "frame": 0,
+               "hang": True, "limit": 200_000, "stops": [uart.entry]}
+    plain = {"args": [0x20100000, 5, 0, 0], "mem": [[0x20100000 + 4 * i, 4, i] for i in range(4)], "returns": [],
+             "calls": [], "frame": 0}
+    before = set().union(*(gen.coverage(fn.entry, fn.insns, c) for c in (stopped, plain)))
+    assert call in before and not count & before
+    new = gen.answers("checked_get", fn.entry, fn.insns, [stopped, plain])
+    made = next((c for c in new if count <= gen.coverage(fn.entry, fn.insns, c)), None)
+    assert made is not None, new
+    assert any(c[0] == report.entry for c in made["calls"]) and note.entry in made["stops"] and made.get("answer"), made
+    assert gen.survives(fn.entry, made)
