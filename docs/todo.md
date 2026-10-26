@@ -3389,9 +3389,21 @@ the pilot's names, which the first review had taken for raw frames. New items:
   frame, and generated cases have none, while the local here is the caller's caller's. The length read
   from it is what earlier frames left there. The stale-data check fills the original only, and its fills
   (0xA5, 0x5A) send it the way the stale data did; the rebuilt image reads its own frame's garbage, takes
-  the other way and faults. Proposal: where a case differs, run both images with the same fill below
-  every function's entry (an input like any other, the comparison whole) and take the case where they
-  then agree.
+  the other way and faults. Tried 2026-10-26:
+  - Both images filled alike (dread.runner filled_alike, docs/decisions.md "A case that agrees with the
+    stack filled alike"): where a case differs, both run again with the same fill below every
+    function's entry and the case agrees where they agree whole under each fill. Kept: the lift check
+    accepts GCC -O0's prvCreateAndDeleteStaticallyAllocatedQueues (395 -> 396 on a copy), the other
+    builds as before. It does not reach these five: their readable C reserves the local with push {r0,
+    r1, r2, ...} and reads the pushed r0, not the fill.
+  - A refusal for the original's read of a stack byte no live frame wrote (a write counted until a
+    function is entered with its stack pointer above the byte), what follows it not compared: it would
+    take the five, but it also refused a C that passes another flag to the callee that writes the local
+    (its only visible effect comes after the original's undefined read), so it hides differences: not
+    done (rule 6), the code not kept.
+  Next: the case itself. memcpy is stubbed because its source, a generated pointer, faulted; with the
+  page mapped instead (as the answers' fault trial maps one, a case's map) memcpy runs and writes the
+  local, and nothing reads stale data.
 
 ## Compiler diversity (the user, 2026-10-20: first, on ARM/Cortex-M and RISC-V)
 
