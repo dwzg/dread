@@ -473,6 +473,36 @@ def test_a_formats_registers_change_no_fill(tmp_path):
 
 
 @needs_arm
+def test_a_call_that_ends_the_run_logs_what_the_callee_reads(tmp_path):
+    """A case of check_a that ends at its call of assert_failed (stops: a callee a run hung in, as the
+    generator makes them) logs the call with the registers assert_failed reads, the file and the line;
+    one of assert_failed that ends at printf logs the format and the two words it takes. Until 2026-10-26
+    a stop logged the call alone, and in a case that ended there the arguments were compared by nothing
+    (a caller that passed the line wrong agreed)."""
+    from dread import autocase
+    from dread.emu import EmuError
+    t = arm_target(tmp_path)
+    p = Program(t, t.image())
+    g = autocase.Generator(t, t.image(), p)
+    image = t.image()
+    file_a = image.base + image.payload().index(b"a.c\0")
+    fmt = image.base + image.payload().index(b"line %d in %s\0")
+    for caller, args, callee, logged in (("check_a", [0, 0, 0, 0], "assert_failed", (file_a, 17)),
+                                         ("assert_failed", [file_a, 17, 0, 0], "printf", (fmt, 17, file_a))):
+        stop = p.by_name[callee].entry
+        case = {"args": args, "mem": [], "returns": [], "calls": [], "hang": True, "limit": 20000, "stops": [stop]}
+        m = g.machine()
+        m.plan = []
+        g.apply(m, case)
+        try:
+            m.call(p.by_name[caller].entry, *args, max_instructions=20000)
+        except EmuError:
+            pass
+        assert m.stopped_at == "never returns", (caller, m.calls)
+        assert ("call 0x%x, never returns" % stop,) + logged in m.calls, (caller, m.calls)
+
+
+@needs_arm
 def test_a_targets_own_function_that_takes_a_format(tmp_path):
     """The same program with printf named log_line: no wrapper's format is known without the target's
     [abi] formats (assert_failed reads the file alone, as before), with formats = {log_line = 0} it is."""

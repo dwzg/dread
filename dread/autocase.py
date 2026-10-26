@@ -683,7 +683,11 @@ class Generator:
                    stub(m, *a, target=target, nargs=nargs, nstack=nstack, only=only))
 
         def stop(m, *args, target=0):       # a callee that never returns: the run ends at its call
-            m.log("call 0x%x, never returns" % target)
+            # What it reads of the call's registers, as a stub logs it (stop_mask; until 2026-10-26 the
+            # call alone, and the arguments of the call that ends the run were compared by nothing)
+            mask = self.stop_mask(target) | (self.format_mask(m, args, taking[target]) if target in taking else 0)
+            seen = [args[i] for i in range(len(args)) if mask >> i & 1]
+            m.log("call 0x%x, never returns" % target, *("stack" if in_stack(a) else a for a in seen))
             m.stopped_at = "never returns"
             m.uc.emu_stop()
             return 0
@@ -994,6 +998,13 @@ class Generator:
             return 1
         reads = set(self._flow.read_regs(name))
         return sum(1 << i for i, r in enumerate(self.target.abi.arg_regs) if r in reads)
+
+    def stop_mask(self, entry):
+        """The argument registers a stop logs at the call of the function at entry (a case's stops: one
+        that never returns, or one a run hung in): what it reads (reads_mask), as a stub of it logs; 0
+        for an address that is no function's entry."""
+        fn = self.program.by_entry.get(entry & ~1)
+        return self.reads_mask(fn.name) if fn is not None else 0
 
     def formats(self):
         """({entry: the index of its format argument} of the functions that take a printf format, the

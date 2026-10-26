@@ -4081,13 +4081,17 @@ undone). Other decisions are taken by the recommended option and written down in
 
 ## Phase 4: cases, mutation, coverage (rest)
 
-- [ ] **A call of a callee that never returns compares no arguments.** dread.autocase's stop stub (a
+- [x] **A call of a callee that never returns compares no arguments.** dread.autocase's stop stub (a
   case's `stops`: a callee that never returns, or one a run hung in) logs only that the call came: the
   arguments of the call that ends the run are compared by nothing (found 2026-10-26 with the printf
   formats: on FreeRTOS GCC -Os, prvAutoReloadTimerCallback's cases stop at vAssertCalled in 11 of the
   69 that reach it, and its file and line went unseen there). Log what the callee reads (reads_mask,
   and the registers a format takes: format_mask), as the call stubs do: it adds to what is compared,
   and the cases stay as they are (the stub reads the mask at the run).
+  Done 2026-10-26 (autocase stop_mask): a stop logs the registers the callee reads and those its format
+  takes; it fills nothing, so the cases run as before. The gate accepts the same functions on the eight
+  builds (gizmo a32 35, m3 36, m4 44, rv32 31; FreeRTOS GCC -Os 328, clang -O2 288, RISC-V GCC -Os 252,
+  GCC -O0 378): no readable C passed a stopped callee other arguments than the original.
 - [x] **Why the cases leave code unrun, by code** (`dread uncovered`, 2026-10-23; asked for before the
   generator gets new work: on a private firmware, DREAD's real-life test, the lift check drops functions
   as UNCOVERED, some without a single instruction run). For each
