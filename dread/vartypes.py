@@ -50,6 +50,11 @@ table's `variables` and `prototypes`):
   holds, the address of a text: a cast at every call, which measured more casts than the types took
   away: docs/decisions.md). A callee's result type is its own everywhere, and a function that calls
   itself declares itself as its head (C takes no other);
+- pointer results: a function every return of which gives one pointer type (a variable typed or
+  declared so, a call of a callee whose result is one, 0) returns that type where its returns and its
+  callers' C hold no more casts so (`return (u32)r0;` goes; a caller that uses the result as a number
+  casts it); memcpy's and strncpy's destination, FreeRTOS's queue and task handles (decide_pointer_result,
+  since 2026-10-26; the head's result may be several words: head_match, head_text);
 - what to take is decided by trying it: each candidate is kept where the function's C, rewritten with
   it, has no more casts than without (a pointer loaded from memory and dereferenced once moves its cast
   to where it is loaded: kept; one handed to five callees that take integers: not). The trials run on
@@ -89,8 +94,7 @@ arithmetic wrap as the lifted u32 arithmetic did; -fwrapv and -fwrapv-pointer fo
 for clang 23; an older clang's -fwrapv-pointer is not confirmed).
 The gate (dread readable --check) checks every function's behaviour as for every other stage.
 
-Not done: pointer results (a function returning a typed pointer stays u32: (u32)r0 at its return,
-and memcpy's destination, returned twice, stays u32 by the count of casts), an access past a
+Not done: an access past a
 structure through its pointer (raw, as dread.shapes leaves it: r0[2].f_0 would need the field's
 name), pointers into the stack frame (dread.frames' object), variables the lifter declares other than
 u32 (MSP430's u16 registers: its pointers are 16 bits), globals that hold pointers (a queue handle in
@@ -1377,6 +1381,18 @@ def negative_variables(facts, taken=(), returning=True):
     return out
 
 
+def head_match(fn):
+    """(result text, parameter text) of a function's head, whose result may be several words (a pointer
+    result: volatile struct s_13 *f(u32 r0)), anchored on its name; None where it does not read so."""
+    return re.match(r"^(.*?)\s*\b%s\((.*)\)$" % re.escape(fn.name), fn.head.strip())
+
+
+def head_text(result, name, params):
+    """A head of these parts: a pointer result's star beside the name (volatile u8 *f(...))."""
+    result = result.strip()
+    return "%s%s%s(%s)" % (result, "" if result.endswith("*") else " ", name, params)
+
+
 def returns_negative(facts, typing):
     """Whether a function's own C makes its result a negative value's: a return of a constant dread.polish
     prints as a negative number (also an arm of a select returned: return c ? 0 : -1), or of a variable
@@ -1560,6 +1576,54 @@ class Planner:
             after += self.cost(c, self.typing[c], self.file_protos(trial, self.calls[c]), atoms)
         return after <= before
 
+    def returned_pointer(self, name, protos):
+        """The pointer type every return of the function gives: a variable the plan typed or the C declares
+        a pointer of that type (dread.shapes' structure pointers), a call of a callee whose result is
+        one, or 0; None where a return gives anything else or two types meet."""
+        fx, typing, types = self.facts[name], self.typing.get(name, {}), self.types[name]
+        seen = set()
+        for st, _ in fx.atoms:
+            if not isinstance(st, C.Return) or st.e is None or is_zero(st.e):
+                continue
+            e, t = st.e, None
+            if isinstance(e, C.Cast) and " ".join(e.type.split()) == "u32" and isinstance(e.e, C.Name):
+                e = e.e                     # (dread.shapes' structure pointer as it returns one: (u32)r0)
+            if isinstance(e, C.Name) and e.id in typing:
+                t = typing[e.id] if parse_pointer(typing[e.id]) is not None else None
+            elif isinstance(e, C.Name):
+                d = types.vars.get(e.id)
+                if d and d[0] == "ptr" and d[1] is not None and d[1][0] in ("int", "struct"):
+                    t = pointer_text(int_text(d[1][1]) if d[1][0] == "int" else d[1][1])
+            elif isinstance(e, C.Call) and isinstance(e.f, C.Name):
+                res = (protos.get(e.f.id) or (None,))[0]
+                t = res if res and parse_pointer(res) is not None else None
+            if t is None:
+                return None
+            seen.add(" ".join(t.split()))
+        return next(iter(seen)) if len(seen) == 1 else None
+
+    def decide_pointer_result(self, name, protos, callers):
+        """The pointer type the function's result takes (returned_pointer), where its returns and its
+        callers' C hold no more casts with it than with the u32 the lifter declared (`return (u32)r0;`
+        goes, a caller that uses the result as a number gets a cast); else None."""
+        t = self.returned_pointer(name, protos)
+        if t is None:
+            return None
+        fx, typing = self.facts[name], self.typing.get(name, {})
+        atoms = [(st, slot) for st, slot in fx.atoms if isinstance(st, C.Return)]
+        fn = self.trees[name][1]
+        own = self.file_protos(protos, self.calls[name])
+        before = Rewriter(fn, typing, self.types[name], own, None, self.sizes).count(atoms)
+        after = Rewriter(fn, typing, self.types[name], own, t, self.sizes).count(atoms)
+        trial = dict(protos)
+        trial[name] = (t, protos[name][1])
+        for c in callers:
+            cx = self.facts[c]
+            catoms = [cx.atoms[k] for k in cx.call_atoms.get(name, ())]
+            before += self.cost(c, self.typing[c], self.file_protos(protos, self.calls[c]), catoms)
+            after += self.cost(c, self.typing[c], self.file_protos(trial, self.calls[c]), catoms)
+        return t if after <= before else None
+
     def decide_outside(self, name, callers):
         """Whether a callee the plan did not analyse (not lifted: its own C printed on request) returns
         s32 as its externs declare it: an analysed caller compares its result signed (Facts.signed_results,
@@ -1603,9 +1667,25 @@ class Planner:
                     self.results[name] = "s32"
                     changed.add(name)
                     again.add(name)
+            for name in order:              # (a pointer result: its callers' variables may follow it)
+                if self.trees[name][1].head.split()[0] != "u32" or self.results.get(name):
+                    continue
+                t = self.decide_pointer_result(name, self.protos(), sorted(callers.get(name, ())))
+                if t is not None:
+                    self.results[name] = t
+                    changed.add(name)
             dirty = {c for f in changed for c in callers.get(f, ())} | again
             if not dirty:
                 break
+        # The pointer results once more with the callers' final types, callees first (a result handed
+        # through): a caller typed in a later round may use one as a number where it held a pointer
+        # before (RISC-V GCC -O2's memset, compared with u32 variables by four callers: a cast each)
+        for name in order:
+            t = self.results.get(name)
+            if t and t != "s32":
+                del self.results[name]
+                if self.decide_pointer_result(name, self.protos(), sorted(callers.get(name, ()))) == t:
+                    self.results[name] = t
         # callees the plan does not analyse (outside the lifted table) whose result an analysed caller
         # compares signed: s32 in their externs, and in their own C printed on request (prototypes)
         outside = {}
@@ -1817,7 +1897,7 @@ def object_arguments(tree, fn, p, names=None, int_bits=None):
         if strip:
             for call, i in strip:
                 call.args[i] = call.args[i].e
-            tree.items[k].text = "extern %s %s(%s);" % (m.group(1).strip(), f, ", ".join(new))
+            tree.items[k].text = "extern %s;" % head_text(m.group(1), f, ", ".join(new))
             changed = True
     return changed
 
@@ -1905,14 +1985,13 @@ def apply(tree, fn, p, made_for=None, names=None, int_bits=None):
         res, params = protos[f]
         old = [x.strip() for x in m.group(3).split(",")] if m.group(3).strip() not in ("", "void") else []
         new = [params[i] if i < len(params) and params[i] else t for i, t in enumerate(old)]
-        tree.items[k].text = "extern %s %s(%s);" % ((res or m.group(1).strip()), f, ", ".join(new) or "void")
+        tree.items[k].text = "extern %s;" % head_text(res or m.group(1), f, ", ".join(new) or "void")
     # the head: its parameters' types and its result
     params = [(typing[n] if n in typing else t, n) for t, n in fn.params]
-    m = re.match(r"^(\w+) (\w+)\((.*)\)$", fn.head.strip())
+    m = head_match(fn)
     if m and (params != fn.params or (result and result != m.group(1))):
         fn.params = params
-        fn.head = "%s %s(%s)" % (result or m.group(1), m.group(2),
-                                 ", ".join(_decl_text(t, n) for t, n in params) or "void")
+        fn.head = head_text(result or m.group(1), fn.name, ", ".join(_decl_text(t, n) for t, n in params) or "void")
     # the locals out of their u32 lines into lines of their types
     moved = {}
     for st in fn.body.body:

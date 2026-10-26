@@ -2167,8 +2167,19 @@ model).
   The structures' scores against the source (dread readable --shapes --score, --statics --score,
   --score) the same, line for line. The plan takes 1.4-1.7 s a FreeRTOS build; every GCC -Os
   function's readable C in one process 43.8 -> 48.8 s of CPU.
-  Left: pointer results (a function returning a typed pointer stays u32: `return (u32)r0;`, and
-  memcpy's destination, returned twice, stays u32 by the count of casts); globals that hold pointers
+  Pointer results done 2026-10-26 (vartypes decide_pointer_result): a function every return of which
+  gives one pointer type (a variable typed or declared so, dread.shapes' structure pointers among them
+  as their (u32)r0 returns, a call of a callee whose result is one, 0) returns that type where its
+  returns and its callers' C hold no more casts so, checked once more with the callers' final types
+  after the rounds (a caller typed later may use it as a number: RISC-V GCC -O2's memset, compared with
+  u32 variables); a head's result may be several words (head_match, head_text: naming renamed
+  parameters by a one-word head's pattern). On the nine builds (copies of the fault branch's results,
+  against the void branch) the gate accepts the same functions; in the lifted functions `return (u32)`
+  20 -> 16 (GCC -Os), 36 -> 32 (clang -O2), 17 -> 14 (RISC-V GCC -Os), 15 -> 10 (GCC -O0), 16 -> 11
+  (RISC-V GCC -O2), gizmo 2-4 -> 0, lines with a (u32) never more (636 -> 634, 661 -> 658, 535 -> 534,
+  750 -> 748, 638 -> 635). The functions outside the lifted table, printed on request, are not in the
+  plan: RISC-V GCC -O2's three more lines there are calls of memset's pointer result. Left: a pointer
+  plus an offset returned (pvPortMalloc's block + its header) stays u32; globals that hold pointers
   (a queue handle in a u32 global: its calls keep the externs' u32, and the pointer casts it would
   need are why); an access past a structure through its pointer stays raw (`r0[2].f_0` would need the
   field's name); arrays of structures dread.shapes makes no structure of are walked as words (spool's

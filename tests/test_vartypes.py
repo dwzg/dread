@@ -45,7 +45,8 @@ def test_a_byte_walk_is_a_pointer_to_bytes_const_where_nothing_is_stored():
     """gizmo a32's strncpy as the stages leave it: the destination's group (the parameter, its copy and
     the end pointer made from it) is volatile u8 *, the source's (the parameter one below its first
     byte, advanced) const volatile u8 *; the accesses p[k] and *p, the advances element counts, the
-    result (u32)r0 (the result stays u32); each advance behind its access folded into it (dread.polish
+    result volatile u8 * (it returns r0, the destination: a pointer result since 2026-10-26, where the
+    result stayed u32 with (u32)r0); each advance behind its access folded into it (dread.polish
     fold_steps: r12 = *++r1_1;, *r3++ = r12;)."""
     out, p = typed(HEAD + """u32 f(u32 r0, u32 r1, u32 r2)
 {
@@ -70,10 +71,10 @@ def test_a_byte_walk_is_a_pointer_to_bytes_const_where_nothing_is_stored():
 """)
     assert p.variables["f"]["types"] == {"r0": "volatile u8 *", "r3": "volatile u8 *", "r2_1": "volatile u8 *",
                                          "r1": "const volatile u8 *", "r1_1": "const volatile u8 *"}, p.variables
-    assert p.prototypes["f"] == [None, "volatile u8 *", "const volatile u8 *", None], p.prototypes
-    for line in ("u32 f(volatile u8 *r0, const volatile u8 *r1, u32 r2)", "const volatile u8 *r1_1;",
+    assert p.prototypes["f"] == ["volatile u8 *", "volatile u8 *", "const volatile u8 *", None], p.prototypes
+    for line in ("volatile u8 *f(volatile u8 *r0, const volatile u8 *r1, u32 r2)", "const volatile u8 *r1_1;",
                  "volatile u8 *r2_1, *r3;", "r1_1 = r1 - 1;", "r12 = *++r1_1;", "*r3++ = r12;",
-                 "r2_1 = r3 + r2;", "if (r3 == r2_1) return (u32)r0;", "*r3++ = 0;"):
+                 "r2_1 = r3 + r2;", "if (r3 == r2_1) return r0;", "*r3++ = 0;"):
         assert line in out, (line, out)
     assert "volatile u8 *)" not in out.split("{", 1)[1], out      # (no raw access left)
     assert out.startswith("/* dread: overflow wraps */\n/* dread: null checks kept */\n"), out
@@ -426,11 +427,12 @@ u32 by_number(u32 r0)
 """
     out, p = typed(text, name="by_address")
     assert p.variables["by_address"]["calls"] == {"fill": {"0": "volatile u8 *"}}, p.variables
-    assert "extern u32 fill(volatile u8 *, u32, u32);" in out and "fill(&g_200017c5[0], 0, " in out, out
+    assert "extern volatile u8 *fill(volatile u8 *, u32, u32);" in out and "fill(&g_200017c5[0], 0, " in out, out
     out, p = typed(text, name="by_number")
-    assert "by_number" not in p.variables and "extern u32 fill(u32, u32, u32);" in out, (p.variables, out)
+    assert "by_number" not in p.variables and "extern volatile u8 *fill(u32, u32, u32);" in out, (p.variables, out)
+    assert "volatile u8 *by_number(u32 r0)" in out, out     # (it returns fill's pointer: a pointer result too)
     out, _ = typed(text, name="fill")
-    assert "u32 fill(volatile u8 *r0, u32 r1, u32 r2)" in out and "*r3++ = r1;" in out, out
+    assert "volatile u8 *fill(volatile u8 *r0, u32 r1, u32 r2)" in out and "*r3++ = r1;" in out, out
 
 
 def test_a_byte_parameter_is_a_void_pointer_where_the_calls_pass_other_pointers():
@@ -469,10 +471,10 @@ u32 by_bytes(u32 r0)
     assert "const volatile u8 *r1" in out, out
     out, p = typed(text, name="by_word")
     assert p.variables["by_word"]["calls"]["copy_in"]["1"] == "const volatile void *", p.variables
-    assert "extern u32 copy_in(volatile u8 *, const volatile void *, u32);" in out and \
+    assert "extern volatile u8 *copy_in(volatile u8 *, const volatile void *, u32);" in out and \
         "copy_in(r0, &g_20001000, " in out, out
     out, p = typed(text, name="by_bytes")
-    assert "extern u32 copy_in(volatile u8 *, const volatile u8 *, u32);" in out and \
+    assert "extern volatile u8 *copy_in(volatile u8 *, const volatile u8 *, u32);" in out and \
         "copy_in(r0, &g_200017c5[0], " in out, out
 
 
@@ -1347,7 +1349,7 @@ def test_explain_shows_each_trial_with_its_casts():
     assert f[0] == "f: the table's types r0 const volatile u16 *, r1 volatile u16 *, r2 s32, r3 s32", f
     assert "  not r4: its address is taken" in f, f
     assert "  group r0: load u16 x1" in f and "  group r1: store u16 x1" in f, f
-    assert "  pointer r0: const volatile u16 *, casts 1 -> 1, kept" in f, f
+    assert "  pointer r0: const volatile u16 *, casts 2 -> 1, kept" in f, f     # (f returns r0: its result a pointer)
     assert "  pointer r1: volatile u16 *, casts 1 -> 0, kept" in f, f
     assert f[-1] == "  typed: r0 const volatile u16 *, r1 volatile u16 *, r2 s32, r3 s32", f
     g = lines[lines.index("g: the table's types none"):]
