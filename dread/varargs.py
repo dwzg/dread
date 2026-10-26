@@ -148,6 +148,114 @@ def sites(program, names):
     return out
 
 
+def _graph(program, fn):
+    """({address: index}, [successors]) of the function's instructions: the next one where an instruction
+    goes on, a jump's target inside the function; None where an indirect jump (a switch) makes the
+    paths unknown."""
+    arch = program.arch
+    index = {a: i for i, a in enumerate(fn.insns)}
+    succ = []
+    for i, a in enumerate(fn.insns):
+        insn = program.insn(a)
+        out = []
+        if insn is not None:
+            kind, target, falls = arch.flow(insn)
+            if kind == "ijump":
+                return None
+            nxt = fn.insns[i + 1] if i + 1 < len(fn.insns) else None
+            if (kind in ("next", "call", "icall") or falls) and nxt == a + insn.size:
+                out.append(i + 1)
+            if kind == "jump" and target is not None and (target & ~1) in index:
+                out.append(index[target & ~1])
+        succ.append(out)
+    return index, succ
+
+
+ENTRY = -1      # (the caller's value of a register, as a definition)
+
+
+GIVEN_DEPTH = 3     # definitions through definitions given_at follows at most
+
+def given_at(program, fn, start, end, depth=GIVEN_DEPTH):
+    """{register: value} of the registers the straight run from start up to end (dread.constants stretch)
+    reads before it writes them that hold one constant at start: the one definition of theirs that
+    reaches start, and the caller's value does not (a call ends the scratch registers, not the
+    callee-saved ones; a write under a condition may not happen), its value a constant (dread.constants
+    at, behind it). RISC-V GCC -Os computes a format into a callee-saved register in front of a loop and
+    copies it into the call's register at each pass (2026-10-26: virt's tasks' sprintf). A definition
+    that computes from a register the same way (s2 = s2 + 1020 behind lui s2 and two calls) gets its own
+    run's given registers, up to depth definitions deep. {} where nothing is known, or the function
+    jumps through a register (a switch: paths not known)."""
+    from dread import constants
+    arch = program.arch
+    graph = _graph(program, fn)
+    if graph is None or start not in graph[0] or end not in graph[0] or fn.entry not in graph[0]:
+        return {}
+    index, succ = graph
+    wanted, written = [], set()
+    for a in fn.insns[index[start]:index[end]]:
+        insn = program.insn(a)
+        if insn is None:
+            return {}
+        reads, writes = arch.reg_effects(insn)
+        wanted += [r for r in reads if r not in written and r not in wanted]
+        written |= set(writes)
+    wanted = [r for r in wanted if r not in program.image.fixed and r != "sp"]
+    if not wanted:
+        return {}
+    general = set(arch.general_regs())
+    saved = set(getattr(program.target.abi, "callee_saved", ()))
+    effects = []                            # per instruction: (registers it writes, under a condition)
+    for a in fn.insns:
+        insn = program.insn(a)
+        if insn is None:
+            effects.append((set(), False))
+            continue
+        writes = set(arch.reg_effects(insn)[1])
+        if arch.flow(insn)[0] in ("call", "icall"):
+            writes |= general - saved      # (a call may change every scratch register)
+        effects.append((writes, arch.predicate(insn) is not None))
+    preds = [[] for _ in fn.insns]
+    for k, nexts in enumerate(succ):
+        for j in nexts:
+            preds[j].append(k)
+    first = index[fn.entry]
+    out = {}
+    for reg in wanted:
+        reach_out = [set() for _ in fn.insns]
+        changed = True
+        while changed:
+            changed = False
+            for k in range(len(fn.insns)):
+                came = set().union(*(reach_out[p] for p in preds[k])) if preds[k] else set()
+                if k == first:
+                    came.add(ENTRY)
+                writes, conditional = effects[k]
+                o = ({k} | came) if (reg in writes and conditional) else ({k} if reg in writes else came)
+                if o != reach_out[k]:
+                    reach_out[k], changed = o, True
+        k0 = index[start]
+        came = set().union(*(reach_out[p] for p in preds[k0])) if preds[k0] else set()
+        if k0 == first:
+            came.add(ENTRY)
+        if len(came) != 1 or ENTRY in came:
+            continue
+        (k,) = came
+        try:
+            value = constants.after(program, fn, fn.insns[k], regs=[reg]).get(reg)
+            if value is None and depth > 1:     # (computed from registers given the same way)
+                upto = fn.insns[k + 1] if k + 1 < len(fn.insns) else None     # (the definition's own reads too)
+                inner = given_at(program, fn, constants.stretch(program, fn, fn.insns[k]), upto, depth - 1) \
+                    if upto is not None else {}
+                if inner:
+                    value = constants.after(program, fn, fn.insns[k], regs=[reg], given=inner).get(reg)
+        except Exception:
+            value = None
+        if value is not None:
+            out[reg] = value
+    return out
+
+
 def call_arities(program, formats, arg_regs, found=None):
     """{address: (how many argument registers the call or tail call there passes, the format's address)}
     of the calls of the functions that take a format (formats: {name: index of the format argument},
@@ -166,6 +274,10 @@ def call_arities(program, formats, arg_regs, found=None):
         reg = arg_regs[index]
         try:
             value = constants.at(program, fn, address, regs=[reg]).get(reg)
+            if value is None:           # (a register written once with a constant on the way in: given_at)
+                given = given_at(program, fn, constants.stretch(program, fn, address), address)
+                if given:
+                    value = constants.at(program, fn, address, regs=[reg], given=given).get(reg)
         except Exception:
             value = None
         n = arity(index, image_format(program, value), len(arg_regs)) if value is not None else None

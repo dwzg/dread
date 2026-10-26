@@ -540,3 +540,131 @@ def test_risc_v_callers_of_an_assertion_handler_take_no_phantom_parameters(tmp_p
     assert sorted(lift.check(t, t.image(), out=lines.append, jobs=2)) == sorted(names), lines
     assert sorted(readable.check(t, t.image(), out=lines.append, jobs=2)) == sorted(names), lines
 
+
+LOOP_RV_S = r"""
+    .text
+    .global sprintf, helper, print_loop, print_loop2, use
+    .type sprintf, @function
+sprintf:                        # the sum of the words its format takes, stored to 0x80000210 (a0 the buffer)
+    addi    sp, sp, -48
+    sw      a2, 24(sp)          # the save area: the words behind the format
+    sw      a3, 28(sp)
+    sw      a4, 32(sp)
+    sw      a5, 36(sp)
+    sw      a6, 40(sp)
+    sw      a7, 44(sp)
+    addi    t1, sp, 24
+    li      t0, 0
+    li      t3, 37
+.Lnext:
+    lbu     t2, 0(a1)
+    addi    a1, a1, 1
+    beqz    t2, .Lend
+    bne     t2, t3, .Lnext
+    lbu     t2, 0(a1)
+    addi    a1, a1, 1
+    beq     t2, t3, .Lnext
+    beqz    t2, .Lend
+    lw      t2, 0(t1)
+    addi    t1, t1, 4
+    add     t0, t0, t2
+    j       .Lnext
+.Lend:
+    lui     t2, %hi(0x80000210)
+    sw      t0, %lo(0x80000210)(t2)
+    addi    sp, sp, 48
+    ret
+    .size sprintf, . - sprintf
+    .type helper, @function
+helper:
+    ret
+    .size helper, . - helper
+    .type print_loop, @function
+print_loop:                     # sprintf(buf, "%d", n) for n = 3, 2, 1: the format in s1 from before the loop
+    addi    sp, sp, -32
+    sw      ra, 28(sp)
+    sw      s0, 24(sp)
+    sw      s1, 20(sp)
+    lui     s1, %hi(fmt_d)
+    addi    s1, s1, %lo(fmt_d)
+    li      s0, 3
+1:  mv      a1, s1
+    mv      a2, s0
+    addi    a0, sp, 4
+    call    sprintf
+    addi    s0, s0, -1
+    bnez    s0, 1b
+    lw      s1, 20(sp)
+    lw      s0, 24(sp)
+    lw      ra, 28(sp)
+    addi    sp, sp, 32
+    ret
+    .size print_loop, . - print_loop
+    .type print_loop2, @function
+print_loop2:                    # the same, s1 written twice with a call between (it keeps s1)
+    addi    sp, sp, -32
+    sw      ra, 28(sp)
+    sw      s0, 24(sp)
+    sw      s1, 20(sp)
+    lui     s1, %hi(fmt_d)
+    call    helper
+    addi    s1, s1, %lo(fmt_d)
+    li      s0, 3
+1:  mv      a1, s1
+    mv      a2, s0
+    addi    a0, sp, 4
+    call    sprintf
+    addi    s0, s0, -1
+    bnez    s0, 1b
+    lw      s1, 20(sp)
+    lw      s0, 24(sp)
+    lw      ra, 28(sp)
+    addi    sp, sp, 32
+    ret
+    .size print_loop2, . - print_loop2
+    .type use, @function
+use:
+    addi    sp, sp, -16
+    sw      ra, 12(sp)
+    call    print_loop
+    call    print_loop2
+    lw      ra, 12(sp)
+    addi    sp, sp, 16
+    ret
+    .size use, . - use
+    .section .rodata
+fmt_d:      .asciz "%d"
+"""
+
+
+@needs_riscv_gcc
+def test_a_format_kept_in_a_saved_register_across_a_loop(tmp_path):
+    """RISC-V GCC -Os computes a format into a callee-saved register in front of a loop and copies it
+    into a1 at each call of sprintf in the loop: the straight run in front of the call stops at the loop's
+    head, so the format was not known (6 of 13 calls on the bench's RISC-V GCC -Os build). The register's
+    one definition that reaches the loop's head is a constant (dread.varargs given_at; dread.constants
+    after: the value behind the definition, the loop's head right behind it), also where it is written
+    twice with a call between (s1 = s1 + low behind lui s1 and a call that keeps s1): both calls are
+    known, three registers, and readable C passes those. Both gates take every function. (The fixture's
+    image ends with the format's NUL at an odd address: the room behind the image began at the halfword
+    that holds it, and every case of print_loop was refused for loading code; dread.program
+    extent_owners.)"""
+    from test_results import riscv_program
+    t = riscv_program(tmp_path, LOOP_RV_S, "use")
+    p = Program(t, t.image())
+    flow = regflow.analyse(p)
+    from dread.program import ROOM
+    image = t.image()
+    assert image.end % 2 == 1                   # (the format's NUL is the image's last byte, at an odd end:
+    assert p.extent_owners()[(image.end - 1 - image.base) >> 1] != ROOM     # its halfword is data, no room)
+    for name in ("print_loop", "print_loop2"):
+        calls = flow.formats[name]
+        assert [(c[1], c[2]) for c in calls] == [("sprintf", 3)], calls
+        assert varargs.image_format(p, calls[0][3]) == b"%d"
+    got, _ = texts(t, ["print_loop", "print_loop2"])
+    for name in ("print_loop", "print_loop2"):
+        assert re.search(r"sprintf\([^,]+, 0x[0-9a-f]+u, [a-z0-9_]+\);", got[name]), got[name]
+    names = ["sprintf", "helper", "print_loop", "print_loop2", "use"]
+    lines = []
+    assert sorted(lift.check(t, t.image(), out=lines.append, jobs=2)) == sorted(names), lines
+    assert sorted(readable.check(t, t.image(), out=lines.append, jobs=2)) == sorted(names), lines

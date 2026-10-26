@@ -111,11 +111,13 @@ def stretch(program, fn, address):
     return fn.insns[start]
 
 
-def at(program, fn, address, regs=None):
+def at(program, fn, address, regs=None, given=None):
     """{register name: value} of the registers (default: the general ones) that hold the same value
     in front of `address` whatever the registers and RAM held before the stretch. When the runs do not
     reach the address (a conditional branch in the stretch goes elsewhere under the fill values), they
-    start again behind each conditional branch of the stretch, from the earliest on."""
+    start again behind each conditional branch of the stretch, from the earliest on. given: {register
+    name: value} of registers known to hold that value where the stretch starts (dread.varargs: one
+    written once with a constant on the way into a loop), set so in both runs."""
     arch = program.arch
     if address not in fn.insns or not hasattr(arch, "new_uc"):   # (an architecture without an engine yet)
         return {}
@@ -134,13 +136,30 @@ def at(program, fn, address, regs=None):
     for start in starts:
         if start == address:
             break
-        got = _run(program, start, address, names)
+        got = _run(program, start, address, names, given)
         if got is not None:
             return got
     return {}
 
 
-def _run(program, first, address, names):
+def after(program, fn, address, regs=None, given=None):
+    """{register name: value} of the registers (default: the general ones) that hold the same value right
+    behind the instruction at address, whatever the registers and RAM held before the straight run that
+    ends with it: what that instruction computed from constants (at asks in front of an instruction,
+    which knows nothing where that one is a join: a loop's head right behind a definition,
+    dread.varargs given_at). {} for an instruction that is no plain one (a branch, a call). given: as
+    for at, where the run starts."""
+    arch = program.arch
+    if address not in fn.insns or not hasattr(arch, "new_uc"):
+        return {}
+    insn = program.insn(address)
+    if insn is None or arch.flow(insn)[0] != "next":
+        return {}
+    first = stretch(program, fn, address)
+    return _run(program, first, address + insn.size, list(regs or arch.general_regs()), given) or {}
+
+
+def _run(program, first, address, names, given=None):
     arch = program.arch
     isa = program.isa_at(address)
     uc, state = _engine(program, isa)
@@ -156,6 +175,8 @@ def _run(program, first, address, names):
                 uc.reg_write(arch.reg_id(r), word)
             arch.initial_status(uc)             # (before sp: the A profile banks sp per mode)
             for r, value in program.image.fixed.items():    # gp and kin keep their one value
+                uc.reg_write(arch.reg_id(r), value)
+            for r, value in (given or {}).items():              # (what the caller knows of the start)
                 uc.reg_write(arch.reg_id(r), value)
             uc.reg_write(arch.reg_id("sp"), word & ~0xFFF)     # a stack address that differs between the runs
             if arch.link_reg:

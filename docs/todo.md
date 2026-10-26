@@ -1606,7 +1606,7 @@ model).
   builds: the gate accepts the same functions; gizmo and clang -O2 unchanged; GCC -Os 473 -> 472
   parameters, RISC-V GCC -Os 442 -> 440 (prvIdleTask(void), vQueueReceiveWhenSuspendedTask(void)), GCC -O0
   484 -> 482. (4), calls through a pointer, stays open: what such a call may reach is not known.
-- [ ] **A format kept in a saved register across a loop.** dread.varargs finds a call's format where
+- [x] **A format kept in a saved register across a loop.** dread.varargs finds a call's format where
   the code puts its address into the register on the straight run in front of the call
   (dread.constants at). RISC-V GCC -Os computes a format once into a callee-saved register in front of
   a loop and copies it into a1 at each call of sprintf in the loop, so the run back from the call stops
@@ -1614,6 +1614,15 @@ model).
   tasks' sprintf(buf, "...", n) in their loops), and those calls keep all eight arguments. A register
   written once in the function, with a constant, on the way into the loop (its one write on every path
   from the entry to the call) holds that constant at the call; regflow's graphs give the paths.
+  Done 2026-10-26 (dread.varargs given_at, dread.constants after and at's given): the registers the
+  straight run reads that hold one constant where it starts (their one definition reaching it, the
+  caller's value not; a call ends the scratch registers, not the callee-saved ones), its value taken
+  behind the definition, also through a definition that computes from such a register (depth 3). On
+  virt-gcc-Os all 13 calls are known now (were 7). Main -> this on the eight builds: the gate accepts
+  the same functions; gizmo, GCC -Os and GCC -O0 unchanged; clang -O2 380 -> 373 parameters, RISC-V GCC
+  -Os 440 -> 425 (prvCoreATask(void)). Found on the way: dread.program extent_owners began the room
+  behind the image at the halfword holding the image's last byte where the image ends at an odd
+  address; a format's NUL there made every case of its reader refused for loading code.
 - [x] **Flags as comparisons, the rest.** After the IT-block work, flags still print as u64 sums with
   carry and zero variables where one compare or subtraction is read by two conditions (borrow, then
   zero), where an add's carry is tested, where a compiler dispatches by successive subtractions

@@ -331,7 +331,10 @@ class Program:
                             if self.base < v < end})
             owners = array.array("H", bytes(2 * ((limit - self.base + 1) // 2)))
             for lo, hi in list(self.image.free) + [(end, limit)]:
-                for a in range(max(lo, self.base) & ~1, min(hi, limit), 2):
+                # (from the first whole halfword: one that holds the image's last byte, an odd end's,
+                # holds its data, and a load of it is none of code; until 2026-10-26 a format's NUL
+                # there made every case of its reader refused)
+                for a in range((max(lo, self.base) + 1) & ~1, min(hi, limit), 2):
                     owners[(a - self.base) >> 1] = ROOM
             readers = {}                # word address -> the functions that load it pc-relatively
             literal, pc_address = getattr(self.arch, "literal", None), getattr(self.arch, "pc_address", None)
