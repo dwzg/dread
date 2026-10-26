@@ -5934,6 +5934,22 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   -O2 +9, RISC-V clang -Os +15 to +17. The readable gate accepts 11,304 of the 11,684 (96.7 %). RISC-V
   GCC -O2 stays the lowest (203 of 300 lifted). The builds' targets predate the recipe's syscall_reads:
   the next measurement rebuilds them.
+- [x] **Measured 2026-10-26** (measure-41 of the 40 builds, DREAD b957032: the day's coverage work up to
+  the fault cases (the code behind a stop, a word read twice, deeper stops, faults), not yet the void
+  parameters, pointer results or system registers; `dread bench measure --jobs 4`: 6.2 h, the targets
+  rebuilt with syscall_reads): every ARM and RISC-V build lifts more than at measure-40 and none loses
+  a function, 11,684 -> 12,148 over the 38 builds: ARM GCC -Os +3 to +9, -O2 +27 to +34, -O0 +12, ARM
+  clang -Os +5 to +7, -O2 +17, the M4F builds +3 and +4, RISC-V GCC -Os +6 and +7, -O2 +41, RISC-V clang
+  -Os +13 to +17. The readable gate accepts 12,121 of the 12,148 (99.8 %). RISC-V GCC -O2 stays the
+  lowest (244 of 300). What stops the 1,286 functions left, summed over the 38 builds: cases leave
+  instructions unrun 537, never returns and not all of it run 438, refused 226, no generated input ends
+  42, a case differs 33. The register measurement (dread callconv) disagreed with regflow 18 times
+  against measure-40's 7: the eleven new ones were the answers' fault cases, whose runs end in the
+  middle of the function and were measured as returns; fixed (callconv leaves out runs that do not
+  end at the return, from the run's log), on copies of the builds the count is back to 7. One of the
+  7 is the original's own: RISC-V GCC -O2's vStartTimerDemoTask "reads its caller's s3" because
+  xTimerGenericCommand queues a message whose union's last word no command sets, holding an s3 saved
+  there before.
 - [ ] **New architectures through it**: Cortex-M4F first (FreeRTOS's ARM_CM4F port, below), then MSP430X
   with TI's cl430 (FreeRTOS's MSP430X port), AVR (its ATmega ports), each as its own item below.
 - [ ] (Later) a compute-heavy library (littlefs) for the case generator on parsers and data structures.
