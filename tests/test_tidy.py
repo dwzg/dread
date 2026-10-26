@@ -431,6 +431,76 @@ def test_an_index_added_to_a_frame_address_counts_from_where_its_constants_come_
     assert "*(volatile u32 *)(sp0 - 16)" in cparse.unparse(fn, notes=False)
 
 
+# GCC 5 -Os's xQueueSelectFromSet, lifted: the entry pushes r0-r2 for room, the local is stored through
+# r3 - 4 where r3 holds sp0 - 8 (str r2, [r3, #-4]!), that address goes to the callee, the slot is read back.
+HELD_FRAME = """#include "dread.h"
+extern u32 g(u32, u32, u32, u32);
+u32 h(u32 a0, u32 a1, u32 a2, u32 a3)
+{
+    u32 r0 = a0, r1 = a1, r2 = a2, r3 = a3, r12 = 0, lr = (u32)__builtin_return_address(0);
+    u32 n = 0, z = 0, c = 0, v = 0;
+    u32 frame[4] __attribute__((aligned(8)));
+    u32 sp0 = (u32)&frame[4];
+    (void)n; (void)z; (void)c; (void)v; (void)r12; (void)lr; (void)sp0;
+    *(volatile u32 *)(sp0 - 16) = r0; *(volatile u32 *)(sp0 - 12) = r1; *(volatile u32 *)(sp0 - 8) = r2;  /* 0: push {r0, r1, r2, lr} */
+    r2 = 0x0u; n = r2 >> 31; z = r2 == 0;  /* 2: movs r2, #0 */
+    r3 = (sp0 - 16) + 0x8u;  /* 4: add r3, sp, #8 */
+    { u32 a = (r3 - 4), w = (r3 - 4); *(volatile u32 *)a = (u32)r2; r3 = w; }  /* 6: str r2, [r3, #-0x4]! */
+    r2 = r1;  /* a: mov r2, r1 */
+    r1 = r3;  /* c: mov r1, r3 */
+    r0 = g(r0, r1, r2, r3); r1 = r2 = r3 = r12 = 0;  /* e: bl g */
+    r0 = (u32)*(volatile u32 *)((sp0 - 12));  /* 12: ldr r0, [sp, #4] */
+    /* 14: add sp, #0xc */
+    return r0;  /* 16: ldr pc, [sp], #4 */
+}
+"""
+
+
+def _call_of(fn, name):
+    """The index of the body's statement that calls name."""
+    from dread.cflow import walk_expr
+    return next(i for i, st in enumerate(fn.body.body)
+                if any(isinstance(x, cparse.Call) and isinstance(x.f, cparse.Name) and x.f.id == name
+                       for e in tidy._stmt_all_exprs(st) for x in walk_expr(e)))
+
+
+def test_a_slot_reached_through_a_variable_that_holds_a_frame_address_stays():
+    """HELD_FRAME: before the frame base is written into its uses, frame_locals saw only sp0 - 8 leave
+    (r3's value) and made the slot at sp0 - 12 a variable, so the read became the register the entry
+    pushed there (return r1, then a1) and the store and the callee's write were lost: the readable gate
+    refused GCC 5 -Os's xQueueSelectFromSet. The variables that hold a frame address count now
+    (_held_frame_addresses: r3 - 4 is sp0 - 12): the slot stays in the frame, only sp0 - 16 below it
+    becomes a variable, and the function returns what the store and the callee left there."""
+    fn = cparse.parse(HELD_FRAME.replace(" (void)sp0;", "")).function("h")
+    tidy.flatten(fn)                                       # (as the passes run: the block's statements apart)
+    body = fn.body.body
+    call = _call_of(fn, "g")
+    at = tidy._held_frame_addresses(fn)
+    assert at.low(call, "r1") == -12 and at.low(call, "r3") == -12 and at.low(call, "r0") is None
+    held, const = {"r3": -8}.get, {"y": 5, "m": 0xa}.get
+    assert tidy._frame_low(expr("r3 - 4"), held) == -12 and tidy._frame_low(expr("(u32)r3 + 0xfffffffcu"), held) == -12
+    assert tidy._frame_low(expr("(u64)r3 + y + 0"), held, const) == -3     # (adds r6, r3, #5, its carry kept)
+    assert tidy._frame_low(expr("(u64)r3 + (u32)~m + 1"), held, const) == -18     # (subs r6, r3, #10)
+    assert tidy._frame_low(expr("r3 + r0"), held) is tidy.UNKNOWN_OFFSET
+    assert tidy._frame_low(expr("*(volatile u32 *)(r3 - 4)"), held) is None
+    assert tidy._frame_low(expr("r3 == 0"), held) is None and tidy._frame_low(expr("g(r3)"), held) is None
+    loop = cparse.parse(HELD_FRAME.replace("    r2 = r1;  /* a: mov r2, r1 */\n",
+                                           "L_up:\n    r3 = r3 + 4;  /* a: adds */\n"
+                                           "    if (r3 != r0) goto L_up;  /* a: bne */\n    r2 = r1;\n")).function("h")
+    tidy.flatten(loop)                                     # (a walk upwards: bounded, one step above the start)
+    assert tidy._held_frame_addresses(loop).low(_call_of(loop, "g"), "r3") == -8
+    down = cparse.parse(cparse.unparse(loop, notes=False).replace("r3 = r3 + 4;", "r3 = r3 - 4;")).function("h")
+    tidy.flatten(down)                                     # (downwards: walked, as the old rule took every pointer)
+    assert tidy._held_frame_addresses(down).low(_call_of(down, "g"), "r3") is tidy.WALKED_OFFSET
+    assert tidy.frame_locals(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "u32 s16;" in out and "s12" not in out and "*(volatile u32 *)(sp0 - 12)" in out, out
+    fn = cparse.parse(HELD_FRAME).function("h")
+    tidy.tidy(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "return *(volatile u32 *)(sp0 - 12);" in out and "return a1" not in out, out
+
+
 def test_a_slot_does_not_take_the_name_of_a_type_the_function_uses():
     """The slot at sp0 - 8 would be s8, which is also a type; where the function uses that type (a
     signed byte load elsewhere), its slots take the next prefix."""

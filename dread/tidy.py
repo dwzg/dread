@@ -1376,6 +1376,214 @@ def _types_used(fn):
     return set(re.findall(r"\b[su](?:8|16|32|64)\b", C.unparse(fn, notes=False)))
 
 
+UNKNOWN_OFFSET = "unknown"  # _frame_low: a frame address not bounded below (an index added, a mask)
+WALKED_OFFSET = "walked"    # _frame_low: a frame address a loop steps downwards (_held_frame_addresses)
+_INT_CASTS = ("u32", "u16", "u64", "s64", "s32")    # casts through which a frame address keeps its value
+
+
+def _signed32(k):
+    k &= 0xFFFFFFFF
+    return k - (1 << 32) if k & 0x80000000 else k
+
+
+def _const_value(e, const):
+    """The value of e (modulo 2**64) where it is a constant: numbers, variables const(name) says hold one,
+    and ~, -, casts, +, -, *, &, |, ^, << and >> of those; None otherwise. The lifter's flag-setting adds
+    keep their operands in variables (y_20 = 0x5u; t_16 = (u64)x_22 + y_20 + 0) until the passes fold them."""
+    mask = (1 << 64) - 1
+    if isinstance(e, C.Num):
+        return e.value & mask if isinstance(e.value, int) else None
+    if isinstance(e, C.Name):
+        return const(e.id)
+    if isinstance(e, C.Cast) and e.type in _INT_CASTS:
+        v = _const_value(e.e, const)
+        if v is None:
+            return None
+        return v if e.type in ("u64", "s64") else (v & 0xFFFF if e.type == "u16" else v & 0xFFFFFFFF)
+    if isinstance(e, C.Unary) and e.op in ("~", "-"):
+        v = _const_value(e.e, const)
+        return None if v is None else (~v if e.op == "~" else -v) & mask
+    if isinstance(e, C.Binary) and e.op in ("+", "-", "*", "&", "|", "^", "<<", ">>"):
+        a, b = _const_value(e.l, const), _const_value(e.r, const)
+        if a is None or b is None or (e.op in ("<<", ">>") and b > 63):
+            return None
+        return {"+": a + b, "-": a - b, "*": a * b, "&": a & b, "|": a | b, "^": a ^ b,
+                "<<": a << b, ">>": a >> b}[e.op] & mask
+    return None
+
+
+def _frame_low(e, held, const=lambda name: None):
+    """The lowest offset from sp0 that e may have as a frame address, where e is sp0, or a variable that
+    may hold one, plus or minus constants (held(name): its lowest offset, UNKNOWN_OFFSET, WALKED_OFFSET
+    or None; const(name): the constant a variable holds, or None); UNKNOWN_OFFSET where e is computed
+    from one otherwise (an index added, a mask), WALKED_OFFSET from a walked one; None where e is no
+    frame address: a load through one is a value read from the frame, not an address, and a call's
+    result is none either (as frame_locals always took it: a callee that hands back the frame address
+    it was given, memcpy's destination, is not followed)."""
+    if isinstance(e, C.Cast) and e.type in _INT_CASTS:
+        return _frame_low(e.e, held, const)
+    if isinstance(e, C.Name):
+        return 0 if e.id == FRAME_BASE else held(e.id)
+    if isinstance(e, C.Unary) and e.op == "*" or isinstance(e, C.Call):
+        return None
+    if isinstance(e, C.Assign):
+        return _frame_low(e.value, held, const) if e.op == "=" else None
+    if isinstance(e, C.Binary) and e.op in ("+", "-"):
+        left, right = _frame_low(e.l, held, const), _frame_low(e.r, held, const)
+        if left is not None and right is None:
+            k = _const_value(e.r, const)
+            if left in (UNKNOWN_OFFSET, WALKED_OFFSET) or k is None:
+                return left if k is not None else UNKNOWN_OFFSET
+            k = _signed32(k)
+            return left + k if e.op == "+" else left - k
+        if right is not None and left is None and e.op == "+":
+            k = _const_value(e.l, const)
+            if right in (UNKNOWN_OFFSET, WALKED_OFFSET) or k is None:
+                return right if k is not None else UNKNOWN_OFFSET
+            return right + _signed32(k)
+        return UNKNOWN_OFFSET if left is not None or right is not None else None
+    if isinstance(e, C.Cond):
+        return _lowest([_frame_low(e.t, held, const), _frame_low(e.f, held, const)])
+    if isinstance(e, C.Binary) and e.op in ("==", "!=", "<", "<=", ">", ">=", "&&", "||"):
+        return None                         # (a truth value)
+    if any(_frame_low(c, held, const) is not None for c in _children(e)):
+        return UNKNOWN_OFFSET               # (a frame address masked, shifted, handed through a call)
+    return None
+
+
+def _lowest(values):
+    """The lowest of _frame_low's answers: UNKNOWN_OFFSET before anything, an offset before
+    WALKED_OFFSET; None where all are None."""
+    values = [v for v in values if v is not None]
+    if UNKNOWN_OFFSET in values:
+        return UNKNOWN_OFFSET
+    offsets = [v for v in values if v is not WALKED_OFFSET]
+    return min(offsets) if offsets else (WALKED_OFFSET if values else None)
+
+
+def _assignments(stmt):
+    """[(variable, value)] of a statement's assignments to variables, nested statements included; a
+    compound assignment's value is the variable with the operation (r3 -= 4: r3 - 4)."""
+    out = []
+
+    def add(e):
+        for x in walk_expr(e):
+            if isinstance(x, C.Assign) and isinstance(x.target, C.Name):
+                value = x.value if x.op == "=" else C.Binary(x.op[:-1], x.target, x.value)
+                out.append((x.target.id, value))
+
+    def visit(st):
+        if isinstance(st, C.Decl) or (isinstance(st, C.For) and isinstance(st.init, C.Decl)):
+            for d in (st if isinstance(st, C.Decl) else st.init).items:
+                if d.init is not None:
+                    out.append((d.name, d.init))
+                    add(d.init)
+        for e in _stmt_all_exprs(st) if not isinstance(st, C.Decl) else ():
+            add(e)
+        for inner in _inner(st):
+            visit(inner)
+    visit(stmt)
+    return out
+
+
+class _HeldFrame:
+    """What _held_frame_addresses found: low(i, name), the lowest offset from sp0 of a frame address the
+    variable may hold in the body's statement i (UNKNOWN_OFFSET, WALKED_OFFSET, None), and const(i,
+    name), the constant it holds there, or None."""
+
+    def __init__(self, body, reach, defs):
+        self.reach, self.lows, self.consts = reach, {}, {}
+        # A statement with statements inside (a block, an if: the lifted C's are flat until
+        # dread.structure) sees its own assignments too, in any order; a plain one only what reaches it
+        # (r3 = r3 - 4 reads the r3 of before)
+        self.nested = [not isinstance(st, (C.ExprStmt, C.Decl, C.Return)) or
+                       any(isinstance(x, C.Comma) for e in _stmt_all_exprs(st) for x in walk_expr(e))
+                       for st in body]
+        self.defs = defs
+
+    def _defs_at(self, i, name):
+        own = [i] if self.nested[i] and (i, name) in self.defs else []
+        return [d for d in (self.reach[i].get(name) or ()) if d >= 0] + own, \
+            any(d < 0 for d in (self.reach[i].get(name) or ()))
+
+    def low(self, i, name):
+        if name == FRAME_BASE:
+            return 0
+        defs, _ = self._defs_at(i, name)
+        return _lowest([self.lows.get((d, name)) for d in defs])
+
+    def const(self, i, name):
+        defs, entry = self._defs_at(i, name)
+        values = {self.consts.get((d, name)) for d in defs}
+        return values.pop() if defs and not entry and len(values) == 1 and None not in values else None
+
+
+def _held_frame_addresses(fn):
+    """The variables that may hold a frame address, statement by statement (_HeldFrame), from the
+    assignments that reach each statement (dread.cflow Graph's reaching definitions): an assignment of
+    sp0 or of such a variable plus or minus constants gives its variable the lowest offset the value
+    may have; constants in variables count as constants (the lifter's flag-setting adds). Only the
+    lowest offset counts (frame_locals keeps every slot at or above an address that leaves), so a walk
+    upwards in a loop needs no bound; one downwards has none the analysis can see, and is marked
+    WALKED_OFFSET: frame_locals takes it to stay at or above the frame addresses the function lets
+    leave otherwise, as it took every pointer before. None for a function that keeps no frame address
+    in a variable. Before the frame base is written into its uses (addresses), a frame address reaches
+    the frame's words this way: GCC 5 -Os's xQueueSelectFromSet keeps sp0 - 8 in r3, stores through
+    r3 - 4 (str r2, [r3, #-4]!) and hands that address to a callee."""
+    body = fn.body.body
+    defs = {}
+    for i, st in enumerate(body):
+        for name, value in _assignments(st):
+            if name != FRAME_BASE:
+                defs.setdefault((i, name), []).append(value)
+    if not any(_frame_low(v, lambda name: None) is not None for vs in defs.values() for v in vs):
+        return None                         # (no variable is given a frame address)
+    held = _HeldFrame(body, Graph(fn).reaching(), defs)
+    rounds = len(defs) + 2
+    for _ in range(rounds):                 # constants through copies
+        changed = False
+        for (i, name), values in defs.items():
+            got = {_const_value(v, lambda n, i=i: held.const(i, n)) for v in values}
+            new = got.pop() if len(got) == 1 else None
+            if new is not None and held.consts.get((i, name)) != new:
+                held.consts[(i, name)] = new
+                changed = True
+        if not changed:
+            break
+    walked = set()
+    for _ in range(rounds):                 # the lowest offsets
+        changed = set()
+        for (i, name), values in defs.items():
+            if (i, name) in walked:
+                continue
+            got = _lowest([_frame_low(v, lambda n, i=i: held.low(i, n), lambda n, i=i: held.const(i, n))
+                           for v in values])
+            new = _lowest([got, held.lows.get((i, name))])
+            if new is not None and new != held.lows.get((i, name)):
+                held.lows[(i, name)] = new
+                changed.add((i, name))
+        if not changed:
+            break
+    else:                                   # (still lower after every round: a walk downwards in a loop)
+        for key in changed:
+            held.lows[key] = WALKED_OFFSET
+            walked.add(key)
+        for _ in range(rounds):             # (what derives from a walked one is walked too)
+            again = False
+            for (i, name), values in defs.items():
+                if (i, name) in walked:
+                    continue
+                got = _lowest([_frame_low(v, lambda n, i=i: held.low(i, n), lambda n, i=i: held.const(i, n))
+                               for v in values])
+                if got is WALKED_OFFSET and held.lows.get((i, name)) is not WALKED_OFFSET:
+                    held.lows[(i, name)] = WALKED_OFFSET
+                    walked.add((i, name))
+                    again = True
+            if not again:
+                break
+    return held
+
+
 def frame_locals(fn):
     """The frame's words as variables of their own: *(volatile u32 *)(sp0 - 36) becomes s36, where
     every slot is accessed with one type and no two overlap. When frame addresses leave the function
@@ -1390,9 +1598,28 @@ def frame_locals(fn):
     both signs (strb, then ldrsb) becomes a variable of the unsigned type, its signed reads cast:
     (s8)s9. A slot that may be read before it is written (what earlier frames left there, a word a
     call through a pointer is handed: the lift check compares such reads apart) stays as it is, the
-    others become variables all the same."""
+    others become variables all the same. A variable that holds a frame address (_held_frame_addresses:
+    before the frame base is written into its uses, r3 = sp0 - 8 and a store through r3 - 4) counts at
+    every use as the addresses it may hold leaving, an access through it as one at those places; one
+    whose offsets are not known keeps the frame as it is until a later round has written it into its
+    uses (until 2026-10-26 only sp0's own expressions counted, and GCC 5 -Os's xQueueSelectFromSet read
+    a slot back as the register its entry pushed there, a store through r3 - 4 and a callee in between)."""
     import copy
     accesses, escapes, escaped = {}, [False], set()
+    at, here = _held_frame_addresses(fn), [0]
+
+    def held_low(e):
+        return _frame_low(e, lambda name: at.low(here[0], name), lambda name: at.const(here[0], name))
+
+    def leaves(low):
+        """An address that leaves at low (_frame_low): every slot at or above it stays; a walked one
+        stays where the addresses it was stepped from left (they count where they are given)."""
+        if low is WALKED_OFFSET:
+            return
+        if low is UNKNOWN_OFFSET or low >= 0:
+            escapes[0] = True
+        else:
+            escaped.add(low)
 
     def visit(e):
         if e is None:
@@ -1405,6 +1632,11 @@ def frame_locals(fn):
                 return
             accesses.setdefault(off, set()).add(pointee[0])
             return
+        if at is not None and isinstance(e, C.Unary) and e.op == "*" and isinstance(e.e, C.Cast):
+            low = held_low(e.e.e)           # (an access through a variable that holds a frame address)
+            if low is not None:
+                leaves(low)
+                return
         if frame_address(e):                # a frame address as a value: it leaves (a call's argument)
             off = frame_offset(e)
             if off is None or off >= 0:
@@ -1412,6 +1644,14 @@ def frame_locals(fn):
             else:
                 escaped.add(off)
             return
+        if isinstance(e, C.Assign) and isinstance(e.target, C.Name) and at is not None:
+            visit(e.value)                  # (the variable given a value: its uses count, not it)
+            return
+        if at is not None and not isinstance(e, C.Assign):
+            low = held_low(e)               # (a variable that holds a frame address, used: it leaves)
+            if low is not None:
+                leaves(low)
+                return
         got = index_sum(e)
         if got is not None:                 # (an index added to a frame address, frame_sums: what the code
             escaped.update(got[1])          # computed it from leaves too; clang's sp0 + r5 - 0x14u names
@@ -1436,7 +1676,8 @@ def frame_locals(fn):
             frame_sums(e, escaped)          # (an index added to a frame address: it leaves too)
         for inner in _inner(st):
             visit_stmt(inner)
-    for st in fn.body.body:
+    for i, st in enumerate(fn.body.body):
+        here[0] = i
         visit_stmt(st)
     if escapes[0] or not accesses:
         return False
