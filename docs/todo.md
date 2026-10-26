@@ -1802,12 +1802,16 @@ model).
   same functions as before and refuse the same cases; the measurement found a fault of the first
   version (fflush on mps2-clang-O2 failed) and one shift too few (prvQueueSetSendingTask's loop cases
   on RISC-V), both mended.
-- [ ] **dread integration's stack check, as the runner's.** An input whose builds differ is left out of
+- [x] **dread integration's stack check, as the runner's.** An input whose builds differ is left out of
   dread integration when the original's outcome moves at all with the stack 64 bytes lower, whatever
   else differs: the hole the runner had until 2026-10-24. Left out only where every difference is an
   output the shifted runs move (fragile.stack_moved, the further shifts while one is left), else
   reported as a DIFF with the reason named. Public test: an input whose return value follows a stack
   address while a store elsewhere differs.
+  Done 2026-10-26 (integration.stack_moves, problem_keys, explained): the outputs the shifted runs of
+  the original move (STACK_SHIFT, then dread.fragile.MORE_SHIFTS while a difference is left), and the
+  input left out only where every difference is among them; a rebuilt image that faults or hangs only
+  where the shifted original fails too; else a DIFF naming what the stack moves.
 - [ ] **A finer clock for an event's refusal.** What comes after a saved register touched or a wild
   call is placed by the last move in or out of the function or log entry before it (runner.After): a
   store the function's own code makes between that tick and the event counts as after it, and a

@@ -15,9 +15,11 @@ differ (a generated pointer into code; loads within 4 KiB of the loading instruc
 literal pools and allowed). The rebuilt image may take RECON_LIMIT instructions. Then the return
 value, the memory written outside the stack and the log of peripheral accesses must agree; values
 that are addresses inside the stack are not compared (frames lie differently in the two builds), and
-an input whose builds differ is left out when the original's own outcome changes with its stack
-starting dread.runner.STACK_SHIFT bytes lower (it took a stack address for a value: a seed, a pointer
-an index pushed past a local).
+an input whose builds differ is left out when every difference is an output the original's own
+outcome moves with its stack starting dread.runner.STACK_SHIFT bytes lower (and dread.fragile's further
+shifts while one is left: it took a stack address for a value, a seed, a pointer an index pushed past
+a local), as dread test decides; a difference beside those is reported, with what the stack moves
+(stack_moves; until 2026-10-26 any move of the original left the input out).
 
 Runs the functions built from C that have generated cases (auto() in the case files) and, with
 --callers, the original functions that call them directly, with inputs generated for them on the
@@ -161,6 +163,63 @@ def compare(a, b, lay, i, skip=None):
     return problems
 
 
+def problem_keys(a, b, lay, skip=None):
+    """The outputs in which b differs from a, as compare finds them: "return", ("log", the index where
+    the peripheral logs part), ("kept", register), ("memory", address); skip as for compare."""
+    from dread import fragile
+    keys = set()
+    if a.ret != b.ret and not lay.in_stack(a.ret):
+        keys.add("return")
+    if a.calls != b.calls:
+        keys.add(("log", fragile.parting(a.calls, b.calls)))
+    theirs = dict(b.kept)
+    keys |= {("kept", reg) for reg, value in a.kept if theirs.get(reg) != value}
+    keys |= {("memory", x) for x in set(a.writes) | set(b.writes)
+             if a.writes.get(x) != b.writes.get(x) and not stackish(a.writes, x, lay)
+             and not (skip and skip[0] <= x < skip[1])}
+    return keys
+
+
+def explained(left, moved):
+    """Whether every difference of left is among the outputs moved: a log that parts at an entry is
+    explained by a move that parts it there or earlier."""
+    logs = [k[1] for k in moved if isinstance(k, tuple) and k[0] == "log" and k[1] is not None]
+    for k in left:
+        if isinstance(k, tuple) and k[0] == "log":
+            if not any(i <= k[1] for i in logs):
+                return False
+        elif k not in moved:
+            return False
+    return True
+
+
+def stack_moves(case, addr, name, a, left):
+    """(left out, the outputs the original's own outcome moves with its stack lower): the stack starts
+    dread.runner.STACK_SHIFT bytes lower, and while a difference of left is one the moves so far do not
+    explain, dread.fragile.MORE_SHIFTS too, what they move joined (a later shift that faults adds
+    nothing). Left out where every difference is among the moved outputs (left None, the rebuilt image
+    faulted or hung: only where the shifted original fails too), as dread.runner decides since
+    2026-10-24; until 2026-10-26 a case was left out here whenever the original moved at all, and a
+    difference beside the one the stack explains went unreported."""
+    from dread import fragile
+    from dread.emu import ARGS_ROOM
+    lay = G["gen"].layout
+    room = (lay.stack_top, lay.stack_top + ARGS_ROOM)
+    moved = set()
+    for k, shift in enumerate((runner.STACK_SHIFT,) + tuple(fragile.MORE_SHIFTS)):
+        if k and (left is None or explained(left, moved)):
+            break
+        other = run(G["original"], None, case, addr, name, shift=shift)
+        if other is None:
+            if k == 0:
+                return True, None           # (it fails with the stack lower: its outcome is the stack's)
+            continue
+        moved |= problem_keys(a, other, lay, room)
+        if k == 0 and not moved:
+            return False, moved             # (nothing moves: every difference is the C's)
+    return left is not None and explained(left, moved), moved
+
+
 def check(item):
     name, addr, cases = item
     if cases is None:
@@ -181,13 +240,15 @@ def check(item):
             problems += compare(a, b, lay, i)
         if len(problems) > before:
             # The original's own outcome may follow where the stack lies (a stack address taken
-            # for a value): C, whose frames lie otherwise, cannot agree then (dread.runner)
-            moved = run(G["original"], None, case, addr, name, shift=runner.STACK_SHIFT)
-            from dread.emu import ARGS_ROOM
-            if moved is None or compare(a, moved, lay, i, (lay.stack_top, lay.stack_top + ARGS_ROOM)):
+            # for a value): C, whose frames lie otherwise, cannot agree in those outputs (dread.runner)
+            out, moved = stack_moves(case, addr, name, a, problem_keys(a, b, lay) if b is not None else None)
+            if out:
                 del problems[before:]
                 ran -= 1
                 continue
+            if moved:
+                problems.append("case %d: the original's own outcome moves with its stack lower in %s, but it "
+                                "differs beyond that" % (i, ", ".join(sorted(str(k) for k in moved))[:200]))
         if len(problems) > before and i >= len(kept):
             differing.append(case)
     if differing and G["keep_failing"]:

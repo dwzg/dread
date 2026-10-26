@@ -30,6 +30,21 @@ def test_callee_bug_shows_in_a_caller(target, variant, tmp_path, capsys):
     assert rc == 1 and "DIFF " + caller in out and "peripheral accesses differ" in out, out
 
 
+def test_a_difference_beside_one_the_stack_explains_is_reported(tmp_path, capsys):
+    """seed_from_stack's C stores into other besides (a difference the stack does not move): the
+    original's own outcome still moves with its stack lower (the seed), but every difference is not
+    among the moved outputs, so the input is reported, naming what the stack moves. Until 2026-10-26
+    dread integration left it out whenever the original moved at all (the hole dread test had until
+    2026-10-24)."""
+    from test_runner import stack_seed_target
+    target, image, payload = stack_seed_target(tmp_path, 'auto("seed_from_stack")\nauto("plain")\n',
+                                               extra="other = 7;")
+    rc = integration.main(["--target", target.root, "--recon", payload])
+    out = capsys.readouterr().out
+    assert rc != 0 and "seed_from_stack" in out and "DIFF" in out, out
+    assert "moves with its stack lower in" in out and "but it differs beyond that" in out, out
+
+
 def test_an_input_whose_outcome_follows_the_stack_is_left_out(tmp_path, capsys):
     """The stack address seed_from_stack seeds its random number with lies elsewhere in the C's
     frame, and the number is no stack address (which the run leaves uncompared anyway): its inputs

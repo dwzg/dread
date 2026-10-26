@@ -92,10 +92,11 @@ def test_a_function_whose_case_generation_fails_is_reported_not_fatal(target, va
     assert runner.RUN["missed"][name] == []
 
 
-def stack_seed_target(tmp_path, cases):
+def stack_seed_target(tmp_path, cases, extra=""):
     """A target whose seed_from_stack seeds a random number with the address of a local (FreeRTOS's
     queue set test does so), with C that is the same but holds its local elsewhere in the frame, and
-    plain beside it; cases: the text of a case file. Returns (target, image, rebuilt payload)."""
+    plain beside it; cases: the text of a case file; extra: C the rebuilt seed_from_stack does besides
+    (a difference the stack does not explain). Returns (target, image, rebuilt payload)."""
     import subprocess
     from test_bench import TARGET
     from dread import elfimport
@@ -130,8 +131,8 @@ def stack_seed_target(tmp_path, cases):
     (src / "rewritten.c").write_text(       # the same, with its local elsewhere in the frame
         "#define seed (*(volatile unsigned *)0x%x)\n#define other (*(volatile unsigned *)0x%x)\n"
         "void touch(volatile unsigned *p);\n" % (data["seed"], data["other"]) +
-        "void seed_from_stack(void) { volatile unsigned pad[4], local = 0; pad[0] = 0; touch(&local); %s }\n"
-        "void plain(unsigned x) { other = x + 1; }\n" % seed)
+        "void seed_from_stack(void) { volatile unsigned pad[4], local = 0; pad[0] = 0; touch(&local); %s %s }\n"
+        "void plain(unsigned x) { other = x + 1; }\n" % (seed, extra))
     os.makedirs(image.cases)
     with open(os.path.join(image.cases, "few.py"), "w") as f:
         f.write(cases)
