@@ -5921,7 +5921,16 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   10 instead of 20. (Found on the way: sysrecord looked cases up with a key of its own that had fallen
   behind and took a loop function's coverage from plain cases it made: now one key, autocase.case_key.)
   Left of the task loops: prvCheckTask (its run reaches no round), prvTimerTestTask, prvSenderTask and
-  xPortStartScheduler (not traced); (2) a cycle that changes nothing (registers alike at a pc, no store, no peripheral) as a
+  xPortStartScheduler (not traced). The bench recorded none of it until 2026-10-26: its record step
+  took only the UNCOVERED and case-generation refusals, read no loop's kept cases (their line said "N
+  cases kept;") and took sysrecord's exit status 1 for "nothing kept" for a failure, so the report's
+  recorded column was "-" at every build of measure-41. Now it records the task loops whose loop cases
+  left instructions unrun too (bench.RECORDABLE), sysrecord exits 0 whenever it ran, and a loop's line
+  says "N kept;" as the others do. On a copy of measure-41's GCC -Os build (main at 1f54018) the
+  recording kept cases for 7 of its 9 dropped task loops, and the lift check accepts 4 more
+  (prvEchoClient twice, prvNotifiedTask_73ac, prvQueueSetReceivingTask_5ea8: 345 -> 350 with
+  vPortValidateInterruptPriority, which the system registers' answers took, not in measure-41);
+  (2) a cycle that changes nothing (registers alike at a pc, no store, no peripheral) as a
   defined end, like a branch to itself (vAssertCalled's wait for a debugger; it stays uncovered for
   its exit path, so mostly time: the failing generations of vAssertCalled, Reset_Handler, main and
   vRegTest2Implementation take 400 to 500 s a build); (3) the M4F builds' libgcc compare helpers that

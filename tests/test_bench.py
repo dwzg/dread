@@ -235,8 +235,9 @@ def test_a_header_substitution(tmp_path, monkeypatch):
 
 
 def test_the_record_step(monkeypatch):
-    """The functions left uncovered or without inputs are recorded in every scenario, the cases
-    kept are counted from sysrecord's lines, and the lift check runs again only when some were."""
+    """The functions left uncovered or without inputs, and the task loops whose loop cases left
+    instructions unrun, are recorded in every scenario, the cases kept are counted from sysrecord's
+    lines (a loop's too), and the lift check runs again only when some were."""
     class T:
         scenarios = {"boot": {}, "long": {}}
     calls = []
@@ -244,18 +245,21 @@ def test_the_record_step(monkeypatch):
     def fake(*args, **kw):
         calls.append(args)
         return 1.0, 0, "f  3 calls recorded, 2 replay with the same result, 1 kept; 4 -> 9 of 9 instructions\n" \
-                       "g  0 calls recorded, 0 replay with the same result, 0 kept; 1 -> 1 of 5 instructions\n"
+                       "g  0 calls recorded, 0 replay with the same result, 0 kept; 1 -> 1 of 5 instructions\n" \
+                       "t  a loop: 2 calls of it recorded, 3 kept; 66 -> 69 of 69 instructions\n"
     monkeypatch.setattr(bench, "dread", fake)
     monkeypatch.setattr(bench, "verdicts_of", lambda t, i: [
         ("f", "dropped", "UNCOVERED 5 of 9"), ("g", "dropped", "FAIL x [case generation]: no input ran"),
-        ("h", "dropped", "never returns or an exception handler"), ("k", "accepted", "")])
+        ("h", "dropped", "never returns or an exception handler"), ("k", "accepted", ""),
+        ("t", "dropped", "never returns; the system run and its loop cases never ran 3 of its 69 instructions: 0x434c"),
+        ("u", "dropped", "never returns; scenario run: device logs differ at entry 18201")])
     image = type("I", (), {"name": "main"})()
     got = bench.record_step(T(), image, "/nowhere")
-    assert got == {"ran": True, "functions": 2, "kept": 2, "seconds": 2.0}
+    assert got == {"ran": True, "functions": 3, "kept": 8, "seconds": 2.0}
     assert [c[:7] for c in calls] == [("sysrecord", "--target", "/nowhere", "--image", "main", "--scenario", s)
-                                      for s in ("boot", "long")] and all(c[7:] == ("f", "g") for c in calls)
+                                      for s in ("boot", "long")] and all(c[7:] == ("f", "g", "t") for c in calls)
     T.scenarios = {}
-    assert bench.record_step(T(), image, "/nowhere") == {"ran": False, "functions": 2}
+    assert bench.record_step(T(), image, "/nowhere") == {"ran": False, "functions": 3}
 
 
 @needs_gcc

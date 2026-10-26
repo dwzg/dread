@@ -45,6 +45,9 @@ when it runs an instruction of the function that no case of it runs yet (its gen
 written cases). Kept cases are appended to the image's extra_cases/NAME.json
 with "by" and "why". The run is deterministic, so the recordings are too.
 
+Exit status 0 when the recording ran, whether it kept a case or not (each function's line says
+what it kept: "N kept;"), 1 when it could not run (no such scenario, a target error).
+
     dread sysrecord [--target DIR] [--image NAME] [--scenario NAME] [--per N] [--all] [--dry-run] NAME...
 """
 import argparse
@@ -488,7 +491,7 @@ def record(target, image, names, scenario, per=PER, keep_all=False, dry_run=Fals
                     case["why"] = "the answers its callees gave it in the system run of scenario %s%s" % (
                         scenario.get("_name", "?"), ", one of them turned" if case.pop("_turned", False) else "")
                 kept[name] = got_cases
-            out("%-24s a loop: %d calls of it recorded, %d cases kept; %d -> %d of %d instructions"
+            out("%-24s a loop: %d calls of it recorded, %d kept; %d -> %d of %d instructions"
                 % (name, len([c for c in recorder.active if c["name"] == name]), len(got_cases), before,
                    len(covered & set(fn.insns)), len(fn.insns)))
             recordings = []
@@ -551,7 +554,7 @@ def main(argv=None):
     except (tgt.TargetError, OSError, ValueError) as e:
         print("dread sysrecord: %s" % e, file=sys.stderr)
         return 1
-    return 0 if kept else 1
+    return 0
 
 
 if __name__ == "__main__":

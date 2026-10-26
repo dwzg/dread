@@ -18,8 +18,10 @@ it measures what DREAD makes of the image, running its tools as they are run on 
   names gained and lost against the build's previous measurement (against_last), so that a change
   of a few functions can be traced to them;
 - recorded inputs (when the target has system-run scenarios): dread sysrecord records calls of the
-  functions the lifter left uncovered or got no inputs for in each scenario, and the lift check
-  runs again with the cases kept (a rebuild whose image differs drops them);
+  functions the lifter left uncovered or got no inputs for in each scenario, and the loops of the
+  tasks whose loop cases left instructions unrun (as loop cases: the answers their callees gave them
+  in the run), and the lift check runs again with the cases kept (a rebuild whose image differs drops
+  them);
 - readable C (readable_step): dread readable --check on the lifted table (run again only when a
   digest of what it decides from changed: DREAD's code, the build's tables, image and cases kept;
   otherwise its last results are taken), the functions lifted, turned readable (the gate built
@@ -120,7 +122,8 @@ import sys
 import time
 
 STEPS =("asm", "ghidra", "lift", "record", "readable", "noreturn", "callconv", "whatcc", "groups")
-RECORDABLE = ("UNCOVERED", "[case generation]")     # refusals that recorded inputs may lift
+RECORDABLE = ("UNCOVERED", "[case generation]",     # refusals that recorded inputs may lift (a task's
+              "its loop cases never ran")           # loop: dread sysrecord's loop cases)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -615,8 +618,12 @@ def lift_step(target, image, where, log):
 
 def record_step(target, image, where):
     """dread sysrecord in every scenario of the target for the functions the last lift check left
-    uncovered or got no inputs for (RECORDABLE): {functions, kept, seconds} (kept: the cases kept,
-    which add instructions), or {"ran": False} without scenarios or verdicts."""
+    uncovered, got no inputs for, or dropped as task loops whose loop cases left instructions unrun
+    (RECORDABLE): {functions, kept, seconds} (kept: the cases kept, which add instructions; ran: every
+    scenario's recording ran, whatever it kept), or {"ran": False} without scenarios or verdicts. Until
+    2026-10-26 the step took no task loop, counted no loop's kept cases (their lines said "N cases
+    kept;") and took sysrecord's exit status 1 for "nothing kept" as a failure: the measurements
+    recorded nothing for the tasks, and the report showed "-" at every build."""
     import re
     names = sorted(fn for fn, verdict, reason in verdicts_of(target, image)
                    if verdict != "accepted" and any(k in reason for k in RECORDABLE))
