@@ -185,7 +185,7 @@ def variadic_area(program, fn):
     from dread import regflow
     arch = program.arch
     insns = [program.insn(a) for a in fn.insns]
-    joins = {fn.entry} | {t & ~1 for i in insns if i is not None
+    joins = {fn.entry} | {program.code_address(t) for i in insns if i is not None
                           for k, t, _ in [arch.flow(i)] if k == "jump" and isinstance(t, int)}
     try:
         area = set(regflow.variadic_save_area(program, fn, insns, joins))

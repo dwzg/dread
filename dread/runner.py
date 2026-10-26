@@ -88,6 +88,7 @@ import os
 import sys
 
 from dread import target as tgt
+from dread.arch import code_address
 from dread.build import HEADERS, SOURCES, recon_dir
 from dread.cases import Suite
 from dread.emu import EmuError, Layout, Machine
@@ -328,13 +329,13 @@ def stale_outputs(name, addr, args, limit, setup, kept, why, first, rebuilt):
     if not images:
         return None
     lay = RUN["layout"]
-    entries = frozenset(e & ~1 for e in Machine.entries.get((lay.target.file, lay.image.name), ()))
+    entries = frozenset(code_address(lay.arch, e) for e in Machine.entries.get((lay.target.file, lay.image.name), ()))
     keys, log_from = set(), None
     for fill in STALE_FILLS:
         m = Machine(lay, RUN["original"], isa_of=RUN["isa_of"])
         m.plan, m.replay, m.function = [], False, name
         m.kept, m.kept_why = kept, why
-        m.stale_fill = (fill, STALE_SPAN, entries | {addr & ~1})
+        m.stale_fill = (fill, STALE_SPAN, entries | {code_address(lay.arch, addr)})
         try:
             setup(m)
             again = m.call(addr, *args, max_instructions=limit)
@@ -365,8 +366,9 @@ def filled_alike(name, addr, args, limit, setup, kept, why, generated):
     message length memcpy was stubbed to leave unwritten, and its readable C reserves that local with
     push {r0, r1, r2, ...}, so it reads the pushed r0, not the fill (still failed)."""
     lay = RUN["layout"]
-    entries = frozenset(e & ~1 for e in Machine.entries.get((lay.target.file, lay.image.name), ())) | {addr & ~1} | \
-        {start & ~1 for spans in (RUN.get("placed") or {}).values() for start, _ in spans}
+    known = Machine.entries.get((lay.target.file, lay.image.name), ())
+    entries = frozenset(code_address(lay.arch, e) for e in known) | {code_address(lay.arch, addr)} | \
+        {start for spans in (RUN.get("placed") or {}).values() for start, _ in spans}
     loop_case = bool(generated and generated.get("hang") and (generated.get("stub_calls") or generated.get("stops")))
     for fill in STALE_FILLS:
         plan, out = [], []
@@ -550,7 +552,7 @@ def run_function(name):
             except Exception as e:
                 out = [EmuError("the case's setup failed: %s: %s" % (type(e).__name__, e)), None]
                 break
-            if (addr & ~1) in m.stubs:
+            if code_address(layout.arch, addr) in m.stubs:
                 out = [EmuError("the case stubs the function it is meant to test"), None]
                 break
             if which == "original" and words and addr == fn.entry:
@@ -667,7 +669,7 @@ def run_function(name):
     return name, len(cases), bad, lines, missed
 
 
-def c_places(path):
+def c_places(path, arch=None):
     """{function: [(start, end)]}: where the rebuilt image holds each function's C (dread.overlay's
     placement.json), with the body behind its naked entry (NAME_dread_body, a helper of its own);
     empty without the file."""
@@ -680,10 +682,12 @@ def c_places(path):
     for name, v in data.items():
         if v.get("placement") == "helper" or "address" not in v:
             continue
-        spans = [(v["address"] & ~1, (v["address"] & ~1) + v.get("c_bytes", 0))]
+        start = code_address(arch, v["address"])
+        spans = [(start, start + v.get("c_bytes", 0))]
         body = data.get(name + "_dread_body")
         if body and "address" in body:
-            spans.append((body["address"] & ~1, (body["address"] & ~1) + body.get("c_bytes", 0)))
+            start = code_address(arch, body["address"])
+            spans.append((start, start + body.get("c_bytes", 0)))
         out[name] = spans
     return out
 
@@ -696,7 +700,7 @@ def prepare(target, image, recon_path, keep_failing=False):
     with open(recon_path, "rb") as f:
         recon = f.read()
     aliases, built = load_placement(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"))
-    placed = c_places(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"))
+    placed = c_places(os.path.join(os.path.dirname(os.path.abspath(recon_path)), "placement.json"), prog.arch)
     from dread.build import read_names
     here = os.path.dirname(os.path.abspath(recon_path))
     lifted_info = {}

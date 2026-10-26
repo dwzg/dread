@@ -48,6 +48,7 @@ runs came out in the order a pairwise judge against the true names had found; Ha
 ranked them alike and agreed closely with Sonnet 5.5 (the area under the ROC curve of its verdicts on
 Sonnet's right and wrong 0.97-0.98).
 """
+from dread.elf import dwarf_code_value
 import os
 import re
 
@@ -112,7 +113,7 @@ def dwarf_definitions(elf_path):
             for die in cu.iter_DIEs():
                 if die.tag != "DW_TAG_subprogram" or "DW_AT_low_pc" not in die.attributes:
                     continue
-                entry = die.attributes["DW_AT_low_pc"].value & ~1
+                entry = dwarf_code_value(elf, die.attributes["DW_AT_low_pc"].value)
                 source, depth = die, 0
                 while "DW_AT_decl_line" not in source.attributes and depth < 8:
                     ref = next((r for r in ("DW_AT_abstract_origin", "DW_AT_specification")

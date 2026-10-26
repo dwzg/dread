@@ -57,6 +57,7 @@ import sys
 
 from unicorn import UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE
 
+from dread.arch import code_address
 from dread import autocase
 from dread import target as tgt
 from dread import sysrun
@@ -119,7 +120,7 @@ class Recorder:
     def entered(self, resume, sp):
         """An exception is about to be taken: the running context waits for the code to be back
         at `resume` with stack pointer `sp`; the handler runs in a context of its own."""
-        self.suspended[(resume & ~1, sp)] = self.context
+        self.suspended[(code_address(self.layout.arch, resume), sp)] = self.context
         self._switch(self.next_context)
         self.next_context += 1
         self.handler_entry = True
@@ -128,7 +129,7 @@ class Recorder:
         """The running context's exception returned, to `resume`."""
         self.returns_seen = True
         self._leave()
-        back = self.suspended.pop((resume & ~1, self.uc.reg_read(self.layout.sp)), None)
+        back = self.suspended.pop((code_address(self.layout.arch, resume), self.uc.reg_read(self.layout.sp)), None)
         if back is None:                    # code that starts here (a task's first run)
             back, self.next_context = self.next_context, self.next_context + 1
         self._switch(back)
@@ -190,7 +191,7 @@ class Recorder:
         """Where a function just entered returns to: its link register, or the word at sp where the
         architecture has none and the call pushed it (MSP430)."""
         if self.layout.lr is not None:
-            return uc.reg_read(self.layout.lr) & ~1
+            return code_address(self.layout.arch, uc.reg_read(self.layout.lr))
         return int.from_bytes(uc.mem_read(sp, self.layout.word), "little")
 
     def _where(self, call, addr):
@@ -333,7 +334,7 @@ def loop_case(gen, call, layout, calls, stops, frame, length):
     for number, reg, offset, size, value, site in call["fills"]:
         insn = gen.program.insn(site)
         target = gen.program.arch.target(insn) if insn is not None else None
-        callee = gen.program.by_entry.get(target & ~1) if target is not None else None
+        callee = gen.program.by_entry.get(gen.program.code_address(target)) if target is not None else None
         if number > length or callee is None:
             continue
         mask = gen.reads_mask(callee.name)

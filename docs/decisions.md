@@ -5379,3 +5379,31 @@ added where they help, the user, 2026-10-21).
 - **Undo.** Revert the runner commit "a case that agrees with the stack filled alike agrees" (such
   cases fail again).
 - **Status.** Done (runner filled_alike, 2026-10-26).
+
+
+## Code addresses keep bit 0 outside ARM (2026-10-27)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** DREAD took bit 0 off a code address wherever it keyed code: ARM's Thumb bit, which a
+  function symbol, a function pointer and an interworking branch carry. x86 code starts at any byte,
+  and gizmo-i386's import put every function at an odd address one byte early (a call ran the end of
+  the function in front). How should the tools tell an instruction-set bit from an address bit?
+- **Options.** (a) Keep the masks and correct x86's entries afterwards: every consumer would have to
+  know. (b) Each layer says which bit, if any, marks an instruction set (isa_bit), and one function
+  (dread.arch.code_address) takes it off; the ELF readers take it off for EM_ARM only. (c) Test the
+  layer's name at every site.
+- **Choice.** (b). A layer without the attribute counts as having the bit, so a layer that forgets it
+  behaves as before. Masks that align to halfwords (the instruction table's halfwords, the extents'
+  owner table, the program database's halfword walks) are no code addresses and stay; instruction_halves
+  starts each instruction's halfwords at its address without bit 0, so an instruction at an odd address
+  is found from a load's halfwords. On RISC-V, MSP430 and MIPS an odd value no longer matches a
+  function's entry (dread.regflow pointer_entries, the extents' words): no code of the instruction sets
+  DREAD supports lies at an odd address there, so this drops only a coincidence; the gizmo builds of
+  those layers import to the same tables. microMIPS and MIPS16 (not supported) mark themselves with bit
+  0 as Thumb does: their layer would say 1.
+- **Measured** on FreeRTOS's eleven RISC-V builds (dread regflow --json, noreturn and the function lists,
+  main against the change): two such coincidences went, both words of code equal to an entry plus one
+  (inside vStartMessageBufferTasks itself on clang -Os, inside vTaskPlaceOnUnorderedEventList on GCC -O2),
+  which had vStartMessageBufferTasks and xAreAbortDelayTestTasksStillRunning counted as called through
+  a pointer, their result read. Every other fact the same.

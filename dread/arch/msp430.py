@@ -272,6 +272,7 @@ class Msp430:
             out.append((i, word & ~1, "reset" if i == 15 else "handler"))
         return out
     link_reg = None             # a call pushes the return address
+    isa_bit = 0                 # no bit of a code address marks an instruction set (dread.arch.code_address)
     own_epilogues = ("__mspabi_func_epilog_",)  # GCC's shared epilogues, which compiled C jumps to
     # Flags the lifted C needs from a compiler besides -Os ([compiler] lifted_cflags' default): GCC's
     # tree phi optimisation turns a flag's `z ? 1 : 0` into (-z | z) >> 15, and a shift by 15 is a

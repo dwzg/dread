@@ -186,6 +186,8 @@ class Arm:
     reg_bits = 32
     syscall_numbers = (2,)      # Unicorn's exception number of svc (dread.emu runs it as a logged no-op)
     link_reg = "lr"         # where a call leaves the return address
+    isa_bit = 1             # bit 0 of a code address marks Thumb code (start_address sets it; the tools key
+                            # code without it: dread.arch.code_address)
     veneer_reg = "r12"      # the register a veneer or a call through a register may go through (ip)
     # Instructions that fill a gap and do nothing besides zero bytes (dread.lift's entered_unseen):
     # Thumb's nop, nop.w and mov r8, r8; ARM's mov r0, r0 and nop

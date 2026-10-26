@@ -120,7 +120,7 @@ def _helper(program, address):
     insn = program.insn(address)
     if insn is None or not getattr(insn, "dispatch_call", False):
         return None
-    callee = program.function_at(program.arch.target(insn) & ~1)
+    callee = program.function_at(program.code_address(program.arch.target(insn)))
     return (callee.entry, program.end(callee)) if callee is not None else None
 
 

@@ -169,6 +169,7 @@ import sys
 from unicorn import (UC_HOOK_BLOCK, UC_HOOK_INTR, UC_HOOK_MEM_READ, UC_HOOK_MEM_UNMAPPED, UC_HOOK_MEM_WRITE,
                      UC_MEM_WRITE, Uc, UcError)
 
+from dread.arch import code_address
 from dread import models as dmodels
 from dread import target as tgt
 from dread.build import recon_dir
@@ -813,7 +814,7 @@ class System:
         if code is None or not code(self.uc, pc):
             return 1
         try:
-            insn = self.program.insn(pc & ~1)
+            insn = self.program.insn(code_address(self.arch, pc))
         except Exception:                   # (no instruction of the image there: RAM, a gap)
             return 1
         if insn is None:
@@ -826,7 +827,7 @@ class System:
         function's entry, what came before it is kept until the entry runs with the stack pointer it has
         now (when the exception returned, or the task it interrupted runs again), so that the transfer
         into it is counted from there, not from the exception's return."""
-        address = pc & ~1
+        address = code_address(self.arch, pc)
         if address not in self.entries or not self.st.came:
             return
         sp = self.regs.reg_read(self.layout.sp)
@@ -1183,7 +1184,7 @@ class System:
             controller.taken(number)
             self.interrupts[number] += 1
             self.progress, self.frozen = self.clock, 0      # (a stretch outside shared code ends)
-            self._log(("interrupt", controller.name, number), at=pc & ~1)
+            self._log(("interrupt", controller.name, number), at=code_address(self.arch, pc))
             vectors = controller.vector_base() if hasattr(controller, "vector_base") else self.image.vectors
             cause = controller.core_cause(number) if hasattr(controller, "core_cause") else None
             self._entering(pc)
@@ -1224,7 +1225,8 @@ class System:
             pc = arch.resume_address(uc)
             if self.syscall and hasattr(arch, "enter_syscall"):    # a trap the layer takes alone (ecall)
                 self.syscall, self.frozen = False, 0
-                self._log(("syscall",), at=pc & ~1)     # (not its address: code that moved is elsewhere)
+                # (not its address: code that moved is elsewhere)
+                self._log(("syscall",), at=code_address(self.arch, pc))
                 self._entering(pc)
                 self._suspend(pc)
                 self.st.came = CAME_SYSCALL
@@ -1235,11 +1237,12 @@ class System:
                 number = getattr(arch, "syscall_exception", None)
                 owner = next((c for c in self.controllers if hasattr(c, "pend")), None)
                 if number is None or owner is None:
-                    how = "svc at pc 0x%x: no exception model takes it" % (pc & ~1)
+                    how = "svc at pc 0x%x: no exception model takes it" % (code_address(self.arch, pc))
                     break
                 owner.pend(number)
                 if self._wanted() != (owner, number) or not self._may_take(owner, number):
-                    how = "svc at pc 0x%x while its exception cannot be taken (HardFault, not modelled)" % (pc & ~1)
+                    how = "svc at pc 0x%x while its exception cannot be taken (HardFault, not modelled)" % \
+                        code_address(self.arch, pc)
                     break
                 pc = take(pc)
             if self.deliver:
@@ -1260,10 +1263,10 @@ class System:
             if self.next_event is None and (stuck or self.clock - self.last_new >= QUIET):
                 if self.log and self.log[-1][0] == "read" and self.clock - self.last_access < QUIET:
                     how = "polls: register 0x%x read %d times in a row, nothing scheduled, pc 0x%x" % (
-                        self.log[-1][2], self.log[-1][5], pc & ~1)
+                        self.log[-1][2], self.log[-1][5], code_address(self.arch, pc))
                 else:
                     how = "waits: no device access for %d units of shared clock and nothing scheduled, pc 0x%x" % (
-                        self.clock - self.last_access, pc & ~1)
+                        self.clock - self.last_access, code_address(self.arch, pc))
                 break
         if self.fast is not None:           # the entries and transfers the C hook counted
             for address, n in self.fast.take_entered():
@@ -1389,7 +1392,7 @@ def transfers(program, calls):
                 at = program.function_at(site)
                 caller = at.name if at is not None else None
                 kind, target, falls = program.arch.flow(insn)
-                if kind in ("call", "jump") and isinstance(target, int) and target & ~1 == entry:
+                if kind in ("call", "jump") and isinstance(target, int) and program.code_address(target) == entry:
                     how = kind
                 elif kind == "icall":
                     how = "pointer"

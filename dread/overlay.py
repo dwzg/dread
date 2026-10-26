@@ -298,7 +298,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
                 if to is not None and to != fn.name and t != funcs[to].entry and fn.name not in sizes:
                     entered.setdefault(to, (fn.name, a, t))
                 if fn.name not in sizes:        # original code goes on branching there (shared code)
-                    jumped.setdefault(t & ~1, set()).add(fn.name)
+                    jumped.setdefault(prog.code_address(t), set()).add(fn.name)
             ref = arch.literal(insn, fn.isa)
             folded = ref is not None            # a pc-relative load: the lifter makes it a constant
             ref = ref[0] if ref else arch.pc_address(insn, fn.isa)
@@ -342,12 +342,13 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             if any(a in loaded for a in inside - mine):
                 reason = "pc-relative loads into it from %s" % " ".join(sorted(
                     {g for a in inside - mine if a in loaded for g in loaders[a]}))
-            elif any(at not in inside and (v & ~1) not in mine for v, at in
+            elif any(at not in inside and (prog.code_address(v)) not in mine for v, at in
                      words[bisect.bisect_right(values, f.entry):bisect.bisect_left(values, stop)]):
                 reason = "words outside point at data inside"
             elif any(f.entry < v < stop for v in constants.get(fn, ())):
                 reason = "the C reads inside it"
-            elif any(f.entry < v < stop and (v & ~1) not in mine for g, vs in constants.items() if g != fn for v in vs):
+            elif any(f.entry < v < stop and prog.code_address(v) not in mine
+                     for g, vs in constants.items() if g != fn for v in vs):
                 reason = "the C of other functions reads inside it"
             elif any(owner.get(a, fn) != fn for a in inside):
                 reason = "instructions of other functions inside"
@@ -534,7 +535,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             if off > len(picture):
                 picture.extend(bytes([erased]) * (off - len(picture)))
             picture[off:off + sec.size] = linked.data(sec)
-    syms = {s.name: s.value & ~1 for s in linked.symbols if s.kind == STT_FUNC and s.name in sizes}
+    syms = {s.name: linked.code_value(s.value) for s in linked.symbols if s.kind == STT_FUNC and s.name in sizes}
     for fn in in_slot + in_body + in_hole:
         if syms.get(fn) != place[fn][0]:
             raise OverlayError("%s was linked at 0x%x, not at its slot 0x%x (alignment?)"

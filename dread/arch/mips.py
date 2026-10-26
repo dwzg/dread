@@ -209,6 +209,8 @@ class Mips:
     word = 4
     reg_bits = 32
     link_reg = "ra"
+    isa_bit = 0                 # no bit of a MIPS32 code address marks an instruction set (microMIPS and MIPS16,
+                                # not supported, would use bit 0 as ARM's Thumb: dread.arch.code_address)
     veneer_reg = "at"       # the overlay's far jump goes through the assembler's temporary
     delay = 4               # bytes of the delay slot behind a branch or jump
     # Allocated sections the toolchain adds to every object that no image of ours wants: ld.lld puts

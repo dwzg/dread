@@ -11,6 +11,16 @@ under way), MIPS (MIPS32r2 little endian, `dread.arch.mips`, under way) and x86 
 M32 = 0xFFFFFFFF
 
 
+def code_address(arch, address):
+    """A code address as the tools key code: without the bit that marks an instruction set in it where
+    the layer has one (isa_bit: ARM's Thumb bit, bit 0), as it is elsewhere (x86's code lies at any
+    byte; RISC-V's, MSP430's and MIPS's at even ones). A layer without isa_bit counts as having bit 0
+    (the tools took it off everywhere until 2026-10-27, which turned x86's odd entries into the byte in
+    front of them)."""
+    bit = getattr(arch, "isa_bit", 1)
+    return address & ~bit if bit else address
+
+
 def low_bits(d):
     """The bits from bit 0 up to the highest bit of d: what bits d of a sum, a difference or a product
     depend on in each operand (a carry goes upwards only); 0 for 0. dread.regflow's bits (the layers'

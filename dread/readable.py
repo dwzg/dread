@@ -331,7 +331,7 @@ def variadic_reach(program, flow=None):
                 if insn is not None:
                     kind, target, _ = program.arch.flow(insn)
                     if kind == "jump" and target is not None:
-                        joins.add(target & ~1)
+                        joins.add(program.code_address(target))
             if variadic_save_area(program, fn, insns, joins):
                 found.add(fn.name)
         calls = {fn.name: set(direct_callees(program, fn)) for fn in program.functions}

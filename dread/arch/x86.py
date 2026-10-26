@@ -52,6 +52,7 @@ class X86:
     word = 4
     reg_bits = 32
     link_reg = None                         # a call pushes the return address
+    isa_bit = 0                             # code lies at any byte, odd ones too (dread.arch.code_address)
     max_insn = 15                           # bytes an instruction may take
     default_args = 0                        # cdecl: every argument on the stack
     default_callee_saved = ("ebx", "esi", "edi", "ebp")

@@ -71,3 +71,35 @@ def test_gizmo_i386_listings_rebuild_byte_for_byte(variant, tool, tmp_path):
                        "--raw", str(raw)]) == 0
     shipped_raw = mkasm.load_raw_words(shipped) if os.path.exists(shipped) else set()
     assert mkasm.load_raw_words(str(raw)) == shipped_raw
+
+
+@pytest.mark.parametrize("variant", ["i386", "i386clang"])
+def test_gizmo_i386_functions_at_odd_addresses_run(variant):
+    """x86 has no instruction-set bit in a code address: an entry at an odd address is the entry
+    (GCC's build starts clamp, sum6, udiv_var and strlen at one, clang's udiv_var). The import keeps
+    bit 0 (until it did not, clamp's row named the byte in front, the ret of the function before,
+    and a call returned at once) and the emulator enters there, the arguments on the stack (cdecl)."""
+    from dread.emu import Layout, Machine
+    from dread.program import Program
+    from dread.target import Target
+    target = Target.load(gizmo_dir(variant))
+    image = target.image()
+    program = Program(target, image)
+    assert program.by_name["udiv_var"].entry & 1
+    assert all(h % 2 == 0 for h in program.instruction_halves())    # (the halfwords' even addresses)
+    scratch = target.memory.scratch_base
+    m = Machine(Layout(target, image), image.payload(), isa_of=program.isa_at)
+    m.write(scratch, b"gizmo\0")
+    for name, args, want in (("clamp", (5, 1, 3), 3), ("clamp", (-4, 1, 3), 1), ("clamp", (2, 1, 3), 2),
+                             ("sum6", (1, 2, 3, 4, 5, 6), 91), ("udiv_var", (100, 7), 14),
+                             ("strlen", (scratch,), 5)):
+        assert m.call(program.by_name[name].entry, *args).ret & 0xFFFFFFFF == want & 0xFFFFFFFF, (name, args)
+
+
+def test_only_arm_takes_bit_0_off_a_code_address():
+    """dread.arch.code_address: ARM's bit 0 marks Thumb code and is no part of the address; x86's and
+    RISC-V's addresses keep it (an odd one is x86 code there, and nothing at all on RISC-V)."""
+    from dread.arch import code_address, get
+    assert code_address(get({"name": "arm", "isa": "t32", "profile": "m"}), 0x08000197) == 0x08000196
+    assert code_address(get({"name": "x86", "isa": "i386"}), 0x08000197) == 0x08000197
+    assert code_address(get({"name": "riscv"}), 0x80000003) == 0x80000003

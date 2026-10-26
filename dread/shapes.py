@@ -106,6 +106,7 @@ timer's every field as a raw access).
 """
 import re
 
+from dread.elf import dwarf_code_value
 from dread import cparse as C
 
 
@@ -1276,7 +1277,8 @@ def source_params(elf_path, pointers=None, held=None):
         return names, die
 
     with open(elf_path, "rb") as f:
-        dwarf = ELFFile(f).get_dwarf_info()
+        elffile = ELFFile(f)
+        dwarf = elffile.get_dwarf_info()
         for cu in dwarf.iter_CUs():
             for die in cu.iter_DIEs():
                 if die.tag in ("DW_TAG_structure_type", "DW_TAG_union_type") and "DW_AT_name" in die.attributes \
@@ -1286,7 +1288,7 @@ def source_params(elf_path, pointers=None, held=None):
             for die in cu.iter_DIEs():
                 if die.tag != "DW_TAG_subprogram" or "DW_AT_low_pc" not in die.attributes:
                     continue
-                entry = die.attributes["DW_AT_low_pc"].value & ~1
+                entry = dwarf_code_value(elffile, die.attributes["DW_AT_low_pc"].value)
                 k = 0
                 for p in die.iter_children():
                     if p.tag != "DW_TAG_formal_parameter":
@@ -1423,7 +1425,8 @@ def source_structures(elf_path):
         return name
 
     with open(elf_path, "rb") as f:
-        dwarf = ELFFile(f).get_dwarf_info()
+        elffile = ELFFile(f)
+        dwarf = elffile.get_dwarf_info()
         for cu in dwarf.iter_CUs():
             for die in cu.iter_DIEs():
                 if die.tag in ("DW_TAG_structure_type", "DW_TAG_union_type") and "DW_AT_name" in die.attributes \
@@ -1433,7 +1436,7 @@ def source_structures(elf_path):
             for die in cu.iter_DIEs():
                 if die.tag != "DW_TAG_subprogram" or "DW_AT_low_pc" not in die.attributes:
                     continue
-                entry = die.attributes["DW_AT_low_pc"].value & ~1
+                entry = dwarf_code_value(elffile, die.attributes["DW_AT_low_pc"].value)
                 k = 0
                 for p in die.iter_children():
                     if p.tag != "DW_TAG_formal_parameter":

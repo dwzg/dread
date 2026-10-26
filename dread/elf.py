@@ -22,6 +22,15 @@ class ElfError(Exception):
     pass
 
 
+EM_ARM = 40                 # e_machine of ARM: bit 0 of a function symbol marks Thumb code
+
+
+def dwarf_code_value(elffile, value):
+    """An address from DWARF (DW_AT_low_pc, a line row) or a symbol of a pyelftools ELFFile as the tools
+    key code: without bit 0 for ARM, where it may mark Thumb code, as it is elsewhere (x86)."""
+    return value & ~1 if elffile.header["e_machine"] == "EM_ARM" else value
+
+
 class Section:
     def __init__(self, name, kind, flags, addr, offset, size, link, align=1, info=0):
         self.name, self.kind, self.flags, self.addr = name, kind, flags, addr
@@ -91,6 +100,11 @@ class Elf:
             for i in range(s.size // 16):
                 (name, value, size, info, _, shndx) = struct.unpack_from("<IIIBBH", raw, s.offset + i * 16)
                 self.symbols.append(Symbol(self._str(strtab, name), value, size, info & 0xF, info >> 4, shndx))
+
+    def code_value(self, value):
+        """The address a function symbol's value names: without bit 0 for ARM, where it marks Thumb code
+        (EM_ARM), as it is elsewhere (x86's functions start at odd bytes too)."""
+        return value & ~1 if self.machine == EM_ARM else value
 
     def _str(self, table, offset):
         end = self.raw.index(b"\0", table + offset)

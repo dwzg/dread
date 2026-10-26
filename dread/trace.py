@@ -108,6 +108,8 @@ from collections import deque
 
 from unicorn import UC_HOOK_BLOCK, UC_HOOK_MEM_WRITE
 
+from dread.arch import code_address
+from dread.elf import dwarf_code_value
 from dread import target as tgt
 from dread.emu import IO_EVENTS, EmuError, Machine
 
@@ -355,7 +357,7 @@ class Recorder:
         ctx = self.ctx
         sp = self.read(ctx.sp_id)
         if ctx.lr_id is not None:
-            ret = self.read(ctx.lr_id) & ~1
+            ret = code_address(ctx.arch, self.read(ctx.lr_id))
         else:                               # (pushed by the call: MSP430)
             try:
                 ret = int.from_bytes(self.m.read(sp, ctx.word), "little")
@@ -948,11 +950,11 @@ class Lines:
                 if s is None:
                     continue
                 if s.end_sequence:
-                    rows.append((s.address & ~1, None, 0))
+                    rows.append((dwarf_code_value(self.elf, s.address), None, 0))
                 else:
                     if s.file not in paths:
                         paths[s.file] = path_of(s.file)
-                    rows.append((s.address & ~1, paths[s.file], s.line))
+                    rows.append((dwarf_code_value(self.elf, s.address), paths[s.file], s.line))
         rows.sort(key=lambda r: (r[0], r[1] is not None))
         return [r[0] for r in rows], rows
 
@@ -980,7 +982,7 @@ class Lines:
             return None
 
     def _at(self, address):
-        address &= ~1
+        address = dwarf_code_value(self.elf, address)
         cu = self.cu_at(address)
         if cu is None:
             return None
@@ -1286,7 +1288,7 @@ class Tracer:
             setup(m)
         except Exception as e:
             raise TraceError("the case's setup failed: %s: %s" % (type(e).__name__, e))
-        if (addr & ~1) in m.stubs:
+        if (code_address(self.ctx.arch, addr)) in m.stubs:
             raise TraceError("the case stubs the function it is meant to test")
         rec = None
         if record:

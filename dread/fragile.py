@@ -15,6 +15,7 @@ register touched, a call into the middle of a function) and the same moment in t
 run, so that what comes before it can be told from what comes after.
 """
 
+from dread.arch import code_address
 from dread.emu import ARGS_ROOM, Result
 
 STACK_SHIFT = 0x40      # bytes the stack moves for the check that a case's outcome depends on it
@@ -67,6 +68,7 @@ class Timeline:
 
     def __init__(self, layout, inside, at=None):
         self.in_stack, self.inside, self.at = layout.in_stack, inside, at
+        self.arch = layout.arch
         self.ticks, self.was = 0, None      # was: whether the last block was the function's (None: before its first)
         self.written = set()                # bytes outside the stack written so far
         self.undo = {}                      # (the original) byte -> its value before the first write since the
@@ -90,7 +92,7 @@ class Timeline:
         m.hook_add(UC_HOOK_MEM_WRITE, self.on_write)
 
     def on_block(self, uc, address, size, user):
-        inside = bool(self.inside(address & ~1))
+        inside = bool(self.inside(code_address(self.arch, address)))
         if self.was is None:
             if inside:                      # (a moved function is entered through the branch at its old entry)
                 self.was = True
@@ -254,7 +256,7 @@ def saves_touched(make, program, layout, setup, addr, args, limit, name=None, ke
             for a in [a for a in saved if a < sp]:
                 del saved[a]
         low[0] = sp
-        insn = prog.insn(address & ~1)
+        insn = prog.insn(prog.code_address(address))
         if insn is None:
             return
         regs = arch.pushed_registers(insn)
@@ -276,7 +278,7 @@ def saves_touched(make, program, layout, setup, addr, args, limit, name=None, ke
         regs = {saved[a] for a in range(address, address + size) if a in saved}
         if not regs:
             return
-        pc = uc.reg_read(lay.pc) & ~1
+        pc = code_address(lay.arch, uc.reg_read(lay.pc))
         insn = prog.insn(pc)
         if insn is not None and all(own(insn, r) for r in regs):
             return                          # (first: a push stores before it moves sp)

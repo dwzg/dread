@@ -138,6 +138,7 @@ from capstone import arm as csarm
 from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_READ_UNMAPPED, UC_MEM_WRITE,
                      UC_MEM_WRITE_UNMAPPED)
 
+from dread.arch import code_address
 from dread.cases import confine_args
 from dread.emu import PAGE, RUN_CALLEE, EmuError, Layout, Machine
 from dread.program import Program, read_functions
@@ -497,7 +498,7 @@ class Generator:
                     continue
                 target = self.arch.target(ins)
                 if target is not None:
-                    targets = [target & ~1]
+                    targets = [code_address(self.arch, target)]
                 elif through is not None:
                     targets = self._register_calls(ins.address).get(ins.address, ())
                 else:
@@ -640,13 +641,13 @@ class Generator:
         def stub(m, *args, target=0, nargs=0, nstack=0, only=None):
             if only is not None:            # it answers the calls numbered in only; the callee runs at the others
                 sp = m.reg("sp")
-                if passing.pop(target, None) == sp and m.unalias.get(m.reg("pc") & ~1) == target:
+                if passing.pop(target, None) == sp and m.unalias.get(code_address(self.arch, m.reg("pc"))) == target:
                     return RUN_CALLEE       # (the same call, through the branch at a moved callee's old entry)
                 n = counted[target] = counted.get(target, 0) + 1
                 if marks is not None:
                     marks.append(("call", target, n, made[0], n in only))
                 if n not in only:
-                    if target in m.aliases and m.reg("pc") & ~1 == target:
+                    if target in m.aliases and code_address(self.arch, m.reg("pc")) == target:
                         passing[target] = sp
                     return RUN_CALLEE
             elif marks is not None:
@@ -721,7 +722,7 @@ class Generator:
         def stop(m, *args, target=0):       # a callee that never returns: the run ends at its call
             first = stop_from.get(target)
             if first is not None:           # (stop_from: the calls before that one are as without the stop)
-                sp, pc = m.reg("sp"), m.reg("pc") & ~1
+                sp, pc = m.reg("sp"), code_address(self.arch, m.reg("pc"))
                 if passing.pop(target, None) == sp and m.unalias.get(pc) == target:
                     return RUN_CALLEE       # (the same call, through the branch at a moved callee's old entry)
                 n = stop_calls[target] = stop_calls.get(target, 0) + 1
@@ -1050,7 +1051,7 @@ class Generator:
         """The argument registers a stop logs at the call of the function at entry (a case's stops: one
         that never returns, or one a run hung in): what it reads (reads_mask), as a stub of it logs; 0
         for an address that is no function's entry."""
-        fn = self.program.by_entry.get(entry & ~1)
+        fn = self.program.by_entry.get(code_address(self.arch, entry))
         return self.reads_mask(fn.name) if fn is not None else 0
 
     def formats(self):
@@ -1146,7 +1147,7 @@ class Generator:
         general registers."""
         prog = self.program
         try:
-            pc = m.reg("pc") & ~1
+            pc = code_address(self.arch, m.reg("pc"))
         except Exception:
             return str(error)
         fn, insn = prog.function_at(pc), prog.insn(pc)
@@ -1558,7 +1559,7 @@ class Generator:
                 if m.spinning:
                     spins.setdefault(m.spinning[0], m.spinning[1:])
                 new = frozenset(m.covered_insns(words) - covered)
-                stuck = self.program.function_at(m.reg("pc") & ~1) if m.timed_out else None
+                stuck = self.program.function_at(code_address(self.arch, m.reg("pc"))) if m.timed_out else None
                 if new and repairs[0] > 0 and (not m.timed_out or (stuck is not None and stuck.entry == entry)):
                     fixed = repair(case, new)       # a fault, or a loop of its own that ran to the limit
                     if fixed is not None:
@@ -1575,7 +1576,7 @@ class Generator:
                 # One that waits for something (an assertion that waits for a debugger, a flag nothing
                 # sets) is stubbed itself in later inputs. Each case says which stubs it has, for both
                 # images.
-                inside = self.program.function_at(m.reg("pc") & ~1) if m.timed_out else None
+                inside = self.program.function_at(code_address(self.arch, m.reg("pc"))) if m.timed_out else None
                 if inside is not None and inside.entry != entry:
                     stub = inside
                     if inside.name in self.endless():
@@ -1594,9 +1595,10 @@ class Generator:
                         calls.append([stub.entry, self.reads_mask(stub.name), 0])
                 learn_pointers(m, case)
                 if pointers:
-                    went = {m.reg("pc") & ~1, m.reg(self.program.arch.veneer_reg)} - {self.fake_pointer, 0}
-                    pin_args.update(i for i, v in enumerate(case["args"][:nregs]) if v & ~1 in went)
-                    pin_mem.update(a for a, n, v in case["mem"] if n == 4 and v & ~1 in went)
+                    went = {code_address(self.arch, m.reg("pc")),
+                            m.reg(self.program.arch.veneer_reg)} - {self.fake_pointer, 0}
+                    pin_args.update(i for i, v in enumerate(case["args"][:nregs]) if code_address(self.arch, v) in went)
+                    pin_mem.update(a for a, n, v in case["mem"] if n == 4 and code_address(self.arch, v) in went)
                     if (pin_args or pin_mem) and all(c[0] != self.fake_pointer for c in calls):
                         calls.append([self.fake_pointer, 0, 0])     # (the stub those inputs go to)
                 # What the run loaded before it failed is an input all the same: a function whose
@@ -1718,7 +1720,8 @@ class Generator:
                     if hung and not case.get("stops"):
                         case.update({"hang": True, "limit": limit, "stops": sorted(hung)})
                     m, ok = null_run(case)
-                    inside = self.program.function_at(m.reg("pc") & ~1) if not ok and m.timed_out else None
+                    inside = self.program.function_at(code_address(self.arch, m.reg("pc"))) \
+                        if not ok and m.timed_out else None
                     if inside is not None and inside.entry != entry and not case.get("stops"):
                         case.update({"hang": True, "limit": limit, "stops": [inside.entry]})
                         m, ok = null_run(case)
@@ -1769,7 +1772,7 @@ class Generator:
                     if m is not None and m.timed_out and not case.get("stops") and not self.loop:
                         # It hung in a callee (a null pointer into an assertion that waits for a
                         # debugger: the sweep is where a pointer becomes 0): once more, ending there
-                        inside = self.program.function_at(m.reg("pc") & ~1)
+                        inside = self.program.function_at(code_address(self.arch, m.reg("pc")))
                         if inside is not None and inside.entry != entry:
                             case.update({"hang": True, "limit": limit, "stops": [inside.entry]})
                             m, r = sweep_run(case)
@@ -1867,7 +1870,7 @@ class Generator:
             kind, target, _ = self.program.arch.flow(insn)
             if kind != "call" or not isinstance(target, int):
                 continue
-            callee = self.program.by_entry.get(target & ~1)
+            callee = self.program.by_entry.get(code_address(self.arch, target))
             if callee is None or callee.entry in stubbed or callee.name in self.endless():
                 continue
             later = [x for x in missed if x > a]
@@ -2094,8 +2097,8 @@ class Generator:
             if not targets:
                 kept.append(case)
                 continue
-            slots_args = {i for i, v in enumerate(case["args"][:nregs]) if v & ~1 in targets}
-            slots_mem = {a for a, n, v in case["mem"] if n == 4 and v & ~1 in targets}
+            slots_args = {i for i, v in enumerate(case["args"][:nregs]) if code_address(self.arch, v) in targets}
+            slots_mem = {a for a, n, v in case["mem"] if n == 4 and code_address(self.arch, v) in targets}
             pin_args |= slots_args
             pin_mem |= slots_mem
             if not slots_args and not slots_mem:
@@ -2132,7 +2135,7 @@ class Generator:
             ended = not self.touches_image(m) and not self.ends_badly(m)
         except EmuError:
             ended = False
-        return ended, {t & ~1 for _, t in getattr(m, "wild_calls", ())}
+        return ended, {code_address(self.arch, t) for _, t in getattr(m, "wild_calls", ())}
 
     def drop_bad_ends(self, entry, cases):
         """The cases without those that should end at a call (stops, loop cases) and end otherwise
@@ -2289,7 +2292,8 @@ class Generator:
             generator 32 learns such a pointer at once, the random stage gives it null too rarely)."""
             if (case.get("stops") and not strict) or self.loop or len(case.get("stops", ())) >= MAX_STOPS:
                 return False                # (the repair adds a stop to those it has: repair_lost)
-            inside = self.program.function_at(m.reg("pc") & ~1) if m.timed_out or (strict and m.spinning) else None
+            inside = self.program.function_at(code_address(self.arch, m.reg("pc"))) \
+                if m.timed_out or (strict and m.spinning) else None
             if inside is not None and inside.entry != entry:
                 stop = inside.entry
             else:
@@ -2655,7 +2659,7 @@ class Generator:
 
                 def on_read(uc, access, address, size, value, user):
                     counts[address] = counts.get(address, 0) + 1
-                    if armed[0] is not None and uc.reg_read(pc) & ~1 == armed[0]:
+                    if armed[0] is not None and code_address(self.arch, uc.reg_read(pc)) == armed[0]:
                         if len(events) < ANSWER_EVENTS:
                             events.append(("load", armed[0], address, size,
                                            int.from_bytes(uc.mem_read(address, size), "little"), counts[address]))
@@ -2767,7 +2771,7 @@ class Generator:
                 return False
             spare = [CHASE_TRIES * 2] if spare is None else spare     # (runs the repairs of one trial take at most)
             if error is not None and m.timed_out:
-                inside = self.program.function_at(m.reg("pc") & ~1)
+                inside = self.program.function_at(code_address(self.arch, m.reg("pc")))
                 stops = case.get("stops", ())
                 if inside is None or inside.entry == entry or self.loop:
                     return False
@@ -3104,7 +3108,8 @@ class Generator:
             if insn is None:
                 continue
             kind, target, _ = self.program.arch.flow(insn)
-            callee = self.program.by_entry.get(target & ~1) if kind == "call" and isinstance(target, int) else None
+            callee = self.program.by_entry.get(code_address(self.arch, target)) \
+                if kind == "call" and isinstance(target, int) else None
             if callee is not None and a + self.program.insn_size(a) in words_set:
                 sites[a] = (callee.entry, a + self.program.insn_size(a))
         tried, progress = set(), True
@@ -3300,10 +3305,10 @@ def reaches(program):
         if any(t in copied[0] or t | 1 in copied[0] for t in list(found[0]) + list(found[1])):
             return False
         for t in found[1]:
-            g = holder(t & ~1)
-            if g is None or not t & ~1:
+            g = holder(program.code_address(t))
+            if g is None or not program.code_address(t):
                 return False
-            enter(fn, callees, g, "jump", t & ~1)
+            enter(fn, callees, g, "jump", program.code_address(t))
         return True
 
     for fn in program.functions:
@@ -3321,13 +3326,13 @@ def reaches(program):
             last = insn
             kind, target, falls = arch.flow(insn)
             direct = arch.target(insn)      # (also a bl the layer marks as a call through a stub)
-            if direct is not None and direct & ~1 not in own:
-                g = holder(direct & ~1)
+            if direct is not None and program.code_address(direct) not in own:
+                g = holder(program.code_address(direct))
                 if g is None:
                     opened = True
                 else:
                     written = frozenset(arch.reg_effects(insn)[1]) & links if links else frozenset()
-                    enter(fn, callees, g, "call" if written else "jump", direct & ~1, written)
+                    enter(fn, callees, g, "call" if written else "jump", program.code_address(direct), written)
             if kind == "icall":
                 if held.get(a):
                     for t in held[a]:

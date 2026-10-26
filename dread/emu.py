@@ -31,6 +31,7 @@ from unicorn import (UC_ERR_FETCH_UNMAPPED, UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_U
                      UC_HOOK_CODE, UC_HOOK_INTR, UC_HOOK_MEM_INVALID, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE,
                      UC_MEM_WRITE, Uc, UcError)
 
+from dread.arch import code_address
 from dread.util.perthread import PerThread
 
 UNMAPPED = (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED, UC_ERR_FETCH_UNMAPPED)
@@ -697,7 +698,7 @@ class Machine:
         stack differ between builds, so it should log what they point to. A callable that returns
         RUN_CALLEE lets the function run at that call, as if no stub were there (and of a moved
         function, the stub at its C is then hit too, through the branch at its old entry)."""
-        addr &= ~1
+        addr = code_address(self.arch, addr)
         known = Machine.entries.get((self.layout.target.file, self.layout.image.name))
         if known is not None and self.layout.base <= addr < self.layout.image.end and addr not in known:
             raise EmuError("stub at 0x%x, which is not the entry of a function" % addr)
@@ -946,15 +947,18 @@ class Machine:
         its limit there had done all it would ever do, without interrupts, in the original and in the
         C alike: a defined end, though not a return (dread.autocase makes it a "hang" case)."""
         resume = self.arch.resume_address(uc)       # (bit 0: Thumb, on the ARM)
-        address = resume & ~1
+        address = code_address(self.arch, resume)
+        thumb = getattr(self.arch, "isa_bit", 1) and resume & 1
         try:
-            insn = self.arch.decode(bytes(uc.mem_read(address, 4)), address, "t32" if resume & 1 else None)
+            insn = self.arch.decode(bytes(uc.mem_read(address, getattr(self.arch, "max_insn", 4))), address,
+                                    "t32" if thumb else None)
         except Exception:
             return None
         if insn is None:
             return None
         kind, target, _ = self.arch.flow(insn)
-        if kind == "jump" and target is not None and target & ~1 == address and self.arch.predicate(insn) is None:
+        if kind == "jump" and target is not None and code_address(self.arch, target) == address and \
+                self.arch.predicate(insn) is None:
             return address
         return None
 
@@ -1087,7 +1091,7 @@ class Machine:
                 self.core.retire()
             if self.may_fault and errno in (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED) and self.unmapped is not None:
                 faulted = ("read" if errno == UC_ERR_READ_UNMAPPED else "write", self.unmapped[1],
-                           uc.reg_read(lay.pc) & ~1)
+                           code_address(self.arch, uc.reg_read(lay.pc)))
             else:
                 raise EmuError("emulation fault at pc=0x%x: %s" % (uc.reg_read(lay.pc), e))
         except Exception as e:              # an exception in a stub or a hook of the case

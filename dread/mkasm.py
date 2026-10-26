@@ -123,9 +123,9 @@ class Listing:
         return None
 
     def describe_value(self, value):
-        st = self.prog.stored(value & ~1)
-        if (value & ~1) in self.prog.by_entry:
-            return self.prog.by_entry[value & ~1].name
+        st = self.prog.stored(self.prog.code_address(value))
+        if (self.prog.code_address(value)) in self.prog.by_entry:
+            return self.prog.by_entry[self.prog.code_address(value)].name
         text = self.cstring(st) if self.has(st) else None
         return '"%s"' % text if text else ""
 

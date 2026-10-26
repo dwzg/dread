@@ -280,9 +280,12 @@ class Program:
     def instruction_halves(self):
         """Every halfword address an instruction covers (not only where it starts): a load of the
         second half of a 32-bit Thumb instruction is a load of code too (a case of strcmp compared a
-        string at an address inside strcmp itself, and the rebuilt image has other bytes there)."""
+        string at an address inside strcmp itself, and the rebuilt image has other bytes there). The
+        halfwords' even addresses, also for an instruction at an odd one (x86): the callers look up a
+        load's halfwords from its address without bit 0."""
         if getattr(self, "_halves", None) is None:
-            self._halves = frozenset(a + k for a, (size, _) in self.code.items() for k in range(0, max(size, 2), 2))
+            self._halves = frozenset(h for a, (size, _) in self.code.items()
+                                     for h in range(a & ~1, a + max(size, 2), 2))
         return self._halves
 
     def icall_sites(self):
@@ -328,7 +331,7 @@ class Program:
             end = self.base + len(self.data)
             limit = max(end, self.image.limit or end)
             entries = sorted(f.entry for f in self.functions if f.insns)
-            words = sorted({v & ~1 for v in struct.unpack_from("<%dI" % (len(self.data) // 4), self.data)
+            words = sorted({self.code_address(v) for v in struct.unpack_from("<%dI" % (len(self.data) // 4), self.data)
                             if self.base < v < end})
             owners = array.array("H", bytes(2 * ((limit - self.base + 1) // 2)))
             for lo, hi in list(self.image.free) + [(end, limit)]:
@@ -437,6 +440,12 @@ class Program:
                 a += self.code[a][0] if a in self.code else self.arch.min_insn(isa)
             if not got and a >= hi:
                 break
+
+    def code_address(self, address):
+        """A code address as the tables key it: without the bit that marks an instruction set where the
+        layer has one (ARM's Thumb bit), as it is elsewhere (dread.arch.code_address)."""
+        from dread.arch import code_address
+        return code_address(self.arch, address)
 
     def insn(self, address):
         """The instruction at `address` (capstone CsInsn), decoded with its code range so that

@@ -132,7 +132,7 @@ def save_words(program, fn):
         if insn is not None:
             kind, target, _ = arch.flow(insn)
             if kind == "jump" and target is not None:
-                joins.add(target & ~1)
+                joins.add(program.code_address(target))
     frames = Frames(program, fn)
     if not frames.ok:
         return {}

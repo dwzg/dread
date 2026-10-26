@@ -899,11 +899,11 @@ def against_source(rows, source, dwarf, program, elf_path):
     symbols = {}
     for s in Elf(elf_path).symbols:
         if s.kind == STT_FUNC and s.name and s.shndx:
-            symbols.setdefault(s.value & ~1, s.name)
+            symbols.setdefault(program.code_address(s.value), s.name)
     units = source["functions"]
     unmatched = {}
     for name, row in sorted(rows.items()):
-        d = dwarf.get(entries.get(name, -1) & ~1)
+        d = dwarf.get(program.code_address(entries.get(name, -1)))
         unit = translation_unit(d["cu"], units) if d else None
         defined = units.get(unit, {})
         if d is None:
@@ -913,7 +913,7 @@ def against_source(rows, source, dwarf, program, elf_path):
         elif d["name"] not in defined:
             row["match"] = MATCHES[4]
         else:
-            symbol = symbols.get(entries[name] & ~1, "")
+            symbol = symbols.get(program.code_address(entries[name]), "")
             row["match"] = MATCHES[1] if ".part." in symbol else MATCHES[0]
             mine = defined[d["name"]]
             row.update(source=d["name"], unit=unit, src_statements=mine["statements"], src_depth=mine["depth"],

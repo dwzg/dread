@@ -416,8 +416,8 @@ def flow_references(program, fn, made=None, scratch=None, made_named=True, index
         if insn is None:
             continue
         kind, target, falls = arch.flow(insn)
-        if kind == "jump" and isinstance(target, int) and (target & ~1) in pos:
-            succ[k].append(pos[target & ~1])
+        if kind == "jump" and isinstance(target, int) and (program.code_address(target)) in pos:
+            succ[k].append(pos[program.code_address(target)])
         elif kind == "jump" or kind == "ijump":
             kind = "tail"                   # (out of the function: its arguments go with it)
             if not isinstance(target, int):
@@ -426,7 +426,7 @@ def flow_references(program, fn, made=None, scratch=None, made_named=True, index
         effects[k] = (arch.reg_effects(insn)[1], arch.is_conditional(insn))
         if k + 1 < n and addrs[k] + insn.size == addrs[k + 1] and (kind in ("next", "call", "icall") or falls):
             succ[k].append(k + 1)
-    starts = {0, pos.get(fn.entry, pos.get(fn.entry & ~1, 0))}
+    starts = {0, pos.get(fn.entry, pos.get(program.code_address(fn.entry), 0))}
     reached = starts | {s for out in succ for s in out}
     unreached = [k for k in range(n) if k not in reached]
     for k in ijumps:
@@ -648,7 +648,7 @@ def classify(program, address, exact=False):
         got = pointed(program, address)
         if got is not None:
             return got
-        if not exact and program.function_at(address & ~1) is not None:
+        if not exact and program.function_at(program.code_address(address)) is not None:
             return None
         if region is None and not exact and not program.in_image(address):
             return None

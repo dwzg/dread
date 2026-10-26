@@ -1090,7 +1090,7 @@ class State:
 
         try:
             value = int(query, 16 if re.fullmatch(r"[0-9a-fA-F]{4,}", query) else 0)
-            fn = prog.function_at(value & ~1)
+            fn = prog.function_at(prog.code_address(value))
             if fn is not None:
                 add("address", fn.name, address=value, entry=fn.entry)
         except ValueError:

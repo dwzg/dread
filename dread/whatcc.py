@@ -241,7 +241,7 @@ def consistent(program, hits):
                     target = arch.target(insn) if insn is not None else None
                     if target is None:
                         continue
-                    there = names.get(target & ~1)
+                    there = names.get(program.code_address(target))
                     if there and callee not in there:
                         ok = False
                         break

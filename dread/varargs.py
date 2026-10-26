@@ -141,8 +141,8 @@ def sites(program, names):
             kind, target, _ = program.arch.flow(insn)
             if target is None or kind not in ("call", "jump"):
                 continue
-            callee = entries.get(target & ~1)
-            if callee is None or (kind == "jump" and target & ~1 == fn.entry):
+            callee = entries.get(program.code_address(target))
+            if callee is None or (kind == "jump" and program.code_address(target) == fn.entry):
                 continue
             out.append((fn, a, callee, "call" if kind == "call" else "tail"))
     return out
@@ -165,8 +165,8 @@ def _graph(program, fn):
             nxt = fn.insns[i + 1] if i + 1 < len(fn.insns) else None
             if (kind in ("next", "call", "icall") or falls) and nxt == a + insn.size:
                 out.append(i + 1)
-            if kind == "jump" and target is not None and (target & ~1) in index:
-                out.append(index[target & ~1])
+            if kind == "jump" and target is not None and (program.code_address(target)) in index:
+                out.append(index[program.code_address(target)])
         succ.append(out)
     return index, succ
 

@@ -43,6 +43,7 @@ import json
 import os
 import re
 
+from dread.elf import dwarf_code_value
 from dread import cparse as C
 
 TABLE = "readable_names"
@@ -1453,7 +1454,7 @@ def truth(elf_path):
             for die in cu.iter_DIEs():
                 if die.tag != "DW_TAG_subprogram" or "DW_AT_low_pc" not in die.attributes:
                     continue
-                entry = die.attributes["DW_AT_low_pc"].value & ~1
+                entry = dwarf_code_value(elf, die.attributes["DW_AT_low_pc"].value)
                 params = [name_of(c) for c in die.iter_children() if c.tag == "DW_TAG_formal_parameter"]
                 found = set()
                 locals_of(die, found)
@@ -1768,9 +1769,10 @@ def function_truth(path):
         elf = f.read(4) == b"\x7fELF"
     if elf:
         from dread.elf import Elf, STT_FUNC
-        for s in Elf(path).symbols:
+        image = Elf(path)
+        for s in image.symbols:
             if s.kind == STT_FUNC and s.name and s.shndx:
-                out[s.value & ~1] = s.name
+                out[image.code_value(s.value)] = s.name
     else:
         for line in open(path).read().splitlines()[1:]:
             parts = line.split("\t")

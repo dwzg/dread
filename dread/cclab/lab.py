@@ -36,6 +36,8 @@ import os
 import subprocess
 import shutil
 
+from dread.arch import code_address
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROBES = os.path.join(HERE, "probes")
 
@@ -336,9 +338,9 @@ class Bench:
         for fn in self.program.functions:   # is __udivsi3), the import's own name first
             self.aliases.setdefault(fn.entry, []).append(fn.name)
         for sym in Elf(os.path.join(directory, "image.elf")).symbols:
-            if sym.kind == 2 and sym.name and (sym.value & ~1) in self.aliases \
-                    and sym.name not in self.aliases[sym.value & ~1]:
-                self.aliases[sym.value & ~1].append(sym.name)
+            if sym.kind == 2 and sym.name and (self.program.code_address(sym.value)) in self.aliases \
+                    and sym.name not in self.aliases[self.program.code_address(sym.value)]:
+                self.aliases[self.program.code_address(sym.value)].append(sym.name)
         self.entries = {n: a for a, names in self.aliases.items() for n in names}
 
     def function(self, name):
@@ -351,7 +353,7 @@ class Bench:
 
     def names(self, address):
         """Every function name at an address, joined with " = "."""
-        return " = ".join(self.aliases.get(address & ~1, ["0x%x" % address]))
+        return " = ".join(self.aliases.get(self.program.code_address(address), ["0x%x" % address]))
 
     def machine(self):
         from dread.emu import Machine
@@ -449,7 +451,7 @@ def shape(bench, name):
     calls, tails, ijumps = [], [], []
     for insn in insns:
         kind, target, _ = arch.flow(insn)
-        callee = program.by_entry.get(target & ~1) if isinstance(target, int) else None
+        callee = program.by_entry.get(program.code_address(target)) if isinstance(target, int) else None
         if kind == "call":
             calls.append(bench.names(callee.entry) if callee is not None else "0x%x" % target)
         elif kind == "icall":
@@ -460,7 +462,7 @@ def shape(bench, name):
             helper = None
             if insn.mnemonic in ("bl", "blx") and hasattr(arch, "target"):
                 t = arch.target(insn)
-                helper = program.by_entry.get(t & ~1) if isinstance(t, int) else None
+                helper = program.by_entry.get(program.code_address(t)) if isinstance(t, int) else None
             ijumps.append(bench.names(helper.entry) if helper is not None else
                           insn.mnemonic + (" pc" if insn.op_str.startswith("pc") else ""))
     text = ["%s %s" % (i.mnemonic, i.op_str) for i in insns]
@@ -600,7 +602,7 @@ def return_address(bench, uc):
     """The return address of a function at its first instruction: the link register's, or the
     word a call pushed (the MSP430)."""
     if bench.arch.link_reg:
-        return uc.reg_read(bench.arch.reg_id(bench.arch.link_reg)) & ~1
+        return code_address(bench.arch, uc.reg_read(bench.arch.reg_id(bench.arch.link_reg)))
     sp = uc.reg_read(bench.arch.reg_id("sp"))
     return int.from_bytes(bytes(uc.mem_read(sp, bench.word)), "little")
 
@@ -734,7 +736,7 @@ def measure_keeps(bench, spec):
             v = int.from_bytes(data[off:off + bench.width], "little")
             if v in by_value:
                 found.add(by_value[v])
-            elif arch.link_reg and (v & ~1) == (bench.sentinel & ~1):
+            elif arch.link_reg and (code_address(arch, v)) == (code_address(arch, bench.sentinel)):
                 ret = True
     out = {"kept": "all" if not broken else "not " + " ".join(broken),
            "saved": [n for n in list(marks) if n in found] + (["return address"] if ret else []),

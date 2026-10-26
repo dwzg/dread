@@ -34,7 +34,7 @@ def calls_of(program, fn):
             continue
         kind, target, _ = program.arch.flow(insn)
         if kind in ("call", "jump") and isinstance(target, int):
-            t = target & ~1
+            t = program.code_address(target)
             if t in program.by_entry and t not in fn.insns:
                 out.append(t)
     return out

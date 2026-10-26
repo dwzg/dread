@@ -32,8 +32,8 @@ def sites(program, patterns):
             kind, target, _ = program.arch.flow(insn)
             if kind not in ("call", "jump") or not isinstance(target, int):
                 continue
-            callee = program.by_entry.get(target & ~1)
-            if callee is None or callee is fn or (kind == "jump" and (target & ~1) in fn.insns):
+            callee = program.by_entry.get(program.code_address(target))
+            if callee is None or callee is fn or (kind == "jump" and (program.code_address(target)) in fn.insns):
                 continue
             if any(fnmatch.fnmatchcase(callee.name, p) for p in patterns):
                 out.append((callee, fn, insn.address, "call" if kind == "call" else "tail call"))

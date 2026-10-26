@@ -81,6 +81,7 @@ import os
 import struct
 import sys
 
+from dread.arch import code_address
 from dread import target as tgt
 
 VERSION = 29                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
@@ -369,7 +370,7 @@ def _rows(program, fn, an, entry_name):
         if insn is not None:
             kind, target, _ = arch.flow(insn)
             if kind == "jump" and target is not None:
-                joins.add(target & ~1)
+                joins.add(program.code_address(target))
     out, state = [], {}
     flags = mask(["flags"])
     # The entry's straight run: a variadic function's save area, the unnamed argument registers
@@ -694,7 +695,7 @@ def vector_words(program, entries):
         if not program.in_image(a, 4):
             break
         word = program.word(a)
-        if word and not (word & 1 and (word & ~1) in entries):
+        if word and not (word & 1 and program.code_address(word) in entries):
             break
         out.add(a)
     return out
@@ -712,14 +713,14 @@ def pointer_entries(program):
     with the first result register). More than are called so (a word that only happens to equal an
     entry), and not every one: an address made by arithmetic the layers do not follow (an offset added
     to a table's base the code loads) is missed (not confirmed on any target)."""
-    entries = {fn.entry & ~1: fn.name for fn in program.functions}
+    entries = {program.code_address(fn.entry): fn.name for fn in program.functions}
     found = set()
     data, arch = program.data, program.arch
     skip = (-program.base) % 4
     usable = (len(data) - skip) // 4 * 4
     table = vector_words(program, entries)
     for k, (word,) in enumerate(struct.iter_unpack("<I", bytes(data[skip:skip + usable]))):
-        name = entries.get(word & ~1)
+        name = entries.get(program.code_address(word))
         if name is not None and program.base + skip + 4 * k not in table:
             found.add(name)
     pc_address = getattr(arch, "pc_address", None)
@@ -730,8 +731,8 @@ def pointer_entries(program):
         if pc_address is not None:
             made += [pc_address(insn, program.isa_at(insn.address)) for insn in insns if insn is not None]
         for value in made:
-            if value is not None and (value & ~1) in entries:
-                found.add(entries[value & ~1])
+            if value is not None and program.code_address(value) in entries:
+                found.add(entries[program.code_address(value)])
     return found | made_pointers(program, entries)
 
 
@@ -765,8 +766,8 @@ def made_pointers(program, entries):
         def used(regs):
             for r in regs:
                 v = known.get(r)
-                if r in made and v is not None and not v[1] and (v[0] & ~1) in entries:
-                    found.add(entries[v[0] & ~1])
+                if r in made and v is not None and not v[1] and program.code_address(v[0]) in entries:
+                    found.add(entries[program.code_address(v[0])])
         for a in fn.insns:
             insn = program.insn(a)
             if insn is None:
@@ -778,7 +779,7 @@ def made_pointers(program, entries):
             elif kind == "return":
                 used(results)
             elif kind == "ijump" or (kind == "jump" and isinstance(target, int) and target not in inside
-                                     and (target & ~1) not in inside):
+                                     and program.code_address(target) not in inside):
                 used(args)                      # (a tail call)
             try:
                 values, _, stored = step(insn, program.isa_at(insn.address), known, program)
@@ -844,7 +845,7 @@ class Analysis:
         entries = {fn.entry: fn.name for fn in program.functions}
 
         def entry_name(address):
-            return entries.get(address & ~1) if address is not None else None
+            return entries.get(program.code_address(address)) if address is not None else None
 
         self.variadic = set()               # functions whose unnamed arguments a va_list reads (_rows)
         self.rows = {fn.name: _rows(program, fn, self, entry_name) for fn in program.functions}
@@ -854,7 +855,7 @@ class Analysis:
         self.graphs = {fn.name: self._graph(fn, self.rows[fn.name], entry_name,
                                             following.get(fn.entry, program.end(fn)))
                        for fn in program.functions}
-        self.edges = {name: self._edge_masks(self.rows[name], self.graphs[name][0]) for name in self.rows}
+        self.edges = {name: self._edge_masks(self.rows[name], self.graphs[name][0], program.arch) for name in self.rows}
         self.shadowed = {}                  # name -> {call index: registers not read behind it} (_neutral_saves)
         self.copies = {}                    # name -> {save index: (restore index, register bit)} (_neutral_saves)
         for fn in program.functions:
@@ -973,7 +974,7 @@ class Analysis:
         return demand
 
     @staticmethod
-    def _edge_masks(code, succ):
+    def _edge_masks(code, succ, arch=None):
         """{(branch row, successor row): registers written on that edge}: a conditional branch's taken
         edge carries what was written under its condition since the flags last changed (it eq; ldreq
         r3, [r1]; beq L: r3 is written at L by that way), its fall-through edge what was written under
@@ -984,7 +985,7 @@ class Analysis:
         for i, row in enumerate(code):
             if row.kind != "jump" or not row.conditional or not (row.covered or row.fall_covered):
                 continue
-            taken = index.get((row.target or 0) & ~1)
+            taken = index.get(code_address(arch, row.target or 0))
             fall = i + 1 if i + 1 < len(code) and code[i + 1].address == row.address + row.size else None
             if taken is None or taken == fall:
                 continue
@@ -1021,7 +1022,7 @@ class Analysis:
         for i, row in enumerate(code):
             kind, target = row.kind, row.target
             if kind == "jump":
-                t = target & ~1
+                t = self.program.code_address(target)
                 if t in index:
                     succ[i].append(index[t])
                 elif entry_name(t):
@@ -1079,7 +1080,7 @@ class Analysis:
         n = len(code)
 
         def inside(address):
-            return (address & ~1) in index
+            return program.code_address(address) in index
 
         # Tables lie in the function's own extent or in the pool behind it: up to the next function,
         # but no further than POOL_REACH behind the last instruction (the next entry may be far away,
@@ -1101,7 +1102,7 @@ class Analysis:
                 if run is None:
                     run = a
                     tables[run] = []
-                tables[run].append(word & ~1)
+                tables[run].append(program.code_address(word))
             else:
                 run = None
 
@@ -1139,13 +1140,13 @@ class Analysis:
                     value = arch.pc_address(near, isa)
                     if lit and lit[1] == 4 and program.in_image(lit[0], 4):
                         value = program.word(lit[0])
-                    found = table_at(value & ~1) if value is not None else None
+                    found = table_at(program.code_address(value)) if value is not None else None
                     if found:
                         targets = found
             if not targets and tables:
                 targets = [t for ts in tables.values() for t in ts]
             if targets:
-                succ[i].extend(sorted({index[t & ~1] for t in targets if inside(t)}))
+                succ[i].extend(sorted({index[program.code_address(t)] for t in targets if inside(t)}))
             else:
                 left.append(i)
                 if leaves is not None:

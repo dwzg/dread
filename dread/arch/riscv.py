@@ -237,6 +237,8 @@ class RiscV:
     default_callee_saved = ("s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11")
     default_result = ("a0", "a1")
     word = 4
+    isa_bit = 0                 # no bit of a code address marks an instruction set (jalr's clearing of bit 0
+                                # is the instruction's own; dread.arch.code_address)
     reg_bits = 32
     syscall_numbers = (8, 9, 11)    # ecall from U, S and M mode (dread.emu runs it as a logged no-op)
     link_reg = "ra"

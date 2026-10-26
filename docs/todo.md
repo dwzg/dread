@@ -6365,6 +6365,18 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
     esp, ebp), flow and targets, register effects, the stack (push, pop, enter, leave), cdecl (arguments
     on the stack, eax and edx:eax results, ebx, esi, edi, ebp kept), a call's pushed return address in
     the emulator (as MSP430's push_return), dread.regflow.
+    - [x] Code addresses keep bit 0 outside ARM. DREAD took bit 0 (ARM's Thumb bit) off code addresses
+      in about 190 places, which made each of x86's odd entries the byte in front of it: gizmo-i386's
+      import put clamp on the ret of the function before (a call returned at once) and broke the code
+      ranges at every odd entry. Since 2026-10-27 each layer says which bit marks an instruction set
+      (isa_bit: ARM 1, the others 0), and dread.arch.code_address, Program.code_address, Elf.code_value
+      and dread.elf.dwarf_code_value take it off only there (docs/decisions.md, "Code addresses keep
+      bit 0 outside ARM"). The other builds of gizmo import to the same tables; both i386 builds now
+      run their functions at odd entries (tests/test_x86.py).
+    - [ ] The extents' owner table (Program.owners) counts halfwords: on x86 the halfword in which one
+      function ends and the next begins at an odd byte counts as the next one's, so a load from the
+      first one's last byte would count as a read of another function's code (not confirmed to happen:
+      compilers put no data there). Bytes where the layer's min_insn is 1, when a case shows it.
   - [ ] The lifter (dread.lift_x86): the integer instructions with the six flags, computed where read;
     the fuzzer's x86 ISA (dread liftfuzz) against Unicorn.
   - [ ] The lift check on gizmo-i386 (both compilers), the overlay (a 5-byte jmp at a moved function's

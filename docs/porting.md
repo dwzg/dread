@@ -33,6 +33,7 @@ A class whose constructor takes the keys of `[arch]` (beyond `name`), with these
 |---|---|
 | `disassembler(isa)`, `decode(code, address, isa)` | instruction objects with `address`, `size`, `bytes`, `mnemonic`, `op_str` (capstone's; RISC-V wraps capstone and adds its own decoded fields, because capstone 5 reports no registers for RISC-V) |
 | `insn_length(code, isa)`, `min_insn(isa)` | lengths, for walking code |
+| `max_insn`, `isa_bit` | optional: the bytes an instruction may take (the program database reads that many to tell a length; 2 without it), and the bit of a code address that marks an instruction set (ARM's Thumb bit: 1; 0 where none does: RISC-V, MSP430, MIPS, x86; 1 without it). `dread.arch.code_address` takes that bit off where the tools key code, so a layer whose code starts at odd bytes (x86) must say 0 |
 
 **What an instruction does** (used by the program database, regflow, switches, noreturn, the
 generator, the lifter, the reading aids)

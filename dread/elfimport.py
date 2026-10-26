@@ -43,13 +43,13 @@ def entry_labels(elf):
     for index, s in enumerate(elf.sections):
         if not (s.alloc and s.code and s.size) or s.nobits:
             continue
-        funcs = [(sym.value & ~1, (sym.value & ~1) + sym.size) for sym in elf.symbols
+        funcs = [(elf.code_value(sym.value), elf.code_value(sym.value) + sym.size) for sym in elf.symbols
                  if sym.kind == STT_FUNC and sym.size and sym.shndx == index]
         labels = {}
         for sym in elf.symbols:
             if sym.shndx != index or not sym.name or sym.name[0] in ".$":
                 continue
-            value = sym.value & ~1 if sym.kind == STT_FUNC else sym.value
+            value = elf.code_value(sym.value) if sym.kind == STT_FUNC else sym.value
             if not s.addr <= value < s.addr + s.size or any(lo <= value < hi for lo, hi in funcs):
                 continue
             if (sym.kind == STT_FUNC and not sym.size) or \
@@ -86,7 +86,7 @@ def code_intervals(elf, isa="a32"):
             continue
         marks = [(a, k) for a, k in mapping.get(index, []) if s.addr <= a < s.addr + s.size]
         if not marks:
-            spans = sorted([(sym.value & ~1, (sym.value & ~1) + sym.size) for sym in elf.symbols
+            spans = sorted([(elf.code_value(sym.value), elf.code_value(sym.value) + sym.size) for sym in elf.symbols
                             if sym.kind == STT_FUNC and sym.size and sym.shndx == index] +
                            [(lo, hi) for lo, hi, _ in labels if s.addr <= lo < s.addr + s.size]) if s.code else []
             if not spans:
@@ -97,8 +97,10 @@ def code_intervals(elf, isa="a32"):
         here = []
         first = marks[0][0]
         if first != s.addr and s.code:          # (an object without mapping symbols in front)
-            funcs = [(sym.value & ~1, min(first, (sym.value & ~1) + sym.size)) for sym in elf.symbols
-                     if sym.kind == STT_FUNC and sym.size and sym.shndx == index and s.addr <= sym.value & ~1 < first]
+            funcs = [(elf.code_value(sym.value), min(first, elf.code_value(sym.value) + sym.size))
+                     for sym in elf.symbols
+                     if sym.kind == STT_FUNC and sym.size and sym.shndx == index
+                     and s.addr <= elf.code_value(sym.value) < first]
             starts = sorted({lo for lo, _ in funcs} | {lo for lo, _, _ in labels if s.addr <= lo < first} |
                             {sym.value for sym in elf.symbols
                              if sym.shndx == index and sym.name and sym.name[0] not in ".$" and s.addr <= sym.value < first
@@ -113,10 +115,12 @@ def code_intervals(elf, isa="a32"):
             if nxt[0] > a:
                 here.append((a, nxt[0], k))
         if s.code:
-            unmarked = [(sym.value & ~1, (sym.value & ~1) + sym.size, THUMB.get(isa, isa) if sym.value & 1 else isa)
+            unmarked = [(elf.code_value(sym.value), elf.code_value(sym.value) + sym.size,
+                         THUMB.get(isa, isa) if sym.value & 1 else isa)
                         for sym in elf.symbols
                         if sym.kind == STT_FUNC and sym.size and sym.shndx == index
-                        and not any((sym.value & ~1) <= a < (sym.value & ~1) + sym.size for a, _ in marks)]
+                        and not any(elf.code_value(sym.value) <= a < elf.code_value(sym.value) + sym.size
+                                    for a, _ in marks)]
             for lo, hi, kind in sorted(unmarked):
                 pieces = []
                 for a, b, k in here:
@@ -245,7 +249,7 @@ def tables(elf, unnamed=False, keep=(), isa="a32"):
         code = cut(code, slot, 4)
     for sym in elf.symbols:
         if sym.kind == STT_FUNC and sym.size and sym.name:
-            entry = sym.value & ~1
+            entry = elf.code_value(sym.value)
             runs = [(max(a, entry), min(b, entry + sym.size), k) for a, b, k in code
                     if a < entry + sym.size and entry < b]
             for slot in inner_padding(elf, runs):
@@ -259,7 +263,7 @@ def tables(elf, unnamed=False, keep=(), isa="a32"):
     for sym in elf.symbols:
         if sym.kind != STT_FUNC or not sym.size or not sym.name:
             continue
-        entry = sym.value & ~1
+        entry = elf.code_value(sym.value)
         if entry in funcs:                      # an alias of a function already seen
             continue
         runs = [(max(a, entry), min(b, entry + sym.size), k) for a, b, k in code
@@ -451,7 +455,7 @@ def called_without_function(target, image):
             kind, dest, _ = program.arch.flow(insn)
             if kind != "call" or not isinstance(dest, int):
                 continue
-            t = dest & ~1
+            t = program.code_address(dest)
             if t in out or program.function_at(t) is not None or program.insn(t) is None:
                 continue
             end = next((e for e in entries if e > t), None)

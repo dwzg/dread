@@ -21,6 +21,7 @@ Used by dread callsites (the arguments at a call) and dread flat.
 from unicorn import (UC_HOOK_MEM_FETCH_UNMAPPED, UC_HOOK_MEM_READ_UNMAPPED, UC_HOOK_MEM_WRITE,
                      UC_HOOK_MEM_WRITE_UNMAPPED, UC_PROT_EXEC, UC_PROT_READ, UcError)
 
+from dread.arch import code_address
 from dread.util.perthread import PerThread
 
 RUN_BACK = 24           # instructions in front of the address that are run at most
@@ -86,8 +87,8 @@ def joins(program, fn):
         if insn is None:
             continue
         kind, target, _ = program.arch.flow(insn)
-        if kind == "jump" and isinstance(target, int) and (target & ~1) in inside:
-            out.add(target & ~1)
+        if kind == "jump" and isinstance(target, int) and (program.code_address(target)) in inside:
+            out.add(program.code_address(target))
     _joins[key] = (program, out)
     return out
 
@@ -196,7 +197,7 @@ def _run(program, first, address, names, given=None):
                 want = []
             if not want:
                 return None
-        if uc.reg_read(arch.pc_reg()) & ~1 != address:
+        if program.code_address(uc.reg_read(arch.pc_reg())) != address:
             return None
         results.append({r: uc.reg_read(arch.reg_id(r)) for r in names})
     a, b = results
@@ -357,8 +358,9 @@ def pointed(program, address):
     if text:
         return "text", text
     by_entry = getattr(program, "by_entry", {})
-    fn = by_entry.get(address & ~1)
-    if fn is not None and (address & ~1) == fn.entry:
+    arch = getattr(program, "arch", None)         # (a stand-in without one: bit 0 off, as before)
+    fn = by_entry.get(code_address(arch, address))
+    if fn is not None and code_address(arch, address) == fn.entry:
         return "function", fn.name
     if address % 4 or not program.in_image(address, 4):
         return None
@@ -369,11 +371,11 @@ def pointed(program, address):
             break
         w = program.word(a)
         text = string_at(program, w)
-        callee = by_entry.get(w & ~1)
+        callee = by_entry.get(code_address(arch, w))
         if text:
             parts.append(("text", text, w))
             useful = True
-        elif callee is not None and (w & ~1) == callee.entry:
+        elif callee is not None and code_address(arch, w) == callee.entry:
             parts.append(("function", callee.name, w))
             useful = True
         else:

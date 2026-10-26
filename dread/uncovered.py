@@ -231,7 +231,7 @@ class Context:
     def callee_name(self, address):
         if address is None:
             return None
-        fn = self.program.by_entry.get(address & ~1)
+        fn = self.program.by_entry.get(self.program.code_address(address))
         return fn.name if fn is not None else "0x%x" % address
 
     def device_name(self, address):
@@ -377,7 +377,7 @@ class Flow:
         if kind in ("next", "call", "icall") or falls:
             out.append(a + insn.size)
         if kind == "jump" and isinstance(target, int):
-            out.append(target & ~1)
+            out.append(self.prog.code_address(target))
         if kind == "ijump":
             from dread import switches
             try:
@@ -388,7 +388,8 @@ class Flow:
                 out += list(got[0])
             else:
                 try:
-                    out += list(self.arch.switch_targets(insn, self.prog, lambda t: (t & ~1) in code) or ())
+                    out += list(self.arch.switch_targets(insn, self.prog,
+                                                         lambda t: self.prog.code_address(t) in code) or ())
                 except Exception:
                     pass
         return out
@@ -850,7 +851,7 @@ def way(flow, p, r):
             out["device"] = "0x%x" % main[1]
         side = ""
         if cause == "branch" and kind == "jump" and isinstance(target, int):
-            side = " (taken)" if r == target & ~1 else " (not taken)"
+            side = " (taken)" if r == flow.prog.code_address(target) else " (not taken)"
         by = "; ".join(insn_text(flow.insn[d]) for d in deciders if d != p)
         out["text"] = "%s%s at 0x%x%s: %s" % (insn_text(insn), side, p, " (%s)" % by if by else "", describe(main))
     elif cause == "call":
@@ -1027,7 +1028,7 @@ def end_of(m, error, gen):
     """How a run ended, in words: by a return, at a stub that ends it, at the instruction limit,
     spinning on a register, a fault (where), or touching the image (which the generator drops)."""
     def where():
-        fn = RUN["program"].function_at(m.reg("pc") & ~1)
+        fn = RUN["program"].function_at(RUN["program"].code_address(m.reg("pc")))
         return " in %s" % fn.name if fn is not None else ""
     if error is not None:
         if "did not return" in str(error):

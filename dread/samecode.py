@@ -39,14 +39,14 @@ def shape(program, fn):
         isa = program.isa_at(insn.address)
         text = insn.mnemonic
         if kind in ("call", "jump") and isinstance(target, int):
-            t = target & ~1
+            t = program.code_address(target)
             text += " L%+d" % (t - insn.address) if t in inside else " call"
         else:
             lit = arch.literal(insn, isa)
             at = arch.pc_address(insn, isa)
             if lit is not None:
                 value = program.word(lit[0]) if lit[1] == 4 and program.in_image(lit[0], 4) else None
-                shown = "address" if value is None or program.in_image(value & ~1) else "=0x%x" % value
+                shown = "address" if value is None or program.in_image(program.code_address(value)) else "=0x%x" % value
                 text += " %s, %s" % (insn.op_str.split(",")[0], shown)
             elif at is not None:
                 text += " %s, address" % insn.op_str.split(",")[0]

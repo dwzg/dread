@@ -194,8 +194,8 @@ def evidence(program, fn, reads=None, scratch=None):
         if insn is None:
             continue
         kind, target, falls = arch.flow(insn)
-        if kind == "jump" and isinstance(target, int) and (target & ~1) in pos:
-            succ[k].append(pos[target & ~1])
+        if kind == "jump" and isinstance(target, int) and (program.code_address(target)) in pos:
+            succ[k].append(pos[program.code_address(target)])
         elif kind in ("jump", "ijump"):
             kind = "tail"                   # (out of the function: its arguments go with it)
             if not isinstance(target, int):
@@ -205,7 +205,7 @@ def evidence(program, fn, reads=None, scratch=None):
         effects[k] = (reg_reads, writes, arch.is_conditional(insn))
         if k + 1 < n and addrs[k] + insn.size == addrs[k + 1] and (kind in ("next", "call", "icall") or falls):
             succ[k].append(k + 1)
-    starts = {0, pos.get(fn.entry, pos.get(fn.entry & ~1, 0))}
+    starts = {0, pos.get(fn.entry, pos.get(program.code_address(fn.entry), 0))}
     reached = starts | {s for o in succ for s in o}
     unreached = [k for k in range(n) if k not in reached]
     for k in ijumps:
@@ -277,7 +277,7 @@ def evidence(program, fn, reads=None, scratch=None):
             out.accesses.append((address, ctype, origin, ix))
         handed = list(stored)
         if kinds[k] in ("call", "icall", "tail"):
-            callee = program.by_entry.get(targets[k] & ~1) if isinstance(targets[k], int) else None
+            callee = program.by_entry.get(program.code_address(targets[k])) if isinstance(targets[k], int) else None
             if reads is not None and callee is not None and callee.name in reads:
                 handed += [r for r in abi.arg_regs if r in reads[callee.name]]
             else:

@@ -122,6 +122,7 @@ import sys
 
 from capstone import arm as A
 
+from dread.arch import code_address
 from dread import target as tgt
 from dread.program import Program, read_ranges
 
@@ -354,7 +355,7 @@ def direct_callees(program, fn):
         last = insn
         kind, target, _ = program.arch.flow(insn)
         if kind in ("call", "jump") and target is not None:
-            callee = program.by_entry.get(target & ~1)
+            callee = program.by_entry.get(program.code_address(target))
             if callee is not None and callee is not fn:
                 out.add(callee.name)
     if last is not None and program.arch.flow(last)[0] == "next":
@@ -437,7 +438,7 @@ class Lifter:
         kind, target, _ = self.arch.flow(insn)
         if kind != "call" or self.arch.predicate(insn) is not None or not isinstance(target, int):
             return None
-        callee = self.prog.by_entry.get(target & ~1)
+        callee = self.prog.by_entry.get(code_address(self.arch, target))
         return callee if callee is not None and self.never_returns(callee.name) else None
 
     def successors(self, fn, index, address, insn, strict=True, values=None):
@@ -459,8 +460,8 @@ class Lifter:
             elif strict:
                 raise Refused("0x%x falls through into what follows (data or other code; a call that does not "
                               "return?)" % address)
-        if kind == "jump" and target is not None and (target & ~1) in index and decided is not False:
-            out.append(target & ~1)
+        if kind == "jump" and target is not None and code_address(self.arch, target) in index and decided is not False:
+            out.append(code_address(self.arch, target))
         if kind == "ijump":
             got = self.resolve(fn, address)
             if got:
@@ -513,8 +514,8 @@ class Lifter:
                 if (kind in ("next", "call", "icall") or falls) and not self.dead_end(insn) \
                         and a + insn.size not in have:
                     exits.append(a + insn.size)
-                if kind == "jump" and isinstance(target, int) and (target & ~1) not in have:
-                    exits.append(target & ~1)
+                if kind == "jump" and isinstance(target, int) and code_address(self.arch, target) not in have:
+                    exits.append(code_address(self.arch, target))
                 for t in exits:
                     if t in prog.by_entry and not after:
                         continue            # a tail call
@@ -554,7 +555,7 @@ class Lifter:
             if (kind in ("next", "call", "icall") or falls) and not self.dead_end(insn):
                 nexts.append(a + insn.size)
             if kind == "jump" and isinstance(target, int):
-                nexts.append(target & ~1)
+                nexts.append(code_address(self.arch, target))
             work += [t for t in nexts if t not in prog.by_entry or t in starts]
         return out
 
@@ -888,7 +889,8 @@ class Lifter:
             insn, (d, values) = self.prog.insn(a), states[a]
             top = max(top, self.reads_above_entry(insn, d, values))
             kind, target, _ = self.arch.flow(insn)
-            callee = self.prog.by_entry.get(target & ~1) if kind in ("call", "jump") and target is not None else None
+            callee = self.prog.by_entry.get(code_address(self.arch, target)) \
+                if kind in ("call", "jump") and target is not None else None
             if callee is not None and callee is not fn:
                 n = self.stack_args(callee) or 0
                 if 4 * n > d:
@@ -1067,8 +1069,9 @@ class Lifter:
             # a call or a tail call (a jump to another function's entry, a fall into one) reads the
             # arguments its callee takes (dread.regflow; r0-r3 without it)
             to = None
-            if isinstance(target, int) and (kind in ("call",) or (kind == "jump" and (target & ~1) not in index)):
-                to = prog.by_entry.get(target & ~1)
+            if isinstance(target, int) and (kind in ("call",) or
+                                            (kind == "jump" and code_address(self.arch, target) not in index)):
+                to = prog.by_entry.get(code_address(self.arch, target))
             into = self.falls_into(fn, insn) if a + insn.size not in index else None
             for callee in (to, into):
                 if callee is not None:
@@ -1140,7 +1143,8 @@ class Lifter:
             for b in self.successors(fn, index, a, insn, strict=False, values=known.get(a, (0, None))[1]):
                 bu, bp = after_u, after_p
                 if kind == "jump" and pred is not None and bp:
-                    cond = pred if isinstance(target, int) and b == target & ~1 else arch.complement(pred)
+                    cond = pred if isinstance(target, int) and b == code_address(self.arch, target) \
+                        else arch.complement(pred)
                     done = {r for r, c in bp if c == cond}
                     bu, bp = bu - done, frozenset(x for x in bp if x[0] not in done)
                 if b not in undef_at:
@@ -1365,13 +1369,13 @@ class Lifter:
         kills = set(writes) if arch.predicate(insn) is None else set()
         if kind == "return" or self.ret_jump(insn, values):
             return set(results) | mirror, set(), True
-        callee = self.prog.by_entry.get(target & ~1) if isinstance(target, int) else None
+        callee = self.prog.by_entry.get(code_address(self.arch, target)) if isinstance(target, int) else None
         if kind in ("call", "icall"):
             reads |= set(self.ARGS) | mirror | (set(self.leaves(callee)) if callee is not None else set())
             if arch.predicate(insn) is None:
                 kills |= set(self.after_call(insn))
             return reads, kills, self.dead_end(insn) is not None
-        if kind == "jump" and callee is not None and (target & ~1) not in own:
+        if kind == "jump" and callee is not None and code_address(self.arch, target) not in own:
             return reads | set(self.ARGS) | mirror | set(self.leaves(callee)), set(), not falls
         if kind == "ijump":
             reads |= set(self.ARGS) | mirror        # a switch, or a tail call through a register
@@ -1454,7 +1458,7 @@ class Lifter:
                 for k in range(len(lanes)):
                     fx.accesses.append((base, None, 4 * k - (4 * len(lanes) if down else 0), 4, "other", None, False))
                 (fx.stored if store else fx.loaded).update(lanes)
-        callee = self.prog.by_entry.get(target & ~1) if isinstance(target, int) else None
+        callee = self.prog.by_entry.get(code_address(self.arch, target)) if isinstance(target, int) else None
         if kind == "call":
             fx.hands |= set(self.ARGS) | (set(self.leaves(callee)) if callee is not None else set())
             for k in range(self.call_stack_words(callee) if callee is not None else 0):
@@ -1466,7 +1470,7 @@ class Lifter:
                 fx.words += [(4 * k, 4) for k in range(min(depth // 4, INDIRECT_STACK_WORDS))]    # (_icall)
         elif kind == "return" or self.ret_jump(insn, values):
             fx.hands |= set(results)
-        elif kind == "jump" and callee is not None and (target & ~1) not in own:
+        elif kind == "jump" and callee is not None and code_address(self.arch, target) not in own:
             fx.hands |= set(self.ARGS) | set(self.leaves(callee))        # a tail call
         elif kind == "ijump":
             fx.hands |= (set(self.ARGS) | set(reads)) - {"sp", "pc"}
@@ -1583,8 +1587,8 @@ class Lifter:
         targets = set()
         for insn in insns:
             kind, target, _ = arch.flow(insn)
-            if kind == "jump" and target is not None and (target & ~1) in depth:
-                targets.add(target & ~1)
+            if kind == "jump" and target is not None and code_address(self.arch, target) in depth:
+                targets.add(code_address(self.arch, target))
         self.ctx = {"fn": fn, "depth": depth, "states": states, "undef": undef, "frame": frame, "callees": set(),
                     "bound": set(), "handed": handed, "save_area": self.save_area(fn, insns), "wrapped": wrapped,
                     "flags_in": flags_in, "handler": handler, "fp": self.uses_fpu(insns), "out": out,
@@ -1606,7 +1610,8 @@ class Lifter:
             into = self.falls_into(fn, insn) if insn.address + insn.size not in own else None
             if into is not None:
                 body.append("    " + self._tail_into(into, insn))
-        stubs = {self.arch.target(i) & ~1 for i in insns if getattr(i, "call_via", None)}   # bl into a bx rN
+        stubs = {code_address(self.arch, self.arch.target(i))       # bl into a bx rN
+                 for i in insns if getattr(i, "call_via", None)}
         got = Lifted(fn.name, self.render(fn, body), sorted(self.ctx["callees"]) + sorted(self.ctx["bound"]),
                      frame, stack_params,
                      [a for a in fn.insns if a not in depth and a not in stubs],
@@ -1720,7 +1725,7 @@ class Lifter:
                 for insn in self.prog.instructions(f):
                     t = self.arch.target(insn) if insn is not None else None
                     if isinstance(t, int):
-                        out.add(t & ~1)
+                        out.add(code_address(self.arch, t))
             self._targets = out
         return self._targets
 
@@ -2098,7 +2103,7 @@ class Lifter:
                 loads = ""
             return (loads + " " if loads else "") + self._return()
         if kind == "jump":
-            t = target & ~1
+            t = code_address(self.arch, target)
             if t not in self.ctx["depth"] and falls and self.decided(insn, self.values()) is False:
                 return None                 # decided never taken (states): its target is unreached
             if i in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ):
@@ -2121,7 +2126,7 @@ class Lifter:
                 return "if (%s) { %s %s }" % (COND[insn.cc], call, self._return())
             return "%s %s" % (call, self._return())
         if kind == "call":
-            callee = prog.by_entry.get(target & ~1)
+            callee = prog.by_entry.get(code_address(self.arch, target))
             if callee is None:
                 raise Refused("0x%x calls into the middle of something (0x%x)" % (insn.address, target))
             text = self._fp_call(self._call(callee, insn, bind=True))
@@ -2824,7 +2829,8 @@ class Lifter:
             if regs and set(regs) <= set(args) and args[-1] in regs:
                 return 4 * len(regs)
         from dread.regflow import variadic_save_area
-        joins = {t & ~1 for i in insns for k, t, _ in [self.arch.flow(i)] if k == "jump" and isinstance(t, int)}
+        joins = {code_address(self.arch, t) for i in insns for k, t, _ in [self.arch.flow(i)]
+                 if k == "jump" and isinstance(t, int)}
         try:
             return 4 * len(variadic_save_area(self.prog, fn, insns, joins))
         except Exception:
@@ -3313,7 +3319,7 @@ class Lifter:
             raise Refused("0x%x: its callers read %s behind a tail call through a register" % (
                 insn.address, self.ctx["more"][0]))
         got = self.resolve(self.ctx["fn"], insn.address)
-        callees = [self.prog.by_entry.get(t & ~1) for t in got[1]] if got and not got[0] else []
+        callees = [self.prog.by_entry.get(code_address(self.arch, t)) for t in got[1]] if got and not got[0] else []
         if not callees or not all(callees):
             through = self._pointer_tail(insn, got)
             if through is None:
@@ -3415,8 +3421,8 @@ def check(target, image, names=None, out=print, jobs=None, system=True, loop_cas
     for fn in program.functions:
         for insn in program.instructions(fn):
             t = program.arch.target(insn) if insn is not None else None
-            owner = program.function_at(t & ~1) if t is not None else None
-            if owner is not None and owner is not fn and (t & ~1) != owner.entry:
+            owner = program.function_at(program.code_address(t)) if t is not None else None
+            if owner is not None and owner is not fn and program.code_address(t) != owner.entry:
                 entered.add(owner.name)
     candidates, refused, endless, loops = [], 0, [], set()
     verdicts = {}                           # name -> (verdict, reason, missed): verdicts.tsv for readers

@@ -38,7 +38,7 @@ def _nodes(program, fn):
         kind, target, falls = arch.flow(insn)
         nxt = fn.insns[i + 1] if i + 1 < len(fn.insns) and fn.insns[i + 1] == a + insn.size else None
         succ, after, tails, ret = [], None, [], False
-        t = target & ~1 if isinstance(target, int) else None
+        t = program.code_address(target) if isinstance(target, int) else None
         if kind == "next" or kind == "icall":
             succ.append(nxt)
             after_end = a + insn.size
@@ -73,7 +73,7 @@ def _nodes(program, fn):
             else:
                 succ += [x for x in got[0] if x in index]
                 for x in got[1]:
-                    callee = program.by_entry.get(x & ~1)
+                    callee = program.by_entry.get(program.code_address(x))
                     if callee is None:
                         ret = True
                     else:

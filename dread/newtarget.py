@@ -223,6 +223,7 @@ def unit_producers(path, addresses):
         info = ELFFile(f)
         if not info.has_dwarf_info():
             return out
+        thumb = info.header["e_machine"] == "EM_ARM"     # (bit 0 of an ARM address marks Thumb code)
         for cu in info.get_dwarf_info().iter_CUs():
             top = cu.get_top_DIE()
             attr = top.attributes.get("DW_AT_producer")
@@ -233,7 +234,7 @@ def unit_producers(path, addresses):
                 if die.tag != "DW_TAG_subprogram" or low is None or not isinstance(low.value, int):
                     continue
                 high = die.attributes.get("DW_AT_high_pc")
-                lo = low.value & ~1
+                lo = low.value & ~1 if thumb else low.value
                 hi = lo if high is None else high.value if high.form == "DW_FORM_addr" else lo + high.value
                 row[0] += max(0, hi - lo)
                 row[1] = row[1] or any(lo <= a < hi for a in addresses)

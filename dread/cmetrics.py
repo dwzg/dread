@@ -43,6 +43,7 @@ import os
 import re
 import subprocess
 
+from dread.elf import dwarf_code_value
 from dread import cparse
 
 FIGURES = ("statements", "depth", "gotos", "labels", "loops")
@@ -399,7 +400,7 @@ def out_of_line(elf_path):
             for die in cu.iter_DIEs():
                 if die.tag != "DW_TAG_subprogram" or "DW_AT_low_pc" not in die.attributes:
                     continue
-                entry = die.attributes["DW_AT_low_pc"].value & ~1
+                entry = dwarf_code_value(elf, die.attributes["DW_AT_low_pc"].value)
                 names = []
                 inlined(die, names)
                 out[entry] = {"name": name_of(die), "cu": os.path.normpath(path) if path else None,

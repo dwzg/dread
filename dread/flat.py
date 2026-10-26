@@ -19,12 +19,12 @@ from dread.program import Program
 
 def describe_value(program, value):
     """A value as the listing shows it: hex, with the name of what it points to or its text."""
-    name = program.name_at(value & ~1) if value is not None else None
+    name = program.name_at(program.code_address(value)) if value is not None else None
     if name:
         return "0x%x <%s>" % (value, name)
-    fn = program.function_at(value & ~1)
+    fn = program.function_at(program.code_address(value))
     if fn is not None:
-        return "0x%x <%s+0x%x>" % (value, fn.name, (value & ~1) - fn.entry)
+        return "0x%x <%s+0x%x>" % (value, fn.name, (program.code_address(value)) - fn.entry)
     from dread.constants import string_at
     text = string_at(program, value)
     if text:
@@ -41,7 +41,7 @@ def callers_of(program):
                 continue
             kind, target, _ = program.arch.flow(insn)
             if kind in ("call", "jump") and isinstance(target, int):
-                callee = program.by_entry.get(target & ~1)
+                callee = program.by_entry.get(program.code_address(target))
                 if callee is not None and callee is not fn:
                     out.setdefault(callee.name, []).append((fn.name, insn.address))
     return out
@@ -49,8 +49,8 @@ def callers_of(program):
 
 def value_parts(program, value):
     """(text, linked name or None) of a value, as describe_value shows it."""
-    name = program.name_at(value & ~1) if value is not None else None
-    if name and (value & ~1) in program.by_entry:
+    name = program.name_at(program.code_address(value)) if value is not None else None
+    if name and (program.code_address(value)) in program.by_entry:
         return describe_value(program, value), name
     return describe_value(program, value), None
 
@@ -67,7 +67,8 @@ def rows(program, fn, flow=None, endless=None, callers=None):
     for insn in insns:
         if insn is not None:
             kind, target, _ = arch.flow(insn)
-            callee = program.by_entry.get(target & ~1) if kind in ("call", "jump") and isinstance(target, int) else None
+            callee = program.by_entry.get(program.code_address(target)) \
+                if kind in ("call", "jump") and isinstance(target, int) else None
             if callee is not None and callee is not fn and callee.name not in calls:
                 calls.append(callee.name)
     notes = program.annotations()
@@ -81,8 +82,9 @@ def rows(program, fn, flow=None, endless=None, callers=None):
         if insn is None:
             continue
         kind, target, _ = arch.flow(insn)
-        if kind == "jump" and isinstance(target, int) and (target & ~1) in fn.insns and (target & ~1) != fn.entry:
-            labels.setdefault(target & ~1, "L%d" % (len(labels) + 1))
+        if kind == "jump" and isinstance(target, int) and program.code_address(target) in fn.insns \
+                and program.code_address(target) != fn.entry:
+            labels.setdefault(program.code_address(target), "L%d" % (len(labels) + 1))
     out = []
     previous_end = fn.entry
     for insn in insns:
@@ -99,7 +101,7 @@ def rows(program, fn, flow=None, endless=None, callers=None):
         kind, target, _ = arch.flow(insn)
         comment = []
         if kind in ("call", "jump") and isinstance(target, int):
-            t = target & ~1
+            t = program.code_address(target)
             if t in labels:
                 comment.append({"text": labels[t], "label": t})
             else:
