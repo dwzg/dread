@@ -1075,6 +1075,9 @@ class Polisher:
             # (the other operand's type is read before it is rewritten: what is not constant keeps its type)
             return C.Binary(e.op, l, r)
         if e.op in ("<<", ">>"):
+            tested = _zero_test(e)
+            if tested is not None:          # (x ? clz(x) : 32) >> 5: whether x is 0 (_zero_test)
+                return C.Binary("==", self._expr(tested, SAME), C.Num("0"))
             l = self._expr(e.l, Use("shifted") if value_of(e.l, self.ctx) is not None else SAME)
             return C.Binary(e.op, l, self._expr(e.r, Use("count")))
         if use.kind == "conv" and use.t is not None and e.op in LOW_BITS:
@@ -1334,6 +1337,32 @@ class Polisher:
                                        if t and t[0] == "int" else SAME)
         for inner in _inner(s):
             self.stmt(inner)
+
+
+def _zero_test(e):
+    """x where e is (x ? (u32)__builtin_clz(x) : 32) >> 5 (its condition x or x != 0, x without effects:
+    the lifters' count of leading zeros, 32 for zero, shifted by five): 1 exactly where x is 0, 0
+    elsewhere (a count below 32 shifted by five is 0), so e is x == 0. GCC -Os on Cortex-M tests for
+    zero so (clz r0, r0; lsr r0, r0, #5: FreeRTOS GCC -Os 51 times, clang -O2 18); None for anything
+    else."""
+    from dread.cflow import has_effects
+    if not (isinstance(e, C.Binary) and e.op == ">>" and isinstance(e.r, C.Num) and e.r.value == 5):
+        return None
+    cond = e.l
+    if not (isinstance(cond, C.Cond) and isinstance(cond.f, C.Num) and cond.f.value == 32):
+        return None
+    t = cond.t
+    while isinstance(t, C.Cast) and t.type in ("u32", "unsigned", "unsigned int"):
+        t = t.e
+    if not (isinstance(t, C.Call) and isinstance(t.f, C.Name) and t.f.id == "__builtin_clz" and len(t.args) == 1):
+        return None
+    x = t.args[0]
+    c = cond.c
+    if isinstance(c, C.Binary) and c.op == "!=" and isinstance(c.r, C.Num) and c.r.value == 0:
+        c = c.l
+    if C.expr_text(c) != C.expr_text(x) or has_effects(x):
+        return None
+    return x
 
 
 def _children(e):

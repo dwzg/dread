@@ -44,6 +44,20 @@ def polished(body, name="f", int_bits=None, head=HEAD, raw=(), pointers=None):
     return cparse.unparse(fn, notes=False, style="readable")
 
 
+def test_a_count_of_leading_zeros_shifted_by_five_is_a_test_for_zero():
+    """GCC -Os on Cortex-M tests a value for zero as clz r0, r0; lsr r0, r0, #5, which the lifter writes
+    (x ? (u32)__builtin_clz(x) : 32) >> 5: 1 where x is 0, 0 elsewhere. It prints x == 0 (FreeRTOS GCC
+    -Os's prvCheckExpectedState(... >> 5) 51 times). Not where the shift is another or the value's
+    test differs from what is counted."""
+    got = polished("u32 f(u32 r0, u32 r1)\n{\n    return (r0 ? (u32)__builtin_clz(r0) : 32) >> 5;\n}\n")
+    assert "return r0 == 0;" in got, got
+    got = polished("u32 f(u32 r0, u32 r1)\n{\n    g(((r0 != 0) ? __builtin_clz(r0) : 32) >> 5, r1);\n    return r1;\n}\n")
+    assert "g(r0 == 0, r1);" in got, got
+    for body in ("u32 f(u32 r0, u32 r1)\n{\n    return (r0 ? (u32)__builtin_clz(r0) : 32) >> 4;\n}\n",
+                 "u32 f(u32 r0, u32 r1)\n{\n    return (r1 ? (u32)__builtin_clz(r0) : 32) >> 5;\n}\n"):
+        assert "== 0" not in polished(body), body
+
+
 def test_negative_numbers_where_a_value_is_one():
     """A complement (mvn) or a constant near the top of its type is -k where it is assigned, returned,
     passed, compared for equality, compared in order where the comparison is signed, or added; it stays

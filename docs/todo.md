@@ -2815,6 +2815,13 @@ model).
   (how some compilers initialise a local array) prints as a do-while over integer pointers. Make it a
   local array with its initialiser read from the image (or a copy helper's call). Public example: none
   found (GCC calls memcpy or copies words); test: gizmo assembly.
+- [x] **A count of leading zeros shifted by five is a test for zero** (2026-10-26, dread.polish _zero_test).
+  GCC -Os on Cortex-M tests a value for zero as clz r0, r0; lsr r0, r0, #5, which the lifter writes
+  (x ? (u32)__builtin_clz(x) : 32) >> 5: 1 where x is 0, 0 elsewhere. It prints x == 0 now
+  (prvIsQueueEmpty's `return r4 == 0;`). Main -> this on the eight builds: the gate accepts the same
+  functions; FreeRTOS GCC -Os 50 such expressions -> 0 (100 lines in 13 files), clang -O2 15 -> 0;
+  gizmo, RISC-V (no clz) and GCC -O0 unchanged. Left: clz's other uses (31 - clz, the highest set bit)
+  keep their form.
 - [x] **Characters as characters.** Bytes from char loads compared with printable codes print as hex
   (`0x20u`, `0x3du`, `0xdu`). Print a printable or common-escape constant compared with or stored
   from a char-typed value as a character literal. Public examples: gizmo a32 parse_kv (`0x20u`,
