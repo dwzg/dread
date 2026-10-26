@@ -851,9 +851,32 @@ def dead(fn):
         changed = True
 
 
+def _written_between(g, d, n, name):
+    """Whether a path from node d (a copy) to node n (a read of what it copied) that does not run d
+    again runs a statement that may write name, the copy's source: name then holds another value at n
+    than the copy took, although the same definitions of it may reach both, the later one through a
+    loop's back edge (pvPortMalloc on clang 12 -Os copies r1 into r6 at the top of its loop and reloads
+    r1 before the exit behind which it reads r6: the read took r1, the reloaded value, and the readable
+    C stored through address 4)."""
+    seen = set()
+    stack = [(i, False) for i in g.nodes[d].succ]
+    while stack:
+        i, dirty = stack.pop()
+        if i == d or i >= len(g.nodes):
+            continue
+        if i == n and dirty:
+            return True
+        dirty = dirty or name in g.nodes[i].writes
+        if (i, dirty) not in seen:
+            seen.add((i, dirty))
+            stack.extend((j, dirty) for j in g.nodes[i].succ)
+    return False
+
+
 def propagate(fn):
     """Constants and copies into the simple statements that read them, those inside a conditional
-    block too (flat_view: a constant address in a register reaches an IT block's load)."""
+    block too (flat_view: a constant address in a register reaches an IT block's load). A copy goes
+    only where no path from it to the read writes its source (_written_between)."""
     view = flat_view(fn)
     g = Graph(view)
     reach = g.reaching()
@@ -877,6 +900,7 @@ def propagate(fn):
             elif len(defs) == 1 and isinstance(value, C.Name) and value.id in g.scope and value.id != v:
                 d = next(iter(defs))
                 if reach[n.index].get(value.id) != reach[d].get(value.id) or \
+                        _written_between(g, d, n.index, value.id) or \
                         (_writes_name(s, value.id) and not _moved_back(s, v, value.id, fn)):
                     continue
             else:

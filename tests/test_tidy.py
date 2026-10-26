@@ -501,6 +501,40 @@ def test_a_slot_reached_through_a_variable_that_holds_a_frame_address_stays():
     assert "return *(volatile u32 *)(sp0 - 12);" in out and "return a1" not in out, out
 
 
+def test_a_copy_does_not_go_past_a_write_of_its_source_on_a_loop_exit():
+    """pvPortMalloc on clang 12 -Os walks its free list: r6 = r1 at the loop's top, r1 reloaded from the
+    block before the loop's second exit, r6 + 4 read behind both exits. The same definitions of r1
+    reach the copy and the read (the reload through the back edge), and propagate wrote r1 + 4 there:
+    on the second exit r1 is the next block's address, 0, and the readable C stored through address 4.
+    A copy goes only where no path from it to the read writes its source."""
+    text = """u32 f(u32 r0, u32 r5)
+{
+    u32 r1, r6, r9;
+    r6 = r0;
+    r1 = *(volatile u32 *)r6;
+    if (r1 == 0) goto L_out;
+L_top: ;
+    r6 = r1;
+    if (*(volatile u32 *)(r6 + 4) >= r5) goto L_found;
+    r1 = *(volatile u32 *)r6;
+    if (r1 != 0) goto L_top;
+L_found: ;
+    r9 = r6 + 4;
+    return r9;
+L_out: ;
+    return 0;
+}
+"""
+    fn = cparse.parse(text).function("f")
+    tidy.propagate(fn)
+    out = cparse.unparse(fn, notes=False)
+    assert "r9 = r6 + 4;" in out and "*(volatile u32 *)(r1 + 4) >= r5" in out, out    # (the read before: r1)
+    plain = text.replace("    r1 = *(volatile u32 *)r6;\n    if (r1 != 0) goto L_top;\n", "")
+    fn = cparse.parse(plain).function("f")                 # (no write of r1 behind the copy: it goes)
+    tidy.propagate(fn)
+    assert "r9 = r1 + 4;" in cparse.unparse(fn, notes=False)
+
+
 def test_a_slot_does_not_take_the_name_of_a_type_the_function_uses():
     """The slot at sp0 - 8 would be s8, which is also a type; where the function uses that type (a
     signed byte load elsewhere), its slots take the next prefix."""
