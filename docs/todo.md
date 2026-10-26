@@ -3373,11 +3373,16 @@ the pilot's names, which the first review had taken for raw frames. New items:
   RISC-V GCC -O2's vTaskResume and vTaskPrioritySet (the cast; the second did not compile there either).
   Tests: tests/test_tidy.py test_a_slot_reached_through_a_variable_that_holds_a_frame_address_stays,
   tests/test_polish.py test_a_pointer_used_as_an_index_is_cast_to_an_integer.
-- [ ] **A copy past a reload of its source on a loop's exit** (pvPortMalloc on clang 12 -Os, from the
+- [x] **A copy past a reload of its source on a loop's exit** (pvPortMalloc on clang 12 -Os, from the
   item above): its free-list walk copies r1 into r6 at the loop's top and reloads r1 before the second
   exit, behind which it reads r6 + 4; propagate wrote r1 + 4 there (the same definitions of r1 reach the
   copy and the read, the reload through the back edge), and the readable C stored through address 4.
-  On its own branch: a copy goes only where no path from it to the read writes its source.
+  Done 2026-10-26 (dread.tidy _written_between): a copy goes only where no path from it to the read,
+  without running it again, writes its source. On copies of measure-41's builds, against main:
+  pvPortMalloc readable on clang 12 -Os (1 -> 0 refusals); on the nine builds one line differs, clang
+  -O2's prvNonBlockingReceiverTask_5300 reading r5 | strcmp(...) where it read r8 (r8 is written between
+  the copy and the read on paths that leave before it: the same value either way). Test:
+  tests/test_tidy.py test_a_copy_does_not_go_past_a_write_of_its_source_on_a_loop_exit.
 - [ ] **Stale stack content in the readable gate** (xStreamBufferReceive and its FromISR form on the GCC
   -O2 builds, five refusals, from the item above). In those cases memcpy is stubbed (its source, a
   generated pointer, faulted) and writes nothing: the generic stub fills only the tested function's
