@@ -452,6 +452,8 @@ class Machine:
         self.unalias = {}           # address a moved function is stubbed at -> its original entry
         self.wide_result = False    # also compare the second result register
         self.may_hang = False       # running into the instruction limit is a result, not an error
+        self.may_fault = False      # a data access to unmapped memory ends the run as a result (a case's fault)
+        self.fault_at = None        # the instruction such an access ended the last call at
         self.io_fixed = None        # {byte address: value}: peripheral reads return these, see _on_io
         self.polls = {}             # see poll_read()
         self.laters = {}            # see later_read()
@@ -725,13 +727,19 @@ class Machine:
 
     def covered_insns(self, insns):
         """The addresses of `insns` (instruction addresses) that lie in executed blocks. (A lifted
-        Body lists its own instructions before the shared code, which may lie in front of them.)"""
+        Body lists its own instructions before the shared code, which may lie in front of them.) After
+        a fault that ended a call as its result (may_fault), the instructions behind the faulting one in
+        its block are left out: they did not run (when that block also ran whole earlier in the call,
+        they are left out too: counted short, never long)."""
         import bisect
         insns = sorted(insns)
         out = set()
+        fault = getattr(self, "fault_at", None)
         for addr, size in getattr(self, "blocks", ()):
             i = bisect.bisect_left(insns, addr)
             while i < len(insns) and insns[i] < addr + size:
+                if fault is not None and addr <= fault < addr + size and insns[i] > fault:
+                    break
                 out.add(insns[i])
                 i += 1
         return out
@@ -921,11 +929,15 @@ class Machine:
         """Call the function at addr (its original entry) with args in the argument registers;
         further arguments go into the stack words at the stack top, as the calling convention
         passes them. Returns a Result; raises EmuError on a fault or when the function does not
-        return within max_instructions (unless may_hang). stall: a run that enters no block it had
+        return within max_instructions (unless may_hang). With may_fault, a load or store to unmapped
+        memory ends the run as a result: the Result's log ends with ("fault", "read" or "write",
+        address), and fault_at is the instruction (covered_insns counts nothing behind it in its
+        block). stall: a run that enters no block it had
         not entered for that many instructions stops as at the limit (self.stalled; the case
         generator's searches: a run circling in code it knows mostly runs into the limit)."""
         uc, lay = self.uc, self.layout
         isa = self.isa_of(addr)
+        self.fault_at, faulted = None, None
         # A moved function that left a branch at its old entry is entered through it, so that the
         # branch is tested with every case; one without is called where it lies now.
         moved = self.aliases.get(addr)
@@ -1032,9 +1044,14 @@ class Machine:
         try:
             uc.emu_start(self.arch.start_address(addr, isa), lay.sentinel, count=count)
         except UcError as e:
-            if getattr(e, "errno", None) not in UNMAPPED:   # an invalid instruction (Core.retire)
+            errno = getattr(e, "errno", None)
+            if errno not in UNMAPPED:       # an invalid instruction (Core.retire)
                 self.core.retire()
-            raise EmuError("emulation fault at pc=0x%x: %s" % (uc.reg_read(lay.pc), e))
+            if self.may_fault and errno in (UC_ERR_READ_UNMAPPED, UC_ERR_WRITE_UNMAPPED) and self.unmapped is not None:
+                faulted = ("read" if errno == UC_ERR_READ_UNMAPPED else "write", self.unmapped[1],
+                           uc.reg_read(lay.pc) & ~1)
+            else:
+                raise EmuError("emulation fault at pc=0x%x: %s" % (uc.reg_read(lay.pc), e))
         except Exception as e:              # an exception in a stub or a hook of the case
             raise EmuError("%s in a stub or hook at pc=0x%x: %s" % (type(e).__name__, uc.reg_read(lay.pc), e))
         finally:
@@ -1053,6 +1070,9 @@ class Machine:
         for register, poll in sorted(self.polls.items()):
             if poll["count"] > poll["stages"][-1][0] + POLL_LOGGED:
                 self.calls.append(("io poll reads", register, poll["count"]))
+        if faulted is not None:             # (may_fault: the access is the result, compared like a stop)
+            self.fault_at = faulted[2]
+            return Result(0, writes, list(self.calls) + [("fault", faulted[0], faulted[1])], layout=lay)
         if uc.reg_read(lay.pc) != lay.sentinel:
             self.timed_out = self.spinning is None and not getattr(self, "stopped_at", None)
             self.self_loop = self.self_loop_at(uc) if self.timed_out else None

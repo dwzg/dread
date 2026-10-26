@@ -91,7 +91,9 @@ for a debugger, the RISC-V demo's prints first and waits in the UART's output), 
 ended so and from an answer that ends so: the callee answered at every call (where that call is its
 first); where that run fails, as one that goes on into the null pointer the check guarded does, the
 call answered and the callee's next call ending the run instead (a case's stop_from); where that fails
-too, the first call the run makes after the answered one ending it (behind; until 2026-10-26 only the
+too, the first call the run makes after the answered one ending it; where the run faults on a data
+access before any call, the fault ending it as its result (a case's fault: RISC-V GCC -O2 jumps back
+from its out-of-line configASSERT call into a read of the null queue) (behind; until 2026-10-26 only the
 first, for the answers' own runs that ended at the callee itself, and FreeRTOS's clang -O2 queue
 functions kept the instruction behind their first configASSERT unrun). Each answer is a
 case like any other (marked "answer"), compared under its stubs in both images; nothing is answered
@@ -228,10 +230,10 @@ ANSWER_VISITS = 2           # visits of a branch whose decision is answered (the
 ANSWER_BASES = 2            # cases a branch is answered from at most (that give something to answer: Generator.answers)
 ANSWER_SCAN = 8             # ... among the first this many cases that get there
 ANSWER_EVENTS = 512         # calls and visits a run records at most
-ANSWERS = 4                 # the frontier answers' version (Generator.answers): cached cases get them anew when
+ANSWERS = 5                 # the frontier answers' version (Generator.answers): cached cases get them anew when
                             # it changes, or when the cases they are made from change (_answered); 2: the code
                             # behind a stop (behind, stop_from); 3: a word read again (reread, later); 4: behind a
-                            # call whose run ended at a stop deeper in
+                            # call whose run ended at a stop deeper in; 5: a case that ends at a fault there
 READING_MARKS = ("carried", "firm", "kept", "why", "by", "answer")     # marks a case made from another drops
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
 # Float arguments (hard float), as bits: zeros, ones, halves, decimal steps, the integer conversions'
@@ -608,6 +610,7 @@ class Generator:
         marks = getattr(m, "call_marks", None)  # (callee, its call number, stub calls before it, answered)
         m.stopped_at = None                 # "calls" or "never returns" when a stub ended the run
         m.ends_at_call = bool(case.get("stops") or (case.get("hang") and case.get("stub_calls")))
+        m.may_fault = bool(case.get("fault"))   # (a data access to unmapped memory ends the run as its result)
         effects = case.get("effects", ())
         fills = case.get("fills", ())
         own = set() if case.get("tight") else None
@@ -2834,7 +2837,9 @@ class Generator:
             returns after nine rounds with two checks each); that call answered and the callee's next call
             ending the run instead (answered_stop); where that fails too (the run goes on into what the
             check in front of the call guards, a null pointer), the first call it makes after the answered
-            one ending it, so that the code up to there is compared. Whether one gained. (Until 2026-10-26
+            one ending it, so that the code up to there is compared; and where the run faults on a data
+            access before any call, the fault ending it as its result (fault: true). Whether one gained.
+            (Until 2026-10-26
             only the first, for the answers' own runs that ended at the callee itself, and runs that went on
             faulted: FreeRTOS's clang -O2 queue functions kept the instruction behind their first
             configASSERT unrun.)"""
@@ -2865,14 +2870,24 @@ class Generator:
                 return False
             at = next((i for i, e in enumerate(events) if e[0] == "call" and e[1] == stop and e[2] == k), None)
             nxt = next((e for e in events[at + 1:] if e[0] == "call"), None) if at is not None else None
-            if nxt is None or nxt[1] in (entry, self.fake_pointer):
-                return False
-            _, x, kx = nxt[:3]
-            ended = json.loads(json.dumps(trial))
-            ended["stops"] = sorted(set(ended.get("stops", ())) | {x})
-            ended["stop_from"] = [[a, c] for a, c in ended["stop_from"] if a != x] + ([[x, kx]] if kx > 1 else [])
-            m3, _, error3 = run(ended)
-            return gained(ended, m3, error3, depth)
+            if nxt is not None and nxt[1] not in (entry, self.fake_pointer):
+                _, x, kx = nxt[:3]
+                ended = json.loads(json.dumps(trial))
+                ended["stops"] = sorted(set(ended.get("stops", ())) | {x})
+                ended["stop_from"] = [[a, c] for a, c in ended["stop_from"] if a != x] + ([[x, kx]] if kx > 1 else [])
+                m3, _, error3 = run(ended)
+                if gained(ended, m3, error3, depth):
+                    return True
+                if runs[0] <= 0:
+                    return False
+            if error2 is not None and getattr(m2, "unmapped", None) is not None:
+                # The run went on into what the check refused and faulted on a data access before any
+                # call (a null queue read at once: RISC-V GCC -O2 jumps back from its out-of-line
+                # configASSERT call): the fault ends the case as its result (a case's fault)
+                faulting = dict(trial, fault=True)
+                m4, _, error4 = run(faulting)
+                return gained(faulting, m4, error4, depth)
+            return False
 
         def renumber(case, after):
             """A stub call inserted as number after + 1: the effects and fills of later calls move on."""

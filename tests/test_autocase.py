@@ -1664,3 +1664,84 @@ def test_answers_run_the_code_behind_a_call_whose_run_ended_deeper(tmp_path):
     assert made is not None, new
     assert any(c[0] == report.entry for c in made["calls"]) and note.entry in made["stops"] and made.get("answer"), made
     assert gen.survives(fn.entry, made)
+
+
+# A case that ends at a fault (a case's fault, Machine.may_fault): first_item asserts its queue and
+# counts the failed check behind the call, then reads the queue at once; with the null queue the
+# assertion refused, the run faults on queue[1] before any call, so no stop can end it there.
+FAULT_C = NOIPA_DEF + """
+volatile unsigned asserted;
+NOIPA void wait_for_debugger(unsigned line) { volatile unsigned go = 0; while (!go) ; }
+unsigned first_item(unsigned *queue)
+{
+    if (queue == 0) { wait_for_debugger(3); asserted++; }
+    return queue[1] * 3u + 1u;
+}
+"""
+
+
+def fault_target(tmp_path):
+    """The first_item program's target and its Generator."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(FAULT_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "first_item", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    return Generator(t, t.image())
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_a_case_that_ends_at_a_fault(tmp_path):
+    """fault: true: a load or store to unmapped memory ends the run as its result, logged ("fault",
+    "read", address) after what the run logged before, compared like any log; the instructions behind
+    the faulting one in its block do not count as run. Without the mark the run is an error."""
+    gen = fault_target(tmp_path)
+    p = gen.program
+    fn, wait = p.by_name["first_item"], p.by_name["wait_for_debugger"]
+    case = {"args": [0, 0, 0, 0], "mem": [], "returns": [], "calls": [[wait.entry, 1, 0]], "frame": 0,
+            "stops": [wait.entry], "stop_from": [[wait.entry, 2]], "fault": True}
+    m = gen.machine()
+    m.plan = []
+    gen.apply(m, case)
+    m.cover(min(fn.insns), max(fn.insns) + 4)
+    got = m.call(fn.entry, *case["args"], max_instructions=200_000)
+    assert got.calls[-1] == ("fault", "read", 4), got.calls
+    assert m.fault_at in fn.insns and not {a for a in m.covered_insns(fn.insns) if a > m.fault_at}
+    ran, why = gen.attempt(fn.entry, fn.insns, case)
+    assert why is None and m.fault_at in ran and gen.survives(fn.entry, case)
+    ran, why = gen.attempt(fn.entry, fn.insns, dict(case, fault=False))
+    assert why and "emulation fault" in why, why
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_end_the_code_behind_a_stop_at_a_fault(tmp_path):
+    """From a case whose run ended at wait_for_debugger's call (a null queue), the answers' three tries
+    of the code behind a stop fail (the run faults on queue[1], and no call comes before it); the fault
+    then ends the case (fault: true), and the count behind the call runs."""
+    gen = fault_target(tmp_path)
+    p = gen.program
+    fn, wait = p.by_name["first_item"], p.by_name["wait_for_debugger"]
+    words = sorted(fn.insns)
+    call = next(a for a in words if p.arch.flow(p.insn(a))[0] == "call" and p.arch.flow(p.insn(a))[1] is not None
+                and p.arch.flow(p.insn(a))[1] & ~1 == wait.entry)
+    count = {a for a in words if call + p.insn_size(call) <= a < call + p.insn_size(call) + 8}
+    stopped = {"args": [0, 0, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0, "hang": True,
+               "limit": 200_000, "stops": [wait.entry]}
+    plain = {"args": [0x20100000, 0, 0, 0], "mem": [[0x20100000 + 4 * i, 4, i] for i in range(4)], "returns": [],
+             "calls": [], "frame": 0}
+    before = set().union(*(gen.coverage(fn.entry, fn.insns, c) for c in (stopped, plain)))
+    assert call in before and not count & before
+    new = gen.answers("first_item", fn.entry, fn.insns, [stopped, plain])
+    made = next((c for c in new if count <= gen.coverage(fn.entry, fn.insns, c)), None)
+    assert made is not None and made.get("fault") and made.get("answer"), new

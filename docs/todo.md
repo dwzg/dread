@@ -4259,14 +4259,25 @@ undone). Other decisions are taken by the recommended option and written down in
   278 (xTimerCreateTimerTask), GCC -O0 393 -> 394 (prvPerformTaskSyncTests), GCC -Os and clang -O2
   unchanged, none lost; the readable gate accepts every new one (RISC-V GCC -O2 224 of 226: the two
   that stayed lifted before still do).
-- [ ] **A case that ends at a fault** (found 2026-10-26 behind the item above). On RISC-V GCC -O2, 40
-  functions keep the instruction behind a configASSERT call unrun (GCC puts the call out of line and
-  jumps back): with the null queue the assertion refused, the run faults at once (0x38 or 0x40 on the
-  virt board, where nothing is mapped below RAM), before any call that could end it, so no try of the
-  code behind a stop gives a case. A case whose end is a data fault, compared like a stop (the logs and
-  writes up to it, the faulting access's address and kind), would run that code. Its risk: a fault that
-  depends on the stack layout (fragile) or on the C's own address arithmetic; it changes what the
-  comparison accepts, so docs/decisions.md first.
+- [x] **A case that ends at a fault** (found 2026-10-26 behind the item above, done the same day;
+  docs/decisions.md "A case that ends at a fault"). On RISC-V GCC -O2, 40 functions kept the instruction
+  behind a configASSERT call unrun (GCC puts the call out of line and jumps back): with the null queue
+  the assertion refused, the run faults at once (0x38 or 0x40 on the virt board, where nothing is
+  mapped below RAM), before any call that could end it. A case may say now that its run ends at a fault
+  (`fault: true`, dread.emu Machine.may_fault): a load or store to unmapped memory ends the run as its
+  result, logged ("fault", kind, address) after what it logged before and compared like the rest; the
+  instructions behind the faulting one in its block do not count as run (covered_insns: short, never
+  long); a fetch fault stays an error. The frontier answers' code behind a stop makes such a case where
+  the answered run faults before any call (behind's last try, ANSWERS 5). Deep-stops -> this (copies of
+  that branch's results): RISC-V GCC -O2 226 -> 244 (xQueueGenericSendFromISR, xQueueGiveFromISR,
+  xQueueReceiveFromISR, xQueuePeekFromISR, xQueueGiveMutexRecursive, xQueueTakeMutexRecursive,
+  xStreamBufferSend, xStreamBufferReceive and their FromISR forms, xStreamBufferNextMessageLengthBytes,
+  xTaskGenericNotify, xTaskGenericNotifyWait, xTaskRemoveFromEventList, vTaskPlaceOnEventListRestricted,
+  vTaskPlaceOnUnorderedEventList, prvNotifyQueueSetContainer, vEventGroupClearBitsCallback), RISC-V GCC
+  -Os 278 -> 279 (vTaskPlaceOnEventListRestricted), GCC -Os 345, clang -O2 317, GCC -O0 394 and gizmo
+  a32, m3, m4, rv32 unchanged, none lost;
+  the readable gate accepts every new one (RISC-V GCC -O2 242 of 244, the two of before). Tests:
+  tests/test_autocase.py test_a_case_that_ends_at_a_fault, test_answers_end_the_code_behind_a_stop_at_a_fault.
 - [x] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
   (found 2026-10-23 with the frontier answers, FreeRTOS RISC-V GCC -Os). With xTaskResumeAll accepted
   (its answers covered it) on top of what was accepted before, the whole image differs: the stream-buffer

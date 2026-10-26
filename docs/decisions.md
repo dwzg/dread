@@ -5245,3 +5245,27 @@ parameters from pushes, system calls and calls that keep every argument", part (
   reads of a word would fail such a case; readable C keeps memory accesses volatile now, and the open
   Memory item (plain accesses for RAM) has to keep the reads a case changes.
 
+
+## A case that ends at a fault (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Behind an assertion's call, the code that runs when the handler returns goes on with
+  what the assertion refused. On FreeRTOS's RISC-V GCC -O2 build forty functions keep the instruction
+  behind such a call unrun: GCC puts the call out of line and jumps back, and with the null queue the
+  run reads at once at 0x38 or 0x40, where nothing is mapped, before any call that could end it. A run
+  that faults was never a case (the runner compared "original: fault" with "rebuilt: fault" as a
+  difference, and the generator dropped such inputs). Should a fault be a result?
+- **Options.** (a) No: such code stays unrun and its functions dropped. (b) Map the null page so that
+  the reads give 0 (a model the hardware does not have). (c) A case may say that its run ends at a fault:
+  a load or store to unmapped memory then ends the run as its result, logged with its kind and address
+  after what the run logged before, and compared like any log (the writes up to it too); the
+  instructions behind the faulting one in its block do not count as run. Only the frontier answers'
+  code behind a stop makes such cases, where the run after the answered call faults before any call.
+- **Choice.** (c). The lifted and readable C make the same loads and stores in the same order (volatile),
+  so the first access to unmapped memory is the same one at the same address in both images, and what
+  the case compares is behaviour up to it: nothing is taken away from the comparison of other cases, and
+  a C that faults elsewhere or not at all differs. A fault whose address depends on the stack (a stale
+  local used as a pointer) would differ between the images and fail (conservative, and the fragile
+  check's business). Fetch faults (a jump to unmapped memory) stay errors. Coverage counts short at the
+  faulting block (a block that also ran whole earlier loses its tail for that case), never long.
