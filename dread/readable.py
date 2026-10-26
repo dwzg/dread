@@ -106,6 +106,8 @@ class Context:
         self.arg_regs, self.reads, self.preserved, self.variadic = [], {}, {}, set()
         self.save_areas = set()         # functions whose entry pushes argument registers only (entry_save_areas)
         self.formats = {}               # function -> the index of its printf format argument (dread.varargs)
+        self.syscall_reads = None       # what a system call's handler reads, where the target says (dread.tidy
+                                        # syscall_binds)
         self.format_words = {}          # a format's address -> the words of arguments it takes (dread.regflow's
                                         # formats: those its calls pass)
         self.results = []               # the registers a result comes back in (the target's [abi])
@@ -166,6 +168,8 @@ class Context:
             if second in flow.kept_regs(name) and second not in flow.preserved_regs(name):
                 self.leftover.add(name)
                 self.leftover_why[name] = flow.why(name, second)
+        reads = getattr(target.abi, "syscall_reads", None)
+        self.syscall_reads = None if reads is None else list(reads)
         from dread import varargs
         taking = varargs.family(target)
         self.formats = {fn.name: taking[fn.name] for fn in program.functions if fn.name in taking}

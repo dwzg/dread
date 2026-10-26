@@ -5147,3 +5147,31 @@ parameters from pushes, system calls and calls that keep every argument", part (
   read from the image only where the code puts its address into the register on the straight run in
   front of the call; a stub reads it from the emulator's memory, never from code, free space or the room
   behind the image, where the two images differ.
+
+## What a system call hands its handler (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20), from docs/todo.md's "No
+parameters from pushes, system calls and calls that keep every argument", part (3).
+
+- **Question.** The lifters bind every argument register to a system call, in and out (`svc`: r0-r3,
+  `ecall`: a0-a7): their C cannot know what the handler reads or writes. A function whose entry registers
+  flow into the binding took them all as parameters (FreeRTOS's RISC-V vTaskDelay(a0, ..., a7) around its
+  yield). The emulator runs a system call as a no-op and logs no register there, so nothing compares what
+  is bound. What should readable C hand the handler?
+- **Options.** (a) Leave it. (b) Nothing but what the function reads after the call, as dread.regflow
+  already assumes (an `ecall` reads nothing there). (c) A statement of the target's: the registers the
+  handler reads (`[abi] syscall_reads`), every argument register where it says nothing; readable C binds
+  those and the registers read after the call, regflow counts them read at the call, and the cases log
+  them at each system call. (d) Work it out from the handler's own code (the trap vector and what it reads
+  before it saves the registers).
+- **Choice.** (c). (b) is wrong for a firmware whose system calls take arguments (a write with its file,
+  buffer and length, Zephyr's user-mode calls), and nothing would notice: the emulator does not run the
+  handler. (d) finds a handler that saves every register (a context switch) reading them all, and a
+  handler that dispatches through a table is out of reach; it may come later for what (c) leaves unsaid.
+  What the target states is checked as far as the cases go: the registers it names are logged at each
+  system call, so the gate compares what readable C hands over; a register it leaves out that the handler
+  does read is the statement's error, not seen. A register read after the call stays bound in and out, so
+  a handler that writes it is kept; one nobody reads after the call is left alone by the C (the
+  handler's write of it, if any, changes nothing the function does). The FreeRTOS recipe says `[]` for
+  its three ports: the RISC-V yield saves the context and switches tasks, the Cortex-M `svc 0` starts the
+  first task, and neither reads an argument register (portASM.S, port.c).

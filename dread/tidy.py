@@ -4086,6 +4086,178 @@ def trim_formats(name, calls, run):
     return changed
 
 
+_SYSCALL = re.compile(r'^"(?:ecall|svc\s+#?\w+)"$')     # the lifters' system calls (lift _svc, lift_riscv _ecall)
+
+
+def syscall_block(s):
+    """(declaration, asm, {bound variable: [its register, the variable it is set from, the statement that
+    assigns it back]}) of a block the lifters write for a system call (dread.lift _svc, dread.lift_riscv
+    _ecall: register variables bound to the argument registers and set from the function's variables,
+    the asm with each as a "+r" operand, then each assigned back); None for any other statement."""
+    if not isinstance(s, C.Block) or len(s.body) < 2:
+        return None
+    decl, asm = s.body[0], s.body[1]
+    if not isinstance(decl, C.Decl) or not isinstance(asm, C.Asm) or asm.inputs or asm.labels:
+        return None
+    if len(asm.template.parts) != 1 or not _SYSCALL.match(asm.template.parts[0]):
+        return None
+    binds = {}
+    for d in decl.items:
+        m = re.match(r'^__asm__\("(\w+)"\)$', d.asm or "")
+        if not m or not isinstance(d.init, C.Name) or d.ptr or d.dims:
+            return None
+        binds[d.name] = [m.group(1), d.init.id, None]
+    if len(asm.outputs) != len(binds) or any(
+            "".join(o.constraint.parts) != '"+r"' or not isinstance(o.e, C.Name) or o.e.id not in binds
+            for o in asm.outputs):
+        return None
+    for x in s.body[2:]:
+        if not (isinstance(x, C.ExprStmt) and isinstance(x.e, C.Assign) and x.e.op == "=" and
+                isinstance(x.e.target, C.Name) and isinstance(x.e.value, C.Name) and x.e.value.id in binds
+                and binds[x.e.value.id][2] is None):
+            return None
+        binds[x.e.value.id][2] = x
+    return decl, asm, binds
+
+
+def _lists_in(s):
+    """The statement lists directly inside a statement (a block's, an if's arms, a loop's or a switch's
+    body; a single statement as a list of one)."""
+    def blk(x):
+        return x.body if isinstance(x, C.Block) else [x]
+    if isinstance(s, C.Block):
+        return [s.body]
+    if isinstance(s, C.If):
+        return [blk(s.then)] + ([blk(s.orelse)] if s.orelse is not None else [])
+    if isinstance(s, (C.While, C.DoWhile, C.For, C.Switch)):
+        return [blk(s.body)]
+    return []
+
+
+def _names_in(s, reads=()):
+    """Every name an expression of a statement or of what it holds mentions (read or written: as reads,
+    an over-approximation); of a system call's block (syscall_block) only what it hands the registers
+    the target says the handler reads (reads): the rest of it leaves the function's variables as they
+    were once its bindings go, so it reads them no more than it must (syscall_binds)."""
+    out = set()
+
+    def visit(x):
+        got = syscall_block(x)
+        if got is not None:
+            out.update(source for reg, source, _ in got[2].values() if reg in reads)
+            return
+        for e in _stmt_all_exprs(x):
+            out.update(n.id for n in walk_expr(e) if isinstance(n, C.Name))
+        if isinstance(x, C.Decl):
+            for d in x.items:
+                if d.init is not None:
+                    out.update(n.id for n in walk_expr(d.init) if isinstance(n, C.Name))
+        for inner in _inner(x):
+            visit(inner)
+    visit(s)
+    return out
+
+
+def _live_on(stmts, end, reads=()):
+    """The names live in front of stmts when end is live behind them, scanning back: a return reads its
+    value and ends the rest, an assignment to a name ends it, anything else reads every name it mentions
+    (_names_in, with reads: a system call's block) and ends none; None where the code jumps (goto,
+    label, break, continue, case): not known."""
+    live = set(end)
+    for x in reversed(stmts):
+        if isinstance(x, (C.Goto, C.Label, C.Break, C.Continue, C.Case)):
+            return None
+        if isinstance(x, C.Return):
+            live = _names_in(x, reads)
+        elif isinstance(x, C.ExprStmt) and isinstance(x.e, C.Assign) and x.e.op == "=" and \
+                isinstance(x.e.target, C.Name):
+            live = (live - {x.e.target.id}) | _names_in(C.ExprStmt(x.e.value), reads)
+        else:
+            if any(isinstance(y, (C.Goto, C.Label, C.Break, C.Continue, C.Case)) for y in _flat(x)):
+                return None
+            live |= _names_in(x, reads)
+    return live
+
+
+def syscall_binds(fn, run=None):
+    """A system call hands its handler the registers the target says it reads ([abi] syscall_reads) and
+    those whose value the function reads after it, no more: the lifters bind every argument register in
+    and out (their C cannot know), and a function whose entry registers flowed into the binding took
+    them as parameters (FreeRTOS's RISC-V vTaskDelay(a0, ..., a7) around its yield). Where the target
+    says nothing, every binding stays. What is read after the block: the clean-up's liveness behind the
+    function's statement that holds it (flat_view), then back over the statements behind the block in
+    each list on the way in (_live_on), a loop's whole body and condition read again behind each pass;
+    where a jump makes that unknown, every binding stays. The cases log the registers the target names
+    at each system call (dread.emu), so the gate compares what is handed over; what the handler reads
+    beyond them is the target's statement, not checked (the emulator runs a system call as a no-op)."""
+    ctx = run.context if run is not None else None
+    reads = getattr(ctx, "syscall_reads", None)
+    if reads is None:
+        return False
+    found = []
+
+    def visit(lst, path):
+        for i, s in enumerate(lst):
+            here = path + [(lst, i)]
+            got = syscall_block(s)
+            if got is not None:
+                found.append((s, got, here))
+                continue
+            for inner in _lists_in(s):
+                visit(inner, here)
+    visit(fn.body.body, [])
+    if not found:
+        return False
+    # the clean-up's liveness over the function's statements, each system call's block a stand-in that
+    # reads only what the target says its handler reads (the rest of the block leaves the variables as
+    # they were once its bindings go: counted, a loop's back edge kept every binding)
+    import types
+    view = flat_view(fn)
+    body, held = [], {}
+    for s in view.body.body:
+        got = syscall_block(s)
+        if got is not None:
+            sources = [C.Name(source) for reg, source, _ in got[2].values() if reg in reads]
+            stand = C.ExprStmt(C.Call(C.Name("__dread_syscall"), sources)) if sources else C.Empty()
+            held[id(stand)] = s
+            s = stand
+        body.append(s)
+    g = Graph(types.SimpleNamespace(**dict(vars(view), body=C.Block(body))))
+    live_out = g.live()
+    top = {id(held.get(id(n.stmt), n.stmt)): live_out[n.index] for n in g.nodes}
+    changed = False
+    for block, (decl, asm, binds), path in found:
+
+        def after(k):
+            lst, i = path[k]
+            if k == 0:
+                end = top.get(id(lst[i]))
+                return set(end) if end is not None else None
+            parent = path[k - 1][0][path[k - 1][1]]
+            end = after(k - 1)
+            if end is None or isinstance(parent, C.Switch):
+                return None
+            if isinstance(parent, (C.While, C.DoWhile, C.For)):
+                end = end | _names_in(parent, reads)    # (read again in a later pass)
+            return _live_on(lst[i + 1:], end, reads)
+        live = after(len(path) - 1)
+        if live is None:
+            continue
+        keep = {x for x, (reg, _, back) in binds.items()
+                if reg in reads or (back is not None and back.e.target.id in live)}
+        if keep == set(binds):
+            continue
+        decl.items[:] = [d for d in decl.items if d.name in keep]
+        asm.outputs[:] = [o for o in asm.outputs if o.e.id in keep]
+        block.body[2:] = [x for x in block.body[2:] if x.e.value.id in keep]
+        if not decl.items:                  # (nothing bound: the asm alone)
+            lst, i = path[-1]
+            asm.addr = asm.addr or block.addr
+            lst[i] = asm
+        changed = True
+    return changed
+
+
 def push_room(fn, run=None):
     """A push's stores into the function's own frame go where no load of the function reads a byte
     of their words: the words a push makes room for locals with (GCC -Os pushes r0-r3 for an 8- or
@@ -4667,9 +4839,9 @@ def _tidy(fn, run, passes, rounds):
     if passes is None:
         void_results(fn, run)               # (first: the clean-up takes out what made the value handed back)
     settle()
-    if passes is None and (trim_calls(fn, run) | params(fn, run)):
+    if passes is None and (syscall_binds(fn, run) | trim_calls(fn, run) | params(fn, run)):
         settle()
-        while trim_calls(fn, run):          # (values nobody reads now: only ever fewer arguments)
+        while trim_calls(fn, run) | syscall_binds(fn, run):     # (values nobody reads now: fewer arguments)
             settle()
         params(fn, run)
     if passes is None:

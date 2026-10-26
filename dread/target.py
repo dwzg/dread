@@ -54,7 +54,7 @@ SCHEMA = {
              "extensions": str},
     "memory": {"regions": list, "io": list, "stack": dict, "sentinel": int, "scratch": dict},
     "abi": {"args": int, "callee_saved": list, "result": list, "float": str, "stack_args": dict,
-            "formats": dict},
+            "formats": dict, "syscall_reads": list},
     "compiler": {"kind": str, "cross": str, "triple": str, "cflags": list, "lifted_cflags": list, "generated_std": str,
                  "cxxflags": list,
                  "ldflags": list,
@@ -176,6 +176,11 @@ class Abi:
     formats       {name: index} of the functions that take a printf format besides the printf family
                   by name (dread.varargs FAMILY), with the index of the format argument: a call whose
                   format is a constant passes the registers the format takes
+    syscall_reads the registers a system call's handler reads (svc, ecall): None where the target does
+                  not say (every argument register is handed to it, as the lifted C does, and a case's
+                  log shows none); a list (FreeRTOS's yield: []) makes readable C hand it those and the
+                  registers read after the call alone, the cases log those at each system call, and
+                  dread.regflow counts them read there
     """
 
     def __init__(self, data, arch):
@@ -192,6 +197,11 @@ class Abi:
         for name, words in self.stack_args.items():
             if not isinstance(words, int) or words < 0:
                 raise ValueError("[abi] stack_args: %s takes a number of words, not %r" % (name, words))
+        self.syscall_reads = data.get("syscall_reads")
+        if self.syscall_reads is not None:
+            self.syscall_reads = [str(r) for r in self.syscall_reads]
+            for reg in self.syscall_reads:
+                arch.reg_id(reg)                # raises on an unknown register name
         self.formats = dict(data.get("formats", {}))
         for name, index in self.formats.items():
             if not isinstance(index, int) or isinstance(index, bool) or index < 0:

@@ -81,6 +81,9 @@ class Layout:
         self.maps = self._merge(spans)
         abi = target.abi
         self.arg_regs = [self.arch.reg_id(r) for r in abi.arg_regs]
+        # what a system call's handler reads, where the target says ([abi] syscall_reads): logged at each one
+        reads = getattr(abi, "syscall_reads", None)
+        self.syscall_regs = None if reads is None else [self.arch.reg_id(r) for r in reads]
         self.saved_regs = [self.arch.reg_id(r) for r in abi.callee_saved]
         self.saved_names = list(abi.callee_saved)
         self.result_regs = [self.arch.reg_id(r) for r in abi.result]
@@ -471,9 +474,10 @@ class Machine:
                                     # byte: what earlier frames left there is gone (dread.runner)
         # (the hooks of _on_unmapped and _on_intr are the Core's, added once)
         # A system call (svc, ecall) runs as a no-op, logged in order: its handler is the firmware's and
-        # not modelled (FreeRTOS's RISC-V port yields with ecall). Any other CPU exception stops the run
-        # as a fault (with a hook in place, Unicorn would take an undefined instruction as handled).
-        self.svc_regs, self.exception = False, None
+        # not modelled (FreeRTOS's RISC-V port yields with ecall), logged with the registers the target
+        # says it reads ([abi] syscall_reads; none where it does not say). Any other CPU exception stops
+        # the run as a fault (with a hook in place, Unicorn would take an undefined instruction as handled).
+        self.svc_regs, self.exception = getattr(layout, "syscall_regs", None) or False, None
 
     # ---- hooks ----
 
@@ -816,7 +820,8 @@ class Machine:
     def _on_intr(self, uc, intno, user):
         if intno in getattr(self.arch, "syscall_numbers", ()):
             if self.svc_regs:
-                self.log("svc", *(uc.reg_read(r) for r in self.layout.arg_regs))
+                regs = self.layout.arg_regs if self.svc_regs is True else self.svc_regs
+                self.log("svc", *(uc.reg_read(r) for r in regs))
             else:
                 self.log("svc")
             return

@@ -1580,6 +1580,15 @@ model).
   ran otherwise than they were made (prvCoreATask's overwrote its loop counter and faulted in the
   original). Left: a format kept in a saved register across a loop (the next item), formats with 64-bit
   or floating-point words, a format argument on the stack.
+  (3) done 2026-10-26 (docs/decisions.md, "What a system call hands its handler"): `[abi] syscall_reads`
+  says what a system call's handler reads; with it readable C binds those and the registers read after
+  the call (dread.tidy syscall_binds), dread.regflow counts them read there and the cases log them at
+  each system call; without it, all stays as it was. The FreeRTOS recipe says `[]` for its three ports.
+  Main -> this on the eight builds: the gate accepts the same functions; gizmo and the ARM builds are
+  unchanged (their svc lies in assembly that is not lifted); RISC-V GCC -Os's readable C 442 -> 412
+  parameters, its bound registers 200 -> 3 (vTaskDelay(a0): `if (xTaskResumeAll() == 0) __asm__
+  volatile ("ecall" ...)`), and the readable_types table found more there (globals as structure
+  pointers in 88 files).
 - [ ] **A format kept in a saved register across a loop.** dread.varargs finds a call's format where
   the code puts its address into the register on the straight run in front of the call
   (dread.constants at). RISC-V GCC -Os computes a format once into a callee-saved register in front of

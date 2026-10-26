@@ -83,7 +83,7 @@ import sys
 
 from dread import target as tgt
 
-VERSION = 28                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 29                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -157,6 +157,8 @@ VERSION = 28                # 3: entry spills (variadic functions) are no use; 4
                             # 28: a call of a function that takes a printf format whose format is a constant
                             # uses the registers the format takes (dread.varargs call_arities: FreeRTOS's
                             # vAssertCalled hands its line on to printf and reads it); variadic and formats
+                            # 29: a system call reads what the target says its handler reads ([abi]
+                            # syscall_reads), where it says; where not, nothing, as before
 
 
 class RegFlow:
@@ -353,9 +355,14 @@ def _rows(program, fn, an, entry_name):
     the same condition, and a write under the opposite condition completes it to a write that
     ends the register, as long as the flags do not change and no other path joins in between.
     (ldrls r3, =table; ldrls r0, [r3, r0, lsl #2] reads no r3 of the caller; ite eq; moveq r0, #1;
-    movne r0, #0 ends r0.)"""
+    movne r0, #0 ends r0.)
+
+    A system call (the layer's is_syscall) reads what the target says its handler reads ([abi]
+    syscall_reads), where it says; else nothing (an indirect call: _handed)."""
     arch = program.arch
     mask = an.mask
+    syscall_reads = getattr(program.target.abi, "syscall_reads", None)
+    is_syscall = getattr(arch, "is_syscall", lambda insn: False)
     insns = [program.insn(a) for a in fn.insns]
     joins = {fn.entry}
     for insn in insns:
@@ -386,6 +393,8 @@ def _rows(program, fn, an, entry_name):
             continue
         kind, target, falls = arch.flow(insn)
         reads, writes = arch.reg_effects(insn)
+        if syscall_reads is not None and is_syscall(insn):
+            reads = set(reads) | set(syscall_reads)     # (what the target says its handler reads)
         if hasattr(arch, "flag_effects"):      # the flags one by one (scratch_names)
             fr, fw = arch.flag_effects(insn)
             reads = (set(reads) - {"flags"}) | {"flags:" + n for n in fr}
@@ -1408,6 +1417,14 @@ class Analysis:
             n, fmt = arities.get(address, (None, None))
             self.format_sites.setdefault(fn.name, []).append([address, callee, n, fmt])
 
+    def _described_syscall(self, row):
+        """Whether a row is a system call whose handler's reads the target states ([abi] syscall_reads):
+        it reads those (_rows) and nothing else, so it is no sink for _handed."""
+        if getattr(self.program.target.abi, "syscall_reads", None) is None:
+            return False
+        insn = self.program.insn(row.address)
+        return insn is not None and getattr(self.program.arch, "is_syscall", lambda i: False)(insn)
+
     def _handed(self):
         """{name: {row: registers}}: what counts as read at the rows where a value goes to code whose reads
         the analysis does not see: a call through a pointer (or an svc, an ecall), a call or tail call of
@@ -1426,7 +1443,8 @@ class Analysis:
         for name, (succ, _, calls, tails, _) in self.graphs.items():
             code = self.rows[name]
             unknown = self.variadic                 # (a call whose format is known passes what it says)
-            sinks = [i for i, c in calls if c is None or (c in unknown and code[i].address not in self.formats)]
+            sinks = [i for i, c in calls if (c is None and not self._described_syscall(code[i])) or
+                     (c in unknown and code[i].address not in self.formats)]
             sinks += [i for i, c in tails if c in unknown and code[i].address not in self.formats]
             sinks += sorted(self.leaves.get(name, ()))
             if not sinks or not args:
@@ -2256,6 +2274,9 @@ def cache_key(target, image):
     formats = sorted((getattr(target.abi, "formats", None) or {}).items())
     if formats:                                             # (the target's [abi] formats, where it has any)
         h.update(b"formats " + repr(formats).encode())
+    syscall_reads = getattr(target.abi, "syscall_reads", None)
+    if syscall_reads is not None:                           # (what it says a system call's handler reads)
+        h.update(b"syscall_reads " + repr(list(syscall_reads)).encode())
     profile = getattr(getattr(target, "compiler", None), "profile", None)
     if profile and os.path.exists(profile):                 # the compiler's profile (dread cclab)
         with open(profile, "rb") as f:

@@ -68,6 +68,12 @@ stack = {top = 0x20400000, size = 0x4000}
 sentinel = 0x00f00000
 scratch = {base = 0x20300000, size = 0x40000}
 
+[abi]
+syscall_reads = []                      # FreeRTOS's system calls read no argument register: the RISC-V
+                                        # port's yield (ecall) saves the context and switches tasks, the
+                                        # Cortex-M ports' svc 0 starts the first task (dread.tidy
+                                        # syscall_binds)
+
 # QEMU's MPS2 AN385 board (ARM's CMSDK peripherals): UART0, the two timers (their interrupts are
 # lines 8 and 9), the core's NVIC and SysTick. Rate 1 (a count per shared-clock unit) makes the
 # emulated core slow against its clocks (about 10,000 instructions a tick), so the runs stay short.
@@ -195,6 +201,12 @@ io = [[0x40000000, 0x40100000], [0xe000e000, 0xe000f000]]
 stack = {top = 0x20400000, size = 0x4000}
 sentinel = 0x00f00000
 scratch = {base = 0x20300000, size = 0x40000}
+
+[abi]
+syscall_reads = []                      # FreeRTOS's system calls read no argument register: the RISC-V
+                                        # port's yield (ecall) saves the context and switches tasks, the
+                                        # Cortex-M ports' svc 0 starts the first task (dread.tidy
+                                        # syscall_binds)
 
 # QEMU's MPS2 AN386 board (ARM's CMSDK peripherals, as the AN385's): UART0, the two timers (their interrupts are
 # lines 8 and 9), the core's NVIC and SysTick. Rate 1 (a count per shared-clock unit) makes the
@@ -344,6 +356,12 @@ io = [[0x02000000, 0x02010000], [0x0c000000, 0x0c400000], [0x10000000, 0x1000100
 stack = {top = 0x80100000, size = 0x4000}
 sentinel = 0x7fff0000
 scratch = {base = 0x800e0000, size = 0x10000}
+
+[abi]
+syscall_reads = []                      # FreeRTOS's system calls read no argument register: the RISC-V
+                                        # port's yield (ecall) saves the context and switches tasks, the
+                                        # Cortex-M ports' svc 0 starts the first task (dread.tidy
+                                        # syscall_binds)
 
 # QEMU's virt board: the NS16550 UART and the CLINT's machine timer (mtime at rate 1: about 10,000
 # instructions a tick, the demo counting 25,000 mtime counts a tick)
