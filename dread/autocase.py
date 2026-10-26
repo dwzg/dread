@@ -74,7 +74,10 @@ one that got there gives it what the other way needs:
     compare-guided stage varies the first SOLVE_RETURNS only);
   - the memory a load reads, wherever its address comes from (a global, a field of an argument's
     object or of what a global points to, a device register): where the load reads is taken from
-    the run, at the visit of the branch;
+    the run, at the visit of the branch; where the run read that word before, also from that read on
+    only (a case's later: the word becomes the value just before it), so that two reads of one word
+    can differ (FreeRTOS's stream buffers read their tail twice and go round while an interrupt moved
+    it; clang -O2 unrolls that loop, and its copies ran in no case);
   - what a stubbed callee stores in a local it was handed the address of (a fill: the case gets the
     function's frame, so that the stub writes there, and a tight fill, so that it writes no further
     than the function's own stores): FreeRTOS's demo checks the value a notification delivers.
@@ -221,11 +224,12 @@ ANSWER_TRIES = 20           # values one input is given for one branch (one way 
 ANSWER_FLIPS = 2            # ... the repairs of at most this many that went the other way and could not be kept
                             # (the next value mostly fails alike: later ones are tried without repairs)
 ANSWER_VISITS = 2           # visits of a branch whose decision is answered (the first ones)
-ANSWER_BASES = 2            # cases a branch is answered from at most
+ANSWER_BASES = 2            # cases a branch is answered from at most (that give something to answer: Generator.answers)
+ANSWER_SCAN = 8             # ... among the first this many cases that get there
 ANSWER_EVENTS = 512         # calls and visits a run records at most
-ANSWERS = 2                 # the frontier answers' version (Generator.answers): cached cases get them anew when
+ANSWERS = 3                 # the frontier answers' version (Generator.answers): cached cases get them anew when
                             # it changes, or when the cases they are made from change (_answered); 2: the code
-                            # behind a stop (behind, stop_from)
+                            # behind a stop (behind, stop_from); 3: a word read again (reread, later)
 READING_MARKS = ("carried", "firm", "kept", "why", "by", "answer")     # marks a case made from another drops
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
 # Float arguments (hard float), as bits: zeros, ones, halves, decimal steps, the integer conversions'
@@ -2498,7 +2502,10 @@ class Generator:
         the function first): ("callee", entry) for the result of a direct call, ("load", address) for the
         load at that address of a global, a device register or a field (memory a case can set: where the
         load reads is learned from a run), ("fill", (address, entry)) for the load at that address of a
-        local the callee at entry was handed the address of (what a stub stores there is the case's).
+        local the callee at entry was handed the address of (what a stub stores there is the case's);
+        then ("reread", address) for each load: the same memory where the run read it before, changed from
+        that read on (a case's later), so that two reads of one word can differ (a loop that reads a
+        stream buffer's tail twice and goes round while an interrupt moved it in between).
         [] when there is none or the trace fails (a layer without value_step follows fixed addresses and
         calls only)."""
         cache = self.__dict__.setdefault("_decisions", {})
@@ -2526,6 +2533,7 @@ class Generator:
                     else:
                         continue
                     out += [s for s in found if s not in out]
+            out += [("reread", d) for kind, d in list(out) if kind == "load"]
         except Exception:
             out = []
         cache[name, branch] = out
@@ -2534,8 +2542,9 @@ class Generator:
     def answers(self, name, entry, words, cases, limit=200_000, loop=False):
         """The frontier answers (see the module's docstring): the cases to add to `cases` (a function's
         generated, kept and written cases: what the lift check runs), made from them. A conditional branch
-        that their runs took one way only (from the first ANSWER_BASES cases that got there, at its first
-        ANSWER_VISITS visits) gets what the other way needs, where what decides it is an input a case can
+        that their runs took one way only (from the first ANSWER_BASES cases that got there and give
+        something to answer, among the first ANSWER_SCAN: a run that read the deciding word in the image
+        gives nothing; at its first ANSWER_VISITS visits) gets what the other way needs, where what decides it is an input a case can
         give (decision_sources): a real callee's result by a stub that answers only the call whose result
         decides (the last call of that callee before the visit; the callee runs at its other calls, so the
         run is the same up to there: the fourth element of a case's calls), a stubbed callee's answer at
@@ -2591,7 +2600,8 @@ class Generator:
             """(machine, events, error) of one run; events: the stub marks ("call", callee, its call
             number, stub calls before it, answered), with watch (branch, decider, reader) the visits of
             the branch's decider ("decide", operands or None, stub calls so far), and the reads of the
-            loads at the addresses in loads ("load", its address, address read, size, value), in order."""
+            loads at the addresses in loads ("load", its address, address read, size, value, the number of
+            that read among the reads that started at that address), in order."""
             runs[0] -= 1
             m = self.machine()
             m.plan = []
@@ -2615,11 +2625,14 @@ class Generator:
                 def arm(uc, address, size, user):
                     armed[0] = address
 
+                counts = {}                 # address -> the reads that started there so far (as later counts them)
+
                 def on_read(uc, access, address, size, value, user):
+                    counts[address] = counts.get(address, 0) + 1
                     if armed[0] is not None and uc.reg_read(pc) & ~1 == armed[0]:
                         if len(events) < ANSWER_EVENTS:
                             events.append(("load", armed[0], address, size,
-                                           int.from_bytes(uc.mem_read(address, size), "little")))
+                                           int.from_bytes(uc.mem_read(address, size), "little"), counts[address]))
                         armed[0] = None
                 for a in sorted(loads):
                     m.hook_add(UC_HOOK_CODE, arm, begin=a, end=a)
@@ -2843,11 +2856,26 @@ class Generator:
         def maker(base, kind, key, events, k, m=None):
             """(make(value) -> case, the input's value in base or None, the address of the memory it sets
             or None) for the source (kind, key) at the decider's visit events[k], or (None, None, None)."""
+            if kind == "reread":            # the memory a load read again: from that read on (later)
+                last = next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key), None)
+                if last is None or last[5] < 2:
+                    return None, None, None
+                _, _, address, size, old, nth = last
+                if size not in (1, 2, 4) or self.layout.in_stack(address) or \
+                        image.base <= address < self.program.writable_end():
+                    return None, None, None
+
+                def make(v):
+                    case = json.loads(json.dumps(base))
+                    case["later"] = [c for c in case.get("later", ()) if c[:3] != [address, size, nth]] + \
+                        [[address, size, nth, v & ((1 << 8 * size) - 1)]]
+                    return case
+                return make, old, address
             if kind == "load":              # the memory the load read last before the visit
                 last = next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key), None)
                 if last is None:
                     return None, None, None
-                _, _, address, size, old = last
+                _, _, address, size, old = last[:5]
                 if size not in (1, 2, 4) or self.layout.in_stack(address) or \
                         image.base <= address < self.program.writable_end():
                     return None, None, None     # (a local, or the image: no input there)
@@ -2862,7 +2890,7 @@ class Generator:
                 last = next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key[0]), None)
                 if last is None or m is None:
                     return None, None, None
-                _, _, address, size, old = last
+                _, _, address, size, old = last[:5]
                 region = next((r for r in reversed(m.regions) if r[2] <= address and address + size <= r[2] + r[3]),
                               None)
                 if size not in (1, 2, 4) or region is None:
@@ -2936,29 +2964,33 @@ class Generator:
             return ordered
 
         def answer(w, base, kind, key):
-            """Answers for the branch w from corpus case base through one source; whether one gained."""
+            """Answers for the branch w from corpus case base through one source: whether one gained, None
+            where base gives nothing to answer (its run does not get there, or reads the deciding word in the
+            image: a pointer given as a small number on a memory map whose flash starts at 0)."""
             at, read = setters.get(w, (None, None))
             case = json.loads(json.dumps(base))
-            loads = (key,) if kind == "load" else (key[0],) if kind == "fill" else ()
+            loads = (key,) if kind in ("load", "reread") else (key[0],) if kind == "fill" else ()
             if kind == "fill":              # (a stubbed callee: with the function's frame its stub fills the local,
                 if all(c[0] != key[1] or len(c) > 3 for c in case.get("calls", ())):    # up to the first word the
-                    return False                                                       # function stored: tight)
+                    return None                                                        # function stored: tight)
                 if case.get("frame", 0) < self.loop_frame(name):
                     case.update(frame=self.loop_frame(name), tight=True)
             if kind == "callee":
                 if key == entry or key in self.endless() or key in self.writing or key == self.fake_pointer:
-                    return False
+                    return None
                 if not any(c[0] == key for c in case.get("calls", ())):
                     case["calls"] = [list(c) for c in case.get("calls", ())] + \
                         [[key, self.reads_mask(names.get(key, "")), 0, []]]       # (counted, never answered)
             m, events, error = run(case, (w, at, read), loads)
             if error is not None and not case.get("stops") and not case.get("hang"):
-                return False
+                return None
             visits = [k for k, e in enumerate(events) if e[0] == "decide"][:ANSWER_VISITS]
+            usable = False
             for k in visits:
                 make, old, keep = maker(case, kind, key, events, k, m)
                 if make is None:
                     continue
+                usable = True
                 nth = sum(1 for e in events[:k + 1] if e[0] == "decide")
                 probes, tried, flips = [], 0, 0
                 while tried < ANSWER_TRIES and runs[0] > 0 and not self.late():
@@ -2978,7 +3010,7 @@ class Generator:
                     if gained(trial, m2, error2, keep=keep, spare=[0] if flips >= ANSWER_FLIPS else None):
                         return True
                     flips += bool(m2.covered_insns(words) - covered)    # (it went the other way, and failed)
-            return False
+            return False if usable else None
 
         direct = {fn.entry for fn in self.callees(words, depth=1)} - {entry, self.fake_pointer}
         sites = {}                          # a call in words -> (its callee, the instruction behind it)
@@ -3014,22 +3046,28 @@ class Generator:
                 if w not in edge():
                     continue
                 sources = self.decision_sources(name, w)
-                bases = [i for i in sorted(reach) if w in reach[i]][:ANSWER_BASES]
+                bases = [i for i in sorted(reach) if w in reach[i]][:ANSWER_SCAN]
                 if DEBUG:
                     print("answer 0x%x: sources %s, bases %s" % (w, sources, bases))
                 if not sources:
                     continue
-                done = False
-                for i in bases:
+                done, used = False, 0
+                for i in bases:             # (ANSWER_BASES of them that give something to answer)
+                    if used >= ANSWER_BASES:
+                        break
+                    usable = False
                     for kind, key in sources:
                         if (w, i, kind, key) in tried or runs[0] <= 0:
                             continue
                         tried.add((w, i, kind, key))
-                        if answer(w, corpus[i], kind, key):
+                        got = answer(w, corpus[i], kind, key)
+                        if got:
                             progress = done = True
                             break
+                        usable |= got is not None
                     if done:
                         break
+                    used += usable
         return corpus[len(cases):]
 
 

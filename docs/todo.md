@@ -4216,14 +4216,32 @@ undone). Other decisions are taken by the recommended option and written down in
   prvBlockOnNotificationsComingFromInterrupts, whose return only a run past all eighteen checks
   reaches.) Tests: tests/test_autocase.py test_a_stop_from_a_later_call,
   test_answers_run_the_code_behind_a_stop.
-- [ ] **A value read twice that changes between the reads** (found 2026-10-26 behind "The code behind a
-  stop"). FreeRTOS's stream buffers read xTail twice and loop while the two reads differ (an interrupt
-  may move it in between); clang -O2 unrolls that loop four times, and the unrolled copies never run: in
-  the emulator nothing writes memory between two reads, and an answer that sets the word sets both
-  (xStreamBufferSpacesAvailable, xStreamBufferIsFull and xStreamBufferSendFromISR keep 18 instructions
-  each unrun on the clang -O2 build). A case's `later` (dread sysrecord's: memory that becomes a value
-  just before the n-th read of an address) can make the second read differ: the frontier answers would
-  give it where both operands of the deciding compare are loads of one address.
+- [x] **A value read twice that changes between the reads** (found 2026-10-26 behind "The code behind a
+  stop", done the same day; docs/decisions.md "A word read twice that changes in between"). FreeRTOS's
+  stream buffers read xTail twice and loop while the two reads differ (an interrupt may move it in
+  between); clang -O2 unrolls that loop four times, and the unrolled copies never ran: in the emulator
+  nothing writes memory between two reads, and an answer that set the word set both
+  (xStreamBufferSpacesAvailable, xStreamBufferIsFull and xStreamBufferSendFromISR kept 18 instructions
+  each unrun on the clang -O2 build). The frontier answers have a source more for every load that
+  decides a branch (reread, ANSWERS 3): where the run read that word before, it becomes the value just
+  before this read (a case's `later`, dread sysrecord's field), so the two reads differ; each unrolled
+  copy is a branch of its own and gets its answer in turn (xStreamBufferSpacesAvailable: the tail
+  changed before its 3rd, 6th and 9th read). On the way: a branch was answered from the first two cases
+  that got there only, and both of xStreamBufferSpacesAvailable's read the buffer through a pointer
+  into the image (a small number on a map whose flash starts at 0), where no answer sets memory; now
+  the first two that give something to answer, among the first eight (ANSWER_SCAN). Behind-stops ->
+  this on the eight builds (copies of that branch's lift results, only the answers made anew): gizmo
+  unchanged; FreeRTOS GCC -Os 343 -> 345 (_free_r, xPortStartScheduler), clang -O2 311 -> 317
+  (xQueuePeek, xQueueSemaphoreTake, xStreamBufferIsFull, xStreamBufferSend,
+  xStreamBufferSpacesAvailable, xPortStartScheduler), RISC-V GCC -Os 275 -> 277 (xEventGroupSync,
+  vPrimaryBlockTimeTestTask), GCC -O0 386 -> 393 (xEventGroupSync, xPortStartScheduler,
+  vPrimaryBlockTimeTestTask, prvSemaphoreTest and three timer test helpers); none lost, the readable
+  gate accepts every one; 39 of the new functions' 42 answer cases use later. xPortStartScheduler
+  writes a priority register and reads it back (the bits it holds), a device's answer later gives.
+  A case with later also tells readable C that merges two reads of one word into one: readable C keeps
+  memory accesses volatile now; the Memory item (plain accesses for RAM) will meet it. Test:
+  tests/test_autocase.py test_answers_change_a_word_between_two_reads (a retry behind a second read of
+  a buffer's tail, with a call so that GCC branches instead of an IT block).
 - [x] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
   (found 2026-10-23 with the frontier answers, FreeRTOS RISC-V GCC -Os). With xTaskResumeAll accepted
   (its answers covered it) on top of what was accepted before, the whole image differs: the stream-buffer

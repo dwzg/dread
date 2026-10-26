@@ -1551,3 +1551,52 @@ def test_answers_run_the_code_behind_a_stop(tmp_path):
     made = next(c for c in new if behind_first_call(gen) <= gen.coverage(fn.entry, fn.insns, c))
     assert [wait.entry, 2] in made["stop_from"] and note.entry in made["stops"] and made.get("answer"), made
     assert gen.survives(fn.entry, made)
+
+
+# A word read twice (Generator.answers' reread, a case's later): spaces reads a buffer's tail, computes
+# with it and reads it again; only where an interrupt moved it in between does it count a retry and
+# compute anew (FreeRTOS's stream buffers loop so). In the emulator nothing writes memory between two
+# reads, and an answer that sets the word sets both reads.
+REREAD_C = NOIPA_DEF + """
+volatile unsigned retries;
+NOIPA unsigned recount(volatile unsigned *buf) { return buf[1] + buf[0]; }
+unsigned spaces(volatile unsigned *buf)
+{
+    unsigned t = buf[0];
+    unsigned s = buf[1] + t;
+    if (t != buf[0]) { retries++; s = recount(buf); }     /* (a call: GCC branches, no IT block) */
+    return s;
+}
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_change_a_word_between_two_reads(tmp_path):
+    """No generated case runs spaces' retry (both reads of the tail alike); the answers give the second
+    read another value (later: the memory becomes it just before that read), and the retry runs."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(REREAD_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "spaces", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    gen = Generator(t, t.image())
+    fn = gen.program.by_name["spaces"]
+    cases = gen.generate("spaces", fn.entry, fn.insns)
+    before, words = covered(gen, "spaces", cases)
+    assert before < words, "the generated cases ran the retry"
+    new = gen.answers("spaces", fn.entry, fn.insns, cases)
+    after = set().union(before, *(gen.coverage(fn.entry, fn.insns, c) for c in new))
+    assert after == words, sorted(hex(a) for a in words - after)
+    made = next(c for c in new if gen.coverage(fn.entry, fn.insns, c) - before)
+    assert made.get("later") and made["later"][0][2] == 2 and made.get("answer"), made

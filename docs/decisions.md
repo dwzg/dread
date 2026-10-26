@@ -5221,3 +5221,25 @@ parameters from pushes, system calls and calls that keep every argument", part (
   call, a place both images reach alike, and goes on from there one call at a time (each answered in
   turn, as far as the answers' depth goes). The answers' version changes, not the generator's: cached
   searches are kept and only the answers are made anew.
+
+## A word read twice that changes in between (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** Code that reads one word twice and acts on the difference (FreeRTOS's stream buffers
+  read their tail twice and go round while an interrupt moved it; a priority register written and read
+  back for the bits it keeps) has paths no generated case runs: in the emulator nothing writes memory
+  between two reads, and a case's memory sets the word for both. Should the generator make cases in
+  which a word changes between two reads, and how?
+- **Options.** (a) No: such paths need another task or a device, and stay uncovered (their functions
+  dropped). (b) Model the other party (a device model, an interrupt between the reads). (c) Give the
+  word a new value just before the read that decides (a case's `later`, which dread sysrecord already
+  uses for what other tasks wrote while a recorded call waited), from the frontier answers, only where
+  the run read that word before and the branch went one way.
+- **Choice.** (c). It is an input like the others, compared under the same rules in both images: the
+  lifted C makes the same reads in the same order (volatile accesses), so a case with a changed word
+  checks the code's behaviour under such a change and nothing more. (b) is the system run's business,
+  where a device model and the interrupts are. A consequence for readable C: a stage that merged two
+  reads of a word would fail such a case; readable C keeps memory accesses volatile now, and the open
+  Memory item (plain accesses for RAM) has to keep the reads a case changes.
+
