@@ -6331,7 +6331,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   thread held a lock. The next suite on the same code passed it. Find what forks with threads alive
   there (the pilot asks its questions in threads, and readable's question trees come from a pool) and
   start such pools before any thread, or with the spawn or forkserver method; a suite should also stop a
-  test that waits too long instead of hanging (a timeout per test).
+  test that waits too long instead of hanging (a timeout per test). Found the same day: no thread
+  outlives a test in tests/test_gui*.py (without a browser), test_jobs, test_llm*, test_pilot (a probe
+  that printed the threads alive before each test found none), and the suite already takes Python's
+  warning of a fork beside other threads for an error; so the child was likely a worker a pool forked
+  from its own handler thread to replace one that ended (the defunct workers beside it), while another of
+  its threads held a lock. A test that hangs fails after half an hour now (pytest-timeout in the test
+  extra, [tool.pytest.ini_options] timeout = 1800; docs/decisions.md). Left: why a worker ended there.
 - [x] **Copies of one target share their generated cases** (2026-10-25, from the private real-life
   test: a naming experiment's copy of a target made every case anew after the target's own lift check
   had just made them, hours of work). `[paths] cases` puts the case cache where a target says (default

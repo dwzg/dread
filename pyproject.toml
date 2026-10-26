@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = ["unicorn==2.1.4", "capstone>=5,<6"]
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest", "pytest-timeout"]    # (a test that hangs fails: [tool.pytest.ini_options] timeout)
 prove = ["z3-solver>=4.12"]     # dread readable proves its rewrites of conditions and values with it
 dwarf = ["pyelftools>=0.29"]    # dread readable --score reads the source's names from debug information
 browser = ["playwright>=1.40"]  # tests/test_gui_browser.py looks at dread gui's pages in headless Chrome
@@ -29,6 +29,11 @@ testpaths = ["tests"]
 # A fork while other threads run may deadlock the child (DREAD's pools fork): Python 3.12 and later
 # warn of it, and the suite takes the warning for an error (the tests after the GUI's hung on CI so)
 filterwarnings = ["error:This process .* is multi-threaded:DeprecationWarning"]
+# A test that hangs fails after half an hour instead of holding the suite (2026-10-26: a pool's child
+# waited on a lock for 23 minutes under a load of about 20, and the suite with it); with pytest-timeout
+# (the test extra), its signal method: the test's own thread is interrupted, a pool's context ends its
+# workers. The slowest tests take minutes.
+timeout = 1800
 markers = [
     "slow: takes more than a few seconds",
     "ghidra: needs a Ghidra installation (GHIDRA_INSTALL_DIR)",

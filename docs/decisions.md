@@ -5306,3 +5306,20 @@ parameters from pushes, system calls and calls that keep every argument", part (
   says is a state the function is called in, as its arguments are; the code reads it with its own
   instruction in both images. The function returns with bx lr to an address of the harness, which is
   no exception return (EXC_RETURN), so the handler state changes nothing else of the run.
+
+## A timeout per test (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20; Python packages may be
+added where they help, the user, 2026-10-21).
+
+- **Question.** A full suite hung for 23 minutes on a pool's child that waited on a lock (under a load of
+  about 20), and an unattended run waits for a suite before it merges: one hang held everything behind
+  it until a person looked. Should a test that hangs fail on its own?
+- **Options.** (a) No: watch the suites. (b) pytest-timeout in the test extra with a limit per test long
+  enough for the slowest tests under load (its signal method interrupts the test's thread; a pool's
+  context then ends its workers). (c) A timeout around the whole suite (it ends the suite, not the test,
+  and says nothing about which).
+- **Choice.** (b), 1800 seconds: the slowest tests take minutes, whole suites took 22 to 34 minutes the
+  same day under that load. CI installs the test extra, so it has it too; a venv without the package
+  warns of an unknown option and runs as before.
+
