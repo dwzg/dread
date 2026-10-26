@@ -5290,3 +5290,19 @@ parameters from pushes, system calls and calls that keep every argument", part (
   library). (d) would need casts inside the callee, whose body reads bytes, and changes the function's
   own C for its callers' sake; not tried.
 
+## A system register a case sets (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** FreeRTOS's vPortValidateInterruptPriority reads the exception number (mrs r0, ipsr) and
+  checks the interrupt's priority only inside a handler (16 and up). Every case ran in thread mode
+  (IPSR 0), so that path never ran and the function was dropped on every Cortex-M build of the bench
+  (27 at measure-40). Should a case be able to say that it runs inside a handler?
+- **Options.** (a) No: such paths stay unrun. (b) Hook the mrs instruction and give its register a value
+  (the rebuilt image's mrs lies elsewhere, so the hook would need its address in both images). (c) A
+  case field that sets the system register before the call, after the core's status is reset: both
+  images' mrs read it alike; the frontier answers give it where an mrs decides a branch.
+- **Choice.** (c), for the registers a layer can set (sysreg_id: IPSR on the M profile). What the case
+  says is a state the function is called in, as its arguments are; the code reads it with its own
+  instruction in both images. The function returns with bx lr to an address of the harness, which is
+  no exception return (EXC_RETURN), so the handler state changes nothing else of the run.

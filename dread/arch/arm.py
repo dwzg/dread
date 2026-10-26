@@ -1420,6 +1420,14 @@ class Arm:
         else:
             engine.reg_write(ua.UC_ARM_REG_XPSR, 0x01000000)
 
+    # The system registers a case may give a value (sysregs): on the M profile the exception number a
+    # handler reads (mrs r0, ipsr: FreeRTOS's vPortValidateInterruptPriority looks at it)
+    SYSREGS_M = {"ipsr": ua.UC_ARM_REG_IPSR}
+
+    def sysreg_id(self, name):
+        """The Unicorn id of a system register a case may set (SYSREGS_M on the M profile), or None."""
+        return self.SYSREGS_M.get(name) if self.profile == "m" else None
+
     IT_MASK = (3 << 25) | (0x3F << 10)     # the IT state in CPSR and xPSR
 
     def status_reg(self):

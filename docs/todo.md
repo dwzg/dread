@@ -4219,8 +4219,9 @@ undone). Other decisions are taken by the recommended option and written down in
   a value two conditions decide together (xAreTimerDemoTasksStillRunning: a counter the function resets
   unless a global equals its argument), two reads of one field compared (clang -O2's stream-buffer
   functions read xTail again to see whether an interrupt moved it: a case's `later`, memory that changes
-  before the n-th read, could answer that), system registers, a run that faults in a call through a
-  pointer a stub's fill gave (prvTimerTask's pending function calls).
+  before the n-th read, could answer that; done 2026-10-26, below), system registers (done 2026-10-26:
+  a case's sysregs, below), a run that faults in a call through a pointer a stub's fill gave
+  (prvTimerTask's pending function calls).
   On the private real-life test (2026-10-23; no whole-image run there): more functions accepted,
   fewer dropped for unrun instructions, and no more disagreements than before.
 
@@ -4309,6 +4310,17 @@ undone). Other decisions are taken by the recommended option and written down in
   a32, m3, m4, rv32 unchanged, none lost;
   the readable gate accepts every new one (RISC-V GCC -O2 242 of 244, the two of before). Tests:
   tests/test_autocase.py test_a_case_that_ends_at_a_fault, test_answers_end_the_code_behind_a_stop_at_a_fault.
+- [x] **A system register a case sets** (2026-10-26; docs/decisions.md "A system register a case
+  sets"). FreeRTOS's vPortValidateInterruptPriority reads the exception number (mrs r0, ipsr) and checks
+  the interrupt's priority only inside a handler (16 and up); every case ran in thread mode, and the
+  function was dropped on every Cortex-M build of the bench (27 at measure-40). A case's `sysregs` sets
+  system registers before the call, after the core's status is reset (dread.emu; the layer's sysreg_id
+  says which: IPSR on the M profile), and the frontier answers give one where an mrs decides a branch
+  (dread.uncovered's "system" source, ANSWERS 6). On the nine builds (copies of main's lift results)
+  vPortValidateInterruptPriority is accepted on FreeRTOS GCC -Os (345 -> 346), clang -O2 (317 -> 318)
+  and GCC -O0 (394 -> 395), and readable; RISC-V and gizmo unchanged (a RISC-V CSR is not settable
+  yet; RISC-V GCC -O2's dropped functions have no system register among their causes). Test: tests/test_autocase.py
+  test_answers_give_a_system_register_a_value.
 - [x] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
   (found 2026-10-23 with the frontier answers, FreeRTOS RISC-V GCC -Os). With xTaskResumeAll accepted
   (its answers covered it) on top of what was accepted before, the whole image differs: the stream-buffer

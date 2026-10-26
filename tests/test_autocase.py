@@ -1745,3 +1745,51 @@ def test_answers_end_the_code_behind_a_stop_at_a_fault(tmp_path):
     new = gen.answers("first_item", fn.entry, fn.insns, [stopped, plain])
     made = next((c for c in new if count <= gen.coverage(fn.entry, fn.insns, c)), None)
     assert made is not None and made.get("fault") and made.get("answer"), new
+
+
+# A system register a case sets (Generator.answers' sysreg, a case's sysregs): in_handler reads the
+# exception number (mrs ipsr), as FreeRTOS's vPortValidateInterruptPriority does, and only in a handler
+# (16 and up) counts and computes. Every generated case runs in thread mode (0).
+SYSREG_C = NOIPA_DEF + """
+volatile unsigned isr_count;
+NOIPA unsigned note(unsigned v) { return v * 3u; }
+unsigned in_handler(unsigned x)
+{
+    unsigned n;
+    __asm__ volatile ("mrs %0, ipsr" : "=r" (n));
+    if (n >= 16) { isr_count++; return note(n - 16 + x); }
+    return x;
+}
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_give_a_system_register_a_value(tmp_path):
+    """No generated case runs in_handler's handler path (IPSR is 0 in every run); dread.uncovered names
+    the mrs as what decides, and the answers set IPSR before the call (sysregs) to what the compare needs."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(SYSREG_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "in_handler", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    gen = Generator(t, t.image())
+    fn = gen.program.by_name["in_handler"]
+    cases = gen.generate("in_handler", fn.entry, fn.insns)
+    before, words = covered(gen, "in_handler", cases)
+    assert before < words and not any(c.get("sysregs") for c in cases), "the generated cases ran the handler path"
+    new = gen.answers("in_handler", fn.entry, fn.insns, cases)
+    after = set().union(before, *(gen.coverage(fn.entry, fn.insns, c) for c in new))
+    assert after == words, sorted(hex(a) for a in words - after)
+    made = next(c for c in new if gen.coverage(fn.entry, fn.insns, c) - before)
+    assert made.get("sysregs", {}).get("ipsr", 0) >= 16 and made.get("answer"), made

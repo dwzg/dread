@@ -453,6 +453,7 @@ class Machine:
         self.wide_result = False    # also compare the second result register
         self.may_hang = False       # running into the instruction limit is a result, not an error
         self.may_fault = False      # a data access to unmapped memory ends the run as a result (a case's fault)
+        self.sysregs = {}           # {name: value} system registers set before each call (a case's sysregs)
         self.fault_at = None        # the instruction such an access ended the last call at
         self.io_fixed = None        # {byte address: value}: peripheral reads return these, see _on_io
         self.polls = {}             # see poll_read()
@@ -954,6 +955,11 @@ class Machine:
         regs = list(args[:len(lay.arg_regs)])
         stacked = list(args[len(lay.arg_regs):])
         self.arch.initial_status(uc)            # before sp: on the A profile sp is banked per mode
+        for name, value in sorted((self.sysregs or {}).items()):     # (a case's: sysregs, after the reset)
+            rid = getattr(self.arch, "sysreg_id", lambda n: None)(name)
+            if rid is None:
+                raise EmuError("the case gives the system register %s, which this core's model cannot set" % name)
+            uc.reg_write(rid, value & 0xFFFFFFFF)
         for reg, value in lay.fixed:            # registers that hold one value in the whole program (gp)
             uc.reg_write(reg, value)
         for reg, value in zip(lay.arg_regs, regs):

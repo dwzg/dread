@@ -80,7 +80,10 @@ one that got there gives it what the other way needs:
     it; clang -O2 unrolls that loop, and its copies ran in no case);
   - what a stubbed callee stores in a local it was handed the address of (a fill: the case gets the
     function's frame, so that the stub writes there, and a tight fill, so that it writes no further
-    than the function's own stores): FreeRTOS's demo checks the value a notification delivers.
+    than the function's own stores): FreeRTOS's demo checks the value a notification delivers;
+  - a system register an mrs reads, where the layer can set it (a case's sysregs, set before the
+    call: IPSR on the M profile, the exception number FreeRTOS's vPortValidateInterruptPriority checks
+    to run only inside a handler).
 The values: the compare's other operand and its neighbours, the operand itself and its neighbours (for
 a test its bits), solved through a constant offset when two runs show one, the word's edges, single
 bits. A run that gains code and then hangs in a callee is tried with that callee stubbed, then ending
@@ -230,10 +233,11 @@ ANSWER_VISITS = 2           # visits of a branch whose decision is answered (the
 ANSWER_BASES = 2            # cases a branch is answered from at most (that give something to answer: Generator.answers)
 ANSWER_SCAN = 8             # ... among the first this many cases that get there
 ANSWER_EVENTS = 512         # calls and visits a run records at most
-ANSWERS = 5                 # the frontier answers' version (Generator.answers): cached cases get them anew when
+ANSWERS = 6                 # the frontier answers' version (Generator.answers): cached cases get them anew when
                             # it changes, or when the cases they are made from change (_answered); 2: the code
                             # behind a stop (behind, stop_from); 3: a word read again (reread, later); 4: behind a
-                            # call whose run ended at a stop deeper in; 5: a case that ends at a fault there
+                            # call whose run ended at a stop deeper in; 5: a case that ends at a fault there;
+                            # 6: a system register an mrs reads (sysregs)
 READING_MARKS = ("carried", "firm", "kept", "why", "by", "answer")     # marks a case made from another drops
 SMALL_ARGS = (1, 2, 3, 4, 8, 16)    # the round of small arguments: the values beside 0
 # Float arguments (hard float), as bits: zeros, ones, halves, decimal steps, the integer conversions'
@@ -611,6 +615,7 @@ class Generator:
         m.stopped_at = None                 # "calls" or "never returns" when a stub ended the run
         m.ends_at_call = bool(case.get("stops") or (case.get("hang") and case.get("stub_calls")))
         m.may_fault = bool(case.get("fault"))   # (a data access to unmapped memory ends the run as its result)
+        m.sysregs = dict(case.get("sysregs") or {})     # (system registers set before the call)
         effects = case.get("effects", ())
         fills = case.get("fills", ())
         own = set() if case.get("tight") else None
@@ -2535,6 +2540,10 @@ class Generator:
                         found = [("fill", (d, self.entries[key])) for d in sorted(flow.loads.get(source, ()))]
                     elif cls in ("global", "device", "field"):
                         found = [("load", d) for d in sorted(flow.loads.get(source, ()))]
+                    elif cls == "system":       # (what an mrs reads: the register a case may set, sysregs)
+                        reg = re.split(r"[\s,]+", key.strip())[-1].lower() if isinstance(key, str) else None
+                        settable = getattr(self.arch, "sysreg_id", lambda n: None)
+                        found = [("sysreg", reg)] if reg and settable(reg) is not None else []
                     else:
                         continue
                     out += [s for s in found if s not in out]
@@ -2899,6 +2908,12 @@ class Generator:
         def maker(base, kind, key, events, k, m=None):
             """(make(value) -> case, the input's value in base or None, the address of the memory it sets
             or None) for the source (kind, key) at the decider's visit events[k], or (None, None, None)."""
+            if kind == "sysreg":            # a system register the run read (mrs): set before the call
+                def make(v):
+                    case = json.loads(json.dumps(base))
+                    case["sysregs"] = dict(case.get("sysregs") or {}, **{key: v & 0xFFFFFFFF})
+                    return case
+                return make, (base.get("sysregs") or {}).get(key, 0), None
             if kind == "reread":            # the memory a load read again: from that read on (later)
                 last = next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key), None)
                 if last is None or last[5] < 2:
