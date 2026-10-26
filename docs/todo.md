@@ -4321,6 +4321,25 @@ undone). Other decisions are taken by the recommended option and written down in
   and GCC -O0 (394 -> 395), and readable; RISC-V and gizmo unchanged (a RISC-V CSR is not settable
   yet; RISC-V GCC -O2's dropped functions have no system register among their causes). Test: tests/test_autocase.py
   test_answers_give_a_system_register_a_value.
+- [x] **A page a case maps for its run** (2026-10-26; docs/decisions.md "A page a case maps for its
+  run"). On a target that maps nothing at address 0 (QEMU's RISC-V virt board) the code behind a null
+  pointer's load ran in no case: GCC -O2 gives configASSERT's path its own copy of the function's end,
+  and the answers' fault case ended the run at the load. FreeRTOS's RISC-V GCC -O2 build dropped
+  seventeen queue, stream-buffer and timer accessors for it (dread uncovered's "straight": every run that
+  reached the load ended there). A case's `map` maps pages for its run alone (dread.emu Machine.map_page,
+  Layout.free_page), and the answers' code behind a stop, after the fault case, tries the run with the
+  faulting page mapped and MAPPED_WORD at the address (ANSWERS 7). On copies of measure-41's builds:
+  RISC-V GCC -O2 244 -> 262 (the same code without it: 244, measure-41's verdicts) (pcTimerGetName, pvTimerGetTimerID,
+  uxQueueMessagesWaiting, uxQueueSpacesAvailable, uxTimerGetReloadMode, vQueueDelete,
+  vStreamBufferDelete, vTaskRemoveFromUnorderedEventList, vTaskSetTimeOutState, vTimerSetReloadMode,
+  vTimerSetTimerID, xQueueGetMutexHolder, xQueueGetMutexHolderFromISR, xStreamBufferBytesAvailable,
+  xStreamBufferIsEmpty, xStreamBufferIsFull, xStreamBufferSpacesAvailable, xTimerIsTimerActive); RISC-V
+  GCC -Os 279 and clang -Os 274 as at measure-41; ARM GCC -O2 and clang -O2 317 -> 318, both
+  vPortValidateInterruptPriority, which the system registers' answers took (their flash lies at 0: no
+  page to map); none lost. Left: vTaskGenericNotifyGiveFromISR there (two instructions behind a priority comparison), and
+  the -Os builds' "faults" (a run sent to a branch's other side faults on the way: vTaskDelete,
+  tiny_print), which no answer behind a stop reaches. Tests: tests/test_autocase.py
+  test_a_case_maps_a_page_of_its_own, test_answers_map_the_page_a_run_faulted_at.
 - [x] **A computation the system run takes for a wait, and the culprits the whole-image check drops**
   (found 2026-10-23 with the frontier answers, FreeRTOS RISC-V GCC -Os). With xTaskResumeAll accepted
   (its answers covered it) on top of what was accepted before, the whole image differs: the stream-buffer
