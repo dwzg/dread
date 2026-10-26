@@ -308,7 +308,8 @@ def test_a_function_given_its_result_back_keeps_its_types(tmp_path):
     readable_types table keeps each function's types for the digest of its C, and the first table was
     made for the void forms: the check makes it anew then, and the functions printed with their result
     keep the pointer types of their parameters (until then strncpy printed `u32 strncpy(u32 r0, u32 r1,
-    u32 r2)` after the check, for `u32 strncpy(volatile u8 *r0, const volatile u8 *r1, u32 r2)`)."""
+    u32 r2)` after the check, for `u32 strncpy(volatile u8 *r0, const volatile u8 *r1, u32 r2)`); since
+    2026-10-26 a result may be a pointer too (`volatile u8 *memcpy(...)`: dread.vartypes pointer results)."""
     import re
     from dread import shapes
     from test_readable import gizmo_copy
@@ -326,7 +327,7 @@ def test_a_function_given_its_result_back_keeps_its_types(tmp_path):
     context = readable.Context(target, image, p, flow)
     for name, types in typed.items():
         text = readable.transform(name, lifter.lift(p.by_name[name]).text, context=context)
-        head = re.search(r"^u32 %s\((.*)\)$" % name, text, re.M)
+        head = re.search(r"^[^\n(]*?\b%s\((.*)\)$" % name, text, re.M)     # (a pointer result too: memcpy)
         assert head and all(t in head.group(1) for t in types), (name, types, text)
 
 

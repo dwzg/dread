@@ -6323,6 +6323,15 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 
 ## Scale and robustness
 
+- [ ] **A suite that hung on a forked child** (2026-10-26, once, under a load of about 20: a bench
+  measurement, a private gate and another suite beside it). The full suite stopped at 53 % in
+  tests/test_pilot.py, most likely test_the_input_question_shows_the_callees_and_a_stopped_input_where_it_stopped
+  (the test after the newest temporary directory): pytest waited for a child process (do_wait) that
+  waited on a lock (futex_wait) for 23 minutes, beside defunct workers: a process forked while another
+  thread held a lock. The next suite on the same code passed it. Find what forks with threads alive
+  there (the pilot asks its questions in threads, and readable's question trees come from a pool) and
+  start such pools before any thread, or with the spawn or forkserver method; a suite should also stop a
+  test that waits too long instead of hanging (a timeout per test).
 - [x] **Copies of one target share their generated cases** (2026-10-25, from the private real-life
   test: a naming experiment's copy of a target made every case anew after the target's own lift check
   had just made them, hours of work). `[paths] cases` puts the case cache where a target says (default
