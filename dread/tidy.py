@@ -3999,6 +3999,41 @@ def all_calls(fn):
     return out
 
 
+def _fed_back(fn, name, p):
+    """Whether every read of a variable that a call of name assigns is the p-th argument of a call of
+    name: what the callee may hand back in that register goes nowhere but back into the same argument
+    (a loop's r0 = check(r0), whose callee does not read r0: FreeRTOS's prvIdleTask), so nothing reads it
+    and the argument is none (trim_calls). Every read anywhere in the function counts, an assignment's
+    target not."""
+    targets, allowed, written = set(), set(), set()
+    nodes = []
+
+    def visit(s):
+        if isinstance(s, C.ExprStmt) and isinstance(s.e, C.Assign) and isinstance(s.e.target, C.Name) and \
+                isinstance(s.e.value, C.Call) and isinstance(s.e.value.f, C.Name) and s.e.value.f.id == name:
+            targets.add(s.e.target.id)
+        for e in _stmt_all_exprs(s):
+            for x in walk_expr(e):
+                if isinstance(x, C.Assign) and isinstance(x.target, C.Name):
+                    written.add(id(x.target))
+                elif isinstance(x, C.Call) and isinstance(x.f, C.Name) and x.f.id == name and len(x.args) > p and \
+                        isinstance(x.args[p], C.Name):
+                    allowed.add(id(x.args[p]))
+                if isinstance(x, C.Name):
+                    nodes.append(x)
+        if isinstance(s, C.Decl):
+            for d in s.items:
+                if d.init is not None:
+                    nodes.extend(x for x in walk_expr(d.init) if isinstance(x, C.Name))
+        for inner in _inner(s):
+            visit(inner)
+    for s in fn.body.body:
+        visit(s)
+    if not targets:
+        return False
+    return all(id(x) in allowed or id(x) in written for x in nodes if x.id in targets)
+
+
 def trim_calls(fn, run):
     """A call passes only the argument registers its callee reads (dread.regflow, the run's context):
     the lifters pass them all. Every call of a callee or none, and only calls of the lifters' form (as
@@ -4044,7 +4079,10 @@ def trim_calls(fn, run):
             # whether callers read it or not. So the arguments in the result registers stay, but for
             # those the callee overwrites (regflow: its own value there on every path).
             for reg in ctx.handed_back(name, run.returns.get(name) in ("u64", "s64")):
-                n = max(n, ctx.arg_regs.index(reg) + 1)
+                p = ctx.arg_regs.index(reg)
+                if p >= n and _fed_back(fn, name, p):
+                    continue                # (what it hands back there goes only back into that argument)
+                n = max(n, p + 1)
         have = run.trimmed.get(name, k)     # (trimmed before: a value read then may be read no longer)
         if n >= have:
             continue

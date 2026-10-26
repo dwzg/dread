@@ -869,6 +869,72 @@ def test_no_argument_in_a_result_register_the_callee_overwrites(tmp_path):
     assert "void gauge_pair(void)" in pair and "    gauge_hold();" in pair and "= gauge_now();" in pair, pair
 
 
+FED_S = r"""
+    .syntax unified
+    .arch armv4t
+    .arm
+    .text
+    .global check, idle3, use
+    .type check, %function
+check:                          @ writes r0 only where a flag is set: it may hand back what came in r0
+    ldr     r3, =0x40000200
+    ldr     r2, [r3]
+    cmp     r2, #0
+    movne   r0, #5
+    bx      lr
+    .ltorg
+    .size check, . - check
+    .type idle3, %function
+idle3:                          @ check() three times (FreeRTOS's prvIdleTask, counted)
+    push    {r4, lr}
+    mov     r4, #3
+1:  bl      check
+    subs    r4, r4, #1
+    bne     1b
+    pop     {r4, lr}
+    bx      lr
+    .size idle3, . - idle3
+    .type use, %function
+use:
+    push    {r4, lr}
+    bl      idle3
+    ldr     r1, =0x40000110
+@VALUE@
+    str     r0, [r1]
+    pop     {r4, lr}
+    bx      lr
+    .ltorg
+    .size use, . - use
+"""
+
+
+@pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-ld")),
+                    reason="needs arm-none-eabi binutils")
+@pytest.mark.parametrize("reads_result", [False, True])
+def test_a_value_that_only_goes_back_into_its_own_call_is_no_argument(tmp_path, reads_result):
+    """check may hand back what came in r0 (it writes r0 on one path), so a call whose value is read keeps
+    r0 (Context.handed_back). In idle3's loop the value goes only back into the next call's r0, which
+    check does not read: nothing reads it, so the call passes nothing and idle3 takes nothing (FreeRTOS's
+    prvIdleTask(r0) around prvCheckTasksWaitingTermination; until 2026-10-26 a phantom parameter). Where
+    idle3's caller reads its result, the r0 that came in may come back through check to it: the argument
+    and the parameter stay. Both gates take every function."""
+    from dread import lift, regflow
+    from dread.program import Program
+    from test_lift_results import arm_program
+    t = arm_program(tmp_path, "a32", FED_S.replace("@VALUE@", "" if reads_result else "    mov     r0, #1"))
+    p = Program(t, t.image())
+    flow = regflow.analyse(p)
+    context = readable.Context(t, t.image(), p, flow)
+    c = readable.transform("idle3", lift.make_lifter(p, flow).lift(p.by_name["idle3"]).text, context=context)
+    if reads_result:
+        assert "u32 idle3(u32 r0)" in c and re.search(r"(r0\w*) = check\(\1\);", c) and "return r0" in c, c
+    else:
+        assert "void idle3(void)" in c and "        check();" in c and "extern u32 check(void);" in c, c
+    lines = []
+    assert lift.check(t, t.image(), out=lines.append, jobs=2) == ["check", "idle3", "use"], lines
+    assert readable.check(t, t.image(), out=lines.append, jobs=2) == ["check", "idle3", "use"], lines
+
+
 def test_read_line_calls_uart_getc_without_an_argument(target):
     """gizmo's read_line (int c = uart_getc();) printed r0 = uart_getc(r0): uart_getc writes its result
     register on every path, so the call passes nothing, as uart_getc's prototype says; uart_getc's own

@@ -1599,6 +1599,13 @@ model).
   parameters, its bound registers 200 -> 3 (vTaskDelay(a0): `if (xTaskResumeAll() == 0) __asm__
   volatile ("ecall" ...)`), and the readable_types table found more there (globals as structure
   pointers in 88 files).
+  (5) done 2026-10-26 (dread.tidy trim_calls, _fed_back): an argument a callee may hand back in a result
+  register goes where every read of a variable its calls assign is that argument of its own calls: the
+  value goes nowhere but back into the same call (FreeRTOS's prvIdleTask and its
+  prvCheckTasksWaitingTermination(r0) loop; chained vTaskSuspendAll calls). Main -> this on the eight
+  builds: the gate accepts the same functions; gizmo and clang -O2 unchanged; GCC -Os 473 -> 472
+  parameters, RISC-V GCC -Os 442 -> 440 (prvIdleTask(void), vQueueReceiveWhenSuspendedTask(void)), GCC -O0
+  484 -> 482. (4), calls through a pointer, stays open: what such a call may reach is not known.
 - [ ] **A format kept in a saved register across a loop.** dread.varargs finds a call's format where
   the code puts its address into the register on the straight run in front of the call
   (dread.constants at). RISC-V GCC -Os computes a format once into a callee-saved register in front of
