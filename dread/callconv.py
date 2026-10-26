@@ -28,13 +28,18 @@ analysis' caution. A read of an unnamed argument kept in a variadic save area is
 printf would otherwise log what a caller's format does not ask for). A case whose findings come from code that touches a saved register's slot (a
 length past a local: a queue's item size a generated input made larger than the item, so memcpy
 copied the saved r4 to r6 into the queue; dread.runner.saves_touched, where dread test refuses such a
-case) is left out. Not seen: a register read only on paths no case takes, one whose value changes
-nothing a case compares, and the flags.
+case) is left out. A stack word the code leaves unset and copies out holds what an earlier frame saved
+there, and the finding is the original's: FreeRTOS's xTimerGenericCommand (RISC-V GCC -O2) queues a
+message whose union's last word no command sets, an s3 saved there before ("reads its caller's s3").
+Not seen: a register read only on paths no case takes, one whose value changes nothing a case compares,
+and the flags.
 
 The cases are each function's cached generated, kept and written ones, as a lift check left them
 (dread lift --check); a function without cases for the image as it is now is left out, nothing is
-generated. At most MAX_CASES cases a function, those of hanging runs left out; functions run in
-parallel worker processes.
+generated. At most MAX_CASES cases a function. A case whose run does not end at the return is left
+out: a hang, a stop, a fault (fault: true) end it in the middle of the function, the callee-saved
+registers not yet restored (from the run's log, so also a kept or written case, whose marks the list
+of cases does not carry). Functions run in parallel worker processes.
 
     dread callconv [--target DIR] [--image NAME] [--json FILE] [NAME...]
 """
@@ -81,6 +86,13 @@ def run_once(name, case, entry_values, args):
     return result, {r: m.reg(r) for r in RUN["regs"]}
 
 
+def returned(result):
+    """Whether a run ended at the function's return: one that may hang or fault ends with ("did not
+    return",) or ("fault", kind, address) in its log instead (dread.emu Machine.call)."""
+    last = result.calls[-1] if result.calls else ()
+    return not (last and last[0] in ("did not return", "fault"))
+
+
 def measure(name):
     """(name, {"cases": n, "reads": [...], "changes": [...]}) of one function, or (name, None) without
     cases."""
@@ -92,7 +104,7 @@ def measure(name):
         cases = autocase.cases_for(RUN, name, fn, make=False)
     except Exception:                       # a failed generation, cached: no cases
         cases = []
-    cases = [c for c in cases if not (c[5] or {}).get("hang")][:MAX_CASES]
+    cases = [c for c in cases if not (c[5] or {}).get("hang") and not (c[5] or {}).get("fault")][:MAX_CASES]
     if not cases:
         return name, None
     regs, arg_regs, saved = RUN["regs"], RUN["arg_regs"], set(RUN["saved"])
@@ -105,8 +117,9 @@ def measure(name):
         base = {r: BASE + 0x101 * (i + 1) for i, r in enumerate(regs)
                 if not (r in arg_regs and arg_regs.index(r) < len(args))}
         first, after = run_once(name, case, base, args)
-        if isinstance(first, Exception):
-            continue                        # the case does not run on its own: nothing to compare with
+        if isinstance(first, Exception) or not returned(first):
+            continue                        # the case does not run on its own, or not to the return:
+                                            # nothing to compare with
         entry = dict(base, **{r: args[arg_regs.index(r)] & 0xFFFFFFFF for r in regs
                               if r in arg_regs and arg_regs.index(r) < len(args)})
         case_reads, case_changes, case_handed = set(), set(), set()

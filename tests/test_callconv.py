@@ -14,7 +14,7 @@ ODD_S = """
     .cpu cortex-m3
     .thumb
     .text
-    .global use, reads_r4, clobbers_r5, clobbers_r3, plain, vargs
+    .global use, reads_r4, clobbers_r5, clobbers_r3, plain, vargs, saves_then_faults
     .type reads_r4, %function
     .thumb_func
 reads_r4:                       @ reads what its caller left in r4
@@ -47,6 +47,15 @@ vargs:  push    {r1, r2, r3}            @ a variadic function's save area
         add     sp, sp, #12
         bx      lr
     .size vargs, . - vargs
+    .type saves_then_faults, %function
+    .thumb_func
+saves_then_faults:              @ changes r4 after saving it, then loads through its argument
+        push    {r4, lr}
+        movs    r4, #9
+        ldr     r0, [r0]
+        adds    r0, r0, r4
+        pop     {r4, pc}
+    .size saves_then_faults, . - saves_then_faults
     .type use, %function
     .thumb_func
 use:    push    {r4, r5, lr}
@@ -73,12 +82,8 @@ class Claims:
         return self.preserved.get(name, self.real.preserved_regs(name))
 
 
-@needs_as
-def test_each_kind_of_disagreement_is_found(tmp_path):
-    """A function that reads its caller's r4 and one that leaves r5 changed are found against the
-    real analysis; against answers made wrong (plain reads nothing; clobbers_r3 leaves r3 alone; plain
-    overwrites r0, its own value at the return whatever its caller passed) the other three kinds are
-    found; plain agrees with the real analysis."""
+def odd_target(tmp_path):
+    """ODD_S assembled and imported as a target, dread callconv prepared on it: (its RUN, the program)."""
     from test_bench import TARGET
     (tmp_path / "t.s").write_text(ODD_S)
     obj, elf = str(tmp_path / "t.o"), str(tmp_path / "t.elf")
@@ -91,7 +96,16 @@ def test_each_kind_of_disagreement_is_found(tmp_path):
     assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"), elf]) == 0
     t = Target.load(str(tmp_path))
     callconv.prepare(t, t.image())
-    run, prog = callconv.RUN, callconv.RUN["program"]
+    return callconv.RUN, callconv.RUN["program"]
+
+
+@needs_as
+def test_each_kind_of_disagreement_is_found(tmp_path):
+    """A function that reads its caller's r4 and one that leaves r5 changed are found against the
+    real analysis; against answers made wrong (plain reads nothing; clobbers_r3 leaves r3 alone; plain
+    overwrites r0, its own value at the return whatever its caller passed) the other three kinds are
+    found; plain agrees with the real analysis."""
+    run, prog = odd_target(tmp_path)
     names = ["reads_r4", "clobbers_r5", "clobbers_r3", "plain"]
     for name in names:                      # cases as a lift check would leave them
         run["suite"].auto.setdefault(name, {})
@@ -109,6 +123,32 @@ def test_each_kind_of_disagreement_is_found(tmp_path):
     assert callconv.measure("plain")[1]["found"] == {"returns from, regflow: own": ["r0"]}
     assert callconv.variadic_area(prog, prog.by_name["vargs"]) == {"r1", "r2", "r3"}
     assert callconv.variadic_area(prog, prog.by_name["plain"]) == set()
+
+
+@needs_as
+def test_a_run_that_ends_at_a_fault_is_left_out(tmp_path, monkeypatch):
+    """A case that ends at a fault (fault: true) stops in the middle of the function, the callee-saved
+    registers not restored: saves_then_faults has its own r4 there. The measurement leaves such a run
+    out, also as a written case, whose marks the list of cases does not carry (the run's log says it);
+    on 2026-10-26 the answers' first fault cases showed up as "changes callee-saved" on the bench."""
+    run, prog = odd_target(tmp_path)
+    name = "saves_then_faults"
+    fn = prog.by_name[name]
+    run["suite"].auto.setdefault(name, {})
+    cases = autocase.cases_for(run, name, fn)
+    assert cases and callconv.measure(name)[1]["found"] == {}
+    gen = autocase.generator_for(run)
+    fault = {"args": [0x30000000, 0, 0, 0], "mem": [], "returns": [], "calls": [], "frame": 0, "fault": True}
+    written = ("written 0", fn.entry, lambda m: gen.apply(m, fault), fault["args"], 200_000, None)
+    first, after = callconv.run_once(name, written, {"r4": 0x1234}, fault["args"])
+    assert first.calls[-1] == ("fault", "read", 0x30000000) and after["r4"] == 9
+    assert not callconv.returned(first) and all(callconv.returned(callconv.run_once(name, c, {}, c[3])[0])
+                                                  for c in cases)
+    monkeypatch.setattr(autocase, "cases_for", lambda *a, **k: [written] + cases)     # (first: MAX_CASES)
+    got = callconv.measure(name)[1]
+    assert got["found"] == {} and got["cases"] == min(len(cases), callconv.MAX_CASES - 1), got
+    monkeypatch.setattr(autocase, "cases_for", lambda *a, **k: [written])
+    assert callconv.measure(name)[1] is None
 
 
 @pytest.mark.compiles
