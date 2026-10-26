@@ -5346,3 +5346,36 @@ added where they help, the user, 2026-10-21).
   and the word set at the address is not 0, so a C that reads another address of the page differs.
   Only pages in which the target maps nothing (Layout.free_page), only for the run (the next reset
   unmaps them).
+
+## A case that agrees with the stack filled alike (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** FreeRTOS's xStreamBufferReceive and its FromISR form stayed lifted on four GCC -O2 builds
+  of measure-41: in a generated case memcpy is stubbed (its source, a generated pointer, faulted), and a
+  stub writes nothing into a caller's caller's local, so the message length read from it is what
+  earlier frames left there. The original went one way on that, the readable C, whose frames lie
+  otherwise, read other leftovers, went the other way and faulted. The stale-data check of 2026-10-20
+  fills the original alone, below every function's entry: its fills (0xA5, 0x5A) send it the way its
+  leftovers did, so no output moves, and a faulting rebuilt run is not judged there at all. Should such
+  a case fail?
+- **Options.** (a) Keep failing it (the function stays lifted where every such case fails). (b) Leave
+  out of the comparison what follows the first read of stale data (more than the fills tell: a read
+  that changes nothing would leave outputs out too). (c) Run both images again with the same fill below
+  every function's entry, once with each fill, and compare them whole: where they agree under every
+  fill, the plain runs differed only in what earlier frames left in a local nothing wrote.
+- **Choice: (c).** Nothing is left out of the comparison: each fill is an input like the others, the
+  same for both images, and every output is compared under it. A translation that differs still shows:
+  a value the original writes would have to equal both fills to hide a C that reads garbage instead.
+  Tried only where a case's plain runs differ and no refusal applies; the report names the case
+  ("agrees with the stack below every function's entry filled alike"), and it counts for coverage.
+- **What came of it.** The cases of the question still fail: the readable C reserves the local with
+  push {r0, r1, r2, ...}, which writes the pushed registers there, so it reads r0 where the original
+  reads the fill. On copies of four bench builds the lift check accepts one function more, GCC -O0's
+  prvCreateAndDeleteStaticallyAllocatedQueues (a test counter written 254 against 249 from what earlier
+  frames left), the others as before; the four GCC -O2 builds' readable gate as before. What would take
+  the cases of the question: the original's read of stack bytes nothing wrote in the run, detected,
+  making such a case refused as the case whose outcome depends on where the stack lies is.
+- **Undo.** Revert the runner commit "a case that agrees with the stack filled alike agrees" (such
+  cases fail again).
+- **Status.** Done (runner filled_alike, 2026-10-26).

@@ -226,6 +226,78 @@ def test_a_case_whose_differences_are_stale_stack_data_is_compared_except_those(
     assert "ok   plain" in text, text
 
 
+def stale_branch_target(tmp_path, cases):
+    """A target whose check reads a local that maybe writes only when asked (n), and branches on it;
+    leave, called first, leaves data where check's frame lies. The C of start leaves other data there
+    (leave(1): leave writes only its own frame), so check's n differs and so does the branch it takes;
+    start2's C asks maybe to write n besides (check(1)): a difference of its own. Returns (target,
+    image, rebuilt payload)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    from dread.program import Program
+    from dread.target import Target
+    if not shutil.which("arm-none-eabi-gcc"):
+        pytest.skip("needs arm-none-eabi-gcc")
+    (tmp_path / "t.c").write_text(
+        "unsigned table[64], other; volatile unsigned done;\n"
+        "__attribute__((noinline)) void maybe(unsigned *p, unsigned flag) { if (flag) *p = 1; }\n"
+        "__attribute__((noinline)) void check(unsigned flag)\n"
+        "{ unsigned n; maybe(&n, flag); if (n >= 64) other = 1; else other = table[n] + 2; }\n"
+        "__attribute__((noinline)) void leave(unsigned x)\n"
+        "{ volatile unsigned junk[16]; int i; for (i = 0; i < 16; i++) junk[i] = x * 3 + i; }\n"
+        "void start(unsigned x) { leave(x); check(0); done = 1; }\n"
+        "void start2(unsigned x) { leave(x); check(0); done = 2; }\n"
+        "void plain(unsigned x) { other = x + 1; }\n")
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-O2", "-nostdlib", "-ffunction-sections",
+                    "-Wno-uninitialized", "-Wno-maybe-uninitialized", "-T", str(tmp_path / "t.ld"), "-e", "plain",
+                    "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         'limit = 0x08010000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n'
+                                         'cflags = ["-mcpu=cortex-m3", "-mthumb", "-O2", "-ffunction-sections"]\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    target = Target.load(str(tmp_path))
+    image = target.image()
+    src = tmp_path / "src"
+    src.mkdir()
+    data = {name: address for kind, address, name in Program(target, image).symbols() if kind == "d"}
+    (src / "rewritten.c").write_text(
+        "#define other (*(volatile unsigned *)0x%x)\n#define done (*(volatile unsigned *)0x%x)\n"
+        % (data["other"], data["done"]) +
+        "void leave(unsigned x); void check(unsigned flag);\n"
+        "void start(unsigned x) { leave(1); check(0); done = 1; }\n"
+        "void start2(unsigned x) { leave(1); check(1); done = 2; }\n"
+        "void plain(unsigned x) { other = x + 1; }\n")
+    os.makedirs(image.cases)
+    with open(os.path.join(image.cases, "few.py"), "w") as f:
+        f.write(cases)
+    payload = build.build(target, image, src=str(src), out=str(tmp_path / "recon"), quiet=True)
+    return target, image, payload
+
+
+def test_a_case_that_agrees_with_the_stack_filled_alike_agrees(tmp_path):
+    """start's C leaves other data where check's n lies: the original reads 300 and more (x = 100) and
+    stores 1, the C reads under 64 and stores table[n] + 2. The stale-data check fills the original
+    alone, and its fills send it the way it went; with the stack below every function's entry filled
+    alike in both images, both read the fill and store 1, whole: the case agrees (filled_alike).
+    start2's C also has maybe write n, a difference the fills keep: it fails. plain agrees as before."""
+    target, image, payload = stale_branch_target(tmp_path, 'case("start", "x = 100", lambda m: None, 100)\n'
+                                                           'case("start2", "x = 100", lambda m: None, 100)\n'
+                                                           'case("plain", "x = 1", lambda m: None, 1)\n')
+    failed, uncovered, text = run_all(target, payload)
+    assert "start [x = 100]: agrees with the stack below every function's entry filled alike" in text, text
+    assert "ok   start " in text and "FAIL start " not in text and "start" not in uncovered, text
+    assert "FAIL start2 [x = 100]" in text, text
+    assert "ok   plain" in text, text
+
+
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_a_call_into_the_middle_of_a_function_is_seen(tmp_path):
     """Machine.watch_calls: a call through a register that lands inside a function but not at its

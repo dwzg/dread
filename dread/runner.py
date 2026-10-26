@@ -25,6 +25,12 @@ mutation check is what shows whether its cases tell both outcomes apart.
 Output, one block per function, in this form (other tools read it):
 
     ok   NAME                       n/m cases agree
+         NAME [label]: agrees with the stack below every function's entry filled alike (...)
+                                    a case whose plain runs differ, but that agrees whole in both
+                                    images with the stack below each function's entry filled alike,
+                                    once with each fill (filled_alike; decided 2026-10-26,
+                                    docs/decisions.md): the difference was what earlier frames left
+                                    in a local nothing wrote; counted for coverage
          NAME [label]: compared except ...   a case whose every difference changes in the original
                                     too when what lies below the stack pointer at its function
                                     entries changes (it read stale stack data, an uninitialised
@@ -343,6 +349,44 @@ def stale_outputs(name, addr, args, limit, setup, kept, why, first, rebuilt):
     return stale if any(stale.explains(i) for i in images) else None
 
 
+def filled_alike(name, addr, args, limit, setup, kept, why, generated):
+    """Whether both images agree with the stack below every function's entry filled alike: the case run
+    again, in the original and in the rebuilt image, once with each of STALE_FILLS (STALE_SPAN bytes
+    below the stack pointer at each entry of a function of the original, which the rebuilt image enters
+    at the same address, its own code, a moved function's branch or its C in place, and at each entry
+    of C the rebuilt image placed elsewhere, which C callers call directly: c_places), compared whole.
+    A case whose plain runs differ only in what earlier frames left in a local nothing wrote agrees so:
+    in the original that is what its callers' frames left, in the C what other frames, laid out
+    otherwise, left, and with the fill both read the same. A translation that differs shows under the
+    fills too: a value the original writes would have to equal both fills to hide it. FreeRTOS's GCC -O0
+    prvCreateAndDeleteStaticallyAllocatedQueues agrees so in the lift check (a test counter written 254
+    against 249 from what earlier frames left; 2026-10-26). It does not reach a local the C itself
+    writes before reading it uninitialised: FreeRTOS's xStreamBufferReceive on the GCC -O2 builds reads a
+    message length memcpy was stubbed to leave unwritten, and its readable C reserves that local with
+    push {r0, r1, r2, ...}, so it reads the pushed r0, not the fill (still failed)."""
+    lay = RUN["layout"]
+    entries = frozenset(e & ~1 for e in Machine.entries.get((lay.target.file, lay.image.name), ())) | {addr & ~1} | \
+        {start & ~1 for spans in (RUN.get("placed") or {}).values() for start, _ in spans}
+    loop_case = bool(generated and generated.get("hang") and (generated.get("stub_calls") or generated.get("stops")))
+    for fill in STALE_FILLS:
+        plan, out = [], []
+        for which, payload in (("original", RUN["original"]), ("rebuilt", RUN["recon"])):
+            m = Machine(lay, payload, RUN["aliases"] if which == "rebuilt" else None, isa_of=RUN["isa_of"])
+            m.plan, m.replay, m.function = plan, which == "rebuilt", name
+            m.kept, m.kept_why = kept, why
+            m.stale_fill = (fill, STALE_SPAN, entries)
+            try:
+                setup(m)
+                budget = limit if which == "original" or (getattr(m, "may_hang", False) and not loop_case) \
+                    else limit * REBUILT_BUDGET
+                out.append(m.call(addr, *args, max_instructions=budget))
+            except Exception:
+                return False
+        if out[0].diff(out[1]):
+            return False
+    return True
+
+
 def items_text(keys):
     """A short text of difference items (fragile.items): memory as address runs, the rest in words."""
     memory = sorted(k[1] for k in keys if isinstance(k, tuple) and k[0] == "memory")
@@ -573,6 +617,14 @@ def run_function(name):
             # those (decided 2026-10-20, docs/decisions.md; such a case was refused before)
             lines.append("     %s [%s]: compared except what the original's stale stack data (an uninitialised "
                          "local) decides: %s" % (name, label, items_text(stale.shown)))
+            covered |= case_covered
+            continue
+        if diff and not refusing and not depends and not code_touched and not isinstance(out[0], Exception) and \
+                len(out) == 2 and out[1] is not None and \
+                filled_alike(name, addr, args, limit, setup, kept, why, generated):
+            lines.append("     %s [%s]: agrees with the stack below every function's entry filled alike (%s): the "
+                         "plain runs differ only in what earlier frames left in a local nothing wrote"
+                         % (name, label, ", ".join("0x%02x" % f for f in STALE_FILLS)))
             covered |= case_covered
             continue
         if stale:
