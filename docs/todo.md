@@ -3349,6 +3349,44 @@ the pilot's names, which the first review had taken for raw frames. New items:
   its initial value, if any, has no effects; a name an asm operand or a raw statement holds counts. On the
   FreeRTOS GCC -Os and clang -O2 builds 18 and 28 such declarations before, none after, the gate
   accepting the same functions (317, 275); it runs after the digest, so names are untouched.
+- [x] **The readable gate's refusals at measure-41** (2026-10-26). The gate kept 27 of the 12,148 lifted
+  functions of the 38 ARM and RISC-V builds lifted: 26 because a case differed, one whose readable C did
+  not compile. Traced with dread trace --readable:
+  - 20 on GCC 4.9, 5, 6 and 7 -Os (five each of xQueueSelectFromSet, xQueueSelectFromSetFromISR,
+    xNotifyTaskFromISR, xStreamBufferSend, prv1stHigherPriorityNormallyFullTask and an echo server
+    task): the entry pushes r0-r2 to make room, a register holds sp0 - 8, the local is stored through
+    it minus 4 (str r2, [r3, #-4]!) and that address goes to a callee. frame_locals saw only sp0 - 8
+    leave (the frame base is written into its uses by a later pass) and made the slot below it a
+    variable: the read became the register the push stored there. Fixed (dread.tidy
+    _held_frame_addresses): frame_locals follows the variables that hold a frame address, on the
+    reaching definitions, with constants held in variables (the lifter's flag-setting adds), an index
+    added counted from the address it is added to (as frame_index), and a walk downwards in a loop taken
+    as before (at or above where its base leaves). The measurement found two first forms too strict:
+    newlib's printi (its digit buffer walked down) and three GCC -O0 functions (an index loaded from the
+    frame added to a local array's address) lost stack variables; both as on main now;
+  - RISC-V GCC -O2's vTaskResume: its task pointer's register holds the priority where it indexes the
+    ready lists, and C takes no pointer as an index (dread.polish casts one);
+  - FreeRTOS pvPortMalloc on clang 12 -Os: propagate took a copy past a reload of its source on a
+    loop's exit (below).
+  On copies of measure-41's builds, against main: GCC 4.9, 5, 6 and 7 -Os 5 -> 0 refusals each, RISC-V
+  GCC -O2 1 -> 0, the other builds as before; on the nine builds the readable C is main's but for
+  RISC-V GCC -O2's vTaskResume and vTaskPrioritySet (the cast; the second did not compile there either).
+  Tests: tests/test_tidy.py test_a_slot_reached_through_a_variable_that_holds_a_frame_address_stays,
+  tests/test_polish.py test_a_pointer_used_as_an_index_is_cast_to_an_integer.
+- [ ] **A copy past a reload of its source on a loop's exit** (pvPortMalloc on clang 12 -Os, from the
+  item above): its free-list walk copies r1 into r6 at the loop's top and reloads r1 before the second
+  exit, behind which it reads r6 + 4; propagate wrote r1 + 4 there (the same definitions of r1 reach the
+  copy and the read, the reload through the back edge), and the readable C stored through address 4.
+  On its own branch: a copy goes only where no path from it to the read writes its source.
+- [ ] **Stale stack content in the readable gate** (xStreamBufferReceive and its FromISR form on the GCC
+  -O2 builds, five refusals, from the item above). In those cases memcpy is stubbed (its source, a
+  generated pointer, faulted) and writes nothing: the generic stub fills only the tested function's
+  frame, and generated cases have none, while the local here is the caller's caller's. The length read
+  from it is what earlier frames left there. The stale-data check fills the original only, and its fills
+  (0xA5, 0x5A) send it the way the stale data did; the rebuilt image reads its own frame's garbage, takes
+  the other way and faults. Proposal: where a case differs, run both images with the same fill below
+  every function's entry (an input like any other, the comparison whole) and take the case where they
+  then agree.
 
 ## Compiler diversity (the user, 2026-10-20: first, on ARM/Cortex-M and RISC-V)
 
