@@ -583,7 +583,13 @@ def test_readable_reasons_fall_into_categories():
     stopped them, as the lift check's."""
     c = bench.readable_reason
     assert c("accepted by the system run: readable C is not checked there yet") == \
-        "accepted by the system run (not checked there yet)"
+        "accepted by the system run (not checked there yet)"       # (the verdicts of a DREAD before 2026-10-26)
+    assert c("accepted by the system run; the whole image differs with its readable C (found by halving): x") == \
+        "the whole image differs with its readable C"
+    assert c("accepted by the system run: the target has no scenarios to try its readable C in") == \
+        "accepted by the system run (no scenarios to try it in)"
+    assert c("accepted by the system run: the whole image differs without its readable C (x), so the scenarios "
+             "decide nothing for it") == "accepted by the system run (the scenarios decide nothing)"
     assert c("no longer lifts: N reads r3") == "no longer lifts"
     assert c("the overlay: no room left for its readable C (12 bytes short)") == "no room for its readable C"
     assert c("its readable C calls __aeabi_uidiv, which the original does not call") == \

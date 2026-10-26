@@ -41,6 +41,16 @@ its sources.
   with the cases cached; the 12 the system run accepted stay lifted until readable C is checked
   there too. (The first try built those 12 from lifted C in the function-level runs too, and a case
   of prvRegTestTaskEntry1 the lift check had accepted failed: the configurations differed.)
+- [x] **Readable C for the functions the system run accepted** (2026-10-26, docs/decisions.md, "Readable C
+  for the functions the system run accepted"). The gate left them lifted ("readable C is not checked
+  there yet"): on the FreeRTOS bench's measure-40, 345 of the 381 functions that stayed lifted, the demo's
+  tasks and its start. Their readable C is tried in the whole image now, with the readable functions',
+  as the lift check tried their lifted C; the smallest set that makes it differ goes back to lifted C
+  (halving); where nothing can decide (no scenarios, an image that differs with lifted C alone) they
+  stay lifted with that reason. Main -> this: gizmo a32 35 -> 36 of 36 (irq_entry), rv32 31 -> 32 of 32
+  (trap_entry), m3 and m4 have none; FreeRTOS GCC -Os 328 -> 341 of 341, clang -O2 288 -> 300 of 300,
+  RISC-V GCC -Os 265 -> 272 of 272, GCC -O0 378 -> 382 of 382, the whole image agreeing on each. dread
+  bench's categories name the new reasons.
 - [x] **Clean-up.** A control-flow graph from labels and gotos; liveness and reaching definitions over
   registers, flags and frame words; flags and registers nobody reads dropped; copies and constants
   propagated; a temporary used once folded into its use; a flag-setting compare and the branch that

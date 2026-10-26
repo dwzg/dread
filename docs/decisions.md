@@ -5175,3 +5175,21 @@ parameters from pushes, system calls and calls that keep every argument", part (
   handler's write of it, if any, changes nothing the function does). The FreeRTOS recipe says `[]` for
   its three ports: the RISC-V yield saves the context and switches tasks, the Cortex-M `svc 0` starts the
   first task, and neither reads an argument register (portASM.S, port.c).
+
+## Readable C for the functions the system run accepted (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The lift check accepts some functions by the system run alone: functions that never
+  return and handlers, whose cases cannot test them on their own (dread lift --check marks them in the
+  lifted table). The readable check left them lifted ("readable C is not checked there yet"): on the
+  FreeRTOS bench (measure-40) 345 of the 381 functions that stayed lifted, the demo's tasks and its start.
+  How is their readable C checked?
+- **Options.** (a) Leave them lifted. (b) Try their readable C where the lift check tried their lifted C:
+  in the whole image, with the readable functions' C, the scenarios against the original's; the smallest
+  set that makes it differ back to lifted C (halving), as for the others in the whole image. (c) Give
+  them cases of their own first (loop cases, recorded inputs) and check them like the others.
+- **Choice.** (b): the same evidence that accepted their lifted C, and nothing the comparison sees is
+  taken away. (c) is the generator's work on hard functions and stays open beside it (the cases decide
+  more finely than a scenario does). Where nothing can decide (a target without scenarios, an image
+  that differs with lifted C alone) they stay lifted, with that reason.

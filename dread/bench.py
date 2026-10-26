@@ -645,7 +645,13 @@ MEASURING = ("dread/bench.py", "dread/cmetrics.py")     # but those that only me
 def readable_reason(reason):
     """Why the readable gate left a function lifted (a reason of its verdicts.tsv), as a category
     across builds; the drops by what stopped them as the lift check's (reason_category)."""
-    for start, category in (("accepted by the system run", "accepted by the system run (not checked there yet)"),
+    for start, category in (("accepted by the system run; the whole image differs",
+                             "the whole image differs with its readable C"),
+                            ("accepted by the system run: the target has no scenarios",
+                             "accepted by the system run (no scenarios to try it in)"),
+                            ("accepted by the system run: the whole image differs without",
+                             "accepted by the system run (the scenarios decide nothing)"),
+                            ("accepted by the system run", "accepted by the system run (not checked there yet)"),
                             ("no longer lifts", "no longer lifts"),
                             ("its lifted C is not the dialect", "its lifted C is not the dialect dread.cparse reads"),
                             ("the overlay: no room", "no room for its readable C"),

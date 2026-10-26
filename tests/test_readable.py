@@ -135,6 +135,41 @@ def test_a_stage_that_breaks_a_function_leaves_it_lifted(tmp_path, monkeypatch):
 
 @pytest.mark.slow
 @needs_gcc
+def test_a_function_the_system_run_accepted_is_tried_in_the_whole_image(tmp_path, monkeypatch):
+    """gizmo-a32's irq_entry, which the lift check accepted by the system run (an interrupt handler: its
+    cases cannot test it alone), stayed lifted in the readable check until 2026-10-26 ("readable C is not
+    checked there yet"); now its readable C is tried in the whole image with the readable functions', as
+    the lift check tried its lifted C, and it is readable. A stage that drops its call of irq_dispatch makes
+    the scenarios differ: it stays lifted, found by halving, and every other function stays readable."""
+    from conftest import GIZMO
+    from dread.target import Target
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    cases = os.path.join(gizmo_dir("a32"), "build", "autocases")
+    if os.path.isdir(cases):
+        shutil.copytree(cases, copy / "a32" / "build" / "autocases")
+    target = Target.load(str(copy / "a32"))
+    image = target.image()
+    lifted = build.read_names(image.table("lifted"))
+    assert "irq_entry" in build.system_names(image.table("lifted"))
+    lines = []
+    accepted = readable.check(target, image, out=lines.append, jobs=2)
+    assert "irq_entry" in accepted and accepted == sorted(lifted), lines
+
+    def drop_call(fn, run=None):
+        if fn.name == "irq_entry":
+            fn.body.body[:] = [s for s in fn.body.body
+                               if not (isinstance(s, cparse.ExprStmt) and isinstance(s.e, cparse.Call))]
+    monkeypatch.setattr(readable, "STAGES", readable.STAGES + [("break", drop_call)])
+    lines = []
+    accepted = readable.check(target, image, out=lines.append, jobs=1)     # (in this process: the stage)
+    assert accepted == sorted(n for n in lifted if n != "irq_entry"), lines
+    verdicts = open(os.path.join(target.build, "readable-check", image.name, "verdicts.tsv")).read()
+    assert re.search(r"^irq_entry\tlifted\taccepted by the system run; the whole image differs", verdicts, re.M), verdicts
+
+
+@pytest.mark.slow
+@needs_gcc
 def test_readable_c_that_does_not_compile_stays_lifted_with_the_compilers_first_error(tmp_path, monkeypatch):
     """A stage that writes an undeclared variable into fmt_dec: its readable C does not compile, so it
     stays lifted, and the gate's line and verdicts.tsv give the compiler's first error with the code

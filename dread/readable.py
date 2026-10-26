@@ -82,7 +82,8 @@ lines for the compiler, each statement's first instruction in a margin (dread.cp
 first_addresses: of its own instruction and those dread.tidy folded into it alone, the lowest).
 Since 2026-10-23; before, every form was the compiled one (docs/decisions.md).
 
-Not yet: functions that never return and were accepted by the system run (they stay lifted).
+The functions the system run accepted (functions that never return, handlers) are tried in the whole
+image only, as the lift check tries them (since 2026-10-26; they stayed lifted before).
 """
 import argparse
 import copy
@@ -1852,8 +1853,6 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
     for name in names or lifted:
         if name not in lifted:
             verdicts[name] = ("not lifted", "not in the lifted table: dread lift --check first")
-        elif name in by_system:
-            verdicts[name] = ("lifted", "accepted by the system run: readable C is not checked there yet")
         else:
             fn = program.by_name.get(name)
             try:
@@ -1864,10 +1863,12 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
     # image's take it from there as long as the context's tables and the lifted C stay the same.
     made = readable_texts({n: t for n, t in texts.items() if t is not None}, context, jobs, verify=verify,
                           stats=stats, kept=trees)
-    candidates = []
+    candidates, by_system_run = [], []      # (by_system_run: the system run's, tried in the whole image only)
     for name, text in texts.items():
         if text is None or made[name] is None:
             verdicts[name] = ("lifted", "its lifted C is not the dialect dread.cparse reads")
+        elif name in by_system:
+            by_system_run.append(name)
         else:
             candidates.append(name)
     accepted, rounds = list(candidates), 0
@@ -2129,6 +2130,32 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
             "; without it alone it agrees, of " + ", ".join(guilty) if one else "", found))
         accepted = [n for n in accepted if n not in ([one] if one else guilty)]
         found = whole(accepted) if accepted else None
+    # The functions the system run accepted (functions that never return, handlers: their cases cannot
+    # test them alone) are tried where the lift check tried them, in the whole image: with the readable
+    # functions' C, theirs too; the smallest set that makes it differ goes back to lifted C (halving), the
+    # rest is readable (until 2026-10-26 they all stayed lifted: on the FreeRTOS bench nine of every ten
+    # functions that did, the demo's tasks). Not where nothing can decide: without scenarios, or where the
+    # image differs with lifted C alone.
+    by_system_run.sort()
+    if by_system_run and not runs:
+        for n in by_system_run:
+            verdicts[n] = ("lifted", "accepted by the system run: the target has no scenarios to try its readable C in")
+        by_system_run = []
+    elif by_system_run and whole(accepted):
+        for n in by_system_run:
+            verdicts[n] = ("lifted", "accepted by the system run: the whole image differs without its readable C "
+                           "(%s), so the scenarios decide nothing for it" % whole(accepted))
+        by_system_run = []
+    found = whole(accepted + by_system_run) if by_system_run else None
+    while found:
+        out("the whole image with the system run's functions: %s" % found)
+        differs = lambda names: whole(accepted + names) if names else None     # noqa: E731
+        guilty = lift.culprits(by_system_run, differs)
+        drop(guilty, "accepted by the system run; the whole image differs with its readable C (found by "
+             "halving): %s" % found)
+        by_system_run = [n for n in by_system_run if n not in guilty]
+        found = whole(accepted + by_system_run) if by_system_run else None
+    accepted = accepted + by_system_run
     for name in accepted:
         verdicts[name] = ("readable", "")
     if context.plan.whole or context.plan.results or context.plan.divcalls:
@@ -2150,7 +2177,7 @@ def check(target, image, names=None, out=print, jobs=None, verify=False):
         f.write("".join(n + "\n" for n in kept))
     out("dread readable --check: %d of %d lifted functions readable after %d rounds (%d stay lifted; the whole "
         "image %s), into %s" % (len(kept), len(lifted), rounds, len(lifted) - len(kept),
-                                whole_note if runs and candidates else "not run", os.path.relpath(path)))
+                                whole_note if runs and (candidates or by_system) else "not run", os.path.relpath(path)))
     out("dread readable --check: the builds asked for readable C %d times, %d made (%d of them from their cleaned "
         "trees), the rest as made before; %d analysis trees made for %d readable_types table%s of %d functions%s" % (
             stats.get("texts", 0), stats.get("made", 0), stats.get("cleaned", 0),
