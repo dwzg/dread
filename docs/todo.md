@@ -3090,6 +3090,26 @@ the pilot's names, which the first review had taken for raw frames. New items:
   (tests/test_polish.py test_a_mask_moved_by_a_shift_stays_a_mask, which fails on the previous rule). The
   gate test was not needed: the change writes the same values. On the eight builds the gate accepts the
   same functions and no line changes (none moves a mask before using it).
+- [x] **A byte pointer parameter as a void pointer in the externs** (2026-10-26; docs/decisions.md "A
+  callee's byte pointer as void * in its callers"). A callee that copies what it is handed byte by byte
+  (FreeRTOS's xQueueGenericSend: its item goes to prvCopyDataToQueue and memcpy) takes `const volatile
+  u8 *` in its own C, and a caller that hands it the address of a u32 local or of a structure got
+  `xQueueGenericSend(q, (u32)&stack4, 0x8cu, 0)` with the extern all-u32: the plan's extern rule takes
+  the callee's type only where the calls pass it without a cast, and a word's address is no byte
+  pointer. Now a byte pointer (u8) may be declared void in a file's externs (void_param): in the
+  plan, where the trial counts fewer casts with it (an extern candidate keeps the type with the fewest
+  casts, the first of those; the other candidates the first that adds none, as before), and in
+  object_arguments (after dread.frames made the objects the plan never saw), where every call passes
+  an object's address of any type or 0; the callee's own definition keeps its bytes (each function is
+  a file of its own: one pointer at the machine's level). `xQueueGenericSend(q, &stack4, 0x8cu, 0)`,
+  `memset(&g_200017ac[0], 0, 0x54u)`. On the nine builds (copies of the fault branch's lift results)
+  the gate accepts the same functions; `(u32)&` 316 -> 257 (GCC -Os), 368 -> 299 (clang -O2), 340 ->
+  309 (RISC-V GCC -Os), 445 -> 410 (GCC -O0), 284 -> 261 (RISC-V GCC -O2), lines with a (u32) 778 ->
+  718, 833 -> 762, 731 -> 698, 955 -> 911, 760 -> 737; gizmo unchanged. Left: the callee's own
+  parameter stays a byte pointer where it only hands it on (a void parameter there would need no cast
+  either; not tried), and an integer passed beside objects keeps the extern u32. Tests:
+  tests/test_vartypes.py test_a_byte_parameter_is_a_void_pointer_where_the_calls_pass_other_pointers,
+  test_objects_of_other_types_go_to_a_byte_parameter_as_void_pointers.
 - [ ] **What a variable loaded from a pointer global reads past its structure.** The structure of a
   pointer global is the one its typed loaders and storers vote for; a variable loaded from it that reads
   past that structure's members (a task block's flag byte past the list item the block starts with, where
@@ -5093,7 +5113,11 @@ reimplement them.
 - [ ] dread import-elf --write-startup leaves a `free = [...]` line in place when the image has no free
   range any more: gizmo-mips's names [0xbfc014f0, 0xbfc01500], of which .ramfunc's last 8 bytes now lie
   in the first half (the overlay could put C over them). Take the line out when the list is empty, and
-  regenerate gizmo-mips (found 2026-10-24 by dread new, which writes the target from scratch).
+  regenerate gizmo-mips (found 2026-10-24 by dread new, which writes the target from scratch). Tried
+  2026-10-26 and dropped: taking the line out where no gap is found removed ranges written by hand
+  (tests/test_lift.py's narrow-branch tests and test_lift_results.py write room inside .text, padding
+  the ELF's gaps do not show; four tests failed). A rule must tell a stale range the tool wrote from one
+  written by hand: its bytes erased in the image, or a mark on the tool's own line. MIPS is paused.
 - [x] 3. The pilot: start a run (task, provider, budget, batches), follow it live (stage, questions asked
   and answered, batches waiting and their age, spend so far against the budget, the names as they
   come), stop it (its batches cancelled: a job's stop is SIGTERM to its process group, which makes the

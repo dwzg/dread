@@ -5269,3 +5269,24 @@ parameters from pushes, system calls and calls that keep every argument", part (
   local used as a pointer) would differ between the images and fail (conservative, and the fragile
   check's business). Fetch faults (a jump to unmapped memory) stay errors. Coverage counts short at the
   faulting block (a block that also ran whole earlier loses its tail for that case), never long.
+
+## A callee's byte pointer as void * in its callers (2026-10-26)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** A callee that takes bytes (its own C dereferences them, or hands them to memcpy) has a
+  `u8` pointer parameter, and its callers mostly hand it other things: the address of a word, a
+  structure (a queue's item, a buffer memset clears). The extern rule (a callee's type where the calls
+  pass it without a cast) left such externs u32 and every call cast: `(u32)&stack4`. How should callers
+  declare it?
+- **Options.** (a) As before: u32 and a cast per call. (b) The callee's type and a pointer cast per call
+  (`(const volatile u8 *)&stack4`: as many casts). (c) `void *` with the parameter's qualifiers in the
+  callers' externs, where their calls pass pointers of other types: C converts any object's pointer to
+  a void pointer without a cast; the callee's own definition keeps its byte pointer. (d) Void in the
+  callee's own definition too.
+- **Choice.** (c), taken by the plan's trial (fewest casts) and by object_arguments for the frame's
+  objects. The extern and the definition differ in type, not in what is passed (one pointer, each
+  function compiled alone, as memcpy's `void *` and a byte loop's `unsigned char *` do in a C
+  library). (d) would need casts inside the callee, whose body reads bytes, and changes the function's
+  own C for its callers' sake; not tried.
+

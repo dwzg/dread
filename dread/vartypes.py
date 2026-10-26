@@ -44,7 +44,9 @@ table's `variables` and `prototypes`):
   quotient). A function the plan does not analyse gets the variables on its own C (local_types);
 - a file's externs: a callee's parameter has the type of the callee's own readable C where the file's
   calls pass what C takes for it without a cast (a pointer of that type, the address of an object of
-  it, 0); elsewhere it stays u32 as the lifter declared it (an integer, a queue handle a u32 global
+  it, 0), and a byte pointer (u8) is a void pointer where they pass pointers of other types (the
+  address of a u32 local for a queue's item: void_param, since 2026-10-26); elsewhere it stays u32 as
+  the lifter declared it (an integer, a queue handle a u32 global
   holds, the address of a text: a cast at every call, which measured more casts than the types took
   away: docs/decisions.md). A callee's result type is its own everywhere, and a function that calls
   itself declares itself as its head (C takes no other);
@@ -105,6 +107,7 @@ SIZES = {"u8": 1, "s8": 1, "u16": 2, "s16": 2, "u32": 4, "s32": 4, "u64": 8, "s6
 INTS = {"u8": (8, False), "s8": (8, True), "u16": (16, False), "s16": (16, True), "u32": (32, False),
         "s32": (32, True), "u64": (64, False), "s64": (64, True)}
 ACCESS = re.compile(r"^volatile ([us](?:8|16|32|64)) \*$")
+VOID = re.compile(r"^(const )?volatile void \*$")     # an extern's void pointer parameter (void_param)
 ROUNDS = 6              # rounds of the plan over the functions (callees' prototypes spread up to callers)
 SMALL = 0x100           # a variable given a constant below this is an index, not a pointer
 FRAME = ("sp0", "frame")
@@ -413,6 +416,24 @@ class Rewriter:
             return C.Num("0")
         return C.Cast(self.text(d, const), self.value(e, "bits"))
 
+    def to_void(self, e, const=False):
+        """e (an integer of the lifted C) as the argument for a void pointer parameter (an extern's, where
+        the callee's own C takes bytes: void_param): a pointer as it is, of any type (const only where the
+        parameter is const), 0 as it is, anything else cast."""
+        n = self.natural(e)
+        if n is None and isinstance(e, C.Cast) and "*" in e.type:
+            n = self._cast(e, "bits")
+        if n is not None:
+            p = self.ptr(n)
+            if p and (const or not p[1]):
+                return n
+            if isinstance(n, C.Cast) and "*" in n.type:
+                n = n.e
+            return C.Cast(pointer_text("void", const), n)
+        if is_zero(e):
+            return C.Num("0")
+        return C.Cast(pointer_text("void", const), self.value(e, "bits"))
+
     # -- accesses --
 
     def access(self, e, store=False):
@@ -613,10 +634,14 @@ class Rewriter:
         params = None
         if isinstance(e.f, C.Name) and e.f.id in self.new.functions:
             params = self.new.functions[e.f.id][1]
+        texts = self.param_texts.get(e.f.id, []) if isinstance(e.f, C.Name) else []
         args = []
         for i, a in enumerate(e.args):
             d = params[i] if params is not None and i < len(params) else None
-            if d is not None and d[0] == "ptr" and d[1] is not None:
+            void = VOID.match(" ".join(texts[i].split())) if i < len(texts) and texts[i] else None
+            if void:
+                args.append(self.to_void(a, bool(void.group(1))))
+            elif d is not None and d[0] == "ptr" and d[1] is not None:
                 args.append(self.to_pointer(a, d[1], self._param_const(e.f, i)))
             elif d is not None and d[0] == "int" and d[1][0] <= 32:
                 args.append(self.value(a, "bits"))
@@ -1321,8 +1346,18 @@ def candidates(facts, protos, signed_result=False):
         params = (protos.get(callee) or (None, []))[1]
         for i, t in enumerate(params):
             if t is not None and parse_pointer(t) is not None:
-                out.append(Candidate([], [t], "extern", {(callee, i)}))
+                out.append(Candidate([], [t] + void_param(t), "extern", {(callee, i)}))
     return out
+
+
+def void_param(t):
+    """[the void pointer type] for a callee's byte pointer parameter t (u8: the bytes of what it is given,
+    memcpy's source and the queue item it is handed on to), with t's const; [] for another. A file's
+    extern may declare it so where its calls pass pointers of other types: C takes any object's pointer
+    for a void pointer without a cast, and the callee's own definition keeps its bytes (one pointer at
+    the machine's level: each function is a file of its own)."""
+    p = parse_pointer(t)
+    return [pointer_text("void", p[1])] if p and p[0] == "u8" else []
 
 
 def negative_variables(facts, taken=(), returning=True):
@@ -1475,18 +1510,22 @@ class Planner:
             ks |= {k for f, _ in cand.params for k in fx.call_atoms.get(f, ())}
             atoms = [fx.atoms[k] for k in sorted(ks)]
             before = self.cost(name, typing, self.file_protos(protos, calls), atoms)
-            for t in cand.types:
+            best = None                     # (an extern candidate: the type with the fewest casts, the
+            for t in cand.types:            # first of those; the others: the first that adds none)
                 trial, trial_calls = dict(typing), {f: dict(ps) for f, ps in calls.items()}
                 trial.update({v: t for v in cand.members})
-                for f, i in cand.params:
-                    trial_calls.setdefault(f, {})[i] = protos[f][1][i]
+                for f, i in cand.params:        # (an extern candidate's own type: the void pointer too)
+                    trial_calls.setdefault(f, {})[i] = t if cand.kind == "extern" else protos[f][1][i]
                 after = self.cost(name, trial, self.file_protos(protos, trial_calls), atoms)
                 if log is not None:
                     log.append((cand.kind, sorted(cand.members), sorted(cand.params), t, before, after,
-                                after <= before))
-                if after <= before:
-                    typing, calls = trial, trial_calls
-                    break
+                                after <= before and (best is None or after < best[0])))
+                if after <= before and (best is None or after < best[0]):
+                    best = (after, trial, trial_calls)
+                    if cand.kind != "extern":
+                        break
+            if best is not None:
+                typing, calls = best[1], best[2]
         return typing, calls
 
     def decide_result(self, name, protos, callers):
@@ -1722,7 +1761,9 @@ def object_arguments(tree, fn, p, names=None, int_bits=None):
     for xTaskDelayUntil((u32)&stack36, 0x1388u)). The rule of a file's externs (plan) for what only exists
     after the plan: the frame's objects, which the plan's trials never saw. Every cast it takes away is
     one less, none comes in. A parameter some call passes anything else (an integer, a sum) stays u32.
-    Returns whether anything changed."""
+    Where the callee takes bytes (u8) and the objects are of other types, the extern declares a void
+    pointer (void_param: a queue's item, xQueueGenericSend(q, &stack4, ...) for a u32 local, since
+    2026-10-26). Returns whether anything changed."""
     from dread import polish, tidy
     prototypes = getattr(p, "prototypes", None) or {}
     if not prototypes or tidy.fixed_registers(tree):
@@ -1756,20 +1797,23 @@ def object_arguments(tree, fn, p, names=None, int_bits=None):
             target = types.parse(want)
             if not target or target[0] != "ptr" or target[1] is None:
                 continue
-            fits = []
-            for call in found:
-                a = call.args[i] if i < len(call.args) else None
-                if isinstance(a, C.Num) and a.value == 0:
-                    continue
-                if isinstance(a, C.Cast) and " ".join(a.type.split()) == "u32" and _object_address(a.e) and \
-                        _points_to(types.of(a.e), target[1]):
-                    fits.append((call, i))
-                    continue
-                fits = None
-                break
-            if fits:
-                new[i] = want
-                strip += fits
+            void = void_param(proto[i + 1])    # (a byte pointer: any object's address as void *)
+            for typed in (True, False) if void else (True,):
+                fits = []
+                for call in found:
+                    a = call.args[i] if i < len(call.args) else None
+                    if isinstance(a, C.Num) and a.value == 0:
+                        continue
+                    if isinstance(a, C.Cast) and " ".join(a.type.split()) == "u32" and _object_address(a.e) and \
+                            (not typed or _points_to(types.of(a.e), target[1])):
+                        fits.append((call, i))
+                        continue
+                    fits = None
+                    break
+                if fits:
+                    new[i] = want if typed else void[0]
+                    strip += fits
+                    break
         if strip:
             for call, i in strip:
                 call.args[i] = call.args[i].e

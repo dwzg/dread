@@ -433,6 +433,49 @@ u32 by_number(u32 r0)
     assert "u32 fill(volatile u8 *r0, u32 r1, u32 r2)" in out and "*r3++ = r1;" in out, out
 
 
+def test_a_byte_parameter_is_a_void_pointer_where_the_calls_pass_other_pointers():
+    """A callee that reads bytes through its second parameter takes const volatile u8 *; a caller that
+    hands it the address of a word (a queue's item: FreeRTOS's xQueueGenericSend(q, &ulValue, ...))
+    declares that parameter const volatile void * in its extern and passes &g_x without a cast (C takes
+    any object's pointer for a void pointer; the callee's own C keeps its bytes); one that hands it a
+    byte object's address keeps the u8 pointer. (The callers' own r0, handed to the first parameter, is a
+    byte pointer by it.)"""
+    text = HEAD + """#define g_20001000 (*(volatile u32 *)0x20001000u)
+#define g_200017c5 ((volatile u8 *)0x200017c5u)
+extern u32 copy_in(u32, u32, u32);
+u32 copy_in(u32 r0, u32 r1, u32 r2)
+{
+    u32 r2_1, r3;
+    r3 = r1;
+    r2_1 = r2 + r1;
+    while (r3 != r2_1)
+    {
+        *(volatile u8 *)r0 = *(volatile u8 *)r3; r3 = r3 + 1; r0 = r0 + 1;
+    }
+    return r0;
+}
+u32 by_word(u32 r0)
+{
+    copy_in(r0, (u32)&g_20001000, 4);
+    return 0;
+}
+u32 by_bytes(u32 r0)
+{
+    copy_in(r0, (u32)&g_200017c5[0], 4);
+    return 0;
+}
+"""
+    out, p = typed(text, name="copy_in")
+    assert "const volatile u8 *r1" in out, out
+    out, p = typed(text, name="by_word")
+    assert p.variables["by_word"]["calls"]["copy_in"]["1"] == "const volatile void *", p.variables
+    assert "extern u32 copy_in(volatile u8 *, const volatile void *, u32);" in out and \
+        "copy_in(r0, &g_20001000, " in out, out
+    out, p = typed(text, name="by_bytes")
+    assert "extern u32 copy_in(volatile u8 *, const volatile u8 *, u32);" in out and \
+        "copy_in(r0, &g_200017c5[0], " in out, out
+
+
 def test_a_structure_parameter_takes_a_held_members_address_and_hands_on_a_type():
     """A callee whose parameter dread.shapes types as a structure (an item) is declared so in a caller
     that hands it the address of the item its own structure holds (&r0->f_4, not (u32)&r0->f_4); a
@@ -1204,6 +1247,32 @@ def test_objects_go_to_callees_as_the_pointers_their_own_c_takes():
                  "extern u32 send(volatile struct s_7 *);", "send(&msg);"):
         assert line in out, (line, out)
     assert not vartypes.object_arguments(tree, fn, p)     # (nothing left to take)
+
+
+def test_objects_of_other_types_go_to_a_byte_parameter_as_void_pointers():
+    """object_arguments where the callee takes bytes (item: const volatile u8 *, a queue's item as
+    FreeRTOS's xQueueGenericSend takes it, copied byte by byte) and the calls pass objects of other
+    types (a halfword's address, a structure's): the extern declares const volatile void * and the
+    calls pass the addresses without a cast; a byte array's call keeps the u8 pointer (fill), and a
+    parameter one call passes an integer stays u32 (put)."""
+    from test_shapes import HEAD as SHAPES_HEAD
+    p = shapes.Plan()
+    p.prototypes = {"fill": [None, "volatile u8 *"], "put": [None, "const volatile u8 *"],
+                    "item": [None, "const volatile u8 *"]}
+    text = ("extern u32 fill(u32);\nextern u32 put(u32);\nextern u32 item(u32);\n"
+            "u32 h(u32 r0)\n{\n    u8 buf[8];\n    u16 half;\n    u32 msg;\n"
+            "    fill((u32)buf);\n    put((u32)&half);\n    put(r0);\n"
+            "    item((u32)&half);\n    item((u32)&msg);\n    item(0);\n    return buf[0];\n}\n")
+    tree = cparse.parse(SHAPES_HEAD + text)
+    fn = tree.function("h")
+    tree.items.insert(tree.items.index(fn), cparse.Raw("struct s_7\n{\n    u32 f_0;\n};"))
+    decl = next(st for st in fn.body.body if isinstance(st, cparse.Decl) and st.items[0].name == "msg")
+    decl.specs = "struct s_7"
+    assert vartypes.object_arguments(tree, fn, p)
+    out = cparse.unparse(tree, notes=False)
+    for line in ("extern u32 fill(volatile u8 *);", "fill(buf);", "extern u32 put(u32);", "put((u32)&half);",
+                 "extern u32 item(const volatile void *);", "item(&half);", "item(&msg);", "item(0);"):
+        assert line in out, (line, out)
 
 
 def test_eligible_says_why_a_variable_is_left_out():
