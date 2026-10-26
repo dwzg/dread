@@ -5754,6 +5754,13 @@ repository holds the recipe; the sources, builds and results live in `~/dread-be
   vRegTest2Implementation take 400 to 500 s a build); (3) the M4F builds' libgcc compare helpers that
   return flags (__aeabi_cdcmple and kin: about six refusals a build); (4) the disagreements left
   (clang's __sflush_r, prvSampleTimeNow).
+- [x] **Measured 2026-10-26** (measure-40 of the 40 builds, DREAD a84de17, `dread bench measure --jobs 4`:
+  5.9 h; the first attempt, one build at a time, was on course for about 11 h): every build lifts more
+  than at measure-39 (2026-10-21), 11,203 -> 11,684 functions over the 38 ARM and RISC-V builds: ARM GCC
+  -Os +9 to +19, -O2 +5 to +10, -O0 +25, ARM clang -Os +11 to +14, -O2 +14, RISC-V GCC -Os +13 to +18,
+  -O2 +9, RISC-V clang -Os +15 to +17. The readable gate accepts 11,304 of the 11,684 (96.7 %). RISC-V
+  GCC -O2 stays the lowest (203 of 300 lifted). The builds' targets predate the recipe's syscall_reads:
+  the next measurement rebuilds them.
 - [ ] **New architectures through it**: Cortex-M4F first (FreeRTOS's ARM_CM4F port, below), then MSP430X
   with TI's cl430 (FreeRTOS's MSP430X port), AVR (its ATmega ports), each as its own item below.
 - [ ] (Later) a compute-heavy library (littlefs) for the case generator on parsers and data structures.
