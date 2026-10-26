@@ -969,12 +969,23 @@ class Polisher:
             return C.Call(self._expr(e.f, SAME), [self._expr(a, Use("conv", t, top=True, mask=i in ms) if t else SAME)
                                                   for i, (a, t) in enumerate(zip(e.args, ts))])
         if isinstance(e, C.Index):
-            return C.Index(self._expr(e.base, SAME), self._expr(e.index, SAME))
+            return C.Index(self._expr(e.base, SAME), self._index(e.index))
         if isinstance(e, C.Member):
             return C.Member(self._expr(e.base, SAME), e.name, e.arrow)
         if isinstance(e, C.Comma):
             return C.Comma([self._expr(x, SAME) for x in e.items])
         return e
+
+    def _index(self, e):
+        """An element's index rewritten; a pointer used as one cast to an integer, since C takes no
+        pointer as an index: a register that a parameter's structure pointer type covers, reused for a
+        number (RISC-V GCC -O2's vTaskResume indexes the ready lists with the register of its task
+        pointer, which holds the task's priority there: its readable C did not compile)."""
+        index = self._expr(e, SAME)
+        d = self.types.of(index)
+        if d is not None and d[0] in ("ptr", "array"):
+            return C.Cast("u32" if self.ctx.int_bits >= 32 else "u16", index)
+        return index
 
     def _cast(self, e, use):
         t = self.types.parse(e.type)
@@ -1289,7 +1300,7 @@ class Polisher:
         if isinstance(x, C.Member):
             return C.Member(self._expr(x.base, SAME), x.name, x.arrow)
         if isinstance(x, C.Index):
-            return C.Index(self._expr(x.base, SAME), self._expr(x.index, SAME))
+            return C.Index(self._expr(x.base, SAME), self._index(x.index))
         return x
 
     # -- statements --

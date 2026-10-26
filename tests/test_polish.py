@@ -58,6 +58,19 @@ def test_a_count_of_leading_zeros_shifted_by_five_is_a_test_for_zero():
         assert "== 0" not in polished(body), body
 
 
+def test_a_pointer_used_as_an_index_is_cast_to_an_integer():
+    """A register that a parameter's structure pointer type covers, reused for a number (RISC-V GCC -O2's
+    vTaskResume: the task pointer's register holds the task's priority where it indexes the ready lists):
+    C takes no pointer as an index, and the readable C did not compile. The index is cast to an integer,
+    in an element's address and in an element's member alike; an integer index stays as it is."""
+    raw = ("struct s_1\n{\n    u32 f_0;\n    u32 f_4;\n};",
+           "#define g_80095914 ((volatile struct s_1 *)0x80095914u)")
+    got = polished("u32 f(u32 r0, u32 r1)\n{\n    u32 a4;\n    a4 = &g_80095914[r0];\n"
+                   "    a4->f_0 = g_80095914[r0].f_4 + g_80095914[r1].f_0;\n    return 0;\n}\n",
+                   raw=raw, pointers={"r0": "s_1", "a4": "s_1"})
+    assert "&g_80095914[(u32)r0]" in got and "g_80095914[(u32)r0].f_4" in got and "g_80095914[r1].f_0" in got, got
+
+
 def test_negative_numbers_where_a_value_is_one():
     """A complement (mvn) or a constant near the top of its type is -k where it is assigned, returned,
     passed, compared for equality, compared in order where the comparison is signed, or added; it stays
