@@ -439,8 +439,8 @@ round for results given back" (docs/todo.md).
   round that gave functions their results back (the table keeps each function's types for the digest of
   its C, and the first was made for the void forms), and with it every analysis tree and every
   function's readable C, which readable_texts kept by the whole context: FreeRTOS's clang -O2 gate went
-  from 58 s to 144 s, GCC -O0's from 49 to 166 s, and on a large private firmware it took several times
-  as long. How does such a round make only what changed, and still give, function for
+  from 58 s to 144 s, GCC -O0's from 49 to 166 s, and a private firmware's grew too. How does such a round
+  make only what changed, and still give, function for
   function, the C a check that keeps nothing gives?
 - **Options.**
   1. The table after such a round: (a) made from trees made anew, as before; (b) made from the analysis
@@ -1458,7 +1458,7 @@ of a private firmware after the second review.
 ## An entry without names carries its sentence (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), found on the private
-real-life test: after a day's printing rules changed many functions' readable C, dread readable --carry
+real-life test: after a day's printing rules changed readable C, dread readable --carry
 reported a number of functions as "carried nothing", every one with the reason "none has its variable
 in this C". Their entries held a sentence and no names: the C had nothing the model renamed (a
 function without locals, or one whose variables the model kept as they were).
@@ -1649,7 +1649,7 @@ objects under the table's names" (docs/todo.md, from a second review).
   named either, it made no objects: not in the printed C, not in the compiled C the gate builds. The
   naming question (question_trees) never ran dread.frames: it showed the frame raw (`sp0 - 20`), so the
   model named `frame` and `sp0` when it named anything there and never saw the objects, whose default
-  names (stackN) got no proposal. On a private firmware this caused most of a review's raw frames.
+  names (stackN) got no proposal. On a private firmware this caused raw frames in a review.
   Public reproduction: gizmo a32's print_status with an entry made for its C naming `sp0` alone
   (`buf_end`): `u8 stack20[12]; fmt_dec((u32)stack20, ...)` became `u32 frame[6]; u32 buf_end =
   (u32)&frame[6]; fmt_dec(buf_end - 20, ...)`. In which order do the objects and the names go, what
@@ -2134,8 +2134,8 @@ were refused fail.
 ## Readable C's two-word results, callers of a function that fails, save areas behind a frame copy (2026-10-24)
 
 **Decided by recommendation** (the user's standing delegation of 2026-10-20), from regressions on the
-private real-life test: after the readable C changes of 2026-10-23 the readable gate kept many more
-of its functions lifted than the day before, many of them readable then.
+private real-life test: after the readable C changes of 2026-10-23 the readable gate kept functions lifted
+that had been readable the day before.
 
 - **Question.** What made those functions fail, and how is each cause mended without taking from what
   the gate compares? Three causes were found, each traced to the first instruction where the images
@@ -2637,8 +2637,8 @@ signed use).
 - **Question.** The key of a function's generated cases held one environment for the whole image: its
   bytes, the startup copies, the memory map, what dread.regflow found in the whole image (its case
   facts since this morning) and the table of stubs that answer registers beyond a C result (more). A
-  change of regflow's findings or of that table anywhere made every case of the image anew: on the
-  private real-life test for hours, for a change that concerned the callers of a few functions. What may
+  change of regflow's findings or of that table anywhere made every case of the image anew: on the private
+  real-life test too, for a change that concerned the callers of some functions. What may
   a function's key leave out, and how are calls through pointers taken?
 - **Options and choices.**
   1. What is scoped: (a) nothing; (b) what belongs to one function: its entries in regflow's case
@@ -3073,8 +3073,8 @@ characters, Radix by use).
   r2, which it sets ...; C returns r0 and r1 only"): an old ARM compiler's __value_in_regs returns a
   structure of up to four words in r0-r3, and C under the AAPCS returns r0:r1 at most (RISC-V: a0:a1;
   a function that leaves a value in a2 or a3 for its callers was refused the same way, and so were
-  those callers, which ARM lifts as bound calls). On a private real-life target many functions are
-  refused so (docs/todo.md). How is such a function lifted, and its callers; and the registers a
+  those callers, which ARM lifts as bound calls). On a private real-life target functions are refused so
+  (docs/todo.md). How is such a function lifted, and its callers; and the registers a
   callee reads of its caller (the stale readers)?
 - **Options and choices.**
   1. How the extra results leave the C: (a) a group: the function lifted with all of its callers,
@@ -4009,9 +4009,9 @@ docs/todo.md, Compiler diversity).
 **Decided by recommendation** (the user's standing delegation of 2026-10-20).
 
 - **Question.** The pilot's naming questions said only "a binary image". On a private firmware
-  (DREAD's real-life test) the subsystem names called several large groups after a kind of device the
-  image is not for, with high confidence, and the same questions asked again guessed another kind for
-  one of them. A reverse engineer always knows what device a firmware is for. Should the questions
+  (DREAD's real-life test) the subsystem names called groups after a kind of device the image is not for,
+  with high confidence, and the same questions asked again guessed another kind. A reverse engineer always
+  knows what device a firmware is for. Should the questions
   say it, where does it come from, and how much do they say?
 - **Options.** (a) Nothing, as before. (b) A person states it in the target. (c) A model reads it
   once from the texts the image's code points to, and every question begins with that reading.
@@ -5066,8 +5066,8 @@ recommendations here."), on a recommendation.
 - **Undo.** `--task name` reads the listing again where `Namer.code` returns it; the order is
   `callees_first` in main(); `--judge` is not given.
 - **Status.** Done. Measured on the private firmware (docs/todo.md, the pilot on the draft). The
-  readable C of every function is made first in a pool of workers (dread.readable views: in a
-  sixth of the time on one core), each worker costing up to the parent's size in memory, so pools are now capped by the memory available.
+  readable C of every function is made first in a pool of workers (dread.readable views), each worker
+  costing up to the parent's size in memory, so pools are now capped by the memory available.
 
 ## A jump to an arm's start as part of the condition (2026-10-25)
 

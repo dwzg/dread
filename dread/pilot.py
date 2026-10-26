@@ -86,7 +86,7 @@ most answers agree with kept in BUILD/pilot/IMAGE/device.tsv). Every question of
 (name, readable, globals, subsystems) then begins with that reading (DEVICE_READ), or with what the
 target states ([llm] device: DEVICE_STATED), unless --no-device. Without either, the questions say
 only "a binary image" and the model guesses the kind of device from the code: on a private firmware,
-DREAD's real-life test, it named several large groups after a kind of device the image is not for,
+DREAD's real-life test, it named groups after a kind of device the image is not for,
 and asked again it guessed yet another; with the line they were named after parts of the right one
 (2026-10-22, docs/decisions.md). The line says the device alone: a sentence on what the program does
 as well made the model name groups after the parts that sentence mentioned.

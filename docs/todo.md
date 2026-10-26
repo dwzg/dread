@@ -99,8 +99,8 @@ its sources.
   the cases that return last; inside it break leaves the switch and continue still goes to the loop
   (tests/test_structure.py: 400 random functions with switches, compiled before and after, the same
   results on random arguments, every switch structured). On the 39 builds' 11,359 lifted functions
-  gotos 12,950 -> 12,228 (FreeRTOS has few switches); on a private firmware's readable C, which has
-  many switches, far more of its gotos went. The gate accepts the same functions as before on
+  gotos 12,950 -> 12,228 (FreeRTOS has few switches); a private firmware's readable C lost gotos too. The
+  gate accepts the same functions as before on
   nine builds (gizmo a32, m3, m4, rv32; FreeRTOS GCC -Os, clang -O2, RISC-V GCC -Os, GCC -O0; the
   private firmware).
   The gotos left, by cause (2026-10-22; each goto by the block it leaves and the one it goes to, on
@@ -467,10 +467,9 @@ its sources.
   that holds items, and the event group that met it held an item and its list at 4; not taken further.
 - [x] **Structures of globals.** Static data reached at fixed addresses, one macro a field
   (g_2000004c_u32, *(volatile u8 *)0x2000a0f1), grouped into the structures it was declared as:
-  `g_state.mode` for the fields one base and its offsets reach in several functions. Found on the
-  private real-life test (2026-10-23): its compiler keeps most data in static structures and reloads
-  every pointer from memory, so the structures behind pointers (Types) found few there, while most of
-  its readable C is accesses to such fields. Code decides it: the accesses through one base plus
+  `g_state.mode` for the fields one base and its offsets reach in several functions. Found on the private
+  real-life test (2026-10-23): the structures behind pointers (Types) left its accesses to static data at
+  fixed addresses as they were. Code decides it: the accesses through one base plus
   constant offsets in each function, the bases several functions share, the extent up to the next base
   or a table's symbol. The hard part: a section anchor (GCC reaches unrelated globals from one base:
   gizmo's dispatch table and FreeRTOS's kernel variables) is not a structure; measured against
@@ -541,11 +540,9 @@ its sources.
   address, not per structure of static data; a target whose data symbols are complete (an ELF's) could
   let them make structures too (gizmo's g_config), which needs the target to say so.
   On the private real-life test (2026-10-23) the gate accepted the same functions with the structures
-  of static data as without; many of its readable C's accesses at fixed addresses became
-  members of them (on FreeRTOS a twentieth), and where its reconstruction has named the fields, the
-  structures found are the blocks it reads as one base with offsets too. With the arrays (the same
-  day) more became members, some of them indexed, raw accesses went, and addresses read as &; the gate
-  still accepted the same functions.
+  of static data as without; accesses at fixed addresses became members of them (on FreeRTOS a twentieth).
+  With the arrays (the same day) indexed members and addresses read as & came in, and the gate still
+  accepted the same functions.
   The four left above, done later on 2026-10-23 (docs/decisions.md, "Arrays of static data, addresses
   as &, and what callees reach"). Arrays (statics.find_arrays): a load or store of the lifted functions'
   readable C at a constant plus an index times a scale (indexed_accesses; dread.tidy folded the
@@ -625,7 +622,7 @@ its sources.
   Where it stands (2026-10-23, the structures behind pointers, of static data and its arrays done):
   volatile now sits in declarations and macros (a struct pointer's type, g_x's definition), where it
   does not get in a reader's way; what still shows it is the raw accesses, *(volatile u32 *)(r3 + 8),
-  some hundreds on a FreeRTOS build and many more on the private firmware, which plain accesses
+  some hundreds on a FreeRTOS build, which plain accesses
   would shorten by a word each. Against that, plain accesses let the compiler merge and hoist loads (a
   wait for a flag an interrupt sets would spin forever) and the gate's per-access identity no longer
   holds. Not now: the raw accesses are better served by more of them becoming members (structures,
@@ -633,8 +630,8 @@ its sources.
 - [x] **Results in r2 and r3, and registers a caller leaves.** A function whose callers read r2 or r3
   after the call (an old ARM compiler's __value_in_regs: a structure of up to four words returned in
   r0-r3) is refused while any original caller reads them, since C under the AAPCS returns at most
-  r0:r1; so is one that reads registers its caller left (the stale readers). On the private real-life
-  test that is many functions, which its reconstruction rewrote by hand together with their callers. A
+  r0:r1; so is one that reads registers its caller left (the stale readers). The private real-life test
+  has such functions. A
   way: lift such a function with all
   of its callers as one group, the extra results handed between the group's C functions through a
   structure (their ABI among themselves is free), refused while a caller stays machine code; or a
@@ -1100,8 +1097,8 @@ its sources.
   the judge on the bench's other builds and on a firmware it knows less; style words in the votes
   (dread.naming.vote pairs similarity()'s words), not tried.
   What the image is, in front of every question (2026-10-22, docs/decisions.md): the questions said
-  only "a binary image". `--subsystems` on the private real-life test named several large groups after
-  a kind of device the image is not for, with high confidence, and asked again without anything else
+  only "a binary image". `--subsystems` on the private real-life test named groups after a kind of device
+  the image is not for, with high confidence, and asked again without anything else
   changed it guessed another one; the texts its code points to say what it is at once (every answer
   agreed). `dread pilot --task device` reads it from them (device_texts: the texts of the functions an
   LLM may be shown, from the listing alone, the most used first; five answers, the device most agree
@@ -1726,8 +1723,8 @@ model).
   stays inside the object it is given, that an index stays inside its array (the cases and the whole
   image decide, as for every transformation; where the cases see otherwise, whole).
 - [x] **A refused case must not hide a difference.** On the private real-life test the gate accepted
-  readable C that had lost an argument of a formatting call: most of the function's cases differed,
-  every one refused as "the input makes the original touch its own saved registers", and those that
+  readable C that had lost an argument of a formatting call: cases of the function differed, every one
+  refused as "the input makes the original touch its own saved registers", and those that
   agreed still ran every instruction. A refusal says the case's input is one the C cannot reproduce;
   it should stand only where every difference of the case is one that refusal explains (the touched
   saved registers, what is computed from them, the stack words), and a difference beyond that (a stub
@@ -1852,8 +1849,8 @@ model).
 
 - [x] **Regressions of 2026-10-23 on a private firmware: two-word results, callers of a function that
   fails, save areas behind a frame copy.** After the day's readable C changes the readable gate kept
-  many more functions of the private real-life test lifted, many of them readable the day
-  before; traced to three causes (docs/decisions.md). (1) A callee declared u64 (two words back: a
+  functions of the private real-life test lifted that had been readable the day before; traced to three
+  causes (docs/decisions.md). (1) A callee declared u64 (two words back: a
   division's quotient and remainder) whose first word a function compares or shifts: since f6757bd
   loads_once lets a call be a value's only effect, the values pass writes r0 = f(...) for
   r0 = (u32)f(...), and fold wrote that into its one reader bare (64 bits, the remainder as the high
@@ -2789,8 +2786,8 @@ the pilot's names, which the first review had taken for raw frames. New items:
 - [x] **Frame objects under the table's names.** dread.frames finds the frame array and its end by their
   names (`frame`, `sp0`) and runs after the readable_names table is applied. Wherever a naming run named
   either, no objects are made: not in the printed C, not in the compiled C the gate builds, not in the
-  next naming question (which then names the raw array again). On a private firmware this caused many of
-  a review's raw frames, including those the 2026-10-23 review reported, and turned a frame that was one
+  next naming question (which then names the raw array again). On a private firmware this caused raw
+  frames in reviews, including those the 2026-10-23 review reported, and turned a frame that was one
   object under the earlier names into raw offsets. Make the objects before applying the names (drop the
   table's names for `frame`/`sp0`, or map them onto the object when the region is one), or find the
   array by identity rather than by name; and show the pilot the objects so stackN gets a name. Public
@@ -2966,8 +2963,8 @@ the pilot's names, which the first review had taken for raw frames. New items:
   its address taken, the lifter's stack arguments, the frame's), the pointer groups with their accesses,
   and every candidate in the plan's order with the casts of what it touches without and with it, kept
   or not; the trials run as the plan's last round does (the C as built, the table's prototypes). For
-  finding why a variable on a real firmware stays an integer without reading the plan's code; the
-  private real-life test has many such variables used directly as addresses.
+  finding why a variable on a real firmware stays an integer without reading the plan's code; the private
+  real-life test has such variables used directly as addresses.
 - [ ] **Pointers held in globals; frame objects to all-u32 externs.** These are "Left" of two done items
   and have no item of their own. A global holding a structure pointer stays a u32 macro, cast through a
   fresh variable at each use, or read through a byte pointer and an index. A frame object passed to an
@@ -4053,8 +4050,8 @@ undone). Other decisions are taken by the recommended option and written down in
 ## Phase 4: cases, mutation, coverage (rest)
 
 - [x] **Why the cases leave code unrun, by code** (`dread uncovered`, 2026-10-23; asked for before the
-  generator gets new work: on a private firmware, DREAD's real-life test, the lift check drops about an
-  eighth of its functions as UNCOVERED, a few of them without a single instruction run). For each
+  generator gets new work: on a private firmware, DREAD's real-life test, the lift check drops functions
+  as UNCOVERED, some without a single instruction run). For each
   function a lift check dropped for missed instructions (verdicts.tsv): the missed code in regions, each
   region's way in (branch, switch, call, straight, not entered, unreached), and for a branch or switch
   what decides it traced back to its source (argument, callee's result, stubbed or real, global, device
@@ -4239,8 +4236,8 @@ undone). Other decisions are taken by the recommended option and written down in
   decisive" when it differs too, as readable does for lifted C alone.
 
 - [x] **Code only a dropped case reached** (found 2026-10-22 on a private firmware, DREAD's real-life
-  test: its uncovered functions took far longer to generate than those accepted, and most of them
-  met callees stubbed for hanging). A case that should end at a call (stops, a loop case)
+  test: its uncovered functions took longer to generate than those accepted, and met callees stubbed for
+  hanging). A case that should end at a call (stops, a loop case)
   and ends otherwise (spinning on a register, at the limit) counts while the search runs, and must:
   it moves the compare-guided stage's frontier (gizmo-rv32cpp's main: where a run waits on memory,
   that stage finds the callee effect that ends the wait; not counting such runs lost four of its
@@ -4249,9 +4246,9 @@ undone). Other decisions are taken by the recommended option and written down in
   and spun on a device register before it. Generator 34: when the surviving
   cases cover less than the search counted, the compare-guided stage runs once more from what they
   cover, every case a source, counting only runs whose case survives, and a run there that comes
-  back cut or spinning in a callee is tried again ending at that call too (repair_lost). On a sample of the
-  private firmware's uncovered functions a few were accepted and some more miss fewer instructions,
-  none more; the gizmo builds lose nothing (msp430's main is accepted by loop cases again instead of
+  back cut or spinning in a callee is tried again ending at that call too (repair_lost). On a sample of
+  the private firmware's uncovered functions some were accepted and some miss fewer instructions, none
+  more; the gizmo builds lose nothing (msp430's main is accepted by loop cases again instead of
   by the system run). The rest: other causes, not traced (a dead
   branch the compiler kept, such as a negative test of a value loaded unsigned; code behind an RTOS
   call that switches tasks and never comes back in the emulator).
@@ -5228,8 +5225,8 @@ tool, the page shows its records; the only changes are the command line's own.
   function, refused outside the target's directory, compiled and loaded after the change and undone
   when anything still uses the old name) and notes (annotations.txt). The tools now keep what the
   page reads: `dread lift --check` writes verdicts.tsv, `dread test` the missed instructions.
-  Measured on a large private image: a function's page comes up at once (it took much longer before the
-  GUI reused one lifter fed with the never-returning functions it already has).
+  Measured on a private image: a function's page comes up at once (it did not before the GUI reused one
+  lifter fed with the never-returning functions it already has).
 - [ ] (Later: after MSP430) v2: a failing case's differences (the test run keeps them per function),
   pilot review (conversations, argued survivors and name proposals, accepted or rejected from the
   page through `dread rename` and argued.tsv).
@@ -6117,8 +6114,8 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
 - [x] **Case keys scoped to a function's call tree** (2026-10-23; docs/decisions.md). The generated
   cases' key held one environment for the whole image (dread.autocase Generator.environment): a change
   of what dread.regflow found anywhere, or of the stubs' answers beyond a C result, made every case of
-  the image anew (on the private real-life test for hours, for a change that concerned
-  the callers of a few functions). Now it has two parts (docs/formats.md, "the key"): whole,
+  the image anew (on the private real-life test too, for a change that concerned the callers of some
+  functions). Now it has two parts (docs/formats.md, "the key"): whole,
   what no call tree scopes (the image's bytes, the startup copies, the memory map, and, in no key
   before, the code's layout, the devices, stack, sentinel and scratch, the calling convention, the
   fixed registers, the core, the domains' address rows); and the facts of every function the

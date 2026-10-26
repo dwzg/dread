@@ -295,7 +295,7 @@ class Retries:
     function failed through the heap's allocator, two calls down; tried again together, they failed
     together). Each function is tried again once, so the passes end by themselves, at most one a
     suspect; `bound` is a safety net, and what it leaves is reported. Until 2026-10-24 the passes
-    stopped at 8: on a private firmware's deep call trees the chain of suspects was longer, and the
+    stopped at 8: on a private firmware the chain of suspects went on, and the
     functions at its top stayed dropped untried (one of them agreed in a trace against the final
     list); on the public builds no check had needed more than two passes or tried a function twice."""
 

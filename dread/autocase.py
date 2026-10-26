@@ -705,8 +705,8 @@ class Generator:
         can reach (scopes(): its call tree), so that a change of one function's facts (what dread.regflow
         finds of it, its stub's answers) gives new keys to the functions whose trees hold it and keeps the
         others' (since 2026-10-23: until then one digest of the whole image's regflow and more, and a
-        change anywhere made every case of the image anew, for hours on a private firmware for a
-        change that concerned the callers of a few functions). With no name, or one the function
+        change anywhere made every case of the image anew, on a private firmware too, for a change that
+        concerned the callers of some functions). With no name, or one the function
         table lacks, every function's facts (everything()): what a key held before."""
         part = self.scopes().get(name) if name is not None else None
         h = hashlib.sha1(b"environment 2\0" + self.whole().encode() + b"\0")
