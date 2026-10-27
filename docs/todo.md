@@ -6640,8 +6640,11 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         tell (in the function-level harness cs is 0, in both images); the system run can, where the
         startup loads a GDT: tests/test_x86.py segment_register_is_read (cs 0x08, gate and selector
         lifted, the device log the original's; with the selector dropped in the C the lift check's whole
-        image differs and drops gate). Not measured on the bench builds yet. A harness with a GDT of its
-        own (cs not 0) would let cases tell.
+        image differs and drops gate). On copies of the three bench builds (lift check, the evening of
+        2026-10-27): every function that reads cs passes, but vPortSetupIDT, which stops at lidt now
+        ("lidt is not modelled"); the builds accept 256 (GCC -Os), 230 (GCC -O2) and 235 (clang)
+        functions, from the afternoon's 247, 221 and 228 (with the day's other changes). A harness with a
+        GDT of its own (cs not 0) would let cases tell.
       - [x] Three of the trial build's disagreements traced to their cause (2026-10-27): (1) GCC 16
         reorders two volatile loads: mov eax, [ebx + 0x38]; cmp [ebx + 0x3c], eax lifted, combine folds
         the later load into the compare and then the earlier one too (cmp mem, mem matches i386's pattern
