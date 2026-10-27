@@ -142,6 +142,7 @@ from dread.arch import code_address
 from dread.cases import confine_args
 from dread.emu import PAGE, RUN_CALLEE, EmuError, Layout, Machine
 from dread.program import Program, read_functions
+from dread.target import TargetError
 
 VERSION = 36       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
@@ -1182,13 +1183,19 @@ class Generator:
 
     def stopped_where(self, m, error):
         """A line on where and why a run stopped: the error, the function and instruction at pc, the
-        general registers."""
+        general registers. pc may lie outside the image (an input aimed a pointer the function calls
+        through at data or at nothing): then "no instruction"; decoding there raised TargetError, which
+        ended the function's case generation (FreeRTOS's timer functions on the IA32 demo)."""
         prog = self.program
         try:
             pc = code_address(self.arch, m.reg("pc"))
         except Exception:
             return str(error)
-        fn, insn = prog.function_at(pc), prog.insn(pc)
+        fn = prog.function_at(pc)
+        try:
+            insn = prog.insn(pc)
+        except TargetError:
+            insn = None
         regs = []
         for name in prog.arch.general_regs():
             try:

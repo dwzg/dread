@@ -6661,6 +6661,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         portGET_HIGHEST_PRIORITY and libgcc's __udivdi3): __builtin_clz and __builtin_ctz behind a test for 0,
         where zf is set and the destination keeps its value. Both lift on the GCC -Os build now
         (vTaskSwitchContext gets no case yet, __udivdi3 misses four instructions). tests/test_x86.py: top, low.
+      - [x] A run that stops outside the image (2026-10-27): an input that aims a pointer the function calls
+        through at nothing (0x9) stops the run there, and the line that says where a run stopped
+        (Generator.stopped_where, in firm_up's attempts) decoded the instruction at pc outside the image and
+        raised TargetError, which ended the function's case generation ("0x9 is outside image main"). Three
+        timer functions of each bench build had no case for it (GCC: prvProcessExpiredTimer, prvReloadTimer,
+        xSecondTimerHandler; clang: xFirstTimerHandler instead of the last); all six pass the lift check now.
+        tests/test_x86.py: callit.
       - [ ] Cases whose original runs into the limit: vGalileoLegacyGPIOInitializationForLED on the -O2
         build failed 26 of 47 ("original: ... did not return within 200000 instructions"), while dread
         trace runs the same cases to the end in both images: the generator's runs and the runner's

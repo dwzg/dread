@@ -1214,6 +1214,51 @@ def test_bsr_and_bsf(tmp_path):
     assert sorted(lift.check(target, image, ["top", "low"], out=lines.append, jobs=2)) == ["low", "top"], lines
 
 
+CALLBACK_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[64];
+
+__attribute__((noinline)) u32 twice(u32 x)
+{
+    return 2 * x;
+}
+
+__attribute__((noinline)) u32 callit(u32 (*f)(u32), u32 x)
+{
+    return f(x) + 1;
+}
+
+void _start(void)
+{
+    sink[1] = callit(twice, 3);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_run_that_stops_outside_the_image_is_described(tmp_path):
+    """callit calls through its argument; an input that aims it at 0x9 stops the run there (nothing is
+    mapped). attempt describes where a run stopped (stopped_where: the function and the instruction at
+    pc), and decoding at pc read outside the image and raised TargetError, which ended the function's
+    case generation in firm_up (FreeRTOS's timer functions on the IA32 demo: "0x9 is outside image
+    main", for the GCC and the clang builds). The run's description says "no instruction" there now."""
+    target = small_i386(tmp_path, CALLBACK_C, "callback")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread.autocase import Generator
+    image = target.image()
+    gen = Generator(target, image)
+    callit = gen.program.by_name["callit"]
+    case = {"args": [9, 3], "mem": [], "returns": [], "calls": [], "frame": 0}
+    covered, why = gen.attempt(callit.entry, callit.insns, case, check_image=True)
+    assert why is not None and "at 0x9 in no function (no instruction)" in why, why
+    assert callit.entry in covered
+    twice = gen.program.by_name["twice"]
+    case = {"args": [twice.entry, 5], "mem": [], "returns": [], "calls": [], "frame": 0}
+    assert gen.attempt(callit.entry, callit.insns, case, check_image=True)[1] is None
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];
