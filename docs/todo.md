@@ -6722,6 +6722,21 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         give eax, edx and ecx a fixed value at the entry where the function reads none, in both images;
         first check that lifted C hands such a register on where the original leaves it to the return
         (regflow's reads: a lifted function that initialises it to 0 would differ).
+      - [x] The compare-guided answers on x86 (2026-10-27). The x86 layer had no value_step, store_slots or
+        load_address, so dread.uncovered named no source for any x86 branch ("the layer takes no value
+        apart"), and a compare with memory gave no decider: the generator's frontier answers had nothing
+        to set. FreeRTOS's IA32 demo had 30 functions without full coverage that the ARM build covers
+        (xTaskIncrementTick: 52 of 126 instructions). Now: value_step (mov, lea, add, sub, xor of a
+        register with itself; each memory operand an access, a fixed address at base 0), store_slots,
+        load_address, address_regs; memory operands in branch_deciders, which the generator's reader reads;
+        dread.uncovered takes an access at base 0 for a fixed address where the layer says
+        absolute_accesses, a compare's flags from a frame slot, and the registers a load reads beside its
+        address (cmp dword ptr [ebp - 0x1c], edx) among its sources; the answer stage takes a decider's
+        own load behind its visit (on x86 the compare is the load, and its read comes after the visit).
+        Of the 40 functions the GCC -Os bench build dropped as UNCOVERED, a lift check on a copy accepts 21
+        (2 without the change). regflow's and callconv's save-area checks took the last argument register,
+        which i386's cdecl has none of: guarded. x86's generator version 8. tests/test_x86.py: the layer's
+        hooks, and test_autocase's gated_by_global on i386.
       - [ ] WaitForStopDet's wait (-O2 build: 20 of its 54 instructions unrun): the status register lies
         behind the base address the driver reads from PCI configuration space, which the generator aims
         at a scratch buffer, plain memory, where no spin is cut and no poll stage answers; the wait's own

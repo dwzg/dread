@@ -274,7 +274,9 @@ class Context:
         accesses at a register plus a constant, found by asking the layer's value_step with a distinct
         value in every register (an access's base value then names its register), and the registers
         it computes besides (a base it writes back); ([], set()) for none, for an access at sp
-        (value_step leaves those out: frame_load has them) and for a layer without value_step."""
+        (value_step leaves those out: frame_load has them) and for a layer without value_step. Where
+        the layer says absolute_accesses (x86: mov eax, [0x190384]), an access at base 0 is at a fixed
+        address, its base register None and its displacement the address."""
         step = getattr(self.arch, "value_step", None)
         if step is None:
             return [], set()
@@ -283,7 +285,11 @@ class Context:
         except Exception:
             return [], set()
         out = []
+        absolute = getattr(self.arch, "absolute_accesses", False)
         for base, offset, _, indexed, load, store in accesses:
+            if absolute and base == 0:
+                out.append((None, offset & 0xFFFFFFFF, indexed, load, store))
+                continue
             k = (base >> SENTINEL_SHIFT) - 1
             if base & ((1 << SENTINEL_SHIFT) - 1) or not 0 <= k < len(self.sentinel_regs):
                 continue
@@ -595,10 +601,21 @@ class Flow:
             v = values.get(reg)
             if v is not None and not v[1]:
                 return {("constant", v[0], "constant 0x%x" % v[0])} | condition
+        # A layer whose instructions take memory beside registers (x86: cmp dword ptr [ebp - 0x1c],
+        # edx; add eax, [ebx + 4]; address_regs) has the registers read besides the address join a
+        # load's sources (operands), and a compare's flags come from the frame as a load's value does
+        address_regs = arch.address_regs(insn) if hasattr(arch, "address_regs") else None
+
+        def besides():
+            """The sources of the registers a load reads besides its address (traced only for a load)."""
+            out = set()
+            for r in sorted(reads - set(address_regs or ()) - {"flags", "sp", "pc"}) if address_regs is not None else []:
+                out |= self.sources(d, r, depth, stack)
+            return out
         # a load from the frame
-        slot = self.frame_load(d, insn) if reg in writes and reg != "flags" else None
+        slot = self.frame_load(d, insn) if reg in writes and (reg != "flags" or address_regs is not None) else None
         if slot is not None:
-            return self.slot_sources(d, slot, depth, stack) | condition
+            return self.slot_sources(d, slot, depth, stack) | besides() | condition
         # a load from a fixed address, or through a pointer
         accesses, moved = ctx.accesses(insn, isa)
         if accesses and reg in moved:               # a base written back: its old value and a step
@@ -606,10 +623,24 @@ class Flow:
         for base, offset, indexed, load, _ in accesses:
             if not load or reg not in writes:
                 continue
+            if base is None:                        # a fixed address (the layer's absolute_accesses)
+                index = set()
+                for r in sorted(set(address_regs or ()) - {"sp"}) if indexed else []:
+                    index |= self.sources(d, r, depth, stack)
+                at = ctx.address_source(offset)
+                if not index:
+                    return {self.load(d, at)} | besides() | condition
+                if at[0] == "constant":             # a table in read-only memory: what indexes it decides
+                    return index | besides() | condition
+                text = "%s indexed by %s" % (at[2], describe(primary(index)))
+                return {self.load(d, (at[0], at[1], text))} | besides() | condition
             k = self.frames.depth(d, base) if self.frames is not None else None
             if k is not None and not indexed:
-                return self.slot_sources(d, k - offset, depth, stack) | condition
-            index_regs = sorted(reads - {base, "flags", "sp", "pc"}) if indexed else []
+                return self.slot_sources(d, k - offset, depth, stack) | besides() | condition
+            if address_regs is not None:            # (the index: an address register, not a value read besides)
+                index_regs = sorted(set(address_regs) - {base, "flags", "sp", "pc"}) if indexed else []
+            else:
+                index_regs = sorted(reads - {base, "flags", "sp", "pc"}) if indexed else []
             index = set()
             for r in index_regs:
                 index |= self.sources(d, r, depth, stack)
@@ -622,16 +653,16 @@ class Flow:
             if c is not None:
                 at = ctx.address_source(c + offset)
                 if not index:
-                    return {self.load(d, at)} | condition
+                    return {self.load(d, at)} | besides() | condition
                 if at[0] == "constant":             # a table in read-only memory: what indexes it decides
-                    return index | condition
+                    return index | besides() | condition
                 text = "%s indexed by %s" % (at[2], describe(primary(index)))
-                return {self.load(d, (at[0], at[1], text))} | condition
+                return {self.load(d, (at[0], at[1], text))} | besides() | condition
             main = primary(self.sources(d, base, depth, stack))
             cls = main[0] if main else "unknown"
             text = "field %s0x%x of %s%s" % ("-" if offset < 0 else "+", abs(offset), describe(main),
                                             " (indexed)" if indexed else "")
-            return {self.load(d, ("field", (cls, offset), text))} | condition
+            return {self.load(d, ("field", (cls, offset), text))} | besides() | condition
         if arch.stack_kind(insn) == "pop":
             return {("local", "restored", "a value restored from the stack (%s at 0x%x)" % (insn_text(insn), d))}
         # a register computed from registers

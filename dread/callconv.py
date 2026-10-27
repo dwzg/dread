@@ -194,7 +194,7 @@ def variadic_area(program, fn):
     args = list(program.target.abi.arg_regs)
     if insns and insns[0] is not None and hasattr(arch, "pushed_registers"):
         pushed = [r for r in arch.pushed_registers(insns[0]) if r]
-        if pushed and args[-1] in pushed and set(pushed) <= set(args):
+        if pushed and args and args[-1] in pushed and set(pushed) <= set(args):     # (i386: no argument registers)
             area |= set(pushed)
     return area
 

@@ -598,7 +598,7 @@ def save_area_reads(program, fn, insns, frames=None):
     args = list(program.target.abi.arg_regs)
     pushed = arch.pushed_registers(insns[0])
     named = [r for r in pushed if r is not None]
-    if not named or args[-1] not in named or not set(named) <= set(args):
+    if not named or not args or args[-1] not in named or not set(named) <= set(args):
         return set()
     total = arch.stack_bytes(insns[0])
     slots = {}                              # depth below the entry's stack pointer -> the register there
@@ -650,6 +650,8 @@ def variadic_save_area(program, fn, insns, joins, frames=None):
     if not hasattr(arch, "store_slots"):
         return set()
     args = list(program.target.abi.arg_regs)
+    if not args:                            # (i386's cdecl: every argument on the stack, no save area)
+        return set()
     if not _stores_on_entry(program, fn, insns, joins, args[-1]):
         return set()                        # (cheap: no states for most functions)
     frames = frames if frames is not None else Frames(program, fn)

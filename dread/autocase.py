@@ -136,7 +136,7 @@ import time
 import capstone as cs
 from capstone import arm as csarm
 from unicorn import (UC_HOOK_CODE, UC_HOOK_MEM_READ, UC_HOOK_MEM_WRITE, UC_MEM_READ_UNMAPPED, UC_MEM_WRITE,
-                     UC_MEM_WRITE_UNMAPPED)
+                     UC_MEM_WRITE_UNMAPPED, UcError)
 
 from dread.arch import code_address
 from dread.cases import confine_args
@@ -585,12 +585,26 @@ class Generator:
         """{conditional branch: (address of the instruction that decides it, reader)}. The reader
         takes the emulator stopped at that instruction and returns (first operand, second operand,
         "test" or "compare"). Which instruction decides a branch, and with which operands, is the
-        architecture's (arch.branch_deciders: ARM's flag setters, RISC-V's branch itself)."""
+        architecture's (arch.branch_deciders: ARM's flag setters, RISC-V's branch itself). An operand
+        in memory (x86: ("mem", base, index, scale, displacement, size)) is read there; the reader
+        gives None where that memory cannot be read."""
         out = {}
+
+        def operand(uc, op, imm):
+            if op is None:
+                return imm
+            if not isinstance(op, tuple):
+                return uc.reg_read(op)
+            _, base, index, scale, disp, size = op
+            address = ((uc.reg_read(base) if base is not None else 0) +
+                       (uc.reg_read(index) * scale if index is not None else 0) + disp) & 0xFFFFFFFF
+            return int.from_bytes(uc.mem_read(address, size), "little")
         for branch, (at, first, second, imm, kind, sign) in self.arch.branch_deciders(self.insns(words)).items():
             def reader(uc, first=first, second=second, imm=imm, kind=kind, sign=sign):
-                a = uc.reg_read(first) if first is not None else imm
-                b = uc.reg_read(second) if second is not None else imm
+                try:
+                    a, b = operand(uc, first, imm), operand(uc, second, imm)
+                except UcError:
+                    return None
                 return a, (sign * b) & 0xFFFFFFFF, kind
             out[branch] = (at, reader)
         return out
@@ -2364,9 +2378,14 @@ class Generator:
                             and not lay.in_stack(addr):
                         m.after[n, addr] = (size, int.from_bytes(uc.mem_read(addr, size), "little"))
                 m.hook_add(UC_HOOK_MEM_READ, on_read)
+            def note(uc, addr, size, user, read):
+                if len(seen.setdefault(addr, [])) < 32:
+                    got = read(uc)
+                    if got is not None:     # (an operand in memory that cannot be read: nothing to note)
+                        seen[addr].append(got)
             for at in watch:
-                m.hook_add(UC_HOOK_CODE, lambda uc, addr, size, user, read=readers[at]:
-                           len(seen.setdefault(addr, [])) < 32 and seen[addr].append(read(uc)), begin=at, end=at)
+                m.hook_add(UC_HOOK_CODE, lambda uc, addr, size, user, read=readers[at]: note(uc, addr, size, user, read),
+                           begin=at, end=at)
             try:
                 m.call(entry, *case["args"], max_instructions=min(limit, SOLVE_LIMIT),
                        stall=self.stall_for(min(limit, SOLVE_LIMIT)))
@@ -3040,9 +3059,19 @@ class Generator:
                     if item[at] > after:
                         item[at] += 1
 
-        def maker(base, kind, key, events, k, m=None):
+        def last_load(events, k, key, decider):
+            """The read of the load at key that the decider's visit events[k] compares: the last one in
+            front of the visit, or, where the decider reads its operand from memory itself (x86's cmp
+            dword ptr [g], 0x5a: the load is the decider, and its read comes behind the visit, which is
+            recorded as the instruction starts), the one right behind it; None without."""
+            if key == decider and k + 1 < len(events) and events[k + 1][0] == "load" and events[k + 1][1] == key:
+                return events[k + 1]
+            return next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key), None)
+
+        def maker(base, kind, key, events, k, m=None, decider=None):
             """(make(value) -> case, the input's value in base or None, the address of the memory it sets
-            or None) for the source (kind, key) at the decider's visit events[k], or (None, None, None)."""
+            or None) for the source (kind, key) at the decider's visit events[k], or (None, None, None).
+            decider: the decider's address (a load that is the decider: last_load)."""
             if kind == "sysreg":            # a system register the run read (mrs): set before the call
                 def make(v):
                     case = json.loads(json.dumps(base))
@@ -3050,7 +3079,7 @@ class Generator:
                     return case
                 return make, (base.get("sysregs") or {}).get(key, 0), None
             if kind == "reread":            # the memory a load read again: from that read on (later)
-                last = next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key), None)
+                last = last_load(events, k, key, decider)
                 if last is None or last[5] < 2:
                     return None, None, None
                 _, _, address, size, old, nth = last
@@ -3065,7 +3094,7 @@ class Generator:
                     return case
                 return make, old, address
             if kind == "load":              # the memory the load read last before the visit
-                last = next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key), None)
+                last = last_load(events, k, key, decider)
                 if last is None:
                     return None, None, None
                 _, _, address, size, old = last[:5]
@@ -3080,7 +3109,7 @@ class Generator:
                     return case
                 return make, old, address
             if kind == "fill":              # a local a stub was handed: what it stores there
-                last = next((e for e in reversed(events[:k]) if e[0] == "load" and e[1] == key[0]), None)
+                last = last_load(events, k, key[0], decider)
                 if last is None or m is None:
                     return None, None, None
                 _, _, address, size, old = last[:5]
@@ -3180,7 +3209,7 @@ class Generator:
             visits = [k for k, e in enumerate(events) if e[0] == "decide"][:ANSWER_VISITS]
             usable = False
             for k in visits:
-                make, old, keep = maker(case, kind, key, events, k, m)
+                make, old, keep = maker(case, kind, key, events, k, m, decider=at)
                 if make is None:
                     continue
                 usable = True

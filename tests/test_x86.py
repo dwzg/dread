@@ -1491,6 +1491,61 @@ def test_double_shifts(tmp_path):
     assert sorted(lift.check(target, image, names, out=lines.append, jobs=2)) == sorted(names), lines
 
 
+def test_the_layer_takes_values_apart():
+    """The x86 layer's hooks for dread.uncovered, dread.relations and dread.statics: value_step gives an
+    access at a fixed address with base 0 (absolute_accesses) and none at an unknown base, values for
+    lea and add, none for a load; store_slots names a mov into the frame; load_address the slot a compare
+    or a call through memory reads; address_regs the registers an address is made of, not the value
+    compared beside it."""
+    a = X86()
+
+    def insn(code):
+        return a.decode(bytes.fromhex(code), 0x1000, "i386")
+    known = {"ebx": (0x1000, False), "ecx": (0x2000, False)}
+    values, accesses, stored = a.value_step(insn("8b0584031900"), "i386", known, None)    # mov eax, [0x190384]
+    assert accesses == [(0, 0x190384, "u32", False, True, False)] and not values.get("eax") and not stored
+    assert a.value_step(insn("8d4308"), "i386", known, None)[0] == {"eax": (0x1008, False)}  # lea eax, [ebx + 8]
+    assert a.value_step(insn("83c310"), "i386", known, None)[0] == {"ebx": (0x1010, False)}  # add ebx, 0x10
+    assert a.value_step(insn("803902"), "i386", known, None)[1] == [(0x2000, 0, "u8", False, True, False)]
+    assert a.value_step(insn("8945e4"), "i386", known, None)[1] == []         # mov [ebp - 0x1c], eax: ebp not known
+    assert a.store_slots(insn("8945e4")) == [("eax", "ebp", -0x1c)]
+    assert a.store_slots(insn("c745e405000000")) == []                        # mov dword ptr [ebp - 0x1c], 5
+    assert a.load_address(insn("3955e4")) == ("ebp", -0x1c)                   # cmp [ebp - 0x1c], edx
+    assert a.load_address(insn("ff55dc")) == ("ebp", -0x24)                   # call dword ptr [ebp - 0x24]
+    assert a.load_address(insn("8945e4")) is None
+    assert a.address_regs(insn("3955e4")) == {"ebp"}
+    assert a.address_regs(insn("8b048500100000")) == {"eax"}                  # mov eax, [eax*4 + 0x1000]
+
+
+def test_the_answers_reach_branches_on_memory(tmp_path):
+    """The frontier answers on i386 (Generator.answers, as test_autocase's ARM test): gated_by_global
+    compares a global with a constant, in memory (GCC 16: cmp dword ptr [gated_limit], 0xc0ffee11) or
+    loaded into a register first (GCC 11 and 13: mov eax, [gated_limit]; cmp eax, 0xc0ffee11). The x86 layer
+    had no value_step, store_slots or load_address and gave no decider for a compare with memory, so
+    dread.uncovered named no source for any x86 branch, and the compare-guided stage had nothing to
+    answer: FreeRTOS's IA32 demo had 30 functions without full coverage that the ARM build covers
+    (xTaskIncrementTick: 52 of 126 instructions). Now the trace names the load of the global, the
+    answer sets it to the compare's other operand, and the code behind the branch runs."""
+    import json
+    from test_autocase import GATED_C, GATE_KEY, answered
+    target = small_i386(tmp_path, GATED_C + "\nvoid _start(void) { gated_by_global(1); for (;;) ; }\n", "gated")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread.autocase import Generator
+    from dread.elf import Elf
+    image = target.image()
+    written = {"args": [GATE_KEY], "mem": [], "returns": [], "calls": [], "frame": 0}
+    os.makedirs(image.extra_cases, exist_ok=True)
+    with open(os.path.join(image.extra_cases, "gated_by_global.json"), "w") as f:
+        json.dump({"cases": [written]}, f)
+    gen = Generator(target, image)
+    before, after, new, words = answered(gen, "gated_by_global", written)
+    assert before < words and after == words, sorted(hex(a) for a in words - after)
+    limit = next(s.value for s in Elf(str(tmp_path / "gated" / "original" / "image.elf")).symbols
+                 if s.name == "gated_limit")
+    assert any([limit, 4, 0xC0FFEE11] in c["mem"] for c in new), new
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

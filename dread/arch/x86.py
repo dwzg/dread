@@ -22,11 +22,12 @@ what the analysis needs, 16-bit and 64-bit modes.
 import struct
 
 import capstone as cs
+from capstone import CS_AC_READ, CS_AC_WRITE
 from capstone import x86 as X
 from unicorn import UC_ARCH_X86, UC_MODE_32, Uc
 from unicorn import x86_const as UX
 
-from dread.arch import extend_bits, low_bits, unshift
+from dread.arch import extend_bits, low_bits, sum_value, unshift
 
 NAMES = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"]
 # the full register of each name capstone may report (the 8- and 16-bit parts of the eight)
@@ -86,13 +87,15 @@ class X86:
                                             # return address the call pushed lies between
     veneer_reg = "eax"                      # no veneers (a 5-byte jmp reaches every address); eax is where
                                             # GCC and clang mostly load a pointer they call through
-    generator_version = 7           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
+    generator_version = 8           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
                                     # 3: one that only pushes edx or ecx as a call's argument takes them;
                                     # 4: a case answers the ports its runs read (ports); 5: padding reads
                                     # no register (is_padding: regflow's reads, case_regs); 6: a frame
                                     # aligned at run time has depths (lift_x86 realigns: the stack
                                     # arguments of such a function and its stubs' words are known);
-                                    # 7: rdtsc reads dread.emu's counter, not the host's clock
+                                    # 7: rdtsc reads dread.emu's counter, not the host's clock;
+                                    # 8: the compare-guided stage sees x86's branches (value_step,
+                                    # store_slots, load_address, memory operands in branch_deciders)
     refine_saved_writes = True              # dread.regflow refines a write of ebx, esi, edi or ebp too (taken as
                                             # all used): with three scratch registers, bytes pass through them
     SWITCH_MAX = 1024                       # table entries read at most
@@ -504,7 +507,10 @@ class X86:
         registers or a register and a constant, at most 16 bytes before with nothing between that sets
         the flags or leaves the straight run (a mov passes). Byte and word registers are read whole:
         exact where the compiler extended the byte into the register first (movzx), a hint otherwise.
-        A compare with memory gives none (not yet: x86 compares a byte in memory directly)."""
+        An operand in memory (cmp dword ptr [ebp - 0x28], 0; cmp byte ptr [ecx], 0x2c; cmp eax, [ebx +
+        4]) is ("mem", base, index, scale, displacement, size), engine ids or None: the generator's
+        reader reads the memory there (Generator.flag_setters). Until 2026-10-27 a compare with memory
+        gave none, and the compare-guided stage had nothing to solve at most of x86's branches."""
         index = {ins.address: k for k, ins in enumerate(insns)}
         out = {}
         for ins in insns:
@@ -518,18 +524,135 @@ class X86:
                     k -= 1                  # (it leaves the flags: look further back)
                     continue
                 ops = s.operands
-                if sets and s.mnemonic in self.DECIDERS and len(ops) == 2 and ops[0].type == X.X86_OP_REG \
-                        and ops[1].type in (X.X86_OP_REG, X.X86_OP_IMM):
-                    first = self._reg_operand(s, ops[0])
-                    second = self._reg_operand(s, ops[1]) if ops[1].type == X.X86_OP_REG else None
+                if sets and s.mnemonic in self.DECIDERS and len(ops) == 2 and ops[0].type != X.X86_OP_IMM \
+                        and ops[1].type in (X.X86_OP_REG, X.X86_OP_IMM, X.X86_OP_MEM) \
+                        and not (ops[0].type == X.X86_OP_MEM and ops[1].type == X.X86_OP_MEM):
+                    first = self._decider_operand(s, ops[0])
+                    second = self._decider_operand(s, ops[1]) if ops[1].type != X.X86_OP_IMM else None
                     if first is not None and (second is not None or ops[1].type == X.X86_OP_IMM):
-                        imm = ops[1].imm & 0xFFFFFFFF if second is None else 0
+                        imm = ops[1].imm & 0xFFFFFFFF if ops[1].type == X.X86_OP_IMM else 0
                         kind = "test" if s.mnemonic in self.TESTS else "compare"
                         sign = -1 if s.mnemonic == "add" else 1
-                        out[ins.address] = (s.address, self.reg_id(first),
-                                            self.reg_id(second) if second is not None else None, imm, kind, sign)
+                        out[ins.address] = (s.address, first, second, imm, kind, sign)
                 break
         return out
+
+    def _decider_operand(self, insn, op):
+        """A decider's operand: the engine's id of a whole register, or ("mem", base, index, scale,
+        displacement, size) of a memory operand without a segment (ids or None); None for a high byte."""
+        if op.type == X.X86_OP_REG:
+            reg = self._reg_operand(insn, op)
+            return self.reg_id(reg) if reg is not None else None
+        if op.type != X.X86_OP_MEM or op.mem.segment:
+            return None
+        base = self.reg_id(self._name(insn.reg_name(op.mem.base))) if op.mem.base else None
+        index = self.reg_id(self._name(insn.reg_name(op.mem.index))) if op.mem.index else None
+        return ("mem", base, index, op.mem.scale, op.mem.disp, op.size)
+
+    # ---- what dread.uncovered, dread.relations and dread.statics learn of the values ----
+
+    absolute_accesses = True        # an access value_step gives at base 0 lies at a fixed address (dread.uncovered)
+    STRING = ("movs", "stos", "lods", "scas", "cmps")
+
+    def address_regs(self, insn):
+        """The whole registers an instruction's memory operands compute their addresses from (esp: "sp"):
+        dread.uncovered tells them from the values the instruction reads besides (cmp [ebx + 4], edx)."""
+        return self._address_regs(insn)
+
+    def _memory_operands(self, insn):
+        """[(operand, base name or None, index name or None)] of the explicit memory operands that access
+        memory: none of lea, nop, string instructions or a segment's (fs:)."""
+        m = insn.mnemonic.split()[-1]
+        if m in ("lea", "nop") or m[:4] in self.STRING:
+            return []
+        out = []
+        for op in insn.operands:
+            if op.type == X.X86_OP_MEM and not op.mem.segment:
+                out.append((op, self._name(insn.reg_name(op.mem.base)) if op.mem.base else None,
+                            self._name(insn.reg_name(op.mem.index)) if op.mem.index else None))
+        return out
+
+    def store_slots(self, insn):
+        """[(register, base register, displacement)] of a mov of a register into memory at a register plus
+        a constant (mov dword ptr [ebp - 0x1c], eax; mov byte ptr [esp + 3], dl: the whole register's
+        name), else [] (dread.regflow Frames: what a slot of the frame holds; a push is the stack's)."""
+        if insn.mnemonic != "mov" or len(insn.operands) != 2:
+            return []
+        dst, src = insn.operands
+        if dst.type != X.X86_OP_MEM or src.type != X.X86_OP_REG or dst.mem.segment or not dst.mem.base \
+                or dst.mem.index:
+            return []
+        reg = LANES.get(insn.reg_name(src.reg))
+        if reg is None:
+            return []
+        return [(reg[0], self._name(insn.reg_name(dst.mem.base)), dst.mem.disp)]
+
+    def load_address(self, insn):
+        """(base register, displacement) of a load from a register plus a constant, any width (dread.uncovered
+        frame_load: the frame's slots, at esp or at a frame pointer), else None."""
+        mems = self._memory_operands(insn)
+        if len(mems) != 1:
+            return None
+        op, base, index = mems[0]
+        if base is None or index is not None or not op.access & CS_AC_READ:
+            return None
+        return base, op.mem.disp
+
+    def value_step(self, insn, isa, known, program):
+        """What an instruction does with the constants registers hold, known: {name: (value, indexed)}
+        (dread.uncovered, dread.relations, dread.statics; the ARM layer's says what it returns): mov of an
+        immediate or a register, lea, add and sub of an immediate or a register and xor of a register with
+        itself give values (None where an input is not known: asked again with constants); each memory
+        operand at a known base plus its displacement is an access, at a fixed address with base 0
+        (absolute_accesses), indexed where an index register takes part, none at esp (frame_load has the
+        frame); a mov into memory stores its register."""
+        values, accesses, stored = {}, [], []
+        m, ops = insn.mnemonic, insn.operands
+
+        def whole(op):
+            lane = LANES.get(insn.reg_name(op.reg)) if op.type == X.X86_OP_REG else None
+            return lane[0] if lane is not None and lane[1] == M32 else None
+        dst = whole(ops[0]) if len(ops) == 2 else None
+        if dst is not None and dst != "sp":
+            src = ops[1]
+            if m == "mov" and src.type == X.X86_OP_IMM:
+                values[dst] = (src.imm & M32, False)
+            elif m == "mov" and src.type == X.X86_OP_REG:
+                values[dst] = known.get(whole(src)) if whole(src) is not None else None
+            elif m == "lea":
+                base = self._name(insn.reg_name(src.mem.base)) if src.mem.base else None
+                b = known.get(base) if base is not None else (0, False)
+                if b is not None and base != "sp":
+                    v = sum_value(b, (src.mem.disp & M32, False))
+                    values[dst] = (v[0], True) if src.mem.index else v
+                else:
+                    values[dst] = None
+            elif m in ("add", "sub") and src.type in (X.X86_OP_IMM, X.X86_OP_REG):
+                b = (src.imm & M32, False) if src.type == X.X86_OP_IMM else \
+                    (known.get(whole(src)) if whole(src) is not None else None)
+                values[dst] = sum_value(known.get(dst), b, m == "add")
+            elif m == "xor" and src.type == X.X86_OP_REG and src.reg == ops[0].reg:
+                values[dst] = (0, False)
+            elif m in ("mov", "add", "sub", "and", "or", "xor", "imul", "movzx", "movsx", "adc", "sbb") \
+                    and src.type != X.X86_OP_MEM:
+                values[dst] = None          # (computed from what is not known; a load gives none, as RISC-V's)
+        for op, base, index in self._memory_operands(insn):
+            if base == "sp":
+                continue
+            b = known.get(base) if base is not None else (0, False)
+            if b is None:
+                continue
+            load, store = bool(op.access & CS_AC_READ), bool(op.access & CS_AC_WRITE)
+            if m == "push":
+                load, store = True, False
+            elif m == "pop":
+                load, store = False, True
+            signed = m == "movsx" and op is ops[-1]
+            ctype = ("s" if signed else "u") + str(8 * op.size)
+            accesses.append((b[0], op.mem.disp, ctype, b[1] or index is not None, load, store))
+            if store and m == "mov" and ops[1].type == X.X86_OP_REG and whole(ops[1]) is not None:
+                stored.append(whole(ops[1]))
+        return values, accesses, stored
 
     # ---- what dread.regflow learns of the bits ----
 
