@@ -125,6 +125,7 @@ class Context:
         self.plan = shapes.Plan()       # the image's readable_types table (dread.shapes)
         self.structs = {}               # the readable_names table's structs part
         self.image_spans = None         # where the image keeps static data (dread.statics image_spans)
+        self.folds_memory = False       # an instruction may read memory beside a register (dread.volorder)
         self._struct_names = None
         self._static_names = None
         self._program = None            # the program (its machine code: pushes and the frame's save words,
@@ -138,6 +139,7 @@ class Context:
         self.names = naming.load(image)
         self.globals = naming.load(image, "globals")
         self.memory = target.memory
+        self.folds_memory = bool(getattr(target.arch, "folds_memory_operands", False))
         from dread import regflow, statics
         from dread.program import Program
         program = program or Program(target, image)
@@ -1376,6 +1378,9 @@ def _named(name, text, stages, context=None, cleaned=None):
         polish_tree(tree, fn, context, int_bits)    # (constants and casts by their use: last)
         from dread import bound
         bound.compact(fn)                   # (a bound call in one statement: how it reads, nothing more)
+        if context is not None and getattr(context, "folds_memory", False):
+            from dread import volorder
+            volorder.guard(tree, fn)        # (x86: two volatile loads one statement combines kept in order)
     return tree, fn, stages
 
 

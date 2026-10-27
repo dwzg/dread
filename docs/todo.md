@@ -6609,6 +6609,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         failed in CI's Ubuntu 22.04 image). An empty asm statement behind such a call (KEEP_CALL) keeps
         it a call; a tail jump passes the function's own parameters, which the compilers jump with in
         place.
+      - [x] Readable C on the trial build (2026-10-27): 209 of its 212 lifted functions readable, 17
+        structures and 19 arrays of static data found. Two of the three that stayed lifted were the HPET's
+        interrupt handlers: they read the counter's high and low words into frame slots and add a global
+        to the pair; the readable passes take the frame's volatile stores away, the statement that
+        combines the three meets GCC 16's reorder again, and the low word came first. dread.volorder puts
+        the lifter's barrier into readable C in front of a statement that reads two values of volatile
+        loads, where the layer says instructions fold memory operands (folds_memory_operands: x86).
+        tests/test_x86.py: counter (refused without it).
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved

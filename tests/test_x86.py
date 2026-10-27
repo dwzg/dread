@@ -886,6 +886,58 @@ def test_port_io_is_logged_answered_and_lifted(tmp_path):
     assert status == {0, 1}, cases
 
 
+COUNTER_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+volatile u32 offset = 5;
+
+/* a 64-bit counter read as two device words, high first, through frame slots, and a global added */
+__asm__(".text\n.globl counter\n.type counter, @function\ncounter:\n"
+        "  pushl %ebp\n  movl %esp, %ebp\n  subl $8, %esp\n"
+        "  movl 0xfed000f4, %eax\n  movl 0xfed000f0, %edx\n"
+        "  movl %edx, -8(%ebp)\n  movl %eax, -4(%ebp)\n"
+        "  movl -8(%ebp), %eax\n  movl -4(%ebp), %edx\n"
+        "  addl offset, %eax\n  adcl $0, %edx\n"
+        "  movl %eax, sink\n  movl %edx, sink+4\n"
+        "  leave\n  ret\n.size counter, .-counter\n");
+void counter(void);
+
+void _start(void)
+{
+    counter();
+    for (;;)
+        ;
+}
+"""
+
+
+def test_readable_c_keeps_two_device_reads_in_order(tmp_path):
+    """counter reads a 64-bit device counter's high word, then its low word, through frame slots, and adds
+    a global to the pair (FreeRTOS's vHPETIRQHandler1). Its lifted C keeps the frame's volatile stores
+    between the reads and their use; its readable C takes them away and combines all three in one
+    statement, which GCC 16 compiled reading the low word first. dread.volorder puts a barrier in front of
+    that statement (x86: folds_memory_operands), and the readable gate accepts it."""
+    target = small_i386(tmp_path, COUNTER_C, "counter")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, readable, volorder
+    from dread.target import Target
+    toml = os.path.join(target.root, "dread.toml")
+    text = open(toml).read()
+    assert "\nio = " not in text
+    open(toml, "w").write(text.replace("\nstack = {", "\nio = [[0xfed00000, 0xfed01000]]\nstack = {", 1))
+    target = Target.load(target.root)
+    image = target.image()
+    lines = []
+    assert lift.check(target, image, ["counter"], out=lines.append, jobs=2) == ["counter"], lines
+    lines = []
+    assert readable.check(target, image, out=lines.append, jobs=2) == ["counter"], lines
+    out = tmp_path / "readable"
+    assert readable.main(["--target", str(target.root), "--out", str(out), "counter"]) == 0
+    c = (out / "counter.c").read_text()
+    assert volorder.BARRIER_TEXT in c or '__asm__ volatile ("" : : : "memory");' in c, c
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

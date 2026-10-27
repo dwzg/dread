@@ -76,6 +76,9 @@ class X86:
     default_result = ("eax", "edx")
     profile = None
     port_instructions = (UX.UC_X86_INS_IN, UX.UC_X86_INS_OUT)    # in and out: dread.emu's port space
+    folds_memory_operands = True            # an instruction may read memory beside a register: a compiler may
+                                            # fold two volatile loads into one and reorder them (GCC 16;
+                                            # dread.lift_x86's barrier, dread.volorder in readable C)
     pushes_arguments = True                 # cdecl pushes a call's stack arguments (dread.regflow: such a
                                             # push reads its register)
     entry_stack_args = 4                    # sp to the first stack argument at a function's entry: the

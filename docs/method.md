@@ -179,7 +179,9 @@ Where the C cannot say what the original's code relies on, the translation says 
   folds x86's mov eax, [a]; cmp [b], eax into one compare of two memory operands and loads b first
   (GCC 11 to 13 and clang keep the order). A compiler barrier (an asm statement with a memory
   clobber) stands in front of an instruction that reads two values of memory outside the frame
-  (since 2026-10-27); the readable passes count it as an effect and fold no load across it;
+  (since 2026-10-27); the readable passes count it as an effect and fold no load across it, and where
+  they take the frame's stores away between two loads and their use, dread.volorder puts one into the
+  readable C in front of the statement that combines them;
 - a frame that must be the real one (a va_list walks from the saved argument registers into the
   stack arguments; an address of a stack argument): an assembly entry reserves the original's frame
   on the real stack and hands the C its stack pointer (ARM state, Thumb-2 and RISC-V, where it also
