@@ -143,7 +143,7 @@ from dread.cases import confine_args
 from dread.emu import PAGE, RUN_CALLEE, EmuError, Layout, Machine
 from dread.program import Program, read_functions
 
-VERSION = 34       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 35       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -201,7 +201,9 @@ VERSION = 34       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # cover less than the search counted (a run that should have ended at a call and
                   # spun on a register counted, and no other input was sought), the compare-guided
                   # stage runs once more from what they cover, counting only runs whose case survives
-                  # (repair_lost)
+                  # (repair_lost); 35: every stub of a callee logs the callee's stack arguments
+                  # (stub_words), not only a loop case's: i386 passes every argument on the stack, and
+                  # the stub of a callee a run hung in logged none (gizmo-i386's handle_key, read_line)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -1026,7 +1028,8 @@ class Generator:
                 for c in seen:
                     reaching.setdefault(c, set()).add(s)
             self._reaching = reaching
-        return [[switches[s], self.reads_mask(s), 0] for s in sorted(self._reaching.get(name, ())) if s != name]
+        return [[switches[s], self.reads_mask(s), self.stub_words(switches[s])]
+                for s in sorted(self._reaching.get(name, ())) if s != name]
 
     def loop_frame(self, name):
         """A loop case's frame: the bytes the function's stack holds at its deepest (dread.lift's
@@ -1610,7 +1613,7 @@ class Generator:
                     if stub is not None and len(hung) < HUNG_STUBS and stub.entry not in hung and \
                             all(c[0] != stub.entry for c in calls):
                         hung.add(stub.entry)
-                        calls.append([stub.entry, self.reads_mask(stub.name), 0])
+                        calls.append([stub.entry, self.reads_mask(stub.name), self.stack_words(stub)])
                 learn_pointers(m, case)
                 if pointers:
                     went = {code_address(self.arch, m.reg("pc")),
@@ -1827,7 +1830,7 @@ class Generator:
             if stub is None:
                 break
             deciders.add(stub.entry)
-            extra = [stub.entry, self.reads_mask(stub.name), 0]
+            extra = [stub.entry, self.reads_mask(stub.name), self.stack_words(stub)]
             # First the compare-guided stage with the stub in every input: the stub's result and what
             # it leaves in memory are inputs there, and the chase points an input that a new path
             # stores through at scratch (newlib's __sfp stores errno through its reent pointer when
@@ -1944,8 +1947,16 @@ class Generator:
                 calls.append([fn.entry, self.reads_mask(fn.name), self.stack_words(fn)])
         return calls, stops
 
+    def stub_words(self, entry):
+        """stack_words of the function at a callee's entry: the stack arguments its stub logs, as the
+        argument registers of reads_mask (0 where the entry is no function's)."""
+        fn = self.program.by_entry.get(entry)
+        return self.stack_words(fn) if fn is not None else 0
+
     def stack_words(self, fn):
-        """How many stack arguments a function reads (dread.lift's stack analysis), 0 where unknown."""
+        """How many stack arguments a function reads (dread.lift's stack analysis), 0 where unknown.
+        Every stub of a callee the generator makes logs them (since VERSION 35): on i386, where cdecl
+        passes every argument on the stack, a stub logged none before."""
         from dread import lift
         try:
             lifter = self.__dict__.get("_frame_lifter") or lift.make_lifter(self.program, self.flow() or None)
@@ -2796,7 +2807,7 @@ class Generator:
                 tries = []
                 if inside.name not in self.endless() and all(c[0] != inside.entry for c in case.get("calls", ())):
                     tries.append(dict(case, calls=[list(c) for c in case.get("calls", ())] +
-                                      [[inside.entry, self.reads_mask(inside.name), 0]]))
+                                      [[inside.entry, self.reads_mask(inside.name), self.stack_words(inside)]]))
                 if inside.entry not in stops and len(stops) < MAX_STOPS:
                     tries.append(dict(case, hang=True, limit=limit, stops=sorted(set(stops) | {inside.entry})))
                 for trial in tries:
@@ -2851,7 +2862,8 @@ class Generator:
             calls = [list(c) for c in case.get("calls", ())]
             mine = next((c for c in calls if c[0] == stop), None)
             if mine is None:
-                calls.append([stop, self.reads_mask(names.get(stop, "")), 0] + ([[k]] if k > 1 else []))
+                calls.append([stop, self.reads_mask(names.get(stop, "")), self.stub_words(stop)] +
+                             ([[k]] if k > 1 else []))
             elif len(mine) > 3 and mine[3] is not None:
                 mine[3] = sorted(set(mine[3]) | {k})
             case["calls"] = calls
@@ -2865,7 +2877,8 @@ class Generator:
                 return dict((a, k) for a, k in base.get("stop_from", ())).get(callee, 1)
             counted = json.loads(json.dumps(base))
             if not any(c[0] == callee for c in counted.get("calls", ())):
-                counted["calls"] = counted.get("calls", []) + [[callee, self.reads_mask(names.get(callee, "")), 0, []]]
+                counted["calls"] = counted.get("calls", []) + \
+                    [[callee, self.reads_mask(names.get(callee, "")), self.stub_words(callee), []]]
             _, events, _ = run(counted)
             seen = [e[2] for e in events if e[0] == "call" and e[1] == callee]
             return max(seen) if seen else None
@@ -2897,7 +2910,7 @@ class Generator:
                 if not every["stop_from"]:
                     del every["stop_from"]
                 every["calls"] = [list(c) for c in every.get("calls", ()) if c[0] != stop] + \
-                    [[stop, self.reads_mask(names.get(stop, "")), 0]]
+                    [[stop, self.reads_mask(names.get(stop, "")), self.stub_words(stop)]]
                 m1, _, error1 = run(every)
                 if gained(every, m1, error1, depth):
                     return True
@@ -2905,7 +2918,7 @@ class Generator:
                     return False
             trial = answered_stop(base, stop, k)
             have = {c[0] for c in trial["calls"]}
-            watched = dict(trial, calls=trial["calls"] + [[c, self.reads_mask(names.get(c, "")), 0, []]
+            watched = dict(trial, calls=trial["calls"] + [[c, self.reads_mask(names.get(c, "")), self.stub_words(c), []]
                                                           for c in sorted(direct - have)])   # (counted only)
             m2, events, error2 = run(watched)
             if gained(trial, m2, error2, depth):
@@ -3033,7 +3046,7 @@ class Generator:
                             c.append(0 if len(c) == 2 else [])
                         c[3] = sorted(set(c[3] or ()) | {n})
                 if stub is None:
-                    case["calls"].append([key, self.reads_mask(names.get(key, "")), 0, [n]])
+                    case["calls"].append([key, self.reads_mask(names.get(key, "")), self.stub_words(key), [n]])
                 returns = list(case.get("returns", ())) + [0] * max(0, before - len(case.get("returns", ())))
                 case["returns"] = returns[:before] + [v & 0xFFFFFFFF] + returns[before:]
                 renumber(case, before)
@@ -3087,7 +3100,7 @@ class Generator:
                     return None
                 if not any(c[0] == key for c in case.get("calls", ())):
                     case["calls"] = [list(c) for c in case.get("calls", ())] + \
-                        [[key, self.reads_mask(names.get(key, "")), 0, []]]       # (counted, never answered)
+                        [[key, self.reads_mask(names.get(key, "")), self.stub_words(key), []]]  # (counted, never answered)
             m, events, error = run(case, (w, at, read), loads)
             if error is not None and not case.get("stops") and not case.get("hang"):
                 return None

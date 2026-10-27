@@ -6393,9 +6393,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       shared rewritten fmt_hex reads the original's digit table (HEX_DIGITS) so that each build leaves
       the registers its original leaves (docs/decisions.md, "The rewritten fmt_hex reads the original's
       table").
-    - [ ] Generated cases log no stack argument of a stubbed callee on x86 yet: how many a callee reads
-      comes from the lifter's stack analysis (Generator.stack_words: dread.lift's stack_args), which x86
-      gets with its lifter. Written cases see them (logging_stubs: the first four from the stack).
+    - [x] Generated cases log a stubbed callee's stack arguments (2026-10-27, generator VERSION 35):
+      only a loop case's stubs logged them (Generator.stack_words, from the lifter's stack analysis);
+      the stubs the other stages make (a callee a run hung in, the decider stage's, the chase's, a
+      stop's, those that reach a context switch) logged the argument registers alone, which on i386
+      is nothing: GCC's handle_key handed read_line any length unseen. Now every stub of a callee logs
+      its stack words (Generator.stub_words), on every architecture (ARM's fifth argument and up);
+      with read_line handed 41 for its 40 bytes, handle_key is dropped (tests/test_x86.py).
     - [ ] refine_saved_writes on ARM and RISC-V: whether refining an instruction that writes a callee-saved
       register (uxtb r4, r1 reads the low byte of r1) changes a lift check or a readable gate there;
       only x86 says it so far (dread.regflow refinement).

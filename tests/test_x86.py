@@ -236,6 +236,38 @@ def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path,
     assert dropped and set(accepted) | set(dropped) == set(I386_NAMES), lines
 
 
+def test_a_stubbed_callee_logs_its_stack_arguments(tmp_path, monkeypatch):
+    """GCC's handle_key calls read_line(line, 40), whose run waits for a key no case gives, so its
+    generated cases stub read_line; the stub logs the two words cdecl passes on the stack (dread.autocase
+    stub_words, since VERSION 35: before, a stub of a callee the generator made logged no argument on
+    i386). With the lifted C handing read_line 41 (a planted mistake) handle_key is dropped."""
+    if not _compiles("i386", tmp_path):
+        pytest.skip("needs the host's gcc with -m32")
+    import re
+    from dread import lift, lift_x86
+    from dread.autocase import Generator
+    target = i386_copy(tmp_path)
+    image = target.image()
+    gen = Generator(target, image)
+    read_line = next(f for f in gen.program.functions if f.name == "read_line")
+    assert gen.stub_words(read_line.entry) == 2
+    lines = []
+    assert lift.check(target, image, ["handle_key"], out=lines.append, jobs=2) == ["handle_key"], lines
+    original = lift_x86.X86Lifter.lift
+
+    def planted(self, fn):
+        got = original(self, fn)
+        if fn.name == "handle_key":
+            got.text, n = re.subn(r"(= read_line\(.*), (\*\(volatile u32 \*\)\(\(u32\)\(sp0 - \d+\)\))\);",
+                                  r"\1, \2 + 1);", got.text)
+            assert n == 1, got.text
+        return got
+    monkeypatch.setattr(lift_x86.X86Lifter, "lift", planted)
+    lines = []
+    assert lift.check(target, image, ["handle_key"], out=lines.append, jobs=2) == [], lines
+    assert any(line.startswith("dropped  FAIL") and "handle_key" in line for line in lines), lines
+
+
 def test_random_x86_functions_agree(tmp_path):
     """dread.lift_x86 on random 32-bit code (dread.liftfuzz): the arithmetic and logic of every width with
     the flags, the shifts by a constant, by cl and by one, the multiplications and divisions, setcc,
