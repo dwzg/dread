@@ -6751,12 +6751,12 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         (2 without the change). regflow's and callconv's save-area checks took the last argument register,
         which i386's cdecl has none of: guarded. x86's generator version 8. tests/test_x86.py: the layer's
         hooks, and test_autocase's gated_by_global on i386.
-      - [ ] A read-back after a write: vPortEnterCritical (IA32 port) writes 0xaf into the local APIC's
-        task priority register and asserts that it reads back 0xaf; its assertion path stays unrun. The
+      - [x] A read-back after a write: vPortEnterCritical (IA32 port) writes 0xaf into the local APIC's
+        task priority register and asserts that it reads back 0xaf; its assertion path stayed unrun. The
         compare-guided stage sets the memory a load reads before the run (overwritten here by the code's
-        own write) and answers a reread from the second read on (later); a first read of memory the run
-        wrote before it needs the later too. Generic (ARM's code reads device registers back as well),
-        so a generator version for every target.
+        own write) and answered a reread from the second read on (later); since 2026-10-27 a first read of
+        memory the run wrote before it gets the later too (generator 37, every target). vPortEnterCritical
+        passes on a copy of the GCC -Os build. tests/test_autocase.py: set_priority on Cortex-M3.
       - [ ] WaitForStopDet's wait (-O2 build: 20 of its 54 instructions unrun): the status register lies
         behind the base address the driver reads from PCI configuration space, which the generator aims
         at a scratch buffer, plain memory, where no spin is cut and no poll stage answers; the wait's own

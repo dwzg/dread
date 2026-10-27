@@ -1570,6 +1570,55 @@ unsigned spaces(volatile unsigned *buf)
 """
 
 
+READBACK_C = NOIPA_DEF + """
+volatile unsigned tpr, done;
+NOIPA void complain(unsigned k) { done = k + 7u; }
+unsigned set_priority(unsigned k)
+{
+    tpr = 0xafu;                    /* a register written and read back (an APIC's task priority) */
+    if (tpr != 0xafu) {             /* only where something else wrote it in between */
+        complain(k);                /* (a call: GCC branches, no IT block) */
+        return 7u;
+    }
+    done = k;
+    return 1u;
+}
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_change_a_word_the_code_wrote_before_reading_it(tmp_path):
+    """set_priority writes tpr and reads it back: every generated case reads what it wrote, and the
+    load's answer (memory set before the run) is gone by the read. The answers give that first read a
+    later where the run wrote the memory first (until generator 37 only from a second read on: the IA32
+    port's vPortEnterCritical kept its assertion path unrun), and the path behind runs."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(READBACK_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "set_priority", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    gen = Generator(t, t.image())
+    fn = gen.program.by_name["set_priority"]
+    cases = gen.generate("set_priority", fn.entry, fn.insns)
+    before, words = covered(gen, "set_priority", cases)
+    assert before < words, "the generated cases ran the path behind the read-back"
+    new = gen.answers("set_priority", fn.entry, fn.insns, cases)
+    after = set().union(before, *(gen.coverage(fn.entry, fn.insns, c) for c in new))
+    assert after == words, sorted(hex(a) for a in words - after)
+    assert any(c.get("later") for c in new), new
+
+
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_answers_change_a_word_between_two_reads(tmp_path):
     """No generated case runs spaces' retry (both reads of the tail alike); the answers give the second

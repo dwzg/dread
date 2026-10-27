@@ -144,7 +144,7 @@ from dread.emu import PAGE, RUN_CALLEE, EmuError, Layout, Machine
 from dread.program import Program, read_functions
 from dread.target import TargetError
 
-VERSION = 36       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 37       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -208,6 +208,8 @@ VERSION = 36       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # 36: a function's stack arguments are arguments of its cases (arg_count), not memory
                   # cells: the chase, the learned pointers, the null and decider stages vary them as
                   # they vary the argument registers (i386: every argument; gizmo's script_run)
+                  # 37: the answers give a first read a later where the run wrote the memory before it
+                  # (a register read back: the IA32 port's vPortEnterCritical)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -3080,9 +3082,15 @@ class Generator:
                 return make, (base.get("sysregs") or {}).get(key, 0), None
             if kind == "reread":            # the memory a load read again: from that read on (later)
                 last = last_load(events, k, key, decider)
-                if last is None or last[5] < 2:
+                if last is None:
                     return None, None, None
                 _, _, address, size, old, nth = last
+                if nth < 2 and not (m is not None and m.wrote_into(address, address + size)):
+                    # (a first read of memory the run did not write: the load's answer sets it before the
+                    # run. One the run wrote first takes a later all the same: the IA32 port's
+                    # vPortEnterCritical writes the local APIC's task priority and asserts that it reads
+                    # it back, and the memory set before the run was gone by then)
+                    return None, None, None
                 if size not in (1, 2, 4) or self.layout.in_stack(address) or \
                         image.base <= address < self.program.writable_end():
                     return None, None, None
