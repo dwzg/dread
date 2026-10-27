@@ -6527,9 +6527,12 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         callee's own stack analysis); its format's words are stack words there, which format_mask
         (registers) does not see. Only where printf is stubbed (a run hung in it): it mostly runs for
         real, and what it prints is compared.
-      - [ ] int N (16): FreeRTOS's yield (int 0x50, portYIELD); as RISC-V's ecall and ARM's svc, a logged
-        system call in the emulator (Unicorn reports int N and CPU exceptions alike: the hook tells int N
-        by its bytes in front of eip) and inline assembly in the C.
+      - [x] int N (2026-10-27; 16 functions at first, 23 once regparm(3) let more of them lift): FreeRTOS's
+        yield (int 0x50, portYIELD). As RISC-V's ecall and ARM's svc, a logged system call in the emulator:
+        Unicorn reports int N as it reports a fault, with its number, but resumes behind it, so the layer
+        tells it by the two bytes cd NN in front of eip (software_interrupt, which dread.emu asks); and in
+        the C inline assembly that hands eax, ecx and edx to the handler and back (it may change them, the
+        emulator's no-op does not), the flags and memory clobbered (tests/test_x86.py: tick yields).
       - [ ] cli and sti (7: interrupts masked around the critical sections), pushes of every register,
         iret, in and out, rdtsc (the port's assembly and the support code: refused, rightly for now),
         rep movsd and bt (2 each), the address of a stack argument taken (printf, sprintf: va_start).

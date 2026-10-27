@@ -882,7 +882,8 @@ class Machine:
             self.code_reads = bool(fast.state.code_reads)
 
     def _on_intr(self, uc, intno, user):
-        if intno in getattr(self.arch, "syscall_numbers", ()):
+        soft = getattr(self.arch, "software_interrupt", None)    # (x86: int N, told from a fault by its bytes)
+        if intno in getattr(self.arch, "syscall_numbers", ()) or (soft is not None and soft(uc, intno)):
             if self.svc_regs:
                 regs = self.layout.arg_regs if self.svc_regs is True else self.svc_regs
                 self.log("svc", *(uc.reg_read(r) for r in regs))

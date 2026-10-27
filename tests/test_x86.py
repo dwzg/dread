@@ -388,6 +388,54 @@ def test_a_static_function_takes_its_arguments_in_registers(tmp_path):
     assert build.REGPARM + "3 */" in "".join(open(p).read() for p in (tmp_path / "regparm" / "build").rglob("mix.c"))
 
 
+YIELD_C = r"""
+typedef unsigned int u32;
+volatile u32 counter;
+
+u32 tick(u32 n)
+{
+    counter += n;
+    if (counter > 10)
+        __asm__ volatile ("int $0x50" ::: "memory");
+    return counter;
+}
+
+void _start(void)
+{
+    tick(3);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_int_n_is_a_system_call(tmp_path):
+    """int N (FreeRTOS's yield: int 0x50) is a system call: the emulator runs it as a logged no-op (Unicorn
+    reports it as it reports a fault, with its number; dread.arch.x86's software_interrupt tells it by the
+    bytes in front of eip), and the lifter writes it as inline assembly that hands eax, ecx and edx to the
+    handler and back. tick's lift check and readable gate pass; until then it was refused."""
+    target = small_i386(tmp_path, YIELD_C, "yield")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, readable, regflow
+    from dread.emu import Core, Machine, Layout
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    text = lifter.lift(program.by_name["tick"]).text
+    assert '__asm__ volatile ("int $0x50" : "+a"(eax), "+c"(ecx), "+d"(edx) :: "memory", "cc");' in text, text
+    m = Machine(Layout(target, image), image.payload(), isa_of=program.isa_at)
+    m.write(0x20000000, (20).to_bytes(4, "little"))        # (counter: past 10, so tick yields)
+    m.write(m.layout.stack_top, (1).to_bytes(4, "little"))
+    result = m.call(program.by_name["tick"].entry, 1)
+    assert ("svc",) in [tuple(e) for e in result.calls] and m.exception is None, result.calls
+    lines = []
+    assert lift.check(target, image, ["tick"], out=lines.append, jobs=2) == ["tick"], lines
+    lines = []
+    assert readable.check(target, image, out=lines.append, jobs=2) == ["tick"], lines
+
+
 @pytest.mark.parametrize("which", ["i386", "i386clang"])
 def test_gizmo_i386_rewritten_functions_agree(which, tmp_path):
     """The rewritten C over the original, every argument on the stack: functions that do not fit move

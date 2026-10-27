@@ -207,6 +207,17 @@ class X86:
     def is_syscall(self, insn):
         return insn.mnemonic in ("int", "into", "syscall", "sysenter")
 
+    def software_interrupt(self, engine, intno):
+        """Whether an interrupt the emulator stopped for is int N (a system call: dread.emu runs it as a
+        logged no-op, as ARM's svc and RISC-V's ecall): Unicorn reports it with N, as it reports a fault
+        with its vector (a division by zero as 0), but resumes behind the instruction, whose two bytes
+        cd NN lie in front of eip. int3 (cc) and into (ce) are no system calls."""
+        eip = engine.reg_read(UX.UC_X86_REG_EIP)
+        try:
+            return 3 < intno < 256 and bytes(engine.mem_read((eip - 2) & 0xFFFFFFFF, 2)) == bytes([0xCD, intno])
+        except Exception:
+            return False
+
     def register_call_targets(self, program, fn):
         return {}
 

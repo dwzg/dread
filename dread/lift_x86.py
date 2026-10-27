@@ -84,7 +84,7 @@ UTYPES = {1: "u8", 2: "u16", 4: "u32"}
 STYPES = {1: "s8", 2: "s16", 4: "s32"}
 REFUSED = {"std": "sets the direction flag", "in": "reads a port", "out": "writes a port", "cli": "masks interrupts",
            "sti": "allows interrupts", "lahf": "reads the flags register", "sahf": "writes the flags register",
-           "pushfd": "pushes the flags register", "popfd": "pops into the flags register", "int": "raises an interrupt",
+           "pushfd": "pushes the flags register", "popfd": "pops into the flags register",
            "int3": "is a breakpoint", "ud2": "is an undefined instruction", "hlt": "halts", "iretd": "returns from an "
            "interrupt", "rdtsc": "reads the time-stamp counter", "cpuid": "asks the core what it is",
            "pushal": "pushes every register", "popal": "pops every register", "enter": "makes a frame with enter"}
@@ -791,6 +791,8 @@ class X86Lifter(lift.Lifter):
         depth = self.ctx["depth"]
         if insn.prefix[0] and kind != "return" and m not in ("movsb", "movsd", "stosb", "stosd", "movsw", "stosw"):
             raise Refused("0x%x: %s with a prefix (lock, rep) is not modelled" % (a, m))
+        if m == "int":
+            return self._int(insn)
         if m in REFUSED:
             raise Refused("0x%x %s" % (a, REFUSED[m]))
         if m in NOPS:
@@ -1187,6 +1189,16 @@ class X86Lifter(lift.Lifter):
                 self._source(insn, insn.operands[0]), ", ".join(["u32"] * (1 + len(words))),
                 ", ".join(["eax"] + words))
         raise Refused("0x%x jumps through a register or memory to targets not known" % a)
+
+    def _int(self, insn):
+        """int N, a system call (FreeRTOS's yield: int 0x50), as inline assembly: eax, ecx and edx go to the
+        handler and come back from it (it may change them, as a call may; the emulator runs it as a
+        logged no-op, dread.arch.x86's software_interrupt), the others it keeps, and the flags and memory
+        it may change."""
+        ops = insn.operands
+        if len(ops) != 1 or ops[0].type != X.X86_OP_IMM or not 3 < ops[0].imm < 256:
+            raise Refused("0x%x raises an interrupt: %s %s" % (insn.address, insn.mnemonic, insn.op_str))
+        return '{ __asm__ volatile ("int $0x%x" : "+a"(eax), "+c"(ecx), "+d"(edx) :: "memory", "cc"); }' % ops[0].imm
 
     def render(self, fn, body):
         ctx = self.ctx
