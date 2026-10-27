@@ -6624,6 +6624,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         x86 lifter refused ("reads ecx behind the call"); since the function hands it back unchanged
         (call_saved: its file is compiled with -fcall-saved-ecx), the C keeps the caller's value through
         the call. tests/test_x86.py: outer2.
+      - [x] A word read back after the call where the callee writes no stack argument (2026-10-27): GCC 12
+        at -Os reads a word it pushed again after the call (push; call; ... [esp]); the C passes a copy,
+        so the lifter refused every such caller (six on the trial build). It refuses now only where the
+        callee may write one of its stack arguments (writes_stack_args: a store above its return address,
+        an address of one taken or an index into them, a tail call passing them on, a jump through a
+        register; True where its frame cannot be followed). Five of the six lift now (their coverage
+        keeps them out); prvQueueSetReceivingTask stays refused, rightly: xQueueGenericSend hands the
+        address of its xTicksToWait on, and the word changes. tests/test_x86.py: back_r, back_w.
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved

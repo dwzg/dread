@@ -1265,7 +1265,7 @@ class X86Lifter(lift.Lifter):
             words = ["sa%d" % k for k in range(nstack)]
         if nstack and not tail:
             back = self._read_back(insn, slots)
-            if back is not None:
+            if back is not None and self.writes_stack_args(callee):
                 raise Refused("0x%x reads a stack word that the call at 0x%x passed to %s, which may change it "
                               "(the C passed a copy)" % (back, insn.address, callee.name))
         regs = [] if variadic else list(self.reg_args(callee))
@@ -1283,6 +1283,42 @@ class X86Lifter(lift.Lifter):
         if width == 2:
             return "{ u64 x_ = %s; eax = (u32)x_; edx = (u32)(x_ >> 32); } %s" % (call, clear)
         return "eax = %s; %s" % (call, clear)
+
+    def writes_stack_args(self, fn):
+        """Whether fn may write one of its stack arguments, as far as its frame shows: a store into a word
+        above its return address (_accesses), an address of one taken or an index into them
+        (walks_stack_args: what reads or writes through them is not followed), a tail call that passes
+        them on to a function that may write them, or a jump through a register. True where its frame
+        cannot be followed. cdecl's callee owns its stack arguments and GCC may reuse their words; a
+        caller that reads a word it passed back after the call (GCC 12 at -Os: push; call; ... reads
+        [esp]) reads what the callee left there, while the C passed a copy: the same where the callee
+        writes none (FreeRTOS's vTaskDelay, xQueueGenericSend: refused until 2026-10-27)."""
+        key = getattr(fn, "key", fn.name)
+        cache = self.__dict__.setdefault("_writes_args", {})
+        if key in cache:
+            return cache[key]
+        cache[key] = True                   # (a recursive look: may write)
+        try:
+            states = self.states(fn, strict=False, switch=True)
+        except Refused:
+            return True
+        if self.walks_stack_args(fn):
+            return True
+        own = set(fn.insns)
+        for a, (depth, values) in states.items():
+            insn = self.prog.insn(a)
+            kind, target, falls = self.arch.flow(insn)
+            if kind == "ijump":
+                return True                 # (a jump through a register: its target may be anything)
+            if kind == "jump" and not falls and target is not None and target not in own:
+                callee = self.prog.by_entry.get(target)
+                if callee is None or self.writes_stack_args(callee):
+                    return True             # (a tail call passes them on)
+            for s, size, read, written in self._accesses(fn, insn, depth, values):
+                if written and s - size + 1 <= -4:
+                    return True
+        cache[key] = False
+        return False
 
     def _read_back(self, insn, slots):
         """The first instruction behind a call that reads one of the frame words the call passed as

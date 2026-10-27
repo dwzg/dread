@@ -1033,6 +1033,51 @@ def test_a_printf_stub_logs_what_its_format_takes(tmp_path):
     assert bytes(m.read(entry[1], 6)) == b"%u %u\n", entry
 
 
+READBACK_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+/* reader leaves its stack argument alone, writer changes it; each caller reads the word it pushed back
+   after the call, as GCC 12 at -Os does */
+__asm__(".text\n.globl reader\n.type reader, @function\nreader:\n"
+        "  movl 4(%esp), %eax\n  addl $1, %eax\n  ret\n.size reader, .-reader\n"
+        ".globl writer\n.type writer, @function\nwriter:\n"
+        "  movl 4(%esp), %eax\n  movl $9, 4(%esp)\n  ret\n.size writer, .-writer\n"
+        ".globl back_r\n.type back_r, @function\nback_r:\n"
+        "  pushl 4(%esp)\n  call reader\n  addl (%esp), %eax\n  addl $4, %esp\n  ret\n.size back_r, .-back_r\n"
+        ".globl back_w\n.type back_w, @function\nback_w:\n"
+        "  pushl 4(%esp)\n  call writer\n  addl (%esp), %eax\n  addl $4, %esp\n  ret\n.size back_w, .-back_w\n");
+u32 back_r(u32 x);
+u32 back_w(u32 x);
+
+void _start(void)
+{
+    sink[1] = back_r(5) + back_w(6);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_word_read_back_after_a_call(tmp_path):
+    """back_r and back_w read the word they pushed back after the call. The C passes a copy, so the lifter
+    refused both; reader writes no stack argument (writes_stack_args), and back_r's copy reads what the
+    original does: its lift check passes. writer changes its argument, which back_w then reads: refused."""
+    target = small_i386(tmp_path, READBACK_C, "readback")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    assert not lifter.writes_stack_args(program.by_name["reader"])
+    assert lifter.writes_stack_args(program.by_name["writer"])
+    lines = []
+    assert lift.check(target, image, ["back_r", "back_w"], out=lines.append, jobs=2) == ["back_r"], lines
+    assert any(line.startswith("refused") and "back_w" in line and "passed to writer" in line for line in lines), lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];
