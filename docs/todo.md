@@ -6426,11 +6426,25 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       there on a core whose instructions may start at odd addresses. tests/test_x86.py: a moved put
       entered three times (fails with either old rule, in the Python hook and in the C hook), gizmo-i386's
       boot and a planted bug, the lift check's whole image.
-    - [ ] Interrupts on x86: the IDT (enter_interrupt: eflags, cs and eip pushed, on at the gate's handler),
-      iret (exception_return), a controller (the RV32 build's model at 0x10002000, or the PC's PIC and
-      the APIC for the bench's IA32 builds), the instructions behind which Unicorn ends a block (sti, popfd:
-      ends_block, to measure); then gizmo-i386's keys and config scenarios (bytes from the UART reach main's
-      ring through its interrupt) and the timer.
+    - [x] Interrupts on x86 (2026-10-27): the layer's enter_interrupt takes a controller's line through the
+      IDT that lidt loaded (vector 0x20 + the line, or the controller's core_cause; a present 32-bit
+      interrupt or trap gate; eflags, cs and the return address pushed, TF, NT, RF, VM and through an
+      interrupt gate IF cleared), and iret runs in Unicorn, which takes cs back from the GDT: Unicorn starts
+      in protected mode with cs 0 and no GDT, so gizmo-i386's startup now loads a flat GDT of its own
+      (lgdt, ljmp $0x8, the data segments), fills the IDT's gate 0x20 with irq_entry (pushal, irq_dispatch,
+      popal, iret) and enables interrupts before main, as the RV32 build does; both i386 builds have the
+      RV32 build's timer, controller and GPIO and its keys and config scenarios. ends_block as measured on
+      Unicorn 2.1.4: sti, popfd, a load of ss, ds or es, a control register (not pause, which the lifter
+      drops; behind sti the interrupt comes one instruction before the core's shadow allows, the place both
+      images share). On copies with nothing written by hand the lift check runs all three scenarios on the
+      whole image: GCC 42 functions, clang 43, the whole image agreeing in both. Found on the way: a far
+      jump was an ordinary instruction to the layer's flow (right only where its offset is the next
+      instruction, as in the startup) and was written as raw bytes (capstone's $0x8:$0x800000e, which GNU
+      as does not read): a jump or call to its offset now, written ljmpl $0x8, $label. The tests' lifted
+      text of clamp and uart_init no longer names addresses, which moved with the startup.
+      tests/test_x86.py: runs_alike (keys and config with the timer's interrupts, both images alike),
+      far_jumps_and_the_instructions_that_end_a_block. Not done: the bench's IA32 builds (the PC's PIC
+      or APIC, the HPET, the UART through port I/O, which the system run does not route to models yet).
     - [x] sysrecord on x86 (2026-10-27): a recorded call's stack arguments start behind the return
       address (entry_stack_args; dread.sysrecord counted the frame's words from sp, and the return address,
       which ret reads, came first), the loop answers' call_args the same, and a pointer into the callers'

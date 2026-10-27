@@ -16,9 +16,14 @@ For dread.regflow the layer has the bits of a register's parts (bit_demand, merg
 store_demand, refine_saved_writes): a byte loaded into dl reads none of the rest of edx unless the rest is
 used. A stub finds its arguments behind the return address the call pushed (entry_stack_args).
 
-Not yet: the lifter, interrupts (the IDT), the x87, MMX and SSE registers, string instructions beyond
-what the analysis needs, 16-bit and 64-bit modes.
+For dread.sysrun: the reset leaves Unicorn's protected mode as it is (the startup loads its own GDT, sets
+esp), interrupts enter through the IDT's gate of a vector (enter_interrupt), iret runs in the emulator,
+and the instructions behind which Unicorn ends a block are measured (ends_block).
+
+Not yet: the x87, MMX and SSE registers, string instructions beyond what the analysis needs, 16-bit and
+64-bit modes, the system run's port I/O (a PC's devices).
 """
+import re
 import struct
 
 import capstone as cs
@@ -177,10 +182,18 @@ class X86:
         """(kind, target, falls), as Arm.flow documents: jmp to a label is a jump, through a register
         or memory an indirect jump (its register's name where it is one); the conditional jumps (and
         jecxz, loop) jump with the next instruction behind them; call to a label is a call, through a
-        register or memory an indirect call; ret, retf and iret return; int and syscall-like
-        instructions are indirect calls (their handler may change any register); hlt, ud2 and int3
-        stop."""
+        register or memory an indirect call; a far jump or call to a selector and an offset (a startup's
+        ljmp $0x8, $label behind lgdt) goes to the offset, the segments being flat; ret, retf and iret
+        return; int and syscall-like instructions are indirect calls (their handler may change any
+        register); hlt, ud2 and int3 stop. (Until 2026-10-27 a far jump was an ordinary instruction:
+        right only where its offset is the next instruction, as in gizmo-i386's startup.)"""
         m = insn.mnemonic
+        if m in ("ljmp", "lcall"):
+            ops = insn.operands
+            call = m == "lcall"
+            if len(ops) == 2 and ops[0].type == X.X86_OP_IMM and ops[1].type == X.X86_OP_IMM:
+                return ("call" if call else "jump"), ops[1].imm & 0xFFFFFFFF, call
+            return ("icall" if call else "ijump"), None, call
         if m == "jmp":
             op = insn.operands[0] if insn.operands else None
             if op is not None and op.type == X.X86_OP_IMM:
@@ -932,6 +945,8 @@ class X86:
     # ---- the system run (dread.sysrun) ----
 
     EFLAGS_IF = 1 << 9                      # (the interrupt flag: sti sets it, cli clears it)
+    EFLAGS_CLEARED = 1 << 8 | 1 << 14 | 1 << 16 | 1 << 17      # TF, NT, RF, VM: an interrupt clears them
+    EXTERNAL = 0x20         # the vector of a controller's line 0 (where a PC's remapped PIC starts)
 
     def reset(self, engine, read_word, entry, vectors):
         """Flat 32-bit protected mode as a loader leaves it (Unicorn's segments start with base 0 and
@@ -941,18 +956,68 @@ class X86:
         return entry
 
     def interrupts_enabled(self, engine):
-        """Whether the core takes an interrupt: eflags.IF (no interrupt is wired yet: gizmo-i386 has no
-        controller model, so none comes)."""
+        """Whether the core takes an interrupt: eflags.IF."""
         return bool(engine.reg_read(UX.UC_X86_REG_EFLAGS) & self.EFLAGS_IF)
+
+    def enter_interrupt(self, engine, number, resume, vectors, read_word, write_word, cause=None):
+        """Take an interrupt as the core does through the IDT, returning to `resume`: the vector is
+        cause (a controller's core_cause) or EXTERNAL + number (the controller's line); its gate (the
+        IDT that lidt loaded: present, a 32-bit interrupt or trap gate) gives cs and the handler; eflags,
+        cs and the return address are pushed on the stack in use (ring 0 only: no stack switch), TF, NT,
+        RF and VM cleared, IF too through an interrupt gate. The segments are flat (base 0). iret, at
+        the handler's end, runs in the emulator, which takes cs back from the GDT (the firmware's
+        startup loads one: Unicorn starts with none)."""
+        vector = self.EXTERNAL + number if cause is None else cause
+        _, base, limit, _ = engine.reg_read(UX.UC_X86_REG_IDTR)
+        if vector * 8 + 7 > limit:
+            raise ValueError("x86: interrupt vector 0x%x lies beyond the IDT (base 0x%x, limit 0x%x)"
+                             % (vector, base, limit))
+        low, high = read_word(base + vector * 8), read_word(base + vector * 8 + 4)
+        kind = high >> 8 & 0x1F
+        if not high & 0x8000 or kind not in (0x0E, 0x0F):
+            raise ValueError("x86: interrupt vector 0x%x has no present 32-bit interrupt or trap gate "
+                             "(0x%08x 0x%08x)" % (vector, high, low))
+        eflags = engine.reg_read(UX.UC_X86_REG_EFLAGS)
+        sp = engine.reg_read(UX.UC_X86_REG_ESP)
+        for value in (eflags, engine.reg_read(UX.UC_X86_REG_CS), resume):
+            sp = (sp - 4) & 0xFFFFFFFF
+            write_word(sp, value)
+        engine.reg_write(UX.UC_X86_REG_ESP, sp)
+        eflags &= ~self.EFLAGS_CLEARED
+        if kind == 0x0E:
+            eflags &= ~self.EFLAGS_IF
+        engine.reg_write(UX.UC_X86_REG_EFLAGS, eflags)
+        selector = low >> 16
+        if selector != engine.reg_read(UX.UC_X86_REG_CS):
+            engine.reg_write(UX.UC_X86_REG_CS, selector)
+        return (low & 0xFFFF) | (high & 0xFFFF0000)
 
     def mask_registers(self, priorities):
         """[(register, bits)]: what interrupts_enabled reads (dread.sysrun's C hook)."""
         return [(UX.UC_X86_REG_EFLAGS, self.EFLAGS_IF)]
 
+    # Instructions behind which Unicorn 2.1.4 ends its translation block though they do not branch,
+    # measured in 32-bit protected mode: sti, popfd, a load of ss, ds or es (mov, pop; not fs nor gs), a
+    # write of a control register, pause and hlt; not cli, pushfd, lidt, lgdt, cpuid, rdtsc, pushal,
+    # popal, cld, std or lahf. sti and a load of ss end the block behind the next instruction too (their
+    # interrupt shadow). dread.sysrun takes an interrupt at the block behind one outside shared code
+    # (System._behind_block_end), which needs the C to keep the instruction: the lifter keeps sti and cli
+    # (inline assembly) and refuses popfd, hlt and the system instructions; it drops pause (no code), so
+    # pause is not one here, and hlt stops the emulator. Behind sti the interrupt comes one instruction
+    # before the core would take it (its shadow): that instruction is the original's in one image and the
+    # C's in the other, so the place right behind sti is the one they share.
+    BLOCK_END_REGS = ("ss", "ds", "es")
+
     def ends_block(self, insn):
-        """Whether Unicorn ends its translation block behind this instruction though it does not branch:
-        none is known yet (sti's interrupt shadow and popfd are the ones to measure once interrupts are
-        wired), which only places interrupts."""
+        """Whether the emulator ends its translation block behind this instruction though it does not
+        branch (the comment above)."""
+        m = insn.mnemonic
+        if m in ("sti", "popfd", "popf"):
+            return True
+        ops = insn.operands
+        if m in ("mov", "pop") and ops and ops[0].type == X.X86_OP_REG:
+            name = insn.reg_name(ops[0].reg)
+            return name in self.BLOCK_END_REGS or name.startswith("cr")
         return False
 
     def enters_code_vector(self, engine, address):
@@ -963,7 +1028,7 @@ class X86:
         return None
 
     def exception_return(self, engine, read_word):
-        """Nothing to finish: iret would run in the emulator."""
+        """Nothing to finish: iret runs in the emulator."""
         return None
 
     def resume_address(self, engine):
@@ -997,10 +1062,13 @@ class X86:
         return engine.reg_read(UX.UC_X86_REG_EIP)
 
 
+FAR_TARGET = re.compile(r"(?<=\$)0x[0-9a-f]+$")    # (X86Asm: the place in a far jump's $selector, $offset)
+
+
 class X86Asm:
     """How dread asm writes i386 code: capstone's AT&T text, which GNU as (--32) reads back; jumps and
-    calls go to labels. What GNU as encodes otherwise (another length of a jump, another form of an
-    operand) the verify loop writes as raw bytes."""
+    calls go to labels (a far one, ljmp $0x8, $label: its selector kept). What GNU as encodes otherwise
+    (another length of a jump, another form of an operand) the verify loop writes as raw bytes."""
 
     comment = "#"
     directives = {"word": ".long", "half": ".short", "byte": ".byte", "text": ".asciz"}
@@ -1033,6 +1101,8 @@ class X86Asm:
             tst = listing.prog.stored(target)
             if listing.space(target) == listing.space(run) and listing.has(tst, 1) and listing.labelable(tst):
                 listing.labels.add(tst)
+                if insn.mnemonic in ("ljmp", "lcall"):  # (capstone's $0x8:$0x800000e; GNU as takes a comma)
+                    return att.mnemonic, ("sub", FAR_TARGET, att.op_str.replace(":", ", "), tst), ""
                 return att.mnemonic, ("label", "", tst), ""
             return None
         return att.mnemonic, att.op_str, ""

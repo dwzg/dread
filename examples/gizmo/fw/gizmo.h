@@ -11,7 +11,7 @@
  * (GIZMO_MIPS: the boot flash at 0xbfc00000 in kseg1, RAM at 0x80000000 in kseg0, peripherals at
  * 0xbf800000, the A32 build's interrupt controller at hardware interrupt 0), and for a 32-bit x86
  * core in flat protected mode (GIZMO_I386: flash at 0x08000000, RAM at 0x20000000, the RV32 build's
- * peripherals, memory-mapped; no interrupts wired yet). The peripherals have the same registers on
+ * peripherals, memory-mapped; their controller at the IDT's vector 0x20). The same registers on
  * all of them. (The M4 and the C++ builds are the M3's and the RV32's with more.)
  */
 #ifndef GIZMO_H

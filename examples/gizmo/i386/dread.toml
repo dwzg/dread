@@ -1,7 +1,7 @@
 # Gizmo 1000, i386 build: DREAD's test firmware (examples/gizmo/fw), built with the host's GCC (-m32) for
 # a 32-bit x86 core in flat protected mode (integer only, not position-independent). Not a real device.
-# The tables in config/ come from the ELF (`make -C ../fw targets`). No interrupts are wired yet: the
-# system run has the UART and the boot scenario.
+# The tables in config/ come from the ELF (`make -C ../fw targets`). The startup loads a flat GDT and an
+# IDT whose gate 0x20 takes the interrupt controller's line.
 
 [target]
 name = "gizmo-i386"
@@ -17,9 +17,9 @@ base = 0x08000000
 limit = 0x08020000              # 128 KiB of flash from the base
 entry = "_start"
 startup = [
-    {kind = "code", run = 0x20000000, size = 0x3c, stored = 0x8000a8c},
-    {kind = "data", run = 0x2000003c, size = 0x1c, stored = 0x8000ac8},
-    {kind = "zero", run = 0x20000060, size = 0x2c},
+    {kind = "code", run = 0x20000000, size = 0x3c, stored = 0x8000b0c},
+    {kind = "data", run = 0x2000003c, size = 0x1c, stored = 0x8000b48},
+    {kind = "zero", run = 0x20000060, size = 0x14c},
 ]
 
 [memory]
@@ -39,9 +39,9 @@ cflags = ["-m32", "-march=i686", "-mno-80387", "-mno-mmx", "-mno-sse", "-fno-pic
           "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common",
           "-fno-asynchronous-unwind-tables", "-fno-stack-protector"]
 
-# Devices for the system run (dread sysrun): gizmo's serial port (examples/gizmo/fw/gizmo.h, GIZMO_I386).
-# No interrupt reaches the core yet (no controller nor IDT model), so a byte sent to the UART never
-# reaches main's ring: the boot scenario only.
+# Devices for the system run (dread sysrun): gizmo's serial port, timer, interrupt controller and GPIO
+# (examples/gizmo/fw/gizmo.h, GIZMO_I386: the RV32 build's addresses). The controller's line enters at
+# vector 0x20 of the IDT the startup fills (dread.arch.x86 enter_interrupt).
 [models.uart]
 kind = "uart"
 base = 0x10000000
@@ -50,6 +50,29 @@ status = 0x4
 tx_ready = 0x1
 rx_ready = 0x2
 
+[models.timer]
+kind = "timer"
+base = 0x10001000
+irq = 0
+
+[models.intc]
+kind = "intc"
+base = 0x10002000
+
+[models.gpio]
+kind = "gpio"
+base = 0x10003000
+
 [scenarios.boot]
 until = {uart = "READY"}
+limit = 5_000_000
+
+[scenarios.keys]
+input = [[40_000, "uart", "s"]]
+until = {uart = "READY\r\nmode run volume 7"}
+limit = 5_000_000
+
+[scenarios.config]
+input = [[40_000, "uart", "cvolume=3\r\n"], [200_000, "uart", "s"]]
+until = {uart = "mode run volume 3"}
 limit = 5_000_000

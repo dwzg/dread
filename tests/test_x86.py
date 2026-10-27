@@ -72,6 +72,8 @@ def test_gizmo_i386_listings_rebuild_byte_for_byte(variant, tool, tmp_path):
                        "--raw", str(raw)]) == 0
     shipped_raw = mkasm.load_raw_words(shipped) if os.path.exists(shipped) else set()
     assert mkasm.load_raw_words(str(raw)) == shipped_raw
+    listing = "".join(p.read_text() for p in sorted((tmp_path / "asm").glob("*.s")))
+    assert "\tljmpl   $0x8, $L_" in listing          # (the startup's far jump, to a label)
 
 
 @pytest.mark.parametrize("variant", ["i386", "i386clang"])
@@ -1723,7 +1725,7 @@ def lift_gizmo(variant):
 
 def test_gizmo_i386_lifts():
     """dread.lift_x86 on both i386 builds: every function but the startup and GCC's main (they set the
-    stack pointer and align it). A jump through a table is a switch (script_run; clang's dispatch, its
+    stack pointer and align it) and the interrupt entry (pushal, iret). A jump through a table is a switch (script_run; clang's dispatch, its
     handlers inlined), GCC's dispatch a tail call through the pointer it loads, which the compiler must make a
     jump (musttail: its handlers take their arguments from dispatch's caller's words). Every function's C takes eax as it
     comes (compiled with -mregparm=1) and its arguments through their addresses; a void function that does not write eax
@@ -1735,7 +1737,7 @@ def test_gizmo_i386_lifts():
     from dread.target import Target
     lifted, refused = lift_gizmo("i386")
     musttail = Target.load(gizmo_dir("i386")).compiler.accepts(lift_x86.MUSTTAIL)    # (GCC 15 and later)
-    assert set(refused) == {"_start", "main"} | (set() if musttail else {"dispatch"}), refused
+    assert set(refused) == {"_start", "main", "irq_entry"} | (set() if musttail else {"dispatch"}), refused
     assert "switch (index) {" in lifted["script_run"].text
     if musttail:
         assert "__attribute__((musttail)) return ((u32 (*)(u32))(s0))(eax);" in lifted["dispatch"].text
@@ -1749,13 +1751,15 @@ def test_gizmo_i386_lifts():
     assert "ecx = 0; cf = zf = sf = of = 0;" in call and "edx = 0" not in call
     text = lifted["clamp"].text
     assert "u32 clamp(u32 eax_in, u32 sa0, u32 sa1, u32 sa2)" in text
-    assert "ecx = *(volatile u32 *)((u32)&sa0);  /* 800019a: mov ecx, dword ptr [ebp + 8] */" in text
-    assert "{ s0 = ecx; if ((zf | (sf != of))) edx = s0; }  /* 80001a6: cmovle edx, ecx */" in text
+    import re
+    # (the addresses left out: they move whenever gizmo's startup changes)
+    assert re.search(r"ecx = \*\(volatile u32 \*\)\(\(u32\)&sa0\);  /\* [0-9a-f]+: mov ecx, dword ptr \[ebp \+ 8\] \*/", text)
+    assert re.search(r"\{ s0 = ecx; if \(\(zf \| \(sf != of\)\)\) edx = s0; \}  /\* [0-9a-f]+: cmovle edx, ecx \*/", text)
     init = lifted["uart_init"].text
-    assert "u32 eax = eax_in," in init and "return eax;  /* 8000504: ret  */" in init
+    assert "u32 eax = eax_in," in init and re.search(r"return eax;  /\* [0-9a-f]+: ret  \*/", init)
     assert "print_status" in lifted
     lifted, refused = lift_gizmo("i386clang")
-    assert set(refused) == {"_start"}, refused
+    assert set(refused) == {"_start", "irq_entry"}, refused
     assert "switch (index) {" in lifted["dispatch"].text and "switch (index) {" in lifted["script_run"].text
 
 
@@ -1971,12 +1975,13 @@ limit = 1_000_000
 """
 
 
-def _both_runs(target, payload, placement):
+def _both_runs(target, payload, placement, scenario=None):
     from dread import sysrun
     image = target.image()
     built = [n for n, p in placement.items() if p["placement"] != "helper"]
-    a = sysrun.run_image(target, image, image.payload(), next(iter(target.scenarios.values())), built=built)
-    b = sysrun.run_image(target, image, payload, next(iter(target.scenarios.values())), placement=placement)
+    scenario = scenario or (target.scenarios["boot"] if "boot" in target.scenarios else next(iter(target.scenarios.values())))
+    a = sysrun.run_image(target, image, image.payload(), scenario, built=built)
+    b = sysrun.run_image(target, image, payload, scenario, placement=placement)
     return a, b
 
 
@@ -2035,10 +2040,13 @@ def test_the_marks_lie_below_every_x86_block_end(tmp_path):
     assert defined and int(defined.group(1), 16) == sysrun.MARKS_END
 
 
-def test_gizmo_i386_boots_alike_and_a_planted_bug_shows(tmp_path):
-    """dread sysrun on gizmo-i386 (the UART, the boot scenario): with its hand-written C (parse_uint moved
-    behind the image, checksum in the room it freed) both images boot to READY with the same device log
-    and shared clock; a digit one too high in fmt_hex changes what the UART sends."""
+def test_gizmo_i386_runs_alike_and_a_planted_bug_shows(tmp_path):
+    """dread sysrun on gizmo-i386 (the RV32 build's devices, its scenarios): with its hand-written C
+    (parse_uint moved behind the image, checksum in the room it freed) both images run every scenario
+    with the same device log and shared clock: boot to READY, and the keys typed in keys and config,
+    which reach main's ring through the timer's interrupt (the controller's line at the IDT's gate 0x20:
+    dread.arch.x86 enter_interrupt; iret in the emulator, behind the startup's own GDT); a digit one too
+    high in fmt_hex changes what the UART sends."""
     if not _compiles("i386", tmp_path):
         pytest.skip("needs the host's gcc with -m32")
     import json
@@ -2055,7 +2063,17 @@ def test_gizmo_i386_boots_alike_and_a_planted_bug_shows(tmp_path):
         with open(os.path.join(os.path.dirname(out), "placement.json")) as f:
             placement = json.load(f)["functions"]
         with open(out, "rb") as f:
-            runs[name] = _both_runs(target, f.read(), placement)
+            payload = f.read()
+        runs[name] = _both_runs(target, payload, placement)
+        if name == "as written":
+            built = [n for n, p in placement.items() if p["placement"] != "helper"]
+            for scenario in ("keys", "config"):
+                a = sysrun.run_image(target, image, image.payload(), target.scenarios[scenario], built=built)
+                b = sysrun.run_image(target, image, payload, target.scenarios[scenario], placement=placement)
+                assert a.how.startswith("until") and b.how.startswith("until"), (scenario, a.how, b.how)
+                assert a.reports["uart"]["sent"].endswith(target.scenarios[scenario]["until"]["uart"])
+                assert a.reports["interrupts"][0] >= 2, a.reports     # (the timer's, which reads the UART)
+                assert sysrun.compare(a, b) == [] and a.clock == b.clock and a.log == b.log, scenario
     a, b = runs["as written"]
     assert a.how.startswith("until") and b.how.startswith("until"), (a.how, b.how)
     assert a.reports["uart"]["sent"].endswith("READY") and "GIZMO 1000" in a.reports["uart"]["sent"]
@@ -2092,3 +2110,24 @@ def test_sysrecord_takes_the_stack_arguments_behind_the_return_address(tmp_path)
     for line in lines:
         if line.startswith(("clamp ", "fmt_hex ")):
             assert " 1 calls recorded, 1 replay with the same result, 1 kept;" in line, line
+
+
+def test_far_jumps_and_the_instructions_that_end_a_block():
+    """A far jump to a selector and an offset (a startup's ljmp $0x8, $label behind lgdt) goes to the
+    offset (flat segments), and dread asm writes it in GNU as's form with a label (gizmo-i386's
+    startup: no raw bytes for it since 2026-10-27). ends_block: what Unicorn 2.1.4 ends a block behind
+    without a branch, as measured (sti, popfd, a load of ss, ds or es, a control register), and not cli,
+    pushfd, a load of fs, nop or pause (which the lifter drops)."""
+    from dread.arch import get
+    arch = get({"name": "x86", "isa": "i386"})
+    md = arch.disassembler("i386")
+
+    def insn(code, at=0x08000000):
+        return next(md.disasm(bytes(code), at, 1))
+    assert arch.flow(insn(b"\xea\x0e\x00\x00\x08\x08\x00", 0x08000007)) == ("jump", 0x0800000e, False)
+    assert arch.flow(insn(b"\x9a\x00\x10\x00\x08\x08\x00")) == ("call", 0x08001000, True)
+    ends = {name: arch.ends_block(insn(code)) for name, code in (
+        ("sti", b"\xfb"), ("popfd", b"\x9d"), ("mov ss", b"\x8e\xd0"), ("mov ds", b"\x8e\xd8"),
+        ("pop es", b"\x07"), ("mov cr0", b"\x0f\x22\xc0"), ("cli", b"\xfa"), ("pushfd", b"\x9c"),
+        ("mov fs", b"\x8e\xe0"), ("nop", b"\x90"), ("pause", b"\xf3\x90"))}
+    assert [n for n, e in ends.items() if e] == ["sti", "popfd", "mov ss", "mov ds", "pop es", "mov cr0"], ends
