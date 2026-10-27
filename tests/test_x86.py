@@ -1259,6 +1259,91 @@ def test_a_run_that_stops_outside_the_image_is_described(tmp_path):
     assert gen.attempt(callit.entry, callit.insns, case, check_image=True)[1] is None
 
 
+REALIGN_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[8];
+
+__attribute__((noinline)) void fill(u32 *p)
+{
+    p[0] = sink[2] + 5;
+    p[1] = sink[3] ^ 9;
+}
+
+u32 realigned(u32 a, u32 b);
+u32 flags_kept(u32 a);
+__asm__(
+"    .intel_syntax noprefix\n"
+"    .globl realigned\n"
+"    .type realigned, @function\n"
+"realigned:\n"
+"    push ebp\n"
+"    mov ebp, esp\n"
+"    push esi\n"
+"    and esp, -8\n"
+"    sub esp, 16\n"
+"    lea eax, [esp + 8]\n"
+"    push eax\n"
+"    call fill\n"
+"    add esp, 4\n"
+"    mov esi, dword ptr [esp + 8]\n"
+"    add esi, dword ptr [ebp + 8]\n"
+"    mov eax, dword ptr [esp + 12]\n"
+"    sub eax, dword ptr [ebp + 12]\n"
+"    mov dword ptr [esp], eax\n"
+"    mov eax, esi\n"
+"    xor eax, dword ptr [esp]\n"
+"    lea esp, [ebp - 4]\n"
+"    pop esi\n"
+"    pop ebp\n"
+"    ret\n"
+"    .size realigned, .-realigned\n"
+"    .globl flags_kept\n"
+"    .type flags_kept, @function\n"
+"flags_kept:\n"
+"    push ebp\n"
+"    mov ebp, esp\n"
+"    and esp, -8\n"
+"    push 0\n"
+"    setz al\n"
+"    movzx eax, al\n"
+"    add eax, dword ptr [ebp + 8]\n"
+"    mov esp, ebp\n"
+"    pop ebp\n"
+"    ret\n"
+"    .size flags_kept, .-flags_kept\n"
+"    .att_syntax prefix\n"
+);
+
+void _start(void)
+{
+    sink[1] = realigned(3, 4) + flags_kept(7);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_frame_aligned_at_run_time(tmp_path):
+    """clang aligns a frame for 8-byte locals with and esp, -8 behind push ebp; mov ebp, esp (FreeRTOS's
+    IA32 demo: 14 functions of its clang 16 build, refused as "changes the stack pointer in a way not
+    modelled"). realigned addresses its locals from the aligned esp (one of them handed to fill), its
+    arguments from ebp, and restores esp from ebp: lifted, its depth taken as if entered aligned, and its
+    lift check passes. flags_kept reads the zero flag the and set (setz behind a push): still refused."""
+    target = small_i386(tmp_path, REALIGN_C, "realign")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    lifter.lift(program.by_name["realigned"])
+    with pytest.raises(lift.Refused, match="changes the stack pointer in a way not modelled"):
+        lifter.lift(program.by_name["flags_kept"])
+    lines = []
+    assert lift.check(target, image, ["realigned"], out=lines.append, jobs=2) == ["realigned"], lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

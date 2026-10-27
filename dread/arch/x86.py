@@ -85,10 +85,12 @@ class X86:
                                             # return address the call pushed lies between
     veneer_reg = "eax"                      # no veneers (a 5-byte jmp reaches every address); eax is where
                                             # GCC and clang mostly load a pointer they call through
-    generator_version = 5           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
+    generator_version = 6           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
                                     # 3: one that only pushes edx or ecx as a call's argument takes them;
                                     # 4: a case answers the ports its runs read (ports); 5: padding reads
-                                    # no register (is_padding: regflow's reads, case_regs)
+                                    # no register (is_padding: regflow's reads, case_regs); 6: a frame
+                                    # aligned at run time has depths (lift_x86 realigns: the stack
+                                    # arguments of such a function and its stubs' words are known)
     refine_saved_writes = True              # dread.regflow refines a write of ebx, esi, edi or ebp too (taken as
                                             # all used): with three scratch registers, bytes pass through them
     SWITCH_MAX = 1024                       # table entries read at most

@@ -98,6 +98,9 @@ def _mask(size):
     return MASKS[size]
 
 
+SETS_ALL_FLAGS = ("add", "sub", "cmp", "and", "or", "xor", "test")   # (cf, of, sf, zf and pf, none read)
+FLAGS_LOOK = 8                              # instructions behind a stack alignment searched for that
+
 class X86Lifter(lift.Lifter):
     REGS, ARGS, AFTER_CALL = REGS, ARGS, AFTER_CALL
     regparm = 1                             # dread.build compiles the C with -mregparm=1 (its REGPARM line)
@@ -275,8 +278,42 @@ class X86Lifter(lift.Lifter):
                 base = self._base(insn, ops[1], depth, values)
                 if base is not None:
                     return base[1] - ops[1].mem.disp
+            align = self.realigns(insn)
+            if align:
+                return (depth + align - 1) // align * align
         raise Refused("0x%x changes the stack pointer in a way not modelled: %s %s" % (
             insn.address, insn.mnemonic, insn.op_str))
+
+    def realigns(self, insn):
+        """The alignment of an and esp, -A that aligns the stack (A a power of two from 4 to 4096), else
+        None. clang aligns the frame for 8-byte locals so (push ebp; mov ebp, esp; and esp, -8; sub esp,
+        16: FreeRTOS's IA32 demo, 14 functions of its clang 16 build), and GCC's main does with -16. How
+        far esp moves depends on where the caller's esp was; the lifter takes the depth as if the function
+        were entered with an aligned stack pointer (rounded up to A). What the code does stays the same:
+        it addresses the locals from the aligned esp and its arguments and saved registers from ebp, and
+        it restores esp from a register that holds a frame address (lea esp, [ebp - 4]; mov esp, ebp),
+        which the depths follow; a return at another depth is refused as before. The C gets no code for
+        it, as for sub esp. The flags it sets must be dead: the instructions behind it, in a straight line,
+        set them all (sub esp, 16) before one reads them or branches, else it is refused (GCC's main pushes
+        three words between the and and its sub)."""
+        ops = insn.operands
+        if insn.mnemonic != "and" or len(ops) != 2 or ops[1].type != X.X86_OP_IMM or ops[0].type != X.X86_OP_REG \
+                or insn.reg_name(ops[0].reg) != "esp":
+            return None
+        align = -ops[1].imm & M32
+        if not 4 <= align <= 0x1000 or align & (align - 1):
+            return None
+        a = insn.address + insn.size
+        for _ in range(FLAGS_LOOK):
+            nxt = self.prog.insn(a)
+            if nxt is None or self.arch.flow(nxt)[0] != "next" or "flags" in self.arch.reg_effects(nxt)[0]:
+                return None
+            if nxt.mnemonic in SETS_ALL_FLAGS:
+                return align
+            if "flags" in self.arch.reg_effects(nxt)[1]:
+                return None                 # (sets some, as inc does: the rest may still be read)
+            a += nxt.size
+        return None
 
     def entry_states(self, fn, given=frozenset()):
         """dread.lift's (_entry_reads), with the function's own register arguments (reg_args) written at
@@ -993,7 +1030,7 @@ class X86Lifter(lift.Lifter):
                 return None
             return "ebp = %s;" % self._load(self._slot(v[1]), 4)
         if len(ops) == 2 and ops[0].type == X.X86_OP_REG and self._reg(insn, ops[0].reg) == "sp":
-            if m in ("add", "sub", "mov", "lea"):
+            if m in ("add", "sub", "mov", "lea") or self.realigns(insn):
                 return None                 # a frame adjustment: states follows it
             raise Refused("0x%x computes the stack pointer: %s %s" % (a, m, insn.op_str))
         if m == "mov":

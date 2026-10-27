@@ -6655,8 +6655,18 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         the NULL_CHECKS line now, -fno-delete-null-pointer-checks; address 0 is memory on DREAD's targets,
         and GCC at -O2 kept such a load and put ud2 behind it, the path being undefined to it
         (pcTimerGetName on the -O2 build, behind its assertion). tests/test_x86.py: getname.
-      - [ ] clang aligns the stack in 14 functions of the bench's clang 16 -Os build (and esp, -16:
-        "changes the stack pointer in a way not modelled"): a frame whose base is computed at run time.
+      - [x] clang aligns the stack in 14 functions of the bench's clang 16 -Os build (and esp, -8 behind
+        push ebp; mov ebp, esp: "changes the stack pointer in a way not modelled"), and three more were
+        refused for calling one (vGalileoPrintc, "whose stack arguments are not known"). Since 2026-10-27
+        the lifter takes the depth after it as if the function were entered with an aligned stack pointer
+        (rounded up to the alignment; lift_x86's realigns): the code addresses its locals from the aligned
+        esp and its arguments from ebp and restores esp from ebp, so how far esp moved does not show. The
+        C gets no code for it, as for sub esp; the flags it sets must be dead (the instructions behind it set
+        them all before one reads them or branches, else refused). 13 of the 17 pass the lift check on a
+        copy of the clang build; three read the time-stamp counter (rdtsc, refused), uiCalibrateTimer misses
+        ten instructions. GCC's main (and esp, -16 behind lea ecx, [esp + 4], both GCC builds) gets past
+        it and is refused for taking its stack arguments' address (ecx). tests/test_x86.py: realigned,
+        flags_kept.
       - [x] bsr and bsf (2026-10-27; two functions in each bench build: vTaskSwitchContext's
         portGET_HIGHEST_PRIORITY and libgcc's __udivdi3): __builtin_clz and __builtin_ctz behind a test for 0,
         where zf is set and the destination keeps its value. Both lift on the GCC -Os build now
