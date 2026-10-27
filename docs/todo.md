@@ -6505,7 +6505,12 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       build without the sparse paths (docs/decisions.md). Measured on 2026-10-27 (asm, lift, readable,
       at f37fafd): GCC 12 -Os 223 of 292 lifted, 222 of them readable; GCC 12 -O2 83 of 269 (83);
       clang 16 -Os 177 of 276 (177); every listing identical. GCC -O2's padding then (below): 194 of
-      269 on a copy of its build.
+      269 on a copy of its build. Measured again the same evening (lift, readable, at 33603d7, with
+      the time-stamp counter's step still 0x10000): GCC 12 -Os 247 of 292 (246 readable), GCC 12 -O2
+      221 of 269 (218), clang 16 -Os 228 of 276 (226): the padding, the realigned frames, rdtsc,
+      shrd, bsr and the compare-guided answers. Lost on GCC -Os: WaitForStopDet and
+      prvSuspendedTaskTimerTestCallback, whose cases ended in a delay at the limit; the step 1 << 24
+      (70c8167) brings the second back on a copy, the first is the open item on its status register.
     - [ ] The lift check with room (.data moved 256 KiB away): 102 of 293 accepted, 109 refused, 82
       dropped at first; with the steps below 189 accepted, 36 refused, 68 dropped (2026-10-27: 54 held
       back by coverage, 14 without cases, none whose cases disagree), and 206 with the PC's
@@ -6723,7 +6728,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         give every argument register a value, so a void C that leaves r0 differs there. Fix: x86's cases
         give eax, edx and ecx a fixed value at the entry where the function reads none, in both images;
         first check that lifted C hands such a register on where the original leaves it to the return
-        (regflow's reads: a lifted function that initialises it to 0 would differ).
+        (regflow's reads: a lifted function that initialises it to 0 would differ). Found since: regflow
+        says no caller reads either function's eax (the handler's caller is the port's wrapper, which
+        returns with iret), so both start void; the gate compares what a void function leaves in the
+        result register all the same (regflow's "no caller reads" may be wrong), rejects the handler,
+        and its retry with a result differs too, as the callee's void C leaves the caller's eax. With the
+        fix the callee's own cases see their void C leave another eax, and it is retried with its
+        result. Whether a leftover nobody reads should be compared at all is the question beneath (every
+        architecture): decided with the item, in docs/decisions.md.
       - [x] The compare-guided answers on x86 (2026-10-27). The x86 layer had no value_step, store_slots or
         load_address, so dread.uncovered named no source for any x86 branch ("the layer takes no value
         apart"), and a compare with memory gave no decider: the generator's frontier answers had nothing
@@ -6739,6 +6751,12 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         (2 without the change). regflow's and callconv's save-area checks took the last argument register,
         which i386's cdecl has none of: guarded. x86's generator version 8. tests/test_x86.py: the layer's
         hooks, and test_autocase's gated_by_global on i386.
+      - [ ] A read-back after a write: vPortEnterCritical (IA32 port) writes 0xaf into the local APIC's
+        task priority register and asserts that it reads back 0xaf; its assertion path stays unrun. The
+        compare-guided stage sets the memory a load reads before the run (overwritten here by the code's
+        own write) and answers a reread from the second read on (later); a first read of memory the run
+        wrote before it needs the later too. Generic (ARM's code reads device registers back as well),
+        so a generator version for every target.
       - [ ] WaitForStopDet's wait (-O2 build: 20 of its 54 instructions unrun): the status register lies
         behind the base address the driver reads from PCI configuration space, which the generator aims
         at a scratch buffer, plain memory, where no spin is cut and no poll stage answers; the wait's own
