@@ -5524,3 +5524,51 @@ docs. And keep the readme clean and nice."). How, **decided by recommendation**:
   item or section whose own text says "paused" is shown paused; an unticked item with nothing under it
   is planned; a ticked one, or a section with every checkbox ticked, is done.
 
+
+## The system run's marks lie below 4 KiB (2026-10-27)
+
+**Decided by recommendation**, bringing the system run to x86. What came before a block (System._ran,
+in C sys_ran) is where the block that ran last ended, or a mark the reset, an exception or a system
+call left. The marks were odd numbers, which no block end could be while instructions start at even
+addresses, as on every core the run had run. On x86 a block may end at an odd address, and the
+C behind a moved function's branch, entered from where that branch ended, counted as a second entry.
+
+- **Marks above every address** (2^32 and up) were the other way: the C hook keeps what came in
+  32-bit set values (the entries an exception came in front of) and packs `came << 32 | entry` into
+  its transfer keys, so its sets would have had to widen.
+- **Taken:** the marks stay odd and below MARKS_END (4 KiB; came_exception refuses a number that
+  would reach it), in Python (is_mark) and in C, and the run refuses code below MARKS_END on a core
+  whose instructions may start at odd addresses (min_insn odd). No x86 image the tests or the bench
+  have puts code there (gizmo-i386 at 0x08000000, the IA32 bench at 1 MiB); one that does is told so
+  instead of being counted wrong. AMD64's 64-bit addresses will move the marks anyway.
+
+## The system run takes an x86 interrupt right behind sti (2026-10-27)
+
+**Decided by recommendation.** sti ends Unicorn's translation block and holds interrupts off for one
+more instruction (its shadow): the core takes a pending one behind the instruction behind sti. The
+system run takes interrupts where blocks start (in front of a block of shared code, or outside it at a
+block behind an instruction that ends one: the layer's ends_block).
+
+- **Behind the shadowed instruction**, as the core does: that instruction is the original's in one
+  image and the C's in the other (lifted C keeps sti as inline assembly, not what follows it), so the
+  images would take the interrupt at places where their states differ.
+- **Not at sti at all:** the interrupt would wait for the next shared block, function entry or wait,
+  in both images alike, but later than the core takes it, possibly much later.
+- **Taken: right behind sti** (ends_block true for sti), the place both images share: one instruction
+  earlier than the core. What could notice: `sti; hlt`, the idiom whose shadow keeps a wake-up from
+  being lost (here the interrupt comes before hlt, and hlt waits for the next). Neither gizmo nor
+  FreeRTOS's IA32 port and Galileo demo has it: the startup's hlt follows cli, and the port's sti
+  in its interrupt wrappers precede a test or a bsr. pause, which ends a block too, is not a place:
+  the lifter drops it, so only the original would have it.
+
+## gizmo-i386 loads a GDT of its own (2026-10-27)
+
+**Decided by recommendation.** Unicorn starts x86 in protected mode with cs 0 and no GDT; iret,
+at an interrupt handler's end, takes cs back from the GDT, and faulted without one. Either the
+firmware's startup loads a GDT, as firmware on the hardware does, or the system run's reset makes
+one in memory of its own choosing, which each target's map would have to leave room for and which
+the firmware would then depend on without knowing. **Taken: the startup** (lgdt, ljmp $0x8, the data
+segments), so nothing the emulator adds is needed. The descriptors have their accessed bits set, so
+loading a segment writes nothing into flash (QEMU sets a clear one, as the core does). The image
+grew by the GDT, the IDT's gate code and irq_entry; the tests that named gizmo-i386's addresses
+in lifted text match without them now.

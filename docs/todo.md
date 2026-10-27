@@ -6625,6 +6625,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         VERSION 32). tests/test_x86.py: kbd polls a status port and reads the data port.
       - [ ] Pushes of every register, iret (the port's assembly and the support code: refused, rightly for
         now).
+      - [ ] dread.fragile saves_touched takes an argument pushed from a callee-saved register for a saved
+        register (found 2026-10-27): vTaskSuspend passes uxListRemove its argument with push esi, and
+        uxListRemove reading it (mov eax, [esp + 8]) is "a read of the saved esi; a length past a local".
+        Every call that pushes ebx, esi, edi or ebp as an argument does so on x86 (ARM passes them in
+        registers), and a case refused for it is not compared: the leftover eax of the phantom-argument
+        attempt above showed as REFUSED, not as FAIL. A push that a call consumes (behind it, up to the
+        callee's stack arguments) is an argument, not a save.
       - [x] Reading a segment register (2026-10-27; "reads cs: not modelled", two to four functions in each
         bench build: pxPortInitialiseStack, vPortSetupIDT, xPortInstallInterruptHandler,
         xPortStartScheduler, prvSetInterruptGate, mov edx, cs or mov dx, cs for an IDT gate or a task's
@@ -6717,6 +6724,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         before. Not done: the callers' calls still pass eax (f(eax, x)), a phantom argument; dropping it
         means declaring the callee regparm(0) in each caller's file. tests/test_x86.py: f's head (eax_in
         read, regparm 3, variadic: kept), scaled through the gate, its call of sum with eax written first.
+        Tried the same day and not kept: a call of a callee that does not take eax (_takes_eax) passed
+        none, its declaration regparm(0) (gizmo-i386 and the GCC -Os bench build: no loss). On the GCC -O2
+        build vStartQueueSetTasks, vStartSemaphoreTasks and vStartInterruptQueueTasks lost coverage:
+        vTaskSuspend's prologue makes room with push eax and its epilogue takes it off with pop eax, so
+        on a path that writes no other eax it returns the eax it was given, through its frame; dread.regflow
+        says it reads no eax (read_regs empty), and the cases compare a void function's leftover eax (the
+        callers' return value: 0x1a7e4016 against 0x201400). First dread.regflow has to see such a round
+        trip (a register pushed and popped back unchanged is handed back); then the change again.
       - [x] A register a function hands back unchanged through a call (2026-10-27): EnableI2CController
         never writes ecx and calls GetI2CIoPortBaseAddress, which leaves it alone; its callers keep a
         value in ecx across it (GCC's -fipa-ra). At its call ecx held what its own caller left, and the
