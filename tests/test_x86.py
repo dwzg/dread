@@ -770,6 +770,49 @@ def test_a_register_pushed_as_an_argument_is_read(tmp_path):
     assert sorted(lift.check(target, image, ["fill", "user3"], out=lines.append, jobs=2)) == ["fill", "user3"], lines
 
 
+BLOCK_C = r"""
+typedef unsigned int u32;
+typedef struct { u32 w[18]; } blk;
+volatile u32 sink[4];
+blk keep;
+
+void init(u32 x)
+{
+    blk b = {{3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3}};
+    b.w[0] = x;
+    b.w[17] = x ^ sink[1];
+    keep = b;
+}
+
+void _start(void)
+{
+    init(7);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_string_copy_through_the_frame_keeps_it(tmp_path):
+    """init fills a structure on its frame from a constant table and copies it to a global, both with
+    rep movsd through esi and edi. The frame analysis did not see those accesses (es:[edi] went with
+    the segment registers), took the words for untouched and left them out of the C's frame array,
+    and the copy ran over the C's own saves and return address (FreeRTOS's
+    vGalileoInitializeLegacyGPIO). A frame address in esi or edi now keeps the whole frame."""
+    target = small_i386(tmp_path, BLOCK_C, "block")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    init = program.by_name["init"]
+    if not any(program.insn(a).mnemonic.startswith("rep movs") for a in init.insns):
+        pytest.skip("this GCC copied the structure without rep movs")
+    lines = []
+    assert lift.check(target, image, ["init"], out=lines.append, jobs=2) == ["init"], lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

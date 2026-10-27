@@ -6585,6 +6585,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         GCC's padding pushes in front of the arguments and its push of a dead register that only
         reserves a word stay no reads. xQueueReceive and xQueuePeek agree on every case now (their
         coverage keeps them out); tests/test_x86.py: fill and user3, which fail without it.
+      - [x] A string operation through a frame address keeps the frame (2026-10-27): frame_effects
+        skipped memory operands with a segment register, and capstone writes movsd's destination as
+        es:[edi]; vGalileoInitializeLegacyGPIO copies a table onto its frame with rep movsd and off it
+        with another, saves_out took the words for untouched, and the C's frame array held 32 of its
+        128 bytes (the copy overwrote the C's return address: every case failed). A string operation's
+        accesses through esi and edi are now unsized ones, which keep the whole frame where either
+        holds a frame address (frame_uses' FrameReach). tests/test_x86.py: init.
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved

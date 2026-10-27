@@ -536,11 +536,22 @@ class X86Lifter(lift.Lifter):
             fx.loaded.add("ebp")
         elif kind in ("call", "icall"):
             fx.accesses.append(("sp", None, -4, 4, "store", None, False))     # the return address
+        string = (m[4:] if m.startswith("rep ") else m) in STRING_OPS
+        if string:
+            # a string operation reads and writes through esi and edi, as far as ecx goes with rep: an
+            # access the layer does not size, so a frame address there reaches the frame where the
+            # states do not know (dread.lift frame_uses). Its es:[edi] was skipped below with the
+            # segment registers, and saves_out took the frame words a rep movsd fills for untouched
+            # (FreeRTOS's vGalileoInitializeLegacyGPIO copies a table onto its frame and off again:
+            # its C's frame array held a third of it, and the copy overwrote its return address)
+            for o in ops:
+                if o.type == X.X86_OP_MEM and o.mem.base:
+                    fx.accesses.append((self._reg(insn, o.mem.base), None, 0, None, "other", None, False))
         for k, o in enumerate(ops):
             # (push and pop of a memory operand read or write it besides the stack word: "other". Left
             # out, push dword ptr [ebp - 0x1c] read nothing here, saves_out took the word for a save,
             # and FreeRTOS's prvAddCurrentTaskToDelayedList lost the store of what it pushes later)
-            if o.type != X.X86_OP_MEM or m in ("lea", "nop") or o.mem.segment:
+            if o.type != X.X86_OP_MEM or m in ("lea", "nop") or o.mem.segment or string:
                 continue
             base = self._reg(insn, o.mem.base) if o.mem.base else None
             index = self._reg(insn, self._index(insn, o)) if self._index(insn, o) else None
