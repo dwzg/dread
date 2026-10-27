@@ -1405,6 +1405,92 @@ def test_the_time_stamp_counter_is_the_emulators(tmp_path):
     assert lift.check(target, image, ["spin"], out=lines.append, jobs=2) == ["spin"], lines
 
 
+SHIFT64_C = r"""
+typedef unsigned int u32;
+typedef unsigned long long u64;
+volatile u32 sink[8];
+
+__attribute__((noinline)) u32 right(u32 lo, u32 hi, u32 n)
+{
+    return (u32)((((u64)hi << 32) | lo) >> (n & 31));
+}
+
+__attribute__((noinline)) u32 left(u32 lo, u32 hi, u32 n)
+{
+    return (u32)(((((u64)hi << 32) | lo) << (n & 31)) >> 32);
+}
+
+__attribute__((noinline)) u32 by_five(u32 lo, u32 hi)
+{
+    return (u32)((((u64)hi << 32) | lo) >> 5);
+}
+
+__attribute__((noinline)) void in_memory(u32 *p, u32 hi, u32 n)
+{
+    __asm__ ("shrdl %%cl, %1, %0" : "+m"(*p) : "r"(hi), "c"(n) : "cc");
+}
+
+__attribute__((noinline)) u32 flags_right(u32 lo, u32 hi, u32 n)
+{
+    u32 c = 0, o = 0;
+    __asm__ ("shrdl %%cl, %3, %2; setc %b0; seto %b1" : "+&q"(c), "+&q"(o), "+r"(lo) : "r"(hi), "c"(n) : "cc");
+    return (c & 1) | (o & 1) << 1 | lo << 2;
+}
+
+__attribute__((noinline)) u32 flags_left(u32 lo, u32 hi, u32 n)
+{
+    u32 c = 0, o = 0;
+    __asm__ ("shldl %%cl, %3, %2; setc %b0; seto %b1" : "+&q"(c), "+&q"(o), "+r"(lo) : "r"(hi), "c"(n) : "cc");
+    return (c & 1) | (o & 1) << 1 | lo << 2;
+}
+
+__attribute__((noinline)) u32 right_by_one(u32 lo, u32 hi)
+{
+    u32 c = 0, o = 0;
+    __asm__ ("shrdl $1, %3, %2; setc %b0; seto %b1" : "+&q"(c), "+&q"(o), "+r"(lo) : "r"(hi) : "cc");
+    return (c & 1) | (o & 1) << 1 | lo << 2;
+}
+
+__attribute__((noinline)) u32 left_by_one(u32 lo, u32 hi)
+{
+    u32 c = 0, o = 0;
+    __asm__ ("shldl $1, %3, %2; setc %b0; seto %b1" : "+&q"(c), "+&q"(o), "+r"(lo) : "r"(hi) : "cc");
+    return (c & 1) | (o & 1) << 1 | lo << 2;
+}
+
+void _start(void)
+{
+    u32 w = 3;
+    in_memory(&w, 9, 4);
+    sink[1] = right(1, 2, 3) + left(4, 5, 6) + by_five(7, 8) + w + flags_right(1, 2, 3) + flags_left(4, 5, 6)
+        + right_by_one(7, 8) + left_by_one(9, 10);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_double_shifts(tmp_path):
+    """shrd and shld: GCC shifts a 64-bit value on i386 with them (shrd eax, edx, cl), and FreeRTOS's
+    IA32 demo divides time-stamp counts so (vMilliSecondDelay, refused for shrd once rdtsc lifted). By a
+    count in cl and an immediate, into a register and into memory, and the carry and overflow flags read
+    behind them (flags_right, flags_left: as QEMU computes them, whatever the count; and for a
+    count of 1, the one Intel defines the overflow flag for: right_by_one, left_by_one): the lift checks
+    pass."""
+    target = small_i386(tmp_path, SHIFT64_C, "shift64")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    names = ["right", "left", "by_five", "in_memory", "flags_right", "flags_left", "right_by_one", "left_by_one"]
+    used = {program.insn(a).mnemonic for n in names for a in program.by_name[n].insns}
+    assert {"shrd", "shld"} <= used, used
+    lines = []
+    assert sorted(lift.check(target, image, names, out=lines.append, jobs=2)) == sorted(names), lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

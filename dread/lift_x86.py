@@ -1051,6 +1051,8 @@ class X86Lifter(lift.Lifter):
             return self._one(insn, m, ops[0])
         if m in SHIFTS:
             return self._shift(insn, m, ops)
+        if m in ("shrd", "shld"):
+            return self._shift_double(insn, m, ops)
         if m in ("imul", "mul"):
             return self._mul(insn, m, ops)
         if m in ("div", "idiv"):
@@ -1199,6 +1201,40 @@ class X86Lifter(lift.Lifter):
             out.append("if (k0) { %s } else { d0 = e0; } %s" % (body, put("d0")))
         else:
             out.append(body)
+            out.append(put("d0"))
+        return "{ %s }" % " ".join(out)
+
+    def _shift_double(self, insn, m, ops):
+        """shrd and shld of a word: the destination shifted, the bits that come in taken from the source
+        register (GCC's 64-bit shifts on i386: shrd eax, edx, cl). A count of 0 (cl's low five bits) leaves
+        everything, a memory operand written back. The flags as QEMU computes them, from the pair shifted
+        by one less than the count (t): cf its last bit out, of bit 31 of t ^ the result (Intel's for a
+        count of 1, undefined above), zf and sf of the result."""
+        dst, src, count = ops
+        if dst.size != 4 or src.type != X.X86_OP_REG:
+            raise Refused("0x%x: %s of %d bytes is not modelled" % (insn.address, m, dst.size))
+        if count.type == X.X86_OP_IMM:
+            if not count.imm & 31:
+                if dst.type != X.X86_OP_MEM:
+                    return None
+                e, put, pre = self._target_op(insn, dst)
+                return "{ %s }" % " ".join(pre + ["e0 = %s;" % e, put("e0")])
+            k = "%du" % (count.imm & 31)
+        else:
+            k = "(ecx & 31u)"
+        e, put, pre = self._target_op(insn, dst)
+        out = list(pre) + ["e0 = %s; s0 = %s; k0 = %s;" % (e, self._source(insn, src), k)]
+        if m == "shrd":                     # (t_: a0 holds a memory operand's address)
+            body = ("u32 t_ = k0 > 1u ? (e0 >> (k0 - 1u)) | (s0 << (33u - k0)) : e0; "
+                    "d0 = (e0 >> k0) | (s0 << (32u - k0)); cf = t_ & 1u; ")
+        else:
+            body = ("u32 t_ = k0 > 1u ? (e0 << (k0 - 1u)) | (s0 >> (33u - k0)) : e0; "
+                    "d0 = (e0 << k0) | (s0 >> (32u - k0)); cf = (t_ >> 31) & 1u; ")
+        body += "of = ((t_ ^ d0) >> 31) & 1u; %s" % self._zs("d0", 4)
+        if count.type != X.X86_OP_IMM:
+            out.append("if (k0) { %s } else { d0 = e0; } %s" % (body, put("d0")))
+        else:
+            out.append("{ %s }" % body)
             out.append(put("d0"))
         return "{ %s }" % " ".join(out)
 

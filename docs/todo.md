@@ -6704,7 +6704,13 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         lifter writes rdtsc as itself (dread.h's dread_rdtsc), where it refused it. No cost measured (a
         long memset: 0.884 s against 0.889 s). On a copy of the -O2 build ReadMultipleByte and
         Pcal9555SetPortRegBit pass besides; DisableI2CController misses one instruction; vMilliSecondDelay
-        is refused for shrd. tests/test_x86.py: spin, at two speeds.
+        was refused for shrd (below). tests/test_x86.py: spin, at two speeds.
+      - [x] shrd and shld of a word (2026-10-27): GCC's 64-bit shifts on i386 (shrd eax, edx, cl), the
+        destination shifted with the source's bits coming in; a count of 0 leaves everything; the flags
+        as QEMU computes them from the pair shifted by one less than the count (cf its last bit out, of
+        bit 31 of that ^ the result, Intel's for a count of 1). vMilliSecondDelay passes the lift check
+        on a copy of the -O2 build. tests/test_x86.py: by cl and by an immediate, into a register and into
+        memory, and the carry and overflow flags read behind them (counts 0, 1 and up).
       - [ ] WaitForStopDet's wait (-O2 build: 20 of its 54 instructions unrun): the status register lies
         behind the base address the driver reads from PCI configuration space, which the generator aims
         at a scratch buffer, plain memory, where no spin is cut and no poll stage answers; the wait's own
