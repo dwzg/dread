@@ -938,6 +938,53 @@ def test_readable_c_keeps_two_device_reads_in_order(tmp_path):
     assert volorder.BARRIER_TEXT in c or '__asm__ volatile ("" : : : "memory");' in c, c
 
 
+HANDBACK_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+/* inner2 leaves ecx alone; outer2 calls it and touches no ecx itself, so it hands its caller's ecx back;
+   user2 keeps a value in ecx across outer2, as code GCC compiled with -fipa-ra does */
+__asm__(".text\n.globl inner2\n.type inner2, @function\ninner2:\n"
+        "  movl 4(%esp), %eax\n  addl $3, %eax\n  ret\n.size inner2, .-inner2\n"
+        ".globl outer2\n.type outer2, @function\nouter2:\n"
+        "  pushl %ebp\n  movl %esp, %ebp\n  pushl 8(%ebp)\n  call inner2\n  addl $4, %esp\n"
+        "  popl %ebp\n  ret\n.size outer2, .-outer2\n"
+        ".globl user2\n.type user2, @function\nuser2:\n"
+        "  pushl %ebp\n  movl %esp, %ebp\n  movl 8(%ebp), %ecx\n  pushl %ecx\n  call outer2\n"
+        "  addl $4, %esp\n  addl %ecx, %eax\n  movl %eax, sink\n  popl %ebp\n  ret\n.size user2, .-user2\n");
+u32 user2(u32 x);
+
+void _start(void)
+{
+    sink[1] = user2(5);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_register_handed_back_through_a_call(tmp_path):
+    """outer2 never writes ecx and calls inner2, which leaves it alone; user2 reads ecx after calling outer2
+    (GCC's -fipa-ra keeps a value there). At outer2's call the register still holds what its own caller left,
+    and the lifter refused the call ("reads ecx behind the call of inner2"). outer2 hands it back unchanged
+    (dread.regflow: kept and preserved), so its file is compiled with -fcall-saved-ecx (call_saved), which
+    keeps the caller's value through the C and the call: the lift check passes (FreeRTOS's
+    EnableI2CController)."""
+    target = small_i386(tmp_path, HANDBACK_C, "handback")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    flow = regflow.load(target, image, program)
+    assert "ecx" in flow.kept_regs("outer2") and "ecx" in flow.preserved_regs("outer2"), flow.kept_regs("outer2")
+    lifter = lift.make_lifter(program, flow)
+    assert lifter.call_saved(program.by_name["outer2"]) == ["ecx"]
+    lines = []
+    assert lift.check(target, image, ["outer2"], out=lines.append, jobs=2) == ["outer2"], lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

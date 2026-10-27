@@ -655,15 +655,21 @@ class X86Lifter(lift.Lifter):
         """A scratch register beyond the result that the caller reads behind the call: refused, unless the
         callee leaves it as it was (dread.regflow's preserved: GCC's -fipa-ra keeps a value in edx across
         uart_putc), which the C keeps too (_call does not clear it; the callee's C is compiled with
-        -fcall-saved-REG: call_saved) where it is not what the function's own caller left there."""
+        -fcall-saved-REG: call_saved) where it is not what the function's own caller left there, or where
+        the function hands that back unchanged itself (its own call_saved: its file is compiled with
+        -fcall-saved-REG, so its C leaves the register to the callee, which leaves it alone)."""
         flow = self.flow
         if flow is None:
             return
         result = set(RESULTS[self._width(callee.name)])
         preserved = set(flow.preserved_regs(callee.name))
         undef = self.ctx["undef"].get(insn.address, frozenset())
+        handed = set(self.call_saved(self.ctx["fn"]))     # (the C keeps them for its own callers: -fcall-saved)
         for reg in flow.kept_regs(callee.name):
-            if reg in result or reg == "flags" or (reg in preserved and reg not in undef):
+            # one the callee leaves as it was: the caller's own value, which the C keeps in its variable, or,
+            # where it is what the function's own caller left (undefined at the call), one the function
+            # hands back unchanged (call_saved: FreeRTOS's EnableI2CController and its callers' ecx)
+            if reg in result or reg == "flags" or (reg in preserved and (reg not in undef or reg in handed)):
                 continue
             if (self.ctx["fn"].name, insn.address) in flow.sites_of(callee.name, reg):
                 raise Refused("0x%x reads %s behind the call of %s (what the callee leaves)" % (

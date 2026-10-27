@@ -6617,6 +6617,12 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         the lifter's barrier into readable C in front of a statement that reads two values of volatile
         loads, where the layer says instructions fold memory operands (folds_memory_operands: x86).
         tests/test_x86.py: counter (refused without it).
+      - [x] A register a function hands back unchanged through a call (2026-10-27): EnableI2CController
+        never writes ecx and calls GetI2CIoPortBaseAddress, which leaves it alone; its callers keep a
+        value in ecx across it (GCC's -fipa-ra). At its call ecx held what its own caller left, and the
+        x86 lifter refused ("reads ecx behind the call"); since the function hands it back unchanged
+        (call_saved: its file is compiled with -fcall-saved-ecx), the C keeps the caller's value through
+        the call. tests/test_x86.py: outer2.
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved
