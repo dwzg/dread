@@ -663,7 +663,8 @@ class Generator:
                 if v is not None:
                     m.write(addr, v.to_bytes(size, "little"))
             sp = m.reg("sp")
-            words = [int.from_bytes(m.read(sp + 4 * i, 4), "little") for i in range(nstack)]
+            first = sp + lay.entry_stack_args       # (x86: behind the return address the call pushed)
+            words = [int.from_bytes(m.read(first + 4 * i, 4), "little") for i in range(nstack)]
             seen = [args[i] for i in range(len(args)) if nargs >> i & 1] + words
             # The registers a printf format takes are logged besides (format_mask), and only logged:
             # the fills behind pointers below go by the case's own mask, so a case made before

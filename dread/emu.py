@@ -48,6 +48,7 @@ SPIN_PERIOD = 4         # longest cycle of peripheral reads the spin cut recogni
 ARGS_ROOM = 0x100   # mapped above the stack top: arguments beyond the registers lie there, as the
                     # caller's frame would hold them (writes there are compared like memory)
 RUN_CALLEE = object()   # what a stub returns to let the callee run at this call (Machine.stub)
+STUB_ARGS = 4           # the arguments a stub gets at least: the argument registers, then words from the stack
 
 
 class EmuError(RuntimeError):
@@ -94,6 +95,10 @@ class Layout:
         # the layer's push_return and pop_return then set up a call and return from a stub)
         self.lr = self.arch.reg_id(self.arch.link_reg) if self.arch.link_reg else None
         self.word = self.arch.word                      # the size of a stack argument
+        # sp to the first stack argument at a function's entry: the return address a call pushes lies
+        # between on x86 (MSP430's is two bytes, which its layer does not say yet: its stubs read the
+        # stack from sp itself, as before)
+        self.entry_stack_args = getattr(self.arch, "entry_stack_args", 0)
         self.fixed = [(self.arch.reg_id(r), v) for r, v in sorted(image.fixed.items())]     # [image] fixed
         # Cores that can have IT blocks need every hook to clear a stale IT state (Arm.settle_it)
         from dread.program import read_code_ranges
@@ -672,6 +677,8 @@ class Machine:
     def _on_stub(self, uc, addr, size, user):
         read = self.core.read32
         args = tuple(read(r) for r in self.layout.arg_regs)
+        if len(args) < STUB_ARGS:           # (cdecl passes every argument on the stack: a stub gets its
+            args += self.stack_args(STUB_ARGS - len(args))      # first ones from there)
         ret = self.stubs[addr](self, *args)
         if ret is RUN_CALLEE:               # the stub lets the callee run at this call (a case that
             return                          # answers some of its calls only: dread.autocase)
@@ -691,8 +698,23 @@ class Machine:
         else:
             self.arch.pop_return(uc, self.read)
 
+    def stack_args(self, n, first=0):
+        """The stack arguments first .. first + n - 1 of the function whose entry the run stands at, as
+        words (0 for one that cannot be read)."""
+        lay = self.layout
+        base = self.core.read32(lay.sp) + lay.entry_stack_args + lay.word * first
+        out = []
+        for k in range(n):
+            try:
+                out.append(int.from_bytes(self.read(base + lay.word * k, lay.word), "little"))
+            except Exception:
+                out.append(0)
+        return tuple(out)
+
     def stub(self, addr, fn=lambda m, *a: 0):
-        """Replace the function at addr with a callable(machine, r0, r1, r2, r3) -> result.
+        """Replace the function at addr with a callable(machine, *args) -> result: args are the call's
+        argument registers, and where the convention has fewer than STUB_ARGS (cdecl: none), the
+        first stack arguments after them.
 
         The callable records what matters about the call with machine.log(); raw pointers into the
         stack differ between builds, so it should log what they point to. A callable that returns

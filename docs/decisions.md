@@ -5407,3 +5407,27 @@ added where they help, the user, 2026-10-21).
   (inside vStartMessageBufferTasks itself on clang -Os, inside vTaskPlaceOnUnorderedEventList on GCC -O2),
   which had vStartMessageBufferTasks and xAreAbortDelayTestTasksStillRunning counted as called through
   a pointer, their result read. Every other fact the same.
+
+
+## The rewritten fmt_hex reads the original's table (2026-10-27)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** gizmo's shared rewritten C (examples/gizmo/rewritten) computed fmt_hex's digits
+  arithmetically and shifted its parameter v. On gizmo-i386 v arrives on the stack, and GCC -Os shifted
+  it in its slot, which lies in the caller's frame: the cases compare that, and the original leaves it
+  alone. A copy of v fared no better (GCC gave the copy v's slot), a volatile copy suited GCC's build and
+  not clang's, digits taken as v >> 4 * k suited clang's and not GCC's: the cases also compare what a
+  void function leaves in its result register, and each original leaves another value there (GCC's its
+  counter, clang's the count, the ARM builds out, RISC-V's out + digits). How should the shared C be
+  written?
+- **Options.** (a) Stop comparing the result register of a function no caller reads (dread.regflow
+  knows): a weaker comparison, against rule 6 and the policy of dread readable, which keeps comparing it
+  for functions it prints void. (b) A variant of fmt_hex per build, chosen by defines of addresses.py, as
+  INLINED_COMMANDS chooses dispatch. (c) fmt_hex as its machine code works: the digits from the
+  original's table (addresses.py writes HEX_DIGITS for every build) a digit a turn from the last, v
+  shifted in place.
+- **Choice.** (c). Each compiler then makes of the rewritten C what it made of the original, and leaves
+  the same registers and slots, on every build; the C still reads only what the original reads (its
+  table), as a reconstruction that read the listing would write it. (b) would have kept three versions
+  of one function apart for the leftovers of three compilers.

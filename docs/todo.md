@@ -6309,6 +6309,9 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   erased flash up to the vectors. Next: the generator's pointer buffers (scratch + 4 KiB, sixteen of
   1 KiB) bounded by the scratch's size (on this target they run past it and over the pointer stub in
   its middle), then the scratch to the top of the flash and the room up to it (30 KiB).
+- [ ] **Stack arguments behind the pushed return address**: the layer does not say entry_stack_args (2:
+  the return address a call pushes), so the generator's and dread record's stubs read a callee's stack
+  words from sp itself, the return address first, four bytes at a time (x86 says 4 since 2026-10-27).
 - [ ] **Runaway mutants on the slow engine**: a mutant that loops forever runs each case to the
   5-million-instruction limit (about 5 s per case on the MSP430 engine; two of gizmo's took over 300
   s). Bound a mutant's case by a multiple of what the original took on it.
@@ -6373,6 +6376,31 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       and dread.elf.dwarf_code_value take it off only there (docs/decisions.md, "Code addresses keep
       bit 0 outside ARM"). The other builds of gizmo import to the same tables; both i386 builds now
       run their functions at odd entries (tests/test_x86.py).
+    - [x] dread test on gizmo-i386's rewritten C (2026-10-27): both builds agree on every case (GCC's 13
+      functions with 515 cases, clang's 13 with 484; tests/test_x86.py). The layer has the switch shapes
+      (cmp r, imm and and r, 2^n - 1 as bound checks; jmp [r*4 + table] read as the fallback), the
+      generator's hints (immediates, switch_hints, compare_chars, branch_deciders, prologue_frame), the
+      overlay's 5-byte jmp at a moved function's entry, resume_address, and pop_return setting eip (it
+      did not: a stubbed callee would have run on); esp is "sp" as on every layer, the reading aids take
+      the argument registers from the target's ABI (cdecl: none), and a stub gets its first four
+      arguments from the stack behind the pushed return address (entry_stack_args). dread.regflow on x86
+      (VERSION 30): merge_demand, flag_demand, refine_saved_writes and the layer's bit rules, checked
+      against the emulator: no gizmo-i386 function reads a register at its entry any more (parse_kv's mov
+      dl, byte ptr [eax]; cmp dl, 0x20 read edx; mov bl, cl all of ecx), and the one register kept besides
+      eax is real (uart_putc leaves edx to uart_puts: GCC's interprocedural register allocation). Found on
+      the way: dread recon did not see a change to a file a source includes from elsewhere (now the
+      compiler's -MMD list), capstone's cmov reads its destination and cdq writes edx alone, and the
+      shared rewritten fmt_hex reads the original's digit table (HEX_DIGITS) so that each build leaves
+      the registers its original leaves (docs/decisions.md, "The rewritten fmt_hex reads the original's
+      table").
+    - [ ] Generated cases log no stack argument of a stubbed callee on x86 yet: how many a callee reads
+      comes from the lifter's stack analysis (Generator.stack_words: dread.lift's stack_args), which x86
+      gets with its lifter. Written cases see them (logging_stubs: the first four from the stack).
+    - [ ] refine_saved_writes on ARM and RISC-V: whether refining an instruction that writes a callee-saved
+      register (uxtb r4, r1 reads the low byte of r1) changes a lift check or a readable gate there;
+      only x86 says it so far (dread.regflow refinement).
+    - [ ] The system run on x86: sysrecord's stack arguments (entry_stack_args), interrupts (the IDT),
+      a device model of the i386 build's peripherals (the RV32 build's).
     - [ ] The extents' owner table (Program.owners) counts halfwords: on x86 the halfword in which one
       function ends and the next begins at an odd byte counts as the next one's, so a load from the
       first one's last byte would count as a read of another function's code (not confirmed to happen:

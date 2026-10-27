@@ -153,8 +153,9 @@ def record(gen, name, fn, calls, frame, spec, rng, limit=LIMIT):
     def stub(m, *regs, target, nargs, nstack):
         number[0] += 1
         sp = m.reg("sp")
+        first = sp + m.layout.entry_stack_args      # (x86: behind the return address the call pushed)
         seen = [regs[i] for i in range(len(regs)) if nargs >> i & 1] + \
-            [int.from_bytes(m.read(sp + 4 * i, 4), "little") for i in range(nstack)]
+            [int.from_bytes(m.read(first + 4 * i, 4), "little") for i in range(nstack)]
         m.model_writes = []
         model = models.get(target)
         answer = (model(m, list(regs), state) or 0) & 0xFFFFFFFF if model else 0

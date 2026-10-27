@@ -393,7 +393,7 @@ def result_words(program, flow, name):
     if not flow:
         return 1
     live = set(flow.kept_regs(name)) - set(flow.preserved_regs(name))
-    n = max((i + 1 for i, r in enumerate(program.arch.arg_regs(4)) if r in live), default=1)
+    n = max((i + 1 for i, r in enumerate(program.target.abi.arg_regs[:4]) if r in live), default=1)
     return 4 if n > 2 else n
 
 
@@ -409,7 +409,7 @@ def prototypes(program, flow, fn):
     word = ctype(program, 1)
     out = []
     for name in sorted(direct_callees(program, fn)):
-        args = program.arch.arg_regs(4)
+        args = program.target.abi.arg_regs[:4]
         reads = flow.read_regs(name) if flow else args
         n = max((args.index(r) + 1 for r in reads if r in args), default=0)
         out.append("%s %s(%s);" % (ctype(program, result_words(program, flow, name)), name,
@@ -426,17 +426,17 @@ def question(target, image, program, fn, flow=None, lifted=None):
     parts = ["The function %s at 0x%x (%s, %d instructions):\n\n```\n%s\n```" % (
         fn.name, fn.entry, fn.isa, len(fn.insns), "\n".join(lines))]
     if flow is not None:
-        reads = [r for r in flow.read_regs(fn.name) if r in program.arch.arg_regs(4)]
+        reads = [r for r in flow.read_regs(fn.name) if r in program.target.abi.arg_regs[:4]]
         parts.append("It reads %s at its entry (its arguments)." % (", ".join(reads) or "no argument register"))
         words = result_words(program, flow, fn.name)
         if words > 1:
-            regs = program.arch.arg_regs(4)[:words]
+            regs = program.target.abi.arg_regs[:4][:words]
             parts.append("Its callers read %s after it: it returns a %d-bit value (%s)." % (
                 " and ".join(regs) if words == 2 else ", ".join(regs), min(64, words * program.arch.reg_bits),
                 ctype(program, words)))
     calls = []
     for callee, caller, address, kind in callsites.sites(program, [fn.name]):
-        values = constants.at(program, caller, address, program.arch.arg_regs(4))
+        values = constants.at(program, caller, address, program.target.abi.arg_regs[:4])
         shown = ", ".join("%s=%s" % (r, flat.describe_value(program, v)) for r, v in sorted(values.items()))
         calls.append("- %s at 0x%x%s" % (caller.name, address, ": " + shown if shown else ""))
     if calls:

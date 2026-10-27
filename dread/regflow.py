@@ -84,7 +84,7 @@ import sys
 from dread.arch import code_address
 from dread import target as tgt
 
-VERSION = 29                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 30                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -160,6 +160,10 @@ VERSION = 29                # 3: entry spills (variadic functions) are no use; 4
                             # vAssertCalled hands its line on to printf and reads it); variadic and formats
                             # 29: a system call reads what the target says its handler reads ([abi]
                             # syscall_reads), where it says; where not, nothing, as before
+                            # 30: a write of part of a register from memory reads the kept bits only where
+                            # they are used (the layer's merge_demand), and a flag setter the operand bits
+                            # its flags depend on where the layer says (flag_demand): x86's mov dl, byte ptr
+                            # [eax]; cmp dl, 0x20 read edx at every function's entry (gizmo-i386's parse_kv)
 
 
 class RegFlow:
@@ -918,19 +922,28 @@ class Analysis:
         """What of a row's uses (used: the registers it reads, as a mask) counts, beyond reading them at
         all: a function of what is used of its results after it, a mask, or None (all of it).
           - An instruction that only computes registers (the layer's register_only), all of which the
-            analysis follows (scratch registers, flags): its results are all it does, so it reads only
+            analysis follows (scratch registers, flags), or any where the layer says refine_saved_writes
+            (x86 moves bytes through ebx and esi: mov bl, cl; a register not followed counts as all
+            used): its results are all it does, so it reads only
             what its used results need (a register whose result nobody uses reads nothing), bit for bit
             where the layer has a rule (bit_demand: bic r1, r1, #0xff whose result's low byte alone is
             used reads none of r1; lsl #16 reads the low half), else every bit once any result bit is
             used; every flag it reads where it runs under a condition (the condition decides whether
             the result is written), every bit where a flag it sets is used.
+            Where a flag it sets is used, the bits the flags depend on where the layer has a rule
+            (flag_demand: x86's cmp dl, 0x20 reads the low byte of edx), else every bit.
           - A store of a byte or a halfword (the layer's store_demand): those bits of the register.
+          - A write of part of a register that keeps the rest, from memory (the layer's merge_demand:
+            x86's mov dl, byte ptr [eax]): of that register the bits it computes from, and the kept bits
+            as far as they are used behind it (GCC's x86 code loads bytes so into registers it reads
+            no more of: every such function looked as if it read them at its entry).
         A read of bits nobody uses is no read: until regflow 26 every read counted, and a register
         whose upper bits a caller kept through a bic and an orr but stored nowhere looked read after
         the call (what its callee left there a second result)."""
         arch = self.program.arch
         only = getattr(arch, "register_only", None)
-        if only is not None and writes and all(w in self.bit for w in writes) and only(insn):
+        if only is not None and writes and only(insn) and (all(w in self.bit for w in writes) or
+                                                           getattr(arch, "refine_saved_writes", False)):
             return self._computed(insn, writes, conditional, used)
         store = getattr(arch, "store_demand", None)
         got = store(insn) if store is not None else None
@@ -940,27 +953,58 @@ class Analysis:
                 if r in self.shift:
                     keep = (keep & ~self.bit[r]) | ((bits & self.field) << self.shift[r])
             return keep if keep != self.everything else None
+        merge = getattr(arch, "merge_demand", None)
+        got = merge(insn) if merge is not None else None
+        if got:
+            return self._merged(got, used)
         return None
+
+    def _merged(self, merges, used):
+        """refinement's function for a write of part of a register that keeps the rest (merges: {register:
+        (kept, operand)}, the layer's merge_demand): live -> the bits of `used` it reads."""
+        field, shift, bit = self.field, self.shift, self.bit
+        parts = [(bit[r], shift[r], kept & field, operand & field) for r, (kept, operand) in merges.items()
+                 if r in shift]
+
+        def demand(live):
+            got = used
+            for b, k, kept, operand in parts:
+                got = (got & ~b) | ((((live >> k) & kept) | operand) << k)
+            return got & used
+        return demand
 
     def _computed(self, insn, writes, conditional, used):
         """refinement's function for an instruction that only computes registers: live (the mask of what
         is used behind it) -> the bits of `used` it reads."""
         precise = getattr(self.program.arch, "bit_demand", None)
+        flagged = getattr(self.program.arch, "flag_demand", None)
         outs = [(w, self.shift[w]) for w in sorted(writes) if w in self.shift]
         flags = [w == "flags" or w.startswith("flags:") for w, _ in outs]
         under = used & self.bit.get("flags", 0) if conditional else 0
         field, shift, memo = self.field, self.shift, {}
+        # a register the analysis does not follow (callee-saved; refinement lets such a write through
+        # where the layer says refine_saved_writes): its bits count as all used
+        fixed = {w: field for w in writes if w not in shift}
 
         def demand(live):
             key = tuple((live >> k) & field for _, k in outs)
             got = memo.get(key)
             if got is None:
-                if not any(key):
+                flag_used = any(v for v, flag in zip(key, flags) if flag)
+                rest = {w: v for (w, _), v, flag in zip(outs, key, flags) if not flag}
+                rest.update(fixed)
+                want = None
+                if not any(key) and not fixed:
                     got = 0
-                elif precise is None or any(v for v, flag in zip(key, flags) if flag):
-                    got = used
-                else:
-                    want = precise(insn, {w: v for (w, _), v, flag in zip(outs, key, flags) if not flag})
+                elif precise is not None and (not flag_used or flagged is not None):
+                    # (where a flag it sets is used: the bits those depend on, the layer's flag_demand
+                    # (x86's cmp dl, 0x20 reads the low byte of edx); without that rule every bit)
+                    want = precise(insn, rest) if any(rest.values()) else {}
+                    if want is not None and flag_used:
+                        more = flagged(insn)
+                        want = None if more is None else {r: want.get(r, 0) | more.get(r, 0)
+                                                          for r in set(want) | set(more)}
+                if got is None:
                     if want is None:
                         got = used
                     else:

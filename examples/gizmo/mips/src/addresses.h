@@ -9,4 +9,5 @@
 #define STR_TEST ((const char *)0x8000008d)
 #define STR_UNKNOWN ((const char *)0x8000009a)
 #define STR_SERVICE ((const char *)0x80000092)
+#define HEX_DIGITS ((const char *)0xbfc01442)
 #define HAVE_UDIV 1

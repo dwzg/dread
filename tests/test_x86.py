@@ -3,6 +3,7 @@ bytes, and gizmo-i386's two builds (the host's GCC with -m32, clang for i686-unk
 that GNU as and clang rebuild them byte for byte."""
 import os
 import shutil
+import subprocess
 
 import pytest
 
@@ -103,3 +104,39 @@ def test_only_arm_takes_bit_0_off_a_code_address():
     assert code_address(get({"name": "arm", "isa": "t32", "profile": "m"}), 0x08000197) == 0x08000196
     assert code_address(get({"name": "x86", "isa": "i386"}), 0x08000197) == 0x08000197
     assert code_address(get({"name": "riscv"}), 0x80000003) == 0x80000003
+
+
+def _compiles(variant, tmp_path):
+    """Whether the build's compiler is here: the host's gcc with 32-bit libraries (-m32), or clang."""
+    command = ["gcc", "-m32"] if variant == "i386" else ["clang", "--target=i686-unknown-elf"]
+    if not shutil.which(command[0]):
+        return False
+    probe = tmp_path / "probe.c"
+    probe.write_text("int f(int x) { return x + 1; }\n")
+    return subprocess.run(command + ["-c", "-o", str(tmp_path / "probe.o"), str(probe)],
+                          capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize("which", ["i386", "i386clang"])
+def test_gizmo_i386_rewritten_functions_agree(which, tmp_path):
+    """The rewritten C over the original, every argument on the stack: functions that do not fit move
+    behind a 5-byte jmp at their entry, and every function agrees with the written and generated cases,
+    which run every instruction. Stubs take their arguments from the stack (behind the return address the
+    call pushed), and dread.regflow takes a byte loaded into part of a register for no read of the rest
+    (until it did, apply_config looked as if it read ecx behind every strcmp)."""
+    if not _compiles(which, tmp_path):
+        pytest.skip("needs the compiler of gizmo-" + which)
+    from dread import build, runner
+    from dread.target import Target
+    from test_runner import src_copy
+    target = Target.load(gizmo_dir(which))
+    payload = build.build(target, target.image(), src=str(src_copy(tmp_path, which)), out=str(tmp_path / "recon"),
+                          quiet=True)
+    with open(tmp_path / "recon" / "report.tsv") as f:
+        assert "branch at original entry" in f.read()
+    suite = runner.prepare(target, target.image(), payload)
+    lines = []
+    failed, uncovered, _ = runner.run(list(suite.cases), out=lines.append, jobs=4)
+    text = "\n".join(lines)
+    assert failed == 0 and not uncovered, text
+    assert "ok   fmt_hex" in text and "ok   dispatch" in text and "ok   strcmp" in text

@@ -76,7 +76,9 @@ lines = ["/* written by examples/gizmo/fw/addresses.py from %s; do not edit */" 
          "#define STR_RUN ((const char *)0x%08x)" % names[2],
          "#define STR_TEST ((const char *)0x%08x)" % names[3],
          "#define STR_UNKNOWN ((const char *)0x%08x)" % names[4],
-         "#define STR_SERVICE ((const char *)0x%08x)" % names[7]]
+         "#define STR_SERVICE ((const char *)0x%08x)" % names[7],
+         # fmt_hex's digits: a static of its own, or merged into other constants (gcc's ARM builds)
+         "#define HEX_DIGITS ((const char *)0x%08x)" % running(base + data.find(b"0123456789abcdef"))]
 if variant in ("m3", "m4", "m3cpp", "rv32", "rv32cpp", "msp430", "mips", "i386", "i386clang"):
     # (msp430: C division calls the image's own __mspabi_divul; i386 divides in hardware)
     lines.append("#define HAVE_UDIV 1")

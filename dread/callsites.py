@@ -95,7 +95,7 @@ def main(argv=None):
     if not found:
         print("dread callsites: no calls of %s" % " ".join(args.patterns), file=sys.stderr)
         return 1
-    ARGS = program.arch.arg_regs(4)
+    ARGS = program.target.abi.arg_regs[:4]
     if args.by is not None:
         reg = ARGS[args.by]
         groups = collections.defaultdict(list)

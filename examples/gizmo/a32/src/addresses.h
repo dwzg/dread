@@ -8,3 +8,4 @@
 #define STR_TEST ((const char *)0x00020d17)
 #define STR_UNKNOWN ((const char *)0x00020d08)
 #define STR_SERVICE ((const char *)0x00020d1c)
+#define HEX_DIGITS ((const char *)0x00020d88)

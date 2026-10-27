@@ -40,8 +40,7 @@ def test_boot_agrees(target):
 
 def test_a_planted_bug_shows(target, variant, tmp_path):
     """fmt_hex writes the checksum line; a digit one too high changes what the UART sends."""
-    src = src_copy(tmp_path, variant, ("out[i] = d < 10 ? '0' + d : 'a' + d - 10;",
-                                       "out[i] = d < 10 ? '1' + d : 'a' + d - 10;"))
+    src = src_copy(tmp_path, variant, ("out[i] = HEX_DIGITS[v & 15];", "out[i] = HEX_DIGITS[(v + 1) & 15];"))
     payload = build.build(target, target.image(), src=str(src), out=str(tmp_path / "recon"), quiet=True)
     a, b = both(target, payload)
     diff = sysrun.compare(a, b)

@@ -8,5 +8,6 @@
 #define STR_TEST ((const char *)0x000094b7)
 #define STR_UNKNOWN ((const char *)0x000094a8)
 #define STR_SERVICE ((const char *)0x000094bc)
+#define HEX_DIGITS ((const char *)0x000094d4)
 #define HAVE_UDIV 1
 #define HWREG(a) (*(volatile u16 *)(a))

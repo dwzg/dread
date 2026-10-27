@@ -16,8 +16,21 @@ import pytest
 from dread import regflow
 from dread.arch.arm import Arm
 from dread.arch.riscv import RiscV
+from dread.arch.x86 import X86
 from conftest import RISCV_CROSS, needs_riscv_gcc
 
+def _as32():
+    """Whether the host's GNU as assembles 32-bit x86 (--32)."""
+    if not (shutil.which("as") and shutil.which("objcopy")):
+        return False
+    try:
+        return subprocess.run(["as", "--32", "-o", "/dev/null", "-"], input=b".intel_syntax noprefix\nnop\n",
+                              capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+needs_x86 = pytest.mark.skipif(not _as32(), reason="needs GNU as for 32-bit x86")
 needs_arm = pytest.mark.skipif(not (shutil.which("arm-none-eabi-as") and shutil.which("arm-none-eabi-objcopy")),
                                reason="needs arm-none-eabi binutils")
 
@@ -49,10 +62,25 @@ xor a1, a2, a3; slli a1, a2, 16; srli a1, a2, 8; srai a1, a2, 3; srai a1, a2, 31
 sub a1, a2, a3; mul a1, a2, a3; slt a1, a2, a3; sltu a1, a2, a3; slti a1, a2, 5; sltiu a1, a2, -5;
 lui a1, 0x12345; auipc a1, 0x10; sll a1, a2, a3; mulhu a1, a2, a3; c.andi a2, 7; c.slli a2, 3; c.srli a2, 5;
 c.srai a2, 9; c.add a2, a3; c.mv a2, a3; c.li a2, 5"""
+# x86 (Intel syntax): moves of whole registers and of their parts (al, ah, ax: the rest kept), the
+# extensions, the logic and sums of every width, shifts and rotations by a constant, lea, setcc, cmovcc,
+# bswap, xchg, the sign extensions of eax; without a rule: adc, sbb, a shift by cl
+X86_LINES = """mov eax, ecx; mov al, cl; mov ah, cl; mov al, ch; mov ax, cx; mov eax, 0x55; mov al, 5; mov bl, ah;
+mov si, ax; movzx eax, cl; movzx eax, cx; movzx eax, ch; movsx eax, cl; movsx eax, cx; and eax, ecx;
+and eax, 0xff00; and al, 0xdf; or eax, 0xf0; or al, cl; xor eax, ecx; xor eax, 0x5555; xor al, al; add eax, ecx;
+add eax, 0x100; add al, 5; sub bl, 0x41; sub eax, 1; sub eax, ecx; inc eax; dec al; neg eax; not eax; not al;
+imul eax, ecx; imul eax, ecx, 5; shl eax, 16; shr eax, 8; sar eax, 3; sar eax, 31; rol eax, 8; ror eax, 12;
+lea eax, [ecx + edx*4 + 8]; lea eax, [ecx + ecx*2 - 3]; lea eax, [edx*8]; sete al; setne cl; setb ah;
+cmove eax, ecx; cmovne ax, cx; bswap eax; xchg eax, ecx; cdq; cwd; cwde; cbw; adc eax, ecx; sbb al, al;
+shl eax, cl; shl al, 2"""
 STORES = {"a32": "strb r1, [r2]; strh r1, [r2, #2]; strb r2, [r2]; str r1, [r2]",
           "t32": "strb r1, [r2]; strh r1, [r2, #2]; strb.w r1, [r2, #-1]; strh r2, [r2]",
-          "rv32": "sb a1, 0(a2); sh a1, 2(a2); sb a2, 0(a2); sw a1, 0(a2)"}
-WHOLE_STORES = {"strb r2, [r2]", "str r1, [r2]", "strh r2, [r2]", "sb a2, 0(a2)", "sw a1, 0(a2)"}
+          "rv32": "sb a1, 0(a2); sh a1, 2(a2); sb a2, 0(a2); sw a1, 0(a2)",
+          "x86": "mov byte ptr [eax], dl; mov byte ptr [eax + 1], dh; mov word ptr [eax + 2], dx; "
+                 "mov byte ptr [edx], dl; mov dword ptr [eax], edx"}
+WHOLE_STORES = {"strb r2, [r2]", "str r1, [r2]", "strh r2, [r2]", "sb a2, 0(a2)", "sw a1, 0(a2)",
+                "mov byte ptr [edx], dl", "mov dword ptr [eax], edx"}
+X86_NAMES = ["eax", "ecx", "edx", "ebx", "esi", "edi", "ebp"]
 
 
 def _arm_layer(kind):
@@ -62,7 +90,10 @@ def _arm_layer(kind):
 def assemble(tmp_path, kind, text):
     """[(insn, bytes)] of the instructions of text (separated by ;) as the layer decodes them."""
     lines = [x.strip() for x in text.replace("\n", " ").split(";") if x.strip()]
-    if kind == "rv32":
+    if kind == "x86":
+        head, layer = ".intel_syntax noprefix\n.code32\n.text\n", X86()
+        as_cmd, objcopy = ["as", "--32"], "objcopy"
+    elif kind == "rv32":
         head, layer = ".option norelax\n.text\n", RiscV()
         as_cmd = [RISCV_CROSS + "as", "-march=rv32imc", "-mabi=ilp32"]
         objcopy = RISCV_CROSS + "objcopy"
@@ -78,7 +109,7 @@ def assemble(tmp_path, kind, text):
         subprocess.run(as_cmd + ["-o", str(obj), str(src)], check=True)
         subprocess.run([objcopy, "-O", "binary", "-j", ".text", str(obj), str(raw)], check=True)
         code = raw.read_bytes()
-        insn = layer.decode(code, CODE, "t32" if kind == "t32" else ("rv32" if kind == "rv32" else "a32"))
+        insn = layer.decode(code, CODE, {"t32": "t32", "rv32": "rv32", "x86": "i386"}.get(kind, "a32"))
         assert insn is not None and insn.size == len(code), (line, code.hex())
         out.append((line, insn, code))
     return layer, out
@@ -92,7 +123,7 @@ class Core:
         self.uc = layer.new_uc("t32" if kind == "t32" else None)
         self.uc.mem_map(CODE, 0x1000)
         self.uc.mem_map(DATA, 0x1000)
-        self.names = ["r%d" % i for i in range(13)] if kind != "rv32" else \
+        self.names = X86_NAMES if kind == "x86" else ["r%d" % i for i in range(13)] if kind != "rv32" else \
             ["a%d" % i for i in range(8)] + ["t%d" % i for i in range(7)]
 
     def run(self, code, regs):
@@ -120,7 +151,7 @@ def inputs(core, rng, data_regs=()):
 
 
 @pytest.mark.parametrize("kind", [pytest.param("a32", marks=needs_arm), pytest.param("t32", marks=needs_arm),
-                                  pytest.param("rv32", marks=needs_riscv_gcc)])
+                                  pytest.param("rv32", marks=needs_riscv_gcc), pytest.param("x86", marks=needs_x86)])
 def test_every_bit_rule_holds_in_the_emulator(tmp_path, kind):
     """For each instruction: a register the layer does not list as read changes none of its results
     (reg_effects; capstone 5 leaves uxtab's second source out: the layer's operand_roles adds it), and
@@ -128,7 +159,8 @@ def test_every_bit_rule_holds_in_the_emulator(tmp_path, kind):
     names changes none of them; the instructions without a rule answer None. The rules are what
     regflow takes for an instruction that only computes registers, so a wrong one would drop a read
     that matters."""
-    layer, insns = assemble(tmp_path, kind, {"a32": A32_LINES, "t32": T32_LINES, "rv32": RV_LINES}[kind])
+    layer, insns = assemble(tmp_path, kind, {"a32": A32_LINES, "t32": T32_LINES, "rv32": RV_LINES,
+                                             "x86": X86_LINES}[kind])
     core, rng = Core(layer, kind), random.Random(26)
     ruled = 0
     for line, insn, code in insns:
@@ -166,7 +198,8 @@ def test_every_bit_rule_holds_in_the_emulator(tmp_path, kind):
                             assert (got[w] ^ first[w]) & out[w] == 0, (line, "%s bits %#x" % (name, flip), w,
                                                                      "%#x" % out[w], need)
     no_rule = {"a32": ("lsl r1, r2, r3", "rrx r1, r2", "adc r1, r2, r3"), "t32": ("lsls r1, r2", "adc.w r1, r2, r3"),
-               "rv32": ("sll a1, a2, a3", "mulhu a1, a2, a3")}[kind]
+               "rv32": ("sll a1, a2, a3", "mulhu a1, a2, a3"),
+               "x86": ("adc eax, ecx", "sbb al, al", "shl eax, cl")}[kind]
     for line, insn, _ in insns:
         if line in no_rule:
             assert layer.bit_demand(insn, {w: M32 for w in layer.reg_effects(insn)[1]}) is None, line
@@ -174,14 +207,14 @@ def test_every_bit_rule_holds_in_the_emulator(tmp_path, kind):
 
 
 @pytest.mark.parametrize("kind", [pytest.param("a32", marks=needs_arm), pytest.param("t32", marks=needs_arm),
-                                  pytest.param("rv32", marks=needs_riscv_gcc)])
+                                  pytest.param("rv32", marks=needs_riscv_gcc), pytest.param("x86", marks=needs_x86)])
 def test_a_narrow_store_takes_the_bits_it_stores(tmp_path, kind):
     """strb and strh (sb, sh) store the low byte or halfword of their register (store_demand): the bits
     above change no byte of memory; where the stored register is also the address, every bit is (None),
     as for a word's store."""
     layer, insns = assemble(tmp_path, kind, STORES[kind])
     core, rng = Core(layer, kind), random.Random(7)
-    base = "r2" if kind != "rv32" else "a2"
+    base = {"rv32": "a2", "x86": "eax"}.get(kind, "r2")
     for line, insn, code in insns:
         got = layer.store_demand(insn)
         reads = layer.reg_effects(insn)[0]
@@ -189,13 +222,71 @@ def test_a_narrow_store_takes_the_bits_it_stores(tmp_path, kind):
             assert got is None, line
             continue
         (reg, bits), = got.items()
-        assert bits in (0xFF, 0xFFFF) and reg in reads, (line, got)
+        assert bits in (0xFF, 0xFF00, 0xFFFF) and reg in reads, (line, got)     # (0xFF00: x86's dh)
         for _ in range(4):
             regs = inputs(core, rng, data_regs=(base,))
             first = core.run(code, regs)[1]
             again = core.run(code, dict(regs, **{reg: regs[reg] ^ (~bits & M32)}))[1]
             assert first == again, line
 
+
+
+X86_FLAG_LINES = """cmp dl, 0x20; cmp eax, ecx; cmp ah, 3; test al, al; test eax, 4; test cl, dl; add al, cl;
+sub bl, 0x41; inc al; dec cx; neg cl; and bl, 0xdf; or ax, 0x10; xor al, ah; shl al, 2; adc al, cl; imul ax, cx"""
+X86_FLAGS = 0x8D5                           # CF, PF, AF, ZF, SF, OF
+
+
+@needs_x86
+def test_x86_flags_take_the_bits_flag_demand_names(tmp_path):
+    """An 8-, 16- or 32-bit operation's flags depend on its operands' parts alone (flag_demand: cmp dl,
+    0x20 reads the low byte of edx): a register bit outside what the rule names changes none of the
+    six arithmetic flags. dread.regflow takes those bits where a flag a register_only instruction sets
+    is used."""
+    layer, insns = assemble(tmp_path, "x86", X86_FLAG_LINES)
+    core, rng = Core(layer, "x86"), random.Random(30)
+    for line, insn, code in insns:
+        assert layer.register_only(insn) and layer.sets_flags(insn), line
+        need = layer.flag_demand(insn)
+        assert need is not None, line
+        for _ in range(4):
+            regs = inputs(core, rng)
+            core.run(code, regs)
+            first = core.uc.reg_read(layer.status_reg()) & X86_FLAGS
+            for name in core.names:
+                free = ~need.get(name, 0) & M32
+                for flip in (free, free & rng.getrandbits(32)):
+                    if flip:
+                        core.run(code, dict(regs, **{name: regs[name] ^ flip}))
+                        got = core.uc.reg_read(layer.status_reg()) & X86_FLAGS
+                        assert got == first, (line, name, "%#x" % flip)
+
+
+X86_MERGES = """mov dl, byte ptr [eax]; mov dh, byte ptr [eax + 1]; mov dx, word ptr [eax]; add dl, byte ptr [eax];
+or cx, word ptr [eax + 2]; mov al, byte ptr [eax]; mov bl, byte ptr [ebx]"""
+
+
+@needs_x86
+def test_x86_a_load_into_part_of_a_register_reads_the_rest_only_where_kept(tmp_path):
+    """mov dl, byte ptr [eax] writes the low byte of edx and keeps the rest (merge_demand): a bit of edx
+    outside the kept and the computed ones changes nothing, a kept bit only itself in the result. Where
+    the register is the address too (mov al, byte ptr [eax]), no rule."""
+    layer, insns = assemble(tmp_path, "x86", X86_MERGES)
+    core, rng = Core(layer, "x86"), random.Random(31)
+    for line, insn, code in insns:
+        got = layer.merge_demand(insn)
+        if line in ("mov al, byte ptr [eax]", "mov bl, byte ptr [ebx]"):
+            assert got is None, line
+            continue
+        (reg, (kept, operand)), = got.items()
+        assert kept and not kept & operand, (line, got)
+        for _ in range(4):
+            regs = inputs(core, rng, data_regs=("eax",))
+            first = core.run(code, regs)[0][reg]
+            free = ~(kept | operand) & M32
+            if free:
+                assert core.run(code, dict(regs, **{reg: regs[reg] ^ free}))[0][reg] == first, line
+            flip = kept & rng.getrandbits(32) or kept
+            assert core.run(code, dict(regs, **{reg: regs[reg] ^ flip}))[0][reg] == first ^ flip, line
 
 # A callee that leaves a constant in r1 (leaf), a caller that hands it on (mid), callers that keep its
 # upper bits through a bic and store a byte of them (top) or hand it to a callee that does (relay, sink),

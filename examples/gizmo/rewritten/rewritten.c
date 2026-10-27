@@ -104,10 +104,15 @@ u32 udiv_var(u32 a, u32 b)
 
 void fmt_hex(char *out, u32 v, int digits)
 {
+    /* The digits from the original's table, one a turn from the last: the way its machine code works,
+     * so that each build leaves the registers as its original does (the cases compare what a void
+     * function leaves in the result register: GCC's i386 build its counter, clang's the count) and
+     * keeps v where it does (in a register: a C that shifted a copy of v had GCC -Os shift it in v's
+     * stack slot, in the caller's frame). */
     int i;
-    for (i = digits - 1; i >= 0; i--, v >>= 4) {
-        u32 d = v & 15;
-        out[i] = d < 10 ? '0' + d : 'a' + d - 10;
+    for (i = digits - 1; i >= 0; i--) {
+        out[i] = HEX_DIGITS[v & 15];
+        v >>= 4;
     }
     out[digits] = 0;
 }

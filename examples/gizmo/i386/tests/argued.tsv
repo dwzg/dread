@@ -1,0 +1,4 @@
+# Survivors of dread mutate that cannot be caught, with the argument why the change alters nothing.
+# function<TAB>source line (stripped)<TAB>change<TAB>argument
+checksum	while (n >= 4) {	>= -> >	the unrolled loop and the tail loop apply the same rotate-and-xor per byte in the same order; with > the last four bytes go through the tail loop instead, with the same result
+checksum	while (n >= 4) {	4 -> 5	as for >= -> >: which loop takes the bytes of an incomplete group of five does not change the result
