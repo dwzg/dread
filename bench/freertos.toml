@@ -487,9 +487,12 @@ isa = "i386"
 
 # The image loaded at 1 MiB (multiboot), its data at 0x180000; the Galileo's HPET, I/O APIC and local
 # APIC as memory-mapped devices (the UART's and the GPIO's registers lie where PCI configuration space,
-# read through port I/O, puts them). No device models yet.
+# read through port I/O, puts them). No device models yet. The PC's conventional memory below 640 KiB
+# is RAM on the Galileo, as on any PC: mapped, a null pointer reads zeros there, as on the board
+# (docs/decisions.md, 2026-10-27).
 [memory]
 regions = [
+    {name = "low", base = 0x00000000, size = 0xa0000},
     {name = "image", base = 0x00100000, size = 0x80000, kind = "rom"},
     {name = "ram", base = 0x00180000, size = 0x20000},
     {name = "stack", base = 0x001c0000, size = 0x10000},

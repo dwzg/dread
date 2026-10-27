@@ -6496,7 +6496,9 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       (the link took the source's), a fetch that applies sparse paths added since, and a digest of a
       build without the sparse paths (docs/decisions.md). Not measured yet (lift, readable): next.
     - [ ] The lift check with room (.data moved 256 KiB away): 102 of 293 accepted, 109 refused, 82
-      dropped. What it showed, largest first:
+      dropped at first; with the steps below 189 accepted, 36 refused, 68 dropped (2026-10-27: 54 held
+      back by coverage, 14 without cases, none whose cases disagree), and 206 with the PC's
+      conventional memory mapped (docs/decisions.md). What it showed, largest first:
       - [x] GCC's local calling convention (2026-10-27): a static function whose address is not taken
         gets its first three arguments in eax, edx and ecx (regparm(3)), prvAddCurrentTaskToDelayedList(eax,
         edx) say; the lifter took eax alone and refused those that read edx or ecx (15) and their callers

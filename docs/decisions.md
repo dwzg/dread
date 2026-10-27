@@ -5477,3 +5477,24 @@ added where they help, the user, 2026-10-21).
   again (seconds) before it measures. A fetch now also applies sparse paths a recipe added to a clone
   already at its commit (it returned early before, and the IA32 demo never came into the checkout).
 
+## The IA32 bench target maps the PC's conventional memory (2026-10-27)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** The memory map of the bench's IA32 target (project ia32) held the image, its data,
+  the stack and the scratch area; everything below 1 MiB was unmapped, so every read through a null
+  pointer faulted. On a Cortex-M the same read finds the vector table at 0 and goes on, and the case
+  generator's inputs run into a list walk's end or an assertion's endless loop there. On the trial
+  build of FreeRTOS's demo, generated inputs faulted at addresses 4 and 0x14 (a list walk past a
+  null item, a UART base address the startup sets) and fourteen functions got no case at all. Map
+  the PC's conventional memory, or keep it out?
+- **Options.** (a) Keep the map as it was: a null pointer faults, which is no output the original
+  defines on the board either. (b) Map 0 to 0x9ffff as RAM: the Galileo (Intel Quark) has RAM there,
+  as every PC does, so a read through a null pointer reads zeros, as it does on the board; a write
+  there lands in RAM, compared like any other.
+- **Choice.** (b). Measured on the trial build with the commits of the day: 189 functions accepted
+  without the region and 206 with it (functions held back by coverage 54 and 38; generation errors
+  14 and 13; no disagreement either way). One function newly gets no case with it
+  (vQueueSetAccessQueueSetFromISR: not looked at yet). A target for another x86 board says what that
+  board has there.
+
