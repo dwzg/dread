@@ -125,9 +125,11 @@ needed on it):
   into one compare, cmp mem, mem matching i386's pattern before reload, and reload loads the later one
   first; GCC 11 to 13 and clang keep the order); a tail jump passes the function's own stack
   parameters themselves (a volatile read of one, GCC stored back into its slot before its jmp, a write
-  the original never makes); and push and pop of a memory operand read and write that word in the
-  frame analysis (saves_out had taken a word that only a push reads for a save, and the C lost its
-  store).
+  the original never makes), while a call with stack arguments gets an empty asm statement behind it,
+  so that no compiler turns it into such a jump (GCC 11 did, in front of a return); and push and pop
+  of a memory operand, and the string operations through esi and edi, read and write the frame in
+  the frame analysis (saves_out had taken a word that only a push reads for a save, and words a rep
+  movsd fills for untouched, and the C lost a store or ran over its own frame).
 - `dread.elfimport`: ARM dispatch slots and padding between functions (other architectures skip
   them).
 

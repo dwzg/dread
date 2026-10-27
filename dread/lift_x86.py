@@ -78,6 +78,7 @@ SETS = {"set" + c: c for c in CONDITIONS}
 MOVES = {"cmov" + c: c for c in CONDITIONS}
 STRING_OPS = ("movsb", "movsw", "movsd", "stosb", "stosw", "stosd")     # (_string: with rep, too)
 BARRIER = '__asm__ volatile ("" ::: "memory");'     # (insn: where GCC could reorder two volatile loads)
+KEEP_CALL = '__asm__ volatile ("");'    # (_call: behind a call with stack arguments, so that it stays one)
 MUSTTAIL = "typedef unsigned (*f_)(unsigned);\nunsigned g_(f_ p, unsigned x) { __attribute__((musttail)) return p(x); }\n"
 NOPS = ("nop", "cld", "endbr32", "pause")   # cld: the direction flag is clear at every call (the ABI)
 ARITH = ("add", "adc", "sub", "sbb", "cmp", "and", "or", "xor", "test")
@@ -1250,6 +1251,12 @@ class X86Lifter(lift.Lifter):
         keep = set(self.flow.preserved_regs(callee.name)) if self.flow else set()
         scratch = [r for r in ("ecx", "edx") if r not in RESULTS[width] and r not in keep]
         clear = ("%s = 0; " % " = ".join(scratch) if scratch else "") + "cf = zf = sf = of = 0;"
+        if nstack and not tail:
+            # a call is no jump: in front of a return, a compiler turns a call into one and stores its
+            # stack arguments into our own incoming slots first, which the original's call never
+            # writes (GCC 11 did so with a call whose words came from the frame); an asm statement
+            # behind the call keeps it a call (a tail jump, above, passes our words where they lie)
+            clear += " " + KEEP_CALL
         if width == 2:
             return "{ u64 x_ = %s; eax = (u32)x_; edx = (u32)(x_ >> 32); } %s" % (call, clear)
         return "eax = %s; %s" % (call, clear)

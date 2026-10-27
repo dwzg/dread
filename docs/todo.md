@@ -6592,6 +6592,12 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         128 bytes (the copy overwrote the C's return address: every case failed). A string operation's
         accesses through esi and edi are now unsized ones, which keep the whole frame where either
         holds a frame address (frame_uses' FrameReach). tests/test_x86.py: init.
+      - [x] A call with stack arguments stays a call (2026-10-27): in front of the C's return, GCC 11
+        turned spill's call of take into a jump and stored take's arguments into spill's own incoming
+        slots first, a write the original's call never makes (GCC 16 did not; tests/test_x86.py's spill
+        failed in CI's Ubuntu 22.04 image). An empty asm statement behind such a call (KEEP_CALL) keeps
+        it a call; a tail jump passes the function's own parameters, which the compilers jump with in
+        place.
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved
