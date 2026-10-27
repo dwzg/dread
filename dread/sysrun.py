@@ -210,16 +210,28 @@ class Outcome:
 
 NO_EVENT = (1 << 63) - 1    # _State.next_event when nothing is scheduled (as in dread.fasthooks)
 CLOCK_MAX = NO_EVENT - 1    # the state's clock and times stop here (64 bits in C); see System.clock
-# What came before a block (System._ran), where it is not the end of the block that ran last (an even
-# address: instructions start at even addresses on every core the system run runs): odd marks
+# What came before a block (System._ran), where it is not the end of the block that ran last: odd marks
+# below MARKS_END (is_mark). Instructions start at even addresses on every core but x86, so a block ends at
+# an even address there; on x86 one may end at an odd one, and the run refuses code below MARKS_END on a
+# core whose instructions may start at odd addresses (System._shared), so that no block end is taken for
+# a mark. Until 2026-10-27 every odd value was a mark: on x86 a jump from the branch at a moved
+# function's old entry to its C counted as a second entry where the branch ended at an odd address.
 CAME_RESET = 1              # the run's first block
 CAME_SYSCALL = 5            # a system call the layer takes alone (RISC-V's ecall)
+MARKS_END = 0x1000          # every mark lies below (came_exception: numbers below 1024); in C too (fasthooks.c)
 PASS_ON = 2                 # _State.vector: the block entered is a vector's lone branch (System._vector_at)
 
 
 def came_exception(number):
     """The mark of an exception the run takes (an interrupt, M-profile svc's SVCall): its number."""
+    if not 0 <= number < MARKS_END >> 2:
+        raise ValueError("exception number %d: no mark for it below 0x%x" % (number, MARKS_END))
     return number << 2 | 3
+
+
+def is_mark(came):
+    """Whether what came before a block (System._ran) is a mark, not where the block before ended."""
+    return bool(came & 1) and came < MARKS_END
 
 
 class _State:
@@ -425,19 +437,27 @@ class System:
         helper = getattr(self.arch, "runtime_helper", None)
         free = {fn.name for fn in prog.functions if helper is not None and helper(fn.name)}
         excluded = []
+        for fn in prog.functions:           # (is_mark: no block may end below MARKS_END at an odd address)
+            if fn.insns and fn.insns[0] < MARKS_END and self.arch.min_insn(fn.isa) % 2:
+                raise tgt.TargetError("%s at 0x%x: the system run keeps its marks below 0x%x, where code on "
+                                      "this core could end a block at an odd address" % (fn.name, fn.entry, MARKS_END))
         if placement:                       # the rebuilt image: its C code and the branches to it
             for name, p in placement.items():
                 excluded.append((p["address"], p["address"] + p["c_bytes"]))
-                if p.get("branch"):
-                    excluded.append((p["entry"], p["entry"] + 4))
+                through = ends = 0
+                if p.get("branch"):         # the branch at the old entry, and the trampoline it goes through
+                    ends = through = p["entry"] + self._branch_bytes(p, "branch_bytes")
+                    excluded.append((p["entry"], ends))
+                    if p.get("via"):
+                        through = p["via"] + self._branch_bytes(p, "via_bytes")
+                        excluded.append((p["via"], through))
                 if p["placement"] != "helper" and p["address"] != p["entry"]:
                     self.entries[p["address"]] = p["entry"]
                 if p["placement"] != "helper" and name in prog.by_name and prog.by_name[name].insns and name not in free:
                     units = self.entry
-                    through = p["entry"] + 4 if p.get("branch") else 0
                     self.costs[p["address"]] = (units, p["address"], p["address"] + p["c_bytes"], through)
                     if through:
-                        self.costs[p["entry"]] = (units, p["entry"], through, 0)
+                        self.costs[p["entry"]] = (units, p["entry"], ends, 0)
         for name in built:                  # the original: the code the C replaces
             fn = prog.by_name.get(name)
             if fn is not None and fn.insns:
@@ -456,6 +476,12 @@ class System:
                 self.fast.add_entry(address)
             self.fast.set_costs(sorted(self.costs.items()))
 
+    def _branch_bytes(self, p, key):
+        """The length of a branch dread.overlay wrote (placement.json's branch_bytes or via_bytes; a file
+        written before 2026-10-27 has neither: the layer's usual branch then)."""
+        n = p.get(key)
+        return n if n else self.arch.branch_length(p.get("isa"))
+
     def _entry_units(self, address):
         """The units a block outside shared code moves the clock: its function's (costs) where it is
         the entry of a function that holds it, entered from outside that function's code (the block
@@ -467,7 +493,7 @@ class System:
         if cost is None:
             return None
         came = self.st.came
-        if not came & 1 and (cost[1] < came <= cost[2] or came == cost[3]):
+        if not is_mark(came) and (cost[1] < came <= cost[2] or came == cost[3]):
             return None
         return cost[0]
 
@@ -1379,9 +1405,9 @@ def transfers(program, calls):
             how = "reset"
         elif came == CAME_SYSCALL:
             how = "syscall"
-        elif came & 3 == 3:
+        elif is_mark(came) and came & 3 == 3:
             how, exception = "exception", came >> 2
-        elif came & 1:
+        elif is_mark(came):
             how = "unknown"
         else:
             site = _site(program, came)

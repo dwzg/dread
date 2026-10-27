@@ -387,7 +387,7 @@ people), then a `#` summary line. Not for programs; they read placement.json.
 
 ```json
 {"functions": {"NAME": {"entry": 131596, "address": 134300, "original_bytes": 180, "c_bytes": 184,
-                        "placement": "behind the image", "branch": true, "isa": "a32"}},
+                        "placement": "behind the image", "branch": true, "branch_bytes": 4, "isa": "a32"}},
  "summary": {"replaced": 13, "functions": 50, "image_bytes": 3440, "room_left": 127632,
              "freed": 216, "reused": 148}}
 ```
@@ -395,7 +395,10 @@ people), then a `#` summary line. Not for programs; they read placement.json.
 `placement` is one of `in place`, `over its pools`, `behind a pool`, `freed space`, `free space`
 (one of the image's free ranges, `[image] free`), `behind the image`, or `helper` (a C function the
 table does not have; no `entry`). The summary's `free_left` is what the free ranges still hold. `branch` says
-that the old entry holds a branch to `address`; the test runner enters such a function through it.
+that the old entry holds a branch to `address`, `branch_bytes` long (x86's jmp 5, RISC-V's auipc and jalr
+8, a narrow Thumb b 2); the test runner enters such a function through it. `via` and `via_bytes`: the
+trampoline a narrow branch goes through, and its branch's length. dread.sysrun counts none of these
+bytes as code both images share, and the C's entry, reached through them, as no second entry.
 
 ## Generated, kept and written cases (JSON)
 

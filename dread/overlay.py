@@ -540,6 +540,7 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
         if syms.get(fn) != place[fn][0]:
             raise OverlayError("%s was linked at 0x%x, not at its slot 0x%x (alignment?)"
                                % (fn, syms.get(fn, 0), place[fn][0]), fn)
+    branch_bytes, via_bytes = {}, {}        # (placement.json: what the branches take, for dread.sysrun)
     for fn in in_body + relocated:
         f = funcs[fn]
         if fn in short:                     # a narrow b, to the C or to its trampoline
@@ -547,9 +548,11 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             if fn in tramps:
                 hop = arch.entry_branch(tramps[fn], syms[fn], f.isa, branch_len[fn])
                 picture[tramps[fn] - base:tramps[fn] - base + len(hop)] = hop
+                via_bytes[fn] = len(hop)
         else:
             code = arch.entry_branch(f.entry, syms[fn], f.isa, branch_len[fn])
         picture[f.entry - base:f.entry - base + len(code)] = code
+        branch_bytes[fn] = len(code)
     picture.extend(bytes([erased]) * (-len(picture) % 4))
 
     # Nothing outside what was handed out may have changed.
@@ -598,8 +601,11 @@ def link(target, image, objects, out, workdir, extent=True, why=()):
             lines[-1] = "%s\t0x%x\t%d\t%d\t%s" % (fn, f.entry, f.size, sizes[fn], text)
         placement[fn] = {"entry": f.entry, "address": syms[fn], "original_bytes": f.size, "c_bytes": sizes[fn],
                          "placement": how, "branch": fn in in_body + relocated, "isa": f.isa}
+        if fn in branch_bytes:
+            placement[fn]["branch_bytes"] = branch_bytes[fn]
         if fn in tramps:
             placement[fn]["via"] = tramps[fn]
+            placement[fn]["via_bytes"] = via_bytes[fn]
     done = len(replaced)
     tail_size = next((s.size for s in linked.sections if s.name == ".recon.tail"), 0)
     free_left = sum(h[1] - h[0] for h in free_holes) - (tail_size if tail_inside else 0)

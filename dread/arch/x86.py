@@ -929,6 +929,46 @@ class X86:
     def status_reg(self):
         return UX.UC_X86_REG_EFLAGS
 
+    # ---- the system run (dread.sysrun) ----
+
+    EFLAGS_IF = 1 << 9                      # (the interrupt flag: sti sets it, cli clears it)
+
+    def reset(self, engine, read_word, entry, vectors):
+        """Flat 32-bit protected mode as a loader leaves it (Unicorn's segments start with base 0 and
+        32-bit code), interrupts off (eflags.IF clear), at the image's entry; the startup sets esp
+        itself (gizmo-i386: movl $__stack_top, %esp)."""
+        engine.reg_write(UX.UC_X86_REG_EFLAGS, EFLAGS_INIT)
+        return entry
+
+    def interrupts_enabled(self, engine):
+        """Whether the core takes an interrupt: eflags.IF (no interrupt is wired yet: gizmo-i386 has no
+        controller model, so none comes)."""
+        return bool(engine.reg_read(UX.UC_X86_REG_EFLAGS) & self.EFLAGS_IF)
+
+    def mask_registers(self, priorities):
+        """[(register, bits)]: what interrupts_enabled reads (dread.sysrun's C hook)."""
+        return [(UX.UC_X86_REG_EFLAGS, self.EFLAGS_IF)]
+
+    def ends_block(self, insn):
+        """Whether Unicorn ends its translation block behind this instruction though it does not branch:
+        none is known yet (sti's interrupt shadow and popfd are the ones to measure once interrupts are
+        wired), which only places interrupts."""
+        return False
+
+    def enters_code_vector(self, engine, address):
+        return False
+
+    def system_exception(self, intno):
+        """No system call is modelled (int 0x80 and sysenter are faults of the run)."""
+        return None
+
+    def exception_return(self, engine, read_word):
+        """Nothing to finish: iret would run in the emulator."""
+        return None
+
+    def resume_address(self, engine):
+        return engine.reg_read(UX.UC_X86_REG_EIP)
+
     def settle_it(self, engine):
         pass
 

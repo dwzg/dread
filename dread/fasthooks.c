@@ -508,17 +508,20 @@ static void sys_ran(void *uc, uint64_t address, uint32_t size, sys_t *st)
     st->last_block = address;
 }
 
+#define MARKS_END 0x1000ULL          /* dread.sysrun's MARKS_END: the marks are odd and below it */
+
 /* The units a known block outside shared code moves the clock (System._entry_units): its function's
  * where it is the entry of a function that holds it, entered from outside that function's code (the
- * block before ended outside it, or a mark came: odd) and not through the branch at its old entry;
- * else -1, a block of a stretch. */
+ * block before ended outside it, or a mark came: odd and below MARKS_END, sysrun's is_mark) and not
+ * through the branch at its old entry; else -1, a block of a stretch. */
 static int64_t sys_entry_units(sys_t *st, uint64_t address)
 {
     uint32_t e = set_get(&st->entry_set, address);
     if (e < 2)
         return -1;
     uint64_t i = e - 2, came = st->came;
-    if (!(came & 1) && ((st->cost_lo[i] < came && came <= st->cost_hi[i]) || came == st->cost_through[i]))
+    int mark = (came & 1) && came < MARKS_END;
+    if (!mark && ((st->cost_lo[i] < came && came <= st->cost_hi[i]) || came == st->cost_through[i]))
         return -1;                  /* a jump back to the entry from inside the function, or the branch at
                                        its old entry, which counted */
     return st->cost_units[i];

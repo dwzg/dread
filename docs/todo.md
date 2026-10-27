@@ -6411,8 +6411,29 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
     - [ ] refine_saved_writes on ARM and RISC-V: whether refining an instruction that writes a callee-saved
       register (uxtb r4, r1 reads the low byte of r1) changes a lift check or a readable gate there;
       only x86 says it so far (dread.regflow refinement).
-    - [ ] The system run on x86: sysrecord's stack arguments (entry_stack_args), interrupts (the IDT),
-      a device model of the i386 build's peripherals (the RV32 build's).
+    - [x] The system run on x86 from reset (2026-10-27): the layer's reset (flat protected mode as a loader
+      leaves it, eflags.IF clear; the startup sets esp), interrupts_enabled (eflags.IF), resume_address; no
+      instruction known yet behind which Unicorn ends a block, no system call. gizmo-i386 and gizmo-i386clang
+      have the UART and the boot scenario, so their lift check runs the boot on the whole lifted image (GCC:
+      42 functions accepted, the whole image agrees, in 9 s on a copy with nothing written by hand; main is
+      refused, see the realigned frames below). x86 showed two faults of dread.sysrun: the branch at a moved
+      function's old entry was taken for 4 bytes (x86's jmp rel32 has 5, RISC-V's auipc and jalr 8, a narrow
+      Thumb b 2: placement.json says branch_bytes now, and via_bytes for a trampoline, which the run counted
+      as code both images share), and every odd address a block ended at was taken for a mark (the reset,
+      an exception, a system call), where on x86 a block may end: the C behind such a branch counted as a
+      second entry, and the rebuilt image's clock ran ahead (gizmo-i386's hand-written build by 224 units,
+      parse_uint's four calls). The marks are odd and below MARKS_END (4 KiB) since; the run refuses code
+      there on a core whose instructions may start at odd addresses. tests/test_x86.py: a moved put
+      entered three times (fails with either old rule, in the Python hook and in the C hook), gizmo-i386's
+      boot and a planted bug, the lift check's whole image.
+    - [ ] Interrupts on x86: the IDT (enter_interrupt: eflags, cs and eip pushed, on at the gate's handler),
+      iret (exception_return), a controller (the RV32 build's model at 0x10002000, or the PC's PIC and
+      the APIC for the bench's IA32 builds), the instructions behind which Unicorn ends a block (sti, popfd:
+      ends_block, to measure); then gizmo-i386's keys and config scenarios (bytes from the UART reach main's
+      ring through its interrupt) and the timer.
+    - [ ] sysrecord on x86: a recorded call's stack arguments start behind the return address
+      (entry_stack_args: dread.sysrecord counts the frame's words from sp, so the return address would be
+      the first argument), and the loop answers' call_args the same.
     - [ ] The extents' owner table (Program.owners) counts halfwords: on x86 the halfword in which one
       function ends and the next begins at an odd byte counts as the next one's, so a load from the
       first one's last byte would count as a read of another function's code (not confirmed to happen:

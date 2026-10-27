@@ -1,7 +1,7 @@
 # Gizmo 1000, i386 build: DREAD's test firmware (examples/gizmo/fw), built with the host's GCC (-m32) for
 # a 32-bit x86 core in flat protected mode (integer only, not position-independent). Not a real device.
-# The tables in config/ come from the ELF (`make -C ../fw targets`). No interrupts are wired yet, so no
-# device models or scenarios.
+# The tables in config/ come from the ELF (`make -C ../fw targets`). No interrupts are wired yet: the
+# system run has the UART and the boot scenario.
 
 [target]
 name = "gizmo-i386"
@@ -38,3 +38,18 @@ cross = ""                      # the host's gcc, with -m32
 cflags = ["-m32", "-march=i686", "-mno-80387", "-mno-mmx", "-mno-sse", "-fno-pic", "-fno-pie", "-Os",
           "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common",
           "-fno-asynchronous-unwind-tables", "-fno-stack-protector"]
+
+# Devices for the system run (dread sysrun): gizmo's serial port (examples/gizmo/fw/gizmo.h, GIZMO_I386).
+# No interrupt reaches the core yet (no controller nor IDT model), so a byte sent to the UART never
+# reaches main's ring: the boot scenario only.
+[models.uart]
+kind = "uart"
+base = 0x10000000
+data = 0x0
+status = 0x4
+tx_ready = 0x1
+rx_ready = 0x2
+
+[scenarios.boot]
+until = {uart = "READY"}
+limit = 5_000_000

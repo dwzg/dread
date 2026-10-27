@@ -1798,6 +1798,8 @@ def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path,
     accepted = lift.check(target, image, names, out=lines.append, jobs=4)
     assert sorted(accepted) == sorted(names), lines
     assert build.read_names(image.table("lifted")) == sorted(names)
+    # (the boot scenario on the image with all of them built: dread.sysrun on x86 since 2026-10-27)
+    assert any("the whole image agrees" in line for line in lines), lines
     monkeypatch.setitem(lift_x86.CONDITIONS, "e", "!zf")
     lines = []
     accepted = lift.check(target, image, names, out=lines.append, jobs=4)
@@ -1909,3 +1911,156 @@ def test_gizmo_i386_readable_c_passes_its_gate(tmp_path):
     # the buffer, a stack parameter read whole, is the parameter and a pointer: dread.tidy stack_params)
     assert head and head.group(1) in ("s32", "u32") and head.group(2).startswith("eax"), head
     assert head.group(3).rstrip().endswith("*"), head.group(0)
+
+
+# ---- the system run (dread.sysrun) ----
+
+MOVED_C = r"""
+typedef unsigned int u32;
+#define UART_DATA   (*(volatile u32 *)0x10000000u)
+#define UART_STATUS (*(volatile u32 *)0x10000004u)
+
+__asm__(".text\n.globl _start\n.type _start, @function\n_start:\n\tmovl $0x20010000, %esp\n\tcall main\n"
+        "1:\thlt\n\tjmp 1b\n.size _start, . - _start\n");
+
+__attribute__((noinline, aligned(4))) void put(u32 c)
+{
+    while (!(UART_STATUS & 1u))
+        ;
+    UART_DATA = c;
+}
+
+int main(void)
+{
+    put('a');
+    put('b');
+    put('c');
+    for (;;)
+        ;
+}
+"""
+
+# put written anew, longer than the original (the nops), so that the overlay moves it and leaves a jmp at
+# its old entry
+MOVED_SRC = r"""
+typedef unsigned int u32;
+#define UART_DATA   (*(volatile u32 *)0x10000000u)
+#define UART_STATUS (*(volatile u32 *)0x10000004u)
+
+void put(u32 c)
+{
+    __asm__ volatile ("nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop; nop");
+    while (!(UART_STATUS & 1u))
+        ;
+    UART_DATA = c;
+}
+"""
+
+MOVED_TOML = """
+[models.uart]
+kind = "uart"
+base = 0x10000000
+data = 0x0
+status = 0x4
+tx_ready = 0x1
+rx_ready = 0x2
+
+[scenarios.abc]
+until = {uart = "abc"}
+limit = 1_000_000
+"""
+
+
+def _both_runs(target, payload, placement):
+    from dread import sysrun
+    image = target.image()
+    built = [n for n, p in placement.items() if p["placement"] != "helper"]
+    a = sysrun.run_image(target, image, image.payload(), next(iter(target.scenarios.values())), built=built)
+    b = sysrun.run_image(target, image, payload, next(iter(target.scenarios.values())), placement=placement)
+    return a, b
+
+
+def test_the_system_run_counts_a_function_entered_through_its_old_entry_once(tmp_path, monkeypatch):
+    """put's C is longer than the original, so the overlay moves it and writes jmp rel32 at its old entry:
+    5 bytes (placement.json's branch_bytes), ending at an odd address (put's entry is even). main calls
+    put three times through that entry; each call is one function entered, as in the original, so both
+    images' shared clocks agree. Until 2026-10-27 dread.sysrun took the branch for 4 bytes, and took
+    every odd address the block before ended at for a mark (a reset, an exception), so the C behind the
+    branch counted as a second entry: the first call in the Python hook, the others in the C hook
+    (dread.fasthooks), which decides the blocks it has seen."""
+    import json
+    from dread import build, fasthooks, sysrun
+    from dread.target import Target
+    target = small_i386(tmp_path, MOVED_C, name="moved")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    root = tmp_path / "moved"
+    toml = (root / "dread.toml").read_text()
+    assert toml.count("\nstack = ") == 1
+    (root / "dread.toml").write_text(toml.replace("\nstack = ", "\nio = [[0x10000000, 0x10010000]]\nstack = ") + MOVED_TOML)
+    (root / "src").mkdir(exist_ok=True)
+    (root / "src" / "put.c").write_text(MOVED_SRC)
+    target = Target.load(str(root))
+    image = target.image()
+    out = build.build(target, image, quiet=True)
+    with open(os.path.join(os.path.dirname(out), "placement.json")) as f:
+        placement = json.load(f)["functions"]
+    put = placement["put"]
+    assert put["branch"] and put["branch_bytes"] == 5 and (put["entry"] + 5) % 2 == 1, put
+    with open(out, "rb") as f:
+        payload = f.read()
+    for python_only in (False, True):
+        if python_only:
+            monkeypatch.setattr(fasthooks, "usable", lambda engine: False)
+        a, b = _both_runs(target, payload, placement)
+        assert a.how.startswith("until") and b.how.startswith("until"), (a.how, b.how)
+        assert a.reports["uart"]["sent"] == "abc"
+        assert sysrun.compare(a, b) == [] and a.log == b.log
+        assert a.clock == b.clock, (python_only, a.clock, b.clock)
+        assert a.entered[put["entry"]] == 3
+
+
+def test_the_marks_lie_below_every_x86_block_end(tmp_path):
+    """dread.sysrun's marks (the reset, an exception, a system call) are odd values below MARKS_END, the C
+    hook's MARKS_END is the same, and an exception number that would reach it has no mark."""
+    from dread import sysrun
+    assert sysrun.is_mark(sysrun.CAME_RESET) and sysrun.is_mark(sysrun.CAME_SYSCALL)
+    assert sysrun.is_mark(sysrun.came_exception(255)) and sysrun.came_exception(255) < sysrun.MARKS_END
+    assert not sysrun.is_mark(0x08000241)           # (an x86 block end at an odd address)
+    with pytest.raises(ValueError):
+        sysrun.came_exception(sysrun.MARKS_END >> 2)
+    import re
+    with open(os.path.join(os.path.dirname(sysrun.__file__), "fasthooks.c")) as f:
+        defined = re.search(r"^#define MARKS_END (0x[0-9a-fA-F]+)ULL", f.read(), re.M)
+    assert defined and int(defined.group(1), 16) == sysrun.MARKS_END
+
+
+def test_gizmo_i386_boots_alike_and_a_planted_bug_shows(tmp_path):
+    """dread sysrun on gizmo-i386 (the UART, the boot scenario): with its hand-written C (parse_uint moved
+    behind the image, checksum in the room it freed) both images boot to READY with the same device log
+    and shared clock; a digit one too high in fmt_hex changes what the UART sends."""
+    if not _compiles("i386", tmp_path):
+        pytest.skip("needs the host's gcc with -m32")
+    import json
+    from dread import build, sysrun
+    from dread.target import Target
+    from test_runner import src_copy
+    target = Target.load(gizmo_dir("i386"))
+    image = target.image()
+    runs = {}
+    for name, replace in (("as written", None),
+                          ("planted", ("out[i] = HEX_DIGITS[v & 15];", "out[i] = HEX_DIGITS[(v + 1) & 15];"))):
+        src = src_copy(tmp_path / name, "i386", replace)
+        out = build.build(target, image, src=str(src), out=str(tmp_path / name / "recon"), quiet=True)
+        with open(os.path.join(os.path.dirname(out), "placement.json")) as f:
+            placement = json.load(f)["functions"]
+        with open(out, "rb") as f:
+            runs[name] = _both_runs(target, f.read(), placement)
+    a, b = runs["as written"]
+    assert a.how.startswith("until") and b.how.startswith("until"), (a.how, b.how)
+    assert a.reports["uart"]["sent"].endswith("READY") and "GIZMO 1000" in a.reports["uart"]["sent"]
+    assert sysrun.compare(a, b) == [] and a.clock == b.clock and a.log == b.log
+    a, b = runs["planted"]
+    diff = sysrun.compare(a, b)
+    assert diff and diff[0].startswith("device logs differ"), diff
+    assert "crc" in a.reports["uart"]["sent"] and a.reports != b.reports
