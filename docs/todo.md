@@ -6457,8 +6457,57 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
   - [ ] mul64's width: its written cases compare edx, which no caller in the image reads, so the lift
     check takes it as one word (the dread.regflow width of a function nobody calls).
   - [ ] The parity and auxiliary flags (jp, setnp, lahf, pushfd: refused), string instructions with a
-    compare (repe cmpsb), the stack's alignment in main (and esp, -16), then a larger open-source target
-    (a FreeRTOS port for i386?).
+    compare (repe cmpsb), the stack's alignment in main (and esp, -16).
+  - [ ] A larger target: FreeRTOS's IA32 port with its demo for Intel's Galileo Gen 2
+    (FreeRTOS/Demo/IA32_flat_GCC_Galileo_Gen_2: the kernel, the port's assembly, fifteen of the common
+    test task files, the demo's own support code), integer only (no flop.c, configSUPPORT_FPU 0).
+    First look on 2026-10-27, a trial build with the host's GCC -Os (not yet a bench recipe):
+    - [x] dread import-elf and dread asm on it: the import took a global label without a type in front
+      of _start for a function (the multiboot header: data in .text), whose bytes read as a call far out
+      of the image, and called_without_function then decoded outside the image and stopped. A label
+      without a type that nothing points at and whose bytes do not hold together as code is data now
+      (elfimport.data_labels); the program database decodes a code range again from every function entry
+      in it and takes bytes that do not decode for no code (the header's bytes changed with the layout,
+      and the walk across them stopped the whole program); and dread asm --verify writes raw from the
+      start what the assembler encodes otherwise (x86's padding nops: 66 90, lea esi, [esi + 0]) and,
+      while a region has a length change, takes nothing but its first one in a pass: the listing went
+      from 808 raw instructions after sixteen passes to 13 after two (a far jump capstone writes as GNU
+      as does not read, eleven padding nops, a near jmp with a short distance: GNU as keeps a jump to a
+      global symbol at 32 bits).
+    - [ ] A bench recipe (bench/freertos.toml, project ia32): the host's 32-bit libgcc does not do,
+      because CachyOS builds its packages for x86-64-v3 and its __udivdi3 uses lzcnt, shlx and shrx,
+      which the Galileo's Quark (a Pentium) never runs: Debian's gcc-i686-linux-gnu in a toolchain
+      image. The demo needs patches: the full demo (mainCREATE_SIMPLE_BLINKY_DEMO_ONLY 0), stats
+      formatting off (kernel V11 asks for trace facility or run-time stats with it; the demo has
+      neither), SIZE_MAX (its own stdint.h has none), the port's ISR_Support.h as before a formatter
+      broke its assembly in 2023 (% eax, ".\n if": kernel commit 01820d3ed has it intact, the same code
+      once comments and spaces are left out), no -fdata-sections (the demo's linker script collects
+      .bss alone, so its startup would clear nothing), and room for C that moves: its linker script
+      puts .data right behind .text, and the first lift check dropped 138 of 293 functions for room.
+      The bench then needs a patch that takes a file as of another commit, and a build key for the
+      compiler DREAD compiles C with on the host (dread_compiler takes a cross prefix from cc).
+    - [ ] The lift check with room (.data moved 256 KiB away): 102 of 293 accepted, 109 refused, 82
+      dropped. What it showed, largest first:
+      - [ ] GCC's local calling convention: a static function whose address is not taken gets its first
+        three arguments in eax, edx and ecx (regparm(3)), prvAddCurrentTaskToDelayedList(eax, edx) say;
+        the lifter takes eax alone and refuses those that read edx or ecx (15) and their callers (about
+        25). Each lifted file has one convention (dread.build's REGPARM line): one with regparm(3) for
+        such a function, and its callees' declarations their own.
+      - [ ] Calls of a variadic function: the words a call passes come from the callee's stack analysis,
+        which for printf sees the format alone; the original pushes the format, the file and the line,
+        the C passed one word, printf read a file name from elsewhere and prints faulted (323 of the
+        first round's failing cases, every one through vAssertCalled). Where the callee walks its
+        stack arguments through a pointer (va_start: "takes the address of a stack argument"), the call
+        passes what the call site stored since its previous call.
+      - [ ] int N (16): FreeRTOS's yield (int 0x50, portYIELD); as RISC-V's ecall and ARM's svc, a logged
+        system call in the emulator (Unicorn reports int N and CPU exceptions alike: the hook tells int N
+        by its bytes in front of eip) and inline assembly in the C.
+      - [ ] cli and sti (7: interrupts masked around the critical sections), pushes of every register,
+        iret, in and out, rdtsc (the port's assembly and the support code: refused, rightly for now),
+        rep movsd and bt (2 each), the address of a stack argument taken (printf, sprintf: va_start).
+      - [ ] What remains of the failing cases once the above is done (52 cases with other memory, 15
+        with another result and other stub calls in the first round), and the case generation errors
+        (10).
 - [ ] AVR on the emulator interface the MSP430 work brings (clang builds it, Unicorn does not run
   it): an interpreter behind it, Harvard memory (program and data spaces) in the program database.
 - [ ] Z80 (low priority; the user, 2026-10-19: "Z80 and later 8051, but both low in prio"): an engine

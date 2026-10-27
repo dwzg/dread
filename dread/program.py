@@ -187,13 +187,13 @@ class Program:
         self.isa = self.arch.isa
         self.code = {}                  # instruction address -> (length, isa)
         self.ranges = read_code_ranges(self.image.table("code_ranges"), self.isa, self.arch.isas())
+        rows = sorted(read_functions(self.image.table("functions")))
+        entries = [entry for entry, _, _ in rows]
         for start, end, isa in self.ranges:
-            self._add_range(start, end, isa)
+            self._add_range(start, end, isa, entries)
         self.functions = []
         self.by_name = {}
         self.by_entry = {}
-        rows = sorted(read_functions(self.image.table("functions")))
-        entries = [entry for entry, _, _ in rows]
         for i, (entry, name, size) in enumerate(rows):
             nxt = entries[i + 1] if i + 1 < len(entries) else None
             fn = self._function(name, entry, size, nxt)
@@ -237,25 +237,36 @@ class Program:
 
     # ---- code ----
 
-    def _add_range(self, start, end, isa):
+    def _add_range(self, start, end, isa, entries=()):
+        """The instructions of a code range, decoded from its start and again from every function entry
+        inside it: data inside a range (x86: FreeRTOS's IA32 start-up has its multiboot header under a
+        label of its own in front of _start) must not leave the walk out of step at the next entry, as
+        it did when a range was one walk. Bytes that do not decode end their piece (they are no code up
+        to the next entry), and an instruction that would run across the next entry is none."""
         step = self.arch.min_insn(isa)
         if start % step:
             raise TargetError("%s: range %s-%s is not aligned for %s"
                               % (self.image.table("code_ranges"), h(start), h(end), isa))
-        a = start
-        while a < end:
-            if isa == "a32":
-                n = 4
-            else:
-                try:            # (x86 needs up to max_insn bytes to tell a length; the others two; at
-                    # most what the range has left: a one-byte ret that ends the image, whose ELF
-                    # Ubuntu's linker ends right there, read a byte past it)
-                    n = self.arch.insn_length(self.read(a, min(getattr(self.arch, "max_insn", 2),
-                                                               max(end - a, step))), isa)
-                except TargetError:
-                    raise TargetError("code range %s-%s lies outside the image" % (h(start), h(end)))
-            self.code[a] = (n, isa)
-            a += n
+        if not (self.in_image(start, 1) and self.in_image(end - 1, 1)):
+            raise TargetError("code range %s-%s lies outside the image" % (h(start), h(end)))
+        cuts = sorted({e for e in entries if start < e < end})
+        for lo, hi in zip([start] + cuts, cuts + [end]):
+            a = lo
+            while a < hi:
+                if isa == "a32":
+                    n = 4
+                else:
+                    try:        # (x86 needs up to max_insn bytes to tell a length; the others two; at
+                        # most what the range has left: a one-byte ret that ends the image, whose ELF
+                        # Ubuntu's linker ends right there, read a byte past it)
+                        n = self.arch.insn_length(self.read(a, min(getattr(self.arch, "max_insn", 2),
+                                                                   max(end - a, step))), isa)
+                    except TargetError:
+                        break
+                if a + n > hi and hi != end:
+                    break
+                self.code[a] = (n, isa)
+                a += n
 
     def _function(self, name, entry, size, nxt):
         isa = self.code[entry][1] if entry in self.code else self.isa

@@ -14,8 +14,12 @@ raw instruction (its bytes).
 `--verify` assembles the listing, links it at the image's base and compares it with the image. An
 instruction the assembler encodes differently, or rejects, is added to the image's `asm_raw_words`
 table and written as raw bytes from then on; the loop repeats until the rebuild is identical. An
-instruction assembled at another length shifts everything behind it, so only the first mismatch of
-a region whose next instruction does not match either is taken per pass.
+instruction assembled at another length shifts everything behind it, and relative branches across it
+come out with other bytes: while there is one, a pass takes the first length change of each region
+alone, and the instructions of their own length that came out differently only in a pass without
+any. A layer that has several encodings of one instruction (x86) asks for a precheck: before the
+first pass, every instruction whose bytes do not depend on where it lies is assembled once per
+distinct text, and those the assembler encodes otherwise are written raw from the start.
 
 The syntax is the architecture layer's (`arch.asm()`): GNU as for ARM (Thumb branches and literal
 loads carry an explicit width, `.w` or `.n`), clang's integrated assembler for RISC-V
@@ -319,23 +323,102 @@ def build(target, base, outdir, builddir, arch=None):
         return f.read(), r.stderr
 
 
+PRECHECK_TRIES = 8  # assembler runs of precheck: each takes the texts the assembler rejected out
+
+
+def precheck(listing, target, builddir, arch=None):
+    """Make raw, before the first pass, the instructions whose bytes do not depend on where they lie
+    and that the assembler encodes otherwise: every instruction with text operands (no label) is
+    assembled once per distinct text, all in one batch, and one whose bytes differ from the image's,
+    or whose text the assembler rejects, is written as raw bytes from the start. A layer asks for it
+    (its Asm's precheck): x86 has several encodings of one instruction (a nop with a prefix, an
+    explicit zero displacement, an immediate in its long form) that GNU as writes shorter, and each
+    shortening shifts everything behind it, which the verify loop could only take one at a time
+    (FreeRTOS's IA32 port pads with such nops). Returns how many it made raw; None when the
+    assembler failed for another reason (the verify loop then finds them)."""
+    texts = {}
+    for st, (mnem, ops, comment) in listing.ins.items():
+        if isinstance(ops, str):
+            texts.setdefault((listing.code[st][2], "\t%-7s %s" % (mnem, ops)), []).append(st)
+    if not texts:
+        return 0
+    os.makedirs(builddir, exist_ok=True)
+    src, obj = os.path.join(builddir, "precheck.s"), os.path.join(builddir, "precheck.o")
+    compiler, arch = target.compiler, arch or target.arch
+    extra_as = arch.assembler_flags(compiler) if hasattr(arch, "assembler_flags") else []
+    made = 0
+
+    def take(st):
+        listing.raw.add(st)
+        del listing.ins[st]
+
+    for _ in range(PRECHECK_TRIES):
+        order, lines, line_of, isa = sorted(texts), [], {}, None
+        for i, (kind, text) in enumerate(order):
+            if kind != isa:
+                lines += listing.syntax.prelude(kind) if isa is None else listing.syntax.switch(kind)
+                isa = kind
+            lines.append("P_%d:" % i)
+            lines.append(text)
+            line_of[len(lines)] = (kind, text)
+        lines.append("P_end:")
+        with open(src, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        r = subprocess.run(compiler.assembler() + extra_as + ["-o", obj, src], capture_output=True, text=True)
+        if r.returncode == 0:
+            break
+        rejected = {line_of.get(int(n)) for n in re.findall(r"precheck\.s:(\d+):(?:\d+:)? (?:Error|error)", r.stderr)}
+        rejected.discard(None)
+        if not rejected:
+            return None
+        for key in rejected:
+            for st in texts.pop(key):
+                take(st)
+                made += 1
+    else:
+        return None
+    from dread.elf import Elf
+    elf = Elf(obj)
+    text_sec = elf.section(".text")
+    body, index = elf.data(text_sec), elf.sections.index(text_sec)
+    at = {s.name: s.value for s in elf.symbols if s.name.startswith("P_") and s.shndx == index}
+    for i, key in enumerate(order):
+        got = body[at["P_%d" % i]:at["P_%d" % (i + 1)] if i + 1 < len(order) else at["P_end"]]
+        for st in texts[key]:
+            if got != listing.data[st - listing.base:st - listing.base + listing.code[st][1]]:
+                take(st)
+                made += 1
+    return made
+
+
 def mismatches(listing, binary):
-    """The stored addresses of instructions that came out differently: every one whose next
-    instruction is right again (same length, other bytes), and per region the first of the rest
-    (a length change shifts what follows, so the rest is not evidence yet)."""
+    """The stored addresses of instructions that came out differently. An instruction assembled at
+    another length shifts everything behind it in its region, and every relative branch across the
+    shift then comes out with other bytes at its own length: while a region has a length change, a
+    pass takes the first length change of each region alone (what the assembler made there decodes
+    at another length), and the instructions of the same length that came out differently only in
+    a pass without any (x86: a call in front of a shortened nop, to a function behind it, was taken
+    as raw with every other such call, as were instructions behind a shift whose next bytes matched
+    by chance)."""
     data, base = listing.data, listing.base
-    bad, first = set(), {}
+    same, first = set(), {}
     for st in sorted(listing.ins):
-        length = listing.code[st][1]
+        region = st // 0x10000
+        if region in first:
+            continue
+        run, length, isa = listing.code[st]
         o = st - base
         if binary[o:o + length] == data[o:o + length]:
             continue
-        nxt = st + length
-        if nxt in listing.code and binary[nxt - base:nxt - base + 2] == data[nxt - base:nxt - base + 2]:
-            bad.add(st)
+        try:
+            got = listing.arch.decode(binary[o:o + getattr(listing.arch, "max_insn", 4)], run, isa)
+        except Exception:
+            got = None
+        if got is not None and got.size == length:
+            same.add(st)
         else:
-            first.setdefault(st // 0x10000, st)
-    return bad | set(first.values())
+            first[region] = st
+    return set(first.values()) if first else same
 
 
 def main(argv=None):
@@ -365,6 +448,10 @@ def main(argv=None):
     for attempt in range(1, args.passes + 1):
         listing = Listing(prog, set(raw), title)
         listing.decode()
+        if attempt == 1 and args.verify and getattr(listing.syntax, "precheck", False):
+            made = precheck(listing, target, os.path.join(builddir, "precheck"), image.arch)
+            if made:
+                print("  %d instructions the assembler encodes otherwise, written raw from the start" % made)
         listing.write(outdir, args.region)
         raw = listing.raw
         print("pass %d: %d instructions, %d raw, %d functions, %d annotated addresses"

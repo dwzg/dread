@@ -71,7 +71,7 @@ generator, the lifter, the reading aids)
 
 | Method | What it gives |
 |---|---|
-| `asm()` | the assembler's dialect: comment character, data directives, prelude, instruction-set switches, raw bytes, function labels, and each instruction's operands with labels for places (`ArmAsm`: GNU as; `RiscVAsm`: llvm-mc with `.option exact`) |
+| `asm()` | the assembler's dialect: comment character, data directives, prelude, instruction-set switches, raw bytes, function labels, and each instruction's operands with labels for places (`ArmAsm`: GNU as; `RiscVAsm`: llvm-mc with `.option exact`); `precheck = True` where one instruction has several encodings that the assembler writes differently (x86: a nop with a prefix, an explicit zero displacement): `dread asm --verify` then assembles every instruction whose bytes do not depend on where it lies once per text, before its first pass, and writes those that come out otherwise raw from the start (`dread.mkasm.precheck`) |
 
 **Emulation** (Unicorn, or an engine of DREAD's own: below)
 

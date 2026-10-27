@@ -435,6 +435,61 @@ def write_startup(toml_path, image_name, copies, key="startup", block=None):
     return True
 
 
+def untyped_entries(elf):
+    """The entries entry_labels made from global or weak labels without a type (not from functions
+    declared without a size), but the ELF's entry: those data_labels may take back."""
+    typed = {elf.code_value(s.value) for s in elf.symbols if s.kind == STT_FUNC}
+    untyped = {s.value for s in elf.symbols if s.kind == STT_NOTYPE and s.bind in (STB_GLOBAL, STB_WEAK)}
+    return {e for e, _, _ in entry_labels(elf)} & untyped - typed - {elf.code_value(elf.entry)}
+
+
+def data_labels(target, image, elf, candidates):
+    """[(start, end)] of the untyped labels among candidates (untyped_entries) that name data in an
+    executable section rather than a function: nothing points at one (no call or jump of other code
+    goes there, no other instruction holds its address as an immediate, no word the sections load
+    equals it outside its own bytes) and its bytes do not hold together as code (an instruction that
+    does not decode, so that its instructions do not fill it, or a call or jump out of the image).
+    FreeRTOS's IA32 start-up puts the multiboot
+    header between a jump and _start under a global label without a type (_mboot_hdr); as a function
+    it read as code calling 0x24101205. A label nothing points at that reads as code stays (dead
+    code, or code entered from elsewhere)."""
+    from dread.program import Program
+    if not candidates:
+        return []
+    try:
+        program = Program(target, image)
+    except Exception:
+        return []
+    fns = {e: program.by_entry[e] for e in candidates if e in program.by_entry}
+    own = {a: e for e, fn in fns.items() for a in fn.insns}
+    runs = [(c.run, c.run + c.size) for c in program.copies if c.kind == "code"]
+    pointed = set()
+    broken = {e for e, fn in fns.items() if sum(program.insn_size(a) for a in fn.insns) < fn.size}
+    for fn in program.functions:
+        for a in fn.insns:
+            insn = program.insn(a)
+            if insn is None:
+                broken.add(own.get(a))
+                continue
+            kind, dest, _ = program.arch.flow(insn)
+            refs = set(program.arch.immediates(insn))
+            if kind in ("call", "jump") and isinstance(dest, int):
+                t = program.code_address(dest)
+                refs.add(t)
+                if not program.in_image(t, 1) and not any(lo <= t < hi for lo, hi in runs):
+                    broken.add(own.get(a))
+            pointed |= {r for r in refs if r in fns and own.get(a) != r}
+    for s in elf.sections:
+        if not (s.alloc and not s.nobits and s.size):
+            continue
+        body = elf.data(s)
+        for i in range((-s.addr) % 4, len(body) - 3, 4):
+            v = int.from_bytes(body[i:i + 4], "little")
+            if v in fns and not v <= s.addr + i < v + max(fns[v].size, 1):
+                pointed.add(v)
+    return sorted((e, e + fns[e].size) for e in fns if e not in pointed and e in broken)
+
+
 def called_without_function(target, image):
     """[(entry, name, size)] for the targets of direct calls that lie in code no function holds: a
     compiler's shared code with a local label only, called with bl from several functions (a reader
@@ -456,7 +511,8 @@ def called_without_function(target, image):
             if kind != "call" or not isinstance(dest, int):
                 continue
             t = program.code_address(dest)
-            if t in out or program.function_at(t) is not None or program.insn(t) is None:
+            if t in out or not program.in_image(t, 1) or program.function_at(t) is not None or \
+                    program.insn(t) is None:
                 continue
             end = next((e for e in entries if e > t), None)
             for lo, hi, _ in program.ranges:
@@ -542,6 +598,20 @@ def main(argv=None):
     if args.write_startup and (copies or fixed or free):    # (read again: the program then knows code that runs
         target = tgt.Target.load(target.file)               # from RAM; a dread.toml without the startup list
         image = target.image(image.name)                    # made the walk below read 0x40000000 outside the image)
+    drops = data_labels(target, image, elf, untyped_entries(elf))
+    if drops:
+        lows = {lo for lo, _ in drops}
+        names = {e: n for e, n, _ in functions}
+        functions = [f for f in functions if f[0] not in lows]
+        symbols = sorted([y for y in symbols if not (y[0] == "f" and y[1] in lows)] +
+                         [("d", lo, names[lo]) for lo in lows], key=lambda y: (y[0] != "f", y[1]))
+        for lo, hi in drops:
+            code = [piece for a, b, k in code
+                    for piece in ([(a, lo, k), (hi, b, k)] if a < hi and lo < b else [(a, b, k)])
+                    if piece[0] < piece[1]]
+        write_tables(image, functions, code, symbols)
+        print("%d labels without a type that nothing points at and that do not read as code, data: %s"
+              % (len(drops), ", ".join(names[lo] for lo, _ in drops)))
     called = called_without_function(target, image)
     if called:
         write_tables(image, sorted(functions + called), code, symbols)

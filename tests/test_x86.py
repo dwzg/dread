@@ -117,6 +117,105 @@ def _compiles(variant, tmp_path):
                           capture_output=True).returncode == 0
 
 
+HEADER_S = r"""
+    .text
+    .globl _start
+_start:
+    jmp     go
+    .p2align 2
+    .globl hdr                  # data under a global label without a type, as a multiboot header is
+hdr:
+    .byte   0xe8                # (read as code: a call far out of the image)
+    .long   0x40000000
+    .long   0x1badb002, 3, hdr
+    .globl go
+go:
+    call    helper
+    pushl   $isr                # (isr: known by its address alone)
+    call    install
+    addl    $4, %esp
+1:  hlt
+    jmp     1b
+    .globl helper
+helper:
+    xorl    %eax, %eax
+    .p2align 4                  # padding the assembler writes as a nop of several bytes
+    incl    %eax
+    ret
+    .globl install
+install:
+    ret
+    .globl isr
+isr:
+    iret
+    .globl dead                 # (nothing points at it, and it reads as code)
+dead:
+    movl    $1, %eax
+    ret
+"""
+
+HEADER_TOML = """[target]
+name = "header-i386"
+title = "Untyped labels and padding (i386)"
+
+[arch]
+name = "x86"
+isa = "i386"
+
+[image.main]
+original = "original/image.bin"
+base = 0x00100000
+limit = 0x00110000
+entry = "_start"
+
+[memory]
+regions = [
+    {name = "image", base = 0x00100000, size = 0x10000, kind = "rom"},
+    {name = "ram", base = 0x00200000, size = 0x10000},
+    {name = "scratch", base = 0x00300000, size = 0x10000},
+]
+stack = {top = 0x00210000, size = 0x2000}
+sentinel = 0x00f00000
+scratch = {base = 0x00300000, size = 0x10000}
+
+[compiler]
+cross = ""
+cflags = ["-m32", "-march=i686", "-fno-pic", "-fno-pie", "-Os", "-ffreestanding"]
+"""
+
+
+def test_untyped_labels_padding_and_the_listing(tmp_path, capsys):
+    """Assembly marks labels as functions without a type, and x86 has no mapping symbols: dread
+    import-elf makes data of one that nothing points at and that does not read as code (a header under
+    a global label: its first bytes call 0x40000000 + hdr), and keeps one known by its address alone
+    (pushl $isr) and one nothing points at that reads as code; the program database decodes again from
+    each function's entry (go follows the header); and dread asm writes the padding nop of several
+    bytes raw from the start (its precheck), so that the listing rebuilds in its first pass."""
+    if not _compiles("i386", tmp_path):
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import elfimport, mkasm
+    from dread.program import Program
+    from dread.target import Target
+    root = tmp_path / "t"
+    (root / "original").mkdir(parents=True)
+    (root / "dread.toml").write_text(HEADER_TOML)
+    source, elf = tmp_path / "header.S", root / "original" / "image.elf"
+    source.write_text(HEADER_S)
+    subprocess.run(["gcc", "-m32", "-nostdlib", "-static", "-Wl,--build-id=none", "-Wl,-Ttext=0x100000",
+                    "-o", str(elf), str(source)], check=True)
+    assert elfimport.main([str(elf), "--target", str(root), "--payload", str(root / "original" / "image.bin")]) == 0
+    out = capsys.readouterr().out
+    assert "data: hdr" in out, out
+    target = Target.load(str(root))
+    program = Program(target, target.image())
+    assert sorted(fn.name for fn in program.functions) == ["_start", "dead", "go", "helper", "install", "isr"]
+    go = program.by_name["go"]
+    assert go.insns[0] == go.entry and program.insn(go.entry).mnemonic == "call"
+    assert mkasm.main(["--target", str(root), "--verify"]) == 0
+    out = capsys.readouterr().out
+    assert "written raw from the start" in out and "pass 2" not in out, out
+
+
 @pytest.mark.parametrize("which", ["i386", "i386clang"])
 def test_gizmo_i386_rewritten_functions_agree(which, tmp_path):
     """The rewritten C over the original, every argument on the stack: functions that do not fit move

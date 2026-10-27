@@ -740,6 +740,8 @@ class X86Asm:
 
     comment = "#"
     directives = {"word": ".long", "half": ".short", "byte": ".byte", "text": ".asciz"}
+    precheck = True                     # (dread.mkasm.precheck: a nop with a prefix, an explicit zero
+                                        # displacement, which GNU as writes shorter)
 
     def __init__(self, arch):
         self.arch = arch
