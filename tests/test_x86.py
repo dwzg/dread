@@ -712,6 +712,64 @@ def test_a_stop_logs_the_registers_its_callee_takes(tmp_path):
     assert lift.check(target, image, ["guard"], out=lines.append, jobs=2) == ["guard"], lines
 
 
+PUSHARG_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[8];
+
+__attribute__((noinline)) void put(volatile u32 *dst, u32 v, u32 n)
+{
+    u32 i;
+    for (i = 0; i < n; i++)
+        dst[i] = v;
+}
+
+static __attribute__((noinline)) void fill(u32 v, volatile u32 *dst)
+{
+    put(dst, v, 2);
+}
+
+u32 user3(u32 v)
+{
+    fill(v + 1, &sink[2 + (v & 1)]);
+    fill(v ^ 5, &sink[4 + (v & 1)]);
+    return sink[3];
+}
+
+void _start(void)
+{
+    sink[1] = user3(4);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_register_pushed_as_an_argument_is_read(tmp_path):
+    """fill takes its pointer in edx (regparm(3)) and only pushes it, as put's first argument: dread.regflow
+    counts that push as a read of edx (a push into a word the call takes; GCC's padding pushes in front
+    of the arguments stay no reads), so fill takes eax, edx and ecx in the C and user3's C passes edx.
+    regflow counted no push as a read, and the C of FreeRTOS's xQueueReceive passed its buffer to
+    prvCopyDataFromQueue nowhere."""
+    target = small_i386(tmp_path, PUSHARG_C, "pusharg")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, regflow
+    from dread.program import Program
+    image = target.image()
+    program = Program(target, image)
+    fill = program.by_name["fill"]
+    pushes = [program.insn(a) for a in regflow.Analysis(program).argument_pushes(fill)]
+    if not any(i.op_str == "edx" for i in pushes):
+        pytest.skip("this GCC did not push fill's edx as put's argument")
+    flow = regflow.load(target, image, program)
+    assert {"eax", "edx"} <= set(flow.read_regs("fill")), flow.read_regs("fill")
+    lifter = lift.make_lifter(program, flow)
+    assert lifter.reg_args(fill) == ("eax", "edx", "ecx")
+    assert "fill(eax, edx, ecx)" in lifter.lift(program.by_name["user3"]).text
+    lines = []
+    assert sorted(lift.check(target, image, ["fill", "user3"], out=lines.append, jobs=2)) == ["fill", "user3"], lines
+
+
 PICK_C = r"""
 typedef unsigned int u32;
 volatile u32 sink[4];

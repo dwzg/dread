@@ -297,6 +297,8 @@ class X86Lifter(lift.Lifter):
             except Refused:
                 found = {}
             reads = set().union(*found.values()) if found else set()
+            if self.flow:                   # (one it only pushes as a call's stack argument: dread.regflow's
+                reads |= set(self.flow.read_regs(fn.name))      # argument pushes; entry_states counts no push)
             cache[key] = REGPARM3 if reads & {"edx", "ecx"} else ARGS
         return cache[key]
 

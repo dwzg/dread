@@ -6571,15 +6571,20 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         (prvAddCurrentTaskToDelayedList passed vListInsert a word it never stored); pop into memory
         through esp, whose address three places formed three ways, is refused (no compiler writes it).
         tests/test_x86.py: isfull, wrap, spill (each fails without its fix).
-      - [ ] A push of a register that a call takes as a stack argument reads that register: FreeRTOS's
-        prvCopyDataFromQueue takes its buffer in edx (regparm(3)) and only pushes it, as memcpy's first
-        argument; dread.regflow counts no push as a read (made for ARM's push {r3, lr}, which only keeps
-        the stack aligned), so its reads were eax alone and the C of its callers passed eax alone
-        (xQueueReceive and xQueuePeek, which lift since the address of a stack argument does, fail so).
-        GCC's padding pushes in front of the arguments (push eax; push eax; push $0x98e; push
-        $0x10cb40; call vAssertCalled) and its push of a dead register that only reserves a word are
-        no reads: the callee's stack argument count (the lifter's stack_args) says which pushed words
-        a call takes.
+      - [x] A push of a register that a call takes as a stack argument reads that register (2026-10-27,
+        regflow VERSION 31, x86 generator_version 3): FreeRTOS's prvCopyDataFromQueue takes its buffer
+        in edx (regparm(3)) and only pushes it, as memcpy's first argument; dread.regflow counted no
+        push as a read (made for ARM's push {r3, lr}, which only keeps the stack aligned), so its reads
+        were eax alone and the C of its callers passed eax alone (xQueueReceive and xQueuePeek, which
+        lift since the address of a stack argument does, failed so). Where the layer says pushes pass
+        arguments (pushes_arguments), a push into a word a call takes (its callee's named stack
+        arguments: the lifter's stack_args; call_words, which passes every stored word to a callee
+        that takes the address of one of its own, made a padding push ecx an argument and refused
+        xQueueReceive for an ecx its caller seemed to read) reads its register (Analysis.
+        argument_pushes); the lifter's reg_args takes regflow's reads besides its own entry analysis.
+        GCC's padding pushes in front of the arguments and its push of a dead register that only
+        reserves a word stay no reads. xQueueReceive and xQueuePeek agree on every case now (their
+        coverage keeps them out); tests/test_x86.py: fill and user3, which fail without it.
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved

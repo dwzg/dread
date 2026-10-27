@@ -54,7 +54,9 @@ function's unnamed arguments, a way out it cannot follow) stays read (Analysis._
 
 It errs on the side of finding less, so that what it finds can be compared without false alarms:
 pushes do not count as reads (push {r3, lr} that only keeps the stack aligned would make r3 an
-argument); an indirect call (and an svc, whose handler may return values anywhere) reads nothing
+argument), except where a call takes the word a push stores as a stack argument and the layer says
+pushes pass arguments (x86's cdecl: push edx; ...; call memcpy; GCC's pushes of a dead register that
+pad the stack in front of the arguments or only reserve a word stay no reads); an indirect call (and an svc, whose handler may return values anywhere) reads nothing
 and ends every scratch register; an indirect jump goes on
 at the function's code that no direct path reaches (the cases of a switch), and where there is none
 it is taken for an indirect tail call that passes nothing on. Not seen: what the callee of an
@@ -84,7 +86,7 @@ import sys
 from dread.arch import code_address
 from dread import target as tgt
 
-VERSION = 30                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
+VERSION = 31                # 3: entry spills (variadic functions) are no use; 4: only a variadic save area
                             # is (-O0 keeps its arguments so and uses them), and a save around a call of a
                             # register never set before is neither a read nor a write
                             # 5: MSP430's sub and subc of a register with itself read nothing
@@ -164,6 +166,10 @@ VERSION = 30                # 3: entry spills (variadic functions) are no use; 4
                             # they are used (the layer's merge_demand), and a flag setter the operand bits
                             # its flags depend on where the layer says (flag_demand): x86's mov dl, byte ptr
                             # [eax]; cmp dl, 0x20 read edx at every function's entry (gizmo-i386's parse_kv)
+                            # 31: a push of a register into a word a call takes as a stack argument reads
+                            # it, where the layer says pushes pass arguments (pushes_arguments: x86's
+                            # cdecl; Analysis.argument_pushes): FreeRTOS's prvCopyDataFromQueue pushes its
+                            # edx as memcpy's first argument, and read eax alone
 
 
 class RegFlow:
@@ -383,6 +389,7 @@ def _rows(program, fn, an, entry_name):
     # printf made every caller of an assertion handler look as if it read r3. Other stores so stay
     # uses: -O0 keeps every argument in its frame and loads it later.
     entry, written = True, set()
+    passed = an.argument_pushes(fn)         # (pushes that pass a call's stack argument: they read)
     frames = Frames(program, fn) if hasattr(arch, "store_slots") else None
     save_area = variadic_save_area(program, fn, insns, joins, frames) if frames is not None else set()
     if save_area or pushed_save_area(program, insns):
@@ -412,7 +419,7 @@ def _rows(program, fn, an, entry_name):
             written |= set(writes)
             if kind != "next":
                 entry = False
-        rm, wm = (0 if stack == "push" else mask(reads)), mask(writes)
+        rm, wm = (0 if stack == "push" and a not in passed else mask(reads)), mask(writes)
         pred = arch.predicate(insn)
         covered = fall_covered = 0
         if pred is None:
@@ -823,6 +830,68 @@ class Analysis:
     bits its instruction's used results depend on (refinement). The result (RegFlow) names a register
     where any bit of its field is set."""
 
+    def argument_pushes(self, fn):
+        """The addresses of fn's pushes of a register into a word that a call takes as a stack argument,
+        where the layer says pushes pass arguments (pushes_arguments: x86, whose cdecl pushes them):
+        such a push reads its register (_rows), where other pushes read nothing. The words each direct
+        call takes are its callee's named stack arguments (dread.lift's stack_args, over its frame
+        states, which need no register flow): not call_words, which passes every word the call site
+        stored to a callee that takes the address of one of its own (a va_list may walk on), and so
+        took FreeRTOS's padding push ecx in front of a call of xQueuePeek for an argument; a variadic
+        callee's unnamed words go unseen so. A push counts when it stored the word last on the
+        straight run to the call. GCC's pushes of a
+        dead register that pad the stack in front of the arguments (push eax; push eax; push $0x98e;
+        push $0x10cb40; call vAssertCalled: two words taken) or only reserve a word lie outside what
+        the call takes; a run that a join or a call starts anew forgets what was pushed before it (an
+        argument pushed before a branch goes unseen: no read, as elsewhere here). Empty without the
+        layer's word, or where the frame cannot be followed."""
+        arch, prog = self.program.arch, self.program
+        if not getattr(arch, "pushes_arguments", False):
+            return set()
+        from dread import lift
+        if self._pusher is None:
+            self._pusher = lift.make_lifter(prog, None)
+        lifter = self._pusher
+        try:
+            states = lifter.states(fn, strict=False)
+        except Exception:
+            return set()
+        joins = set()
+        for a in fn.insns:
+            insn = prog.insn(a)
+            kind, target, _ = arch.flow(insn) if insn is not None else (None, None, None)
+            if kind == "jump" and target is not None:
+                joins.add(prog.code_address(target))
+        out, writer = set(), {}
+        for a in fn.insns:
+            insn = prog.insn(a)
+            if insn is None or a not in states:
+                writer = {}
+                continue
+            if a in joins:
+                writer = {}
+            depth = states[a][0]
+            kind, target, _ = arch.flow(insn)
+            if arch.stack_kind(insn) == "push":
+                regs = arch.pushed_registers(insn)
+                if len(regs) == 1 and regs[0] is not None:
+                    writer[depth + 4] = a
+                else:                       # (memory or an immediate: no register read)
+                    writer.pop(depth + 4, None)
+            elif kind == "call" and target is not None:
+                callee = prog.by_entry.get(prog.code_address(target))
+                try:
+                    n = lifter.stack_args(callee) if callee is not None else 0
+                except Exception:
+                    n = 0
+                for k in range(n or 0):
+                    if depth - 4 * k in writer:
+                        out.add(writer[depth - 4 * k])
+                writer = {}
+            elif kind != "next":
+                writer = {}
+        return out
+
     def __init__(self, program):
         self.program = program
         arch = program.arch
@@ -852,6 +921,7 @@ class Analysis:
             return entries.get(program.code_address(address)) if address is not None else None
 
         self.variadic = set()               # functions whose unnamed arguments a va_list reads (_rows)
+        self._pusher = None                 # (argument_pushes: a lifter for the frames, made once)
         self.rows = {fn.name: _rows(program, fn, self, entry_name) for fn in program.functions}
         ordered = sorted(fn.entry for fn in program.functions)
         following = {a: b for a, b in zip(ordered, ordered[1:])}

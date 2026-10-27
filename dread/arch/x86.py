@@ -75,11 +75,14 @@ class X86:
     default_callee_saved = ("ebx", "esi", "edi", "ebp")
     default_result = ("eax", "edx")
     profile = None
+    pushes_arguments = True                 # cdecl pushes a call's stack arguments (dread.regflow: such a
+                                            # push reads its register)
     entry_stack_args = 4                    # sp to the first stack argument at a function's entry: the
                                             # return address the call pushed lies between
     veneer_reg = "eax"                      # no veneers (a 5-byte jmp reaches every address); eax is where
                                             # GCC and clang mostly load a pointer they call through
-    generator_version = 2           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs)
+    generator_version = 3           # 2: a case gives eax, edx and ecx to a function that takes them (case_regs);
+                                    # 3: one that only pushes edx or ecx as a call's argument takes them
     refine_saved_writes = True              # dread.regflow refines a write of ebx, esi, edi or ebp too (taken as
                                             # all used): with three scratch registers, bytes pass through them
     SWITCH_MAX = 1024                       # table entries read at most
