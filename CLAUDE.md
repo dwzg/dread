@@ -89,7 +89,8 @@ When the user is away (a `/loop`), the work runs from files, not from a conversa
   The x86 tests compile with the host's `gcc -m32`, which `bin/with-toolchain` does not put in
   front: `bin/ci-container [PYTEST ARGUMENTS...]` runs the tests in a copy of the tree, without the
   examples' caches as on CI, in an image like CI's runner (ci/ubuntu-24.04.containerfile: GCC 13
-  with -m32, clang 18, the workflow's cross compilers). On 2026-10-27 three x86 steps went out while
+  with -m32, clang 18, the workflow's cross compilers; `--os ubuntu-22.04` for CI's other runner, GCC
+  11 and clang 14, where a test whose cases the lifted C's frame decided failed the same day). On 2026-10-27 three x86 steps went out while
   CI's run of the first was still going; it failed (a register GCC 13 set where GCC 15 did not, an
   image Ubuntu's linker ended at its last byte), and main stayed red until the fix: run what a
   change touches in the container before pushing, and watch a push's run before the next push.

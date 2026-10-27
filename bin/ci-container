@@ -1,6 +1,7 @@
 #!/bin/sh
 # The tests as CI runs them, in a podman container of an image like CI's runner (ci/NAME.containerfile,
-# by default ubuntu-24.04: GCC 13 with -m32, clang 18, the cross compilers the workflow installs): a
+# by default ubuntu-24.04: GCC 13 with -m32, clang 18, the cross compilers the workflow installs; CI's
+# other runner is ubuntu-22.04: GCC 11, clang 14): a
 # copy of this checkout's files (not .git and .venv, and as on CI not the examples' caches; --caches
 # takes them along, which is faster and sees less), a venv of its own, then pytest with the arguments
 # given (none: the whole suite). The host's compilers are newer than
@@ -26,6 +27,6 @@ image="localhost/dread-ci-$os:$(sha1sum "$file" | cut -c1-12)"     # (a changed 
 podman image exists "$image" || podman build -q -t "$image" -f "$file" "$root/ci" >/dev/null
 exec podman run --rm -e CACHES="$caches" -v "$root:/src:ro" "$image" sh -c '
     mkdir -p /work && cd /src && tar --exclude=./.venv --exclude=./.git "$CACHES" -cf - . | (cd /work && tar -xf -)
-    cd /work && python3 -m venv .venv
+    cd /work && ${DREAD_CI_PYTHON:-python3} -m venv .venv
     .venv/bin/pip install -q -e ".[test,prove,dwarf]" >/tmp/pip.log 2>&1 || { tail -20 /tmp/pip.log; exit 3; }
     exec .venv/bin/python -m pytest -q -p no:cacheprovider "$@"' ci-container "$@"
