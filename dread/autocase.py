@@ -144,7 +144,7 @@ from dread.emu import PAGE, RUN_CALLEE, EmuError, Layout, Machine
 from dread.program import Program, read_functions
 from dread.target import TargetError
 
-VERSION = 37       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
+VERSION = 38       # 2: stale Thumb IT state cleared in hooks; 3: data pointers are learned from faults;
                   # 4: callee constants, the dictionary, text in buffers, call-tree coverage;
                   # 5: spins on a peripheral register are cut and answered with poll stages;
                   # 6: learned pointers sometimes misaligned; flag setters known by their mnemonic;
@@ -209,7 +209,9 @@ VERSION = 37       # 2: stale Thumb IT state cleared in hooks; 3: data pointers 
                   # cells: the chase, the learned pointers, the null and decider stages vary them as
                   # they vary the argument registers (i386: every argument; gizmo's script_run)
                   # 37: the answers give a first read a later where the run wrote the memory before it
-                  # (a register read back: the IA32 port's vPortEnterCritical)
+                  # (a register read back: the IA32 port's vPortEnterCritical); 38: an answer whose run
+                  # ends at the limit is tried once more with the old value from the next read on (a
+                  # loop that tests the same memory: xTaskResumeAll's pending-ready list)
 SEED = 17
 DEBUG = bool(os.environ.get("DREAD_AUTOCASE_DEBUG"))
 FAILURE_SECONDS = 10        # a generation that fails is cached only when it took this long (cases_for)
@@ -3115,6 +3117,7 @@ class Generator:
                     case["mem"] = [c for c in case["mem"] if c[:2] != [address, size]] + \
                         [[address, size, v & ((1 << 8 * size) - 1)]]
                     return case
+                make.back = (address, size, last[5])    # (the read the answer changes: a way back out, below)
                 return make, old, address
             if kind == "fill":              # a local a stub was handed: what it stores there
                 last = last_load(events, k, key[0], decider)
@@ -3239,6 +3242,21 @@ class Generator:
                             len(m2.covered_insns(words) - covered)))
                     if gained(trial, m2, error2, keep=keep, spare=[0] if flips >= ANSWER_FLIPS else None):
                         return True
+                    back = getattr(make, "back", None)
+                    if back is not None and m2.timed_out and old is not None and runs[0] > 0:
+                        # The answer went the other way into a loop that tests the same memory again, and the
+                        # memory set before the run holds there each time: FreeRTOS's xTaskResumeAll, its
+                        # pending-ready list's count set non-zero, took a list item off and found the count
+                        # unchanged (the item's container was other memory), and its runs ended at the limit.
+                        # Once more with the old value from the next read on (later): the loop's way out
+                        address, size, nth_read = back
+                        trial = json.loads(json.dumps(trial))
+                        trial["later"] = [c for c in trial.get("later", ()) if c[:3] != [address, size, nth_read + 1]] \
+                            + [[address, size, nth_read + 1, old & ((1 << 8 * size) - 1)]]
+                        tried += 1
+                        m2, events2, error2 = run(trial, (w, at, read))
+                        if gained(trial, m2, error2, keep=keep, spare=[0] if flips >= ANSWER_FLIPS else None):
+                            return True
                     flips += bool(m2.covered_insns(words) - covered)    # (it went the other way, and failed)
             return False if usable else None
 

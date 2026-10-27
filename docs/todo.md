@@ -6789,9 +6789,14 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         range makes its buffer a device range for the run, or a near miss that ran to the limit in a
         loop of the function's own is tried once with the long limit. The same on the GCC -Os build:
         WaitForStopDet's 3 instructions behind its delay call (40000 polls with a delay each; accepted
-        under the host's clock), and xTaskResumeAll's pending-ready loop: the answer that sets the list's
-        count enters it (45 new instructions), and the loop goes on while the count stays, which an answer
-        of the old value at the count's next read (later) would end.
+        under the host's clock). (xTaskResumeAll's pending-ready loop, noted here first: done, below.)
+      - [x] An answer that enters a loop testing the same memory (2026-10-27, generator 38): xTaskResumeAll's
+        pending-ready list, its count set non-zero by the answer, took an item off and found the count as
+        before (the item's container was other memory), and every such run ended at the limit (50 of its
+        114 instructions unrun on the GCC -Os build). An answer of the load kind whose run ends at the limit
+        is tried once more with the old value from the next read on (later): the loop runs once and leaves.
+        The answers then cover all 114 (on the cached cases of a copy). tests/test_autocase.py: drain on
+        Cortex-M3, its loop calling nothing (code behind a call has the hang cases of its own).
       - [ ] An input that has code read stack words nothing wrote (a length past a local:
         prvNotifyQueueSetContainer copies an item of the input's size from its 4-byte local) reads the
         original's frame layout, which the C's differs from; dread.fragile refuses it only where a saved

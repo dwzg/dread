@@ -1619,6 +1619,53 @@ def test_answers_change_a_word_the_code_wrote_before_reading_it(tmp_path):
     assert any(c.get("later") for c in new), new
 
 
+DRAIN_C = """
+volatile unsigned pending, taken, items[4];
+unsigned drain(unsigned k)
+{
+    while (pending != 0u) {         /* a list's count: another context empties it */
+        items[taken & 3u] = k;      /* (no call: the code behind a call has a way of its own) */
+        taken++;
+    }
+    return k + 1u;
+}
+"""
+
+
+@pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
+def test_answers_let_a_loop_out_that_tests_the_same_word(tmp_path):
+    """drain waits while pending is not 0, calling nothing: every generated case either skips the loop or
+    hangs in it. The answer that sets pending enters the loop, whose runs end at the limit, as the memory
+    set before the run holds at every test; since generator 38 such an answer is tried once more with the
+    old value from the next read on (later), and the loop's body runs once (FreeRTOS's xTaskResumeAll on
+    the IA32 demo: its pending-ready list, 50 of 114 instructions unrun)."""
+    import subprocess
+    from test_bench import TARGET
+    from dread import elfimport
+    (tmp_path / "t.c").write_text(DRAIN_C)
+    (tmp_path / "t.ld").write_text("MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 64K\n"
+                                   " RAM (rw) : ORIGIN = 0x20000000, LENGTH = 16K }\n"
+                                   "SECTIONS { .text : { *(.text*) } > FLASH\n .bss : { *(.bss*) *(COMMON) } > RAM }\n")
+    elf = str(tmp_path / "t.elf")
+    subprocess.run(["arm-none-eabi-gcc", "-mcpu=cortex-m3", "-mthumb", "-Os", "-nostdlib", "-ffunction-sections",
+                    "-T", str(tmp_path / "t.ld"), "-e", "drain", "-o", elf, str(tmp_path / "t.c")], check=True)
+    (tmp_path / "original").mkdir()
+    (tmp_path / "dread.toml").write_text(TARGET + '\n[image.main]\noriginal = "original/t.bin"\nbase = 0x08000000\n'
+                                         '\n[compiler]\ncross = "arm-none-eabi-"\n')
+    assert elfimport.main(["--target", str(tmp_path), "--payload", str(tmp_path / "original" / "t.bin"),
+                           "--write-startup", elf]) == 0
+    t = Target.load(str(tmp_path))
+    gen = Generator(t, t.image())
+    fn = gen.program.by_name["drain"]
+    cases = gen.generate("drain", fn.entry, fn.insns)
+    before, words = covered(gen, "drain", cases)
+    assert before < words, "the generated cases ran the loop's body"
+    new = gen.answers("drain", fn.entry, fn.insns, cases)
+    after = set().union(before, *(gen.coverage(fn.entry, fn.insns, c) for c in new))
+    assert after == words, sorted(hex(a) for a in words - after)
+    assert any(c.get("later") and c.get("mem") for c in new), new
+
+
 @pytest.mark.skipif(not __import__("shutil").which("arm-none-eabi-gcc"), reason="needs arm-none-eabi-gcc")
 def test_answers_change_a_word_between_two_reads(tmp_path):
     """No generated case runs spaces' retry (both reads of the tail alike); the answers give the second
