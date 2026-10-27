@@ -1083,6 +1083,13 @@ class X86Lifter(lift.Lifter):
             return self._string(insn, m)
         if m in ("cli", "sti"):             # (FreeRTOS's critical sections: the C masks as the original does)
             return '__asm__ volatile ("%s" ::: "memory");' % m
+        if m in ("lidt", "lgdt", "sidt", "sgdt") and len(ops) == 1 and ops[0].type == X.X86_OP_MEM:
+            # a descriptor table's register loaded from (or stored into) the six bytes at the operand by
+            # the instruction itself, the address in a register (FreeRTOS's vPortSetupIDT: lidt of its
+            # IDT's descriptor); the cases compare none of the core's tables, a system run takes
+            # interrupts through them. Until 2026-10-27 refused.
+            return '{ u32 a_ = (u32)(%s); __asm__ volatile ("%s (%%0)" : : "r"(a_) : "memory"); }' % (
+                self._address(insn, ops[0]), m)
         if m == "rdtsc":                    # (the instruction itself: dread.emu answers both images' alike)
             return "{ u64 t = dread_rdtsc(); eax = (u32)t; edx = (u32)(t >> 32); }"
         if m == "bt" and ops[0].type == X.X86_OP_REG and LANES.get(insn.reg_name(ops[0].reg), (0, 0))[1] == M32:

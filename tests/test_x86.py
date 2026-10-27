@@ -2268,3 +2268,42 @@ def test_an_argument_passed_from_a_saved_register_is_no_save(tmp_path):
     assert first.ret == 16                         # (7 + 1, twice)
     assert fragile.saves_touched(gen.machine, gen.program, gen.layout, setup, outer.entry, [scratch, 1],
                                  10_000) is None
+
+
+LIDT_C = r"""
+typedef unsigned int u32;
+typedef unsigned short u16;
+struct __attribute__((packed)) desc { u16 limit; u32 base; };
+struct desc idt_desc;
+u32 table[64];
+
+__attribute__((noinline)) void setup_idt(u32 n)
+{
+    idt_desc.limit = (u16)(n * 8 - 1);
+    idt_desc.base = (u32)table;
+    __asm__ volatile ("lidt %0" : : "m"(idt_desc));
+}
+
+void _start(void)
+{
+    setup_idt(33);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_lidt_is_the_instruction_itself(tmp_path):
+    """FreeRTOS's IA32 port loads its IDT's register with lidt (vPortSetupIDT): the lifter writes the
+    instruction itself, its operand's address in a register, as it writes cli and sti; the cases
+    compare the descriptor's stores around it (none of the core's tables). Until 2026-10-27 refused
+    ("lidt is not modelled")."""
+    from dread import lift
+    target = small_i386(tmp_path, LIDT_C, name="lidt")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    image = target.image()
+    lines = []
+    assert lift.check(target, image, ["setup_idt"], out=lines.append, jobs=2) == ["setup_idt"], lines
+    text = (tmp_path / "lidt" / "build" / "lift-check" / image.name / "lifted" / "setup_idt.c").read_text()
+    assert '__asm__ volatile ("lidt (%0)" : : "r"(a_) : "memory");' in text, text
