@@ -1381,7 +1381,44 @@ def _named(name, text, stages, context=None, cleaned=None):
         if context is not None and getattr(context, "folds_memory", False):
             from dread import volorder
             volorder.guard(tree, fn)        # (x86: two volatile loads one statement combines kept in order)
+        cdecl(tree, fn)
     return tree, fn, stages
+
+
+CDECL = "__attribute__((regparm(0))) "      # (the head of readable C compiled cdecl: see cdecl)
+
+
+def cdecl(tree, fn):
+    """A function the x86 lifter gave eax as its first parameter (eax_in, in eax: dread.build compiles its
+    file with -mregparm=1) whose readable C never reads it is compiled as cdecl, without it: its head says
+    regparm(0) (CDECL), and its stack parameters lie where cdecl has them either way, so its callers, which
+    still hand it eax in eax, call it as before. The head lost a parameter the source does not have (u32
+    uxListRemove(u32 eax_in, volatile u32 *sa0) on the IA32 demo: 48 of the GCC -Os build's 273 readable
+    functions). The file keeps -mregparm=1, for its calls of the functions it declares: a whole file
+    compiled cdecl passed vMicroSecondDelay's __udivdi3 its eax on the stack, every argument a word off.
+    Only for a function of regparm 1 (no edx_in nor ecx_in: with regparm 3, dropping eax would move edx
+    into it), not variadic (GCC passes no register arguments to one), whose stack parameters follow (one
+    alone goes with dread.tidy params, as a trailing one), and where nothing in the body names eax_in.
+    Returns whether it changed anything."""
+    import re
+    names = [p[1] for p in fn.params]
+    if len(fn.params) < 2 or names[0] != "eax_in" or fn.params[0][0].split()[-1] not in ("u32", "s32") or \
+            "edx_in" in names or "ecx_in" in names or "..." in fn.head or "regparm" in fn.head:
+        return False
+    from dread.cflow import walk_expr
+    from dread.tidy import _flat, _stmt_all_exprs
+    for s in fn.body.body:
+        for st in _flat(s):
+            for e in _stmt_all_exprs(st):
+                if any(isinstance(x, cparse.Name) and x.id == "eax_in" for x in walk_expr(e)):
+                    return False
+    m = re.match(r"^(.*?)\b%s\((.*)\)\s*$" % re.escape(fn.name), fn.head.strip(), re.S)
+    if m is None:
+        return False
+    fn.params = fn.params[1:]
+    fn.head = "%s%s%s(%s)" % (CDECL, m.group(1), fn.name, ", ".join(
+        "%s%s%s" % (t, "" if t.endswith("*") else " ", n) for t, n in fn.params))
+    return True
 
 
 def polish_tree(tree, fn, context=None, int_bits=None):

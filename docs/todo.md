@@ -6653,11 +6653,19 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
         figures, with the stack parameters): structures 27 -> 39 (in 27 -> 72 functions), typed variables
         69 -> 203, members 186 -> 573, raw accesses 232 -> 86; ARM GCC -Os unchanged in every figure.
         tests/test_shapes.py: unlink's three fields.
-      - [ ] The register parameter a regparm(1) function keeps (u32 uxListRemove(u32 eax_in, ...)): the
-        lifter hands eax in where regflow says the function reads it at its entry, and the readable C keeps
-        the parameter where the body never reads it, since dropping it would move the first stack
-        parameter into eax. Dropping it means compiling the function cdecl (regparm 0) and declaring it so
-        in every caller's file.
+      - [x] The register parameter a regparm(1) function kept (u32 uxListRemove(u32 eax_in, ...)): the x86
+        lifter gives every function eax first (-mregparm=1), and the readable C kept it where the body never
+        reads it, since dropping it alone would move the first stack parameter into eax (48 of the GCC -Os
+        build's 273 readable functions). Since 2026-10-27 (dread.readable cdecl) such a function's readable
+        C is compiled cdecl without it: its head says __attribute__((regparm(0))), and its stack parameters
+        lie where they did, so callers that still hand it eax in eax call it as before. The file keeps
+        -mregparm=1 for its own calls: a first try compiled the whole file cdecl, and the file's calls of
+        the functions it declares then put eax on the stack (vMicroSecondDelay's __udivdi3, every argument
+        a word off: 224 of 247 readable instead of 245). Variadic functions keep it (GCC passes them no
+        register argument). On a copy of the GCC -Os build: 44 heads lose eax_in, 245 of 247 readable as
+        before. Not done: the callers' calls still pass eax (f(eax, x)), a phantom argument; dropping it
+        means declaring the callee regparm(0) in each caller's file. tests/test_x86.py: f's head (eax_in
+        read, regparm 3, variadic: kept), scaled through the gate, its call of sum with eax written first.
       - [x] A register a function hands back unchanged through a call (2026-10-27): EnableI2CController
         never writes ecx and calls GetI2CIoPortBaseAddress, which leaves it alone; its callers keep a
         value in ecx across it (GCC's -fipa-ra). At its call ecx held what its own caller left, and the

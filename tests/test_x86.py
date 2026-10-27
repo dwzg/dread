@@ -1491,6 +1491,87 @@ def test_double_shifts(tmp_path):
     assert sorted(lift.check(target, image, names, out=lines.append, jobs=2)) == sorted(names), lines
 
 
+CDECL_C = """/* f at 0x1000, lifted by dread lift: one statement per instruction. */
+#include "dread.h"
+u32 f(u32 eax_in, u32 sa0)
+{
+    return *(volatile u32 *)(sa0 + 4u);
+}
+"""
+
+
+def test_an_eax_nothing_reads_leaves_the_head():
+    """dread.readable cdecl: the x86 lifter gives every function eax as its first parameter (dread.build
+    compiles it with -mregparm=1); where the readable C never reads it and stack parameters follow, the
+    function is compiled as cdecl without it (its stack parameters lie where they did, so callers that
+    hand it eax call it as before): the parameter goes and the head says regparm(0); the file keeps
+    -mregparm=1 for its calls. A function that reads eax_in, one of regparm 3 (edx_in and ecx_in too:
+    dropping eax would move edx into it) or a variadic one (GCC passes it no register argument) keeps it."""
+    from dread import cparse, readable
+    tree = cparse.parse(CDECL_C)
+    fn = tree.function("f")
+    assert readable.cdecl(tree, fn)
+    text = cparse.unparse(tree)
+    assert readable.CDECL + "u32 f(u32 sa0)" in text, text
+    used = CDECL_C.replace("return *(volatile u32 *)(sa0 + 4u);", "return eax_in + *(volatile u32 *)(sa0 + 4u);")
+    tree = cparse.parse(used)
+    assert not readable.cdecl(tree, tree.function("f")) and "regparm" not in cparse.unparse(tree)
+    three = CDECL_C.replace("u32 f(u32 eax_in, u32 sa0)", "u32 f(u32 eax_in, u32 edx_in, u32 ecx_in, u32 sa0)")
+    tree = cparse.parse(three)
+    assert not readable.cdecl(tree, tree.function("f"))
+    variadic = CDECL_C.replace("u32 f(u32 eax_in, u32 sa0)", "u32 f(u32 eax_in, u32 sa0, ...)")
+    tree = cparse.parse(variadic)
+    assert not readable.cdecl(tree, tree.function("f"))
+
+
+SUM_C = r"""
+typedef unsigned int u32;
+volatile u32 sink[4];
+
+__attribute__((noinline)) u32 sum(const u32 *p, u32 n)
+{
+    u32 s = 0;
+    while (n--)
+        s += *p++;
+    return s;
+}
+
+__attribute__((noinline)) u32 scaled(const u32 *p, u32 n)
+{
+    __asm__ volatile ("movl $7, %%eax" ::: "eax");     /* (eax written before the call: none handed on) */
+    return sum(p, n) + 1u;
+}
+
+void _start(void)
+{
+    static const u32 data[4] = {1, 2, 3, 4};
+    sink[0] = scaled(data, 4);
+    for (;;)
+        ;
+}
+"""
+
+
+def test_a_cdecl_function_passes_the_gate_with_callers_that_hand_it_eax(tmp_path):
+    """scaled takes its arguments on the stack and never reads its eax: its readable C is compiled cdecl
+    (regparm(0) in the head, eax_in gone), while its callers still hand it eax. It calls sum, which stays
+    the original's code, with eax written before the call: its file calls sum as the declaration says
+    (-mregparm=1: eax, then the stack). With the whole file compiled cdecl, eax went onto the stack and
+    sum read every argument a word off (vMicroSecondDelay's __udivdi3 on the IA32 demo). The lift check
+    and the readable gate pass."""
+    target = small_i386(tmp_path, SUM_C, "cdecl")
+    if target is None:
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import lift, readable
+    image = target.image()
+    lines = []
+    assert lift.check(target, image, ["scaled"], out=lines.append, jobs=2) == ["scaled"], lines
+    lines = []
+    assert readable.check(target, image, out=lines.append, jobs=2) == ["scaled"], lines
+    built = (tmp_path / "cdecl" / "build" / "readable-check" / "main" / "lifted" / "scaled.c").read_text()
+    assert readable.CDECL + "u32 scaled(" in built and "eax_in" not in built and "regparm 1" in built, built
+
+
 def test_the_layer_takes_values_apart():
     """The x86 layer's hooks for dread.uncovered, dread.relations and dread.statics: value_step gives an
     access at a fixed address with base 0 (absolute_accesses) and none at an unknown base, values for
