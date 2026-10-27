@@ -110,7 +110,13 @@ needed on it):
   translation writes the original's instruction in inline assembly: a generated case may stub such
   a routine (one a run hung in, deeper in the tree), and the stub would answer the C's own calls;
   `dread.lift.foreign_calls` drops, in a lift check, any function whose C calls what its original
-  does not.
+  does not. `dread.lift_x86` follows the MSP430 lifter's plan (a pushed return address, every argument
+  on the stack) and needed two things more: a register handed in and on (eax: cdecl passes nothing in a
+  register, but a function that does not write eax hands its caller's eax back, which the cases compare;
+  the C takes it with GCC's regparm(1), the stack arguments staying where cdecl has them; its ARGS is
+  ("eax",), and c_uses has a call read it only where the callee takes it), and an entry analysis that
+  leaves out what an instruction reads only to keep the rest of a register whose part it writes (the
+  layer's merge_only: mov bl, cl).
 - `dread.elfimport`: ARM dispatch slots and padding between functions (other architectures skip
   them).
 

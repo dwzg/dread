@@ -64,7 +64,7 @@ lui a1, 0x12345; auipc a1, 0x10; sll a1, a2, a3; mulhu a1, a2, a3; c.andi a2, 7;
 c.srai a2, 9; c.add a2, a3; c.mv a2, a3; c.li a2, 5"""
 # x86 (Intel syntax): moves of whole registers and of their parts (al, ah, ax: the rest kept), the
 # extensions, the logic and sums of every width, shifts and rotations by a constant, lea, setcc, cmovcc,
-# bswap, xchg, the sign extensions of eax; without a rule: adc, sbb, a shift by cl
+# bswap, xchg, the sign extensions of eax, the shifts by cl; without a rule: adc, sbb, mul
 X86_LINES = """mov eax, ecx; mov al, cl; mov ah, cl; mov al, ch; mov ax, cx; mov eax, 0x55; mov al, 5; mov bl, ah;
 mov si, ax; movzx eax, cl; movzx eax, cx; movzx eax, ch; movsx eax, cl; movsx eax, cx; and eax, ecx;
 and eax, 0xff00; and al, 0xdf; or eax, 0xf0; or al, cl; xor eax, ecx; xor eax, 0x5555; xor al, al; add eax, ecx;
@@ -72,7 +72,7 @@ add eax, 0x100; add al, 5; sub bl, 0x41; sub eax, 1; sub eax, ecx; inc eax; dec 
 imul eax, ecx; imul eax, ecx, 5; shl eax, 16; shr eax, 8; sar eax, 3; sar eax, 31; rol eax, 8; ror eax, 12;
 lea eax, [ecx + edx*4 + 8]; lea eax, [ecx + ecx*2 - 3]; lea eax, [edx*8]; sete al; setne cl; setb ah;
 cmove eax, ecx; cmovne ax, cx; bswap eax; xchg eax, ecx; cdq; cwd; cwde; cbw; adc eax, ecx; sbb al, al;
-shl eax, cl; shl al, 2"""
+shl eax, cl; shr eax, cl; sar eax, cl; rol eax, cl; shl al, 2; mul ecx"""
 STORES = {"a32": "strb r1, [r2]; strh r1, [r2, #2]; strb r2, [r2]; str r1, [r2]",
           "t32": "strb r1, [r2]; strh r1, [r2, #2]; strb.w r1, [r2, #-1]; strh r2, [r2]",
           "rv32": "sb a1, 0(a2); sh a1, 2(a2); sb a2, 0(a2); sw a1, 0(a2)",
@@ -199,7 +199,7 @@ def test_every_bit_rule_holds_in_the_emulator(tmp_path, kind):
                                                                      "%#x" % out[w], need)
     no_rule = {"a32": ("lsl r1, r2, r3", "rrx r1, r2", "adc r1, r2, r3"), "t32": ("lsls r1, r2", "adc.w r1, r2, r3"),
                "rv32": ("sll a1, a2, a3", "mulhu a1, a2, a3"),
-               "x86": ("adc eax, ecx", "sbb al, al", "shl eax, cl")}[kind]
+               "x86": ("adc eax, ecx", "sbb al, al", "mul ecx")}[kind]
     for line, insn, _ in insns:
         if line in no_rule:
             assert layer.bit_demand(insn, {w: M32 for w in layer.reg_effects(insn)[1]}) is None, line
@@ -262,31 +262,41 @@ def test_x86_flags_take_the_bits_flag_demand_names(tmp_path):
 
 
 X86_MERGES = """mov dl, byte ptr [eax]; mov dh, byte ptr [eax + 1]; mov dx, word ptr [eax]; add dl, byte ptr [eax];
-or cx, word ptr [eax + 2]; mov al, byte ptr [eax]; mov bl, byte ptr [ebx]"""
+or cx, word ptr [eax + 2]; cmp cl, byte ptr [eax]; test byte ptr [eax], dl; add byte ptr [eax], ch;
+mov al, byte ptr [eax]; mov bl, byte ptr [ebx]"""
 
 
 @needs_x86
-def test_x86_a_load_into_part_of_a_register_reads_the_rest_only_where_kept(tmp_path):
-    """mov dl, byte ptr [eax] writes the low byte of edx and keeps the rest (merge_demand): a bit of edx
-    outside the kept and the computed ones changes nothing, a kept bit only itself in the result. Where
-    the register is the address too (mov al, byte ptr [eax]), no rule."""
+def test_x86_parts_of_registers_outside_register_only(tmp_path):
+    """An instruction with a memory operand that writes part of a register keeps the rest (merge_demand:
+    mov dl, byte ptr [eax] keeps the upper 24 bits of edx), one that reads part of one reads that part
+    alone (cmp cl, byte ptr [eax]: the low byte of ecx): a bit outside the kept and the read ones changes
+    nothing (the register where it is written, the flags, memory), a kept bit only itself in the result.
+    Where the register is the address too (mov al, byte ptr [eax]), no rule."""
     layer, insns = assemble(tmp_path, "x86", X86_MERGES)
     core, rng = Core(layer, "x86"), random.Random(31)
+
+    def run(code, regs):
+        out, data = core.run(code, regs)
+        return out, data, core.uc.reg_read(layer.status_reg()) & X86_FLAGS
     for line, insn, code in insns:
         got = layer.merge_demand(insn)
         if line in ("mov al, byte ptr [eax]", "mov bl, byte ptr [ebx]"):
             assert got is None, line
             continue
         (reg, (kept, operand)), = got.items()
-        assert kept and not kept & operand, (line, got)
+        assert not kept & operand and (kept or operand), (line, got)
+        written = reg in layer.reg_effects(insn)[1]
         for _ in range(4):
             regs = inputs(core, rng, data_regs=("eax",))
-            first = core.run(code, regs)[0][reg]
+            first, data, flags = run(code, regs)
             free = ~(kept | operand) & M32
             if free:
-                assert core.run(code, dict(regs, **{reg: regs[reg] ^ free}))[0][reg] == first, line
-            flip = kept & rng.getrandbits(32) or kept
-            assert core.run(code, dict(regs, **{reg: regs[reg] ^ flip}))[0][reg] == first ^ flip, line
+                again, data2, flags2 = run(code, dict(regs, **{reg: regs[reg] ^ free}))
+                assert data2 == data and flags2 == flags and (not written or again[reg] == first[reg]), line
+            if kept:
+                flip = kept & rng.getrandbits(32) or kept
+                assert run(code, dict(regs, **{reg: regs[reg] ^ flip}))[0][reg] == first[reg] ^ flip, line
 
 # A callee that leaves a constant in r1 (leaf), a caller that hands it on (mid), callers that keep its
 # upper bits through a bic and store a byte of them (top) or hand it to a callee that does (relay, sink),

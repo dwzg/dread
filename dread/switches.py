@@ -163,7 +163,8 @@ def pointer_tail(program, fn, address):
     pxTimer)` jumped to behind prvProcessExpiredTimer's epilogue on every build of both
     architectures): the plain states know it, the function had a frame and it is gone there, the
     return address is back in its register and the jump does not go through it (a return), and no
-    run lands inside the function (a switch). Strict on purpose: dread.program counts such a jump
+    run lands inside the function (a switch); where the call pushed the return address (x86, MSP430),
+    it is on top of the stack at the entry's depth. Strict on purpose: dread.program counts such a jump
     with the calls through a register, whose generated inputs get the pointer stub instead of the
     middle of a function, and a switch counted so would have its callers' cases dropped (their runs
     reach a computed target). A leaf function's jump (no frame anywhere) is not one."""
@@ -173,7 +174,10 @@ def pointer_tail(program, fn, address):
     if state is None or insn is None or state[0] or not any(d for d, _ in states.values()):
         return False
     link = getattr(program.arch, "link_reg", None)
-    if link is None or state[1].get(link) != lifter.RET or lifter.ret_jump(insn, state[1]):
+    if link is None:                    # (the call pushed it: on top of the stack, the frame gone)
+        if state[1].get(0) != lifter.RET:
+            return False
+    elif state[1].get(link) != lifter.RET or lifter.ret_jump(insn, state[1]):
         return False
     got = resolve(program, fn, address)
     return not (got and got[0])

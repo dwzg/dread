@@ -361,12 +361,27 @@ class Generator:
     # ---- tables ----
 
     def _wide_results(self):
+        """The entries of the callees whose stubs answer a second result word: those the wide_results
+        table names, and, where the second result register is no argument register (x86's edx: cdecl
+        passes nothing in a register), those whose callers read it after the call (dread.regflow: kept,
+        not preserved). An ARM, RISC-V or MSP430 C passes its caller's value in that register at the
+        call (r1, a1, r13), and a stub that leaves it alone hands back the same value in both images; a
+        C's edx at a call is what its compiler had there, which the stub must answer (gizmo-i386's
+        helpers: a lifted caller of a 64-bit result read the C's edx behind a stub that left it)."""
         path = self.image.table("wide_results")
         names = set()
         if os.path.exists(path):
             with open(path) as f:
                 names = {l.split()[0] for l in f if l.strip() and not l.startswith("#")}
-        return {self.entries[n] for n in names if n in self.entries}
+        out = {self.entries[n] for n in names if n in self.entries}
+        abi = self.target.abi
+        second = abi.result[1] if len(abi.result) > 1 else None
+        if second is not None and second not in abi.arg_regs:
+            flow = self.flow()
+            for fn in self.program.functions if flow else ():
+                if second in flow.kept_regs(fn.name) and second not in flow.preserved_regs(fn.name):
+                    out.add(fn.entry)
+        return out
 
     def more(self):
         """{entry: registers} of the functions that hand back registers beyond a C result (dread.lift's
@@ -1517,6 +1532,8 @@ class Generator:
                         slots = [("args", i) for i in range(nregs)] + [("mem", i) for i in range(len(case["mem"]))] \
                             + [("returns", i) for i in range(len(case["returns"]))] \
                             + [("fargs", i) for i in range(len(case.get("fargs", ())))]
+                        if not slots:       # (nothing to vary: no argument, no load, no call; a cdecl function
+                            break           # without stack arguments, gizmo-i386's uart_init)
                         kind, i = rng.choice(slots)
                         if kind == "mem":
                             case["mem"][i][2] = value()

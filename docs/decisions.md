@@ -5431,3 +5431,25 @@ added where they help, the user, 2026-10-21).
   the same registers and slots, on every build; the C still reads only what the original reads (its
   table), as a reconstruction that read the listing would write it. (b) would have kept three versions
   of one function apart for the leftovers of three compilers.
+
+
+## The x86 lifter hands eax in and on (2026-10-27)
+
+**Decided by recommendation** (the user's standing delegation of 2026-10-20).
+
+- **Question.** cdecl passes every argument on the stack, so the lifted C's registers start at 0. But a
+  function that does not write eax returns what its caller left there (gizmo-i386's uart_init: one
+  store and ret), the cases compare a void function's result register too, and the C returned 0 where
+  the original returned the caller's eax: every such case failed. How should the C get the caller's
+  eax?
+- **Options.** (a) Refuse such functions (the base lifter's entry analysis would, had its rule for a
+  result register at a return covered x86). (b) Stop comparing the result register of a function no
+  caller reads: a weaker comparison (rule 6). (c) Hand eax in and on: GCC's (and clang's)
+  regparm(1) makes the first parameter eax and leaves every further one where cdecl puts it, so the
+  C's u32 eax_in is the caller's eax, and a lifted caller passes its own; original callers and
+  callees, and hand-written C, see a cdecl function (eax is no argument there, only scratch).
+- **Choice.** (c). The lifted C returns what the original returns on every path, with nothing added
+  to the comparison or taken from it. The cost: the lifted C of a caller hands its eax to every callee,
+  so register flow decides whether the value matters there (c_uses: a call reads eax only where the
+  callee takes it, else GCC's pop eax that takes an argument off again before the next call looked
+  like a read of that argument).

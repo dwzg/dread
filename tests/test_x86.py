@@ -140,3 +140,121 @@ def test_gizmo_i386_rewritten_functions_agree(which, tmp_path):
     text = "\n".join(lines)
     assert failed == 0 and not uncovered, text
     assert "ok   fmt_hex" in text and "ok   dispatch" in text and "ok   strcmp" in text
+
+
+def lift_gizmo(variant):
+    from dread import lift, regflow
+    from dread.program import Program
+    from dread.target import Target
+    target = Target.load(gizmo_dir(variant))
+    image = target.image()
+    program = Program(target, image)
+    lifter = lift.make_lifter(program, regflow.load(target, image, program))
+    lifted, refused = {}, {}
+    for fn in program.functions:
+        try:
+            lifted[fn.name] = lifter.lift(fn)
+        except lift.Refused as e:
+            refused[fn.name] = str(e)
+    return lifted, refused
+
+
+def test_gizmo_i386_lifts():
+    """dread.lift_x86 on both i386 builds: every function but the startup and GCC's main (they set the
+    stack pointer and align it). A jump through a table is a switch (script_run; clang's dispatch, its
+    handlers inlined), GCC's dispatch a tail call through the pointer it loads. Every function's C takes eax as it
+    comes (regparm(1)) and its arguments through their addresses; a void function that does not write eax
+    hands it back (uart_init: one store), GCC's pop eax that takes an argument off again is no read of it
+    (print_status), and uart_puts reads edx behind uart_putc, whose code leaves it (GCC's interprocedural
+    register allocation): uart_putc's C keeps edx (-fcall-saved-edx), and the call does not clear it."""
+    from dread import lift, regflow
+    from dread.program import Program
+    from dread.target import Target
+    lifted, refused = lift_gizmo("i386")
+    assert set(refused) == {"_start", "main"}, refused
+    assert "switch (index) {" in lifted["script_run"].text
+    assert "return ((u32 (__attribute__((regparm(1))) *)(u32, u32, u32))(s0))(eax," in lifted["dispatch"].text
+    target = Target.load(gizmo_dir("i386"))
+    program = Program(target)
+    lifter = lift.make_lifter(program, regflow.load(target, target.image(), program))
+    assert lifter.call_saved(program.by_name["uart_putc"]) == ["edx"]
+    call = [line for line in lifted["uart_puts"].text.splitlines() if "uart_putc(eax" in line][0]
+    assert "ecx = 0; cf = zf = sf = of = 0;" in call and "edx = 0" not in call
+    text = lifted["clamp"].text
+    assert "u32 __attribute__((regparm(1))) clamp(u32 eax_in, u32 sa0, u32 sa1, u32 sa2)" in text
+    assert "ecx = *(volatile u32 *)((u32)&sa0);  /* 800019a: mov ecx, dword ptr [ebp + 8] */" in text
+    assert "{ s0 = ecx; if ((zf | (sf != of))) edx = s0; }  /* 80001a6: cmovle edx, ecx */" in text
+    init = lifted["uart_init"].text
+    assert "u32 eax = eax_in," in init and "return eax;  /* 8000504: ret  */" in init
+    assert "print_status" in lifted
+    lifted, refused = lift_gizmo("i386clang")
+    assert set(refused) == {"_start"}, refused
+    assert "switch (index) {" in lifted["dispatch"].text and "switch (index) {" in lifted["script_run"].text
+
+
+# (not mul64: its written cases compare its result's upper half, which no caller in the image reads, so
+# the register flow cannot tell; nor script_run, whose generated cases miss one arm of its switch, nor
+# dispatch, whose tail-called handlers write the stack arguments they came with, which the C passes as
+# copies: docs/todo.md. uart_putc and uart_puts: the edx that GCC keeps across the call)
+I386_NAMES = ["clamp", "checksum", "parse_uint", "fmt_hex", "sum6", "udiv_var", "uart_init", "print_status",
+              "strcmp", "parse_kv", "uart_putc", "uart_puts"]
+
+
+def test_gizmo_i386_lift_check_accepts_what_agrees_and_drops_a_mistake(tmp_path, monkeypatch):
+    """The lift check on GCC's i386 build: the lifted C of these functions agrees with the original on
+    generated cases that run every instruction; with je taken on zf clear (a planted mistake) the
+    functions that test equality are dropped."""
+    if not _compiles("i386", tmp_path):
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import build, lift, lift_x86
+    from dread.target import Target
+    from conftest import GIZMO
+    copy = tmp_path / "gizmo"
+    shutil.copytree(GIZMO, copy, ignore=shutil.ignore_patterns("build"))
+    for cache in ("autocases", "regflow"):
+        here = os.path.join(gizmo_dir("i386"), "build", cache)
+        if os.path.isdir(here):
+            shutil.copytree(here, copy / "i386" / "build" / cache)
+    os.remove(copy / "i386" / "src" / "rewritten.c")       # (nothing written by hand: all of them lift)
+    target = Target.load(str(copy / "i386"))
+    image = target.image()
+    lines = []
+    accepted = lift.check(target, image, I386_NAMES, out=lines.append, jobs=4)
+    assert sorted(accepted) == sorted(I386_NAMES), lines
+    assert build.read_names(image.table("lifted")) == sorted(I386_NAMES)
+    monkeypatch.setitem(lift_x86.CONDITIONS, "e", "!zf")
+    lines = []
+    accepted = lift.check(target, image, I386_NAMES, out=lines.append, jobs=4)
+    dropped = [line.split()[2] for line in lines if line.startswith("dropped  FAIL")]
+    assert dropped and set(accepted) | set(dropped) == set(I386_NAMES), lines
+
+
+def test_random_x86_functions_agree(tmp_path):
+    """dread.lift_x86 on random 32-bit code (dread.liftfuzz): the arithmetic and logic of every width with
+    the flags, the shifts by a constant, by cl and by one, the multiplications and divisions, setcc,
+    cmovcc, lea, xchg, frame slots through esp and ebp, push and pop, forward branches, cdecl calls."""
+    if not _compiles("i386", tmp_path):
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import liftfuzz
+    lines = []
+    failures, refused, _ = liftfuzz.run("x86", functions=16, length=40, inputs=12, seed=7,
+                                        keep=str(tmp_path / "x86"), out=lines.append, reduce=0)
+    assert not failures and not refused, "\n".join(lines)
+
+
+@pytest.mark.slow
+def test_a_planted_x86_mistake_shows_and_is_reduced(tmp_path, monkeypatch):
+    """sf taken as the sign of the operand instead of the result (a planted mistake in the flags of a
+    subtraction): the fuzzer finds it and reduces it to a few units."""
+    if not _compiles("i386", tmp_path):
+        pytest.skip("needs the host's gcc with -m32")
+    from dread import liftfuzz, lift_x86
+    original = lift_x86.X86Lifter._zs
+    monkeypatch.setattr(lift_x86.X86Lifter, "_zs", staticmethod(
+        lambda res, size: original("e0", size).replace("zf = e0 == 0;", "zf = %s == 0;" % res)))
+    lines = []
+    failures, refused, _ = liftfuzz.run("x86", functions=16, length=40, inputs=12, seed=7,
+                                        keep=str(tmp_path / "x86"), out=lines.append, reduce=1)
+    assert failures and not refused, "\n".join(lines)
+    reduced = [line for line in lines if line.startswith("reduced")]
+    assert len(reduced) == 1 and len(reduced[0].split(" to: ")[1].split(" | ")) <= 6, reduced

@@ -49,10 +49,17 @@ through sp and the frame pointer, and a helper that takes two stack words). Its 
 libgcc's shared epilogues and nothing else of libgcc: lifted C that called a shift routine fails
 the build, reported per function and reduced like a difference. Found on its first runs: TI's GCC
 8.2 deletes a volatile load and a store of the same value back to the same address as a move to
-itself. The image, its target directory and the lifted C go to a temporary directory, kept when
-something fails (or with --keep).
+itself; x86 (32-bit, dread.lift_x86), with the host's gcc -m32: X86Generator (ebp, ebx, esi and edi
+pushed, the frame written, every argument on the stack, esi the buffer's address, ebp the frame pointer
+in the "fp" style; every width of the arithmetic and logic with registers, immediates and buffer words,
+the shifts by a constant, by cl and by one, imul, mul, div and idiv on odd divisors, lea, setcc, cmovcc,
+xchg, bswap, push and pop, cdecl calls of three helpers, the flags stored with setcc). Found on its first
+runs: a shift by cl with a count of 0 writes its memory operand back, div leaves the flags as they were,
+mul sets sf and zf from its low half (the emulator's way with what the core leaves undefined). The image,
+its target directory and the lifted C go to a temporary directory, kept when something fails (or with
+--keep).
 
-    dread liftfuzz [--isa a32|t32|m4|m4f|rv32|msp430] [--functions N] [--length L] [--inputs K] [--seed S]
+    dread liftfuzz [--isa a32|t32|m4|m4f|rv32|msp430|x86] [--functions N] [--length L] [--inputs K] [--seed S]
                    [--reduce N] [--keep DIR]
 """
 import argparse
@@ -225,6 +232,36 @@ sentinel = 0x1fff0000
 scratch = {base = 0x80100000, size = 0x20000}
 ''',
         "base": 0x20000000, "ram": 0x80000000,
+    },
+    "x86": {
+        "flags": ["-m32", "-march=i686", "-mno-80387", "-mno-mmx", "-mno-sse", "-fno-pic", "-fno-pie",
+                  "-fno-stack-protector", "-fno-asynchronous-unwind-tables"],
+        "toml": '''[target]
+name = "liftfuzz-x86"
+title = "dread liftfuzz, 32-bit x86"
+
+[arch]
+name = "x86"
+isa = "i386"
+
+[image.main]
+original = "fuzz.bin"
+base = 0x08000000
+limit = 0x08080000
+entry = "f0"
+
+[memory]
+regions = [
+    {name = "flash", base = 0x08000000, size = 0x100000, kind = "rom"},
+    {name = "ram", base = 0x20000000, size = 0x10000},
+    {name = "scratch", base = 0x20100000, size = 0x20000},
+]
+io = [[0x10000000, 0x10010000]]
+stack = {top = 0x20010000, size = 0x2000}
+sentinel = 0x1fff0000
+scratch = {base = 0x20100000, size = 0x20000}
+''',
+        "base": 0x08000000, "ram": 0x20000000,
     },
     "msp430": {
         "flags": ["-mcpu=msp430", "-mhwmult=none"],
@@ -1193,8 +1230,210 @@ class Msp430Generator:
         return lines + [".size %s, . - %s" % (name, name)]
 
 
+X86_ALU = ["add", "adc", "sub", "sbb", "and", "or", "xor", "cmp", "test"]
+X86_SHIFTS = ["shl", "shr", "sar", "rol", "ror"]
+X86_CONDS = ["o", "no", "b", "ae", "e", "ne", "be", "a", "s", "ns", "l", "ge", "le", "g"]
+X86_PARTS = {"eax": ("ax", "al", "ah"), "ecx": ("cx", "cl", "ch"), "edx": ("dx", "dl", "dh"), "ebx": ("bx", "bl", "bh"),
+             "edi": ("di", None, None), "ebp": ("bp", None, None)}
+X86_SIZES = {1: "byte", 2: "word", 4: "dword"}
+# cdecl helpers: three stack words in, a 64-bit result in edx:eax, one stack word in
+X86_HELPERS = [
+    ("h0", ["mov eax, dword ptr [esp + 4]", "xor eax, dword ptr [esp + 8]", "add eax, dword ptr [esp + 12]", "ret"]),
+    ("h1", ["mov eax, dword ptr [esp + 4]", "mov edx, dword ptr [esp + 8]", "add eax, edx", "adc edx, 0", "ret"]),
+    ("h2", ["mov eax, dword ptr [esp + 4]", "sar eax, 1", "ret"]),
+]
+
+
+class X86Generator:
+    """Random 32-bit x86 functions (see the module): the same interface as Generator. Every argument comes
+    on the stack (cdecl); the function keeps ebp, ebx, esi and edi (pushed), writes every frame slot,
+    sets eax, ecx, edx, ebx and edi from the arguments, esi the buffer's address, and ebp the frame
+    pointer in the "fp" style (else one more register to compute with). The body draws the arithmetic
+    and logic of every width with registers, immediates and buffer words, the shifts by a constant, by
+    cl and by one, imul in all three forms, mul, div and idiv (their divisor made odd: no division by
+    0), lea, setcc, cmovcc, xchg, bswap, the sign extensions of eax, frame slots through esp and ebp,
+    push and pop around a few instructions, forward branches, and calls of the helpers. At the end the
+    registers and cf, zf, sf and of (setcc) go into the result buffer."""
+
+    thumb = False
+
+    def __init__(self, isa, rng):
+        self.isa, self.rng, self.label, self.fp = isa, rng, 0, None
+        self.buf = ISAS[isa]["ram"] + 0x1000 + 4 * (BUF_WORDS // 2)
+
+    def regs(self):
+        return ["eax", "ecx", "edx", "ebx", "edi"] + ([] if self.fp else ["ebp"])
+
+    def reg(self, size=4):
+        rng = self.rng
+        full = rng.choice(self.regs())
+        if size == 4:
+            return full
+        parts = X86_PARTS[full]
+        if size == 2:
+            return parts[0]
+        return rng.choice([p for p in parts[1:] if p] or ["al"])
+
+    def imm(self, size):
+        rng = self.rng
+        v = rng.choice(EDGES) if rng.random() < 0.4 else rng.getrandbits(8 * size)
+        return v & ((1 << 8 * size) - 1)
+
+    def mem(self, size):
+        return "%s ptr [esi + %d]" % (X86_SIZES[size], 4 * self.rng.randrange(-16, 16) + self.rng.randrange(4))
+
+    def operand(self, size, memory=True):
+        r = self.rng.random()
+        if r < 0.5:
+            return self.reg(size)
+        if r < 0.75 or not memory:
+            return "0x%x" % self.imm(size)
+        return self.mem(size)
+
+    def frame_slot(self):
+        rng = self.rng
+        if self.fp and rng.random() < 0.5:     # (ebp lies 12 bytes above the frame's top: ebx, esi, edi)
+            return "dword ptr [ebp - %d]" % (16 + 4 * rng.randrange(FRAME // 4))
+        return "dword ptr [esp + %d]" % (4 * rng.randrange(FRAME // 4))
+
+    def one(self):
+        rng = self.rng
+        size = rng.choice([4, 4, 4, 2, 1, 1])
+        kind = rng.choices(["alu", "mov", "ext", "unary", "shift", "mul", "div", "lea", "set", "cmov", "xchg",
+                            "misc", "frame"], [26, 10, 6, 6, 9, 5, 2, 5, 4, 4, 2, 3, 6])[0]
+        if kind == "alu":
+            op = rng.choice(X86_ALU)
+            if rng.random() < 0.2:          # into memory
+                return ["%s %s, %s" % (op, self.mem(size), rng.choice([self.reg(size), "0x%x" % self.imm(size)]))]
+            return ["%s %s, %s" % (op, self.reg(size), self.operand(size))]
+        if kind == "mov":
+            if rng.random() < 0.2:
+                return ["mov %s, %s" % (self.mem(size), rng.choice([self.reg(size), "0x%x" % self.imm(size)]))]
+            return ["mov %s, %s" % (self.reg(size), self.operand(size))]
+        if kind == "ext":
+            src = rng.choice([1, 2])
+            return ["%s %s, %s" % (rng.choice(["movzx", "movsx"]), self.reg(4),
+                                   self.reg(src) if rng.random() < 0.6 else self.mem(src))]
+        if kind == "unary":
+            return ["%s %s" % (rng.choice(["inc", "dec", "neg", "not"]),
+                               self.reg(size) if rng.random() < 0.8 else self.mem(size))]
+        if kind == "shift":
+            count = rng.choice(["1", "cl", "%d" % rng.randrange(32)])
+            if count == "1":
+                return ["%s %s, 1" % (rng.choice(X86_SHIFTS), self.reg(size))]
+            return ["%s %s, %s" % (rng.choice(X86_SHIFTS), self.reg(size) if rng.random() < 0.85 else self.mem(size),
+                                   count)]
+        if kind == "mul":
+            form = rng.choice(["two", "three", "one", "mul"])
+            size = rng.choice([4, 2]) if form in ("two", "three") else rng.choice([4, 4, 2, 1])
+            if form == "two":
+                return ["imul %s, %s" % (self.reg(size), self.reg(size) if rng.random() < 0.7 else self.mem(size))]
+            if form == "three":
+                return ["imul %s, %s, %d" % (self.reg(size), self.reg(size), rng.randrange(-128, 128))]
+            return ["%s %s" % ("imul" if form == "one" else "mul",
+                               self.reg(size) if rng.random() < 0.7 else self.mem(size))]
+        if kind == "div":                   # an odd divisor in ecx, edx:eax small enough for its quotient
+            op = rng.choice(["div", "idiv"])
+            return ["mov ecx, dword ptr [esi + %d]" % (4 * rng.randrange(-16, 16)), "or ecx, 1",
+                    "xor edx, edx" if op == "div" else "cdq", "%s ecx" % op]
+        if kind == "lea":
+            base, index = rng.choice(self.regs()), rng.choice(self.regs())
+            return ["lea %s, [%s + %s*%d + %d]" % (self.reg(4), base, index, rng.choice([1, 2, 4, 8]),
+                                                   rng.randrange(-512, 512))]
+        if kind == "set":
+            return ["set%s %s" % (rng.choice(X86_CONDS), self.reg(1) if rng.random() < 0.7 else self.mem(1))]
+        if kind == "cmov":
+            size = rng.choice([4, 2])
+            return ["cmov%s %s, %s" % (rng.choice(X86_CONDS), self.reg(size),
+                                       self.reg(size) if rng.random() < 0.7 else self.mem(size))]
+        if kind == "xchg":
+            return ["xchg %s, %s" % (self.reg(size), self.reg(size) if rng.random() < 0.6 else self.mem(size))]
+        if kind == "misc":
+            return [rng.choice(["bswap %s" % self.reg(4), "cdq", "cwde", "cbw", "cwd"])]
+        if rng.random() < 0.5:
+            return ["mov %s, %s" % (self.frame_slot(), self.reg(4))]
+        return ["mov %s, %s" % (self.reg(4), self.frame_slot())]
+
+    def unit(self, name):
+        rng = self.rng
+        r = rng.random()
+        if r < 0.18:
+            self.label += 1
+            label = ".L%s_%d" % (name, self.label)
+            if rng.random() < 0.6:          # on a bit of the buffer, so that inputs go both ways
+                lines = ["test byte ptr [esi + %d], %d" % (rng.randrange(-64, 64), 1 << rng.randrange(8)),
+                         "j%s %s" % (rng.choice(["e", "ne"]), label)]
+            else:
+                lines = ["cmp %s, %s" % (self.reg(4), self.operand(4, memory=False)),
+                         "j%s %s" % (rng.choice(X86_CONDS), label)]
+            k = rng.randrange(1, 4)
+            for _ in range(k):
+                lines += self.one()
+            return lines + [label + ":"], k
+        if r < 0.23:
+            return self.call(), 1
+        if r < 0.27:                        # push and pop around a few instructions
+            reg = rng.choice(self.regs())
+            lines = ["push %s" % reg]
+            for _ in range(rng.randrange(1, 3)):
+                lines += [l for l in self.one() if "esp" not in l]
+            return lines + ["pop %s" % reg], 2
+        return self.one(), 1
+
+    def call(self):
+        """A cdecl call of a helper; the scratch registers it may change are set again afterwards."""
+        rng = self.rng
+        helper, words = rng.choice([("h0", 3), ("h1", 2), ("h2", 1)])
+        lines = ["push %s" % rng.choice(self.regs() + ["0x%x" % self.imm(4)]) for _ in range(words)]
+        lines += ["call %s" % helper, "add esp, %d" % (4 * words)]
+        keep = {"eax", "edx"} if helper == "h1" else {"eax"}
+        for r in ("eax", "ecx", "edx"):
+            if r not in keep:
+                lines.append("mov %s, %s" % (r, rng.choice(["ebx", "edi"])))
+        return lines
+
+    def body(self, name, length):
+        units, n = [], 0
+        while n < length:
+            lines, k = self.unit(name)
+            units.append(lines)
+            n += k
+        return units
+
+    def fp_number(self):
+        return 5                            # ebp
+
+    def prelude(self):
+        return [".intel_syntax noprefix", ".code32", ".text"]
+
+    def helpers(self):
+        lines = []
+        for name, body in X86_HELPERS:
+            lines += [".p2align 2", ".global %s" % name, ".type %s, @function" % name, "%s:" % name] + body
+            lines += [".size %s, . - %s" % (name, name)]
+        return lines
+
+    def function(self, name, units, buf, result, style):
+        """The function around a body (see the module)."""
+        lines = [".p2align 2", ".global %s" % name, ".type %s, @function" % name, "%s:" % name,
+                 "push ebp", "mov ebp, esp", "push ebx", "push esi", "push edi", "sub esp, %d" % FRAME,
+                 "mov eax, dword ptr [ebp + 8]"]
+        lines += ["mov dword ptr [esp + %d], eax" % k for k in range(0, FRAME, 4)]
+        lines += ["mov ecx, dword ptr [ebp + 12]", "mov edx, dword ptr [ebp + 16]", "mov ebx, dword ptr [ebp + 20]",
+                  "mov edi, eax", "xor edi, edx", "mov esi, 0x%x" % self.buf]
+        if "fp" not in style:
+            lines += ["mov ebp, ecx", "add ebp, ebx"]
+        lines += [l for unit in units for l in unit]
+        regs = ["eax", "ecx", "edx", "ebx", "edi"] + ([] if "fp" in style else ["ebp"])
+        lines += ["mov dword ptr [0x%x], %s" % (result + 4 * k, r) for k, r in enumerate(regs)]
+        lines += ["set%s byte ptr [0x%x]" % (c, result + 32 + k) for k, c in enumerate(["b", "e", "s", "o"])]
+        lines += ["lea esp, [ebp - 12]" if "fp" in style else "add esp, %d" % FRAME,
+                  "pop edi", "pop esi", "pop ebx", "pop ebp", "ret"]
+        return lines + [".size %s, . - %s" % (name, name)]
+
+
 GENERATORS = {"a32": None, "t32": None, "m4": None, "m4f": None, "rv32": RiscVGenerator,
-              "msp430": Msp430Generator}   # None: ARM
+              "msp430": Msp430Generator, "x86": X86Generator}   # None: ARM
 
 
 def generator(isa, rng):
@@ -1239,11 +1478,11 @@ def make(isa, out, bodies, cases):
     conf = ISAS[isa]
     gen = generator(isa, random.Random(0))
     buf, result = conf["ram"] + 0x1000, conf["ram"] + 0x2000
-    riscv, msp = isa == "rv32", isa == "msp430"
-    text = gen.prelude() if riscv or msp else [".syntax unified", ".thumb" if gen.thumb else ".arm", ".text"]
+    riscv, msp, x86 = isa == "rv32", isa == "msp430", isa == "x86"
+    text = gen.prelude() if riscv or msp or x86 else [".syntax unified", ".thumb" if gen.thumb else ".arm", ".text"]
     for name, (style, units) in bodies.items():
         text += gen.function(name, units, buf, result, style)
-    text += gen.helpers() if riscv or msp else helpers(gen.thumb)
+    text += gen.helpers() if riscv or msp or x86 else helpers(gen.thumb)
     os.makedirs(out, exist_ok=True)
     source = os.path.join(out, "fuzz.S")
     with open(source, "w") as f:
@@ -1253,6 +1492,9 @@ def make(isa, out, bodies, cases):
     if riscv:
         cmd = ["clang"] + conf["flags"] + ["-nostdlib", "-fuse-ld=lld", "-Wl,-Ttext=0x%x" % conf["base"],
                                            "-Wl,-e," + first, "-o", elf_path, source]
+    elif x86:                           # the host's GCC, 32-bit
+        cmd = ["gcc"] + conf["flags"] + ["-nostdlib", "-static", "-Wl,--build-id=none",
+                                         "-Wl,-Ttext=0x%x" % conf["base"], "-Wl,-e," + first, "-o", elf_path, source]
     elif msp:                           # a script of its own: the default's text region starts at 0x8000
         script = os.path.join(out, "fuzz.ld")
         with open(script, "w") as f:
@@ -1272,7 +1514,7 @@ def make(isa, out, bodies, cases):
         ["-Os", "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fno-common"]
     toml = conf["toml"].replace('entry = "f0"', 'entry = "%s"' % first)
     compiler = 'kind = "clang"\ntriple = "riscv32-unknown-elf"' if riscv else \
-        'cross = "msp430-elf-"\nldflags = []' if msp else 'cross = "arm-none-eabi-"'
+        'cross = "msp430-elf-"\nldflags = []' if msp else 'cross = ""' if x86 else 'cross = "arm-none-eabi-"'
     toml += '\n[compiler]\n%s\ncflags = [%s]\n' % (compiler, ", ".join('"%s"' % f for f in cflags))
     with open(os.path.join(out, "dread.toml"), "w") as f:
         f.write(toml)

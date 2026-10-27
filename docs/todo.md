@@ -6405,10 +6405,38 @@ Unicorn does not run it and capstone does not decode it, so it needs more than a
       function ends and the next begins at an odd byte counts as the next one's, so a load from the
       first one's last byte would count as a read of another function's code (not confirmed to happen:
       compilers put no data there). Bytes where the layer's min_insn is 1, when a case shows it.
-  - [ ] The lifter (dread.lift_x86): the integer instructions with the six flags, computed where read;
-    the fuzzer's x86 ISA (dread liftfuzz) against Unicorn.
-  - [ ] The lift check on gizmo-i386 (both compilers), the overlay (a 5-byte jmp at a moved function's
-    entry), then readable C, then a larger open-source target.
+  - [x] The lifter (dread.lift_x86) and the lift check on gizmo-i386 (2026-10-27): every function of
+    both builds lifts but the startup and GCC's main (it aligns esp): 44 of 46 on GCC's build, 45 on
+    clang's. A jump through a table is a switch over the index its bound check takes (script_run;
+    clang's dispatch, its handlers inlined), GCC's dispatch a tail call through the pointer it loads
+    (switches.pointer_tail now also where the call pushed the return address). The lift check accepts 41
+    of GCC's functions and 43 of clang's; ram_crc runs from RAM, and two are dropped by their cases (below).
+    The fuzzer's x86 ISA (dread liftfuzz --isa x86: every width of the arithmetic with the flags, the
+    shifts, mul, imul, div, setcc, cmovcc, lea, xchg, frame slots, push and pop, branches, cdecl calls)
+    agrees on 800 random functions of 40 instructions (seeds 21 to 28, the last three on the final code).
+    What it took beyond the MSP430 lifter's plan: eax handed in and on with GCC's regparm(1) (cdecl
+    passes nothing in a register, but a function that does not write eax hands its caller's eax back, and
+    the cases compare a void function's result register: uart_init; with regparm(1) the stack arguments
+    stay where cdecl has them), the entry analysis without the reads of a write of a register's part
+    (merge_only), a call reading eax only where the callee takes it (GCC's pop eax that takes an argument
+    off again), the registers GCC keeps across a call (uart_putc's edx: -fcall-saved-edx, the call not
+    clearing it), the flags a core leaves undefined as the emulator (QEMU) leaves them (div keeps them;
+    sf and zf of mul's low half; a shift by cl writes memory back with a count of 0), shift by cl and
+    parts read outside register_only in dread.regflow's bits, generic stubs that answer edx for a callee
+    whose callers read it (edx is no argument register: the C's edx at a call is its compiler's), and a
+    case generator that has nothing to vary (no argument, load or call: uart_init).
+  - [ ] GCC's dispatch on i386: its handlers, tail-called through the pointer, pass their argument on to
+    gpio_set by rewriting the stack arguments they came with, in dispatch's caller's frame; the C's call
+    passes copies, and the cases see the writes missing (dropped, rightly). A real tail jump from C is not
+    possible; asm, or a refusal with the reason, would say it plainly.
+  - [ ] script_run on i386 (both builds): the generated cases miss an arm of its switch (index 1 on GCC's
+    build: no input made keys_read's register come out 1 in its low three bits), where every ARM and
+    RISC-V build's cases reach every arm. Not looked into further: why the search does not draw it here.
+  - [ ] mul64's width: its written cases compare edx, which no caller in the image reads, so the lift
+    check takes it as one word (the dread.regflow width of a function nobody calls).
+  - [ ] The parity and auxiliary flags (jp, setnp, lahf, pushfd: refused), string instructions with a
+    compare (repe cmpsb), the stack's alignment in main (and esp, -16), then readable C on x86 and a
+    larger open-source target.
 - [ ] AVR on the emulator interface the MSP430 work brings (clang builds it, Unicorn does not run
   it): an interpreter behind it, Harvard memory (program and data spaces) in the program database.
 - [ ] Z80 (low priority; the user, 2026-10-19: "Z80 and later 8051, but both low in prio"): an engine

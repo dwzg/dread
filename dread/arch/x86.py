@@ -475,11 +475,12 @@ class X86:
         rest, which it reads where that is used. Rules: mov, movzx and movsx (the bits moved, the sign
         bit where a bit above is used), and, or, xor (the same bits; with an immediate where it lets them
         through), add, sub, inc, dec, neg, imul (the bits up to the highest used: a carry goes upwards),
-        not, shl, sal, shr, sar, rol and ror by a constant (32-bit: the bits the shift moves there), lea
+        not, shl, sal, shr, sar, rol and ror by a constant (32-bit: the bits the shift moves there) and
+        by cl (its low five bits; of the operand, its bits up to the highest used for shl, else all), lea
         (its base up to the highest bit used, its index as far as the scale leaves it), setcc and cmovcc
         (the flags), bswap, xchg, cdq, cwd, cwde and cbw; any other write to part of a register: every
-        bit it reads where the written part is used, else the kept bits alone. Not adc, sbb, the shifts by
-        cl, mul, and the 8- and 16-bit shifts. Checked against the emulator on every rule
+        bit it reads where the written part is used, else the kept bits alone. Not adc, sbb, mul, and the
+        8- and 16-bit shifts. Checked against the emulator on every rule
         (tests/test_regflow_bits.py)."""
         m, ops = insn.mnemonic, insn.operands
         reads, writes = self.reg_effects(insn)
@@ -547,6 +548,10 @@ class X86:
             k = imm & 31
             kind = {"shl": "lsl", "sal": "lsl", "shr": "lsr", "sar": "asr", "ror": "ror", "rol": "ror"}[m]
             source(ops[0], unshift(v, kind, (32 - k) % 32 if m == "rol" else k))
+        elif m in ("shl", "sal", "shr", "sar", "rol", "ror") and width == 32 and len(ops) == 2 \
+                and ops[1].type == X.X86_OP_REG and insn.reg_name(ops[1].reg) == "cl":
+            source(ops[0], low_bits(v) if m in ("shl", "sal") else M32)    # (by an unknown count)
+            add("ecx", 0x1F)                # the count: cl's low five bits
         elif m == "lea":
             mem, low = ops[1].mem, low_bits(v)
             if mem.base:
@@ -568,6 +573,25 @@ class X86:
             return None
         return need
 
+    def merge_only(self, insn):
+        """The whole registers an instruction reads only to keep the bits outside the part it writes
+        (mov bl, cl; mov dl, byte ptr [eax]; setne al; xor al, al): a part as its destination, the
+        register read in no other way (no source, no address). dread.lift_x86's entry_states."""
+        ops, m = insn.operands, insn.mnemonic
+        if not ops or ops[0].type != X.X86_OP_REG:
+            return frozenset()
+        lane = LANES.get(insn.reg_name(ops[0].reg))
+        if lane is None or lane[1] == M32:
+            return frozenset()
+        zero = m in ("xor", "sub") and len(ops) == 2 and ops[1].type == X.X86_OP_REG and ops[0].reg == ops[1].reg
+        if not (zero or m in ("mov", "movzx", "movsx", "lea") or m.startswith("set")):
+            return frozenset()
+        if lane[0] in self._address_regs(insn):
+            return frozenset()
+        if not zero and any((self._lane(insn, o) or (None,))[0] == lane[0] for o in ops[1:]):
+            return frozenset()
+        return frozenset((lane[0],))
+
     def flag_demand(self, insn):
         """{register: bits} of what the flags an instruction that only computes registers sets depend on:
         an 8-, 16- or 32-bit operation's flags come from its operands' parts (cmp dl, 0x20: the low byte
@@ -588,22 +612,38 @@ class X86:
         return need
 
     def merge_demand(self, insn):
-        """{register: (kept, operand)} of an instruction outside register_only that writes part of a
-        register from memory (mov dl, byte ptr [eax]; add dl, byte ptr [ecx]): the bits the write keeps,
-        which dread.regflow counts as read only where they are used behind it, and those it computes
-        from (always read). None for any other instruction, and where the register is also read
-        otherwise (an address: mov al, byte ptr [eax])."""
-        ops = insn.operands
-        m = insn.mnemonic
-        if len(ops) != 2 or m not in ("mov",) + self.READS_DESTINATION or self.register_only(insn):
+        """{register: (kept, operand)} of an instruction outside register_only that reads or writes parts
+        of registers: the bits a write of a part keeps, which dread.regflow counts as read only where
+        they are used behind it, and those it reads of each part (always read). mov dl, byte ptr [eax]
+        keeps the upper 24 bits of edx and reads none of the rest; add dl, byte ptr [ecx] reads its low
+        byte too; cmp al, byte ptr [ecx] reads the low byte of eax alone. None where it touches no part,
+        and a register also read whole (an address, a whole operand, an implicit operand) is left out."""
+        if self.register_only(insn):
             return None
-        lane = self._lane(insn, ops[0])
-        if lane is None or lane[1] == M32 or lane[0] in self._address_regs(insn):
-            return None
-        other = self._lane(insn, ops[1])
-        if other is not None and other[0] == lane[0]:
-            return None
-        return {lane[0]: (~lane[1] & M32, lane[1] if m in self.READS_DESTINATION else 0)}
+        ops, m = insn.operands, insn.mnemonic
+        writes_first = m not in ("cmp", "test", "push") and not m.startswith("j") and m != "call"
+        reads_first = m not in ("mov", "movzx", "movsx", "lea", "pop") and not m.startswith("set")
+        out, whole = {}, set(self._address_regs(insn))
+        for k, o in enumerate(ops):
+            lane = self._lane(insn, o)
+            if lane is None:
+                continue
+            full, mask, _ = lane
+            if mask == M32:
+                whole.add(full)
+                continue
+            kept, operand = out.get(full, (0, 0))
+            first = k == 0 and len(ops) >= 1
+            if first and writes_first:
+                kept |= ~mask & M32
+            if not first or reads_first:
+                operand |= mask
+            out[full] = (kept, operand & ~kept & M32)
+        named = set(out) | whole
+        whole |= set(self.reg_effects(insn)[0]) - named - {"flags", "sp"}   # (implicit: none of their parts)
+        for r in whole:
+            out.pop(r, None)
+        return out or None
 
     def store_demand(self, insn):
         """{register: bits} of what a byte's or a halfword's store takes of its register (mov byte ptr

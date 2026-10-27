@@ -378,13 +378,17 @@ class NoLifter(Exception):
 
 def make_lifter(program, flow=None, endless=None):
     """The lifter for the program's architecture: Lifter for ARM, dread.lift_riscv.RiscVLifter for
-    RISC-V, dread.lift_msp430.Msp430Lifter for the 16-bit MSP430; NoLifter for any other."""
+    RISC-V, dread.lift_msp430.Msp430Lifter for the 16-bit MSP430, dread.lift_x86.X86Lifter for 32-bit
+    x86; NoLifter for any other."""
     if program.arch.name == "riscv":
         from dread.lift_riscv import RiscVLifter
         return RiscVLifter(program, flow, endless)
     if program.arch.name == "msp430":
         from dread.lift_msp430 import Msp430Lifter
         return Msp430Lifter(program, flow, endless)
+    if program.arch.name == "x86":
+        from dread.lift_x86 import X86Lifter
+        return X86Lifter(program, flow, endless)
     if program.arch.name != "arm":
         raise NoLifter("no lifter for %s yet" % program.arch.name)
     return Lifter(program, flow, endless)
